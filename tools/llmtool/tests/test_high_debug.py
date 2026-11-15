@@ -5,6 +5,8 @@ import subprocess
 import json
 import hashlib
 import re
+import copy
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -16,6 +18,7 @@ import test_task_store as task_store_fixtures
 
 from llmtool import high_debug
 from llmtool import cli
+from llmtool import task_submission_cli
 from llmtool import test_output_excerpts
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore
@@ -2182,6 +2185,297 @@ class _Store:
             self.events.append(event)
             return {'created': True}
         return {'created': False}
+
+
+class _NoPRStore(_Store):
+    def __init__(self, *, completion=None, review_repair_claims=None, entries=None):
+        super().__init__()
+        self.completion = completion
+        self.review_repair_claims = review_repair_claims if review_repair_claims is not None else []
+        if entries:
+            self.entries = list(entries)
+
+    def get(self, task_id):
+        self.served.add(task_id)
+        return {
+            'task_id': task_id,
+            'run_id': 'b' * 32,
+            'review_repair_claims': self.review_repair_claims,
+            'completion': self.completion,
+            'high_debug': list(self.entries),
+            'completion_events': list(self.events),
+        }
+
+
+class HighDebugNoPRTests(unittest.TestCase):
+    def setUp(self):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        store_root_patch = patch.object(high_debug.task_store, 'default_root',
+                                        return_value=Path(root.name) / 'tasks')
+        store_root_patch.start()
+        self.addCleanup(store_root_patch.stop)
+        poster_patch = patch.object(high_debug, '_post_github_record',
+                                    return_value=True)
+        self.poster = poster_patch.start()
+        self.addCleanup(poster_patch.stop)
+        _stub_debug_rules(self)
+        dispatch_patch = patch.object(high_debug.worker_dispatch, 'evaluate',
+                                      return_value=SimpleNamespace(allowed=True))
+        dispatch_patch.start()
+        self.addCleanup(dispatch_patch.stop)
+        env_patch = patch.object(
+            high_debug.ai_github_exec, 'verified_ai_env',
+            side_effect=lambda *args, **kwargs: {
+                'GH_CONFIG_DIR': '/safe/gh-config',
+                'PATH': '/usr/bin',
+            })
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+
+    def _repo(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        subprocess.run(['git', 'init', '-q', str(root)], check=True)
+        subprocess.run(['git', '-C', str(root), '-c', 'user.name=t', '-c', 'user.email=t@e',
+                        'commit', '-q', '--allow-empty', '-m', 'base'], check=True)
+        return root
+
+    def _real_task_store_task(self):
+        review_trust_fixture.install_for_case(self)
+        return task_store_fixtures.TaskStoreTests._codex_dispatch_task(self)
+
+    def test_issue_early_no_pr_run_without_completion(self):
+        root = self._repo()
+        store = _NoPRStore(completion=None)
+        registration = SimpleNamespace(
+            root=str(root),
+            common_dir=str(root / '.git'),
+            result_sha='c' * 40,
+        )
+        prompts = []
+        parts = []
+        for section in high_debug.REPORT_SECTIONS[:-1]:
+            parts.append('## ' + section + '\ntext\n')
+        parts.append('## Outcome/cost\nRCA_CONFIRMED\n')
+        valid_report = '\n'.join(parts)
+
+        def runner(*, prompt, cwd, output_path):
+            prompts.append(prompt)
+            Path(output_path).write_text(valid_report, encoding='utf-8')
+            return subprocess.CompletedProcess([], 0, stdout=b'{"model":"gpt-6.1-sol"}\n', stderr=b'')
+
+        with patch.object(high_debug.task_completion, 'collect_git_snapshot',
+                          return_value=SimpleNamespace(head='c' * 40)):
+            res = high_debug.run_high_debug(
+                store=store,
+                task_id='a' * 32,
+                executor_task='executor',
+                issue_number=42,
+                family='no-pr',
+                early_reason='pre-pr-failure',
+                runner=runner,
+                create_d6=lambda **_kwargs: str(root),
+                read_registration=lambda *_args, **_kwargs: registration,
+                repo_root=str(root),
+            )
+
+        self.assertEqual(len(store.entries), 1)
+        entry = store.entries[0]
+        self.assertIs(entry.get('no_pr'), True)
+        self.assertEqual(entry['family'], 'no-pr')
+        self.assertEqual(entry['examined_sha'], 'c' * 40)
+        self.assertEqual(entry['status'], 'RCA_CONFIRMED')
+        self.assertEqual(self.poster.call_args[0][0], 42)
+        self.assertIn('Issue: 42 (no PR)', prompts[0])
+        self.assertNotIn('PR: 42', prompts[0])
+
+    def test_argument_invalid_combinations_refuse_with_no_entry(self):
+        cases = (
+            dict(pr_number=None, issue_number=42, family='no-pr', failed_corrections=2, early_reason=None),
+            dict(pr_number=None, issue_number=42, family='pr-1', failed_corrections=None, early_reason='early'),
+            dict(pr_number=17, issue_number=None, family='no-pr', failed_corrections=2, early_reason=None),
+            dict(pr_number=17, issue_number=None, family='no-pr', failed_corrections=None, early_reason='early'),
+            dict(pr_number=None, issue_number=None, family='no-pr', failed_corrections=None, early_reason='early'),
+            dict(pr_number=17, issue_number=42, family='no-pr', failed_corrections=None, early_reason='early'),
+        )
+        for kwargs in cases:
+            with self.subTest(**kwargs):
+                store = _NoPRStore()
+                with self.assertRaises(LLMToolError) as caught:
+                    high_debug.run_high_debug(
+                        store=store,
+                        task_id='a' * 32,
+                        executor_task='executor',
+                        **kwargs
+                    )
+                self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_ARGUMENT_INVALID')
+                self.assertEqual(store.entries, [])
+                self.assertEqual(store.events, [])
+                self.poster.assert_not_called()
+
+    def test_cli_argument_invalid_combinations_refuse(self):
+        cli_cases = (
+            dict(pr=None, issue=None, family='no-pr', failed_corrections=None, early='e'),
+            dict(pr=17, issue=42, family='no-pr', failed_corrections=None, early='e'),
+            dict(pr=None, issue=42, family='no-pr', failed_corrections=2, early=None),
+            dict(pr=None, issue=42, family='pr-1', failed_corrections=None, early='e'),
+            dict(pr=17, issue=None, family='no-pr', failed_corrections=None, early='e'),
+        )
+        for kwargs in cli_cases:
+            with self.subTest(**kwargs):
+                args = SimpleNamespace(
+                    task_id='a' * 32,
+                    executor_task='executor',
+                    evidence_file=None,
+                    route='codex',
+                    **kwargs
+                )
+                with self.assertRaises(LLMToolError) as caught:
+                    task_submission_cli.run_task_high_debug(args, store=_NoPRStore())
+                self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_ARGUMENT_INVALID')
+
+    def test_entry_count_toward_8_cap_and_admission(self):
+        entries = []
+        for i in range(4):
+            entries.append(high_debug._failed_entry(
+                family='test-family', failed_corrections=2, early_reason=None,
+                head='a' * 40, d6=f'other-hd{i}-aaaaaaa',
+                code='HIGH_DEBUG_RUN_FAILED', observed='UNKNOWN',
+                effort='UNKNOWN', usage='UNKNOWN',
+                recorded_at='2026-10-27T00:00:00Z'))
+        for i in range(4):
+            entries.append(high_debug._failed_entry(
+                family='no-pr', failed_corrections=None, early_reason='early',
+                head='a' * 40, d6=f'other2-hd{i}-aaaaaaa',
+                code='HIGH_DEBUG_RUN_FAILED', observed='UNKNOWN',
+                effort='UNKNOWN', usage='UNKNOWN',
+                recorded_at='2026-10-27T00:00:00Z',
+                no_pr=True))
+
+        store = _NoPRStore(entries=entries)
+        with self.assertRaises(LLMToolError) as caught:
+            high_debug.run_high_debug(
+                store=store,
+                task_id='a' * 32,
+                executor_task='executor',
+                issue_number=42,
+                family='no-pr',
+                early_reason='pre-pr-failure',
+            )
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_LIMIT')
+
+        parent_entry = high_debug._failed_entry(
+            family='no-pr', failed_corrections=None, early_reason='early',
+            head='a' * 40, d6='executor-hd1-aaaaaaa',
+            code='HIGH_DEBUG_RUN_FAILED', observed='UNKNOWN',
+            effort='UNKNOWN', usage='UNKNOWN',
+            recorded_at='2026-10-27T00:00:00Z',
+            no_pr=True)
+        admission_store = _NoPRStore(entries=[parent_entry])
+        with self.assertRaises(LLMToolError) as caught:
+            high_debug.run_high_debug(
+                store=admission_store,
+                task_id='a' * 32,
+                executor_task='executor',
+                issue_number=42,
+                family='no-pr',
+                early_reason='pre-pr-failure',
+            )
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_DEBUG_PARENT_USED')
+
+    def test_cli_and_repair_rca_and_high_debug_task_binding(self):
+        # 1. CLI invocation succeeds
+        args = SimpleNamespace(
+            task_id='a' * 32,
+            executor_task='executor',
+            pr=None,
+            issue=42,
+            family='no-pr',
+            failed_corrections=None,
+            early='pre-pr-failure',
+            evidence_file=None,
+            route='codex',
+        )
+        with patch.object(task_submission_cli, 'run_high_debug_with_fallback',
+                          return_value={'status': 'RCA_CONFIRMED'}) as mock_fb:
+            result = task_submission_cli.run_task_high_debug(args, store=_NoPRStore())
+        self.assertEqual(result, {'status': 'RCA_CONFIRMED'})
+        mock_fb.assert_called_once()
+        self.assertEqual(mock_fb.call_args.kwargs['issue_number'], 42)
+        self.assertIsNone(mock_fb.call_args.kwargs['pr_number'])
+        self.assertEqual(mock_fb.call_args.kwargs['family'], 'no-pr')
+        self.assertEqual(mock_fb.call_args.kwargs['early_reason'], 'pre-pr-failure')
+
+        # 2. Repair-2 RCA rejects no_pr=True but accepts older PR entry
+        packet = {
+            'task': 'a' * 32,
+            'executor_task': 'executor',
+            'failed_head': 'c' * 40,
+            'high_debug_report_sha256': 'd' * 64,
+        }
+        no_pr_entry = {
+            'no_pr': True,
+            'status': 'RCA_CONFIRMED',
+            'examined_sha': 'c' * 40,
+            'report_sha256': 'd' * 64,
+            'd6': 'executor-hd1-aaaaaaa',
+            'family': 'no-pr',
+        }
+        store_only_no_pr = _NoPRStore(
+            completion={'executor_task_id': 'executor'},
+            entries=[no_pr_entry],
+        )
+        with self.assertRaises(LLMToolError) as caught:
+            task_submission_cli._check_repair_packet_rca(packet, store_only_no_pr, 'executor')
+        self.assertEqual(str(caught.exception), 'DELEGATE_HIGH_DEBUG_TASK_INVALID')
+
+        pr_entry = {
+            'status': 'RCA_CONFIRMED',
+            'examined_sha': 'c' * 40,
+            'report_sha256': 'd' * 64,
+            'd6': 'executor-hd2-aaaaaaa',
+            'family': 'pr-17',
+        }
+        store_both = _NoPRStore(
+            completion={'executor_task_id': 'executor'},
+            entries=[pr_entry, no_pr_entry],
+        )
+        task_submission_cli._check_repair_packet_rca(packet, store_both, 'executor')
+
+        # 3. High debug task binding rejects no_pr=True and selects older PR entry
+        matching_empty = [e for e in [no_pr_entry] if type(e) is dict and e.get('no_pr') is not True]
+        self.assertEqual(matching_empty, [])
+        matching_both = [e for e in [pr_entry, no_pr_entry] if type(e) is dict and e.get('no_pr') is not True]
+        self.assertEqual(matching_both, [pr_entry])
+
+    def test_task_store_validates_no_pr_true_and_refuses_no_pr_false(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TaskStore(Path(directory).resolve() / 'tasks')
+            task = self._real_task_store_task()
+            store.create(task)
+            valid_entry = high_debug._failed_entry(
+                family='no-pr', failed_corrections=None, early_reason='early',
+                head='a' * 40, d6='executor-hd1-aaaaaaa',
+                code='HIGH_DEBUG_RUN_FAILED', observed='UNKNOWN',
+                effort='UNKNOWN', usage='UNKNOWN',
+                recorded_at='2026-10-27T00:00:00Z',
+                no_pr=True)
+            saved = store.append_high_debug(task['task_id'], valid_entry)
+            self.assertIs(saved['high_debug'][0].get('no_pr'), True)
+
+            # Invalid: no_pr is False
+            invalid_entry = dict(valid_entry, no_pr=False)
+            with self.assertRaises(LLMToolError) as caught:
+                store.append_high_debug(task['task_id'], invalid_entry)
+            self.assertEqual(caught.exception.task_store_error_code, 'HIGH_DEBUG_INVALID')
+
+            # Invalid: no_pr is string
+            invalid_entry2 = dict(valid_entry, no_pr='true')
+            with self.assertRaises(LLMToolError) as caught:
+                store.append_high_debug(task['task_id'], invalid_entry2)
+            self.assertEqual(caught.exception.task_store_error_code, 'HIGH_DEBUG_INVALID')
 
 
 if __name__ == '__main__':

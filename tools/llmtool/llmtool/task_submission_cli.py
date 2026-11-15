@@ -1024,7 +1024,9 @@ def add_task_submission_parsers(actions):
     high_debug = actions.add_parser('high-debug', help='Run one read-only Codex or Claude diagnosis of an Executor D6')
     high_debug.add_argument('task_id')
     high_debug.add_argument('--executor-task', required=True)
-    high_debug.add_argument('--pr', required=True, type=int)
+    target = high_debug.add_mutually_exclusive_group()
+    target.add_argument('--pr', type=int)
+    target.add_argument('--issue', type=int)
     high_debug.add_argument('--family', required=True)
     choice = high_debug.add_mutually_exclusive_group(required=True)
     choice.add_argument('--failed-corrections', type=int)
@@ -2435,10 +2437,30 @@ def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
 
 def run_task_high_debug(args, *, store=None, runner=None, create_d6=None):
     from .high_debug import run_high_debug_with_fallback
+    pr = getattr(args, 'pr', None)
+    issue = getattr(args, 'issue', None)
+    family = getattr(args, 'family', None)
+    failed_corrections = getattr(args, 'failed_corrections', None)
+    early = getattr(args, 'early', None)
+    if (pr is None) == (issue is None):
+        err = LLMToolError('HIGH_DEBUG_ARGUMENT_INVALID')
+        err.high_debug_code = 'HIGH_DEBUG_ARGUMENT_INVALID'
+        raise err
+    if issue is not None:
+        if failed_corrections is not None or early is None or family != 'no-pr':
+            err = LLMToolError('HIGH_DEBUG_ARGUMENT_INVALID')
+            err.high_debug_code = 'HIGH_DEBUG_ARGUMENT_INVALID'
+            raise err
+    if pr is not None:
+        if family == 'no-pr':
+            err = LLMToolError('HIGH_DEBUG_ARGUMENT_INVALID')
+            err.high_debug_code = 'HIGH_DEBUG_ARGUMENT_INVALID'
+            raise err
     return run_high_debug_with_fallback(store=TaskStore() if store is None else store,
-        task_id=args.task_id, executor_task=args.executor_task, pr_number=args.pr,
-        family=args.family, failed_corrections=getattr(args, 'failed_corrections', None),
-        early_reason=getattr(args, 'early', None), evidence=getattr(args, 'evidence_file', None),
+        task_id=args.task_id, executor_task=args.executor_task, pr_number=pr,
+        issue_number=issue,
+        family=args.family, failed_corrections=failed_corrections,
+        early_reason=early, evidence=getattr(args, 'evidence_file', None),
         runner=runner, create_d6=create_d6, route=getattr(args, 'route', 'codex'))
 
 
@@ -7297,6 +7319,7 @@ def _check_repair_packet_rca(packet, store, executor_task):
                 completion.get('executor_task_id') != executor_task or
                 type(entries) is not list or
                 not any(type(entry) is dict and
+                        entry.get('no_pr') is not True and
                         entry.get('status') == 'RCA_CONFIRMED' and
                         entry.get('examined_sha') == failed_head and
                         entry.get('report_sha256') == report_sha256
@@ -7493,7 +7516,10 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment):
                 diagnosis_task.get('task_id') != high_debug_task or
                 type(entries) is not list or not entries):
             raise ValueError
-        entry = entries[-1]
+        matching = [e for e in entries if type(e) is dict and e.get('no_pr') is not True]
+        if not matching:
+            raise ValueError
+        entry = matching[-1]
         d6 = entry.get('d6')
         examined_sha = entry.get('examined_sha')
         family = entry.get('family')

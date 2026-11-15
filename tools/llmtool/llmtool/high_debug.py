@@ -1130,7 +1130,7 @@ def _claude_usage(raw_usage):
 def _failed_entry(*, family, failed_corrections, early_reason, head, d6, code,
                   report=None,
                   observed, effort, usage, recorded_at, model_requested='gpt-6.1-sol',
-                  rules_sha256=None):
+                  rules_sha256=None, no_pr=None):
     """The high_debug entry recording one attempt that did not finish.
 
     ``rules_sha256`` (the digest of the rule prefix sent) is recorded when given.
@@ -1144,6 +1144,8 @@ def _failed_entry(*, family, failed_corrections, early_reason, head, d6, code,
              'report': stored_report, 'usage': usage, 'recorded_at': recorded_at}
     if rules_sha256 is not None:
         entry['rules_sha256'] = rules_sha256
+    if no_pr is True:
+        entry['no_pr'] = True
     return entry
 
 
@@ -1423,7 +1425,8 @@ def _reserve_debug(store, task_id, entries, reservation):
         release()
 
 
-def run_high_debug(*, store, task_id, executor_task, pr_number, family,
+def run_high_debug(*, store, task_id, executor_task, pr_number=None,
+                   issue_number=None, family,
                    failed_corrections=None, early_reason=None, evidence=None,
                    runner=None, create_d6=None, repo_root=None,
                    read_registration=None, sessions_dir=None,
@@ -1435,8 +1438,11 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
             type(task_id) is not str or _SCREEN_TASK_ID.fullmatch(task_id) is None or
             type(executor_task) is not str or
             re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', executor_task) is None or
-            type(pr_number) is not int or not 1 <= pr_number <= 9999999 or
-            type(family) is not str or re.fullmatch(r'[a-z0-9._-]{1,64}', family) is None):
+            type(family) is not str or re.fullmatch(r'[a-z0-9._-]{1,64}', family) is None or
+            (pr_number is None and issue_number is None) or
+            (pr_number is not None and issue_number is not None) or
+            (pr_number is not None and (type(pr_number) is not int or not 1 <= pr_number <= 9999999 or family == 'no-pr')) or
+            (issue_number is not None and (type(issue_number) is not int or not 1 <= issue_number <= 9999999 or family != 'no-pr' or failed_corrections is not None))):
         _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
     if ((type(failed_corrections) is int and failed_corrections >= 2 and early_reason is None) or
         (failed_corrections is None and type(early_reason) is str and 1 <= len(early_reason) <= 300)):
@@ -1455,13 +1461,14 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     _require_screen_cleared(task_id, family)
     # #1887: the review repair gate finds a confirmed RCA by the repair claim
     # family, so a Debug for a PR that has repair claims must name one of them.
-    claims = task.get('review_repair_claims', [])
-    families = sorted({claim.get('family', f"pr-{claim.get('pr')}")
-                       for claim in (claims if type(claims) is list else [])
-                       if type(claim) is dict and claim.get('pr') == pr_number and
-                       type(claim.get('family', '')) is str})
-    if families and family not in families:
-        _refuse('HIGH_DEBUG_FAMILY_MISMATCH', 'expected=' + ','.join(families))
+    if pr_number is not None:
+        claims = task.get('review_repair_claims', [])
+        families = sorted({claim.get('family', f"pr-{claim.get('pr')}")
+                           for claim in (claims if type(claims) is list else [])
+                           if type(claim) is dict and claim.get('pr') == pr_number and
+                           type(claim.get('family', '')) is str})
+        if families and family not in families:
+            _refuse('HIGH_DEBUG_FAMILY_MISMATCH', 'expected=' + ','.join(families))
     if evidence is not None:
         try:
             with open(evidence, 'rb') as evidence_stream:
@@ -1522,23 +1529,50 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     debug_model = _admit_debug_model(worker_key, debug_model)
     completion = task.get('completion')
     ev = completion.get('evidence') if type(completion) is dict else None
-    if type(ev) is not dict or completion.get('executor_task_id') != executor_task or type(ev.get('common_dir')) is not str:
+    has_completion = (type(completion) is dict and
+                      completion.get('executor_task_id') == executor_task and
+                      type(ev) is dict and type(ev.get('common_dir')) is str)
+    if has_completion:
+        try:
+            reader = read_registration or task_completion.read_d6_registration
+            registration = reader(executor_task, ev['common_dir'],
+                allowed_states=task_completion._D6_EVIDENCE_STATES)
+            head = registration.result_sha
+            snap = task_completion.collect_git_snapshot(registration.root)
+        except Exception:
+            _refuse('HIGH_DEBUG_D6_UNAVAILABLE')
+        if not isinstance(head, str) or _HEX40.fullmatch(head) is None or snap.head != head:
+            _refuse('HIGH_DEBUG_HEAD_MISMATCH')
+    elif issue_number is not None:
+        base_dir = repo_root
+        if not base_dir:
+            try:
+                base_dir = subprocess.run(
+                    ['git', 'rev-parse', '--show-toplevel'],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, check=True, timeout=10
+                ).stdout.decode('utf-8').strip()
+            except Exception:
+                base_dir = os.getcwd()
+        common_dir = os.path.realpath(os.path.join(base_dir, '.git'))
+        try:
+            reader = read_registration or task_completion.read_d6_registration
+            registration = reader(executor_task, common_dir,
+                                  allowed_states=task_completion._D6_EVIDENCE_STATES)
+            snap = task_completion.collect_git_snapshot(registration.root)
+            head = snap.head
+            if not isinstance(head, str) or _HEX40.fullmatch(head) is None:
+                _refuse('HIGH_DEBUG_D6_UNAVAILABLE')
+        except Exception:
+            _refuse('HIGH_DEBUG_D6_UNAVAILABLE')
+    else:
         _refuse('HIGH_DEBUG_D6_UNAVAILABLE')
-    try:
-        reader = read_registration or task_completion.read_d6_registration
-        registration = reader(executor_task, ev['common_dir'],
-            allowed_states=task_completion._D6_EVIDENCE_STATES)
-        head = registration.result_sha
-        snap = task_completion.collect_git_snapshot(registration.root)
-    except Exception:
-        _refuse('HIGH_DEBUG_D6_UNAVAILABLE')
-    if not isinstance(head, str) or _HEX40.fullmatch(head) is None or snap.head != head:
-        _refuse('HIGH_DEBUG_HEAD_MISMATCH')
-    # #1502 WP-D D13: no AI Debug while a dispute on this PR head is OPEN. The
-    # refusal records no entry, so it uses no Debug.
-    from .review_repair import dispute_open_on
-    if dispute_open_on(task, pr_number, head):
-        _refuse('DEBUG_DISPUTE_OPEN')
+    if pr_number is not None:
+        # #1502 WP-D D13: no AI Debug while a dispute on this PR head is OPEN. The
+        # refusal records no entry, so it uses no Debug.
+        from .review_repair import dispute_open_on
+        if dispute_open_on(task, pr_number, head):
+            _refuse('DEBUG_DISPUTE_OPEN')
     entries = task.get('high_debug', [])
     if type(entries) is not list or len(entries) >= 8: _refuse('HIGH_DEBUG_LIMIT')
     _admit_debug(task, entries)
@@ -1555,6 +1589,8 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     else:
         _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
 
+    target_number = issue_number if issue_number is not None else pr_number
+    no_pr = True if issue_number is not None else None
     model_requested = debug_model
     # O7: reserved before any D6 create or provider call; a crash leaves it RESERVED.
     try:
@@ -1565,7 +1601,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         family=family, failed_corrections=failed_corrections, early_reason=early_reason,
         head=head, d6=d6, code='HIGH_DEBUG_RESERVED', observed='UNKNOWN', effort='UNKNOWN',
         usage='UNKNOWN', recorded_at=reserved_at, model_requested=model_requested,
-        rules_sha256=rules_sha256)
+        rules_sha256=rules_sha256, no_pr=no_pr)
     reservation['status'] = 'RESERVED'
     index = _reserve_debug(store, task_id, entries, reservation)
 
@@ -1580,12 +1616,12 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
                 early_reason=early_reason, head=head, d6=d6, code=code, report=report,
                 observed=observed, effort=effort, usage=usage,
                 recorded_at=recorded_at, model_requested=model_requested,
-                rules_sha256=rules_sha256)
+                rules_sha256=rules_sha256, no_pr=no_pr)
         try:
             store.finalize_high_debug(task_id, index, entry)
         except Exception:
             detail = (detail + ' ' if detail else '') + 'reservation=UNFINALIZED'
-        if post and not _post_record(entry, pr_number, repo_root, task_id, code,
+        if post and not _post_record(entry, target_number, repo_root, task_id, code,
                                      account=account):
             detail = (detail + ' ' if detail else '') + 'github_record=UNPOSTED'
         if screen_hits is not None:
@@ -1612,7 +1648,8 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
             failed('HIGH_DEBUG_D6_CREATE_FAILED', post=False)
         _refuse('HIGH_DEBUG_D6_CREATE_FAILED', 'reservation=RESERVED')
     reason = f'failed corrections: {failed_corrections}' if failed_corrections is not None else f'early reason: {early_reason}'
-    prompt = rules_prefix + (f'Task: {task_id}\nPR: {pr_number}\nFamily: {family}\n{reason}\nExamined SHA: {head}\n'
+    target_line = f'Issue: {issue_number} (no PR)' if issue_number is not None else f'PR: {pr_number}'
+    prompt = rules_prefix + (f'Task: {task_id}\n{target_line}\nFamily: {family}\n{reason}\nExamined SHA: {head}\n'
               f'Evidence:\n{evidence_text}\n\nRequired report sections, each exactly as its own line:\n'
               + '\n'.join('## ' + section for section in REPORT_SECTIONS) + '\n'
               'The Outcome/cost section must start with exactly one status word alone on its own line: '
@@ -1717,8 +1754,10 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
        'effort_observed':effort,'status':status,'report_sha256':hashlib.sha256(report.encode()).hexdigest(),
        'report':report,'usage':usage,'recorded_at':store._completion_now(),
        'rules_sha256':rules_sha256}
+    if no_pr:
+        entry['no_pr'] = True
     store.finalize_high_debug(task_id, index, entry)
-    posted = _post_record(entry, pr_number, repo_root, task_id, account=account)
+    posted = _post_record(entry, target_number, repo_root, task_id, account=account)
     payload=entry['report_sha256'].encode()
     event_id=hashlib.sha256(('HIGH_DEBUG\0'+task_id+'\0'+head+'\0'+entry['report_sha256']).encode()).hexdigest()[:32]
     result=store.record_completion_event(task_id,event_id=event_id,run_id=task['run_id'],
