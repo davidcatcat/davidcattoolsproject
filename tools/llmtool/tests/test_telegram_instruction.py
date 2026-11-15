@@ -296,9 +296,9 @@ class CommandTests(InstructionTest):
         code_two = inbox.instruction_id(ALIAS, 82)[:12]
         self.run_update(message(81, '/do first'))
         self.run_update(message(82, '/do second'))
+        listed = code_two + ' QUEUED\n' + code_one + ' QUEUED'
         self.assertEqual(self.run_update(message(83, '/inbox')),
-                         {'outcome': ti.HANDLED,
-                          'reply': code_two + '\n' + code_one})
+                         {'outcome': ti.HANDLED, 'reply': listed})
         self.assertEqual(self.run_update(message(84, '/inbox ' + code_one)),
                          {'outcome': ti.HANDLED,
                           'reply': code_one + ' QUEUED'})
