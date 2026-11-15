@@ -60,6 +60,10 @@ _RECEIPT_FIELDS = frozenset((
     'identity', 'started_at', 'ended_at', 'elapsed_s', 'ran_total', 'final',
     'failures', 'log_bytes', 'log_sha256', 'remote_log_path'))
 _RECEIPT_FIELDS_WITH_EXCERPT = _RECEIPT_FIELDS | frozenset(('failure_excerpt',))
+# #2119 WP-1: module_results is optional until every producer emits it.
+_MODULE_RESULTS_FIELD = frozenset(('module_results',))
+_RECEIPT_SHAPES = (_RECEIPT_FIELDS, _RECEIPT_FIELDS_WITH_EXCERPT)
+_RECEIPT_SHAPES += tuple(shape | _MODULE_RESULTS_FIELD for shape in _RECEIPT_SHAPES)
 
 
 def _valid_failure_excerpt(value):
@@ -344,7 +348,7 @@ def _validate_remote_receipt(raw, *, sha, modules):
     except (UnicodeDecodeError, json.JSONDecodeError):
         return None
     if (type(receipt) is not dict or
-            set(receipt) not in (_RECEIPT_FIELDS, _RECEIPT_FIELDS_WITH_EXCERPT)):
+            set(receipt) not in _RECEIPT_SHAPES):
         return None
     if 'failure_excerpt' in receipt:
         excerpt = receipt['failure_excerpt']
@@ -389,6 +393,8 @@ def _validate_remote_receipt(raw, *, sha, modules):
                 for line in receipt['final'])):
         return None
     if receipt['result'] in ('FAIL', 'TIMEOUT', 'SHA_MISMATCH') and receipt['exit_code'] == 0:
+        return None
+    if not valid_module_results(receipt):
         return None
     return receipt
 
