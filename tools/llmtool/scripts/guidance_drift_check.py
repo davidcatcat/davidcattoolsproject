@@ -169,7 +169,7 @@ class TimeoutPair:
 # Same value as llmtool.developer_routes.HARD_TIMEOUT_CAP_SECONDS (#1815);
 # tests/test_developer_route_timeout.py keeps the two in step. This script and
 # its own test do not import the llmtool package.
-ROUTE_TIMEOUT_CAP_SECONDS = 1800
+ROUTE_TIMEOUT_CAP_SECONDS = 3600
 REPO_PATH = r"(?!/)(?!.*\\)(?!(?:.*/)?\.\.(?:/|$))[^\s]+"
 ROUTE_PROFILE = Obj(
     {"adapter": Str(), "model": Str()},
@@ -198,11 +198,16 @@ DEVELOPER_ROUTE = TimeoutPair(Obj(
         "profile": ROUTE_PROFILE,
         "authorization_ref": Str(r"https://\S+"),
         "allowed_data_classes": ListOf(Str(r"[a-z_]+"), min_items=1),
+        # #1815: same bounds as developer_routes.base max_diff_bytes_ok.
+        "max_diff_bytes": Int(1024, 512 * 1024),
     },
 ))
 # Review/AI Debug role model registry (#1502 WP-E). The route loader checks
 # the exact role names; this schema checks shape only.
-ROLE_MODELS = Obj({"allowed_models": ListOf(Str(), min_items=1)})
+ROLE_MODELS = Obj(
+    {"allowed_models": ListOf(Str(), min_items=1)},
+    {"timeout": Int(1, ROUTE_TIMEOUT_CAP_SECONDS)},
+)
 WORKER_DISPATCH_ENTRY = Obj({
     "dispatch": OneOf(*sorted(DISPATCH_VALUES)),
     "decided_by": Str(),
@@ -235,7 +240,10 @@ RULE_SCHEMAS: dict[str, Any] = {
     }),
     "developer-routes.json": Obj(
         {"schema_version": Const(1), "routes": MapOf(DEVELOPER_ROUTE, min_items=1)},
-        {"roles": MapOf(ROLE_MODELS, min_items=1)},
+        {
+            "roles": MapOf(ROLE_MODELS, min_items=1),
+            "remote_test_timeout": Int(1, ROUTE_TIMEOUT_CAP_SECONDS),
+        },
     ),
     "policy.json": Obj({
         "schema_version": Const(1),
@@ -247,7 +255,7 @@ RULE_SCHEMAS: dict[str, Any] = {
         "test_fail_max": Int(0),
         "review_fail_max": Int(0),
         "waiting_notify_after_hours": Int(1),
-    }),
+    }, {"timeout_continuation_max": Int(0, 3)}),
     "worker-dispatch.json": Obj({
         "schema_version": Const(1),
         "workers": MapOf(WORKER_DISPATCH_ENTRY, min_items=1),

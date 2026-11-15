@@ -234,8 +234,11 @@ class ExchangeTests(unittest.TestCase):
             '--output',self.wait_args.output,'--timeout','30','--json',
             wait_ready_file=ready)
         env = dict(os.environ,PYTHONDONTWRITEBYTECODE='1')
+        # #2074: a parent started as a background job has SIGINT ignored, and the
+        # child would inherit that; give the child the default SIGINT disposition.
         child = subprocess.Popen(command,env=env,stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,
+            preexec_fn=lambda: signal.signal(signal.SIGINT,signal.SIG_DFL))
         try:
             # The child must reach the review-wait polling loop (request and
             # trust validated) and still be running before it is interrupted.
@@ -297,6 +300,22 @@ class ExchangeTests(unittest.TestCase):
         verdict['criterion_evidence'] = []
         with self.assertRaises(LLMToolError):
             x.validate_report(receipt,verdict,self.request,self.request_sha,verdict['receipt_sha256'])
+
+    def test_report_refusal_codes_name_each_check(self):
+        # #1230 refusal-code pin: each validate_report and wait_report check refuses with one fixed code.
+        self.prepare(); receipt,verdict = self.envelopes()
+        def code(changed_receipt,changed_verdict,receipt_sha=verdict['receipt_sha256']):
+            with self.assertRaises(LLMToolError) as caught:
+                x.validate_report(changed_receipt,changed_verdict,self.request,self.request_sha,receipt_sha)
+            return caught.exception.review_code
+        self.assertEqual(code(dict(receipt,bundle_read=False),verdict),'EXCHANGE_RECEIPT_INVALID')
+        self.assertEqual(code(receipt,verdict,'0'*64),'EXCHANGE_BINDING_INVALID')
+        self.assertEqual(code(receipt,dict(verdict,security='MAYBE')),'EXCHANGE_VERDICT_INVALID')
+        self.assertEqual(code(receipt,dict(verdict,findings={})),'EXCHANGE_VERDICT_INVALID')
+        self.assertEqual(code(receipt,dict(verdict,criterion_evidence=[])),'EXCHANGE_EVIDENCE_INVALID')
+        self.publish(self.wait_args.verdict,verdict)
+        with self.assertRaises(LLMToolError) as caught: x.wait_report(self.wait_args,time.monotonic()+1)
+        self.assertEqual(caught.exception.review_code,'EXCHANGE_RECEIPT_MISSING')
 
     def test_ready_marker_bad_digest_replacement_and_hardlink_block(self):
         self.prepare(); receipt,_ = self.envelopes(); self.publish(self.wait_args.receipt,receipt)

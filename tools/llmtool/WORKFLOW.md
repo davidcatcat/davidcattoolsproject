@@ -25,9 +25,15 @@ Declare read and write paths at task claude-bind, including an admitted test mod
 6. After PASS, `task advance` adds the `mac-ci` label; exact-head `check (macOS 3.13)` must be SUCCESS where required.
 7. Merge without syncing main when there is no conflict (M1, Owner decision #1317).
 
-A required check must be SUCCESS. A check that does not apply to the PR is recorded NOT_RUN; skipped, cancelled or pending is never PASS. Environment problems (timeout, runner or EC2 unreachable) are not test failures: `task advance` reruns an EC2 timeout once on the same commit. Returning EC2, Linux CI and Mac CI failures to the original Developer as test-failure repairs, counted apart from review failures, is 待實作（WP-D）; today `task advance` stops at `CI_FAILED` on a CI failure.
+A required check must be SUCCESS. A check that does not apply to the PR is recorded NOT_RUN; skipped, cancelled or pending is never PASS. Environment problems (timeout, runner or EC2 unreachable) are not test failures: `task advance` reruns an EC2 timeout once on the same commit. An EC2, Linux CI or Mac CI failure goes back to the original Developer as a test-failure repair, on a count kept apart from review failures (#1502 WP-D D11); an environment conclusion waits uncounted, and a used-up count stops with `TEST_FAIL_LIMIT_REACHED`.
 
 Manual commands are recovery only: use the [manual recovery flow](../../skills/ai-team-delivery/pm-continuation.md#manual-recovery-flow) when `task advance` cannot run. Review FAIL, AI Debug, split and Owner notification rules are in the [PM Continuation Contract](../../skills/ai-team-delivery/pm-continuation.md).
+
+A review repair claim whose dispatch outcome was not recorded stays `UNKNOWN`, and llmtool does not treat it as dispatched.
+It settles only through `llmtool task repair TASK --executor-task D6 --pr N --recover-claim REPAIR_TASK_ID` (#1928).
+That sets the claim `DISPATCHED` in one locked TaskStore update, only after evidence checks E1-E5 pass: the claim, the repair Task's identity, its dispatch audit, its VERIFIED execution session, and the registered D6 and HEAD.
+It dispatches nothing and changes no repair count; a failed check leaves the claim `UNKNOWN`.
+Never edit the TaskStore by hand or write a receipt to settle a claim.
 
 ## Owner outcome reports and decision boundary (2026-10-19)
 

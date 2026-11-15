@@ -59,8 +59,10 @@ The Owner authorizes **incremental improvement on the already delivered TUI**, t
 
 Owner order puts A12.1 Telegram after the Mac CLI and before the A12.2 local Web UI. Requirements are not yet agreed. This work builds only what the posted [v1 design](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6552977888) fixes. Open questions wait for the Owner.
 
+Owner decision [#1230 D1=A](https://github.com/davidcatcat/davidcattoolsproject/issues/1230#issuecomment-6723058672) adds a Telegram to PM Inbox instruction channel; its design and limits are in [telegram-pm-inbox-1160.md](../../docs/design/telegram-pm-inbox-1160.md).
+
 - Read-only status and notifications only.
-- No approvals, Task creation, execution, free chat to the PM or STOP from Telegram.
+- No approvals, Task creation, execution, free chat to the PM or STOP from Telegram. The excluded free chat is replaced by the PM Inbox instruction channel, limited as in [telegram-pm-inbox-1160.md](../../docs/design/telegram-pm-inbox-1160.md).
 - No standing service, listener, webhook, launchd item or runner.
 - No egress except the Telegram Bot API.
 - Every outbound text passes the existing sensitive-content screens.
@@ -74,6 +76,11 @@ Owner order puts A12.1 Telegram after the Mac CLI and before the A12.2 local Web
 | 3. Real Bot API transport, token file, pairing and allowlist | Owner enables new data egress and holds the token | Not started |
 | 4. Foreground run command | Owner decides run mode | Not started |
 | 5. Remote approve and reject | A11b.3 `REMOTE_OWNER` issuer, Security review and an Owner grant | Not started |
+| 6. Design note [docs/design/telegram-pm-inbox-1160.md](../../docs/design/telegram-pm-inbox-1160.md) | Nothing | PR #2093 merged |
+| 7. Owner instruction inbox store `owner_instruction_inbox.py` | Nothing | PR #2116 merged; offline, not wired |
+| 8. Update gates and `/do`, `/inbox`, `/revoke`, `/help` `telegram_instruction.py` | Nothing | PR #2120 merged; fake transport only, not wired |
+| 9. PM CLI `llmtool owner-inbox` | Nothing | PR #2127 merged; local only |
+| 10. Real Bot API transport, token and allowlist files, pairing, foreground run command, go-live | Owner (credentials, new data egress) and an independent security review before go-live | Not started |
 
 The cursor follows the same private state-file rules as the WP5 GitHubSync poll ledger (#1144); a shared helper can follow once both merge.
 

@@ -23,7 +23,7 @@ class PolicyFileTests(unittest.TestCase):
         return path
 
     def test_repository_policy_has_the_owner_limits(self):
-        self.assertEqual(rp.load_policy(), GOOD)
+        self.assertEqual(rp.load_policy(), dict(GOOD, timeout_continuation_max=1))
         self.assertEqual(rp.policy_path().name, 'policy.json')
 
     def test_valid_file_loads(self):

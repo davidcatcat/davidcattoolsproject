@@ -806,6 +806,10 @@ class _DelegateStore:
         self.record = copy.deepcopy(record)
         self.writes = []
 
+    def task_ids(self):
+        # #1502 WP-D R2: the real chain gate scans the store at the claim.
+        return [self.record['task_id']]
+
     def get(self, task_id):
         return copy.deepcopy(self.record)
 
@@ -840,14 +844,16 @@ class OpenCodeDelegateSessionRefusalTest(_StoreCase):
         registration = SimpleNamespace(
             task_id='provider-evidence-fixture', trusted_agent_id='opencode-developer',
             session_ref='fixture-session-ref', native_session_id='UNKNOWN',
-            root='/nonexistent/d6', common_dir='/nonexistent/d6/.git', branch='main')
+            root='/nonexistent/d6', common_dir='/nonexistent/d6/.git', branch='main',
+            source_sha=HEAD)
         snapshot = SimpleNamespace(root=registration.root, common_dir=registration.common_dir,
                                    branch='main', head=HEAD)
+        # executor_task and source_sha: the chain gate reads the D6 and its base.
         args = SimpleNamespace(
             task_id=task['task_id'], timeout=None, context_stdin=False,
             selection_source='USER', acceptance=['Edit x.txt.'], read_path=['x.txt'],
             write_path=['x.txt'], egress_basis='Synthetic fixture text only.',
-            repair_packet=None)
+            repair_packet=None, executor_task=registration.task_id)
         store = _DelegateStore(task)
         patches = (
             mock.patch.object(cli, '_delegate_timeout', return_value=600),

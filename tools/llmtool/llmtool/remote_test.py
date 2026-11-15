@@ -53,7 +53,7 @@ _GH_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
 _REMOTE_LIMIT = 32768
 _FAILURE_EXCERPT_LIMIT = 4096
 _FAILURE_EXCERPT_LINES = 40
-_SSH_TIMEOUT = 600
+_SSH_TIMEOUT = 1800
 _MAX_REMOTE_MODULES = 8
 _RECEIPT_FIELDS = frozenset((
     'result', 'exit_code', 'source_sha', 'tree', 'fetch_head', 'modules',
@@ -287,6 +287,14 @@ def _config(path=None):
             '..' in value['python'].split('/')):
         raise LLMToolError('ADMISSION_DENIED: remote test config is invalid')
     return value
+
+
+def _ssh_timeout():
+    from . import developer_routes
+    try:
+        return developer_routes.remote_test_timeout()
+    except developer_routes.RouteError:
+        raise LLMToolError('ADMISSION_DENIED: remote test timeout config is invalid') from None
 
 
 def _task_path_modules(task):
@@ -541,8 +549,9 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
             return known
     if transport is None:
         transport = _ssh_transport
+    timeout = _ssh_timeout()
     try:
-        result = transport(argv, _REMOTE_SCRIPT, _SSH_TIMEOUT)
+        result = transport(argv, _REMOTE_SCRIPT, timeout)
     except subprocess.TimeoutExpired:
         return _record_outcome(store, task_id, task, result='TIMEOUT', code='SSH_TIMEOUT',
                                executor_task=executor_task, sha=sha, modules=selected)
@@ -708,8 +717,9 @@ def run_incident_remote_test(incident_id, *, sha, modules=(), root=None,
 
     if transport is None:
         transport = _ssh_transport
+    timeout = _ssh_timeout()
     try:
-        result = transport(argv, _REMOTE_SCRIPT, _SSH_TIMEOUT)
+        result = transport(argv, _REMOTE_SCRIPT, timeout)
     except subprocess.TimeoutExpired:
         return finish('TIMEOUT', 'SSH_TIMEOUT')
     except (OSError, ConnectionError):

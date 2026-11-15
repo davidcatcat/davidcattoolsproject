@@ -22,6 +22,21 @@ from llmtool.task_submission_cli import (  # noqa: E402
     _strict_json_object,
 )
 
+# #2006: task repair adds one bounded item and record-pm allows 16, so keep one free.
+REPAIR_ROOM_MAX_ACCEPTANCE = 15
+
+
+def check_ascii(spec: dict[str, Any]) -> list[str]:
+    """#2099: gw-agent copies non-ASCII text unreliably; fixed labels of fields that have any."""
+    if spec.get("provider") != "gw-agent":
+        return []
+    fields = [("goal", spec.get("goal"))]
+    fields += [(f"acceptance[{i}]", item) for i, item in enumerate(spec.get("acceptance") or [])]
+    edits = spec.get("edits") if isinstance(spec.get("edits"), list) else []
+    fields += [(f"edits[{i}]", json.dumps(edit, ensure_ascii=False)) for i, edit in enumerate(edits)]
+    return [f"{label}_non_ascii" for label, value in fields
+            if isinstance(value, str) and not value.isascii()]
+
 
 def check(spec: dict[str, Any]) -> list[str]:
     """Return fixed failure labels; never include untrusted field values."""
@@ -193,25 +208,35 @@ def ladder_tier(entries, max_tier=LADDER_MAX_TIER, route=None):
 LADDER_SIZES = {1: (1, 1536, 6), 2: (1, 3072, 10), 3: (2, 6144, 12), 4: (3, 10240, 16),
                 5: (4, 16384, 16), 6: (5, 24576, 16)}
 
+# #2005: the ladder sizes a new file as T4 (skills/company-llm-delegation/SKILL.md).
+NEW_FILE_MIN_TIER = 4
 
-def spec_tier(spec, context_bytes=0):
+
+def spec_tier(spec, context_bytes=0, repo=None):
     """Return the smallest ladder tier whose limits fit the spec: write count,
-    context bytes, and (for gw-agent specs) turn count; LADDER_MAX_TIER if none fits."""
+    context bytes, and (for gw-agent specs) turn count; LADDER_MAX_TIER if none fits.
+    If repo is given and any write path does not exist under repo, return at least
+    NEW_FILE_MIN_TIER."""
     writes = spec.get("write") if isinstance(spec.get("write"), list) else []
     reads = spec.get("read") if isinstance(spec.get("read"), list) else []
     agent = spec.get("provider") == "gw-agent"
     turns = len(reads) + 2 * len(writes) + 1
-    for tier in sorted(LADDER_SIZES):
-        files, limit_bytes, turn_limit = LADDER_SIZES[tier]
+    tier = LADDER_MAX_TIER
+    for candidate in sorted(LADDER_SIZES):
+        files, limit_bytes, turn_limit = LADDER_SIZES[candidate]
         if len(writes) <= files and context_bytes <= limit_bytes and (not agent or turns <= turn_limit):
-            return tier
-    return LADDER_MAX_TIER
+            tier = candidate
+            break
+    if repo is not None and any(isinstance(w, str) and not (Path(repo) / w).is_file() for w in writes):
+        tier = max(tier, NEW_FILE_MIN_TIER)
+    return min(tier, LADDER_MAX_TIER)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     ladder_log: str | None = None
     repo_dir: Path = Path.cwd()
+    repo_given = False
     spec_path: str | None = None
 
     i = 0
@@ -228,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
                 print("SPEC_PREFLIGHT_INVALID")
                 return 2
             repo_dir = Path(args[i + 1])
+            repo_given = True
             i += 2
         elif arg.startswith("-"):
             print("SPEC_PREFLIGHT_INVALID")
@@ -255,10 +281,13 @@ def main(argv: list[str] | None = None) -> int:
         print("SPEC_PREFLIGHT_INVALID")
         return 2
 
-    failures = check(spec)
+    failures = check(spec) + check_ascii(spec)
     if failures:
         print("SPEC_PREFLIGHT_FAIL:" + ",".join(failures))
         return 1
+
+    if len(spec["acceptance"]) > REPAIR_ROOM_MAX_ACCEPTANCE:
+        print("SPEC_PREFLIGHT_WARN:ACCEPTANCE_NO_REPAIR_ROOM", file=sys.stderr)
 
     if "edits" in spec and spec["edits"] is not None:
         if not isinstance(spec["edits"], list):
@@ -306,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         context_bytes = os.path.getsize(context_file)
     else:
         context_bytes = 0
-    required = spec_tier(spec, context_bytes)
+    required = spec_tier(spec, context_bytes, repo=repo_dir if repo_given else None)
     if required > current:
         print(f"SPEC_LADDER_TIER_EXCEEDED:required={required},current={current}")
         return 2

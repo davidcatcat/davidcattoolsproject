@@ -8,11 +8,11 @@ import unittest
 from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 from llmtool import (review_dispatch, skill_ledger, skill_manifest, task_completion,
                      task_submission_cli, worker_dispatch)
-from llmtool.developer_routes import RouteError
+from llmtool.developer_routes import RouteError, resolve_route_max_diff_bytes
 from llmtool.developer_routes.agy import owner_assignment_gate
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore
@@ -22,6 +22,7 @@ import review_trust_fixture
 import worker_policy_fixture
 
 
+_SHIPPED_AGY_MAX_DIFF = resolve_route_max_diff_bytes('agy')
 _MAIN_PIN = '9' * 40
 _CORE = skill_manifest.COMMON_CORE_CARD_PATH
 _DEV_CARD = skill_manifest.DEVELOPER_CARD_PATH
@@ -145,6 +146,10 @@ class AgyRouteWiringTests(unittest.TestCase):
         class Store:
             def __init__(self):
                 self.task = dict(task)
+
+            def task_ids(self):
+                # #1502 WP-D R2: the real chain gate scans the store at the claim.
+                return [task_id]
 
             def get(self, _task_id):
                 return dict(self.task)
@@ -288,7 +293,8 @@ class AgyRouteWiringTests(unittest.TestCase):
                  'routes': {'agy': {'executable': 'agy', 'default_model': 'gemini-test',
                                     'allowed_models': ['gemini-test'],
                                     'default_effort': 'high', 'denied_dirs': ['.gemini'],
-                                    'state_dirs': {'policy': 'private-temp-only'}}}}), \
+                                    'state_dirs': {'policy': 'private-temp-only'},
+                                    'max_diff_bytes': _SHIPPED_AGY_MAX_DIFF}}}), \
              patch.object(task_submission_cli.shutil, 'which', return_value='/usr/bin/agy'), \
              patch.object(task_submission_cli, 'for_platform', return_value=boundary), \
              patch.object(task_submission_cli, '_task_view', return_value={}), \
@@ -990,10 +996,47 @@ class AgyRouteWiringTests(unittest.TestCase):
                 self.assertIs(owner_assignment_gate('a' * 32, 'owner-ref')(), decision)
 
     def test_agy_large_diff_has_distinct_output_error(self):
-        status, task, inbox_events, _prompts = self._run_agy_delegate(diff_bytes=b'x' * (64 * 1024 + 1))
+        status, task, inbox_events, _prompts = self._run_agy_delegate(
+            diff_bytes=b'x' * (resolve_route_max_diff_bytes('agy') + 1))
         self.assertEqual(status, 1)
         self.assertEqual(task['developer']['error_code'], 'AGY_OUTPUT_TOO_LARGE')
         self.assertEqual(inbox_events, [])
+
+    def test_agy_diff_above_old_64_kib_is_accepted(self):
+        header = b'diff --git a/src.py b/src.py\n'
+        line = b'+y = 1\n'
+        repeats = ((64 * 1024 - len(header)) // len(line)) + 2
+        diff = header + line * repeats
+        status, task, _events, _prompts = self._run_agy_delegate(diff_bytes=diff)
+        self.assertEqual(status, 0)
+        self.assertEqual(task['developer']['state'], 'DEVELOPER_RESPONDED')
+
+    def test_agy_diff_cap_follows_route_config(self):
+        with patch.object(task_submission_cli, 'resolve_route_max_diff_bytes',
+                          return_value=1024) as mock_resolver:
+            status, task, inbox_events, _prompts = self._run_agy_delegate(diff_bytes=b'x' * 1025)
+        self.assertEqual(status, 1)
+        self.assertEqual(task['developer']['error_code'], 'AGY_OUTPUT_TOO_LARGE')
+        self.assertEqual(inbox_events, [])
+        mock_resolver.assert_called_with('agy', config=ANY)
+
+    def test_agy_resolve_route_max_diff_bytes_uses_bound_config_without_rereading(self):
+        with patch('llmtool.developer_routes.load_route_config',
+                   side_effect=RouteError('ROUTE_CONFIG_INVALID')):
+            self.assertEqual(
+                resolve_route_max_diff_bytes('agy', config={'routes': {'agy': {'max_diff_bytes': 2048}}}),
+                2048)
+
+    def test_agy_delegate_passes_dispatch_bound_config_to_max_diff_bytes(self):
+        with patch.object(task_submission_cli, 'resolve_route_max_diff_bytes',
+                          wraps=resolve_route_max_diff_bytes) as mock_resolver:
+            status, task, _inbox_events, _prompts = self._run_agy_delegate()
+        self.assertEqual(status, 0)
+        self.assertEqual(task['developer']['state'], 'DEVELOPER_RESPONDED')
+        mock_resolver.assert_called_once()
+        _args, kwargs = mock_resolver.call_args
+        self.assertIsInstance(kwargs['config'], dict)
+        self.assertEqual(kwargs['config']['routes']['agy']['executable'], 'agy')
 
     def test_agy_repair_prompt_contains_untrusted_reference(self):
         packet = {'task': 'task-1', 'pr': 7, 'executor_task': 'executor-d6',

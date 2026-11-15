@@ -1484,7 +1484,7 @@ class TaskStoreTests(unittest.TestCase):
             task['task_id'], expected={'developer': None},
             developer=self._developer_assignment())
         self.assertNotIn('timeout_seconds', saved['developer'])
-        for timeout in (1, 600, 1200, 1800):
+        for timeout in (1, 600, 1200, 1800, 3600):
             with self.subTest(timeout=timeout):
                 task = self._codex_dispatch_task()
                 self.store.create(task)
@@ -1511,7 +1511,7 @@ class TaskStoreTests(unittest.TestCase):
     def test_developer_timeout_seconds_rejects_invalid_values(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
-        for timeout in (0, -1, 1801, True, 600.0, '600', None):
+        for timeout in (0, -1, 3601, True, 600.0, '600', None):
             with self.subTest(timeout=timeout):
                 developer = dict(self._developer_assignment(), timeout_seconds=timeout)
                 with self.assertRaises(LLMToolError):
@@ -3192,6 +3192,62 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(saved['developer']['execution']['native_session_binding'], 'BOUND')
         self.assertEqual(saved['developer']['usage']['total_tokens'], 21)
 
+    def test_developer_artifact_256_kib_round_trips(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        pending = self._developer_assignment(provider='codex', max_tokens=None)
+        pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+        dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                       'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+        self.store.update(task['task_id'], developer=dispatching)
+        header = ('diff --git a/src.py b/src.py\n'
+                  '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n')
+        artifact = header + '+y = 1\n' * ((256 * 1024 - len(header)) // 7)
+        execution = {'status': 'DONE',
+            'native_session_id': '12345678-1234-4234-8234-123456789abc',
+            'process_exit_code': 0, 'stdout_sha256': 'c' * 64, 'elapsed_ms': 12,
+            'cleanup_status': 'CONFIRMED', 'usage_source': 'CLI_REPORTED',
+            'source_bytes': None, 'source_file_count': None,
+            'source_manifest_sha256': None, 'native_session_binding': 'BOUND'}
+        responded = {**dispatching, 'state': 'DEVELOPER_RESPONDED',
+            'artifact': artifact, 'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
+            'execution': execution,
+            'usage': {'prompt_tokens': 13, 'completion_tokens': 8, 'total_tokens': 21}}
+        self.store.update(task['task_id'], developer=responded)
+        self.assertEqual(self.store.get(task['task_id'])['developer']['artifact'], artifact)
+
+    def test_developer_artifact_over_512_kib_is_refused(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        pending = self._developer_assignment(provider='codex', max_tokens=None)
+        pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+        dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                       'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+        self.store.update(task['task_id'], developer=dispatching)
+        header = ('diff --git a/src.py b/src.py\n'
+                  '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n')
+        artifact = header + '+y = 1\n' * ((512 * 1024 - len(header)) // 7 + 1)
+        execution = {'status': 'DONE',
+            'native_session_id': '12345678-1234-4234-8234-123456789abc',
+            'process_exit_code': 0, 'stdout_sha256': 'c' * 64, 'elapsed_ms': 12,
+            'cleanup_status': 'CONFIRMED', 'usage_source': 'CLI_REPORTED',
+            'source_bytes': None, 'source_file_count': None,
+            'source_manifest_sha256': None, 'native_session_binding': 'BOUND'}
+        responded = {**dispatching, 'state': 'DEVELOPER_RESPONDED',
+            'artifact': artifact, 'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
+            'execution': execution,
+            'usage': {'prompt_tokens': 13, 'completion_tokens': 8, 'total_tokens': 21}}
+        with self.assertRaises(LLMToolError):
+            self.store.update(task['task_id'], developer=responded)
+        self.assertEqual(
+            self.store.get(task['task_id'])['developer']['state'],
+            'DEVELOPER_DISPATCHING',
+        )
+
     def test_native_session_binding_rejected_for_opencode_and_invalid_values(self):
         artifact = ('diff --git a/src.py b/src.py\n'
                     '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')
@@ -3445,7 +3501,7 @@ class TaskStoreTests(unittest.TestCase):
             task_id='executor-task', trusted_agent_id='agent',
             session_ref='session-ref', native_session_id=None, root=root,
             common_dir=snapshot.common_dir, branch=snapshot.branch,
-            env2_pass_marker='pass')
+            env2_pass_marker='pass', source_sha=snapshot.head)
         args = SimpleNamespace(
             task_id=None, selection_source='USER', context_stdin=False,
             executor_task='executor-task', read_path=['src.py'],
@@ -3460,11 +3516,15 @@ class TaskStoreTests(unittest.TestCase):
             ('The requested change cannot be made safely.',
              'CODEX_RESULT_EVIDENCE_UNKNOWN', None, 'UNKNOWN', True),
         )
-        for reason, expected_code, expected_reason, expected_execution, evidence_failure in cases:
+        for index, (reason, expected_code, expected_reason, expected_execution,
+                    evidence_failure) in enumerate(cases):
             with self.subTest(reason=reason[:20]):
                 task = self._codex_dispatch_task()
                 self.store.create(task)
                 args.task_id = task['task_id']
+                # #1502 WP-D R2: each case is a first run on its own D6, so the
+                # chain gate's repair count never sees an earlier case's run.
+                registration.task_id = args.executor_task = f'executor-task-{index}'
                 result = SimpleNamespace(
                     status='BLOCKED', blocked_reason=reason,
                     thread_id='12345678-1234-4234-8234-123456789abc',
@@ -3516,7 +3576,7 @@ class TaskStoreTests(unittest.TestCase):
             task_id='executor-task', trusted_agent_id='agent',
             session_ref='session-ref', native_session_id=None, root=root,
             common_dir=snapshot.common_dir, branch=snapshot.branch,
-            env2_pass_marker='pass')
+            env2_pass_marker='pass', source_sha=snapshot.head)
         task = self._codex_dispatch_task()
         self.store.create(task)
         args = SimpleNamespace(

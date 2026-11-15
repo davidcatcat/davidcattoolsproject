@@ -223,7 +223,7 @@ class HighDebugTests(unittest.TestCase):
         return caught.exception.high_debug_code, created
 
     def test_failed_codex_attempts_are_recorded_and_retry_uses_a_new_d6(self):
-        store = _Store()
+        # O7: a started attempt is used; one fresh store per case.
         root = self._repo()
         cases = (
             ({'returncode': 1}, 'HIGH_DEBUG_RUN_FAILED'),
@@ -231,17 +231,20 @@ class HighDebugTests(unittest.TestCase):
              'HIGH_DEBUG_RUN_FAILED'),
             ({'dirty': True}, 'HIGH_DEBUG_WROTE_FILES'),
         )
-        for attempt, (kwargs, code) in enumerate(cases, 1):
-            with self.subTest(code=code, attempt=attempt):
+        for kwargs, code in cases:
+            with self.subTest(code=code):
+                store = _Store()
                 observed, created = self._failing_case(store, root, **kwargs)
                 self.assertEqual(observed, code)
-                self.assertEqual(created, [f'executor-hd{attempt}-aaaaaaa'])
+                self.assertEqual(created, ['executor-hd1-aaaaaaa'])
                 entry = store.entries[-1]
                 self.assertEqual((entry['status'], entry['report'], entry['d6']),
                                  ('RUN_FAILED', code, created[0]))
                 (root / 'unexpected.txt').unlink(missing_ok=True)
-        self.assertEqual(len(store.entries), len(cases))
-        self.assertEqual(store.events, [])
+                self.assertEqual(self._failing_case(store, root),
+                                 ('HIGH_DEBUG_DEBUG_PARENT_USED', []))
+                self.assertEqual(len(store.entries), 1)
+                self.assertEqual(store.events, [])
 
     def _failed_report(self, report):
         store = _Store()
@@ -582,35 +585,44 @@ class HighDebugTests(unittest.TestCase):
     def test_failed_create_costs_no_entry_and_retry_skips_a_leftover_d6(self):
         store = _Store()
         root = self._repo()
-        def leaves_branch(**kwargs):
-            subprocess.run(['git', '-C', str(root), 'branch',
-                            'llmtool/high-debug-' + kwargs['task_id']], check=True)
-            raise subprocess.TimeoutExpired('lifecycle', 180)
         def leaves_record(**kwargs):
             registry = root / '.git' / 'llmtool-worktrees'
             registry.mkdir(exist_ok=True)
             (registry / (kwargs['task_id'] + '.json')).write_text('{}', encoding='utf-8')
-            raise subprocess.CalledProcessError(1, 'lifecycle')
+            raise high_debug._D6CreateRejected('D6_TEST_REJECTED')
         def leaves_nothing(**_kwargs):
-            raise subprocess.CalledProcessError(1, 'lifecycle')
+            raise high_debug._D6CreateRejected('D6_TEST_REJECTED')
+        # O7: a confirmed failed create is not used; a leftover D6 stays RESERVED.
+        subprocess.run(['git', '-C', str(root), 'branch',
+                        'llmtool/high-debug-executor-hd2-aaaaaaa'], check=True)
+        (root / 'd6s').mkdir()
+        trusted = patch.object(high_debug, 'trust', SimpleNamespace(
+            load_trust=lambda: SimpleNamespace(tasks_root=str(root / 'd6s'))))
+        trusted.start()
+        self.addCleanup(trusted.stop)
         expected = (
-            (leaves_branch, 'executor-hd1-aaaaaaa'),
-            (leaves_record, 'executor-hd2-aaaaaaa'),
-            (leaves_nothing, 'executor-hd3-aaaaaaa'),
-            (leaves_nothing, 'executor-hd3-aaaaaaa'),
+            (leaves_nothing, 'executor-hd1-aaaaaaa', 'RUN_FAILED', 'HIGH_DEBUG_D6_CREATE_FAILED'),
+            (leaves_nothing, 'executor-hd3-aaaaaaa', 'RUN_FAILED', 'HIGH_DEBUG_D6_CREATE_FAILED'),
+            (leaves_record, 'executor-hd3-aaaaaaa', 'RESERVED', 'HIGH_DEBUG_RESERVED'),
         )
-        for create, name in expected:
+        for create, name, _status, _report in expected:
             with self.subTest(name=name):
                 observed, created = self._failing_case(store, root, create=create)
                 self.assertEqual(observed, 'HIGH_DEBUG_D6_CREATE_FAILED')
                 self.assertEqual(created, [name])
-        self.assertEqual(store.entries, [])
+        self.assertEqual([(entry['status'], entry['report'], entry['d6'])
+                          for entry in store.entries],
+                         [(status, report, name) for _create, name, status, report in expected])
+        self.assertEqual([high_debug._debug_entry_used(entry) for entry in store.entries],
+                         [False, False, True])
+        self.assertEqual(self._failing_case(store, root, create=leaves_nothing),
+                         ('HIGH_DEBUG_DEBUG_PARENT_USED', []))
 
     def test_failed_attempt_keeps_its_code_when_recording_fails(self):
         store = _Store()
-        def refuse(_task_id, _entry):
+        def refuse(_task_id, _index, _entry):
             raise LLMToolError('limit')
-        store.append_high_debug = refuse
+        store.finalize_high_debug = refuse
         observed, _created = self._failing_case(store, self._repo(), returncode=1)
         self.assertEqual(observed, 'HIGH_DEBUG_RUN_FAILED')
 
@@ -661,7 +673,8 @@ class HighDebugTests(unittest.TestCase):
     def test_a_failed_launch_does_not_use_up_the_parent_debug(self):
         report = ''.join('## ' + heading + '\nDetails.\n' for heading in high_debug.REPORT_SECTIONS)
         (_result, invoke, store) = self._run_case(report + 'RCA_UNCONFIRMED')
-        store.entries[0] = dict(store.entries[0], status='RUN_FAILED')
+        store.entries[0] = dict(store.entries[0], status='RUN_FAILED',
+                                report='HIGH_DEBUG_QUOTA_EXHAUSTED')
         self.assertIsNone(invoke())
         self.assertEqual([entry['status'] for entry in store.entries],
                          ['RUN_FAILED', 'RCA_UNCONFIRMED'])
@@ -2145,7 +2158,13 @@ class _Store:
     def __init__(self):
         self.entries = []
         self.events = []
+        self.served = set()
+    def task_ids(self):
+        return sorted(self.served)
+    def finalize_high_debug(self, _task_id, index, entry):
+        self.entries[index] = entry
     def get(self, task_id):
+        self.served.add(task_id)
         return {'task_id': task_id, 'run_id': 'b' * 32,
                 'review_repair_claims': [
                     {'family': 'family', 'pr': 17},

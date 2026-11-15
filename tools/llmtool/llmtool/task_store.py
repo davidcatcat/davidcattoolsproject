@@ -52,6 +52,8 @@ def _added_diff_content(value):
 
 SCHEMA_VERSION = 2
 MAX_RECORD_BYTES = 1024 * 1024
+# #1815: a Developer diff is stored whole; the 1 MiB record limit is the ceiling, so artifacts stay at or below half of it. Same value as developer_routes.base.HARD_MAX_DIFF_BYTES.
+MAX_ARTIFACT_BYTES = 512 * 1024
 TASK_ID = re.compile(r'[0-9a-f]{32}')
 D6_TASK_ID = re.compile(r'[a-z0-9][a-z0-9-]{0,95}')
 SESSION_ID = re.compile(r'pm-[a-z0-9-]{1,60}')
@@ -158,6 +160,30 @@ _REPAIR_CAP_OVERRIDE_VALID_SHAPES = tuple(
 _HIGH_DEBUG_FIELDS = frozenset(('family', 'failed_corrections', 'early_reason', 'examined_sha',
     'd6', 'model_requested', 'model_observed', 'effort_observed', 'status',
     'report_sha256', 'report', 'usage', 'recorded_at'))
+# #1502 WP-D O7: a RESERVED entry keeps these values and gets one of these statuses.
+_HIGH_DEBUG_IDENTITY = ('family', 'failed_corrections', 'early_reason', 'examined_sha',
+                        'd6', 'model_requested', 'rules_sha256')
+_HIGH_DEBUG_FINAL_STATUSES = ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED',
+                              'REPORT_INVALID', 'RUN_FAILED')
+
+
+def _check_high_debug_finalize(old, new, index):
+    """Only entries[index] changes, from RESERVED to a final entry of the same identity."""
+    if (type(old) is not list or type(new) is not list or len(new) != len(old) or
+            type(index) is not int or not 0 <= index < len(old) or
+            new[:index] != old[:index] or new[index + 1:] != old[index + 1:]):
+        _fail('HIGH_DEBUG_IMMUTABLE')
+    before, after = old[index], new[index]
+    missing = object()
+    if (type(before) is not dict or before.get('status') != 'RESERVED' or
+            type(after) is not dict or
+            type(after.get('status')) is not str or
+            after['status'] not in _HIGH_DEBUG_FINAL_STATUSES or
+            any(before.get(key, missing) != after.get(key, missing)
+                for key in _HIGH_DEBUG_IDENTITY)):
+        _fail('HIGH_DEBUG_IMMUTABLE')
+
+
 MAX_COMPLETION_EVENTS = 32
 # Retention: when the event list is full, the oldest ACKED event is compacted
 # into a tombstone that keeps its identity and stream position, so an acked
@@ -280,7 +306,7 @@ _DEVELOPER_GW_AUDIT_FIELDS = frozenset((
     'audit_sha256', 'audit_copy_path_sha256', 'changed_files'))
 # #1815: resolved Developer run timeout, optional on every developer shape.
 _DEVELOPER_TIMEOUT_FIELDS = frozenset(('timeout_seconds',))
-_DEVELOPER_TIMEOUT_MAX_SECONDS = 1800
+_DEVELOPER_TIMEOUT_MAX_SECONDS = 3600
 # The data class a gw-agent delegate validated at dispatch, optional on every
 # developer shape so a review repair can reuse it (legacy records omit it).
 _DEVELOPER_DATA_CLASS_FIELDS = frozenset(('data_class',))
@@ -1198,6 +1224,11 @@ def _known_review_failure_reason(value):
     return type(value) is str and value in REVIEW_FAILURE_REASONS
 
 
+def _known_bind_failure_reason(value):
+    from .review_dispatch import REVIEWER_BIND_FAILURE_REASONS
+    return type(value) is str and value in REVIEWER_BIND_FAILURE_REASONS
+
+
 _BINDING_MISMATCH_KEY_NAMES = frozenset(('task_id', 'run_id', 'head'))
 
 
@@ -1975,7 +2006,7 @@ def _validate(record, *, strict=True):
                 (item.get('usage') != 'UNKNOWN' and type(item.get('usage')) is not dict) or
                 type(item.get('recorded_at')) is not str or
                 item.get('status') not in ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED', 'REPORT_INVALID',
-                                        'RUN_FAILED')):
+                                        'RUN_FAILED', 'RESERVED')):
                 _fail('HIGH_DEBUG_INVALID')
     if 'repair_cap_override' in record:
         # #1502 WP-D D7: nothing writes this field any more and nothing reads
@@ -1996,7 +2027,7 @@ def _validate(record, *, strict=True):
         for item in claims:
             if (type(item) is not dict or
                     set(item) - frozenset(('failure_reason', 'binding_mismatch_keys',
-                                           'rules_sha256')) not in (
+                                           'rules_sha256', 'bind_failure_reason')) not in (
                         _REVIEW_DISPATCH_CLAIM_FIELDS,
                         _REVIEW_DISPATCH_CLAIM_FIELDS | frozenset(('review_result',)),
                         _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS,
@@ -2004,6 +2035,11 @@ def _validate(record, *, strict=True):
                         frozenset(('review_result',))) or
                     ('failure_reason' in item and
                      not _known_review_failure_reason(item['failure_reason'])) or
+                    # #1909 item 1 (security v91): only an UNKNOWN claim, never with failure_reason.
+                    ('bind_failure_reason' in item and
+                     (not _known_bind_failure_reason(item['bind_failure_reason']) or
+                      item.get('state') != 'UNKNOWN' or
+                      'failure_reason' in item)) or
                     ('binding_mismatch_keys' in item and
                      not _valid_binding_mismatch_keys(item)) or
                     # #1502 WP-F: sha256 of the exact Reviewer rule prefix sent.
@@ -2704,7 +2740,7 @@ def _validate(record, *, strict=True):
             artifact = developer['artifact']
             artifact_sha = developer['artifact_sha256']
             if artifact is not None:
-                if (type(artifact) is not str or len(artifact.encode('utf-8')) > 64 * 1024 or
+                if (type(artifact) is not str or len(artifact.encode('utf-8')) > MAX_ARTIFACT_BYTES or
                         type(artifact_sha) is not str or
                         hashlib.sha256(artifact.encode('utf-8')).hexdigest() != artifact_sha or
                         _emitted_sensitive(_added_diff_content(artifact))):
@@ -3699,6 +3735,24 @@ class TaskStore:
             _fail()
         return self._update(task_id, expected=expected, changes=changes)
 
+    def recover_review_repair_claim(self, task_id, repair_task_id, *, executor_task, pr_number,
+                                    expected_sha256):
+        """#1928: one CAS setting one UNKNOWN review repair claim DISPATCHED.
+
+        review_repair_recovery.verify_recovery (E1-E5) runs inside the locked update on
+        the record read there; a failed check refuses and nothing is written.
+        """
+        return self._update(task_id, expected={'record_sha256': expected_sha256}, changes={},
+                            claim_recovery=(repair_task_id, executor_task, pr_number))
+
+    @staticmethod
+    def _claim_recovered(old, new, recovery):
+        """#1928: under a claim recovery the one change is UNKNOWN -> DISPATCHED."""
+        if recovery and (old.get('state') != 'UNKNOWN' or new.get('state') != 'DISPATCHED' or
+                         set(old) != set(new)):
+            _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
+        return recovery
+
     @staticmethod
     def _claude_d6_holds(record, executor_task_id):
         if record.get('abandonment') is not None:
@@ -4091,6 +4145,22 @@ class TaskStore:
             try:
                 return self.compare_and_update(task_id, expected={'high_debug': current.get('high_debug')},
                                                high_debug=entries + [entry])
+            except TaskStoreConflict:
+                continue
+        _fail('HIGH_DEBUG_BUSY')
+
+    def finalize_high_debug(self, task_id, index, entry):
+        """O7: replace the RESERVED entry at index with its final entry, once."""
+        for _ in range(5):
+            current = self.get(task_id)
+            entries = current.get('high_debug', [])
+            if type(entries) is not list or type(index) is not int or not 0 <= index < len(entries):
+                _fail('HIGH_DEBUG_IMMUTABLE')
+            changed = list(entries)
+            changed[index] = entry
+            try:
+                return self._update(task_id, expected={'high_debug': current.get('high_debug')},
+                                    changes={'high_debug': changed}, high_debug_finalize=index)
             except TaskStoreConflict:
                 continue
         _fail('HIGH_DEBUG_BUSY')
@@ -5221,19 +5291,24 @@ class TaskStore:
                 task_id, expected=expected, changes=changes,
                 d6_claims=authorized, **trusted))
 
-    def _update_record(self, task_id, *, expected, changes, d6_claims,
+    def _update_record(self, task_id, *, expected, changes, d6_claims, claim_recovery=None,
                        trusted_dispatch_audit=False,
                        trusted_completion_events=False, trusted_abandonment=False,
                        abandonment_pm_session_id=None, trusted_pm_session_adoption=False,
                        trusted_codex_launch=False, trusted_opencode_launch=False,
-                       trusted_split=None, split_child_max=None):
+                       trusted_split=None, split_child_max=None, high_debug_finalize=None):
         # Refused here, not by the writable-field check: the dispatch gate
         # before that check can write its audit to the record.
         if _D6_CLAIM_ARGUMENTS & set(changes):
             _fail()
+        if high_debug_finalize is not None and set(changes) != {'high_debug'}:
+            _fail('HIGH_DEBUG_IMMUTABLE')
         if 'continues' in changes:
             # #1502 WP-D L1: continues is written once, when record-pm creates the Task.
             _fail('TASK_CONTINUES_IMMUTABLE')
+        if claim_recovery is not None and changes:
+            # #1928: a claim recovery builds its one change under the lock.
+            _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
         if (trusted_split is not None or split_child_max is not None) and (
                 trusted_split not in SPLIT_ACTIONS or set(changes) != {'lineage'} or
                 (split_child_max is not None) != (trusted_split == 'COMMIT') or
@@ -5336,6 +5411,15 @@ class TaskStore:
             if expected is not None and any(current.get(key) != value
                                             for key, value in expected.items()):
                 raise TaskStoreConflict() from None
+            if claim_recovery is not None:
+                # #1928: E1-E5 on the record read under this lock; the change is built here.
+                from . import review_repair_recovery
+                repair_id, executor, pr_number = claim_recovery
+                review_repair_recovery.verify_recovery(
+                    self, current, repair_id, executor_task=executor, pr_number=pr_number)
+                changes = {'review_repair_claims': [
+                    dict(item, state='DISPATCHED') if item.get('repair_task_id') == repair_id
+                    else item for item in current['review_repair_claims']]}
             if trusted_codex_launch or trusted_opencode_launch:
                 proposed = changes.get('developer')
                 old = current.get('developer')
@@ -5441,6 +5525,7 @@ class TaskStore:
                                 allowed_claim_transition = (
                                     'failure_reason' not in before and
                                     'binding_mismatch_keys' not in before and
+                                    'bind_failure_reason' not in before and
                                     type(before.get('native_session_id')) is str and
                                     set(after) == set(before) and
                                     all(before.get(key) == after.get(key) for key in before
@@ -5498,7 +5583,8 @@ class TaskStore:
                         _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
                     i = changed[0]
                     old, new = old_claims[i], new_claims[i]
-                    if (not ((old.get('state') == 'CLAIMED' and
+                    recovered = self._claim_recovered(old, new, claim_recovery is not None)
+                    if (not (recovered or (old.get('state') == 'CLAIMED' and
                               new.get('state') in ('DISPATCHED', 'UNKNOWN')) or
                              (old.get('state') == 'DISPATCHED' and
                               new.get('state') == 'FAILED')) or
@@ -5508,7 +5594,9 @@ class TaskStore:
             if 'high_debug' in changes:
                 old_entries = current.get('high_debug', [])
                 new_entries = changes['high_debug']
-                if (type(new_entries) is not list or len(new_entries) != len(old_entries) + 1 or
+                if high_debug_finalize is not None:
+                    _check_high_debug_finalize(old_entries, new_entries, high_debug_finalize)
+                elif (type(new_entries) is not list or len(new_entries) != len(old_entries) + 1 or
                         new_entries[:-1] != old_entries):
                     _fail('HIGH_DEBUG_IMMUTABLE')
             from . import worker_dispatch

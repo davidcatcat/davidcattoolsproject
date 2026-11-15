@@ -1,9 +1,10 @@
 """Provider-neutral execution contracts for direct CLI Developer routes."""
 
 from .base import (
-    DEFAULT_TIMEOUT_SECONDS, HARD_TIMEOUT_CAP_SECONDS, TIMEOUT_KEYS as _TIMEOUT_KEYS,
-    DeveloperRoute, RouteError, RouteResult, capture_snapshot, resolve_route_timeout,
-    run_route, timeout_limits_ok as _timeout_limits_ok,
+    DEFAULT_TIMEOUT_SECONDS, HARD_TIMEOUT_CAP_SECONDS, ROUTE_LIMIT_KEYS,
+    TIMEOUT_KEYS as _TIMEOUT_KEYS, DeveloperRoute, RouteError, RouteResult,
+    capture_snapshot, max_diff_bytes_ok, resolve_route_max_diff_bytes,
+    resolve_route_timeout, run_route, timeout_limits_ok as _timeout_limits_ok,
 )
 from .agy import AgyRoute, owner_assignment_gate
 from .claude import ClaudeRoute
@@ -19,10 +20,20 @@ __all__ = [
     'DeveloperRoute', 'RouteError', 'RouteResult', 'capture_snapshot', 'run_route',
     'AgyRoute', 'ClaudeRoute', 'GwAgentRoute', 'owner_assignment_gate', 'load_route_config',
     'check_route_model', 'check_registry_role_model', 'REGISTRY_ROLES',
-    'resolve_route_timeout', 'DEFAULT_TIMEOUT_SECONDS', 'HARD_TIMEOUT_CAP_SECONDS',
+    'resolve_route_timeout', 'resolve_route_max_diff_bytes',
+    'DEFAULT_TIMEOUT_SECONDS', 'HARD_TIMEOUT_CAP_SECONDS',
+    'DEFAULT_ROLE_TIMEOUT_SECONDS', 'DEFAULT_REMOTE_TEST_TIMEOUT_SECONDS',
+    'role_timeout', 'remote_test_timeout',
     'SandboxExecBoundary', 'UnsupportedBoundary', 'WriteBoundary',
     'for_platform',
 ]
+
+DEFAULT_ROLE_TIMEOUT_SECONDS = 1800
+DEFAULT_REMOTE_TEST_TIMEOUT_SECONDS = 1800
+
+
+def _timeout_value_ok(v):
+    return type(v) is int and 1 <= v <= HARD_TIMEOUT_CAP_SECONDS
 
 _MAX_ALLOWED_MODELS = 16
 _GENERIC_MODEL_PATTERN = r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}'
@@ -104,13 +115,18 @@ def _role_models(roles):
     normalized = {}
     for role, model_ok in _ROLE_MODEL_CHECKS.items():
         entry = roles[role]
-        if type(entry) is not dict or set(entry) != {'allowed_models'}:
+        if type(entry) is not dict or set(entry) not in ({'allowed_models'}, {'allowed_models', 'timeout'}):
             raise RouteError('ROUTE_CONFIG_INVALID')
         models = entry['allowed_models']
         if (type(models) is not list or len(models) != 1 or
                 not model_ok(models[0])):
             raise RouteError('ROUTE_CONFIG_INVALID')
-        normalized[role] = {'allowed_models': list(models)}
+        if 'timeout' in entry:
+            if not _timeout_value_ok(entry['timeout']):
+                raise RouteError('ROUTE_CONFIG_INVALID')
+            normalized[role] = {'allowed_models': list(models), 'timeout': entry['timeout']}
+        else:
+            normalized[role] = {'allowed_models': list(models)}
     return normalized
 
 
@@ -174,13 +190,17 @@ def check_registry_role_model(config, role, model):
     * role is not one of the canonical ids (aliases are mapped by the caller);
     * model is not a str, or its full identifier is not of the role's model
       family (no provider-prefix stripping, no case folding);
-    * model is not exactly one of the role's allowed_models.
+    * model is not exactly one of the role's allowed_models;
+    * an unloadable repository file refuses ROUTE_CONFIG_UNAVAILABLE (#2027).
 
     There is no owner_override exemption and no other bypass.
     """
-    try:
-        if config is None:
+    if config is None:
+        try:
             config = load_route_config()
+        except RouteError:
+            raise RouteError('ROUTE_CONFIG_UNAVAILABLE') from None
+    try:
         roles = config.get('roles') if type(config) is dict else None
         registry = _role_models(roles)
     except RouteError:
@@ -208,12 +228,15 @@ def load_route_config(path=None):
                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
     except (OSError, UnicodeError, ValueError, TypeError, RecursionError):
         raise RouteError('ROUTE_CONFIG_INVALID') from None
-    # 'roles' is optional so older fixtures still load; when present it is
-    # validated strictly (#1502 WP-E).
-    if (type(value) is not dict or set(value) - {'roles'} != {'schema_version', 'routes'} or
+    # 'roles' and 'remote_test_timeout' are optional so older fixtures still
+    # load; when present they are validated strictly (#1502 WP-E, #1815).
+    if (type(value) is not dict or set(value) - {'roles', 'remote_test_timeout'} != {'schema_version', 'routes'} or
             type(value.get('schema_version')) is not int or value['schema_version'] != 1 or
             type(value.get('routes')) is not dict):
         raise RouteError('ROUTE_CONFIG_INVALID')
+    if 'remote_test_timeout' in value:
+        if not _timeout_value_ok(value['remote_test_timeout']):
+            raise RouteError('ROUTE_CONFIG_INVALID')
     routes = value['routes']
     if ('agy' not in routes or set(routes) - {'agy', 'claude', 'gw-agent', 'opencode'} or
             type(routes['agy']) is not dict or
@@ -223,10 +246,13 @@ def load_route_config(path=None):
         raise RouteError('ROUTE_CONFIG_INVALID')
     if not all(_route_timeouts_ok(item) for item in routes.values()):
         raise RouteError('ROUTE_CONFIG_INVALID')
+    if not all(max_diff_bytes_ok(item['max_diff_bytes'])
+               for item in routes.values() if 'max_diff_bytes' in item):
+        raise RouteError('ROUTE_CONFIG_INVALID')
     entry = routes['agy']
     expected = {'executable', 'default_model', 'allowed_models', 'default_effort',
                 'denied_dirs', 'state_dirs'}
-    if set(entry) - _TIMEOUT_KEYS != expected:
+    if set(entry) - ROUTE_LIMIT_KEYS != expected:
         raise RouteError('ROUTE_CONFIG_INVALID')
     if (entry['executable'] != 'agy' or type(entry['default_model']) is not str or
             '://' in entry['default_model'] or
@@ -243,7 +269,7 @@ def load_route_config(path=None):
         claude = routes['claude']
         expected_claude = {'executable', 'default_model', 'allowed_models', 'default_effort',
                            'denied_dirs', 'state_dirs'}
-        if (set(claude) - _TIMEOUT_KEYS != expected_claude or claude.get('executable') != 'claude' or
+        if (set(claude) - ROUTE_LIMIT_KEYS != expected_claude or claude.get('executable') != 'claude' or
                 type(claude.get('default_model')) is not str or
                 re.fullmatch(r'claude-[a-z0-9][a-z0-9.-]{0,120}',
                              claude['default_model']) is None or
@@ -262,7 +288,7 @@ def load_route_config(path=None):
         expected_gw = {'package_path', 'default_model', 'allowed_models', 'default_effort',
                        'profile_name', 'profile', 'authorization_ref',
                        'allowed_data_classes'}
-        if (set(gw) - _TIMEOUT_KEYS != expected_gw or
+        if (set(gw) - ROUTE_LIMIT_KEYS != expected_gw or
                 type(gw.get('package_path')) is not str or
                 not (gw['package_path'].startswith('/') or
                      gw['package_path'].startswith('~/')) or
@@ -288,8 +314,8 @@ def load_route_config(path=None):
         normalized['gw-agent']['allowed_models'] = list(gw['allowed_models'])
     if 'opencode' in routes:
         opencode = routes['opencode']
-        if (set(opencode) - _TIMEOUT_KEYS != {'executable', 'default_model',
-                                              'allowed_models', 'default_effort'} or
+        if (set(opencode) - ROUTE_LIMIT_KEYS != {'executable', 'default_model',
+                                                 'allowed_models', 'default_effort'} or
                 opencode.get('executable') != 'opencode' or
                 not _opencode_model_ok(opencode.get('default_model')) or
                 type(opencode.get('default_effort')) is not str or
@@ -302,7 +328,28 @@ def load_route_config(path=None):
     result = {'schema_version': 1, 'routes': normalized}
     if 'roles' in value:
         result['roles'] = _role_models(value['roles'])
+    if 'remote_test_timeout' in value:
+        result['remote_test_timeout'] = value['remote_test_timeout']
     return result
+
+
+def role_timeout(role, path=None):
+    """Return the timeout in seconds configured for role or DEFAULT_ROLE_TIMEOUT_SECONDS."""
+    if role not in REGISTRY_ROLES:
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    config = load_route_config(path)
+    roles = config.get('roles')
+    if type(roles) is dict and role in roles:
+        timeout = roles[role].get('timeout')
+        if timeout is not None:
+            return timeout
+    return DEFAULT_ROLE_TIMEOUT_SECONDS
+
+
+def remote_test_timeout(path=None):
+    """Return the remote test timeout in seconds or DEFAULT_REMOTE_TEST_TIMEOUT_SECONDS."""
+    config = load_route_config(path)
+    return config.get('remote_test_timeout', DEFAULT_REMOTE_TEST_TIMEOUT_SECONDS)
 
 
 def _unique_config_pairs(pairs):

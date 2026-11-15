@@ -20,6 +20,22 @@ from llmtool.task_store import _json_bytes
 from llmtool.cli import main, parser_for_cli
 
 
+# #2073: drive-calling tests must not depend on a live git checkout (EC2 workdir is not one); production fail-closed is unchanged.
+_code_tree_patch = None
+
+
+def setUpModule():
+    global _code_tree_patch
+    _code_tree_patch = patch('llmtool.source_freshness.code_tree', return_value='d' * 64)
+    _code_tree_patch.start()
+
+
+def tearDownModule():
+    global _code_tree_patch
+    if _code_tree_patch is not None:
+        _code_tree_patch.stop()
+
+
 HEAD = 'a' * 40
 MAIN_SHA = 'e' * 40
 PR = {'number': 17, 'head': {'sha': HEAD}, 'merged': False}
@@ -1747,7 +1763,7 @@ class TaskAdvanceCiFailRepairTests(unittest.TestCase):
         self.assertEqual(dispatched, [])
 
     def test_env_conclusions_wait_without_repair_or_ci_rerun(self):
-        for conclusion in ('cancelled', 'timed_out', 'startup_failure'):
+        for conclusion in ('cancelled', 'startup_failure'):
             with self.subTest(conclusion=conclusion):
                 result, dispatched, calls, repaired, gh_calls = self.linux(conclusion)
                 self.assertEqual((result['step'], result['codes']),

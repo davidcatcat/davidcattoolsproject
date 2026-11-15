@@ -17,7 +17,7 @@ import sys
 import time
 
 from .errors import LLMToolError
-from . import github_identity, role_config, skill_manifest, task_completion, worker_dispatch
+from . import developer_routes, github_identity, role_config, skill_manifest, task_completion, worker_dispatch
 
 
 # #1502 WP-E R1: the fallbacks equal the roles registry's listed models and,
@@ -25,7 +25,7 @@ from . import github_identity, role_config, skill_manifest, task_completion, wor
 _CODEX_REVIEW_MODEL = 'gpt-6.1-sol'
 _CLAUDE_REVIEW_MODEL = 'claude-sonnet-5-5'
 _CODEX_REVIEW_EFFORT = 'high'
-_CODEX_REVIEW_TIMEOUT = 600
+_CODEX_REVIEW_TIMEOUT = 1800
 _CODEX_REVIEW_MAX_OUTPUT = 1024 * 1024
 
 # Fixed names of the check that refused a finished Codex run's output. They are
@@ -42,6 +42,8 @@ REVIEW_FAILURE_REASONS = _D6_CREATE_FAILURE_REASONS | frozenset((
     'REVIEW_CLASSIFIER_REJECTED',
     # The review prompt was refused before any Reviewer session started.
     'REVIEW_PROMPT_REFUSED'))
+# #1909 item 1: fixed codes for a Reviewer session bind that failed after the session started; kept apart from REVIEW_FAILURE_REASONS (nothing-posted reasons).
+REVIEWER_BIND_FAILURE_REASONS = frozenset(('REVIEWER_SESSION_BIND_FAILED', 'REVIEWER_SESSION_BIND_TIMEOUT'))
 REVIEW_OUTPUT_WITHHELD = 'REVIEW_OUTPUT_WITHHELD'
 REVIEW_OUTPUT_ABSENT = 'REVIEW_OUTPUT_ABSENT'
 _REVIEW_REFUSALS_DIR = 'review-refusals'
@@ -131,14 +133,30 @@ def _review_rules(repo_root):
 
 
 def _admit_review_model(reviewer_key, model):
-    """#1502 WP-E R1: return model only when the shared registry check admits it.
+    """#1502 WP-E R1 (#2027): return model only when the shared registry check admits it.
 
     Refuses with REVIEW_DISPATCH code ROLE_MODEL_NOT_ALLOWED; never a fallback.
     """
     try:
         return role_config.check_registry_model(reviewer_key, model)
-    except LLMToolError:
+    except LLMToolError as error:
+        if getattr(error, 'role_config_code', None) == role_config.ROUTE_CONFIG_UNAVAILABLE:
+            _refuse('ROUTE_CONFIG_UNAVAILABLE')
         _refuse('ROLE_MODEL_NOT_ALLOWED')
+
+
+def _resolve_reviewer_role(reviewer_key):
+    """#2027: resolve the role config for reviewer_key; tag review_dispatch_code on LLMToolError."""
+    try:
+        return role_config.resolve_role(
+            'reviewer' if reviewer_key == 'claude-reviewer' else 'codex-reviewer')
+    except LLMToolError as exc:
+        code = getattr(exc, 'role_config_code', None)
+        if code == role_config.ROUTE_CONFIG_UNAVAILABLE:
+            exc.review_dispatch_code = 'ROUTE_CONFIG_UNAVAILABLE'
+        elif code == role_config.ROLE_MODEL_NOT_ALLOWED:
+            exc.review_dispatch_code = 'ROLE_MODEL_NOT_ALLOWED'
+        raise
 
 
 def _policy(task, reviewer_key):
@@ -627,6 +645,10 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
                     model=_CODEX_REVIEW_MODEL, effort=_CODEX_REVIEW_EFFORT,
                     config_dir=None):
     model = _admit_review_model('codex-reviewer', model)
+    try:
+        timeout = developer_routes.role_timeout('codex-reviewer')
+    except developer_routes.RouteError:
+        _refuse('ROUTE_CONFIG_UNAVAILABLE')
     executable = shutil.which('codex')
     if executable is None:
         _refuse('REVIEWER_RUNTIME_UNAVAILABLE')
@@ -643,7 +665,7 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
             stderr=subprocess.PIPE,
             env=env,
             check=False,
-            timeout=_CODEX_REVIEW_TIMEOUT)
+            timeout=timeout)
     except subprocess.TimeoutExpired:
         _refuse('REVIEWER_TIMEOUT')
     except OSError:
@@ -685,11 +707,28 @@ def _dispatch(*, task_id, prompt, repo_root, env, model):
 
 def _bind_d6(task_id, session_id, repo_root):
     lifecycle = Path(__file__).resolve().parents[1] / 'scripts' / 'd6_worktree_lifecycle.py'
-    result = subprocess.run(
-        [sys.executable, '-B', str(lifecycle), '--bind-native-session-task-id', task_id,
-         '--native-session-id', session_id, '--repo-root', str(repo_root)],
-        cwd=str(repo_root), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, check=False, timeout=120)
+    cmd = [sys.executable, '-B', str(lifecycle), '--bind-native-session-task-id', task_id,
+           '--native-session-id', session_id, '--repo-root', str(repo_root)]
+    try:
+        result = subprocess.run(
+            cmd, cwd=str(repo_root), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False, timeout=120)
+    except (subprocess.TimeoutExpired, OSError):
+        # #1909 item 3: a bind helper that timed out (often waiting on the registry lock) or did not start is retried exactly once, like #1895 item 2.
+        try:
+            result = subprocess.run(
+                cmd, cwd=str(repo_root), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, check=False, timeout=120)
+        except (subprocess.TimeoutExpired, OSError):
+            raise RuntimeError('REVIEWER_SESSION_BIND_TIMEOUT')
+        if result.returncode == 0:
+            return None
+        if result.stderr and b'D6_BIND_NATIVE_SESSION_ALREADY_SET' in result.stderr:
+            from .review_result import _reviewer_session_bound
+            if _reviewer_session_bound({'reviewer_task': task_id, 'native_session_id': session_id}, None) is True:
+                return None
+        raise RuntimeError('REVIEWER_SESSION_BIND_FAILED')
+
     if result.returncode:
         raise RuntimeError('REVIEWER_SESSION_BIND_FAILED')
 
@@ -1241,15 +1280,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             'REVIEW_DISPATCH_VERSION_USED',
             f'Review version {version} is already used for PR {pr_number} '
             f'on another head; use version {next_version}.')
-    try:
-        reviewer_role = role_config.resolve_role(
-            'reviewer' if reviewer_key == 'claude-reviewer' else 'codex-reviewer')
-    except LLMToolError as exc:
-        # #1502 WP-E R1: the resolver's registry refusal (after precedence)
-        # also carries the dispatch code; nothing is claimed or launched.
-        if getattr(exc, 'role_config_code', None) == role_config.ROLE_MODEL_NOT_ALLOWED:
-            exc.review_dispatch_code = 'ROLE_MODEL_NOT_ALLOWED'
-        raise
+    reviewer_role = _resolve_reviewer_role(reviewer_key)
     config_dir = reviewer_role['config_dir'] if reviewer_role is not None else None
     # #1777 (CWE-863): the Claude Reviewer never runs under another provider's
     # account directory, whichever layer or alias resolved it. The resolver
@@ -1404,6 +1435,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         reason = getattr(exc, 'review_failure_reason', None)
         if reason in REVIEW_FAILURE_REASONS:
             unknown['failure_reason'] = reason
+        if type(exc) is RuntimeError and len(exc.args) == 1 and exc.args[0] in REVIEWER_BIND_FAILURE_REASONS:
+            unknown['bind_failure_reason'] = exc.args[0]
         mismatch = getattr(exc, 'review_binding_mismatch_keys', None)
         if reason == 'VERDICT_BINDING_MISMATCH' and type(mismatch) is tuple:
             # Keep only the fixed JSON key names; never a returned or expected value.

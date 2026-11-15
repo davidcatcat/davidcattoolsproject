@@ -14,7 +14,8 @@ from datetime import datetime, timezone
 import functools
 
 from .errors import LLMToolError
-from . import ai_github_exec, role_config, skill_manifest, task_completion, task_store, worker_dispatch
+from . import (ai_github_exec, role_config, skill_manifest, task_completion, task_store, trust,
+               worker_dispatch)
 from .test_output_excerpts import (
     _CLOUD_KEY, _SENSITIVE, _emitted_sensitive, _sensitive_jwt, _sensitive_url,
 )
@@ -908,14 +909,35 @@ def confirm_screen_batch(task_id, family, d6, batch, hits, classification, ref, 
     return progress
 
 
+_LIFECYCLE = Path(__file__).resolve().parents[1] / 'scripts' / 'd6_worktree_lifecycle.py'
+_LIFECYCLE_REJECTED = re.compile(rb'D6 lifecycle rejected \(([A-Z0-9_]{1,64})\)')
+
+
+class _D6CreateRejected(Exception):
+    """The lifecycle exited by itself and named its own rejection (#1502 WP-D O7)."""
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
 def _create_d6(*, task_id, base_sha, repo_root, executor_task, agent_id='codex-high-debug-gpt-6.1-sol'):
-    lifecycle = Path(__file__).resolve().parents[1] / 'scripts' / 'd6_worktree_lifecycle.py'
-    result = subprocess.run([sys.executable, '-B', str(lifecycle), '--task-id', task_id,
+    argv = [sys.executable, '-B', str(_LIFECYCLE), '--task-id', task_id,
         '--agent-id', agent_id, '--session-ref', 'pending-' + task_id,
         '--lease-ref', f'high-debug {executor_task} at {base_sha}', '--branch',
-        'llmtool/high-debug-' + task_id, '--base-sha', base_sha, '--repo-root', str(repo_root)],
+        'llmtool/high-debug-' + task_id, '--base-sha', base_sha, '--repo-root', str(repo_root)]
+    result = subprocess.run(argv,
         cwd=repo_root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, check=True, timeout=180)
+        stderr=subprocess.PIPE, check=False, timeout=180)
+    if result.returncode != 0:
+        # Only a normal exit naming the lifecycle's own rejection is classified.
+        stderr = result.stderr or b''
+        match = (_LIFECYCLE_REJECTED.search(stderr)
+                 if type(result.returncode) is int and result.returncode > 0 and
+                 b'Traceback (most recent call last)' not in stderr else None)
+        if match is not None:
+            raise _D6CreateRejected(match.group(1).decode('ascii'))
+        raise subprocess.CalledProcessError(result.returncode, argv, result.stdout, stderr)
     marker = ('root=',)
     for field in result.stdout.decode('utf-8', 'replace').split():
         if field.startswith(marker[0]): return field[5:]
@@ -995,9 +1017,24 @@ def _resolve_debug_role(role):
         raise
 
 
+# #1815 T2b: Debug run timeout from the developer-routes.json role entry (default 1800, max 3600).
+def _debug_timeout(role):
+    """Return the configured run timeout for role; refuse before launch on bad config.
+
+    The refusal ROUTE_CONFIG_UNAVAILABLE is not a DEBUG_FALLBACK_CODES member,
+    so it never switches routes.
+    """
+    from .developer_routes import RouteError, role_timeout
+    try:
+        return role_timeout(role)
+    except RouteError:
+        _refuse('ROUTE_CONFIG_UNAVAILABLE')
+
+
 def _run_codex(*, prompt, cwd, output_path, model=_CODEX_MODEL):
     from . import codex_direct_developer
     model = _admit_debug_model('codex-debug', model)
+    timeout = _debug_timeout('codex-debug')
     argv = ['codex', 'exec', '--ignore-user-config', '--ignore-rules',
             '-m', model]
     for setting in _CODEX_SETTINGS + (
@@ -1008,12 +1045,13 @@ def _run_codex(*, prompt, cwd, output_path, model=_CODEX_MODEL):
     with tempfile.TemporaryDirectory(prefix='llmtool-high-debug-tmp-') as tmpdir:
         return subprocess.run(argv, input=prompt.encode('utf-8'), cwd=cwd,
             env=codex_direct_developer._environment(tmpdir), stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, check=False, timeout=1800)
+            stderr=subprocess.PIPE, check=False, timeout=timeout)
 
 
 def _run_claude(*, prompt, cwd, output_path, config_dir, model=_CLAUDE_MODEL):
     from .developer_routes.claude import ClaudeRoute
     model = _admit_debug_model('claude-debug', model)
+    timeout = _debug_timeout('claude-debug')
     route = ClaudeRoute({'executable': 'claude', 'config_dir': config_dir})
     argv = [
         'claude', '-p', '--output-format', 'json', '--model', model,
@@ -1025,7 +1063,7 @@ def _run_claude(*, prompt, cwd, output_path, config_dir, model=_CLAUDE_MODEL):
         return subprocess.run(
             argv, stdin=subprocess.DEVNULL, cwd=cwd,
             env=route.build_env(tmpdir), stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, check=False, timeout=1800)
+            stderr=subprocess.PIPE, check=False, timeout=timeout)
 
 
 def _d6_taken(repo_root, common_dir, d6):
@@ -1045,6 +1083,31 @@ def _d6_taken(repo_root, common_dir, d6):
         return record.exists() or record.is_symlink()
     except Exception:
         return True
+
+
+def _d6_trust_root():
+    """(trusted tasks_root, st_dev, st_ino) of an absolute directory, else None."""
+    try:
+        root = Path(trust.load_trust().tasks_root)
+        info = os.stat(root) if root.is_absolute() else None
+    except Exception:
+        return None
+    if info is None or not stat.S_ISDIR(info.st_mode):
+        return None
+    return root, info.st_dev, info.st_ino
+
+
+def _d6_path_absent(d6, bound):
+    """F1: True only when bound/d6 is confirmed absent and trust still names bound."""
+    if bound is None or _d6_trust_root() != bound:
+        return False
+    try:
+        (bound[0] / d6).lstat()
+    except FileNotFoundError:
+        return True
+    except Exception:
+        return False
+    return False
 
 
 _D6_NAME_PROBES = 16
@@ -1242,6 +1305,19 @@ def _require_screen_cleared(task_id, family):
 # #1502 WP-D: Debug outcomes that use up a Debug; a launch that recorded
 # RUN_FAILED did not run one, so a fallback route may still run.
 _DEBUG_USED_STATUSES = ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED', 'REPORT_INVALID')
+# #1502 WP-D O7: RUN_FAILED reports confirming that no Debug started.
+_DEBUG_NOT_STARTED = ('HIGH_DEBUG_QUOTA_EXHAUSTED', 'HIGH_DEBUG_AUTH_FAILED',
+                      'HIGH_DEBUG_D6_CREATE_FAILED')
+
+
+def _debug_entry_used(entry):
+    """True unless entry is a RUN_FAILED confirmed not started; any doubt is used."""
+    if type(entry) is not dict:
+        return True
+    if entry.get('status') == 'RUN_FAILED':
+        report = entry.get('report')
+        return not (type(report) is str and report in _DEBUG_NOT_STARTED)
+    return True
 
 
 def _admit_debug(task, entries):
@@ -1253,8 +1329,7 @@ def _admit_debug(task, entries):
         _refuse('HIGH_DEBUG_POLICY_INVALID')
     lineage = task.get('lineage')
     kind = lineage.get('kind') if type(lineage) is dict else 'root'
-    used = sum(1 for entry in entries
-               if type(entry) is not dict or entry.get('status') in _DEBUG_USED_STATUSES)
+    used = sum(1 for entry in entries if _debug_entry_used(entry))
     try:
         code = repair_policy.admit_debug(kind=kind, parent_debug_used=used,
                                          group_debug_used=used, policy=policy)
@@ -1262,6 +1337,90 @@ def _admit_debug(task, entries):
         _refuse('HIGH_DEBUG_LINEAGE_INVALID')
     if code is not None:
         _refuse('HIGH_DEBUG_' + code)
+
+
+def _debug_kind_and_key(store, task):
+    """(lineage kind, lock key): a split child locks on its ROOT, others on their chain."""
+    from . import lineage_counts
+    lineage = task.get('lineage')
+    kind = lineage.get('kind') if type(lineage) is dict else 'root'
+    if kind == 'child':
+        return kind, lineage.get('lineage_id')
+    return kind, lineage_counts.chain_key(store, task)
+
+
+def _read_task(store, task_id):
+    """The stored Task task_id, or None when unreadable or another Task."""
+    try:
+        task = store.get(task_id)
+    except Exception:
+        return None
+    return task if type(task) is dict and task.get('task_id') == task_id else None
+
+
+def _group_debug_used(store, task, entries):
+    """Debugs used by the child and every child in its ROOT's splits; doubt is UNKNOWN."""
+    from .repair_policy import UNKNOWN
+    root = _read_task(store, task['lineage'].get('lineage_id'))
+    line = root.get('lineage') if root else None
+    if (type(line) is not dict or type(line.get('splits', [])) is not list or
+            type(entries) is not list):
+        return UNKNOWN
+    used = sum(1 for entry in entries if _debug_entry_used(entry))
+    seen = {task.get('task_id')}
+    for split in line.get('splits', []):
+        children = split.get('children') if type(split) is dict else None
+        if type(children) is not list:
+            return UNKNOWN
+        for child_id in children:
+            if child_id in seen:
+                continue
+            seen.add(child_id)
+            child = _read_task(store, child_id)
+            other = child.get('high_debug', []) if child else None
+            if type(other) is not list:
+                return UNKNOWN
+            used += sum(1 for entry in other if _debug_entry_used(entry))
+    return used
+
+
+def _reserve_debug(store, task_id, entries, reservation):
+    """O7: under the lineage lock, count and append one RESERVED entry; return its index."""
+    from . import lineage_counts, repair_policy
+    try:
+        policy = repair_policy.load_policy()
+    except LLMToolError:
+        _refuse('HIGH_DEBUG_POLICY_INVALID')
+    task = _read_task(store, task_id)
+    if task is None:
+        _refuse('HIGH_DEBUG_BUSY')
+    _kind, key = _debug_kind_and_key(store, task)
+    try:
+        release = lineage_counts.acquire_chain_lock(store, key)
+    except Exception:
+        _refuse('HIGH_DEBUG_CHAIN_LOCK_UNAVAILABLE')
+    try:
+        current = _read_task(store, task_id)
+        if (current is None or _debug_kind_and_key(store, current)[1] != key or
+                current.get('high_debug', []) != entries):
+            _refuse('HIGH_DEBUG_BUSY')
+        kind = _debug_kind_and_key(store, current)[0]
+        used = (_group_debug_used(store, current, entries) if kind == 'child' else
+                lineage_counts.chain_debug_used(store, current, entries, _debug_entry_used)[0])
+        try:
+            code = repair_policy.admit_debug(kind=kind, parent_debug_used=used,
+                                             group_debug_used=used, policy=policy)
+        except LLMToolError:
+            _refuse('HIGH_DEBUG_LINEAGE_INVALID')
+        if code is not None:
+            _refuse('HIGH_DEBUG_' + code)
+        try:
+            store.append_high_debug(task_id, reservation)
+        except Exception:
+            _refuse('HIGH_DEBUG_RESERVATION_FAILED')
+        return len(entries)
+    finally:
+        release()
 
 
 def run_high_debug(*, store, task_id, executor_task, pr_number, family,
@@ -1397,12 +1556,21 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
 
     model_requested = debug_model
+    # O7: reserved before any D6 create or provider call; a crash leaves it RESERVED.
+    try:
+        reserved_at = store._completion_now()
+    except Exception:
+        reserved_at = None
+    reservation = _failed_entry(
+        family=family, failed_corrections=failed_corrections, early_reason=early_reason,
+        head=head, d6=d6, code='HIGH_DEBUG_RESERVED', observed='UNKNOWN', effort='UNKNOWN',
+        usage='UNKNOWN', recorded_at=reserved_at, model_requested=model_requested,
+        rules_sha256=rules_sha256)
+    reservation['status'] = 'RESERVED'
+    index = _reserve_debug(store, task_id, entries, reservation)
 
     def failed(code, observed='UNKNOWN', effort='UNKNOWN', usage='UNKNOWN', report=None,
-               detail=None, screen_hits=None):
-        # A diagnosis attempt that started but did not finish is recorded: it
-        # counts toward the entry limit and keeps its D6 traceable. Recording
-        # is best effort: the original refusal code is what the caller sees.
+               detail=None, screen_hits=None, post=True):
         try:
             recorded_at = store._completion_now()
         except Exception:
@@ -1414,11 +1582,11 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
                 recorded_at=recorded_at, model_requested=model_requested,
                 rules_sha256=rules_sha256)
         try:
-            store.append_high_debug(task_id, entry)
+            store.finalize_high_debug(task_id, index, entry)
         except Exception:
-            pass
-        posted = _post_record(entry, pr_number, repo_root, task_id, code, account=account)
-        if not posted:
+            detail = (detail + ' ' if detail else '') + 'reservation=UNFINALIZED'
+        if post and not _post_record(entry, pr_number, repo_root, task_id, code,
+                                     account=account):
             detail = (detail + ' ' if detail else '') + 'github_record=UNPOSTED'
         if screen_hits is not None:
             detail = _screen_detail(
@@ -1427,6 +1595,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         _refuse(code, detail)
 
     create = create_d6 or _create_d6
+    trusted = _d6_trust_root()   # F1: bound once for the create and its cancel
     try:
         # Codex keeps the original create call; only Claude passes an agent id.
         if route == 'claude':
@@ -1436,7 +1605,12 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         else:
             diagnosis_root = create(task_id=d6, base_sha=head, repo_root=repo_root,
                                     executor_task=executor_task)
-    except Exception: _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
+    except Exception as error:
+        # Only a classified rejection with no D6 left behind is cancelled.
+        if (isinstance(error, _D6CreateRejected) and _d6_path_absent(d6, trusted) and
+                not _d6_taken(repo_root, registration.common_dir, d6)):
+            failed('HIGH_DEBUG_D6_CREATE_FAILED', post=False)
+        _refuse('HIGH_DEBUG_D6_CREATE_FAILED', 'reservation=RESERVED')
     reason = f'failed corrections: {failed_corrections}' if failed_corrections is not None else f'early reason: {early_reason}'
     prompt = rules_prefix + (f'Task: {task_id}\nPR: {pr_number}\nFamily: {family}\n{reason}\nExamined SHA: {head}\n'
               f'Evidence:\n{evidence_text}\n\nRequired report sections, each exactly as its own line:\n'
@@ -1543,7 +1717,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
        'effort_observed':effort,'status':status,'report_sha256':hashlib.sha256(report.encode()).hexdigest(),
        'report':report,'usage':usage,'recorded_at':store._completion_now(),
        'rules_sha256':rules_sha256}
-    store.append_high_debug(task_id, entry)
+    store.finalize_high_debug(task_id, index, entry)
     posted = _post_record(entry, pr_number, repo_root, task_id, account=account)
     payload=entry['report_sha256'].encode()
     event_id=hashlib.sha256(('HIGH_DEBUG\0'+task_id+'\0'+head+'\0'+entry['report_sha256']).encode()).hexdigest()[:32]

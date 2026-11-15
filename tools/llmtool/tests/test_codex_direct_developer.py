@@ -558,6 +558,10 @@ class CodexDirectDeveloperTests(unittest.TestCase):
             def __init__(self):
                 self.value = dict(task)
 
+            def task_ids(self):
+                # #1502 WP-D R2: the real chain gate scans the store at the claim.
+                return [task_id]
+
             def get(self, _task_id):
                 return self.value
 
