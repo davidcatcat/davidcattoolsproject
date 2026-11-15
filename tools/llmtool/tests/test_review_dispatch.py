@@ -790,7 +790,7 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertIn('model_reasoning_effort=high', argv)
         self.assertEqual(argv[argv.index('--cd') + 1], '/repo/reviewer-d6')
         self.assertEqual(run.call_args.kwargs['cwd'], '/repo/reviewer-d6')
-        self.assertEqual(run.call_args.kwargs['timeout'], 600)
+        self.assertEqual(run.call_args.kwargs['timeout'], 1800)
         self.assertEqual(review_result, {'thread_id': '0123456789abcdef',
                                          'review_text': review_text,
                                          'verdict': 'PASS'})

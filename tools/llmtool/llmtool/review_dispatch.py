@@ -17,7 +17,7 @@ import sys
 import time
 
 from .errors import LLMToolError
-from . import github_identity, role_config, skill_manifest, task_completion, worker_dispatch
+from . import developer_routes, github_identity, role_config, skill_manifest, task_completion, worker_dispatch
 
 
 # #1502 WP-E R1: the fallbacks equal the roles registry's listed models and,
@@ -25,7 +25,7 @@ from . import github_identity, role_config, skill_manifest, task_completion, wor
 _CODEX_REVIEW_MODEL = 'gpt-6.1-sol'
 _CLAUDE_REVIEW_MODEL = 'claude-sonnet-5-5'
 _CODEX_REVIEW_EFFORT = 'high'
-_CODEX_REVIEW_TIMEOUT = 600
+_CODEX_REVIEW_TIMEOUT = 1800
 _CODEX_REVIEW_MAX_OUTPUT = 1024 * 1024
 
 # Fixed names of the check that refused a finished Codex run's output. They are
@@ -645,6 +645,10 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
                     model=_CODEX_REVIEW_MODEL, effort=_CODEX_REVIEW_EFFORT,
                     config_dir=None):
     model = _admit_review_model('codex-reviewer', model)
+    try:
+        timeout = developer_routes.role_timeout('codex-reviewer')
+    except developer_routes.RouteError:
+        _refuse('ROUTE_CONFIG_UNAVAILABLE')
     executable = shutil.which('codex')
     if executable is None:
         _refuse('REVIEWER_RUNTIME_UNAVAILABLE')
@@ -661,7 +665,7 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
             stderr=subprocess.PIPE,
             env=env,
             check=False,
-            timeout=_CODEX_REVIEW_TIMEOUT)
+            timeout=timeout)
     except subprocess.TimeoutExpired:
         _refuse('REVIEWER_TIMEOUT')
     except OSError:
