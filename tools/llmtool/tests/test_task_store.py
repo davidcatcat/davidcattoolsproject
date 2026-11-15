@@ -5525,6 +5525,267 @@ class FileOpsTaskStoreTests(unittest.TestCase):
         self.assertEqual(file_ops.ops_sha256(json_str), hash1)
         self.assertEqual(file_ops.ops_sha256(json_str.encode('utf-8')), hash1)
 
+    def test_record_file_ops_evidence_once_second_write_and_abandoned_refused(self):
+        rec = self._make_record()
+        ops_val = self._valid_file_ops(rec)
+        rec['file_ops'] = ops_val
+        created = self.store.create(rec)
+        task_id = created['task_id']
+        ev_val = self._valid_evidence(created, ops_val)
+
+        # refuse (_fail default code) if expected is not a non-empty dict
+        for bad_expected in (None, {}, 'not-a-dict', 123, []):
+            with self.subTest(bad_expected=bad_expected):
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.record_file_ops_evidence(task_id, ev_val, expected=bad_expected)
+                self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_INVALID')
+
+        # evidence written once via record_file_ops_evidence
+        saved = self.store.record_file_ops_evidence(
+            task_id, ev_val, expected={'record_sha256': created['record_sha256']})
+        self.assertEqual(saved['file_ops_evidence'], ev_val)
+        loaded = self.store.get(task_id)
+        self.assertEqual(loaded['file_ops_evidence'], ev_val)
+
+        # then a second write gives IMMUTABLE
+        ev_val2 = dict(ev_val, recorded_at='2026-11-16T00:01:00Z')
+        cur = self.store.get(task_id)
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.record_file_ops_evidence(
+                task_id, ev_val2, expected={'record_sha256': cur['record_sha256']})
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_FILE_OPS_EVIDENCE_IMMUTABLE')
+
+        # second write with expected={'file_ops_evidence': None} still gives IMMUTABLE
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.record_file_ops_evidence(
+                task_id, ev_val2, expected={'file_ops_evidence': None})
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_FILE_OPS_EVIDENCE_IMMUTABLE')
+
+        # evidence on an abandoned Task is refused
+        abandon_rec = self._make_record()
+        abandon_ops = self._valid_file_ops(abandon_rec)
+        abandon_rec['file_ops'] = abandon_ops
+        abandon_created = self.store.create(abandon_rec)
+        abandon_id = abandon_created['task_id']
+        self.store.abandon(
+            abandon_id, pm_session_id=abandon_created['pm_session_id'],
+            reason='Abandoned before evidence')
+        abandon_ev = self._valid_evidence(abandon_created, abandon_ops)
+        abandon_cur = self.store.get(abandon_id)
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.record_file_ops_evidence(
+                abandon_id, abandon_ev, expected={'record_sha256': abandon_cur['record_sha256']})
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_FILE_OPS_EVIDENCE_IMMUTABLE')
+
+    def test_file_ops_reservation_d6_binding_lock_and_refusals(self):
+        rec = self._make_record()
+        ops_val = self._valid_file_ops(rec)
+        rec['file_ops'] = ops_val
+        created = self.store.create(rec)
+        task_id = created['task_id']
+
+        # the reservation is accepted only inside d6_binding_lock
+        with self.store.d6_binding_lock() as reserve:
+            cur = self.store.get(task_id)
+            saved = reserve(task_id, 'executor-d6-1', expected={'record_sha256': cur['record_sha256']})
+            self.assertEqual(saved['file_ops_reservation']['executor_task'], 'executor-d6-1')
+            self.assertRegex(saved['file_ops_reservation']['reserved_at'],
+                             r'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$')
+
+        loaded = self.store.get(task_id)
+        self.assertEqual(loaded['file_ops_reservation']['executor_task'], 'executor-d6-1')
+
+        # reserve after exit is refused
+        cur2 = self.store.get(task_id)
+        with self.assertRaises(LLMToolError) as caught:
+            reserve(task_id, 'executor-d6-2', expected={'record_sha256': cur2['record_sha256']})
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_FILE_OPS_RESERVATION_FORBIDDEN')
+
+        # a second reservation is refused
+        with self.store.d6_binding_lock() as reserve2:
+            cur3 = self.store.get(task_id)
+            with self.assertRaises(LLMToolError) as caught:
+                reserve2(task_id, 'executor-d6-2', expected={'record_sha256': cur3['record_sha256']})
+            self.assertEqual(caught.exception.task_store_error_code, 'TASK_FILE_OPS_RESERVATION_FORBIDDEN')
+
+        # a reservation with a developer is refused
+        dev_rec = self._make_record()
+        dev_ops = self._valid_file_ops(dev_rec)
+        dev_rec['file_ops'] = dev_ops
+        dev_created = self.store.create(dev_rec)
+        dev_id = dev_created['task_id']
+        dev_assignment = TaskStoreTests._developer_assignment(provider='codex')
+        dev_cur = self.store.get(dev_id)
+        self.store.compare_and_update(
+            dev_id, expected={'record_sha256': dev_cur['record_sha256']},
+            developer=dev_assignment)
+        with self.store.d6_binding_lock() as reserve_dev:
+            cur_with_dev = self.store.get(dev_id)
+            with self.assertRaises(LLMToolError) as caught:
+                reserve_dev(dev_id, 'executor-d6-dev', expected={'record_sha256': cur_with_dev['record_sha256']})
+            self.assertEqual(caught.exception.task_store_error_code, 'TASK_FILE_OPS_RESERVATION_FORBIDDEN')
+
+        # a reservation without file_ops is refused
+        no_ops_rec = self._make_record()
+        no_ops_created = self.store.create(no_ops_rec)
+        no_ops_id = no_ops_created['task_id']
+        with self.store.d6_binding_lock() as reserve_no_ops:
+            cur_no_ops = self.store.get(no_ops_id)
+            with self.assertRaises(LLMToolError) as caught:
+                reserve_no_ops(no_ops_id, 'executor-d6-no-ops', expected={'record_sha256': cur_no_ops['record_sha256']})
+            self.assertEqual(caught.exception.task_store_error_code, 'TASK_FILE_OPS_RESERVATION_FORBIDDEN')
+
+        # reserve input validation: invalid executor_task or empty/non-dict expected
+        with self.store.d6_binding_lock() as reserve_val:
+            cur_val = self.store.get(task_id)
+            for bad_exec in ('-bad-', 'UPPER', 123, ''):
+                with self.subTest(bad_exec=bad_exec):
+                    with self.assertRaises(LLMToolError) as caught:
+                        reserve_val(task_id, bad_exec, expected={'record_sha256': cur_val['record_sha256']})
+                    self.assertEqual(caught.exception.task_store_error_code, 'TASK_FILE_OPS_RESERVATION_INVALID')
+            for bad_exp in (None, {}, 'str'):
+                with self.subTest(bad_exp=bad_exp):
+                    with self.assertRaises(LLMToolError) as caught:
+                        reserve_val(task_id, 'executor-d6-val', expected=bad_exp)
+                    self.assertEqual(caught.exception.task_store_error_code, 'TASK_FILE_OPS_RESERVATION_INVALID')
+
+    def test_d6_binding_predicates_and_conflict_after_reservation(self):
+        rec_a = self._make_record()
+        ops_a = self._valid_file_ops(rec_a)
+        rec_a['file_ops'] = ops_a
+        created_a = self.store.create(rec_a)
+        task_a_id = created_a['task_id']
+        executor_task_id = 'executor-d6-bound-1'
+
+        with self.store.d6_binding_lock() as reserve:
+            reserve(task_a_id, executor_task_id, expected={'record_sha256': created_a['record_sha256']})
+
+        rec_a_loaded = self.store.get(task_a_id)
+
+        # after a reservation, _d6_bind_holds and _claude_d6_holds are True for that D6
+        self.assertTrue(TaskStore._file_ops_reserves(rec_a_loaded, executor_task_id))
+        self.assertTrue(TaskStore._claude_d6_holds(rec_a_loaded, executor_task_id))
+        self.assertTrue(TaskStore._d6_bind_holds(rec_a_loaded, executor_task_id))
+        self.assertIn(executor_task_id, TaskStore._d6_live_ids(rec_a_loaded))
+
+        # and an ordinary D6 bind of the same executor task refuses TASK_D6_ALREADY_BOUND
+        rec_b = self._make_record()
+        created_b = self.store.create(rec_b)
+        task_b_id = created_b['task_id']
+        pending_dev = TaskStoreTests._developer_assignment(provider='codex')
+        completion = {
+            'state': 'WAITING_EXECUTOR', 'executor_task_id': executor_task_id,
+            'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
+            'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+            'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+        }
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.d6_bind_compare_and_update(
+                task_b_id, executor_task_id=executor_task_id,
+                expected={'developer': None, 'completion': None},
+                developer=pending_dev, completion=completion)
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_D6_ALREADY_BOUND')
+
+    def test_adopt_pm_session_waits_for_d6_binding_lock(self):
+        # Task with file_ops and no evidence
+        rec = self._make_record()
+        ops_val = self._valid_file_ops(rec)
+        rec['file_ops'] = ops_val
+        created = self.store.create(rec)
+        task_id = created['task_id']
+
+        lock_held = threading.Event()
+        release_lock = threading.Event()
+
+        def lock_holder():
+            with self.store.d6_binding_lock():
+                lock_held.set()
+                release_lock.wait(timeout=5.0)
+
+        t_holder = threading.Thread(target=lock_holder)
+        t_holder.start()
+        self.assertTrue(lock_held.wait(timeout=5.0))
+
+        # adopt_pm_session on a Task with file_ops and no evidence waits on the binding lock
+        adoption_done = threading.Event()
+        adoption_results = []
+        new_sess = 'pm-' + new_id()
+
+        def adopt_worker():
+            cur = self.store.get(task_id)
+            res = self.store.adopt_pm_session(
+                task_id, old_session_key=cur['pm_session_id'],
+                new_session_key=new_sess, at='2026-11-16T00:00:00Z',
+                expected_record_sha256=cur['record_sha256'],
+                old_runtime='codex', new_runtime='codex',
+                new_account=None, liveness=['PROCESS_CLEAN', 'LOCK_FREE'])
+            adoption_results.append(res)
+            adoption_done.set()
+
+        t_adopter = threading.Thread(target=adopt_worker)
+        t_adopter.start()
+
+        # Assert adoption completes only after release, with a short timeout
+        self.assertFalse(adoption_done.wait(timeout=0.15))
+        release_lock.set()
+        t_holder.join(timeout=3.0)
+        self.assertTrue(adoption_done.wait(timeout=3.0))
+        t_adopter.join(timeout=3.0)
+        self.assertEqual(len(adoption_results), 1)
+        self.assertEqual(adoption_results[0]['pm_session_id'], new_sess)
+
+        # without file_ops it does not take the lock
+        no_ops_rec = self._make_record()
+        no_ops_created = self.store.create(no_ops_rec)
+        no_ops_id = no_ops_created['task_id']
+
+        # Task with file_ops AND evidence also does not take the lock
+        ev_rec = self._make_record()
+        ev_ops = self._valid_file_ops(ev_rec)
+        ev_rec['file_ops'] = ev_ops
+        ev_created = self.store.create(ev_rec)
+        ev_id = ev_created['task_id']
+        ev_val = self._valid_evidence(ev_created, ev_ops)
+        self.store.record_file_ops_evidence(
+            ev_id, ev_val, expected={'record_sha256': ev_created['record_sha256']})
+        ev_loaded = self.store.get(ev_id)
+
+        lock_held2 = threading.Event()
+        release_lock2 = threading.Event()
+
+        def lock_holder2():
+            with self.store.d6_binding_lock():
+                lock_held2.set()
+                release_lock2.wait(timeout=5.0)
+
+        t_holder2 = threading.Thread(target=lock_holder2)
+        t_holder2.start()
+        self.assertTrue(lock_held2.wait(timeout=5.0))
+
+        try:
+            # Without file_ops, adopt_pm_session completes immediately while lock is held
+            no_ops_sess = 'pm-' + new_id()
+            res_no_ops = self.store.adopt_pm_session(
+                no_ops_id, old_session_key=no_ops_created['pm_session_id'],
+                new_session_key=no_ops_sess, at='2026-11-16T00:00:00Z',
+                expected_record_sha256=no_ops_created['record_sha256'],
+                old_runtime='codex', new_runtime='codex',
+                new_account=None, liveness=['PROCESS_CLEAN', 'LOCK_FREE'])
+            self.assertEqual(res_no_ops['pm_session_id'], no_ops_sess)
+
+            # With file_ops AND evidence, adopt_pm_session completes immediately while lock is held
+            ev_sess = 'pm-' + new_id()
+            res_ev = self.store.adopt_pm_session(
+                ev_id, old_session_key=ev_loaded['pm_session_id'],
+                new_session_key=ev_sess, at='2026-11-16T00:00:00Z',
+                expected_record_sha256=ev_loaded['record_sha256'],
+                old_runtime='codex', new_runtime='codex',
+                new_account=None, liveness=['PROCESS_CLEAN', 'LOCK_FREE'])
+            self.assertEqual(res_ev['pm_session_id'], ev_sess)
+        finally:
+            release_lock2.set()
+            t_holder2.join(timeout=3.0)
+
 
 if __name__ == '__main__':
     unittest.main()

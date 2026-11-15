@@ -3851,9 +3851,16 @@ class TaskStore:
         return recovery
 
     @staticmethod
+    def _file_ops_reserves(record, executor_task_id):
+        res = record.get('file_ops_reservation')
+        return type(res) is dict and res.get('executor_task') == executor_task_id
+
+    @staticmethod
     def _claude_d6_holds(record, executor_task_id):
         if record.get('abandonment') is not None:
             return False
+        if TaskStore._file_ops_reserves(record, executor_task_id):
+            return True
         dev = record.get('developer')
         completion = record.get('completion')
         return ((type(dev) is dict and
@@ -3865,6 +3872,8 @@ class TaskStore:
     def _d6_bind_holds(record, executor_task_id):
         if record.get('abandonment') is not None:
             return False
+        if TaskStore._file_ops_reserves(record, executor_task_id):
+            return True
         dev = record.get('developer')
         if type(dev) is not dict:
             return False
@@ -3894,9 +3903,14 @@ class TaskStore:
         developer = record.get('developer')
         callback = (developer.get('direct_result_callback')
                     if type(developer) is dict else None)
-        bound = (item.get('executor_task_id')
+        reservation = record.get('file_ops_reservation')
+        reservation_id = (reservation.get('executor_task')
+                          if type(reservation) is dict else None)
+        bound = [item.get('executor_task_id')
                  for item in (developer, record.get('completion'), callback)
-                 if type(item) is dict)
+                 if type(item) is dict]
+        if type(reservation_id) is str:
+            bound.append(reservation_id)
         return frozenset(value for value in bound if type(value) is str and
                          TaskStore._d6_bind_holds(record, value))
 
@@ -4097,6 +4111,61 @@ class TaskStore:
             holds=self._d6_bind_holds,
             abandoned_target_code='TASK_D6_ALREADY_BOUND', **changes)
 
+    @contextlib.contextmanager
+    def d6_binding_lock(self):
+        """Take the D6 binding sidecar lock exclusively and yield reserve()."""
+        directory = self._dirfd()
+        try:
+            lock_fd = self._lock_sidecar(directory, D6_BINDING_LOCK_NAME,
+                                         exclusive=True, code='TASK_D6_BINDING')
+        finally:
+            os.close(directory)
+        held = True
+
+        def reserve(task_id, executor_task_id, *, expected):
+            if not held:
+                _fail('TASK_FILE_OPS_RESERVATION_FORBIDDEN')
+            return self._reserve_file_ops_d6(task_id, executor_task_id, expected=expected)
+
+        try:
+            yield reserve
+        finally:
+            held = False
+            self._unlock_sidecar(lock_fd)
+
+    def _reserve_file_ops_d6(self, task_id, executor_task_id, *, expected):
+        self._name(task_id)
+        if (not _safe_identifier(executor_task_id, D6_TASK_ID) or
+                type(expected) is not dict or not expected):
+            _fail('TASK_FILE_OPS_RESERVATION_INVALID')
+        claims = frozenset((executor_task_id,))
+        directory = self._dirfd()
+        try:
+            journal = self._read_d6_journal_at(directory)
+            self._append_d6_journal_at(directory, journal, task_id, claims)
+        finally:
+            os.close(directory)
+        reserved_at = datetime.now(timezone.utc).replace(
+            microsecond=0).strftime(_UTC_SECONDS)
+        return self._update(
+            task_id,
+            expected=expected,
+            changes={'file_ops_reservation': {
+                'executor_task': executor_task_id,
+                'reserved_at': reserved_at,
+            }},
+            d6_claims=claims,
+            trusted_file_ops_reservation=True,
+        )
+
+    def record_file_ops_evidence(self, task_id, evidence, *, expected):
+        """Record the sealed file_ops evidence result for this Task."""
+        if type(expected) is not dict or not expected:
+            _fail()
+        return self._update(task_id, expected=expected,
+                            changes={'file_ops_evidence': evidence},
+                            trusted_file_ops_evidence=True)
+
     def record_published_pr(self, task_id, pr, head_sha):
         """Record or replace the PR linked to this Task's published HEAD."""
         if (type(pr) is not int or not 1 <= pr <= 9999999 or
@@ -4181,6 +4250,33 @@ class TaskStore:
                          expected_record_sha256, old_runtime, new_runtime, new_account,
                          liveness):
         """Library-internal: atomically move one PM binding, inbox and audit entry."""
+        current = self.get(task_id)
+        if type(current.get('file_ops')) is not dict or 'file_ops_evidence' in current:
+            return self._adopt_pm_session(
+                task_id, old_session_key=old_session_key,
+                new_session_key=new_session_key, at=at,
+                expected_record_sha256=expected_record_sha256,
+                old_runtime=old_runtime, new_runtime=new_runtime,
+                new_account=new_account, liveness=liveness)
+        directory = self._dirfd()
+        try:
+            lock_fd = self._lock_sidecar(directory, D6_BINDING_LOCK_NAME,
+                                         exclusive=False, code='TASK_D6_BINDING')
+        finally:
+            os.close(directory)
+        try:
+            return self._adopt_pm_session(
+                task_id, old_session_key=old_session_key,
+                new_session_key=new_session_key, at=at,
+                expected_record_sha256=expected_record_sha256,
+                old_runtime=old_runtime, new_runtime=new_runtime,
+                new_account=new_account, liveness=liveness)
+        finally:
+            self._unlock_sidecar(lock_fd)
+
+    def _adopt_pm_session(self, task_id, *, old_session_key, new_session_key, at,
+                          expected_record_sha256, old_runtime, new_runtime, new_account,
+                          liveness):
         current = self.get(task_id)
         if current.get('pm_session_id') != old_session_key:
             raise TaskStoreConflict() from None
@@ -5528,6 +5624,17 @@ class TaskStore:
                 # review, merge claim, abandonment or lineage end can use it.
                 _fail('TASK_LINEAGE_PENDING')
             _check_lineage_merge_claim(current, changes)
+            if trusted_file_ops_evidence and (
+                    'file_ops_evidence' in current or
+                    current.get('abandonment') is not None):
+                _fail('TASK_FILE_OPS_EVIDENCE_IMMUTABLE')
+            if trusted_file_ops_reservation and (
+                    'file_ops_reservation' in current or
+                    'file_ops_evidence' in current or
+                    type(current.get('file_ops')) is not dict or
+                    current.get('developer') is not None or
+                    current.get('abandonment') is not None):
+                _fail('TASK_FILE_OPS_RESERVATION_FORBIDDEN')
             if expected is not None and any(current.get(key) != value
                                             for key, value in expected.items()):
                 raise TaskStoreConflict() from None
