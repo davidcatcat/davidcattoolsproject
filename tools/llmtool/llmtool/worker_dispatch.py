@@ -51,7 +51,7 @@ AUDIT_ACTIONS = frozenset((
     'TIMEOUT_CONTINUATION', 'REVIEWER_HANDOFF', 'REVIEWER_RETRY',
     'COMMITTED_RESULT_CARRY',
 ))
-MAX_TIMEOUT_CONTINUATIONS_PER_TASK = 1
+MAX_TIMEOUT_CONTINUATIONS_PER_TASK = 1  # default; policy.json timeout_continuation_max (#1815)
 MAX_COMMITTED_CARRIES = 1  # per Developer assignment (#1148)
 def _policy_candidates():
     """List policy locations for this actual module layout, in authority order."""
@@ -291,6 +291,16 @@ def evaluate(worker_key, owner_assignment_ref=None, task_id=None):
             return PolicyDecision(worker_key, True, 'OWNER_ASSIGNMENT_MATCHED', digest)
         return PolicyDecision(worker_key, False, 'OWNER_ASSIGNMENT_REQUIRED', digest)
     return PolicyDecision(worker_key, False, 'OWNER_PAUSED', digest)
+
+
+def timeout_continuation_max():
+    """#1815 T3: policy.json timeout_continuation_max (default 1); None if policy is unreadable."""
+    from . import repair_policy
+    try:
+        return repair_policy.load_policy().get('timeout_continuation_max',
+                                                MAX_TIMEOUT_CONTINUATIONS_PER_TASK)
+    except LLMToolError:
+        return None
 
 
 def audit_entry(decision, action, *, binding=None, authorization_id=None):
@@ -730,7 +740,13 @@ def authorize_task_store_change(current, changes, expected=None):
                 1 for item in audit
                 if type(item) is dict and stored_worker_id(item.get('worker_key')) == worker_key and
                 item.get('action') == action)
-            if prior_attempts >= MAX_TIMEOUT_CONTINUATIONS_PER_TASK:
+            limit = timeout_continuation_max()
+            if limit is None:
+                # #1815 T3: an unreadable policy allows no continuation, under its own code.
+                decision = PolicyDecision(worker_key, False,
+                                          'WORKER_TIMEOUT_CONTINUATION_POLICY_INVALID',
+                                          decision.policy_sha256)
+            elif prior_attempts >= limit:
                 decision = PolicyDecision(worker_key, False,
                                           'WORKER_TIMEOUT_CONTINUATION_LIMIT',
                                           decision.policy_sha256)
