@@ -104,7 +104,10 @@ Issue, then runs `llmtool owner-inbox ack <code>`.
 
 ## Deferred items
 
-- Tombstones fill after about 1200 instructions (`OWNER_INBOX_HISTORY_LIMIT`) and need an
-  Owner-run local reset.
-- `peek` does not show EXPIRED items yet.
-- A resend of a compacted (tombstoned) update reports ACKED.
+- Done in #2134: `owner-inbox peek --include-expired` shows EXPIRED items.
+- Done in #2134: `owner-inbox prune-history --keep N` drops old tombstones after a typed
+  confirmation, so a full history (`OWNER_INBOX_HISTORY_LIMIT`) needs no manual reset.
+- Done in #2134: a resend of a compacted (tombstoned) update reports COMPACTED, not ACKED.
+  The Telegram `/do` reply is `<code> COMPACTED`; a test pins it.
+- Open: once pruned, an id is unknown again. Only the Telegram cursor offset and the 120 s
+  freshness window then keep an old resend out.
