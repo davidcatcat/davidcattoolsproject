@@ -124,6 +124,25 @@ def codex_entry(authorization_id=None, assignment=OTHER_ASSIGNMENT):
         authorization_id=authorization_id)
 
 
+def adapter_for(transition, worker_key='claude-developer', bind=None, decision=None):
+    """A ROLE_TIMEOUT_RETRY ADAPTER entry naming transition's attempt_id."""
+    return worker_dispatch.audit_entry(
+        decision or allowed(worker_key), ACTION, binding=bind or binding(),
+        authorization_id=transition['attempt_id'], retry_phase='ADAPTER')
+
+
+def genuine_pair():
+    """An ALLOWED transition and its bound ADAPTER entry: one logical attempt."""
+    transition = role_entry()
+    return [transition, adapter_for(transition)]
+
+
+def codex_pair():
+    """A Codex continuation transition and its bound adapter entry."""
+    transition = codex_entry()
+    return [transition, codex_entry(authorization_id=transition['attempt_id'])]
+
+
 def codex_continuation(audit=None):
     """A valid Codex CODEX_TIMEOUT_WITH_CHANGES continuation (existing path)."""
     old = {
@@ -406,9 +425,10 @@ class SharedCodexBudgetTests(RoleTimeoutGateBase):
             worker_dispatch.authorize_task_store_change(current, changes, expected))
 
     def test_codex_adapter_entry_is_not_a_second_attempt(self):
+        # The adapter entry is bound to its transition (PR #2180 repair):
+        # an unbound authorization_id is covered by AdapterValidationCountTests.
         self.set_limit(2)
-        audit = [codex_entry(), codex_entry(authorization_id='8' * 32)]
-        self.assertIsNone(self.transition(record(developer(), audit))[0])
+        self.assertIsNone(self.transition(record(developer(), codex_pair()))[0])
 
     def test_codex_limit_and_policy_codes_unchanged(self):
         self.set_limit(1)
@@ -621,6 +641,150 @@ class AdapterGateTests(RoleTimeoutGateBase):
         current = record(dispatching(developer()), [transition])
         self.assertEqual(worker_dispatch._latest_transition_authorization(
             current, 'claude-developer', ACTION, binding()), transition['attempt_id'])
+
+
+class AdapterValidationCountTests(RoleTimeoutGateBase):
+    """PR #2180 repair (CWE-345): an adapter entry counts 0 only when it is bound
+    to an earlier ALLOWED transition with the same authorization_id and binding;
+    a forged, mis-bound or malformed one is a spent attempt."""
+
+    LIMITS = (2, 3)
+
+    def count(self, audit):
+        return worker_dispatch._logical_timeout_attempts(audit)
+
+    def pairs(self, number):
+        audit = []
+        for _ in range(number):
+            audit.extend(genuine_pair())
+        return audit
+
+    def assert_cap(self, limit, audit, refused):
+        self.set_limit(limit)
+        current = record(developer(), audit)
+        result, _ = self.transition(current)
+        if refused:
+            self.assert_refused(result, 'WORKER_ROLE_TIMEOUT_RETRY_LIMIT')
+        else:
+            self.assertIsNone(result)
+        self.assertEqual(current['dispatch_audit'][-1]['retry_phase'], 'TRANSITION')
+
+    def assert_spent(self, fragment, spent):
+        """fragment counts spent; with genuine pairs filling the rest it hits the cap."""
+        self.assertEqual(self.count(fragment), spent)
+        for limit in self.LIMITS:
+            with self.subTest(limit=limit):
+                audit = self.pairs(limit - spent) + fragment
+                self.assertEqual(self.count(audit), limit)
+                self.assert_cap(limit, audit, refused=True)
+
+    def test_genuine_pair_counts_once(self):
+        self.assertEqual(self.count(genuine_pair()), 1)
+        self.assertEqual(self.count(codex_pair()), 1)
+        transition = role_entry()
+        blocked_adapter = adapter_for(
+            transition, decision=blocked('claude-developer', 'OWNER_PAUSED'))
+        self.assertEqual(self.count([transition, blocked_adapter]), 1)
+        consumed = adapter_for(transition, decision=blocked(
+            'claude-developer', 'WORKER_DISPATCH_AUTHORIZATION_CONSUMED'))
+        self.assertEqual(self.count([transition, adapter_for(transition), consumed]), 1)
+        self.assertEqual(self.count(genuine_pair() + codex_pair()), 2)
+        for limit in self.LIMITS:
+            with self.subTest(limit=limit):
+                self.assertEqual(self.count(self.pairs(limit - 1)), limit - 1)
+                self.assert_cap(limit, self.pairs(limit - 1), refused=False)
+                self.assert_cap(limit, self.pairs(limit), refused=True)
+
+    def test_forged_adapter_without_transition_counts_spent(self):
+        cases = {
+            'role adapter, unknown id': role_entry(phase='ADAPTER', authorization_id='8' * 32),
+            'role adapter, no id': role_entry(phase='ADAPTER'),
+            'codex adapter, unknown id': codex_entry(authorization_id='8' * 32),
+        }
+        for name, forged in cases.items():
+            with self.subTest(case=name):
+                # role_timeout alone counts it 0; the dispatch gate does not trust it.
+                self.assertEqual(role_timeout.count_timeout_attempts([forged]), 0)
+                self.assert_spent([forged], 1)
+
+    def test_forged_adapter_also_spends_codex_budget(self):
+        self.set_limit(2)
+        forged = role_entry(phase='ADAPTER', authorization_id='8' * 32)
+        current, changes, expected = codex_continuation(genuine_pair() + [forged])
+        self.assert_refused(
+            worker_dispatch.authorize_task_store_change(current, changes, expected),
+            'WORKER_TIMEOUT_CONTINUATION_LIMIT')
+        current, changes, expected = codex_continuation(genuine_pair())
+        self.assertIsNone(
+            worker_dispatch.authorize_task_store_change(current, changes, expected))
+
+    def test_mismatched_binding_counts_spent(self):
+        other_source = {'assignment_id': ASSIGNMENT, 'source_sha': OTHER_SHA,
+                        'contract_digest': CONTRACT}
+        other_contract = {'assignment_id': ASSIGNMENT, 'source_sha': SOURCE_SHA,
+                          'contract_digest': 'c' * 64}
+
+        def bad_pair(**adapter_options):
+            transition = role_entry()
+            return [transition, adapter_for(transition, **adapter_options)]
+
+        blocked_transition = role_entry(decision=blocked('claude-developer', 'OWNER_PAUSED'))
+        reversed_transition = role_entry()
+        codex_transition = codex_entry()
+        cases = {
+            'other assignment_id': bad_pair(bind=binding(OTHER_ASSIGNMENT)),
+            'other source_sha': bad_pair(bind=other_source),
+            'other contract_digest': bad_pair(bind=other_contract),
+            'other worker key': bad_pair(worker_key='agy'),
+            'transition not allowed': [blocked_transition, adapter_for(blocked_transition)],
+            'adapter before its transition': [adapter_for(reversed_transition),
+                                              reversed_transition],
+            'codex other assignment_id': [codex_transition, codex_entry(
+                authorization_id=codex_transition['attempt_id'], assignment=ASSIGNMENT)],
+        }
+        for name, fragment in cases.items():
+            with self.subTest(case=name):
+                self.assert_spent(fragment, 2)
+
+    def test_malformed_adapter_counts_spent(self):
+        def bad_pair(edit, make=genuine_pair):
+            fragment = make()
+            edit(*fragment)
+            return fragment
+
+        def fixed_ids(transition, adapter):
+            transition['attempt_id'] = 'a' * 32
+            adapter['authorization_id'] = 'A' * 32
+
+        def drop_binding(transition, adapter):
+            for item in (transition, adapter):
+                for field in ('assignment_id', 'source_sha', 'contract_digest'):
+                    del item[field]
+
+        def non_hex_source(transition, adapter):
+            for item in (transition, adapter):
+                item['source_sha'] = 'x' * 40
+
+        cases = {
+            'authorization_id not a string': (
+                bad_pair(lambda t, a: a.update(authorization_id=7)), 2),
+            'authorization_id not lower-case hex': (bad_pair(fixed_ids), 2),
+            'adapter binding field missing': (
+                bad_pair(lambda t, a: a.pop('contract_digest')), 2),
+            'binding missing on both entries': (bad_pair(drop_binding), 2),
+            'binding not hex on both entries': (bad_pair(non_hex_source), 2),
+            'adapter worker key missing': (bad_pair(lambda t, a: a.pop('worker_key')), 2),
+            'codex adapter binding missing': (
+                bad_pair(lambda t, a: a.pop('assignment_id'), make=codex_pair), 2),
+            'entry not a mapping': (['ROLE_TIMEOUT_RETRY'], 1),
+        }
+        for name, (fragment, spent) in cases.items():
+            with self.subTest(case=name):
+                self.assert_spent(fragment, spent)
+
+    def test_unreadable_audit_is_unknown(self):
+        self.assertIsNone(self.count({'action': ACTION}))
+        self.assertIsNone(self.count(None))
 
 
 class AuditEntryAndLegacyTests(RoleTimeoutGateBase):

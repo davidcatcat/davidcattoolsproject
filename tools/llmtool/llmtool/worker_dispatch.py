@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import hashlib
@@ -632,12 +633,73 @@ def _role_timeout_retry_valid(current, changes, expected, old, new, audit):
             all(_no_result_head(item) for item in completions) and no_carry)
 
 
+_TIMEOUT_ADAPTER_ACTIONS = (ROLE_TIMEOUT_RETRY, role_timeout.TIMEOUT_CONTINUATION)
+_BINDING_PATTERNS = (('assignment_id', r'[0-9a-f]{32}'), ('source_sha', r'[0-9a-f]{40}'),
+                     ('contract_digest', r'[0-9a-f]{64}'))
+
+
+def _validated_timeout_adapter(audit, index):
+    """True only for an adapter entry bound to an earlier ALLOWED transition (CWE-345).
+
+    The adapter entry must be a ROLE_TIMEOUT_RETRY ADAPTER entry or a
+    TIMEOUT_CONTINUATION entry with a well-formed authorization_id and
+    binding. An earlier ALLOWED transition entry of the same action and worker,
+    with no authorization_id (and phase TRANSITION for ROLE_TIMEOUT_RETRY), must
+    have attempt_id equal to that authorization_id and the same assignment_id,
+    source_sha and contract_digest. Anything else is not validated."""
+    entry = audit[index]
+    if type(entry) is not dict:
+        return False
+    action = entry.get('action')
+    authorization_id = entry.get('authorization_id')
+    worker_key = entry.get('worker_key')
+    if (type(action) is not str or action not in _TIMEOUT_ADAPTER_ACTIONS or
+            type(worker_key) is not str or
+            type(authorization_id) is not str or
+            re.fullmatch(r'[0-9a-f]{32}', authorization_id) is None or
+            not all(type(entry.get(field)) is str and
+                    re.fullmatch(pattern, entry[field]) is not None
+                    for field, pattern in _BINDING_PATTERNS)):
+        return False
+    if action == ROLE_TIMEOUT_RETRY and entry.get('retry_phase') != role_timeout.PHASE_ADAPTER:
+        return False
+    worker_key = stored_worker_id(worker_key)
+    for transition in audit[:index]:
+        if (type(transition) is dict and
+                transition.get('attempt_id') == authorization_id and
+                transition.get('action') == action and
+                transition.get('decision') == 'ALLOWED' and
+                'authorization_id' not in transition and
+                stored_worker_id(transition.get('worker_key')) == worker_key and
+                all(transition.get(field) == entry[field] for field in _AUDIT_BINDING_FIELDS) and
+                (action != ROLE_TIMEOUT_RETRY or
+                 transition.get('retry_phase') == role_timeout.PHASE_TRANSITION)):
+            return True
+    return False
+
+
 def _logical_timeout_attempts(audit):
-    """Shared logical count for ROLE_TIMEOUT_RETRY and TIMEOUT_CONTINUATION; None if unknown."""
-    try:
-        return role_timeout.count_timeout_attempts(audit)
-    except role_timeout.RoleTimeoutError:
+    """Shared logical count for ROLE_TIMEOUT_RETRY and TIMEOUT_CONTINUATION; None if unknown.
+
+    role_timeout.count_timeout_attempts gives each entry its design count. An
+    adapter entry (ROLE_TIMEOUT_RETRY ADAPTER, or TIMEOUT_CONTINUATION with an
+    authorization_id) that it counts 0 still counts 1 here unless it is
+    validated against its matching ALLOWED transition and binding: a forged,
+    mis-bound or malformed adapter entry is a spent attempt (fail closed)."""
+    if type(audit) not in (list, tuple):
         return None
+    total = 0
+    for index, entry in enumerate(audit):
+        try:
+            count = role_timeout.count_timeout_attempts([entry])
+        except role_timeout.RoleTimeoutError:
+            return None
+        if (count == 0 and isinstance(entry, Mapping) and
+                entry.get('action') in _TIMEOUT_ADAPTER_ACTIONS and
+                not _validated_timeout_adapter(audit, index)):
+            count = 1
+        total += count
+    return total
 
 
 def _committed_carry_valid(current, changes, expected, old, new):
