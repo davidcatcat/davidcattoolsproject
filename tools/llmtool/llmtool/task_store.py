@@ -324,6 +324,24 @@ _DISPATCH_AUDIT_FIELDS = frozenset((
 _DISPATCH_AUDIT_BINDING_FIELDS = frozenset((
     'assignment_id', 'source_sha', 'contract_digest',
 ))
+# Every stored audit entry key set before #1019 A11 row 41, unchanged.
+_DISPATCH_AUDIT_SHAPES = (
+    _DISPATCH_AUDIT_FIELDS,
+    _DISPATCH_AUDIT_FIELDS | _DISPATCH_AUDIT_BINDING_FIELDS,
+    _DISPATCH_AUDIT_FIELDS | _DISPATCH_AUDIT_BINDING_FIELDS | frozenset(('authorization_id',)),
+)
+_DISPATCH_AUDIT_ACTIONS = (
+    'DISPATCH', 'RETRY', 'REASSIGN', 'RECOVERY', 'REPAIR',
+    'TIMEOUT_CONTINUATION', 'REVIEWER_HANDOFF', 'REVIEWER_RETRY',
+    'COMMITTED_RESULT_CARRY',
+)
+# #1019 A11 row 41 (PR #2182 review v1 F2): a ROLE_TIMEOUT_RETRY entry is one
+# of the shapes above plus retry_phase, TRANSITION or ADAPTER. retry_phase is
+# refused on every other action, and that action is refused without it.
+_ROLE_TIMEOUT_RETRY_ACTION = 'ROLE_TIMEOUT_RETRY'
+_DISPATCH_AUDIT_RETRY_PHASES = ('TRANSITION', 'ADAPTER')
+_DISPATCH_AUDIT_RETRY_SHAPES = tuple(
+    shape | frozenset(('retry_phase',)) for shape in _DISPATCH_AUDIT_SHAPES)
 _LEGACY_DEVELOPER_FIELDS = frozenset((
     'assignment_id', 'selection_source', 'state', 'provider_profile',
     'provider_type', 'model', 'backend_session_semantics', 'session_id',
@@ -2312,20 +2330,22 @@ def _validate(record, *, strict=True):
             _fail()
         seen_attempts = set()
         for entry in audit:
+            role_timeout_retry = (type(entry) is dict and
+                                  type(entry.get('action')) is str and
+                                  entry.get('action') == _ROLE_TIMEOUT_RETRY_ACTION)
             if (type(entry) is not dict or set(entry) not in (
-                    _DISPATCH_AUDIT_FIELDS,
-                    _DISPATCH_AUDIT_FIELDS | _DISPATCH_AUDIT_BINDING_FIELDS,
-                    _DISPATCH_AUDIT_FIELDS | _DISPATCH_AUDIT_BINDING_FIELDS |
-                    frozenset(('authorization_id',))) or
+                    _DISPATCH_AUDIT_RETRY_SHAPES if role_timeout_retry
+                    else _DISPATCH_AUDIT_SHAPES) or
+                    (role_timeout_retry and
+                     (type(entry['retry_phase']) is not str or
+                      entry['retry_phase'] not in _DISPATCH_AUDIT_RETRY_PHASES)) or
                     type(entry['attempt_id']) is not str or
                     re.fullmatch(r'[0-9a-f]{32}', entry['attempt_id']) is None or
                     entry['attempt_id'] in seen_attempts or
                     type(entry['worker_key']) is not str or
                     re.fullmatch(r'[a-z][a-z0-9-]{0,63}', entry['worker_key']) is None or
-                    entry['action'] not in (
-                        'DISPATCH', 'RETRY', 'REASSIGN', 'RECOVERY', 'REPAIR',
-                        'TIMEOUT_CONTINUATION', 'REVIEWER_HANDOFF', 'REVIEWER_RETRY',
-                        'COMMITTED_RESULT_CARRY') or
+                    (not role_timeout_retry and
+                     entry['action'] not in _DISPATCH_AUDIT_ACTIONS) or
                     entry['decision'] not in ('ALLOWED', 'BLOCKED') or
                     type(entry['reason_code']) is not str or
                     re.fullmatch(r'[A-Z0-9_]{1,64}', entry['reason_code']) is None or

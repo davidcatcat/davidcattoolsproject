@@ -2,9 +2,12 @@
 
 Design: docs/design/a11-row41-timeout-retry-1019.md section 6, tests 13-24.
 Fixed, made-up values only: repeated-digit hex ids, route names and plain
-words. No provider calls. The Owner policy decision (worker_dispatch.evaluate)
+words (the real-TaskStore class also uses random new_id() hex ids, as
+tests/test_task_store.py does). No provider calls. The Owner policy decision (worker_dispatch.evaluate)
 and the repair policy loader are injected; the gate code under test is real.
-The adapter store keeps its record in a temporary JSON file.
+Most adapter tests keep their record in a temporary JSON file;
+RealTaskStorePersistenceTests write and read back through a real TaskStore
+whose records are built the way tests/test_task_store.py builds them.
 """
 
 from __future__ import annotations
@@ -19,7 +22,19 @@ from unittest import mock
 
 from llmtool import repair_policy, role_timeout, worker_dispatch
 from llmtool.errors import LLMToolError
+from llmtool.task_store import TaskStore, new_id
+from llmtool.task_submission_cli import _record
 from llmtool.worker_dispatch import PolicyDecision, WorkerDispatchDenied
+
+import review_trust_fixture
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
 
 TASK_ID = '1' * 32
 RUN_ID = '0' * 32
@@ -681,13 +696,6 @@ class AdapterValidationCountTests(RoleTimeoutGateBase):
     def test_genuine_pair_counts_once(self):
         self.assertEqual(self.count(genuine_pair()), 1)
         self.assertEqual(self.count(codex_pair()), 1)
-        transition = role_entry()
-        blocked_adapter = adapter_for(
-            transition, decision=blocked('claude-developer', 'OWNER_PAUSED'))
-        self.assertEqual(self.count([transition, blocked_adapter]), 1)
-        consumed = adapter_for(transition, decision=blocked(
-            'claude-developer', 'WORKER_DISPATCH_AUTHORIZATION_CONSUMED'))
-        self.assertEqual(self.count([transition, adapter_for(transition), consumed]), 1)
         self.assertEqual(self.count(genuine_pair() + codex_pair()), 2)
         for limit in self.LIMITS:
             with self.subTest(limit=limit):
@@ -777,14 +785,241 @@ class AdapterValidationCountTests(RoleTimeoutGateBase):
             'codex adapter binding missing': (
                 bad_pair(lambda t, a: a.pop('assignment_id'), make=codex_pair), 2),
             'entry not a mapping': (['ROLE_TIMEOUT_RETRY'], 1),
+            'adapter attempt_id not hex': (
+                bad_pair(lambda t, a: a.update(attempt_id='z' * 32)), 2),
+            'adapter attempt_id not a string': (
+                bad_pair(lambda t, a: a.update(attempt_id=7)), 2),
+            'adapter decision missing': (bad_pair(lambda t, a: a.pop('decision')), 2),
+            'adapter decision lower-case': (
+                bad_pair(lambda t, a: a.update(decision='allowed')), 2),
+            'adapter action missing': (bad_pair(lambda t, a: a.pop('action')), 2),
+            'adapter worker key malformed': (
+                bad_pair(lambda t, a: a.update(worker_key='Claude Developer')), 2),
+            'adapter reason_code missing': (bad_pair(lambda t, a: a.pop('reason_code')), 2),
+            'adapter reason_code malformed': (
+                bad_pair(lambda t, a: a.update(reason_code='owner policy allowed')), 2),
+            'adapter policy_sha256 missing': (
+                bad_pair(lambda t, a: a.pop('policy_sha256')), 2),
+            'adapter policy_sha256 malformed': (
+                bad_pair(lambda t, a: a.update(policy_sha256='d' * 63)), 2),
+            'adapter at missing': (bad_pair(lambda t, a: a.pop('at')), 2),
+            'adapter at malformed': (
+                bad_pair(lambda t, a: a.update(at='2026-11-16 00:00:00')), 2),
+            'adapter at not a string': (bad_pair(lambda t, a: a.update(at=0)), 2),
+            'adapter extra key': (bad_pair(lambda t, a: a.update(note='extra')), 2),
+            'adapter retry_phase missing': (bad_pair(lambda t, a: a.pop('retry_phase')), 2),
+            'codex adapter with retry_phase': (
+                bad_pair(lambda t, a: a.update(retry_phase='ADAPTER'), make=codex_pair), 2),
         }
         for name, (fragment, spent) in cases.items():
             with self.subTest(case=name):
                 self.assert_spent(fragment, spent)
 
+    def test_adapter_missing_attempt_id_or_not_allowed_counts_spent(self):
+        """PR #2182 review v1 F1: an adapter with no attempt_id or a non-ALLOWED
+        decision is a spent attempt at limits 2 and 3, even when it names a
+        real ALLOWED transition with the same binding."""
+
+        def without_attempt_id(make):
+            transition, adapter = make()
+            del adapter['attempt_id']
+            return [transition, adapter]
+
+        def with_decision(make, code):
+            transition, adapter = make()
+            adapter.update(decision='BLOCKED', reason_code=code)
+            return [transition, adapter]
+
+        transition = role_entry()
+        cases = {
+            'role adapter, attempt_id missing': without_attempt_id(genuine_pair),
+            'codex adapter, attempt_id missing': without_attempt_id(codex_pair),
+            'role adapter, BLOCKED OWNER_PAUSED': [transition, adapter_for(
+                transition, decision=blocked('claude-developer', 'OWNER_PAUSED'))],
+            'role adapter, BLOCKED consumed after an allowed launch': [
+                transition, adapter_for(transition), adapter_for(transition, decision=blocked(
+                    'claude-developer', 'WORKER_DISPATCH_AUTHORIZATION_CONSUMED'))],
+            'role adapter, decision edited to BLOCKED': with_decision(
+                genuine_pair, 'OWNER_PAUSED'),
+            'codex adapter, decision edited to BLOCKED': with_decision(
+                codex_pair, 'OWNER_PAUSED'),
+            'role adapter, decision not a known value': [transition, dict(
+                adapter_for(transition), decision='UNKNOWN')],
+        }
+        for name, fragment in cases.items():
+            with self.subTest(case=name):
+                # The pure design count trusts the shape; the dispatch gate does not.
+                self.assertEqual(role_timeout.count_timeout_attempts(fragment),
+                                 len([item for item in fragment
+                                      if 'authorization_id' not in item]))
+                self.assert_spent(fragment, 2)
+
     def test_unreadable_audit_is_unknown(self):
         self.assertIsNone(self.count({'action': ACTION}))
         self.assertIsNone(self.count(None))
+
+
+class RealTaskStorePersistenceTests(RoleTimeoutGateBase):
+    """PR #2182 review v1 F2: ROLE_TIMEOUT_RETRY entries with retry_phase are
+    written and read back through a real TaskStore (no TempFileStore).
+
+    The Task record comes from task_submission_cli._record, as in
+    tests/test_task_store.py; the Developer route is agy. The Owner decision and
+    the repair policy loader stay injected by RoleTimeoutGateBase."""
+
+    def setUp(self):
+        super().setUp()
+        self.store = TaskStore(Path(self.tmpdir).resolve() / 'tasks')
+
+    def new_task(self):
+        request = 'Bounded non-sensitive role timeout retry task.'
+        task_id, run_id = new_id(), new_id()
+        request_sha = hashlib.sha256(request.encode()).hexdigest()
+        task = _record(
+            task_id, run_id, 'pm-' + new_id(), 'pm-profile', request,
+            state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+            backend='NO_NATIVE_SESSION_ID_EXPOSED', request_sha=request_sha)
+        task.update(
+            pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                              'base_url': None},
+            response='PM returned a bounded task.', error_code=None,
+            pm_assignment={'schema_version': 1, 'route': 'agy', 'risk': 'LOW',
+                           'goal': 'Produce a proposal diff.',
+                           'acceptance': ['the proposal is recorded']},
+        )
+        self.store.create(task)
+        return task_id
+
+    def dispatching(self, task_id):
+        """Pending, then dispatching, each through the real store and gate."""
+        pending = {
+            'assignment_id': new_id(), 'selection_source': 'PM',
+            'state': 'DEVELOPER_PENDING', 'provider_profile': 'agy',
+            'provider_type': None, 'model': None,
+            'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+            'session_id': 'dev-' + new_id(), 'source_sha': 'a' * 40,
+            'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+            'read_paths': ['src.py'], 'write_paths': ['src.py'],
+            'acceptance': ['the proposal is recorded'],
+            'context_sha256': 'b' * 64,
+            'egress_basis': 'Approved non-sensitive test context.', 'input_bytes': 10,
+            'max_tokens': None, 'artifact_format': 'unified_diff',
+            'artifact': None, 'artifact_sha256': None, 'usage': None,
+            'error_code': None, 'created_at': '2026-10-23T00:00:00Z',
+            'owner_assignment_ref': None,
+        }
+        self.store.compare_and_update(task_id, expected={'developer': None},
+                                      developer=pending)
+        dispatching = dict(pending, state='DEVELOPER_DISPATCHING',
+                           provider_type='agy-cli', model='agy-model')
+        self.store.update(task_id, developer=dispatching)
+        return dispatching
+
+    def timed_out(self, task_id):
+        """The agy route's exact timeout code with confirmed cleanup."""
+        timed_out = dict(self.dispatching(task_id), state='DEVELOPER_OUTCOME_UNKNOWN',
+                         error_code=role_timeout.ROUTE_TIMEOUT_CODES['agy'],
+                         execution={
+                             'status': 'TIMEOUT', 'native_session_id': None,
+                             'process_exit_code': None, 'stdout_sha256': None,
+                             'elapsed_ms': 25, 'cleanup_status': 'CONFIRMED',
+                             'usage_source': 'UNKNOWN', 'source_bytes': None,
+                             'source_file_count': None, 'source_manifest_sha256': None})
+        self.store.update(task_id, developer=timed_out)
+        return timed_out
+
+    def retry(self, task_id):
+        old = self.store.get(task_id)['developer']
+        new = dict(old, state='DEVELOPER_DISPATCHING', error_code=None, execution=None)
+        return self.store.compare_and_update(task_id, expected={'developer': old},
+                                             developer=new)
+
+    def assert_denied(self, call, code):
+        with self.assertRaises(WorkerDispatchDenied) as raised:
+            call()
+        self.assertEqual(raised.exception.dispatch_code, code)
+
+    def test_blocked_retry_transitions_are_persisted(self):
+        self.set_limit(1)
+        task_id = self.new_task()
+        self.timed_out(task_id)
+        before = self.store.get(task_id)
+        self.assertEqual(worker_dispatch.task_store_attempts(before, {'developer': dict(
+            before['developer'], state='DEVELOPER_DISPATCHING', error_code=None,
+            execution=None)}), [('agy', ACTION)])
+
+        # The stored record has no clean-diff evidence, so the real gate refuses
+        # the precondition; the BLOCKED TRANSITION entry is still stored.
+        self.assert_denied(lambda: self.retry(task_id),
+                           'WORKER_ROLE_TIMEOUT_RETRY_PRECONDITION')
+        saved = self.store.get(task_id)
+        self.assertEqual(saved['developer'], before['developer'])
+        self.assertEqual(saved['dispatch_audit'][:-1], before['dispatch_audit'])
+        entry = saved['dispatch_audit'][-1]
+        self.assertEqual(
+            (entry['action'], entry['retry_phase'], entry['decision'],
+             entry['reason_code'], entry['worker_key']),
+            (ACTION, 'TRANSITION', 'BLOCKED', 'WORKER_ROLE_TIMEOUT_RETRY_PRECONDITION', 'agy'))
+        self.assertNotIn('authorization_id', entry)
+        self.assertEqual(entry['assignment_id'], before['developer']['assignment_id'])
+        self.assertEqual(entry['contract_digest'], before['task_binding']['contract_digest'])
+        self.assertEqual(worker_dispatch._logical_timeout_attempts(saved['dispatch_audit']), 1)
+
+        # Read back, the blocked transition spent the budget of 1.
+        self.assert_denied(lambda: self.retry(task_id), 'WORKER_ROLE_TIMEOUT_RETRY_LIMIT')
+        final = self.store.get(task_id)
+        self.assertEqual(final['dispatch_audit'][:-1], saved['dispatch_audit'])
+        last = final['dispatch_audit'][-1]
+        self.assertEqual((last['retry_phase'], last['decision'], last['reason_code']),
+                         ('TRANSITION', 'BLOCKED', 'WORKER_ROLE_TIMEOUT_RETRY_LIMIT'))
+        self.assertEqual(worker_dispatch._logical_timeout_attempts(final['dispatch_audit']), 2)
+
+    def test_allowed_retry_and_blocked_adapter_are_persisted(self):
+        self.set_limit(1)
+        task_id = self.new_task()
+        self.dispatching(task_id)
+        current = self.store.get(task_id)
+        developer_record = current['developer']
+        bind = {'assignment_id': developer_record['assignment_id'],
+                'source_sha': developer_record['source_sha'],
+                'contract_digest': current['task_binding']['contract_digest']}
+        # An ALLOWED TRANSITION entry is appended through the store's own audit
+        # path; the store validates it like any other entry.
+        transition = worker_dispatch.audit_entry(
+            allowed('agy'), ACTION, binding=bind, retry_phase='TRANSITION')
+        self.store.append_dispatch_audit(task_id, transition,
+                                         expected={'developer': developer_record})
+        self.assertEqual(self.store.get(task_id)['dispatch_audit'][-1], transition)
+
+        decision = worker_dispatch.authorize_dispatch(self.store, task_id, 'agy', action=ACTION)
+        self.assertTrue(decision.allowed)
+        saved = self.store.get(task_id)
+        adapter = saved['dispatch_audit'][-1]
+        self.assertEqual(
+            (adapter['action'], adapter['retry_phase'], adapter['decision'],
+             adapter['authorization_id']),
+            (ACTION, 'ADAPTER', 'ALLOWED', transition['attempt_id']))
+        self.assertEqual({field: adapter[field] for field in bind}, bind)
+        self.assertTrue(worker_dispatch._validated_timeout_adapter(
+            saved['dispatch_audit'], len(saved['dispatch_audit']) - 1))
+        self.assertEqual(worker_dispatch._logical_timeout_attempts(saved['dispatch_audit']), 1)
+
+        # A second launch is refused and its BLOCKED ADAPTER entry is stored.
+        self.assert_denied(
+            lambda: worker_dispatch.authorize_dispatch(self.store, task_id, 'agy',
+                                                       action=ACTION),
+            'WORKER_DISPATCH_AUTHORIZATION_CONSUMED')
+        final = self.store.get(task_id)
+        self.assertEqual(final['dispatch_audit'][:-1], saved['dispatch_audit'])
+        consumed = final['dispatch_audit'][-1]
+        self.assertEqual(
+            (consumed['retry_phase'], consumed['decision'], consumed['reason_code'],
+             consumed['authorization_id']),
+            ('ADAPTER', 'BLOCKED', 'WORKER_DISPATCH_AUTHORIZATION_CONSUMED',
+             transition['attempt_id']))
+        # F1: a BLOCKED adapter entry counts as spent at the dispatch gate.
+        self.assertEqual(worker_dispatch._logical_timeout_attempts(final['dispatch_audit']), 2)
+        self.assertEqual(role_timeout.count_timeout_attempts(final['dispatch_audit']), 1)
 
 
 class AuditEntryAndLegacyTests(RoleTimeoutGateBase):

@@ -636,17 +636,63 @@ def _role_timeout_retry_valid(current, changes, expected, old, new, audit):
 _TIMEOUT_ADAPTER_ACTIONS = (ROLE_TIMEOUT_RETRY, role_timeout.TIMEOUT_CONTINUATION)
 _BINDING_PATTERNS = (('assignment_id', r'[0-9a-f]{32}'), ('source_sha', r'[0-9a-f]{40}'),
                      ('contract_digest', r'[0-9a-f]{64}'))
+# The exact key set authorize_dispatch writes for a bound adapter entry
+# (audit_entry with binding and authorization_id); ROLE_TIMEOUT_RETRY adds
+# retry_phase. PR #2182 review v1 F1.
+_ADAPTER_ENTRY_FIELDS = frozenset((
+    'attempt_id', 'worker_key', 'action', 'decision', 'reason_code',
+    'policy_sha256', 'at', 'authorization_id', *_AUDIT_BINDING_FIELDS))
+_AUDIT_STAMP_FORMAT = '%Y-%m-%dT%H:%M:%SZ'
+
+
+def _valid_adapter_own_fields(entry):
+    """True only if an adapter entry's own audit fields are all well formed.
+
+    The key set is exact; attempt_id is 32 lower-case hex; decision is
+    ALLOWED; worker_key and reason_code have the TaskStore formats;
+    policy_sha256 is None or 64 lower-case hex; at is a second-precision UTC
+    stamp. Anything missing, extra or malformed is not valid (fail closed)."""
+    expected_keys = (_ADAPTER_ENTRY_FIELDS | {'retry_phase'}
+                     if entry.get('action') == ROLE_TIMEOUT_RETRY else _ADAPTER_ENTRY_FIELDS)
+    if set(entry) != expected_keys:
+        return False
+    attempt_id = entry['attempt_id']
+    decision = entry['decision']
+    worker_key = entry['worker_key']
+    reason_code = entry['reason_code']
+    policy_sha256 = entry['policy_sha256']
+    stamp = entry['at']
+    if (type(attempt_id) is not str or re.fullmatch(r'[0-9a-f]{32}', attempt_id) is None or
+            type(decision) is not str or decision != 'ALLOWED' or
+            type(worker_key) is not str or
+            re.fullmatch(r'[a-z][a-z0-9-]{0,63}', worker_key) is None or
+            type(reason_code) is not str or
+            re.fullmatch(r'[A-Z0-9_]{1,64}', reason_code) is None or
+            (policy_sha256 is not None and
+             (type(policy_sha256) is not str or
+              re.fullmatch(r'[0-9a-f]{64}', policy_sha256) is None)) or
+            type(stamp) is not str):
+        return False
+    try:
+        parsed = datetime.strptime(stamp, _AUDIT_STAMP_FORMAT)
+    except ValueError:
+        return False
+    return parsed.strftime(_AUDIT_STAMP_FORMAT) == stamp
 
 
 def _validated_timeout_adapter(audit, index):
-    """True only for an adapter entry bound to an earlier ALLOWED transition (CWE-345).
+    """True only for a well-formed adapter entry bound to an earlier ALLOWED transition.
 
-    The adapter entry must be a ROLE_TIMEOUT_RETRY ADAPTER entry or a
-    TIMEOUT_CONTINUATION entry with a well-formed authorization_id and
-    binding. An earlier ALLOWED transition entry of the same action and worker,
-    with no authorization_id (and phase TRANSITION for ROLE_TIMEOUT_RETRY), must
-    have attempt_id equal to that authorization_id and the same assignment_id,
-    source_sha and contract_digest. Anything else is not validated."""
+    CWE-345 (PR #2180 repair, PR #2182 review v1 F1). The adapter entry must
+    be a ROLE_TIMEOUT_RETRY ADAPTER entry or a TIMEOUT_CONTINUATION entry whose
+    own audit fields are valid (_valid_adapter_own_fields: attempt_id, decision
+    ALLOWED, action, worker_key, reason_code, policy_sha256, at) with a
+    well-formed authorization_id and binding. An earlier ALLOWED transition
+    entry of the same action and worker, with no authorization_id (and phase
+    TRANSITION for ROLE_TIMEOUT_RETRY), must have attempt_id equal to that
+    authorization_id and the same assignment_id, source_sha and
+    contract_digest. Anything else, including a BLOCKED adapter entry, is not
+    validated."""
     entry = audit[index]
     if type(entry) is not dict:
         return False
@@ -654,6 +700,7 @@ def _validated_timeout_adapter(audit, index):
     authorization_id = entry.get('authorization_id')
     worker_key = entry.get('worker_key')
     if (type(action) is not str or action not in _TIMEOUT_ADAPTER_ACTIONS or
+            not _valid_adapter_own_fields(entry) or
             type(worker_key) is not str or
             type(authorization_id) is not str or
             re.fullmatch(r'[0-9a-f]{32}', authorization_id) is None or
@@ -683,9 +730,10 @@ def _logical_timeout_attempts(audit):
 
     role_timeout.count_timeout_attempts gives each entry its design count. An
     adapter entry (ROLE_TIMEOUT_RETRY ADAPTER, or TIMEOUT_CONTINUATION with an
-    authorization_id) that it counts 0 still counts 1 here unless it is
-    validated against its matching ALLOWED transition and binding: a forged,
-    mis-bound or malformed adapter entry is a spent attempt (fail closed)."""
+    authorization_id) that it counts 0 still counts 1 here unless its own
+    audit fields are valid, its decision is ALLOWED, and it is validated
+    against its matching ALLOWED transition and binding: a forged, mis-bound,
+    malformed or BLOCKED adapter entry is a spent attempt (fail closed)."""
     if type(audit) not in (list, tuple):
         return None
     total = 0
