@@ -87,6 +87,13 @@ read). In no case does the drive dispatch the Developer again.
   (lines 739-742). A `None` limit refuses
   `WORKER_TIMEOUT_CONTINUATION_POLICY_INVALID` (lines 743-748); a used-up
   limit refuses `WORKER_TIMEOUT_CONTINUATION_LIMIT` (lines 749-752).
+- Two kinds of audit entry share one action name. A TaskStore transition
+  entry is written by `audit_entry(decision, action, binding=binding)`
+  (line 804) and has no `authorization_id`. An adapter entry is written by
+  `authorize_dispatch` with the supplied action (lines 434-435) and carries
+  `authorization_id` only when a matching transition was found
+  (lines 328-333, 417-418). The count at lines 739-742 does not tell them
+  apart.
 - So the existing continuation is for a Codex timeout WITH changes, on a new
   assignment. A route timeout with no changes has no path today.
 - A same-assignment re-dispatch from any state other than pending is
@@ -186,7 +193,10 @@ step, as it already does for the merge (task_drive.py lines 212-216).
 1. Classify (pure, no I/O): a new `role_timeout.classify(record, d6_check,
    limit)` returns one of `RETRY_READY`, `LIMIT`, `WRITE_AMBIGUOUS`,
    `POLICY_INVALID` or `NOT_TIMEOUT`. `limit` is the value of
-   `timeout_continuation_max()`; `None` gives `POLICY_INVALID`.
+   `timeout_continuation_max()`; `None` gives `POLICY_INVALID`. The used
+   count is `count_timeout_attempts(record['dispatch_audit'])` (section
+   3.3): logical attempts, not audit entries. A clean timeout with a used
+   count at or above `limit` gives `LIMIT`.
 2. Advance without the flag: when the Developer record classifies as a role
    timeout, advance makes no dispatch and returns:
    - `RETRY_READY`: step `DEVELOPER_TIMEOUT`, codes
@@ -232,8 +242,9 @@ step, as it already does for the merge (task_drive.py lines 212-216).
 
 With the default limit of 1: first timeout, one retry; second timeout,
 `STOPPED` with `ROLE_TIMEOUT_LIMIT` and a D4 notice. With limit 0 the first
-timeout stops the same way. With limit 2 or 3 the stop comes after that many
-retries.
+timeout stops the same way. With limit 2 or 3 the stop comes after exactly
+that many retries. This holds because each retry is counted once, although
+it writes two audit entries (section 3.3, counting rule).
 
 ### 3.3 Cap and dispatch gate (worker_dispatch.py)
 
@@ -251,13 +262,80 @@ retries.
     `WORKER_ROLE_TIMEOUT_RETRY_PRECONDITION`;
   - `timeout_continuation_max()` is `None`: refuse
     `WORKER_ROLE_TIMEOUT_RETRY_POLICY_INVALID`;
-  - count every audit entry in this Task record whose action is
-    `ROLE_TIMEOUT_RETRY` or `TIMEOUT_CONTINUATION`, for any worker key, any
-    decision and any assignment. At or above the limit: refuse
-    `WORKER_ROLE_TIMEOUT_RETRY_LIMIT`. The Codex check at lines 739-742
-    counts the same shared set, so a Codex continuation and a role retry in
-    one Task never exceed the limit together. This makes the Codex check
-    stricter only in a Task that already used a role retry.
+  - count the logical timeout attempts already in this Task record (rule
+    below), for any worker key, any decision and any assignment. At or above
+    the limit: refuse `WORKER_ROLE_TIMEOUT_RETRY_LIMIT`. The Codex check at
+    lines 739-742 uses the same count, so a Codex continuation and a role
+    retry in one Task never exceed the limit together. This makes the Codex
+    check stricter in a Task that already used a role retry.
+
+#### Counting logical attempts, not audit entries
+
+One retry writes two audit entries with the same action: the TaskStore
+transition entry from `authorize_task_store_change` (written by
+`audit_entry(decision, action, binding=binding)` at line 804, so it has no
+`authorization_id`) and the adapter entry from `authorize_dispatch` (written
+at lines 434-435, which keeps the supplied action and adds `authorization_id`
+when a matching transition was found, lines 328-333 and 417-418). Counting
+every entry with the action, as lines 739-742 do today, would count each
+retry twice: with limit 2 the second retry would be refused after only one
+retry, and limit 3 would allow only two. The cap therefore counts logical
+attempts, once each, through one pure helper,
+`role_timeout.count_timeout_attempts(audit)`, used by the classifier
+(section 3.2), the role retry check and the Codex check.
+
+Explicit attempt binding for the new action:
+
+- `audit_entry` gains an optional keyword `retry_phase`. It is required for
+  action `ROLE_TIMEOUT_RETRY`, must be `TRANSITION` or `ADAPTER`, and is
+  refused with `WORKER_DISPATCH_ACTION_INVALID` for any other action or
+  value, the same refusal line 308 uses for a bad action.
+- `authorize_task_store_change` writes the transition entry with
+  `retry_phase='TRANSITION'` and never with `authorization_id`.
+- `authorize_dispatch` writes the adapter entry with
+  `retry_phase='ADAPTER'`, whether it is allowed or blocked, and whether or
+  not a transition was found.
+- `_latest_transition_authorization` (lines 362-369), for this action only,
+  also requires `retry_phase == 'TRANSITION'`, so an adapter entry can never
+  be taken as a transition.
+
+Count rule, per audit entry (any decision, any worker key, any assignment):
+
+| Entry | Counts |
+| --- | --- |
+| `ROLE_TIMEOUT_RETRY`, `retry_phase` `TRANSITION`, no `authorization_id` | 1 |
+| `ROLE_TIMEOUT_RETRY`, `retry_phase` `ADAPTER` | 0 |
+| `ROLE_TIMEOUT_RETRY`, any other shape (phase missing or unknown, or `TRANSITION` with `authorization_id`) | 1 |
+| `TIMEOUT_CONTINUATION` without `authorization_id` (Codex transition entry) | 1 |
+| `TIMEOUT_CONTINUATION` with `authorization_id` (adapter entry) | 0 |
+| any other action | 0 |
+
+Why each row:
+
+- A transition entry is the logical attempt. It counts once whatever its
+  decision, so a BLOCKED transition still uses budget, as the Codex check
+  does today (any decision, lines 739-742). This keeps the intended
+  fail-closed treatment of blocked attempts: a gate refusal (for example a
+  PAUSED race inside the authoritative re-check) is not free to repeat.
+- An adapter entry is the second half of an attempt whose transition entry
+  already counted, or a refused launch with no transition at all (for
+  example `WORKER_DISPATCH_TRANSITION_NOT_FOUND`, line 424). In both cases
+  no new attempt is made, so it counts 0, allowed or blocked.
+- A shape that cannot be classified counts as one, never zero, in line with
+  the rule that an unknown count counts as used (`_used`, repair_policy.py
+  lines 67-69).
+- For `TIMEOUT_CONTINUATION`, no new field is added; the existing
+  `authorization_id` split is used. Whether the Codex adapter calls
+  `authorize_dispatch` with action `TIMEOUT_CONTINUATION` is UNVERIFIED
+  (the adapter was not read). If it does, today's Codex check has the same
+  double count and the helper fixes it; if it does not, the Codex count is
+  unchanged for a Task with no role retry. An adapter entry that found no
+  transition has no `authorization_id` (lines 417-418, 328-333) and so
+  counts 1 for this action: an over-count, which fails closed.
+
+Result: with limit N (0 to 3, repair_policy.py line 21), exactly N retries
+are allowed per Task record, each leaving two entries, and the next timeout
+stops.
 - `RECOVERY` (lines 776-792) refuses a record whose `error_code` is a role
   timeout code, with `WORKER_ROLE_TIMEOUT_NOT_RECOVERY`, so a timeout cannot
   get a second budget through recovery.
@@ -306,9 +384,10 @@ committed before the time limit.
   writes nothing on these refusals; the authoritative re-check inside
   `authorize_task_store_change` and `authorize_dispatch` still runs, so a
   race where the switch changes in between still refuses.
-- Audit size: a retry adds two entries (transition and adapter). The cap of
-  3 keeps a Task far below `MAX_AUDIT_ENTRIES` (line 21); the existing limit
-  check (lines 694-695) still applies.
+- Audit size: a retry adds two entries (transition and adapter) but counts
+  as one logical attempt (section 3.3). The cap of 3 adds at most six
+  entries, far below `MAX_AUDIT_ENTRIES` (line 21); the existing limit check
+  (lines 694-695) still applies.
 - The GitHub quota stop (task_drive.py lines 29-44) and the code-tree stop
   (lines 86-102) are unchanged.
 
@@ -345,84 +424,121 @@ password-, API-key-, token- or other credential-shaped strings. Policy,
 quota gate, D6 check, `evaluate` and advance are injected or monkeypatched;
 no test disables or weakens a production check.
 
+Attempt count (`role_timeout.count_timeout_attempts`, `audit_entry`):
+
+1. One full retry (an ALLOWED `TRANSITION` entry and its ALLOWED `ADAPTER`
+   entry) counts 1, not 2.
+2. A BLOCKED `TRANSITION` entry counts 1. A BLOCKED `ADAPTER` entry counts 0,
+   for each of `WORKER_DISPATCH_AUTHORIZATION_CONSUMED`,
+   `WORKER_DISPATCH_TRANSITION_NOT_FOUND` and `OWNER_PAUSED`.
+3. A `ROLE_TIMEOUT_RETRY` entry with no `retry_phase`, an unknown
+   `retry_phase`, or `TRANSITION` together with `authorization_id` counts 1.
+4. A `TIMEOUT_CONTINUATION` entry without `authorization_id` counts 1, one
+   with `authorization_id` counts 0; entries with any other action count 0.
+5. `audit_entry` refuses `WORKER_DISPATCH_ACTION_INVALID` for
+   `ROLE_TIMEOUT_RETRY` without `retry_phase`, for an unknown `retry_phase`
+   value, and for `retry_phase` on any other action.
+
 Classifier (`role_timeout.classify`):
 
-1. Each route's exact timeout code with clean evidence gives `RETRY_READY`.
-2. A wrong-route code (for example the agy code on a claude record) gives
+6. Each route's exact timeout code with clean evidence gives `RETRY_READY`.
+7. A wrong-route code (for example the agy code on a claude record) gives
    `NOT_TIMEOUT`.
-3. A quota code, an auth code, a crash, the OpenCode step limit and
+8. A quota code, an auth code, a crash, the OpenCode step limit and
    `CODEX_TIMEOUT_WITH_CHANGES` each give `NOT_TIMEOUT`.
-4. `cleanup_status` not `CONFIRMED` gives `WRITE_AMBIGUOUS`.
-5. Non-empty diff digest, `diff_base_sha` mismatch, missing diff fields,
-   D6 HEAD moved, untracked file, staged change and a failed D6 read each
-   give `WRITE_AMBIGUOUS`.
-6. A `result_head` or a committed carry gives `WRITE_AMBIGUOUS`.
-7. Limit `None` gives `POLICY_INVALID`; limit 0 gives `LIMIT` on the first
-   timeout; limit 1 gives `LIMIT` after one recorded retry.
+9. `cleanup_status` not `CONFIRMED` gives `WRITE_AMBIGUOUS`.
+10. Non-empty diff digest, `diff_base_sha` mismatch, missing diff fields,
+    D6 HEAD moved, untracked file, staged change and a failed D6 read each
+    give `WRITE_AMBIGUOUS`.
+11. A `result_head` or a committed carry gives `WRITE_AMBIGUOUS`.
+12. Limit `None` gives `POLICY_INVALID`; limit 0 gives `LIMIT` on the first
+    timeout; limit 1 gives `LIMIT` after one full retry (two entries).
+    Limit 2: `RETRY_READY` after one full retry, `LIMIT` after two.
+    Limit 3: `RETRY_READY` after two full retries, `LIMIT` after three.
 
 Dispatch gate (`worker_dispatch`):
 
-8. A same-assignment transition from a role timeout to dispatching is
-   classified `ROLE_TIMEOUT_RETRY`, not `RETRY`, and is allowed once.
-9. A second one in the same Task is refused
-   `WORKER_ROLE_TIMEOUT_RETRY_LIMIT`, also when the first was on another
-   assignment or another worker key, and also when the first entry was
-   BLOCKED.
-10. One Codex `TIMEOUT_CONTINUATION` entry uses the shared budget: a role
-    retry is then refused at limit 1, and the reverse.
-11. Unreadable policy refuses `WORKER_ROLE_TIMEOUT_RETRY_POLICY_INVALID`.
-12. A changed identity field (assignment, session, source SHA) or scope field
+13. A same-assignment transition from a role timeout to dispatching is
+    classified `ROLE_TIMEOUT_RETRY`, not `RETRY`, and is allowed once at
+    limit 1; its audit entry has `retry_phase` `TRANSITION` and no
+    `authorization_id`.
+14. A second one in the same Task at limit 1 is refused
+    `WORKER_ROLE_TIMEOUT_RETRY_LIMIT`, also when the first was on another
+    assignment or another worker key, and also when the first transition
+    entry was BLOCKED.
+15. Limit 2: transition, adapter, transition, adapter all ALLOWED (two
+    retries, four entries); the third transition is refused
+    `WORKER_ROLE_TIMEOUT_RETRY_LIMIT`.
+16. Limit 3: three full retries (six entries) are ALLOWED; the fourth
+    transition is refused `WORKER_ROLE_TIMEOUT_RETRY_LIMIT`.
+17. One Codex `TIMEOUT_CONTINUATION` attempt uses the shared budget: a role
+    retry is then refused at limit 1, and the reverse. At limit 2, one Codex
+    attempt and one role retry are both allowed.
+18. Unreadable policy refuses `WORKER_ROLE_TIMEOUT_RETRY_POLICY_INVALID`.
+19. A changed identity field (assignment, session, source SHA) or scope field
     refuses `WORKER_ROLE_TIMEOUT_RETRY_PRECONDITION`.
-13. A `PAUSED` worker refuses `OWNER_PAUSED`; a missing Owner row refuses
+20. A `PAUSED` worker refuses `OWNER_PAUSED`; a missing Owner row refuses
     `OWNER_ASSIGNMENT_REQUIRED`.
-14. `RECOVERY` of a role-timeout record refuses
+21. `RECOVERY` of a role-timeout record refuses
     `WORKER_ROLE_TIMEOUT_NOT_RECOVERY`.
-15. `authorize_dispatch(action='ROLE_TIMEOUT_RETRY')` passes once and then
-    refuses `WORKER_DISPATCH_AUTHORIZATION_CONSUMED`.
-16. Existing Codex continuation tests still pass unchanged.
+22. `authorize_dispatch(action='ROLE_TIMEOUT_RETRY')` passes once, writes
+    `retry_phase` `ADAPTER` with the transition's `authorization_id`, and
+    then refuses `WORKER_DISPATCH_AUTHORIZATION_CONSUMED`.
+23. A hand-built ALLOWED `ROLE_TIMEOUT_RETRY` entry with `retry_phase`
+    `ADAPTER` and no `authorization_id` is never returned by
+    `_latest_transition_authorization`, so it cannot authorize a launch.
+24. Existing Codex continuation tests still pass unchanged.
 
 Advance:
 
-17. Without the flag, each classifier outcome maps to the step and code in
+25. Without the flag, each classifier outcome maps to the step and code in
     section 3.2, and only `LIMIT` changes Task state (to `STOPPED`).
-18. `LIMIT` produces the D4 notice through the existing path, once.
-19. With the flag, a quota FAIL or `OWNER_PAUSED` pre-check returns
+26. `LIMIT` produces the D4 notice through the existing path, once.
+27. With the flag, a quota FAIL or `OWNER_PAUSED` pre-check returns
     `REFUSED` with that code and writes no audit entry.
-20. With the flag, the retry does not change repair, review FAIL, test
+28. With the flag, the retry does not change repair, review FAIL, test
     failure or Debug counts.
-21. An unknown transition or launch outcome returns
+29. An unknown transition or launch outcome returns
     `ROLE_TIMEOUT_RETRY_OUTCOME_UNKNOWN`, and a second call does not replay.
 
 Drive:
 
-22. Timeout, retry, then success: one `timeout_retry=True` call, then
+30. Timeout, retry, then success: one `timeout_retry=True` call, then
     normal polling to the next step.
-23. Timeout, retry, timeout: drive returns `STOPPED` with
+31. Timeout, retry, timeout at limit 1: drive returns `STOPPED` with
     `ROLE_TIMEOUT_LIMIT`.
-24. Policy unreadable at the drive: `REFUSED` with
+32. Limit 2 and limit 3, every run timing out: exactly 2 and exactly 3
+    `timeout_retry=True` calls, then `STOPPED` with `ROLE_TIMEOUT_LIMIT`;
+    the guard code is not hit.
+33. Policy unreadable at the drive: `REFUSED` with
     `ROLE_TIMEOUT_POLICY_INVALID`, no advance call with the flag.
-25. Advance reports `RETRY_READY` again after the drive already retried up
+34. Advance reports `RETRY_READY` again after the drive already retried up
     to the limit: `ROLE_TIMEOUT_DRIVE_GUARD`, no further call.
-26. `WRITE_AMBIGUOUS`, `POLICY_INVALID` and `OUTCOME_UNKNOWN` results are
+35. `WRITE_AMBIGUOUS`, `POLICY_INVALID` and `OUTCOME_UNKNOWN` results are
     returned without a retry call.
-27. The retry call counts against `max_steps`; a budget of exactly the
+36. The retry call counts against `max_steps`; a budget of exactly the
     calls used ends in `MAX_STEPS` without an extra call.
-28. Code-tree change during a retry still returns `RESTART_REQUIRED`.
-29. Existing drive tests still pass unchanged.
+37. Code-tree change during a retry still returns `RESTART_REQUIRED`.
+38. Existing drive tests still pass unchanged.
 
 ## 7. PR split
 
 Three small PRs, in order. Each is reviewed and merged before the next.
 
 PR 1: classifier and dispatch gate (not wired).
-- `tools/llmtool/llmtool/role_timeout.py` (new): route code table and
-  `classify`, pure.
+- `tools/llmtool/llmtool/role_timeout.py` (new): route code table,
+  `count_timeout_attempts` and `classify`, pure.
 - `tools/llmtool/llmtool/worker_dispatch.py`: `ROLE_TIMEOUT_RETRY` action,
-  the `task_store_attempts` branch, the checks and shared count in
-  `authorize_task_store_change`, the `RECOVERY` refusal.
-- Tests: new classifier and dispatch-gate test files under
+  the `retry_phase` keyword in `audit_entry`, the phase in
+  `authorize_task_store_change` and `authorize_dispatch`, the phase check in
+  `_latest_transition_authorization`, the `task_store_attempts` branch, the
+  checks and the shared logical count (also used by the Codex check), the
+  `RECOVERY` refusal.
+- The TaskStore module only if it validates audit entry keys and refuses
+  `retry_phase` (UNVERIFIED; name it in the PR if touched).
+- Tests: new count, classifier and dispatch-gate test files under
   `tools/llmtool/tests/` (exact names follow the existing convention,
-  UNVERIFIED). Tests 1-16.
+  UNVERIFIED). Tests 1-24.
 - Before coding, confirm the four route timeout code strings and the
   execution fields from the adapters; record them in this doc.
 
@@ -433,12 +549,12 @@ PR 2: advance step.
   unknown step.
 - The TaskStore module only if the store refuses the transition shape
   (UNVERIFIED; name it in the PR if touched).
-- Tests: advance tests 17-21.
+- Tests: advance tests 25-29.
 
 PR 3: drive wiring.
 - `tools/llmtool/llmtool/task_drive.py`: the `DEVELOPER_TIMEOUT` branch, the
   local guard, the docstring update.
-- Tests: drive tests 22-29.
+- Tests: drive tests 30-38.
 - This doc: mark row 41 delivered, with the merged PR numbers.
 
 ## 8. Open points
