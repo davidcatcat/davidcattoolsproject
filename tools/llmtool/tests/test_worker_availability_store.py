@@ -258,6 +258,65 @@ class WorkerAvailabilityStoreTests(unittest.TestCase):
                          0o600)
         self.assertFalse(any(path.name.endswith('.tmp') for path in self.root.iterdir()))
 
+    def test_expected_current_item_replaces_it(self):
+        self._observation(status='FAIL')
+        current = self.store.get_worker_observations()['codex-developer']['runtime']
+        self.assertEqual(current['status'], 'FAIL')
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        saved = self.store.record_worker_observation(
+            worker_key='codex-developer', layer='runtime', status='PASS',
+            observed_at=stamp(now - timedelta(seconds=1)),
+            fresh_until=stamp(now + timedelta(hours=1)),
+            source='LOCAL_OBSERVATION',
+            evidence_sha256=hashlib.sha256(b'updated evidence').hexdigest(),
+            expected=current)
+        self.assertEqual(saved['codex-developer']['runtime']['status'], 'PASS')
+        after = self.store.get_worker_observations()['codex-developer']['runtime']
+        self.assertEqual(after['status'], 'PASS')
+
+    def test_expected_mismatch_raises_and_leaves_file_unchanged(self):
+        self._observation(status='FAIL')
+        path = self.root / '.worker-availability.json'
+        bytes_before = path.read_bytes()
+        current = dict(self.store.get_worker_observations()['codex-developer']['runtime'])
+        current['status'] = 'PASS'
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.record_worker_observation(
+                worker_key='codex-developer', layer='runtime', status='PASS',
+                observed_at=stamp(now - timedelta(seconds=1)),
+                fresh_until=stamp(now + timedelta(hours=1)),
+                source='LOCAL_OBSERVATION',
+                evidence_sha256=hashlib.sha256(b'updated evidence').hexdigest(),
+                expected=current)
+        self.assertEqual(str(caught.exception), 'WORKER_AVAILABILITY_CHANGED')
+        self.assertEqual(path.read_bytes(), bytes_before)
+
+        # Absence: expecting an item when none exists raises and leaves file unchanged
+        absent_expected = dict(current)
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.record_worker_observation(
+                worker_key='opencode-developer', layer='quota', status='PASS',
+                observed_at=stamp(now - timedelta(seconds=1)),
+                fresh_until=stamp(now + timedelta(hours=1)),
+                source='LOCAL_OBSERVATION',
+                evidence_sha256=hashlib.sha256(b'updated evidence').hexdigest(),
+                expected=absent_expected)
+        self.assertEqual(str(caught.exception), 'WORKER_AVAILABILITY_CHANGED')
+        self.assertEqual(path.read_bytes(), bytes_before)
+
+    def test_expected_none_behaves_as_before(self):
+        self._observation(status='FAIL')
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        saved = self.store.record_worker_observation(
+            worker_key='codex-developer', layer='runtime', status='PASS',
+            observed_at=stamp(now - timedelta(seconds=1)),
+            fresh_until=stamp(now + timedelta(hours=1)),
+            source='LOCAL_OBSERVATION',
+            evidence_sha256=hashlib.sha256(b'updated evidence').hexdigest(),
+            expected=None)
+        self.assertEqual(saved['codex-developer']['runtime']['status'], 'PASS')
+
 
 if __name__ == '__main__':
     unittest.main()
