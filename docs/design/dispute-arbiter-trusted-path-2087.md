@@ -9,7 +9,7 @@ Scope: docs only. This note designs two llmtool changes:
 
 Binding Owner decision: ruling C on #1817. **The disputing PM must never bind or vouch for the arbiter.**
 
-Source read for this note: `c0381925` (the Task source commit; it changes only this note over `main` at `9b08c2fe`, so the code line numbers are the same on both). Line numbers refer to that commit. Files outside this Task's read scope are marked UNKNOWN where they matter (`task_store.py`, `review_result.py`, `lineage_counts.py`, `pm_caller.py`, `scripts/d6_worktree_lifecycle.py`, merge-gate code).
+Source read for this note: `f6cb928f` (the Task source commit of this repair). Line numbers refer to that commit. The functions cited here were re-checked at that commit and their lines match. Not every single cited line was re-read. Files outside this Task's read scope are marked UNKNOWN where they matter (`task_store.py`, `review_result.py`, `lineage_counts.py`, `pm_caller.py`, `scripts/d6_worktree_lifecycle.py`, merge-gate code).
 
 ---
 
@@ -63,6 +63,11 @@ On success the entry becomes `RULED` with a `ruling` dict (`:2864-2870`), and th
   - The Codex parser accepts only a `review_verdict` marker and a `Verdict:` header (`review_dispatch.py:377-385`). A `dispute_ruling` body is refused `REVIEW_HEADER_MISMATCH`.
   - The Claude route ends `DISPATCHED` (`:1406`); its later completion lives in `review_result.py` (outside read scope). Whether that path accepts ruling text is UNKNOWN.
   - So, as read, no trusted route produces the `COMPLETED` ruling claim that `dispute_rule` requires.
+- **Formal readers take the highest version at a head.** Any new claim at the disputed head would be read as the latest formal review:
+  - `_failed_event` (`review_repair.py:325-367`) takes `max(version)` of the claims at the failed head (`:336-344`). It then looks for a verdict comment of that version (`:357-358`) and refuses `REVIEW_FAIL_EVENT_MISSING` when there is none.
+  - `_dispute_fail_verdict` (`task_submission_cli.py:2720-2736`) takes `max(version)` of the `COMPLETED` claims (`:2724-2729`). It skips a ruling claim only by its text marker (`_is_ruling_claim`, `:2585-2592`), so a withheld ruling (empty text) is not skipped.
+  - `dispatch_review`'s prior-claim branch (`review_dispatch.py:1231-1251`) posts the stored text of any `COMPLETED` claim with the same (pr, head, version).
+  - So an arbiter claim at version max+1 would break review repair after an `UPHELD` ruling, and could be posted as a verdict. Design A must exclude it from every formal reader (§2.2 step 7, §4 item 5, PR A1b).
 - **A moot dispute stays OPEN forever.** When a corrected-contract replacement Task (`continues`, `task_submission_cli.py:8021-8034`, `:8063-8064`) produces a new head, nothing can close the old Task's OPEN dispute. The only exits are `RULED` (needs an arbiter on a head nobody will repair) or nothing.
 
 ---
@@ -88,7 +93,7 @@ Every refusal before step 7 writes nothing.
    - Find exactly one `OPEN` entry for (pr, finding) whose `head_sha` equals the live PR head (`_dispute_head`, `:2515-2528`).
    - Refuse with the existing codes: `DISPUTE_NOT_OPEN`, `DISPUTE_STALE`, `DISPUTE_ALREADY_RULED`. Add `DISPUTE_SUPERSEDED` (§3).
 3. **Disputed verdict.**
-   - Load the `COMPLETED` claim with `version == entry.review_version` at that head.
+   - Load the `COMPLETED` formal claim with `version == entry.review_version` at that head. Claims with `purpose: 'dispute_ruling'` are skipped.
    - Refuse `DISPUTE_VERDICT_NEWER` if a later formal (non-ruling) `COMPLETED` claim exists at the same head. The dispute argues against a verdict that is no longer current.
 4. **Arbiter.**
    - `chosen = _dispute_arbiter(record, claim)` (`:2739-2743`). Only llmtool chooses.
@@ -100,12 +105,15 @@ Every refusal before step 7 writes nothing.
    - the task binding is valid.
 
    The preflight head must equal `entry.head_sha`, or the call refuses `DISPUTE_STALE`.
-6. **Rules.** Build `_review_rules(repo_root)` from authenticated `main` before any write, as at `review_dispatch.py:1317-1319`.
+6. **Rules and dispute text.**
+   - Build `_review_rules(repo_root)` from authenticated `main` before any write, as at `review_dispatch.py:1317-1319`.
+   - Read the PM's dispute text once from the comment named by `entry.evidence_ref` (`review_dispute_ref_parts`). All agents share one login (#926), so the comment must be on this PR, unedited (`updated_at == created_at`) and created no later than `entry.opened_at`. Otherwise the call refuses `DISPUTE_TEXT_INVALID` and writes nothing.
+   - Screen it (`_screen_text`) and size-limit it here. A screen refusal refuses with its code (metadata only, no text) and writes nothing. Keep its SHA-256 for step 7.
 7. **Arbiter claim.**
    - One compare-and-update on `record_sha256` appends a `review_dispatch_claim` with these fields:
      - the fields every claim has (as at `review_dispatch.py:1321-1325`), which `_dispute_ruling_claim` and `_dispute_review_claims` read: `executor_task` (the Task's `completion.executor_task_id`), `pr`, `head_sha` (= `entry.head_sha`), `claimed_at`, `updated_at`;
-     - `purpose: 'dispute_ruling'`;
-     - `dispute: {pr, finding_id, head_sha, review_version}`;
+     - `purpose: 'dispute_ruling'`. Every formal reader skips a claim with this purpose, whatever its text or state (§1.5, PR A1b);
+     - `dispute: {pr, finding_id, head_sha, review_version, dispute_text_sha256}`, the digest from step 6;
      - `reviewer`: the arbiter key llmtool chose in step 4 (`claude-reviewer` or `codex-reviewer`). This is recorded because `claim_reviewer` cannot derive it from a ruling claim (§1.3 item 5);
      - `version`: max recorded version of this Executor and PR + 1, so it is always later than `entry.review_version`;
      - `reviewer_task`: `'reviewer-' + os.urandom(10).hex()`, generated by llmtool as at `:1320`;
@@ -119,7 +127,7 @@ Every refusal before step 7 writes nothing.
    - `_dispute_arbiter_registration` requires the record's `result_sha` to equal the disputed head (`task_submission_cli.py:2555`). Whether `d6_worktree_lifecycle.py` sets `result_sha` to `--base-sha` for a Reviewer D6 is UNKNOWN (out of scope). PR A2 confirms it by test. If it does not, the ruling is refused `DISPUTE_ARBITER_UNVERIFIED` (fail-closed), and the lifecycle change is a separate PR (§8).
 9. **Prompt.**
    - llmtool renders a fixed ruling prompt: rules prefix + the binding line + the disputed `Finding:` line and its section, taken verbatim from the stored claim `review_text`.
-   - It adds the PM's dispute text, read live from `entry.evidence_ref`. That text is screened (`_screen_text`), size-limited and fenced as untrusted quoted data.
+   - It adds the PM's dispute text from step 6, fenced as untrusted quoted data. Its digest must still equal the claim's `dispute.dispute_text_sha256`. The text is not re-read, and a replay never launches again (§2.4).
    - The prompt also gives the exact output contract (§2.3).
    - Before launch, preflight runs again. A moved head refuses `DISPUTE_STALE`, as at `review_dispatch.py:1372-1376`. The policy gate is re-read.
 10. **Launch and bind.** Use the same calls as `dispatch_review`:
@@ -277,8 +285,9 @@ The replacement Task is not written. It finds the old dispute through `continues
 4. **Head binding.** The same head must hold at every step: live PR head, Executor D6 head, entry `head_sha`, Reviewer D6 base and `result_sha`, claim `head_sha`, `review_result.head`, the binding line and the `Ruling:` header.
 5. **Nothing resets.**
    - Counts, the `continues` lineage, `review_dispatch_claim` versions and the old head's refusals never reset or decrease.
-   - A `purpose: 'dispute_ruling'` claim is never a formal verdict. `_dispute_fail_verdict` and the formal readers exclude it by `purpose` as well as by text marker (`_is_ruling_claim`, `task_submission_cli.py:2585-2592`).
-   - Whether lineage counting counts it as a review round is UNKNOWN here. PR A1 pins whichever it is by test, and it may only add to a count, never lower one.
+   - A `purpose: 'dispute_ruling'` claim is never a formal verdict, in any state and with any text (withheld text included). Every formal reader excludes it by `purpose`, not only by text marker (`_is_ruling_claim`, `task_submission_cli.py:2585-2592`): `_failed_event` (`review_repair.py:336-344`), `_dispute_fail_verdict` (`task_submission_cli.py:2724-2729`), the disputed-claim lookup of `arbitrate` step 3, and `dispatch_review`'s prior-claim branch (`review_dispatch.py:1231-1262`). Readers in `review_result.py` and merge-gate code are outside read scope (UNKNOWN); PR A1b greps every reader of `review_dispatch_claim` and pins each one by test.
+   - So after an `UPHELD` ruling, review repair of that head still finds the disputed FAIL verdict and its comment, as it would without the arbiter claim.
+   - Whether lineage counting counts it as a review round is UNKNOWN here. PR A1b pins whichever it is by test, and it may only add to a count, never lower one.
 6. **A ruling never replaces the formal PASS.** `formal_pass_required: True` stays (`task_submission_cli.py:2873`).
 7. **Every transition is audited** in the append-only entry `history` (§2.6). The store refuses rewriting it.
 8. **Terminal states.** `RULED` and `SUPERSEDED` are terminal. No transition leaves them.
@@ -300,6 +309,8 @@ The replacement Task is not written. It finds the old dispute through `continues
 | **Supersede used to escape a ruling.** | A pending `COMPLETED` ruling refuses supersede. Supersede lifts no refusal and withdraws no finding. |
 | **Forged replacement.** A Task that does not really replace the old one. | The checks are: `continues` equals the old Task exactly, same chain key under the chain lock, a different contract digest, and a registered, clean Executor D6 with a new head. |
 | **Prompt injection in the PM's dispute text.** | The text is screened, size-limited and fenced as untrusted data. The output contract is fixed and parsed strictly; anything else is `BLOCKED` and no ruling. |
+| **Dispute text swapped after open.** Someone edits the PM's dispute comment, or posts one later and points at it. | The entry's `evidence_ref` is fixed at open. The comment must be unedited and created no later than `opened_at`. Its digest is bound into the arbiter claim before launch, and it is read once (§2.2 step 6). |
+| **Arbiter claim read as a formal review.** The arbiter claim has the highest version at the head. | Every formal reader excludes `purpose: 'dispute_ruling'` (§4 item 5, PR A1b). A2 does not merge before A1b, so no arbiter claim exists before the readers skip it. |
 | **Sensitive data in ruling text.** | `_screen_text` before storing and posting. Withheld text is never posted (as `review_dispatch.py:1495-1498`). |
 
 ---
@@ -312,6 +323,7 @@ The replacement Task is not written. It finds the old dispute through `continues
   - arbiter unavailable or not allowed by policy; family clash;
   - Executor D6 dirty or unregistered; PR head unreadable or moved;
   - rules from `main` unreadable;
+  - dispute text unreadable, edited, created after `opened_at`, screened out or too large;
   - claim CAS conflict; D6 create failure; launch failure; bind failure or timeout;
   - ruling output invalid or withheld; post receipt unavailable, in progress, unverified or without a comment id; any verification refusal;
   - arbiter claim without a recorded `reviewer`, or a ruling marker actor that differs from it;
@@ -342,21 +354,37 @@ Each PR touches at most four files. Tests follow the test data rule (Owner #763 
 
 The PM runs the tests on EC2; none were run for this note.
 
-### PR A1: claim purpose and store schema (#2087)
+Merge order: A1, A1b, A2 (and A2b if needed), A3. B1 needs only A1. A2 must not merge before A1b, so no arbiter claim is ever stored while a formal reader could still pick it.
+
+### PR A1: store schema (#2087, #2088)
 
 Files:
 
 - `tools/llmtool/llmtool/task_store.py`: `purpose`/`dispute`/`reviewer` keys on `review_dispatch_claim` (`reviewer` allowed only with `purpose: 'dispute_ruling'`); `arbiter_claim` and append-only `history` on dispute entries; the terminal `SUPERSEDED` state and its `superseded` key for B1, so B1 stays at four files.
-- `tools/llmtool/llmtool/review_dispatch.py`: the prior-claim branch refuses a `dispute_ruling` claim.
-- `tools/llmtool/llmtool/task_submission_cli.py`: `_dispute_fail_verdict` also excludes by `purpose`.
-- `tools/llmtool/tests/test_dispute_claim_purpose.py`.
+- `tools/llmtool/tests/test_dispute_store_schema.py`.
 
 Tests:
 
-- The store refuses a `history` that is shortened or rewritten, an unknown `purpose`, and a `reviewer` key on a claim without `purpose: 'dispute_ruling'`.
-- `dispatch_review` with the version of a `dispute_ruling` claim refuses `REVIEW_DISPATCH_VERSION_USED` and posts nothing.
-- A `dispute_ruling` claim is never picked as the disputed FAIL verdict.
+- The store refuses a `history` that is shortened or rewritten, an unknown `purpose`, a `reviewer` key on a claim without `purpose: 'dispute_ruling'`, and a `dispute` key without a 64-hex `dispute_text_sha256`.
+- The store accepts `SUPERSEDED` only with a well-formed `superseded` dict and no `ruling` key, and refuses any change to a `RULED` or `SUPERSEDED` entry.
+
+### PR A1b: formal readers skip ruling claims (#2087)
+
+Files:
+
+- `tools/llmtool/llmtool/review_repair.py`: `_failed_event` (`:336-344`) leaves out `purpose: 'dispute_ruling'` claims before taking `max(version)`.
+- `tools/llmtool/llmtool/review_dispatch.py`: the prior-claim branch (`:1231-1262`) refuses `REVIEW_DISPATCH_VERSION_USED` for a `dispute_ruling` claim and posts nothing.
+- `tools/llmtool/llmtool/task_submission_cli.py`: `_dispute_fail_verdict` (`:2724-2729`) and the disputed-claim lookup (`:2833-2836`) also exclude by `purpose`.
+- `tools/llmtool/tests/test_dispute_ruling_claim_readers.py`.
+
+Tests (claims are built in the test as plain records; no runtime is started):
+
+- With a FAIL claim at version N and a `dispute_ruling` claim at N+1 on the same head, `_failed_event` still returns the version-N verdict packet (injected `github_get` lists the version-N comment only). This holds for a `COMPLETED` ruling claim, a withheld one (`BLOCKED`, empty text) and an `UNKNOWN` one.
+- `dispatch_review` with the version of a `dispute_ruling` claim refuses `REVIEW_DISPATCH_VERSION_USED`, and the injected `comment_poster` is never called.
+- A `dispute_ruling` claim, with or without ruling text, is never picked as the disputed FAIL verdict.
+- Without any `dispute_ruling` claim, every reader returns exactly what it returns today (no check weakened).
 - Counting with an arbiter claim present never lowers any count.
+- The PR description lists every reader of `review_dispatch_claim` found by grep, including any in `review_result.py` and merge-gate code. Each one is either changed and tested here, or shown not to select by version. If a reader needs a fifth file, it gets its own PR before A2.
 
 ### PR A2: `arbitrate` launch (#2087)
 
@@ -379,7 +407,8 @@ Tests:
 - A head move before launch refuses `DISPUTE_STALE` with no launch.
 - The session recorded is the one the injected runtime returned, and bind is called with it.
 - A ruling with the wrong actor, finding, head or binding line refuses `DISPUTE_RULING_OUTPUT_INVALID`.
-- A screen refusal (monkeypatched `_screen_text`) records `BLOCKED`, and the dispute stays `OPEN`.
+- A screen refusal (monkeypatched `_screen_text`) on the ruling records `BLOCKED`, and the dispute stays `OPEN`.
+- The dispute text comment (injected `github_get`) that is edited, created after `opened_at`, or refused by a monkeypatched `_screen_text` refuses before any write, D6 or launch. A valid one has its digest on the stored claim, and the rendered prompt carries that exact text inside the untrusted fence.
 
 ### PR A3: post, rule, retire manual rule (#2087)
 
@@ -436,7 +465,8 @@ Files: `CLAUDE.md`, `AGENTS.md`, `skills/ai-team-delivery/pm-continuation.md`. T
 
 - Whether `review_result.py` can complete a Claude-route ruling claim unchanged (UNKNOWN; decides whether PR A2b is needed).
 - Whether `task_store.py` allows the one `review_disputes` write on an abandoned Task (UNKNOWN; §3.2 item 5).
-- Whether lineage counting counts a `dispute_ruling` claim as a review round (UNKNOWN; A1 pins it, never lowering a count).
+- Whether lineage counting counts a `dispute_ruling` claim as a review round (UNKNOWN; A1b pins it, never lowering a count).
+- Which readers of `review_dispatch_claim` in `review_result.py` and merge-gate code select a claim by version (UNKNOWN; out of scope; A1b must cover every one before A2 merges).
 - Which merge-gate code reads `review_disputes` (UNKNOWN; B1 must cover every reader).
 - Whether a Reviewer D6 made by `_create_d6` records `result_sha` equal to its `--base-sha` (UNKNOWN; `d6_worktree_lifecycle.py` is out of scope; A2 pins it, and any lifecycle change is a separate PR).
 - Whether `'reviewer-' + 20 hex` matches `D6_TASK_ID` and runtime session ids pass `valid_review_dispute_session` (UNKNOWN; `task_store.py` is out of scope; A3 pins both; a needed change only widens a pattern to the exact generated shape, in its own reviewed PR).
