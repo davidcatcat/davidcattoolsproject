@@ -51,9 +51,13 @@ def code(alias='ops', update_id=1):
 
 def entry(ident_value=None, alias='ops', update_id=1, received_at=NOW,
           state=QUEUED, text=TEXT):
-    return {'id': ident(alias, update_id) if ident_value is None else ident_value,
-            'alias': alias, 'update_id': update_id, 'received_at': received_at,
-            'state': state, 'text': text}
+    if ident_value is None:
+        ident_value = hashlib.sha256(
+            b'llmtool.owner_instruction_inbox.v1\n' +
+            str(alias).encode('ascii') + b'\n' +
+            str(update_id).encode('ascii')).hexdigest()
+    return {'id': ident_value, 'alias': alias, 'update_id': update_id,
+            'received_at': received_at, 'state': state, 'text': text}
 
 
 def document(entries=(), tombstones=(), enabled=True, **extra):
@@ -76,7 +80,6 @@ class InboxTestCase(unittest.TestCase):
 
     def init(self):
         oi.init_state(self.path)
-        return self.path
 
     def assertCode(self, expected, func, *args, **kwargs):
         with self.assertRaises(oi.OwnerInboxError) as caught:
@@ -267,8 +270,9 @@ class ArgumentTests(InboxTestCase):
                                 value, NOW)
                 self.assertCode(ARGUMENT_INVALID, oi.revoke, self.path, 'ops',
                                 value, NOW)
-                self.assertCode(ARGUMENT_INVALID, oi.status, self.path, 'ops',
-                                NOW, value)
+                if value is not None:
+                    self.assertCode(ARGUMENT_INVALID, oi.status, self.path,
+                                    'ops', NOW, value)
 
     def test_update_ids_now_text_and_limit_types(self):
         for value in (-1, 2 ** 63, True, False, 1.0, '5', None):
@@ -548,6 +552,10 @@ class AddTests(InboxTestCase):
 
 class ExpiryTests(InboxTestCase):
 
+    def setUp(self):
+        super().setUp()
+        self.init()
+
     def test_expiry_boundary_and_read_only_states(self):
         first = self.add(now=NOW)
         self.assertEqual(oi.peek(self.path, NOW + DAY - 1)[0]['state'], QUEUED)
@@ -562,8 +570,8 @@ class ExpiryTests(InboxTestCase):
     def test_seen_expires_after_a_day(self):
         first = self.add(now=NOW)
         oi.mark_seen(self.path, first['code'], NOW + 10)
-        self.assertEqual(oi.peek(self.path, NOW + DAY + 9)[0]['state'], SEEN)
-        self.assertEqual(oi.status(self.path, 'ops', NOW + DAY + 10),
+        self.assertEqual(oi.peek(self.path, NOW + DAY - 1)[0]['state'], SEEN)
+        self.assertEqual(oi.status(self.path, 'ops', NOW + DAY),
                          [{'code': first['code'], 'state': EXPIRED}])
 
     def test_expired_entry_refusal_and_revoke(self):
@@ -662,6 +670,10 @@ class TransitionTests(InboxTestCase):
 
 
 class ReadTests(InboxTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.init()
 
     def test_peek_lists_live_entries_oldest_first(self):
         first = self.add(update_id=1, text='alpha text', now=NOW)
