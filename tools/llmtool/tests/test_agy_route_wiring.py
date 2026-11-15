@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 from llmtool import (review_dispatch, skill_ledger, skill_manifest, task_completion,
                      task_submission_cli, worker_dispatch)
-from llmtool.developer_routes import RouteError
+from llmtool.developer_routes import RouteError, resolve_route_max_diff_bytes
 from llmtool.developer_routes.agy import owner_assignment_gate
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore
@@ -990,10 +990,29 @@ class AgyRouteWiringTests(unittest.TestCase):
                 self.assertIs(owner_assignment_gate('a' * 32, 'owner-ref')(), decision)
 
     def test_agy_large_diff_has_distinct_output_error(self):
-        status, task, inbox_events, _prompts = self._run_agy_delegate(diff_bytes=b'x' * (64 * 1024 + 1))
+        status, task, inbox_events, _prompts = self._run_agy_delegate(
+            diff_bytes=b'x' * (resolve_route_max_diff_bytes('agy') + 1))
         self.assertEqual(status, 1)
         self.assertEqual(task['developer']['error_code'], 'AGY_OUTPUT_TOO_LARGE')
         self.assertEqual(inbox_events, [])
+
+    def test_agy_diff_above_old_64_kib_is_accepted(self):
+        header = b'diff --git a/src.py b/src.py\n'
+        line = b'+y = 1\n'
+        repeats = ((64 * 1024 - len(header)) // len(line)) + 2
+        diff = header + line * repeats
+        status, task, _events, _prompts = self._run_agy_delegate(diff_bytes=diff)
+        self.assertEqual(status, 0)
+        self.assertEqual(task['developer']['state'], 'DEVELOPER_RESPONDED')
+
+    def test_agy_diff_cap_follows_route_config(self):
+        with patch.object(task_submission_cli, 'resolve_route_max_diff_bytes',
+                          return_value=1024) as mock_resolver:
+            status, task, inbox_events, _prompts = self._run_agy_delegate(diff_bytes=b'x' * 1025)
+        self.assertEqual(status, 1)
+        self.assertEqual(task['developer']['error_code'], 'AGY_OUTPUT_TOO_LARGE')
+        self.assertEqual(inbox_events, [])
+        mock_resolver.assert_called_with('agy')
 
     def test_agy_repair_prompt_contains_untrusted_reference(self):
         packet = {'task': 'task-1', 'pr': 7, 'executor_task': 'executor-d6',
