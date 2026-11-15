@@ -6,6 +6,20 @@ from llmtool import task_advance
 from llmtool import task_submission_cli
 from llmtool.cli import parser_for_cli
 
+_code_tree_patch = None
+
+
+def setUpModule():
+    global _code_tree_patch
+    _code_tree_patch = patch('llmtool.source_freshness.code_tree', return_value='d' * 64)
+    _code_tree_patch.start()
+
+
+def tearDownModule():
+    global _code_tree_patch
+    if _code_tree_patch is not None:
+        _code_tree_patch.stop()
+
 
 class TaskDriveTests(unittest.TestCase):
     def adapter(self, results):

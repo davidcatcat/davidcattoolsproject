@@ -43,10 +43,12 @@ from .developer_output_normalize import _HUNK
 from . import role_config
 from . import skill_ledger
 from . import skill_manifest
+from . import source_freshness
 from . import trust
 from .developer_routes import (AgyRoute, ClaudeRoute, GwAgentRoute, RouteError, capture_snapshot,
                                UnsupportedBoundary, check_route_model, for_platform,
-                               load_route_config, resolve_route_timeout, run_route)
+                               load_route_config, resolve_route_max_diff_bytes,
+                               resolve_route_timeout, run_route)
 from .developer_routes.gw_agent import (_GATEWAY_DATA_CLASS, _normalize_gw_agent_usage,
                                         cleanup_audit_copies)
 from .developer_routes.agy import (
@@ -4719,9 +4721,20 @@ def _developer_card_prefix(task, registration, provider):
         raise LLMToolError(label + '_SKILL_PIN_FAILED: ' + code) from None
     if type(pinned) is not str or re.fullmatch(r'[0-9a-f]{40}', pinned) is None:
         raise LLMToolError(label + '_SKILL_PIN_FAILED: PIN_INVALID')
+    # #2029: a merge during dispatch can leave the authenticated pin newer than the local fetch.
+    task_completion.ensure_main_commit(registration.root, pinned)
     try:
-        built = skill_manifest.build_role_cards(
-            registration.root, pinned, route, main_ref=skill_manifest.DEFAULT_MAIN_REF)
+        try:
+            built = skill_manifest.build_role_cards(
+                registration.root, pinned, route, main_ref=skill_manifest.DEFAULT_MAIN_REF)
+        except skill_manifest.SkillManifestError as exc:
+            if exc.code in (skill_manifest.SKILL_MANIFEST_COMMIT_NOT_LOCAL,
+                            skill_manifest.SKILL_MANIFEST_COMMIT_NOT_ON_MAIN):
+                source_freshness._fetch_origin_main(registration.root)
+                built = skill_manifest.build_role_cards(
+                    registration.root, pinned, route, main_ref=skill_manifest.DEFAULT_MAIN_REF)
+            else:
+                raise
     except skill_manifest.SkillManifestError as exc:
         if exc.code == skill_manifest.SKILL_MANIFEST_PATH_MISSING:
             raise LLMToolError(label + '_ROLE_CARD_MISSING') from None
@@ -5454,7 +5467,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                 after.head != snapshot.head):
             raise RouteError('AGY_D6_BINDING_CHANGED')
         changed_paths, raw = task_completion._worktree_diff(registration.root, snapshot.head)
-        if len(raw) > 64 * 1024:
+        # #1815: the route cap from developer-routes.json (max_diff_bytes).
+        if len(raw) > resolve_route_max_diff_bytes("agy"):
             raise RouteError('AGY_OUTPUT_TOO_LARGE')
         if any(path not in write_paths for path in changed_paths):
             raise RouteError('AGY_WRITE_SCOPE_VIOLATION')
@@ -5934,7 +5948,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
             except Exception:
                 raise RouteError('CLAUDE_NO_CHANGES') from None
             raise _ClaudeCommittedCarry()
-        if len(raw) > 64 * 1024:
+        # #1815: the route cap from developer-routes.json (max_diff_bytes).
+        if len(raw) > resolve_route_max_diff_bytes("claude"):
             raise RouteError('CLAUDE_OUTPUT_TOO_LARGE')
         if any(path not in write_paths for path in changed_paths):
             raise RouteError('CLAUDE_WRITE_SCOPE_VIOLATION')
