@@ -7,7 +7,7 @@ import unittest
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 from llmtool import task_submission_cli
 from llmtool import review_repair
@@ -24,6 +24,7 @@ import review_trust_fixture
 import worker_policy_fixture
 
 
+_SHIPPED_CLAUDE_MAX_DIFF = resolve_route_max_diff_bytes('claude')
 _MAIN_PIN = '9' * 40
 _CORE = skill_manifest.COMMON_CORE_CARD_PATH
 _DEV_CARD = skill_manifest.DEVELOPER_CARD_PATH
@@ -215,7 +216,8 @@ class ClaudeRouteWiringTests(unittest.TestCase):
             patch.object(task_submission_cli, 'load_route_config', return_value={
                 'routes': {'claude': {'default_model': 'claude-test-1',
                     'allowed_models': ['claude-test-1'],
-                    'default_effort': 'high', 'denied_dirs': ['.claude']}}}),
+                    'default_effort': 'high', 'denied_dirs': ['.claude'],
+                    'max_diff_bytes': _SHIPPED_CLAUDE_MAX_DIFF}}}),
             patch.object(task_submission_cli.role_config, 'resolve_role', return_value={
                 'model': None, 'effort': None, 'config_dir': '/tmp/claude-config'}),
             patch.object(task_submission_cli.shutil, 'which', return_value='/usr/bin/claude'),
@@ -762,7 +764,24 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertEqual(developer['state'], 'BLOCKED')
         self.assertEqual(developer['error_code'], 'CLAUDE_OUTPUT_TOO_LARGE')
-        mock_resolver.assert_called_with('claude')
+        mock_resolver.assert_called_with('claude', config=ANY)
+
+    def test_claude_delegate_passes_dispatch_bound_config_to_max_diff_bytes(self):
+        cli, store, args, _reg, _eval, _prompts, _reqs, patches, runner = self._setup()
+        with contextlib.ExitStack() as stack:
+            for item in patches:
+                stack.enter_context(item)
+            mock_resolver = stack.enter_context(
+                patch.object(task_submission_cli, 'resolve_route_max_diff_bytes',
+                             wraps=resolve_route_max_diff_bytes))
+            status = cli.run_task_claude_delegate(args, store=store, route_runner=runner)
+        developer = store.task['developer']
+        self.assertEqual(status, 0)
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+        mock_resolver.assert_called_once()
+        _args, kwargs = mock_resolver.call_args
+        self.assertIsInstance(kwargs['config'], dict)
+        self.assertEqual(kwargs['config']['routes']['claude']['default_model'], 'claude-test-1')
 
     def test_repair_packet_is_embedded_as_untrusted_reference(self):
         cli, store, args, _registration, _evaluations, prompts, _requests, patches, runner = self._setup()

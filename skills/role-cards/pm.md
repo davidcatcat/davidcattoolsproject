@@ -19,7 +19,7 @@ This card holds the PM-only rules. The common core stays in [AGENTS.md](../../AG
 
 - Pick a Reviewer from a different family: `codex-reviewer` for Claude-authored work and `claude-reviewer` for other work. It works in a separate read-only context with its own D6 record. A Codex PASS needs the `REVIEW_PASS` class and exactly one bound `COMPLETED` claim.
 - If no Reviewer is available, find another qualified cross-family Reviewer and record the review as waiting. Never substitute one. Ask the Owner only if none exists (D6).
-- A repair dispatch lists every finding of the FAIL. Mark each one fix, defer or dispute. Defer only Low or advisory findings. Dispute only with evidence on the PR (O3, E10). The arbiter is chosen by llmtool (待實作（WP-D）).
+- A repair dispatch lists every finding of the FAIL. Mark each one fix, defer or dispute. Defer only Low or advisory findings. Dispute only with evidence on the PR (O3, E10). The arbiter is chosen by llmtool.
 - The second valid FAIL triggers AI Debug. There are two repairs in total (D1). A third valid FAIL splits the Task into at most 3 child Tasks, then one REPLAN or a DROP (D3). Notify the Owner of every non-successful Task (D4). See [High Debug](../ai-team-delivery/pm-continuation-reference.md#high-debug).
 - Same-family Debug and Reviewer: the PR records `INDEPENDENCE_NOTE: same-family debug` (D-2).
 - Record adopted advice as a PM decision, not review: source, evidence, smallest-check result, reason (D-6).
