@@ -100,3 +100,55 @@ def _fail_never_ran(receipt, entries):
         total = receipt.get('ran_total')
         return type(total) is int and total == 0
     return any(entry['ran'] == 0 for entry in entries)
+
+
+def remote_evidence_status(record, *, executor_task, head, expected):
+    """#2119 WP-3 slice 2, not wired: (step, code, failing_modules, receipt_digest).
+    Design section 4.2 and 4.3. expected is the (remote, tui, unsupported) triple
+    from expected_remote_modules. step is PASS, RUN_REMOTE_TEST, REPAIR,
+    STOP_FOR_PM or NEEDS_ATTENTION, as in the 4.3 step column, and code is None
+    only for PASS. Only the newest receipt for the Task run, executor_task and
+    head counts; any other receipt is ignored. failing_modules is a sorted tuple.
+    receipt_digest is set only when the receipt digest recomputes.
+    """
+    args_ok = type(record) is dict and type(record.get('task_id')) is str
+    if not args_ok or type(executor_task) is not str or type(head) is not str:
+        raise LLMToolError(ARGUMENT_INVALID)
+    if type(expected) is not tuple or len(expected) != 3:
+        raise LLMToolError(ARGUMENT_INVALID)
+    remote, _tui, unsupported = expected
+    if unsupported:
+        return STEP_STOP, MODULE_UNSUPPORTED, tuple(sorted(unsupported)), None
+    receipt = _bound_receipt(record, executor_task, head)
+    if receipt is None:
+        return STEP_RUN, RECEIPT_MISSING, (), None
+    if not _digest_ok(receipt):
+        return STEP_STOP, EVIDENCE_INVALID, (), None
+    digest = receipt['receipt_digest']
+    result, modules = receipt.get('result'), receipt.get('modules')
+    if result in ('TIMEOUT', 'SHA_MISMATCH'):
+        return STEP_ATTENTION, 'REMOTE_TEST_' + result, (), digest
+    if result not in ('PASS', 'FAIL') or type(modules) is not list:
+        return STEP_STOP, EVIDENCE_INVALID, (), digest
+    if not valid_module_results(receipt) or any(type(name) is not str for name in modules):
+        return STEP_STOP, EVIDENCE_INVALID, (), digest
+    if tuple(sorted(modules)) != tuple(remote):
+        return STEP_RUN, MODULES_MISMATCH, (), digest
+    entries = receipt.get('module_results')
+    not_run = [entry['module'] for entry in entries or () if entry['ran'] == 0]
+    ran_entries = [entry for entry in entries or () if entry['ran'] > 0]
+    skipped = [entry['module'] for entry in ran_entries if entry['skipped'] > 0]
+    failing = tuple(sorted(not_run + skipped))
+    if result == 'FAIL' and _fail_never_ran(receipt, entries):
+        listed = failing if entries is not None else tuple(sorted(modules))
+        return STEP_STOP, MODULE_NOT_EXECUTED, listed, digest
+    if result == 'FAIL':
+        failures = receipt.get('failures') if type(receipt.get('failures')) is list else []
+        return STEP_REPAIR, TEST_FAILED, tuple(sorted(str(name) for name in failures)), digest
+    if entries is None:
+        return STEP_RUN, EVIDENCE_LEGACY, (), digest
+    if not_run:
+        return STEP_STOP, MODULE_NOT_EXECUTED, failing, digest
+    if skipped:
+        return STEP_STOP, MODULE_SKIPPED, failing, digest
+    return STEP_PASS, None, (), digest
