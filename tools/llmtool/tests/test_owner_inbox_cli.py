@@ -40,8 +40,8 @@ class OwnerInboxCliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(values, {'initialized': True})
 
-    def _add(self, alias, update_id, text):
-        return store.add(str(self.path), alias, update_id, text, 1000)
+    def _add(self, alias, update_id, text, now=1000):
+        return store.add(str(self.path), alias, update_id, text, now)
 
     def test_init_creates_private_parent_then_peek_is_empty(self):
         self._init()
@@ -172,14 +172,15 @@ class OwnerInboxCliTest(unittest.TestCase):
     def test_peek_include_expired_adds_expired_items(self):
         self._init()
         old = self._add('owner', 1, 'read the old plan')
-        new = self._add('owner', 2, 'read the new plan')
+        # Received later, so at expired_at it is still inside the 24 h window.
+        new = self._add('owner', 2, 'read the new plan', now=2000)
         expired_at = 1000 + store.EXPIRY_SECONDS
 
         code, values, _raw = self._run(
             'peek', '--path', str(self.path), now=expired_at)
         self.assertEqual(code, 0)
         self.assertEqual(values['items'], [{
-            'code': new['code'], 'alias': 'owner', 'received_at': 1000,
+            'code': new['code'], 'alias': 'owner', 'received_at': 2000,
             'state': 'QUEUED', 'text': 'read the new plan'}])
 
         code, values, _raw = self._run(
@@ -189,7 +190,7 @@ class OwnerInboxCliTest(unittest.TestCase):
         self.assertEqual(values['items'], [
             {'code': old['code'], 'alias': 'owner', 'received_at': 1000,
              'state': 'EXPIRED', 'text': 'read the old plan'},
-            {'code': new['code'], 'alias': 'owner', 'received_at': 1000,
+            {'code': new['code'], 'alias': 'owner', 'received_at': 2000,
              'state': 'QUEUED', 'text': 'read the new plan'}])
 
     def _compact_one(self):
