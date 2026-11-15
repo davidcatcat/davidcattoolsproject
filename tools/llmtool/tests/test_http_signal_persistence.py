@@ -99,7 +99,9 @@ class HttpSignalPersistenceTests(unittest.TestCase):
         return subprocess.Popen([python, '-B', '-m', 'llmtool', 'ask', PROMPT,
                                  '--save-diagnostics'], cwd=str(Path(__file__).resolve().parents[1]), env=self.env,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE)
+                                stderr=subprocess.PIPE,
+                                # #2074: never pass an inherited ignored SIGINT to the child.
+                                preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
 
     def reader(self, *args, deadline=None):
         if deadline is None:
