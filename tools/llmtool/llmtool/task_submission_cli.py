@@ -7516,7 +7516,7 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment):
                 diagnosis_task.get('task_id') != high_debug_task or
                 type(entries) is not list or not entries):
             raise ValueError
-        matching = [e for e in entries if type(e) is dict and e.get('no_pr') is not True]
+        matching = [e for e in entries if not (type(e) is dict and e.get('no_pr') is True)]
         if not matching:
             raise ValueError
         entry = matching[-1]

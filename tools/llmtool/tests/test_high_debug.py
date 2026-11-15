@@ -2355,35 +2355,40 @@ class HighDebugNoPRTests(unittest.TestCase):
                 no_pr=True))
 
         store = _NoPRStore(entries=entries)
-        with self.assertRaises(LLMToolError) as caught:
-            high_debug.run_high_debug(
-                store=store,
-                task_id='a' * 32,
-                executor_task='executor',
-                issue_number=42,
-                family='no-pr',
-                early_reason='pre-pr-failure',
-            )
-        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_LIMIT')
+        fake_reg = SimpleNamespace(root='/fake', common_dir='/fake/.git', result_sha='a' * 40)
+        with patch.object(high_debug.task_completion, 'collect_git_snapshot',
+                          return_value=SimpleNamespace(head='a' * 40)):
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.run_high_debug(
+                    store=store,
+                    task_id='a' * 32,
+                    executor_task='executor',
+                    issue_number=42,
+                    family='no-pr',
+                    early_reason='pre-pr-failure',
+                    read_registration=lambda *_args, **_kwargs: fake_reg,
+                )
+            self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_LIMIT')
 
-        parent_entry = high_debug._failed_entry(
-            family='no-pr', failed_corrections=None, early_reason='early',
-            head='a' * 40, d6='executor-hd1-aaaaaaa',
-            code='HIGH_DEBUG_RUN_FAILED', observed='UNKNOWN',
-            effort='UNKNOWN', usage='UNKNOWN',
-            recorded_at='2026-10-27T00:00:00Z',
-            no_pr=True)
-        admission_store = _NoPRStore(entries=[parent_entry])
-        with self.assertRaises(LLMToolError) as caught:
-            high_debug.run_high_debug(
-                store=admission_store,
-                task_id='a' * 32,
-                executor_task='executor',
-                issue_number=42,
-                family='no-pr',
-                early_reason='pre-pr-failure',
-            )
-        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_DEBUG_PARENT_USED')
+            parent_entry = high_debug._failed_entry(
+                family='no-pr', failed_corrections=None, early_reason='early',
+                head='a' * 40, d6='executor-hd1-aaaaaaa',
+                code='HIGH_DEBUG_RUN_FAILED', observed='UNKNOWN',
+                effort='UNKNOWN', usage='UNKNOWN',
+                recorded_at='2026-10-27T00:00:00Z',
+                no_pr=True)
+            admission_store = _NoPRStore(entries=[parent_entry])
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.run_high_debug(
+                    store=admission_store,
+                    task_id='a' * 32,
+                    executor_task='executor',
+                    issue_number=42,
+                    family='no-pr',
+                    early_reason='pre-pr-failure',
+                    read_registration=lambda *_args, **_kwargs: fake_reg,
+                )
+            self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_DEBUG_PARENT_USED')
 
     def test_cli_and_repair_rca_and_high_debug_task_binding(self):
         # 1. CLI invocation succeeds
@@ -2398,8 +2403,8 @@ class HighDebugNoPRTests(unittest.TestCase):
             evidence_file=None,
             route='codex',
         )
-        with patch.object(task_submission_cli, 'run_high_debug_with_fallback',
-                          return_value={'status': 'RCA_CONFIRMED'}) as mock_fb:
+        with patch('llmtool.high_debug.run_high_debug_with_fallback',
+                   return_value={'status': 'RCA_CONFIRMED'}) as mock_fb:
             result = task_submission_cli.run_task_high_debug(args, store=_NoPRStore())
         self.assertEqual(result, {'status': 'RCA_CONFIRMED'})
         mock_fb.assert_called_once()
@@ -2445,9 +2450,9 @@ class HighDebugNoPRTests(unittest.TestCase):
         task_submission_cli._check_repair_packet_rca(packet, store_both, 'executor')
 
         # 3. High debug task binding rejects no_pr=True and selects older PR entry
-        matching_empty = [e for e in [no_pr_entry] if type(e) is dict and e.get('no_pr') is not True]
+        matching_empty = [e for e in [no_pr_entry] if not (type(e) is dict and e.get('no_pr') is True)]
         self.assertEqual(matching_empty, [])
-        matching_both = [e for e in [pr_entry, no_pr_entry] if type(e) is dict and e.get('no_pr') is not True]
+        matching_both = [e for e in [pr_entry, no_pr_entry] if not (type(e) is dict and e.get('no_pr') is True)]
         self.assertEqual(matching_both, [pr_entry])
 
     def test_task_store_validates_no_pr_true_and_refuses_no_pr_false(self):
