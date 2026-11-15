@@ -2035,8 +2035,11 @@ def _validate(record, *, strict=True):
                         frozenset(('review_result',))) or
                     ('failure_reason' in item and
                      not _known_review_failure_reason(item['failure_reason'])) or
+                    # #1909 item 1 (security v91): only an UNKNOWN claim, never with failure_reason.
                     ('bind_failure_reason' in item and
-                     not _known_bind_failure_reason(item['bind_failure_reason'])) or
+                     (not _known_bind_failure_reason(item['bind_failure_reason']) or
+                      item.get('state') != 'UNKNOWN' or
+                      'failure_reason' in item)) or
                     ('binding_mismatch_keys' in item and
                      not _valid_binding_mismatch_keys(item)) or
                     # #1502 WP-F: sha256 of the exact Reviewer rule prefix sent.

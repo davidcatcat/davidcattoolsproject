@@ -135,6 +135,74 @@ class ReviewBindFailureReasonStoreTests(unittest.TestCase):
                     )
                 self.assertEqual(store.get(task_id)['review_dispatch_claim'], [claimed])
 
+    def test_rejects_dispatched_claim_with_bind_failure_reason(self):
+        store, task_id = trd._real_store(Path(self.temp.name) / 'dispatched')
+        initial = store.get(task_id)
+        claimed = trd._claim()
+        store.compare_and_update(
+            task_id,
+            expected={'record_sha256': initial['record_sha256']},
+            review_dispatch_claim=[claimed],
+        )
+        current = store.get(task_id)
+        dispatched = dict(
+            claimed,
+            state='DISPATCHED',
+            native_session_id='native-1',
+            bind_failure_reason='REVIEWER_SESSION_BIND_TIMEOUT',
+        )
+        with self.assertRaises(LLMToolError):
+            store.compare_and_update(
+                task_id,
+                expected={'record_sha256': current['record_sha256']},
+                review_dispatch_claim=[dispatched],
+            )
+        self.assertEqual(store.get(task_id)['review_dispatch_claim'], [claimed])
+
+    def test_rejects_unknown_claim_with_both_bind_failure_reason_and_failure_reason(self):
+        store, task_id = trd._real_store(Path(self.temp.name) / 'unknown_both')
+        initial = store.get(task_id)
+        claimed = trd._claim()
+        store.compare_and_update(
+            task_id,
+            expected={'record_sha256': initial['record_sha256']},
+            review_dispatch_claim=[claimed],
+        )
+        current = store.get(task_id)
+        bad_unknown = dict(
+            claimed,
+            state='UNKNOWN',
+            native_session_id='native-1',
+            bind_failure_reason='REVIEWER_SESSION_BIND_FAILED',
+            failure_reason='OUTPUT_UNREADABLE',
+            updated_at='2026-10-27T00:03:00Z',
+        )
+        with self.assertRaises(LLMToolError):
+            store.compare_and_update(
+                task_id,
+                expected={'record_sha256': current['record_sha256']},
+                review_dispatch_claim=[bad_unknown],
+            )
+        self.assertEqual(store.get(task_id)['review_dispatch_claim'], [claimed])
+
+    def test_rejects_claimed_claim_with_bind_failure_reason(self):
+        store, task_id = trd._real_store(Path(self.temp.name) / 'claimed_bind_reason')
+        initial = store.get(task_id)
+        claimed = dict(
+            trd._claim(),
+            bind_failure_reason='REVIEWER_SESSION_BIND_TIMEOUT',
+        )
+        with self.assertRaises(LLMToolError):
+            store.compare_and_update(
+                task_id,
+                expected={'record_sha256': initial['record_sha256']},
+                review_dispatch_claim=[claimed],
+            )
+        self.assertEqual(
+            store.get(task_id).get('review_dispatch_claim'),
+            initial.get('review_dispatch_claim'),
+        )
+
 
 if __name__ == '__main__':
     unittest.main()
