@@ -1,8 +1,9 @@
 """#1943 WP-5 PR1: the O6 advice ledger in llmtool.high_debug_consult.
 
 Every test uses a temp Task store root and an injected clock; nothing touches
-the default state root, Git, a provider or the network. The report digest is
-the SHA-256 of a fixed plain label; no test holds credential-shaped data.
+the default state root (the default-root test injects ``default_root``), Git,
+a provider or the network. The report digest is the SHA-256 of a fixed plain
+label; no test holds credential-shaped data.
 """
 import hashlib
 import json
@@ -17,6 +18,7 @@ from unittest import mock
 from datetime import datetime, timedelta, timezone
 
 from llmtool import high_debug_consult as consult
+from llmtool import task_store
 from llmtool.errors import LLMToolError
 
 # Wednesday of ISO week 2026-W46 (UTC); that week runs Mon 9 to Sun 15 November.
@@ -42,9 +44,14 @@ def _race_worker(root, wp, now_text, barrier, results):
 class ConsultLedgerTest(unittest.TestCase):
 
     def setUp(self):
-        self.base = Path(tempfile.mkdtemp())
+        # realpath: the ledger refuses any symlink in the root's path chain, and
+        # some temp locations (macOS /var) are reached through one.
+        self.base = Path(os.path.realpath(tempfile.mkdtemp()))
         self.addCleanup(shutil.rmtree, self.base, True)
+        os.chmod(self.base, 0o700)  # the state root holding the ledger
         self.root = self.base / 'tasks'  # Task store root; the ledger sits beside it
+        self.root.mkdir(mode=0o700)
+        os.chmod(self.root, 0o700)
         self.ledger = self.base / consult.LEDGER_DIR
 
     # helpers
@@ -121,6 +128,7 @@ class ConsultLedgerTest(unittest.TestCase):
         for name in self.names(''):
             path = self.ledger / name
             self.assertEqual(stat.S_IMODE(path.lstat().st_mode), 0o600)
+            self.assertEqual(path.lstat().st_nlink, 1)  # the temporary name is gone
             text = path.read_text(encoding='utf-8')
             self.assertNotIn(str(self.base), text)
             self.assertNotIn('/', text)
@@ -275,6 +283,133 @@ class ConsultLedgerTest(unittest.TestCase):
         self.refuses(consult.LEDGER_INVALID, self.reserve, 'another')
         self.assertNotIn('wp-another.json', self.names('wp-'))
 
+    # hard links (security repair 1a)
+
+    def test_hard_linked_slot_refuses_ledger_invalid(self):
+        handle = self.reserve('real')
+        os.link(self.ledger / 'wp-real.json', self.base / 'outside-alias.json')
+        # A used WP whose slot carries a planted second name is invalid, not used.
+        self.refuses(consult.LEDGER_INVALID, self.reserve, 'real')
+        self.refuses(consult.LEDGER_INVALID, consult.finish, handle, consult.DONE, REPORT,
+                     now=NOW)
+        self.assertEqual(self.load('wp-real.json')['state'], 'RESERVED')
+        # A hard-linked week slot blocks the week before any new WP slot is taken.
+        os.link(self.ledger / 'week-2026-W46-1.json', self.base / 'week-alias.json')
+        self.refuses(consult.LEDGER_INVALID, self.reserve, 'other')
+        self.assertNotIn('wp-other.json', self.names('wp-'))
+
+    def test_planted_hard_link_into_the_ledger_refuses_ledger_invalid(self):
+        self.reserve('seed')
+        outside = self.base / 'outside.json'
+        record = dict(self.load('wp-seed.json'), wp='planted')
+        fd = os.open(outside, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, json.dumps(record).encode('ascii'))
+        finally:
+            os.close(fd)
+        os.link(outside, self.ledger / 'wp-planted.json')
+        self.refuses(consult.LEDGER_INVALID, self.reserve, 'planted')
+
+    def test_another_callers_temporary_second_name_is_waited_out(self):
+        self.reserve('busy')
+        in_flight = self.ledger / '.consult-in-flight'
+        os.link(self.ledger / 'wp-busy.json', in_flight)
+        pauses = []
+
+        def other_caller_finishes():
+            pauses.append(True)
+            os.unlink(in_flight)
+
+        with mock.patch.object(consult, '_settle_pause', side_effect=other_caller_finishes):
+            error = self.refuses(consult.WP_USED, self.reserve, 'busy')
+        self.assertIn('state=RESERVED', str(error))
+        self.assertEqual(pauses, [True])
+
+    def test_created_slot_keeping_its_temporary_name_refuses_and_stays(self):
+        real_unlink = os.unlink
+
+        def keep_temporary(path, *args, **kwargs):
+            if os.path.basename(os.fspath(path)).startswith('.consult-'):
+                raise OSError('temporary name kept')
+            return real_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(consult.os, 'unlink', side_effect=keep_temporary):
+            self.refuses(consult.LEDGER_INVALID, self.reserve, 'stuck')
+        # Fail closed: the WP slot is never removed and no week slot was taken.
+        self.assertEqual(self.names('wp-'), ['wp-stuck.json'])
+        self.assertEqual(self.names('week-'), [])
+        self.assertEqual((self.ledger / 'wp-stuck.json').lstat().st_nlink, 2)
+
+    # root confinement (security repair 1b)
+
+    def test_symlinked_root_refuses_ledger_invalid(self):
+        real = self.base / 'real-tasks'
+        real.mkdir(mode=0o700)
+        os.chmod(real, 0o700)
+        link = self.base / 'tasks-link'
+        os.symlink(real, link)
+        self.refuses(consult.LEDGER_INVALID, consult.reserve, 'wp5', now=NOW, root=link)
+        self.assertFalse(self.ledger.exists())
+
+    def test_symlinked_parent_refuses_ledger_invalid(self):
+        state = self.base / 'real-state'
+        state.mkdir(mode=0o700)
+        (state / 'tasks').mkdir(mode=0o700)
+        os.chmod(state, 0o700)
+        os.chmod(state / 'tasks', 0o700)
+        link = self.base / 'state-link'
+        os.symlink(state, link)
+        self.refuses(consult.LEDGER_INVALID, consult.reserve, 'wp5', now=NOW,
+                     root=link / 'tasks')
+        self.assertFalse((state / consult.LEDGER_DIR).exists())
+        # A handle whose ledger path runs through a symlink refuses too.
+        handle = self.reserve('wp5')
+        aliased = consult.Reservation('wp5', WEEK, handle.week_slot,
+                                      self.base / 'base-link' / consult.LEDGER_DIR)
+        os.symlink(self.base, self.base / 'base-link')
+        self.refuses(consult.LEDGER_INVALID, consult.finish, aliased, consult.DONE, REPORT,
+                     now=NOW)
+        self.assertEqual(self.load('wp-wp5.json')['state'], 'RESERVED')
+
+    def test_group_or_world_writable_root_refuses_ledger_invalid(self):
+        self.addCleanup(os.chmod, self.base, 0o700)
+        self.addCleanup(os.chmod, self.root, 0o700)
+        for mode in (0o770, 0o707, 0o750, 0o755):
+            with self.subTest(root_mode=oct(mode)):
+                os.chmod(self.root, mode)
+                self.refuses(consult.LEDGER_INVALID, self.reserve, 'wp5')
+        os.chmod(self.root, 0o700)
+        for mode in (0o770, 0o702):
+            with self.subTest(state_mode=oct(mode)):
+                os.chmod(self.base, mode)
+                self.refuses(consult.LEDGER_INVALID, self.reserve, 'wp5')
+        os.chmod(self.base, 0o700)
+        self.assertFalse(self.ledger.exists())
+        self.assertEqual(self.reserve('wp5').week_slot, 1)
+
+    def test_missing_or_non_directory_root_refuses(self):
+        self.refuses(consult.LEDGER_INVALID, consult.reserve, 'wp5', now=NOW,
+                     root=self.base / 'absent')
+        plain = self.base / 'plain'
+        plain.write_bytes(b'')
+        self.refuses(consult.LEDGER_INVALID, consult.reserve, 'wp5', now=NOW, root=plain)
+        self.refuses(consult.LEDGER_INVALID, consult.reserve, 'wp5', now=NOW,
+                     root=plain / 'tasks')
+        self.refuses(consult.ARGUMENT_INVALID, consult.reserve, 'wp5', now=NOW, root=5)
+        self.assertFalse(self.ledger.exists())
+
+    def test_default_root_uses_the_task_store_state_root(self):
+        with mock.patch.object(task_store, 'default_root', return_value=str(self.root)):
+            self.assertEqual(consult.ledger_directory(), self.ledger)
+            handle = consult.reserve('wp5', now=NOW)
+        self.assertEqual(handle.directory, self.ledger)
+        self.assertEqual(self.names('wp-'), ['wp-wp5.json'])
+        os.symlink(self.base, self.base / 'state-link')
+        aliased = self.base / 'state-link' / 'tasks'
+        with mock.patch.object(task_store, 'default_root', return_value=str(aliased)):
+            self.refuses(consult.LEDGER_INVALID, consult.reserve, 'wp6', now=NOW)
+        self.assertEqual(self.names('wp-'), ['wp-wp5.json'])
+
     # finish
 
     def test_finish_done_records_digest_and_keeps_both_slots(self):
@@ -321,6 +456,11 @@ class ConsultLedgerTest(unittest.TestCase):
             (('wp5', WEEK, 1), consult.DONE, REPORT),
             (consult.Reservation('wp5', WEEK, 0, handle.directory), consult.DONE, REPORT),
             (consult.Reservation('../x', WEEK, 1, handle.directory), consult.DONE, REPORT),
+            (consult.Reservation('wp5', WEEK, 1, Path(consult.LEDGER_DIR)), consult.DONE,
+             REPORT),
+            (consult.Reservation('wp5', WEEK, 1, self.base), consult.DONE, REPORT),
+            (consult.Reservation('wp5', WEEK, 1, self.root / '..' / consult.LEDGER_DIR),
+             consult.DONE, REPORT),
         ]
         for args in bad_calls:
             with self.subTest(args=args[1:]):

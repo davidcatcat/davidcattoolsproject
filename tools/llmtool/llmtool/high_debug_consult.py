@@ -15,6 +15,15 @@ FAILED with the report digest. Slots are never deleted, so a crash fails
 closed. Records hold metadata only: no question, evidence or report text and
 no path. Design: docs/design/wp5-no-pr-high-debug-entry-1943.md §3.7-3.8.
 Nothing calls this module yet (WP-5 PR1).
+
+Confinement (security repair 1): the state root (the Task store root's
+parent) and, for a supplied root, the Task store root itself are reached with
+no symlink in any path component, are owned by the user and are not group- or
+world-writable; a supplied root must be exactly 0700. An existing slot must
+hold exactly one name: a hard-linked slot refuses LEDGER_INVALID. Create-once
+briefly holds its own temporary second name and checks for a single name
+after removing it; a reader that meets such a second name waits a bounded
+time for it to go, then refuses.
 """
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -24,6 +33,7 @@ from pathlib import Path
 import re
 import stat
 import tempfile
+import time
 
 from .errors import LLMToolError
 
@@ -49,6 +59,14 @@ _WP_KEYS = frozenset(('schema', 'wp', 'state', 'week', 'week_slot', 'reserved_at
                       'finished_at', 'report_sha256'))
 _WEEK_KEYS = frozenset(('schema', 'week', 'slot', 'wp', 'state', 'reserved_at',
                         'finished_at', 'report_sha256'))
+# Bounded wait (about one second) for another caller's create-once or replace
+# to finish; a second name that outlasts it is a planted hard link.
+_SETTLE_TRIES = 40
+_SETTLE_DELAY = 0.025
+
+
+class _Settling(Exception):
+    """A slot briefly holds two names (create-once) or none (an open replaced inode)."""
 
 
 @dataclass(frozen=True)
@@ -72,12 +90,69 @@ def _refuse(code, detail=None):
     raise error from None
 
 
+def _absolute(value):
+    """Absolute, normalised form of a path argument; symlinks are not resolved."""
+    try:
+        text = os.fspath(value)
+    except TypeError:
+        _refuse(ARGUMENT_INVALID, 'root must be a path')
+    if type(text) is not str or not text or '\x00' in text:
+        _refuse(ARGUMENT_INVALID, 'root must be a path')
+    return Path(os.path.abspath(text))
+
+
+def _real_chain(path):
+    """lstat every component of absolute ``path`` from the anchor down.
+
+    Each component must be a real directory, never a symlink. Returns the
+    lstat result of ``path`` itself.
+    """
+    current = Path(path.anchor)
+    real = True
+    try:
+        info = os.lstat(current)
+        real = stat.S_ISDIR(info.st_mode)
+        for part in path.parts[1:]:
+            if not real:
+                break
+            current = current / part
+            info = os.lstat(current)
+            real = stat.S_ISDIR(info.st_mode)
+    except OSError:
+        _refuse(LEDGER_INVALID, 'state root unusable')
+    if not real:
+        _refuse(LEDGER_INVALID, 'state root path not a real directory')
+    return info
+
+
+def _check_state_root(state):
+    """The ledger's parent: symlink-free, owned by the user, not group/world-writable."""
+    info = _real_chain(state)
+    if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o022:
+        _refuse(LEDGER_INVALID, 'state root not private')
+
+
 def ledger_directory(root=None):
-    """The ledger directory beside Task store ``root``; None means the default store."""
+    """The ledger directory beside Task store ``root``; None means the default store.
+
+    The ledger sits in the private llmtool state root that holds high_debug's
+    ``high-debug-screen`` records (the Task store root's parent). A supplied
+    ``root`` must be an existing real directory, owned by the user, exactly
+    0700 and with no symlink in any component of its path. In every case the
+    state root must be symlink-free, owned by the user and not group- or
+    world-writable. Anything else refuses LEDGER_INVALID. Nothing is created.
+    """
     if root is None:
         from . import task_store
-        root = task_store.default_root()
-    return Path(root).parent / LEDGER_DIR
+        store = _absolute(task_store.default_root())
+    else:
+        store = _absolute(root)
+        info = _real_chain(store)
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            _refuse(LEDGER_INVALID, 'Task store root not private')
+    state = store.parent
+    _check_state_root(state)
+    return state / LEDGER_DIR
 
 
 def iso_week(moment):
@@ -121,10 +196,13 @@ def _week_path(directory, week, n):
 
 
 def _ledger_ready(directory, *, create):
-    """Create (when ``create``) and check the owner-only, non-symlink ledger directory."""
+    """Create (when ``create``) and check the owner-only, non-symlink ledger directory.
+
+    The state root above it was already checked by ``ledger_directory`` (or by
+    ``finish`` for a handle); it is never created here.
+    """
     try:
         if create:
-            directory.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             try:
                 os.mkdir(directory, 0o700)
             except FileExistsError:
@@ -139,22 +217,58 @@ def _ledger_ready(directory, *, create):
         _refuse(LEDGER_INVALID, 'ledger directory not private')
 
 
-def _private_file(info):
-    # The link count is not checked: create-once briefly holds a second name.
+def _private_shape(info):
+    """Regular, 0600, owned by the user and bounded; the link count is checked apart."""
     return (stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600 and
             info.st_uid == os.getuid() and info.st_size <= _RECORD_LIMIT)
 
 
+def _private_file(info):
+    """An existing slot: private, regular, bounded and with exactly one name.
+
+    A second name is a hard link that aliases the slot outside the ledger's
+    control, so it is never accepted as a settled slot.
+    """
+    return _private_shape(info) and info.st_nlink == 1
+
+
+def _check_slot_file(info):
+    """Accept a settled slot; signal a transient link count; refuse anything else."""
+    if _private_file(info):
+        return
+    # Two names: another caller's create-once between link and unlink of its
+    # temporary. No name: an opened inode that an atomic replace just swapped out.
+    if _private_shape(info) and info.st_nlink in (0, 2):
+        raise _Settling()
+    _refuse(LEDGER_INVALID, 'slot not a private single-link regular file')
+
+
+def _settle_pause():
+    time.sleep(_SETTLE_DELAY)
+
+
 def _read_slot(path):
-    """Return one slot's parsed JSON, or None when the name does not exist."""
+    """Return one slot's parsed JSON, or None when the name does not exist.
+
+    A slot that keeps a second name past the bounded wait is a planted hard
+    link and refuses LEDGER_INVALID.
+    """
+    for _ in range(_SETTLE_TRIES):
+        try:
+            return _read_slot_once(path)
+        except _Settling:
+            _settle_pause()
+    _refuse(LEDGER_INVALID, 'slot has more than one link')
+
+
+def _read_slot_once(path):
     try:
         info = os.lstat(path)
     except FileNotFoundError:
         return None
     except OSError:
         _refuse(LEDGER_INVALID, 'slot unreadable')
-    if not _private_file(info):
-        _refuse(LEDGER_INVALID, 'slot not a private regular file')
+    _check_slot_file(info)
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) |
                      getattr(os, 'O_NONBLOCK', 0))
@@ -163,8 +277,7 @@ def _read_slot(path):
     try:
         # The inode may differ from the lstat one: the owner's atomic replace
         # can land in between. O_NOFOLLOW and these checks still bind the file.
-        if not _private_file(os.fstat(fd)):
-            _refuse(LEDGER_INVALID, 'slot not a private regular file')
+        _check_slot_file(os.fstat(fd))
         chunks, remaining = [], _RECORD_LIMIT + 1
         while remaining:
             chunk = os.read(fd, remaining)
@@ -248,7 +361,12 @@ def _sync_directory(directory):
 
 
 def _create_once(path, record):
-    """Create ``path`` holding ``record`` exactly once; FileExistsError if the name exists."""
+    """Create ``path`` holding ``record`` exactly once; FileExistsError if the name exists.
+
+    The temporary name is the only second link ever tolerated: once it is
+    removed the new slot must be our inode with exactly one name, else the
+    slot stays (fail closed) and the call refuses LEDGER_INVALID.
+    """
     fd, temporary = tempfile.mkstemp(prefix='.consult-', dir=str(path.parent))
     try:
         try:
@@ -261,6 +379,7 @@ def _create_once(path, record):
             stream.write(_record_bytes(record))
             stream.flush()
             os.fsync(stream.fileno())
+            created = os.fstat(stream.fileno())
         # A hard link is atomic and fails when the name already exists.
         os.link(temporary, path)
     finally:
@@ -268,6 +387,13 @@ def _create_once(path, record):
             os.unlink(temporary)
         except OSError:
             pass
+    try:
+        info = os.lstat(path)
+    except OSError:
+        _refuse(LEDGER_INVALID, 'created slot unreadable')
+    if (not _private_file(info) or info.st_ino != created.st_ino or
+            info.st_dev != created.st_dev):
+        _refuse(LEDGER_INVALID, 'created slot not a single-link private file')
 
 
 def _replace(path, record):
@@ -332,8 +458,9 @@ def reserve(wp, *, now=None, root=None):
     Call after every local check and just before launch. Returns a
     ``Reservation``. Refuses WP_USED (with the slot state and report digest)
     when the WP was ever reserved, WEEK_CAP when the week has no free slot,
-    LEDGER_INVALID for a bad ledger and ARGUMENT_INVALID for a bad ``wp`` or
-    ``now``. ``root`` is the Task store root, as for the screen records.
+    LEDGER_INVALID for a bad ledger or root and ARGUMENT_INVALID for a bad
+    ``wp``, ``now`` or ``root`` type. ``root`` is the Task store root, as for
+    the screen records; see ``ledger_directory`` for its confinement.
     """
     if not _valid_wp(wp):
         _refuse(ARGUMENT_INVALID, 'wp must match [A-Za-z0-9._-]{1,64}')
@@ -393,7 +520,9 @@ def finish(handle, status, report_sha256, *, now=None):
     if (type(handle) is not Reservation or not _valid_wp(handle.wp) or
             type(handle.week) is not str or _WEEK.fullmatch(handle.week) is None or
             not _valid_slot_number(handle.week_slot) or
-            not isinstance(handle.directory, Path)):
+            not isinstance(handle.directory, Path) or not handle.directory.is_absolute() or
+            handle.directory.name != LEDGER_DIR or
+            os.path.normpath(str(handle.directory)) != str(handle.directory)):
         _refuse(ARGUMENT_INVALID, 'handle invalid')
     if status not in (DONE, FAILED):
         _refuse(ARGUMENT_INVALID, 'status must be DONE or FAILED')
@@ -404,6 +533,8 @@ def finish(handle, status, report_sha256, *, now=None):
         _refuse(ARGUMENT_INVALID, 'report digest must be 64 lowercase hex')
     stamp = _utc(now).isoformat()
     directory = handle.directory
+    # The handle's directory gets the same confinement as a fresh reservation.
+    _check_state_root(directory.parent)
     _ledger_ready(directory, create=False)
     wp_path = _wp_path(directory, handle.wp)
     week_path = _week_path(directory, handle.week, handle.week_slot)
