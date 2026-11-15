@@ -5525,6 +5525,7 @@ class TaskStore:
                                 allowed_claim_transition = (
                                     'failure_reason' not in before and
                                     'binding_mismatch_keys' not in before and
+                                    'bind_failure_reason' not in before and
                                     type(before.get('native_session_id')) is str and
                                     set(after) == set(before) and
                                     all(before.get(key) == after.get(key) for key in before

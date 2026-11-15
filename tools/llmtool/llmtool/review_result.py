@@ -188,7 +188,9 @@ def _settle_candidate(task, claim, comments, *, head, version):
     Anything else leaves the claim UNKNOWN. The dispatch is never replayed.
     """
     claimed_at = claim.get('claimed_at')
+    # #1909 item 1 (security v92): a failed Reviewer bind never settles.
     if (claim.get('state') != 'UNKNOWN' or 'failure_reason' in claim or
+            'bind_failure_reason' in claim or
             'binding_mismatch_keys' in claim or
             type(claim.get('reviewer_task')) is not str or
             type(claim.get('native_session_id')) is not str or
