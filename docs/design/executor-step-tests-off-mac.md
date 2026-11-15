@@ -1,502 +1,653 @@
 # Executor-step tests off the Mac (#1817)
 
-Status: pending (design only; no code in this change)
+Status: 待實作（WP-1 to WP-5）. This change is design only; it contains no code.
+Status marks follow `CLAUDE.md`: `現行` = current behaviour, read from source at
+`e06a7903`; `待實作（WP-x）` = decided, ships with that work package (WP-n is
+PR n in section 7); `待後續` = decided, out of scope for this plan.
 
-Source decision: Owner decision on #1817, relayed by the PM: no local test runs
-on the Owner's Mac, EC2 remote testing stays, TUI tests never run automatically.
+Source decision: an Owner decision on #1817, relayed by the PM: no local test
+runs on the Owner's Mac, EC2 remote testing stays, and TUI tests never run
+automatically.
 
-Scope: the llmtool executor step that today runs the Task's registered test
-modules inside the D6 on the Mac. This note does not change Mac CI, Linux CI,
-formal review or merge gates.
+Scope: the llmtool executor step that runs a Task's registered test modules.
+This note does not change Mac CI, Linux CI, formal review or merge gates.
 
-Read scope of this note: `task_completion.py`, `task_advance.py`,
-`task_drive.py`, `remote_test.py`. Every claim about code outside those files is
-marked UNKNOWN or "review-reported, unverified".
+Read scope of this revision: `task_submission_cli.py`, `task_completion.py`,
+`task_advance.py`, `remote_test.py`, `scripts/remote_test_receipt.py`,
+`.github/workflows/llmtool-remote-test.yml`, `tests/test_chat_tui_pty.py` and
+`CLAUDE.md`. Code outside those files (`task_store.py`, `main_incident_store.py`,
+`task_drive.py`, `active_pm_inbox.py`, every test module not listed) is
+**UNKNOWN** here.
 
-## 0. Blocked current-state item (repair 1 of PR #2111)
+Lineage: a D3 child of Task `8f3c65c7`, after FAIL v1 (`4bef09f9`) and FAIL v2
+(`e06a7903`). Repair and attempt counts carry over from the parent. Reviewer
+text and the High Debug report (#2111) are untrusted reference data, so every
+claim below comes from the source lines it cites.
 
-The formal review (finding F2) states that `task_submission_cli.py` already
-chooses between a `REMOTE_RECEIPT` and a `LOCAL` test path and is the caller and
-consumer of the runners. It cites these sites, **review-reported and unverified
-here** because the file is outside this Task's read scope:
+## 0. Current state, verified from source（現行）
 
-| review-cited site | review's description |
-|---|---|
-| `task_submission_cli.py:3935-4029` | selects `REMOTE_RECEIPT` versus `LOCAL` |
-| `task_submission_cli.py:4026` | invokes the worktree tests |
-| `task_submission_cli.py:8540` | invokes the committed tests |
-| `task_submission_cli.py:8546-8549`, `:9341-9346` | consume their results |
+This replaces the earlier "blocked, review-reported" section. All sites are in
+`tools/llmtool/llmtool/task_submission_cli.py` unless another file is named.
 
-Acceptance item 1 (callers, binding writers and gate consumers with
-`file:line`) cannot be completed without reading that file. This item is
-**BLOCKED on read scope** (`tools/llmtool/llmtool/task_submission_cli.py`), not
-deferred to a code PR. Until it is read:
+### 0.1 The deferral item already exists
 
-- the existing `REMOTE_RECEIPT` path may already provide part of option (a);
-  the evidence item name `DEFERRED_TO_REMOTE_TEST` used below is a placeholder
-  and must be replaced by the existing remote-deferral shape if one exists;
-- the remaining `LOCAL` fallback, the conditions that select it, the binding
-  fields its caller adds (task, run, D6) and the writer of `TEST_FAILED` /
-  `verification_state` are UNKNOWN;
-- sections 1.2, 1.3 and 7 (PR 3) must be revised against that reading before
-  this note leaves `pending`.
+- `_deferred_remote_test` (`:686-691`) writes
+  `{'status': 'DEFERRED_REMOTE_RECEIPT', 'path', 'source_sha', 'exit_code': 0,
+  'output_sha256': sha256(b''), 'result_head', 'diff_sha256'}`. Its docstring
+  calls it "an explicit pending status in the existing zero-exit evidence
+  shape". No test ran, so it has `NOT_RUN` semantics. `exit_code: 0` is only
+  a shape-compatibility field.
+- `_test_packet` (`:672-675`) passes it to the PM packet as
+  `{status, path, source_sha}`.
+- Deferrals are produced **today** on both paths below (0.3, 0.4). An earlier
+  version of this note said deferrals would start only in PR 4. That claim is
+  removed.
 
-## 1. Today
+### 0.2 Policy selection
 
-### 1.1 Where the local run happens
+- `_remote_task_test_paths` (`:3935-3974`) takes the module paths from the
+  contract `test_commands`, or from `tools/llmtool/tests/test_*.py` entries in
+  `read_paths` when the contract has none. It returns `()` (no remote set) if
+  any of these hold:
+  - a command is not exactly
+    `python[3] -m unittest discover -s tools/llmtool/tests -p test_[a-z0-9_]{1,80}.py`
+    with `cwd '.'` (`:3950-3958`);
+  - the `read_paths` test set differs from the command set (`:3960-3966`);
+  - there are more than 8 modules (`:3967-3968`);
+  - `remote_test._admitted_modules` disagrees (`:3969-3973`).
+- `_remote_receipt_test_policy` (`:3977-3981`) returns `REMOTE_RECEIPT` when
+  that set is non-empty and `LOCAL` otherwise. `config_loader` is unused.
+- `_direct_result_callback` (`:4032-4055`) stores the policy as
+  `evidence.test_policy`. The callers are:
+  - `:4906` (OpenCode): fixed `LOCAL`;
+  - `:5396` (AGY), `:5870` (Claude), `:6200` (route not identified in this
+    reading) and `:6745` (Codex): computed by the policy;
+  - `:9274-9278`, the lazy callback creation: computed only when
+    `provider_profile == 'codex'`, otherwise `LOCAL`.
+- The Codex packet also carries `test_policy` (`:5161-5171`, `:5201`).
 
-- `tools/llmtool/llmtool/task_completion.py:75-78` `_TEST_REGISTRY`: a path is a
-  registered test if it matches `tools/llmtool/tests/test_[A-Za-z0-9_]+.py`
-  (kind `unittest`) or `scripts/test_[A-Za-z0-9_]+.py` (kind `script`).
-- `task_completion.py:1785-1791` `_registered_test(path)` classifies one path.
-- `task_completion.py:1854-1922` `_run_registered_tests(root, source_sha,
-  eligible, *, home, pycache=None)` is the only place in the read scope that
-  spawns tests. For each eligible path it starts `sys.executable -m unittest
-  discover` with `cwd=root` (the D6 on the Mac), a reduced env,
-  `start_new_session=True`, a 600 s per-module limit (`_TEST_TIMEOUT`,
-  `task_completion.py:51`, which the comment at `:49-50` sizes for a ~310 s Mac
-  run of `test_task_completion`) and a 256 KiB output limit (`:52`).
-- Callers in `task_completion.py`:
-  - `run_bounded_tests` (`:1925-1958`): committed result. Checks the D6 is
-    clean at `result_sha` (`:1937-1939`), derives changed paths (`:1940-1946`),
-    returns `NOT_APPLICABLE_DOCS_ONLY` for docs-only (`:1947-1949`), stops
-    `TEST_SCOPE_MISSING` if no registered test is in read/write paths
-    (`:1950-1951`), runs `_run_registered_tests` at `:1954`, then stops
-    `TEST_SOURCE_CHANGED` if the Git snapshot moved (`:1955-1957`).
-  - `run_bounded_worktree_tests` (`:1961-1990`): uncommitted D6 diff bound by
-    `diff_sha256`. Same docs-only and scope rules (`:1972-1979`), runs at
-    `:1982` with a private pycache, adds `result_head: None` and `diff_sha256`
-    to every item (`:1984-1985`).
-- Callers in `task_advance.py` / `task_drive.py`: neither file calls
-  `run_bounded_tests`, `run_bounded_worktree_tests` or `_run_registered_tests`
-  directly. The executor step is reached through:
-  - `task_advance.py:3493-3516` step `RUN_TASK_COMPLETE` calls
-    `task_submission_cli.run_task_complete` (`:3496`) and maps non-CI
-    `completion.missing_gates` to `WAITING_EXECUTOR` (`:3514-3516`).
-  - `task_drive.py:14` lists `WAITING_EXECUTOR` as a polling step; the drive
-    loop pauses and re-advances on it (`task_drive.py:187-201`).
-  - The direct call sites are in `task_submission_cli.py` (section 0,
-    review-reported, unverified; BLOCKED on read scope).
+### 0.3 Uncommitted callback verification
 
-### 1.2 What evidence it records
+- `_direct_result_tests` (`:4020-4029`):
+  - With `REMOTE_RECEIPT`, it returns one deferral item per remote path, bound
+    to the task `source_sha` and the worktree `diff_sha256`
+    (`result_head: None`).
+  - With `LOCAL`, it calls `task_completion.run_bounded_worktree_tests`, which
+    **runs tests on the Mac** (`task_completion.py:1961-1990`, spawning at
+    `:1982`).
+- Callback verification (`:9332-9346`) calls `_direct_result_tests`, then sets
+  `verification_state: 'READY'`.
+  - It writes `TEST_FAILED` / `verification_state: 'FAILED'` only for an item
+    whose status is neither `NOT_APPLICABLE_DOCS_ONLY` nor
+    `DEFERRED_REMOTE_RECEIPT` and whose `exit_code != 0` (`:9341-9346`).
+  - A deferral-only callback therefore reaches `READY`, then `WAITING_PM`
+    (`:9377-9378`), with no receipt check. That is correct: an uncommitted
+    diff has no commit that EC2 (`git archive <sha>`) or the hosted job could
+    test.
 
-Per module (`task_completion.py:1909-1921`):
+### 0.4 Committed completion
 
-| field | value |
-|---|---|
-| `path` | registered test path |
-| `source_sha` | `result_sha` (committed) or task `source_sha` (worktree) |
-| `exit_code` | process exit code |
-| `output_sha256` | SHA-256 of captured output |
-| `duration_ms` | wall time |
-| `command_sha256` | SHA-256 of argv JSON |
-| `status` | `PASSED` or `FAILED` (`script` kind also needs `Ran N` with N > 0) |
-| `output_excerpt` | only on failure, screened by `select_test_excerpts` (`:1838-1851`) |
-| `result_head`, `diff_sha256` | worktree path only (`:1985`) |
+- At `:8525-8549`, if the developer used the Claude route (`:8430-8431`) or the
+  callback policy is `REMOTE_RECEIPT`:
+  - the remote paths are recomputed (`:8530`);
+  - `_matching_remote_test_receipt` is called for `source_sha = result_head`
+    (`:8531-8533`);
+  - deferral items are recorded with `source_sha = result_head = result_head`
+    (`:8534-8536`);
+  - any returned gate code is appended to `missing` (`:8537-8538`).
+- Otherwise `task_completion.run_bounded_tests` **runs tests on the Mac**
+  (`:8540-8543`, which reaches `task_completion.py:1954`).
+- `TEST_FAILED` is added under the same deferral and docs-only exemption as in
+  0.3 (`:8546-8549`).
+- When a Claude-route Task has an empty remote set, the completion adds
+  `REMOTE_TEST_RECEIPT_MISSING` (`:3986-3987`) and records no test items.
+  Whether a docs-only Claude Task reaches this line was not traced: UNKNOWN.
+- `task_advance.py:3493-3516` maps any non-CI missing gate to
+  `WAITING_EXECUTOR`.
 
-Docs-only returns one item `{'status': 'NOT_APPLICABLE_DOCS_ONLY',
-'changed_paths', 'source_sha', 'docs_only': True}` (`:1948`, `:1973-1975`).
-Stops (no evidence, `_stop` code): `TEST_SOURCE_MISMATCH`, `TEST_PATH_INVALID`,
-`TEST_SCOPE_MISSING`, `TEST_RUNNER_UNAVAILABLE`, `TEST_RUNNER_TIMEOUT`,
-`TEST_OUTPUT_TOO_LARGE`, `TEST_SOURCE_CHANGED`, `TEST_BINDING_INVALID`.
+### 0.5 Receipt matching today
 
-The per-module item does not itself carry task ID, run ID or D6 identity; that
-binding is added by the caller in `task_submission_cli.py` (section 0,
-BLOCKED).
+`_matching_remote_test_receipt` (`:3984-4017`) scans every stored receipt,
+oldest first. It accepts a receipt only when all of these hold:
 
-### 1.3 Which gates read it
+- `result == 'PASS'`;
+- `task_id`, `run_id` and `executor_task` match;
+- `source_sha` equals the head;
+- the required modules are a **subset** of the receipt's `modules`;
+- aggregate `ran_total > 0`;
+- `failures == []`;
+- `len(final) >= len(modules)`;
+- the digest recomputes.
 
-- `completion.evidence.tests` and `developer.direct_result_callback.evidence`
-  carry the list. `remote_test.py:313-336` `_admitted_modules` reads
-  `evidence.tests[*].path` when no module is declared, and shows the gate
-  shape: callback state `WAITING_EXECUTOR` with `missing_gates ==
-  ['TEST_FAILED']` and `verification_state == 'FAILED'`
-  (`remote_test.py:321-326`). The writer of `TEST_FAILED` /
-  `verification_state` is in the BLOCKED file (section 0).
-- `task_advance.py:3508-3516`: any non-CI missing gate (including a test gate)
-  holds the Task at `WAITING_EXECUTOR`.
-- `remote_test.py:475-481` `run_remote_test` takes `common_dir` and
-  `result.result_head` from `completion.evidence` (or the callback evidence) to
-  admit an EC2 run, so the same evidence record also binds the EC2 head.
+It also has a skip gap:
 
-### 1.4 The EC2 path that already exists
+- A receipt whose final lines include `OK (skipped=N)` is still accepted,
+  because `:4011-4016` treats that line as passing.
+- The `skipped` flag (`:4008-4010`) only changes the miss code to
+  `MAC_EVIDENCE_REQUIRED` when **no** receipt matched.
 
-- `remote_test.py:452-581` `run_remote_test`: admits task, executor D6
-  (`read_d6_registration`, `:493`), exact head (`:523-525`, recorded
-  `result_sha` must equal `sha` and the fresh PR head), modules (`:528-532`,
-  only declared `tools/llmtool/tests/test_[a-z0-9_]{1,80}.py`, at most 8,
-  `_MAX_REMOTE_MODULES` `:57`), then runs one SSH session (or a GitHub-hosted
-  run, `:533-536`, on `ubuntu-24.04` only, `:36`). The receipt is validated
-  (`:339-393`), extended with `task_id`, `run_id`, `executor_task`,
-  `pm_session`, `command_digest`, and sealed with `receipt_digest`
-  (`:575-578`).
-- The remote script runs each module with a 180 s cap inside a 540 s session
-  (`remote_test.py:81`, `:221-235`), as user `nobody`, from `git archive <sha>`.
-- `task_advance.py:2235-2274` `_pre_pr_remote_gate` runs EC2 on the pushed
-  branch head before a PR opens; `task_advance.py:3280-3306` step
-  `RUN_REMOTE_TEST` runs it on `refs/pull/<n>/head`; `task_advance.py:2346-2362`
-  `_pre_review_action` blocks review until the exact head has `PASS` (or the
-  `ADMISSION_DENIED`/no-module case).
-- `task_advance.py:2118-2170` `_remote_test_status` picks the newest receipt for
-  `(task_id, run_id, executor_task, head)` with a valid digest.
+So today a PASS receipt in which one module skipped every test satisfies the
+committed completion gate (gap 5, section 1.5).
 
-### 1.5 What a remote `PASS` proves today, per module
+### 0.6 Where tests still run on the Mac today
 
-The receipt does not record per-module execution:
+The `LOCAL` fallback runs in each of these cases:
 
-- The script adds every module's `Ran N` into one aggregate `ran_total`
-  (`remote_test.py:229`). It keeps one final result line per module
-  (`:227-228`), stored as `finals[-len(mods)*2:]` (`:256`), with no module
-  name and no per-module test or skip count.
-- A module's result counts as passing on `OK` or `OK (skipped=N)`
-  (`passing_final`, `:164`); the validator accepts the same lines
-  (`:387-389`) and needs only `ran_total > 0` overall (`:385`) and
-  `len(final) >= len(modules)` (`:386`).
+- every OpenCode Task (`:4906`);
+- non-Codex lazy callbacks (`:9276`);
+- every Task whose remote set is `()` (0.2): `scripts/test_*.py` modules,
+  upper-case module names, more than 8 modules, or contract commands that do
+  not match.
 
-So a mixed set where one module skips all of its tests on Linux and another
-module runs real tests yields a valid `PASS` receipt. The review (F1) names
-`test_chat_tui_pty` as such a module (its class skips on Linux,
-`test_chat_tui_pty.py:68-69`, review-reported, unverified here: outside read
-scope). A `PASS` receipt is therefore **not** proof that every module in it
-executed a test.
+The local runner is `task_completion.py:1854-1922` (`_run_registered_tests`).
+It has two callers, `run_bounded_tests` (`:1925-1958`) and
+`run_bounded_worktree_tests` (`:1961-1990`). The `REMOTE_RECEIPT` path skips
+both, so the docs-only classification (`NOT_APPLICABLE_DOCS_ONLY`) and the
+`TEST_SCOPE_MISSING` check are not applied on it.
 
-### 1.6 Gaps found while reading
+## 1. Today: runner, receipt and gates（現行）
 
-1. `_remote_test_status` (`task_advance.py:2128-2143`) does not check that the
-   receipt's `modules` equal the declared set. `run_remote_test` admits any
-   non-empty subset of the declared modules (`remote_test.py:529-532`), so a
-   manual `llmtool task remote-test --module <one>` PASS can satisfy the
-   pre-review gate for a partial set.
-2. `scripts/test_*.py` modules and module names with upper-case letters are
-   registered locally (`task_completion.py:75-78`) but cannot run on EC2
-   (`remote_test.py:31`, `:224`, `:309`).
-3. A Task with more than 8 declared modules is refused on EC2
-   (`MODULE_NOT_ADMITTED`).
-4. The worktree path (`run_bounded_worktree_tests`) has no commit, so EC2
-   (which runs `git archive <sha>`) cannot test it.
-5. No per-module execution evidence (section 1.5): an all-skipped module
-   inside a mixed set is indistinguishable from an executed one.
+### 1.1 Local runner
+
+`task_completion.py`:
+
+- `_TEST_REGISTRY` (`:75-78`): a path is a registered test if it matches
+  `tools/llmtool/tests/test_[A-Za-z0-9_]+.py` (kind `unittest`) or
+  `scripts/test_[A-Za-z0-9_]+.py` (kind `script`). `_registered_test`
+  (`:1785`) classifies one path.
+- `_run_registered_tests` (`:1854-1922`) runs `sys.executable -m unittest
+  discover` with `cwd = root` (the D6 on the Mac). Limits: 600 s per module
+  (`_TEST_TIMEOUT`, `:51`) and 256 KiB of output (`:52`).
+- Each item carries `path`, `source_sha`, `exit_code`, `output_sha256`,
+  `duration_ms`, `command_sha256` and `status`. The worktree variant also
+  carries `result_head: None` and `diff_sha256`.
+- Docs-only returns one `NOT_APPLICABLE_DOCS_ONLY` item (`:1947-1949`,
+  `:1972-1975`). A code change with no registered test stops with
+  `TEST_SCOPE_MISSING` (`:1950-1951`, `:1978-1979`).
+
+### 1.2 Receipt producers
+
+There are two producers. Both write the same 16-field receipt, plus
+`failure_excerpt` on a non-PASS result.
+
+1. **EC2: `remote_test.py` `_REMOTE_SCRIPT`** (`:75-261`).
+   - It is a fixed program sent over SSH by `run_remote_test` (`:452-581`).
+   - Each module runs under `unittest discover` with a 180 s cap inside a
+     540 s session (`:221-235`).
+   - `ran += first "Ran N tests" match` (`:229`); there is one `final` line per
+     module, with no module name (`:227-228`, `:256`).
+   - PASS requires no failures and aggregate `ran > 0` (`:235`).
+   - `run_incident_remote_test` reuses the same script and validator
+     (`:709-741`) for main incidents.
+2. **Hosted: `tools/llmtool/scripts/remote_test_receipt.py`**.
+   - The same per-module logic: `ran +=` the first match (`:502-503`), one
+     `final` per module truncated to 512 chars (`:498-501`), and PASS on no
+     failures with `ran > 0` (`:526-528`).
+   - Its field set is `_RECEIPT_FIELDS` (`:28-32`).
+   - **The hosted workflow** `.github/workflows/llmtool-remote-test.yml` runs
+     it from a trusted checkout of `main` at `github.sha` (`:90-95`,
+     `:164-179`, job gated to `refs/heads/main`, `:33`) on `ubuntu-24.04`
+     (`:37`).
+   - The workflow only passes arguments and uploads `receipt.json`
+     (`:181-188`). It does not parse the receipt shape.
+   - `remote_test._hosted_outcome` (`:1261-1321`) validates the artifact with
+     the same `_validate_remote_receipt`. The trust checks in `_hosted_job`
+     (`:934-982`) are:
+     - exact job name;
+     - labels `== ['ubuntu-24.04']` (`:36`, `:963`);
+     - runner group `GitHub Actions`;
+     - check-run app id `15368`;
+     - head equality.
+
+Validator: `_validate_remote_receipt` (`remote_test.py:339-393`) requires the
+**exact** field set (`:346-348`). A new receipt field is therefore rejected
+until the validator accepts it (see section 5 for the rollout order).
+
+`passing_final` (`remote_test.py:164`, `remote_test_receipt.py:68-69`) and the
+validator (`:387-389`) accept `OK` and `OK (skipped=N)`. `OK (expected
+failures=N)` is not a passing final, so it already yields FAIL.
+
+### 1.3 Receipt consumers
+
+- `task_submission_cli._matching_remote_test_receipt` (0.5): the committed
+  completion gate.
+- `task_advance._remote_test_status` (`:2118-2170`): the pre-PR gate
+  (`_pre_pr_remote_gate`, `:2235-2274`) and the pre-review gate
+  (`_pre_review_action`, `:2346-2362`).
+  - It takes the newest digest-valid receipt for
+    `(task_id, run_id, executor_task, head)`.
+  - It does **not** compare `modules` with the declared set (gap 1).
+- `task_advance._remote_test_timeout_count` (`:2173-2210`) and
+  `_remote_test_receipt_summary` (`:1087-`): display and timeout counting.
+- `remote_test.run_remote_test` (`:543-549`) reuses a stored PASS or
+  SHA_MISMATCH receipt only when its `command_digest` matches.
+  `_command_digest` (`:442-444`) hashes the argv **and** `_REMOTE_SCRIPT`, so
+  any script change forces a fresh EC2 run.
+- `TaskStore.append_remote_test_receipt` (called at `remote_test.py:579`,
+  `:1465`) lives in `task_store.py`. Whether it validates the receipt field set
+  is **UNKNOWN** (outside read scope).
+
+### 1.4 TUI module behaviour on Linux
+
+`tests/test_chat_tui_pty.py:65-79`: `ChatTUIPTYTests.setUpClass` raises
+`unittest.SkipTest` when `sys.platform != "darwin"`, and also when `pyte` or a
+pseudo-terminal is missing. unittest records a class-level skip as **one skip
+with no test run**, so the module reports `Ran 0 tests` and `OK (skipped=1)`:
+`ran = 0`, `skipped = 1`. **Skip totals can exceed `ran`.**
+
+On EC2 or hosted Linux this module passes `passing_final`. If the receipt also
+lists a module that ran real tests, `ran_total > 0` and the receipt is PASS
+(F1). This was read from source; it has not been run here.
+
+### 1.5 Gaps
+
+1. `_remote_test_status` accepts a PASS for any non-empty module subset.
+   `run_remote_test` admits any subset of the declared modules
+   (`remote_test.py:528-532`). `_matching_remote_test_receipt` accepts a
+   superset.
+2. `scripts/test_*.py` modules, upper-case names and more than 8 modules have
+   no remote route and fall back to `LOCAL` (0.6).
+3. The uncommitted worktree cannot be tested remotely. This is already handled
+   by deferral plus the committed-head gate (0.3, 0.4).
+4. The `LOCAL` fallback still runs tests on the Mac (0.6).
+5. There is no per-module execution evidence. A module with `ran = 0,
+   skipped = 1` inside a mixed PASS receipt is indistinguishable from one that
+   executed (1.4, 0.5).
 
 ## 2. Options
 
-### (a) The exact-head EC2 receipt is the executor test evidence (recommended)
+- **(a) Recommended: the exact-head remote receipt is the executor test
+  evidence.** This extends today's `REMOTE_RECEIPT` path to every Task and
+  closes gaps 1, 2, 4 and 5. There is no Mac run, no second EC2 run (the
+  pre-PR gate already runs one), and one source of test truth.
+- (b) The executor step calls `llmtool task remote-test` itself. It
+  duplicates the pre-PR EC2 run, needs a pushed ref that may not exist yet,
+  and adds no evidence. Rejected.
+- (c) Keep a local run behind an opt-in flag. This contradicts the Owner
+  decision. Rejected; no PR adds it.
 
-The executor step no longer spawns tests. It records a deferral item and the
-test gate reads the exact-head remote-test receipt that the existing advance
-steps already produce (`_pre_pr_remote_gate`, `RUN_REMOTE_TEST`).
+## 3. Per-module execution evidence（待實作（WP-1, WP-2））
 
-- Pro: no Mac run at all; no second EC2 run (the pre-PR gate already runs
-  one); one source of test truth for executor, review and completion.
-- Pro: the receipt already binds task, run, executor D6, head, modules and the
-  command digest, sealed by `receipt_digest`.
-- Con: the receipt must first gain per-module execution counts (gap 5);
-  without them it cannot prove each module ran.
-- Con: the executor step cannot report PASS before publish; the gate moves to
-  "waiting for remote evidence", which is honest.
+New receipt field `module_results`: a list with one entry per executed module,
+in `modules` order, each `{module, ran, skipped, final}`.
 
-### (b) The executor step calls `llmtool task remote-test` itself
+- `ran`: the integer from that module's **last** line matching
+  `^Ran (\d+) tests? in `, or 0 when there is none. The last line is the
+  unittest summary; an earlier match can come from nested subprocess output.
+  `ran_total` becomes the sum of the `ran` values. Each producer switches its
+  aggregation from first match to last match in the same change that adds
+  `module_results` (WP-1 for EC2, WP-2 for hosted).
+- `skipped`: the integer from `skipped=(\d+)` in that module's `final`, or 0.
+- `final`: identical to the module's entry in `final`.
 
-- Con: makes the executor step an external action (needs the `guard()` used at
-  `task_advance.py:2281`, `:3609`), duplicates the pre-PR EC2 run, and needs a
-  pushed ref that may not exist yet at executor time. It adds EC2 load and
-  retry logic for no new evidence, and still needs gap 5 closed.
+Validator rules (`_validate_remote_receipt`), when the field is present:
 
-### (c) Keep a local run behind an explicit opt-in flag
+- integer counts `ran >= 0` and `skipped >= 0`. There is **no** constraint
+  between `skipped` and `ran`: a class- or module-level `SkipTest` gives
+  `ran = 0, skipped = 1` (1.4), and that receipt must stay *valid* so the gate
+  can name the real cause;
+- `module` values are a prefix of `modules`, in order. For `PASS` they are
+  exactly `modules`, one to one;
+- `final` equals the corresponding `final` element, `skipped` equals the count
+  parsed from it, and `sum(ran) == ran_total`;
+- for `PASS`, every `final` passes `passing_final` (unchanged).
 
-- Con: contradicts the Owner decision (no local test runs on the Mac). Even
-  opt-in, its result could be mistaken for gate evidence.
-- Not recommended. If ever added, its output is diagnostic only and never
-  gate evidence; no PR in this plan adds it.
+## 4. The executor test gate（待實作（WP-3, WP-4））
 
-### Recommendation: (a), fail closed
+### 4.1 Expected module set
 
-#### Per-module execution evidence (new receipt field)
+The expected set comes from the Task's `read_paths` and `write_paths`, the
+same source as `remote_test._task_path_modules` (`remote_test.py:300-310`):
 
-PR 1 extends the fixed remote script and its validator with one field,
-`module_results`: one entry per admitted module, in admitted order, each
-`{module, ran, skipped, expected_failures, final}` taken from that module's
-own unittest output. The validator requires: entries equal the `modules` list
-one-to-one; integer counts, `0 <= skipped + expected_failures <= ran`; for
-`PASS`, every entry's `final` is a passing line and `ran_total` equals the sum
-of `ran`. For each module, `executed = ran - skipped - expected_failures`.
+- **remote set**: every registered `tools/llmtool/tests/test_[a-z0-9_]{1,80}.py`
+  as a sorted module stem, TUI modules included;
+- **unsupported**: any other registered path (`scripts/test_*.py`, upper-case
+  names) or a remote set larger than 8. This gives
+  `TEST_REMOTE_MODULE_UNSUPPORTED` and never a silent drop or a `LOCAL` run;
+- an **empty remote set with code changes** gives `TEST_SCOPE_MISSING`, and
+  docs-only gives `NOT_APPLICABLE_DOCS_ONLY`. Both are Git-derived
+  classifications that spawn no process.
 
-Receipts without `module_results` (all receipts written before PR 1) stay
-valid for the existing pre-review gate as today but **never** satisfy the
-executor test gate below (`TEST_REMOTE_EVIDENCE_INVALID`); the executor must
-get a fresh exact-head run.
+### 4.2 Predicate
 
-#### The executor test gate predicate
+The gate passes for head `H` only when a stored receipt `R` meets all of
+these:
 
-The executor test gate is PASS only when, for the current head, every module in
-the expected set (section 4) has **verified execution**. A module has verified
-execution only from a receipt R in `record.remote_test_receipts` that meets
-all of:
+1. `receipt_digest` recomputes (as at `task_advance.py:2137-2141`).
+2. `task_id` and `run_id` equal the Task's, `executor_task` equals
+   `completion.executor_task_id`, and `source_sha == H`. `H` is the committed
+   `result_head` and, when a PR exists, the fresh PR head.
+3. `result == 'PASS'`.
+4. `sorted(R.modules)` **equals** the expected remote set: no subset, no
+   superset.
+5. `R` carries `module_results`.
+6. For **every** entry: `ran > 0` **and** `skipped == 0`.
 
-1. `receipt_digest` recomputes (as `task_advance.py:2137-2141`).
-2. `task_id`, `run_id` equal the Task; `executor_task` equals
-   `completion.executor_task_id`; `read_d6_registration(executor_task, ...)`
-   is readable and its `result_sha` equals the receipt `source_sha`.
-3. `source_sha` equals the current D6 `result_head` and, when a PR exists, the
-   fresh PR head.
-4. `result == 'PASS'` (the validator also requires `exit_code == 0`, no
-   failures and passing final lines, `remote_test.py:383-390`).
-5. `modules` equals exactly the expected remote set from section 4 (sorted
-   list equality, not subset), and R carries `module_results`.
-6. For that module's `module_results` entry: `executed >= 1` **and**
-   `skipped == 0`.
+An aggregate `ran_total > 0` is never enough on its own.
 
-Aggregate `ran_total > 0` is never enough on its own (closes gap 5). A module
-whose entry has `skipped > 0` (Linux skips, for example Darwin-only TUI
-classes) gets no verified execution from that receipt even though the receipt
-is `PASS`. Its coverage must come from a second exact-head receipt from a
-**verified GitHub-hosted macOS** remote-test run (section 3) that meets items
-1-5 for the same module list, in which that module has `executed >= 1` and
-`skipped == 0`. If no such receipt exists, the module stays without evidence
-and the gate is not PASS.
-
-Otherwise the gate is not PASS and carries one code:
+### 4.3 Codes
 
 | condition | code | step |
 |---|---|---|
-| no receipt for this head | `TEST_REMOTE_EVIDENCE_MISSING` | `RUN_REMOTE_TEST` (existing) |
-| only receipts for another head | `TEST_REMOTE_EVIDENCE_STALE` | `RUN_REMOTE_TEST` |
-| receipt modules differ from expected set | `TEST_REMOTE_MODULES_MISMATCH` | `RUN_REMOTE_TEST` with the full set |
-| a module has `executed == 0` (all skipped or none ran) | `TEST_REMOTE_MODULE_NOT_EXECUTED` | stop for PM |
-| a module skipped tests and has no verified hosted macOS execution | `TEST_REMOTE_MODULE_SKIPPED` | stop for PM (macOS route, section 3) |
+| no receipt for `H` | `REMOTE_TEST_RECEIPT_MISSING` (existing) | `RUN_REMOTE_TEST` |
+| receipt `modules` differ from expected set | `TEST_REMOTE_MODULES_MISMATCH` | `RUN_REMOTE_TEST` with the full set |
+| legacy receipt for `H` (no `module_results`) | `TEST_REMOTE_EVIDENCE_LEGACY` | `RUN_REMOTE_TEST`, once (section 5.3) |
+| an entry has `ran == 0` (any `skipped`, including class/module `SkipTest`) | `TEST_REMOTE_MODULE_NOT_EXECUTED` | stop for PM |
+| an entry has `ran > 0` and `skipped > 0` | `TEST_REMOTE_MODULE_SKIPPED` | stop for PM |
 | `FAIL` | `TEST_FAILED` (existing) | repair route (existing) |
 | `TIMEOUT`, `SHA_MISMATCH` | existing `REMOTE_TEST_*` | `NEEDS_ATTENTION` (existing) |
-| registered test not runnable remotely (gap 2, 3) | `TEST_REMOTE_MODULE_UNSUPPORTED` | stop for PM |
-| digest or binding invalid, or no `module_results` | `TEST_REMOTE_EVIDENCE_INVALID` | stop for PM |
+| unsupported registered test (4.1) | `TEST_REMOTE_MODULE_UNSUPPORTED` | stop for PM |
+| digest or binding invalid | `TEST_REMOTE_EVIDENCE_INVALID` | stop for PM |
 
-`ADMISSION_DENIED`, `UNAVAILABLE` and `UNKNOWN` outcomes never satisfy the
-executor test gate. Code changes with no registered test keep
-`TEST_SCOPE_MISSING` (today `task_completion.py:1950-1951`). Docs-only keeps
-`NOT_APPLICABLE_DOCS_ONLY`; that is a Git-derived classification, not a test
-run, and needs no Mac process.
+When one receipt triggers several conditions, `NOT_EXECUTED` takes precedence
+over `SKIPPED`. Every failing module is listed. `ADMISSION_DENIED`,
+`UNAVAILABLE` and `UNKNOWN` outcomes never satisfy the gate.
+`MAC_EVIDENCE_REQUIRED` (`task_submission_cli.py:4017`) is replaced by the two
+module codes. Readers of that code outside the read scope are UNKNOWN: before
+WP-4, the PM searches the repo for them.
 
-The worktree path (gap 4) records `NOT_RUN` with reason
-`DEFERRED_TO_REMOTE_TEST` (placeholder name, section 0); its gate cannot pass
-until a commit exists and the committed head has receipts meeting the
-predicate. The deferral item keeps its `path` so the `_admitted_modules`
-fallback (`remote_test.py:327-335`) still finds the modules.
+### 4.4 TUI
 
-## 3. TUI
+- TUI paths are the ones `task_advance.py:443-456` classifies:
+  `tests/test_chat_tui*`, `tests/test_tui_*` and the helper
+  `tests/tui_pty_driver.py`.
+- On Linux, `test_chat_tui_pty` gives `ran = 0, skipped = 1`, so the code is
+  `TEST_REMOTE_MODULE_NOT_EXECUTED` and the PM decides. No gate is lowered:
+  the result is a stop, never a PASS.
+- The required Mac CI check is not module evidence. It does not show which
+  modules ran, and it stays a separate, unchanged gate.
+- 待後續: a verified GitHub-hosted **macOS** remote-test job for Darwin-only
+  modules.
+  - It would need the same trust checks as `_hosted_job` (`:934-982`), with
+    macOS-hosted labels and never `self-hosted`, and would be dispatched only
+    by an explicit PM step.
+  - It needs a PM answer to two questions:
+    1. Does "TUI never automatic" also exclude EC2 and hosted runs?
+    2. Is a macOS hosted job acceptable?
+  - It is not part of WP-1 to WP-5. Until it exists, every Task that declares a
+    Darwin-only TUI module stops for the PM at completion.
 
-- TUI test modules are the paths `task_advance.py:450-452` already classifies:
-  `tools/llmtool/tests/test_chat_tui*` and `tools/llmtool/tests/test_tui_*`,
-  plus the helper `tools/llmtool/tests/tui_pty_driver.py`
-  (`task_advance.py:443`, `:1272`).
-- Mac exclusion: after PR 4 the executor step spawns no test process at all,
-  so no TUI/PTY module can run on the Owner's Mac from it. PR 4 adds a static
-  test that pins this (no `unittest` argv in the executor step code).
-- Replacement evidence is per module and must show actual execution
-  (section 2 predicate, item 6). A `PASS` receipt in which the TUI module
-  skipped is **not** evidence for it.
-  1. EC2 / hosted Linux receipt: counts for a TUI module only when that module
-     has `executed >= 1` and `skipped == 0` on Linux.
-  2. Verified GitHub-hosted macOS remote-test receipt for Darwin-only
-     coverage. "Verified" means the same trust checks the hosted Linux run
-     uses today (`remote_test.py:934-981`: exact job name, exact labels,
-     runner group `GitHub Actions`, GitHub Actions app id), with macOS-hosted
-     labels and never a `self-hosted` label (as `task_completion.py:2276-2281`
-     requires for `github-hosted` CI). The hosted labels today are only
-     `ubuntu-24.04` (`remote_test.py:36`); the macOS job is new work (PR 5).
-     It is dispatched by an explicit PM step, not automatically.
-  3. The existing required Mac CI check (`check (macOS 3.13)`,
-     `task_completion.py:58`, `:61`) is **not** TUI module evidence: a green
-     check does not show which modules ran or skipped, the check is only
-     selected for Mac-workflow paths (`task_completion.py:2452-2458`), and its
-     runner names (`task_completion.py:63`) may be self-hosted. It stays an
-     unchanged, separate gate.
-- If neither 1 nor 2 gives verified execution, the TUI module is recorded
-  `NOT_RUN` with reason `TUI_EXCLUDED`, and the executor test gate is not PASS
-  (`TEST_REMOTE_MODULE_SKIPPED` or `TEST_TUI_EVIDENCE_MISSING`); the PM
-  decides. No gate is lowered: the result is a stop, never a PASS.
-- Open questions for the PM (UNKNOWN today):
-  - Does "TUI never runs automatically" also exclude EC2 and hosted macOS? If
-    yes, items 1 and 2 are dispatched only on an explicit PM step, and until
-    then TUI modules stay `NOT_RUN` and the gate stays not PASS.
-  - Is a hosted macOS remote-test job acceptable (cost, workflow change)? If
-    not, Darwin-only TUI coverage has no evidence source and every Task with a
-    Darwin-only TUI module stops for the PM.
+## 5. Rollout and compatibility（待實作（WP-1 to WP-5））
 
-## 4. Expected module set
+### 5.1 Deferral item: reuse, no new shape
 
-From the Task's declared `read_paths` and `write_paths` (the same source as
-`remote_test._task_path_modules`, `remote_test.py:300-310`, and
-`task_completion.py:1935-1936`):
+- `DEFERRED_REMOTE_RECEIPT` stays the only deferral status, with its existing
+  fields (0.1). This plan adds no `NOT_RUN` status string and no
+  `DEFERRED_TO_REMOTE_TEST` name.
+- Its meaning is `NOT_RUN`. Every consumer treats it as "no test ran": its
+  `exit_code: 0` is never read as a pass, and it is never rewritten to a
+  passed item. The gate result references receipts by `receipt_digest`.
+- The packet (`_test_packet`, `:672-675`) and `_admitted_modules`
+  (`remote_test.py:313-336`, which reads `tests[*].path`) already handle it
+  unchanged.
 
-- remote set: every registered `tools/llmtool/tests/test_[a-z0-9_]{1,80}.py`,
-  as module stems, sorted, TUI modules included;
-- unsupported: any other registered path (scripts tests, upper-case names) or
-  a remote set larger than 8; gives `TEST_REMOTE_MODULE_UNSUPPORTED`, never a
-  silent drop;
-- empty remote set with code changes: `TEST_SCOPE_MISSING`.
+### 5.2 Order: producers, packet and consumers
 
-## 5. Invariants
+- **WP-1**: the validator accepts optional `module_results` and the EC2 script
+  emits it. Both live in `remote_test.py`, so producer and validator change
+  atomically. The `_command_digest` change (1.3) means no pre-WP-1 EC2 receipt
+  is reused.
+  - `run_incident_remote_test` removes `module_results` before
+    `_screen_incident_receipt` (`:734`), so the incident receipt shape does not
+    change and `main_incident_store.py` (UNKNOWN) needs no change.
+  - If `task_store.append_remote_test_receipt` checks the receipt field set
+    (UNKNOWN), the `task_store.py` change and its test go in **this** PR (see
+    7).
+- **WP-2**: the hosted producer (`scripts/remote_test_receipt.py`) emits the
+  same field.
+  - The workflow runs `main`'s copy, so this goes live on merge. It merges
+    only after WP-1 is on `main` **and** the llmtool build that validates
+    hosted receipts includes WP-1. How the running build is confirmed is
+    UNKNOWN; the PM confirms it.
+  - The workflow file needs no change (1.2).
+- **WP-3**: a pure predicate module with no behaviour change.
+- **WP-4**: the consumers switch to the predicate. This is the first
+  production behaviour change: a mixed PASS receipt with a skipped or
+  unexecuted module no longer clears completion, and gap 1 closes.
+- **WP-5**: the remaining `LOCAL` fallback is removed (0.6). Every executor
+  path now produces either deferral items, a docs-only item or a stop.
 
-1. Evidence binds task (`task_id`, `run_id`), D6 (`executor_task` plus the
-   registration `result_sha`), exact head (`source_sha`) and the exact module
-   list, sealed by `receipt_digest`.
-2. No gate becomes PASS without a real run of **each** required module: only
-   a validated `PASS` receipt whose `module_results` show `executed >= 1` and
-   `skipped == 0` for that module (Linux, or verified hosted macOS) counts.
-   Aggregate counts, skipped modules and green CI checks never stand in for a
-   module.
-3. `NOT_RUN` stays `NOT_RUN`. The deferral item is never rewritten to
-   `PASSED`; the gate result references the receipt(s) by `receipt_digest`.
-4. The Mac never runs a test from the executor step; no opt-in path is added.
-5. No existing gate is weakened: `TEST_SCOPE_MISSING`, the pre-review EC2
-   gate, required Mac and Linux CI, formal review and merge gates stay as
-   they are. Gap 1 is closed, which tightens the pre-review gate.
-6. No intermediate release state: consumers must handle the `NOT_RUN`
-   deferral item fail closed (PR 3) before any runner produces it (PR 4).
+Each step is backward compatible with the one before it. No release has a
+producer emitting a shape that a merged consumer rejects, and no consumer
+requires a field that a merged producer does not yet emit: the gate
+(WP-4) treats a missing field as legacy and asks for a fresh run.
 
-## 6. Threats
+### 5.3 Legacy receipts
+
+A receipt without `module_results` (every receipt written before WP-1, or
+WP-2 for hosted runs) stays digest-valid and stays readable for display
+(`_remote_test_receipt_summary`).
+
+- It never satisfies the executor gate.
+- For head `H`, the gate returns `TEST_REMOTE_EVIDENCE_LEGACY`, and
+  `task_advance` routes the result to `RUN_REMOTE_TEST` for `H` **once**. The
+  script digest changed, so the reuse check at `remote_test.py:543-549` does
+  not short-circuit.
+- If the fresh run is also legacy (an old build), the Task stops with
+  `TEST_REMOTE_EVIDENCE_INVALID` instead of looping.
+- `_remote_test_status` applies the same legacy rule, so the pre-review gate
+  and the completion gate cannot disagree.
+
+### 5.4 Uncommitted callback and committed acceptance
+
+The current split stays.
+
+- The uncommitted callback (0.3) with deferral items may reach `READY` /
+  `WAITING_PM`, so the PM can review and publish the diff. No receipt can
+  exist for an uncommitted diff.
+- Executor acceptance (committed completion, 0.4) waits for committed-head
+  receipts that meet section 4.
+- WP-4 pins this split with tests.
+
+## 6. Invariants and threats
+
+1. Evidence binds task (`task_id`, `run_id`), D6 (`executor_task`), the exact
+   head (`source_sha`) and the exact module list, and is sealed by
+   `receipt_digest`.
+2. No gate passes without a real run of **each** required module (`ran > 0`,
+   `skipped == 0` in `module_results`). Aggregate counts, skipped modules and
+   green CI checks never stand in for a module.
+3. `DEFERRED_REMOTE_RECEIPT` means `NOT_RUN` and is never treated as passed.
+4. After WP-5 the Mac never runs a test from the executor step, and no opt-in
+   path exists.
+5. No existing gate is weakened: `TEST_SCOPE_MISSING`, the pre-review remote
+   gate, required Mac and Linux CI, formal review and merge stay. Gap 1
+   tightens.
 
 | threat | control |
 |---|---|
-| stale receipt (older head of the same Task) | `source_sha` must equal current D6 `result_head`, registration `result_sha` and fresh PR head |
-| receipt for another head, task or D6 | `task_id`, `run_id`, `executor_task` and digest checks; head equality |
-| partial module set | exact list equality with section 4; closes gap 1 |
-| skipped module hidden in a mixed `PASS` set | per-module `module_results`; `executed >= 1` and `skipped == 0` per module; closes gap 5 |
-| Darwin-only coverage skipped on Linux | only a verified hosted macOS receipt for that module counts; otherwise stop |
-| self-hosted or untrusted runner posing as hosted macOS | hosted trust checks (`remote_test.py:934-981`), no `self-hosted` label |
-| old receipt without `module_results` | `TEST_REMOTE_EVIDENCE_INVALID` for the executor gate |
-| forged or edited receipt in the store | `receipt_digest` recompute; receipt field set validated at write (`remote_test.py:346-348`) |
-| silently dropped modules (scripts, >8) | `TEST_REMOTE_MODULE_UNSUPPORTED` stop |
-| module slower than the EC2 180 s cap | `TIMEOUT`, never PASS; existing `NEEDS_ATTENTION` route |
-| `ADMISSION_DENIED` read as pass | excluded from the executor test gate |
-| runners emit `NOT_RUN` before consumers understand it | PR order: PR 3 (consumers) merges before PR 4 (runners) |
+| stale receipt | `source_sha == H` (committed head, fresh PR head) |
+| receipt for another task, run or D6 | `task_id`, `run_id`, `executor_task`, digest |
+| partial or extended module set | exact sorted equality (4.2 item 4) |
+| class/module `SkipTest` hidden in a mixed PASS | `ran > 0` per module, `TEST_REMOTE_MODULE_NOT_EXECUTED` |
+| partly skipped module | `skipped == 0` per module, `TEST_REMOTE_MODULE_SKIPPED` |
+| validator rejecting a valid `skipped > ran` receipt and masking the cause | no `skipped <= ran` rule (section 3) |
+| producer ahead of validator | WP-1 before WP-2 (5.2) |
+| legacy receipt read as module evidence | `TEST_REMOTE_EVIDENCE_LEGACY`, one fresh run, then stop |
+| forged or edited receipt | digest recompute; field set validated at write |
+| silently dropped modules | `TEST_REMOTE_MODULE_UNSUPPORTED` |
+| deferral `exit_code: 0` read as pass | explicit `NOT_RUN` handling, tested in WP-4 |
 
 ## 7. PR plan
 
-Each PR touches at most 4 files. Status of every PR: pending. Order is
-binding: each PR merges only after the one before it. Tests follow the test
-data rule (Owner #763 A): fixtures use hex SHAs, hex IDs, module names and
-counts only; no credential-shaped strings; no production check is disabled.
+Each PR touches at most 4 files and merges only after the one before it. Tests
+follow the test data rule (Owner #763 A): fixtures use hex SHAs, hex IDs,
+module names, counts and unittest summary lines only; there are no
+credential-shaped strings, refusal flows inject the screen function, and no
+production check is disabled. Test module names marked UNKNOWN are outside
+this note's read scope; the PM confirms them before dispatch.
 
-### PR 1: per-module execution evidence in the receipt. Status: pending
+### PR 1: receipt field, validator and EC2 producer（待實作（WP-1））
 
-Files: `tools/llmtool/llmtool/remote_test.py`, the existing remote-test test
-module (name UNKNOWN, outside read scope), and
-`.github/workflows/llmtool-remote-test.yml` only if it embeds or checks the
-receipt shape (UNKNOWN, outside read scope).
+Files:
 
-- The fixed script records `module_results` per module (section 2); the
-  validator requires it for new receipts and checks the per-module rules.
+- `tools/llmtool/llmtool/remote_test.py`;
+- the existing remote-test test module (name UNKNOWN);
+- only if `append_remote_test_receipt` checks the field set (UNKNOWN):
+  `tools/llmtool/llmtool/task_store.py` and its test module (name UNKNOWN).
 
-Tests: a mixed set (one module `OK (skipped=N)` with `ran == skipped`, one
-module `OK` with real runs) yields a receipt whose skipped module has
-`executed == 0`; per-module counts that do not add up to `ran_total` are
-rejected; entries not one-to-one with `modules` are rejected; `PASS` with a
-failing per-module final is rejected.
+Changes:
 
-### PR 2: evidence validator (pure, no behaviour change). Status: pending
+- `_REMOTE_SCRIPT` emits `module_results` and uses last-match aggregation.
+- `_validate_remote_receipt` accepts the field as optional and enforces the
+  section 3 rules.
+- The incident path strips the field.
 
-Files: `tools/llmtool/llmtool/executor_test_evidence.py` (new),
-`tools/llmtool/tests/test_executor_test_evidence.py` (new).
+Tests:
 
-- `expected_remote_modules(read_paths, write_paths)` returns remote set, TUI
-  set and unsupported paths.
-- `remote_evidence_status(record, *, head, expected_modules)` returns
-  `(status, code, receipt_digests)` per section 2, including per-module
-  verified execution and the hosted macOS route.
+- `ran = 0, skipped = 1, final 'OK (skipped=1)'` beside `ran = 12,
+  skipped = 0, final 'OK'` is a **valid** PASS receipt (no `skipped <= ran`
+  rule).
+- `ran = 5, skipped = 2` is valid.
+- `sum(ran) != ran_total`, entries out of order or not one-to-one on PASS, a
+  `skipped` that disagrees with `final`, and negative counts are each
+  rejected.
+- A pre-WP-1 field set is still accepted.
+- The incident receipt has no `module_results`.
+- Nested `Ran N tests` output earlier in a module's output does not change its
+  `ran`.
+- If `task_store.py` changes: a stored receipt with `module_results`
+  round-trips, and an unknown extra field is still refused.
 
-Tests: PASS for an exact-head, exact-set, valid-digest receipt where every
-module has `executed >= 1` and `skipped == 0`; MISSING; STALE (receipt for an
-older head); other `task_id`, `run_id` or `executor_task`; subset and superset
-module lists give MISMATCH; edited field gives INVALID; receipt without
-`module_results` gives INVALID; `FAIL`, `TIMEOUT`, `SHA_MISMATCH`,
-`ADMISSION_DENIED` never PASS; scripts path, upper-case name and 9 modules
-give UNSUPPORTED; TUI paths classified. Mixed-set skip cases:
-- TUI module skipped on Linux, non-TUI module ran, aggregate `ran_total > 0`,
-  no macOS receipt: not PASS, `TEST_REMOTE_MODULE_SKIPPED`;
-- same, plus a verified hosted macOS receipt in which the TUI module executed
-  with no skips: PASS;
-- same, but the macOS receipt is for another head, a different module list,
-  a self-hosted runner, or the TUI module skipped there too: not PASS;
-- a module with `executed == 0` and `skipped == 0` (none ran): not PASS,
-  `TEST_REMOTE_MODULE_NOT_EXECUTED`;
-- non-TUI module partly skipped on Linux, no macOS receipt: not PASS.
+### PR 2: hosted producer（待實作（WP-2））
 
-### PR 3: consumers and gates read remote evidence, fail closed. Status: pending
+Precondition: PR 1 merged and the validating build confirmed (5.2).
 
-Precondition: section 0 resolved (read scope for `task_submission_cli.py`
-granted, current state documented, this note updated).
+Files:
 
-Files: `tools/llmtool/llmtool/task_submission_cli.py`,
-`tools/llmtool/llmtool/task_advance.py`,
-`tools/llmtool/tests/test_task_submission_cli.py`,
-`tools/llmtool/tests/test_task_advance.py` (or the existing advance test
-module that covers `_remote_test_status`; UNKNOWN name).
+- `tools/llmtool/scripts/remote_test_receipt.py`;
+- its test module (name UNKNOWN).
 
-- Every consumer of runner results (the review-cited sites in section 0, to be
-  verified) accepts a `NOT_RUN` deferral item only through
-  `remote_evidence_status`: no matching evidence keeps the Task at
-  `WAITING_EXECUTOR` with the section 2 code; a deferral item is never read as
-  `PASSED` and never as `TEST_FAILED` (no false repair route).
-- The completion test gate uses `remote_evidence_status` for deferral items.
-  Local `PASSED` / `FAILED` items keep today's handling until PR 4 stops
-  producing them; no existing check is removed in this PR.
-- `_remote_test_status` requires exact module equality (closes gap 1).
-- Runners are unchanged in this PR, so no deferral item is produced in
-  production yet; the new path is exercised by tests only. The only production
-  behaviour change is the gap 1 tightening.
+`.github/workflows/llmtool-remote-test.yml` is unchanged; it was read and does
+not parse the receipt.
 
-Tests: a synthetic `NOT_RUN` deferral item with no receipt gives
-`WAITING_EXECUTOR` and `TEST_REMOTE_EVIDENCE_MISSING`, not PASS and not
-`TEST_FAILED`; with an exact-head, exact-set receipt where every module
-executed, it clears; with a mixed-set receipt where the TUI module skipped and
-no macOS receipt, it stays `WAITING_EXECUTOR`; a subset PASS receipt no longer
-clears `_pre_review_action`; a PASS receipt for an older head does not clear;
-`FAIL` routes to repair as today.
+Changes:
 
-### PR 4: executor step stops running tests; no-local-run pin. Status: pending
+- `main()` emits the same `module_results` and uses last-match aggregation.
+- `_RECEIPT_FIELDS` (`:28-32`) gains the field.
 
-Precondition: PR 3 merged.
+Tests (with an injected `runner`):
 
-Files: `tools/llmtool/llmtool/task_completion.py`,
-`tools/llmtool/tests/test_task_completion.py`, this note (status update).
+- a class-skip module plus an executing module gives `ran = 0, skipped = 1`
+  for the first, and the receipt passes the PR 1 validator;
+- the mismatch and checkout-failure receipts carry an empty list;
+- a timeout gives a prefix.
 
-- `run_bounded_tests` and `run_bounded_worktree_tests` keep every binding,
-  docs-only and scope check, and return `NOT_RUN` items with reason
-  `DEFERRED_TO_REMOTE_TEST` (or the existing remote-deferral shape, section
-  0), bound to head (or `diff_sha256`) and modules, keeping `path`. They no
-  longer call `_run_registered_tests`.
-- If section 0 shows a remaining `LOCAL` fallback in `task_submission_cli.py`,
-  removing it moves into this PR or PR 3, keeping the 4-file limit.
+### PR 3: pure evidence predicate（待實作（WP-3））
 
-Tests: a monkeypatched `subprocess.Popen` is never called from either
-function; docs-only result unchanged; `TEST_SCOPE_MISSING`,
-`TEST_SOURCE_MISMATCH`, `TEST_SOURCE_CHANGED` still stop; the deferral item is
-`NOT_RUN`, never `PASSED`; a static check that the executor-step functions in
-`task_completion.py` build no `unittest` argv.
+Files:
 
-### PR 5: verified hosted macOS remote-test route. Status: pending
+- `tools/llmtool/llmtool/executor_test_evidence.py` (new);
+- `tools/llmtool/tests/test_executor_test_evidence.py` (new).
 
-Precondition: PM answer to the section 3 questions. If the answer is no, this
-PR is dropped and Darwin-only TUI modules always stop for the PM.
+Functions:
 
-Files: `tools/llmtool/llmtool/remote_test.py`,
-`.github/workflows/llmtool-remote-test.yml` (UNKNOWN content, outside read
-scope), the existing remote-test test module (name UNKNOWN).
+- `expected_remote_modules(read_paths, write_paths)` returns the remote set,
+  the TUI set and the unsupported paths.
+- `remote_evidence_status(record, *, executor_task, head, expected)` returns
+  `(status, code, failing_modules, receipt_digest)`, as defined in 4.2 and
+  4.3.
 
-- A hosted macOS job with exact macOS-hosted labels and the same trust checks
-  as the Linux job; dispatched only by an explicit PM step.
+Tests:
 
-Tests: a job with a `self-hosted` label, wrong runner group, wrong labels or
-wrong app id gives `HOSTED_RUNNER_UNTRUSTED` and no receipt; a valid macOS
-receipt carries `module_results` and binds the same task, run, executor D6 and
-head.
+- **regression F1**: a TUI module with `ran = 0, skipped = 1` plus a non-TUI
+  module with `ran = 12`, aggregate `ran_total = 12`, PASS: not PASS,
+  `TEST_REMOTE_MODULE_NOT_EXECUTED`, failing module named;
+- **regression skip**: one module with `ran = 5, skipped = 2`, the others
+  clean: `TEST_REMOTE_MODULE_SKIPPED`;
+- a module with `ran = 0, skipped = 0`: `NOT_EXECUTED`;
+- both conditions in one receipt: `NOT_EXECUTED` with both modules listed;
+- every module `ran > 0, skipped = 0`, exact set, current head: PASS;
+- a subset or superset list: `TEST_REMOTE_MODULES_MISMATCH`;
+- an older head: `REMOTE_TEST_RECEIPT_MISSING`;
+- another task, run or executor: ignored;
+- an edited field: `INVALID`;
+- no `module_results`: `TEST_REMOTE_EVIDENCE_LEGACY`;
+- `FAIL`, `TIMEOUT`, `SHA_MISMATCH` and `ADMISSION_DENIED`: never PASS;
+- a scripts path, an upper-case name or 9 modules: `UNSUPPORTED`;
+- TUI paths are classified.
+
+### PR 4: consumers read the predicate（待實作（WP-4））
+
+Files:
+
+- `tools/llmtool/llmtool/task_submission_cli.py`;
+- `tools/llmtool/llmtool/task_advance.py`;
+- `tools/llmtool/tests/test_task_submission_cli.py`;
+- the advance test module covering `_remote_test_status` (name UNKNOWN).
+
+Changes:
+
+- `_matching_remote_test_receipt` (`:3984-4017`) is replaced by
+  `remote_evidence_status` at committed completion (`:8528-8538`). Its codes
+  go into `missing`, and deferral items stay as they are (`:8534-8536`).
+- The `TEST_FAILED` checks (`:8546-8549`, `:9341-9346`) keep exempting
+  `DEFERRED_REMOTE_RECEIPT`, so a deferral is never `TEST_FAILED` and never
+  passed.
+- `_remote_test_status` (`task_advance.py:2118-2170`) applies exact module
+  equality and the legacy rule.
+- `task_advance` maps the codes from 4.3 to their steps: `RUN_REMOTE_TEST`
+  for missing, mismatch and legacy (once), and a stop for the module codes,
+  `UNSUPPORTED` and `INVALID`.
+
+Tests:
+
+- the committed completion with the F1 receipt stays `WAITING_EXECUTOR` with
+  `TEST_REMOTE_MODULE_NOT_EXECUTED` (today it clears);
+- with the skip receipt: `TEST_REMOTE_MODULE_SKIPPED`;
+- with a clean exact-set receipt it clears;
+- a subset PASS no longer clears `_pre_review_action`;
+- a legacy PASS gives one `RUN_REMOTE_TEST`, then a stop;
+- an uncommitted callback with only deferral items still reaches `READY` /
+  `WAITING_PM` with no receipt (5.4);
+- a deferral item's `exit_code: 0` is never counted as a pass;
+- `FAIL` routes to repair as today.
+
+### PR 5: remove the `LOCAL` fallback; no-local-run pin（待實作（WP-5））
+
+Precondition: PR 4 merged.
+
+Files:
+
+- `tools/llmtool/llmtool/task_completion.py`;
+- `tools/llmtool/tests/test_task_completion.py`;
+- `tools/llmtool/llmtool/task_submission_cli.py`;
+- `tools/llmtool/tests/test_task_submission_cli.py`.
+
+Changes:
+
+- `task_completion` gains a no-spawn classifier. It keeps every binding check,
+  docs-only classification, `TEST_SCOPE_MISSING` and the source checks from
+  `run_bounded_tests` / `run_bounded_worktree_tests`, and returns either a
+  docs-only item, deferral paths or a stop. `_run_registered_tests` has no
+  caller left and is removed.
+- The `LOCAL` sites change: `:4906` (OpenCode), `:9276` (non-Codex lazy
+  callback), and the `()` result of `_remote_receipt_test_policy`. Each one
+  either defers or stops with `TEST_REMOTE_MODULE_UNSUPPORTED` /
+  `TEST_SCOPE_MISSING`; none runs tests.
+- The PR updates this note's status marks.
+
+Tests:
+
+- a monkeypatched `subprocess.Popen` is never called on either executor path,
+  for every provider profile;
+- the docs-only result is unchanged;
+- `TEST_SCOPE_MISSING`, `TEST_SOURCE_MISMATCH` and `TEST_SOURCE_CHANGED`
+  still stop;
+- a scripts test or 9 modules gives `UNSUPPORTED`, not a local run;
+- a static check confirms that `task_completion.py` and the executor paths in
+  `task_submission_cli.py` build no `unittest` argv.
+
+### Hosted macOS route（待後續）
+
+See 4.4. This is a separate plan after the PM answers.
 
 ## 8. Not done here
 
 - No code, no tests run, no Git.
-- Section 0 is BLOCKED: `tools/llmtool/llmtool/task_submission_cli.py` is
-  outside this Task's read scope, so its callers, binding writers, the
-  `REMOTE_RECEIPT`/`LOCAL` selection and the `TEST_FAILED` writer are not
-  documented from source. The cited lines there are review-reported and
-  unverified.
-- The repo's status-mark convention was not readable within this note's read
-  scope; this note uses a plain `Status: pending` line and a per-PR status.
+- `task_store.py`, `main_incident_store.py`, `task_drive.py` and the test
+  module names marked UNKNOWN were not read. PR 1's file list and PR 4's
+  `MAC_EVIDENCE_REQUIRED` readers depend on them, and the PM resolves both
+  before dispatch.
+- The unittest class-skip accounting (`ran = 0, skipped = 1`) was read from
+  source and reviewed reasoning. It has not been observed in a run here.
