@@ -83,6 +83,7 @@ R=re.compile(r"[0-9a-f]{40}\Z"); F=re.compile(r"(?:refs/pull/[0-9]+/head|[A-Za-z
 SENSITIVE=re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|(?:(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}\b|(?<!(?-i:[A-Za-z0-9_]))(?:AKIA|ASIA)[A-Z0-9]{16}(?=(?-i:[^\W\x00-\x7f])))|\bsk-[A-Za-z0-9_-]{12,}|\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|\bxox[abprs]-[A-Za-z0-9-]{20,}|\b(?:bearer|basic)\s+\S+|\b[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@|\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b|[\"']?\b(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|client[_-]?secret|aws_secret_access_key)[\"']?\s*[:=]",re.I)
 if not R.fullmatch(sha) or not F.fullmatch(ref) or not mods or len(mods)>8 or any(not M.fullmatch(x) for x in mods): sys.exit(40)
 started=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z"); begin=time.monotonic(); work_deadline=begin+480; deadline=begin+540; log=b""; result="FAIL"; code=1; tree=None; fetch=None; finals=[]; failures=[]; ran=0; uid=None; log_path=None; work=None
+module_results=[]
 def failure_excerpt(outputs,work,home):
     blocks=[]
     def safe_line(line):
@@ -166,6 +167,13 @@ def final_line(lines):
                  line.endswith("FAILED") or line.startswith("ERROR")), "NO_FINAL")
 def passing_final(line):
     return line.endswith("OK") or re.fullmatch(r"OK \(skipped=[1-9][0-9]{0,5}\)", line) is not None
+def module_result(mod,test_output,final):
+    ran=0
+    for line in test_output.decode("utf8","replace").splitlines():
+        found=re.match(r"Ran (\d+) tests? in ",line.strip())
+        if found: ran=int(found.group(1))
+    skip=re.search(r"skipped=(\d+)",final)
+    return {"module":mod,"ran":ran,"skipped":int(skip.group(1)) if skip else 0,"final":final}
 try: lock_fd=open_lock(os.path.expanduser("~")+"/.llmtool-remote-test.lock")
 except BlockingIOError: sys.exit(75)
 cleanup_source="""import os,re,shutil,stat,sys,time
