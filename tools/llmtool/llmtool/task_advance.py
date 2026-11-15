@@ -865,7 +865,7 @@ def _test_family_used_up(record, number, head, store=None):
 
 
 _MAC_DETAILS_URL_RE = re.compile(r'/actions/runs/([0-9]+)/job/([0-9]+)\Z')
-_CANCEL_CONCLUSIONS = frozenset({'cancelled', 'startup_failure', 'timed_out'})
+_CANCEL_CONCLUSIONS = frozenset({'cancelled', 'startup_failure'})
 _ALLOWED_JOB_CONCLUSIONS = frozenset({
     'success', 'failure', 'cancelled', 'skipped',
     'timed_out', 'startup_failure', 'neutral', 'action_required'
@@ -875,9 +875,11 @@ _ALLOWED_JOB_CONCLUSIONS = frozenset({
 def _mac_capacity_cancel(run, head, github_get, number=None):
     """Classify a Mac CI failure as infrastructure capacity cancellation (#1786).
 
-    Return ('WAITING_ENV', ['CI_ENV_MAC_CAPACITY_CANCELLED'], evidence) when
-    positive sibling-job evidence shows select or shards were cancelled with no
-    failed test job; otherwise return None (fail closed to today's routing).
+    Accepted cancellation is interrupted CI evidence, not verified capacity
+    causation. Return ('WAITING_ENV', ['CI_ENV_MAC_CAPACITY_CANCELLED'],
+    evidence) when positive sibling-job evidence shows select or shards were
+    cancelled with no failed test job; otherwise return None (fail closed to
+    today's routing).
     """
     if type(run) is not dict or run.get('name') != _MAC_CHECK:
         return None
@@ -984,6 +986,9 @@ def _mac_capacity_cancel(run, head, github_get, number=None):
 
     select_conclusion = select_job.get('conclusion')
     shards_jobs = [j for j in jobs if j.get('name', '').startswith('shards')]
+
+    if select_conclusion == 'timed_out' or any(j.get('conclusion') == 'timed_out' for j in shards_jobs):
+        return None
 
     is_capacity = False
     if select_conclusion in _CANCEL_CONCLUSIONS:

@@ -518,6 +518,116 @@ class TestTaskAdvanceMacCapacity(unittest.TestCase):
         self.assertEqual(len(repair_calls), 1)
         self.assertEqual(route_result[0], 'CI_FAILED')
 
+    def test_none_timed_out_select_with_skipped_shards(self):
+        run = _make_run()
+        mac_job = _make_job(MAC_CHECK, conclusion='failure', steps=[
+            {'name': 'Shard results', 'conclusion': 'failure'},
+        ])
+        jobs = [
+            _make_job('select', conclusion='timed_out'),
+            _make_job('shards (1/2)', conclusion='skipped'),
+            _make_job('shards (2/2)', conclusion='skipped'),
+            mac_job,
+        ]
+        payload = {'total_count': len(jobs), 'jobs': jobs}
+        fake_github_get = _make_fake_github_get(payload)
+
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
+        self.assertIsNone(direct)
+
+        repair_calls = []
+        route_result = _call_route(run, fake_github_get, repair_calls)
+        self.assertEqual(len(repair_calls), 1)
+        self.assertEqual(route_result[0], 'CI_FAILED')
+
+    def test_none_select_success_all_shards_timed_out(self):
+        run = _make_run()
+        mac_job = _make_job(MAC_CHECK, conclusion='failure', steps=[
+            {'name': 'Shard results', 'conclusion': 'failure'},
+        ])
+        jobs = [
+            _make_job('select', conclusion='success'),
+            _make_job('shards (1/2)', conclusion='timed_out'),
+            _make_job('shards (2/2)', conclusion='timed_out'),
+            mac_job,
+        ]
+        payload = {'total_count': len(jobs), 'jobs': jobs}
+        fake_github_get = _make_fake_github_get(payload)
+
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
+        self.assertIsNone(direct)
+
+        repair_calls = []
+        route_result = _call_route(run, fake_github_get, repair_calls)
+        self.assertEqual(len(repair_calls), 1)
+        self.assertEqual(route_result[0], 'CI_FAILED')
+
+    def test_none_select_success_one_cancelled_one_timed_out_shard(self):
+        run = _make_run()
+        mac_job = _make_job(MAC_CHECK, conclusion='failure', steps=[
+            {'name': 'Shard results', 'conclusion': 'failure'},
+        ])
+        jobs = [
+            _make_job('select', conclusion='success'),
+            _make_job('shards (1/2)', conclusion='cancelled'),
+            _make_job('shards (2/2)', conclusion='timed_out'),
+            mac_job,
+        ]
+        payload = {'total_count': len(jobs), 'jobs': jobs}
+        fake_github_get = _make_fake_github_get(payload)
+
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
+        self.assertIsNone(direct)
+
+        repair_calls = []
+        route_result = _call_route(run, fake_github_get, repair_calls)
+        self.assertEqual(len(repair_calls), 1)
+        self.assertEqual(route_result[0], 'CI_FAILED')
+
+    def test_none_select_cancelled_with_timed_out_shard(self):
+        run = _make_run()
+        mac_job = _make_job(MAC_CHECK, conclusion='failure', steps=[
+            {'name': 'Shard results', 'conclusion': 'failure'},
+        ])
+        jobs = [
+            _make_job('select', conclusion='cancelled'),
+            _make_job('shards (1/2)', conclusion='timed_out'),
+            _make_job('shards (2/2)', conclusion='skipped'),
+            mac_job,
+        ]
+        payload = {'total_count': len(jobs), 'jobs': jobs}
+        fake_github_get = _make_fake_github_get(payload)
+
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
+        self.assertIsNone(direct)
+
+        repair_calls = []
+        route_result = _call_route(run, fake_github_get, repair_calls)
+        self.assertEqual(len(repair_calls), 1)
+        self.assertEqual(route_result[0], 'CI_FAILED')
+
+    def test_none_select_startup_failure_with_timed_out_shard(self):
+        run = _make_run()
+        mac_job = _make_job(MAC_CHECK, conclusion='failure', steps=[
+            {'name': 'Shard results', 'conclusion': 'failure'},
+        ])
+        jobs = [
+            _make_job('select', conclusion='startup_failure'),
+            _make_job('shards (1/2)', conclusion='timed_out'),
+            _make_job('shards (2/2)', conclusion='skipped'),
+            mac_job,
+        ]
+        payload = {'total_count': len(jobs), 'jobs': jobs}
+        fake_github_get = _make_fake_github_get(payload)
+
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
+        self.assertIsNone(direct)
+
+        repair_calls = []
+        route_result = _call_route(run, fake_github_get, repair_calls)
+        self.assertEqual(len(repair_calls), 1)
+        self.assertEqual(route_result[0], 'CI_FAILED')
+
 
 if __name__ == '__main__':
     unittest.main()
