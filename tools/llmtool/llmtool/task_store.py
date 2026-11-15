@@ -306,7 +306,7 @@ _DEVELOPER_GW_AUDIT_FIELDS = frozenset((
     'audit_sha256', 'audit_copy_path_sha256', 'changed_files'))
 # #1815: resolved Developer run timeout, optional on every developer shape.
 _DEVELOPER_TIMEOUT_FIELDS = frozenset(('timeout_seconds',))
-_DEVELOPER_TIMEOUT_MAX_SECONDS = 1800
+_DEVELOPER_TIMEOUT_MAX_SECONDS = 3600
 # The data class a gw-agent delegate validated at dispatch, optional on every
 # developer shape so a review repair can reuse it (legacy records omit it).
 _DEVELOPER_DATA_CLASS_FIELDS = frozenset(('data_class',))
