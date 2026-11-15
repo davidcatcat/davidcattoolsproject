@@ -14,10 +14,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from llmtool import high_debug, lineage_counts, repair_policy, task_submission_cli
+from llmtool import (config, high_debug, lineage_counts, repair_policy, task_submission_cli,
+                     worker_dispatch)
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore, new_id
 
+REPOSITORY = {'slug': 'example/project', 'dispatch_issue': 289, 'dispatch_evidence_pr': 1}
 SOURCE = 'c' * 40   # the base every chain starts from
 HEAD_A, HEAD_B = '1' * 40, '2' * 40
 AT = '2026-11-15T00:00:00Z'
@@ -42,6 +44,11 @@ class LineageDelegateIntegrationTests(unittest.TestCase):
         self.base = Path(temp.name).resolve()
         for patcher in (
                 patch.dict(os.environ, {'HOME': str(self.base)}),
+                # The temp HOME has no owner trust file; the store's dispatch gate
+                # reads the repository identity through worker_dispatch.
+                patch.object(config, 'repository_config', return_value=dict(REPOSITORY)),
+                patch.object(worker_dispatch, 'repository_config',
+                             return_value=dict(REPOSITORY)),
                 patch.object(high_debug.task_store, 'default_root',
                              return_value=self.base / 'tasks'),
                 # Two review runs per chain, so a third Developer run is over it.

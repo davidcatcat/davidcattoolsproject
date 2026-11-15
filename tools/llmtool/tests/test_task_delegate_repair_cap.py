@@ -16,6 +16,7 @@ from contextlib import redirect_stderr
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from llmtool import config
 from llmtool import lineage_counts
 from llmtool import repair_policy
 from llmtool import task_store as task_store_module
@@ -188,11 +189,20 @@ def _no_high_debug(**overrides):
                  high_debug_family=None, **overrides)
 
 
+_REPOSITORY = {'slug': 'example/project', 'dispatch_issue': 289, 'dispatch_evidence_pr': 1}
+
+
 def _patch_trust_and_binding(test, binding=(None, SimpleNamespace(head=_HEAD))):
+    # The repository identity comes from owner trust, absent in a test HOME; the
+    # owner-ref check and the store's dispatch gate read it through worker_dispatch.
     for target, kwargs in (
             ((task_submission_cli.trust, 'load_trust'),
              {'return_value': SimpleNamespace(
                  repository={'slug': 'example/project'})}),
+            ((config, 'repository_config'),
+             {'return_value': dict(_REPOSITORY)}),
+            ((task_submission_cli.worker_dispatch, 'repository_config'),
+             {'return_value': dict(_REPOSITORY)}),
             ((task_submission_cli, '_delegate_d6_binding'),
              {'return_value': binding})):
         started = patch.object(*target, **kwargs)
