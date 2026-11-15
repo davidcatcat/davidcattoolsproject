@@ -15,7 +15,7 @@ from llmtool import skill_ledger
 from llmtool import skill_manifest
 from llmtool import task_advance
 from llmtool import worker_dispatch
-from llmtool.developer_routes import RouteError
+from llmtool.developer_routes import RouteError, resolve_route_max_diff_bytes
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore
 
@@ -716,6 +716,47 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                 self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
                 self.assertEqual(developer['usage']['total_tokens'], 5)
                 entered[id(direct_event)].assert_not_called()
+
+    def test_claude_diff_above_route_cap_is_blocked(self):
+        raw = b'x' * (resolve_route_max_diff_bytes('claude') + 1)
+        cli, store, args, _reg, _eval, _prompts, _reqs, patches, runner = self._setup(raw=raw)
+        with contextlib.ExitStack() as stack:
+            for item in patches:
+                stack.enter_context(item)
+            status = cli.run_task_claude_delegate(args, store=store, route_runner=runner)
+        developer = store.task['developer']
+        self.assertEqual(status, 1)
+        self.assertEqual(developer['state'], 'BLOCKED')
+        self.assertEqual(developer['error_code'], 'CLAUDE_OUTPUT_TOO_LARGE')
+
+    def test_claude_diff_above_old_64_kib_is_accepted(self):
+        header = b'diff --git a/src.py b/src.py\n'
+        line = b'+y = 1\n'
+        repeats = ((64 * 1024 - len(header)) // len(line)) + 2
+        raw = header + line * repeats
+        cli, store, args, _reg, _eval, _prompts, _reqs, patches, runner = self._setup(raw=raw)
+        with contextlib.ExitStack() as stack:
+            for item in patches:
+                stack.enter_context(item)
+            status = cli.run_task_claude_delegate(args, store=store, route_runner=runner)
+        developer = store.task['developer']
+        self.assertEqual(status, 0)
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+
+    def test_claude_diff_cap_follows_route_config(self):
+        raw = b'x' * 1025
+        cli, store, args, _reg, _eval, _prompts, _reqs, patches, runner = self._setup(raw=raw)
+        with contextlib.ExitStack() as stack:
+            for item in patches:
+                stack.enter_context(item)
+            mock_resolver = stack.enter_context(
+                patch.object(task_submission_cli, 'resolve_route_max_diff_bytes', return_value=1024))
+            status = cli.run_task_claude_delegate(args, store=store, route_runner=runner)
+        developer = store.task['developer']
+        self.assertEqual(status, 1)
+        self.assertEqual(developer['state'], 'BLOCKED')
+        self.assertEqual(developer['error_code'], 'CLAUDE_OUTPUT_TOO_LARGE')
+        mock_resolver.assert_called_with('claude')
 
     def test_repair_packet_is_embedded_as_untrusted_reference(self):
         cli, store, args, _registration, _evaluations, prompts, _requests, patches, runner = self._setup()

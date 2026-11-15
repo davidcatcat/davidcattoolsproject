@@ -46,7 +46,8 @@ from . import skill_manifest
 from . import trust
 from .developer_routes import (AgyRoute, ClaudeRoute, GwAgentRoute, RouteError, capture_snapshot,
                                UnsupportedBoundary, check_route_model, for_platform,
-                               load_route_config, resolve_route_timeout, run_route)
+                               load_route_config, resolve_route_max_diff_bytes,
+                               resolve_route_timeout, run_route)
 from .developer_routes.gw_agent import (_GATEWAY_DATA_CLASS, _normalize_gw_agent_usage,
                                         cleanup_audit_copies)
 from .developer_routes.agy import (
@@ -5452,7 +5453,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                 after.head != snapshot.head):
             raise RouteError('AGY_D6_BINDING_CHANGED')
         changed_paths, raw = task_completion._worktree_diff(registration.root, snapshot.head)
-        if len(raw) > 64 * 1024:
+        # #1815: the route cap from developer-routes.json (max_diff_bytes).
+        if len(raw) > resolve_route_max_diff_bytes("agy"):
             raise RouteError('AGY_OUTPUT_TOO_LARGE')
         if any(path not in write_paths for path in changed_paths):
             raise RouteError('AGY_WRITE_SCOPE_VIOLATION')
@@ -5931,7 +5933,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
             except Exception:
                 raise RouteError('CLAUDE_NO_CHANGES') from None
             raise _ClaudeCommittedCarry()
-        if len(raw) > 64 * 1024:
+        # #1815: the route cap from developer-routes.json (max_diff_bytes).
+        if len(raw) > resolve_route_max_diff_bytes("claude"):
             raise RouteError('CLAUDE_OUTPUT_TOO_LARGE')
         if any(path not in write_paths for path in changed_paths):
             raise RouteError('CLAUDE_WRITE_SCOPE_VIOLATION')
