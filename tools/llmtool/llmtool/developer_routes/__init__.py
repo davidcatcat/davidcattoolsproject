@@ -3,7 +3,8 @@
 from .base import (
     DEFAULT_TIMEOUT_SECONDS, HARD_TIMEOUT_CAP_SECONDS, ROUTE_LIMIT_KEYS,
     TIMEOUT_KEYS as _TIMEOUT_KEYS, DeveloperRoute, RouteError, RouteResult,
-    capture_snapshot, max_diff_bytes_ok, resolve_route_max_diff_bytes,
+    capture_snapshot, max_diff_bytes_ok, max_task_paths_ok, resolve_route_max_diff_bytes,
+    resolve_route_max_task_paths,
     resolve_route_timeout, run_route, timeout_limits_ok as _timeout_limits_ok,
 )
 from .agy import AgyRoute, owner_assignment_gate
@@ -20,7 +21,7 @@ __all__ = [
     'DeveloperRoute', 'RouteError', 'RouteResult', 'capture_snapshot', 'run_route',
     'AgyRoute', 'ClaudeRoute', 'GwAgentRoute', 'owner_assignment_gate', 'load_route_config',
     'check_route_model', 'check_registry_role_model', 'REGISTRY_ROLES',
-    'resolve_route_timeout', 'resolve_route_max_diff_bytes',
+    'resolve_route_timeout', 'resolve_route_max_diff_bytes', 'resolve_route_max_task_paths',
     'DEFAULT_TIMEOUT_SECONDS', 'HARD_TIMEOUT_CAP_SECONDS',
     'DEFAULT_ROLE_TIMEOUT_SECONDS', 'DEFAULT_REMOTE_TEST_TIMEOUT_SECONDS',
     'role_timeout', 'remote_test_timeout',
@@ -248,6 +249,9 @@ def load_route_config(path=None):
         raise RouteError('ROUTE_CONFIG_INVALID')
     if not all(max_diff_bytes_ok(item['max_diff_bytes'])
                for item in routes.values() if 'max_diff_bytes' in item):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    task_paths = [item['max_task_paths'] for item in routes.values() if 'max_task_paths' in item]
+    if not all(map(max_task_paths_ok, task_paths)):
         raise RouteError('ROUTE_CONFIG_INVALID')
     entry = routes['agy']
     expected = {'executable', 'default_model', 'allowed_models', 'default_effort',

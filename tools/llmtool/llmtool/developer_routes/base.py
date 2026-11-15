@@ -38,12 +38,26 @@ DEFAULT_MAX_DIFF_BYTES = 64 * 1024
 MIN_MAX_DIFF_BYTES = 1024
 # #1815: the TaskStore artifact limit (task_store.MAX_ARTIFACT_BYTES).
 HARD_MAX_DIFF_BYTES = 512 * 1024
-ROUTE_LIMIT_KEYS = TIMEOUT_KEYS | {'max_diff_bytes'}
+# #2157: Developer read and write path caps per route. TaskStore stores at most
+# 32 of each per Developer record, so a route may lower the cap but not raise it.
+DEFAULT_MAX_TASK_PATHS = 32
+HARD_MAX_TASK_PATHS = 32
+ROUTE_LIMIT_KEYS = TIMEOUT_KEYS | {'max_diff_bytes', 'max_task_paths'}
 
 
 def max_diff_bytes_ok(value: Any) -> bool:
     """Return True only for an int (not bool) with MIN_MAX_DIFF_BYTES <= value <= HARD_MAX_DIFF_BYTES."""
     return type(value) is int and MIN_MAX_DIFF_BYTES <= value <= HARD_MAX_DIFF_BYTES
+
+
+def max_task_paths_ok(value: Any) -> bool:
+    """Return True only for the int DEFAULT_MAX_TASK_PATHS, not bool, for now (#2157).
+
+    _assignment_paths does not read max_task_paths yet, so any other value would
+    look like a limit that is not enforced. The wiring PR relaxes this check to
+    1..HARD_MAX_TASK_PATHS together with that enforcement.
+    """
+    return type(value) is int and value == DEFAULT_MAX_TASK_PATHS
 
 
 class RouteError(LLMToolError):
@@ -331,6 +345,43 @@ def resolve_route_max_diff_bytes(route: Any, *,
     if not max_diff_bytes_ok(val):
         raise RouteError('ROUTE_CONFIG_INVALID')
     return val
+
+
+def resolve_route_max_task_paths(route: Any, *, config: Mapping[str, Any] | None = None) -> int:
+    """Return the Developer read and write path cap for route (#2157); not wired yet.
+
+    route is a registered route name or a DeveloperRoute; config is a
+    load_route_config() result (None loads the repository file). A route
+    without max_task_paths returns DEFAULT_MAX_TASK_PATHS. An invalid value,
+    unknown str route or bad config raises RouteError('ROUTE_CONFIG_INVALID').
+    """
+    if isinstance(route, DeveloperRoute):
+        name = getattr(route, 'name', None)
+        if type(name) is not str:
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        key, registered_only = name.lower().replace('_', '-'), False
+    elif type(route) is str:
+        key, registered_only = route, True
+    else:
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    if config is None:
+        from . import load_route_config
+        config = load_route_config()
+    routes = config.get('routes') if isinstance(config, Mapping) else None
+    if not isinstance(routes, Mapping):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    entry = routes.get(key)
+    if entry is None:
+        if registered_only:
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        return DEFAULT_MAX_TASK_PATHS
+    if not isinstance(entry, Mapping):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    if 'max_task_paths' not in entry:
+        return DEFAULT_MAX_TASK_PATHS
+    if not max_task_paths_ok(entry['max_task_paths']):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    return entry['max_task_paths']
 
 
 def _default_runner(argv, cwd, env, timeout):
