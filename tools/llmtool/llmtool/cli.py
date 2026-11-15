@@ -190,6 +190,7 @@ def parser_for_cli():
     add_review_authority_parser(sub)
     add_roles_parser(sub)
     add_dispatch_check_parser(sub)
+    add_worker_quota_recovered_parser(sub)
     add_board_check_parser(sub)
     from .mac_full_due import add_ci_parser
     add_ci_parser(sub)
@@ -572,6 +573,32 @@ def _run_test_triage_worker(args):
     return exit_status(result)
 
 
+def add_worker_quota_recovered_parser(subparsers):
+    parser = subparsers.add_parser(
+        'worker-quota-recovered', help='Record Owner recovery for a worker quota observation')
+    parser.add_argument('worker')
+    parser.add_argument('--owner-relay', required=True, dest='owner_relay',
+                        help='Owner relay comment URL')
+    return parser
+
+
+def run_worker_quota_recovered(args, store=None):
+    from .task_store import TaskStore
+    from .worker_availability import record_owner_recovery
+    if store is None:
+        store = getattr(args, 'store', None)
+    if store is None:
+        store = TaskStore()
+    try:
+        result = record_owner_recovery(store, args.worker, args.owner_relay)
+        print(json.dumps(result, separators=(',', ':'), ensure_ascii=True))
+        return 0
+    except LLMToolError as exc:
+        code = getattr(exc, 'code', None) or str(exc)
+        print(code, file=sys.stderr)
+        return 2
+
+
 def main(argv=None):
     try:
         args = parser_for_cli().parse_args(argv)
@@ -582,6 +609,8 @@ def main(argv=None):
             return run_roles(args)
         if args.command == 'dispatch-check':
             return run_dispatch_check(args)
+        if args.command == 'worker-quota-recovered':
+            return run_worker_quota_recovered(args)
         if args.command == 'board-check':
             return run_board_check(args)
         if args.command == 'ci':
