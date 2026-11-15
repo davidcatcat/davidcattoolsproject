@@ -2304,7 +2304,7 @@ class HighDebugNoPRTests(unittest.TestCase):
         self.assertNotIn('PR: 42', prompts[0])
 
     def test_no_completion_uses_trusted_checkout_and_ignores_caller_repo_root_and_cwd(self):
-        trusted_root = '/safe/canonical/repo'
+        trusted_root = str(self._repo())
         self.trust_config.canonical_root = trusted_root
         attacker_cwd = '/attacker/evil/cwd'
         attacker_root = '/attacker/evil/repo'
@@ -2531,7 +2531,7 @@ class HighDebugNoPRTests(unittest.TestCase):
                 self.poster.assert_not_called()
 
     def test_completion_none_positive_succeeds_through_trusted_lookup(self):
-        trusted_root = '/safe/canonical/repo'
+        trusted_root = str(self._repo())
         self.trust_config.canonical_root = trusted_root
         store = _NoPRStore(completion=None)
         reg = SimpleNamespace(
