@@ -22,9 +22,9 @@ class OwnerInboxCliTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.home)
         self.path = self.home / 'inbox' / 'inbox.json'
 
-    def _run(self, *arguments):
+    def _run(self, *arguments, now=1000):
         output = io.StringIO()
-        with mock.patch.object(owner_inbox_cli.time, 'time', return_value=1000), \
+        with mock.patch.object(owner_inbox_cli.time, 'time', return_value=now), \
                 contextlib.redirect_stdout(output):
             code = cli.main(['owner-inbox', *arguments])
         raw = output.getvalue()
@@ -168,6 +168,78 @@ class OwnerInboxCliTest(unittest.TestCase):
             'init', '--path', str(self.path))
         self.assertEqual(code, 1)
         self.assertEqual(values, {'code': store.STATE_EXISTS})
+
+    def test_peek_include_expired_adds_expired_items(self):
+        self._init()
+        old = self._add('owner', 1, 'read the old plan')
+        new = self._add('owner', 2, 'read the new plan')
+        expired_at = 1000 + store.EXPIRY_SECONDS
+
+        code, values, _raw = self._run(
+            'peek', '--path', str(self.path), now=expired_at)
+        self.assertEqual(code, 0)
+        self.assertEqual(values['items'], [{
+            'code': new['code'], 'alias': 'owner', 'received_at': 1000,
+            'state': 'QUEUED', 'text': 'read the new plan'}])
+
+        code, values, _raw = self._run(
+            'peek', '--include-expired', '--path', str(self.path),
+            now=expired_at)
+        self.assertEqual(code, 0)
+        self.assertEqual(values['items'], [
+            {'code': old['code'], 'alias': 'owner', 'received_at': 1000,
+             'state': 'EXPIRED', 'text': 'read the old plan'},
+            {'code': new['code'], 'alias': 'owner', 'received_at': 1000,
+             'state': 'QUEUED', 'text': 'read the new plan'}])
+
+    def _compact_one(self):
+        with mock.patch.object(store, 'MAX_ENTRIES', 1):
+            first = self._add('owner', 1, 'read the old plan')
+            store.ack(str(self.path), first['code'], 1000)
+            self._add('owner', 2, 'read the new plan')
+        return first
+
+    def test_prune_history_with_typed_prune_prints_the_store_result(self):
+        self._init()
+        self._compact_one()
+        stdin = mock.Mock()
+        stdin.isatty.return_value = True
+        with mock.patch.object(owner_inbox_cli.sys, 'stdin', stdin), \
+                mock.patch('builtins.input', return_value='PRUNE'):
+            code, values, _raw = self._run(
+                'prune-history', '--keep', '0', '--path', str(self.path))
+        self.assertEqual(code, 0)
+        self.assertEqual(values, {'removed': 1, 'kept': 0})
+        self.assertEqual(json.loads(self.path.read_text())['tombstones'], [])
+
+    def test_prune_history_with_a_wrong_word_refuses_without_a_write(self):
+        self._init()
+        self._compact_one()
+        before = self.path.read_bytes()
+        stdin = mock.Mock()
+        stdin.isatty.return_value = True
+        with mock.patch.object(owner_inbox_cli.sys, 'stdin', stdin), \
+                mock.patch('builtins.input', return_value='prune'):
+            code, values, _raw = self._run(
+                'prune-history', '--keep', '0', '--path', str(self.path))
+        self.assertEqual(code, 1)
+        self.assertEqual(values, {'code': owner_inbox_cli.CONFIRM_REQUIRED})
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_prune_history_without_a_tty_refuses_and_skips_the_store(self):
+        self._init()
+        stdin = mock.Mock()
+        stdin.isatty.return_value = False
+        with mock.patch.object(owner_inbox_cli.sys, 'stdin', stdin), \
+                mock.patch('builtins.input') as typed, \
+                mock.patch.object(owner_inbox_cli,
+                                  'prune_tombstones') as pruning:
+            code, values, _raw = self._run(
+                'prune-history', '--keep', '0', '--path', str(self.path))
+        self.assertEqual(code, 1)
+        self.assertEqual(values, {'code': owner_inbox_cli.CONFIRM_REQUIRED})
+        typed.assert_not_called()
+        pruning.assert_not_called()
 
 
 if __name__ == '__main__':
