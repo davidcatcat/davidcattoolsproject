@@ -301,6 +301,22 @@ class ExchangeTests(unittest.TestCase):
         with self.assertRaises(LLMToolError):
             x.validate_report(receipt,verdict,self.request,self.request_sha,verdict['receipt_sha256'])
 
+    def test_report_refusal_codes_name_each_check(self):
+        # #1230 refusal-code pin: each validate_report and wait_report check refuses with one fixed code.
+        self.prepare(); receipt,verdict = self.envelopes()
+        def code(changed_receipt,changed_verdict,receipt_sha=verdict['receipt_sha256']):
+            with self.assertRaises(LLMToolError) as caught:
+                x.validate_report(changed_receipt,changed_verdict,self.request,self.request_sha,receipt_sha)
+            return caught.exception.review_code
+        self.assertEqual(code(dict(receipt,bundle_read=False),verdict),'EXCHANGE_RECEIPT_INVALID')
+        self.assertEqual(code(receipt,verdict,'0'*64),'EXCHANGE_BINDING_INVALID')
+        self.assertEqual(code(receipt,dict(verdict,security='MAYBE')),'EXCHANGE_VERDICT_INVALID')
+        self.assertEqual(code(receipt,dict(verdict,findings={})),'EXCHANGE_VERDICT_INVALID')
+        self.assertEqual(code(receipt,dict(verdict,criterion_evidence=[])),'EXCHANGE_EVIDENCE_INVALID')
+        self.publish(self.wait_args.verdict,verdict)
+        with self.assertRaises(LLMToolError) as caught: x.wait_report(self.wait_args,time.monotonic()+1)
+        self.assertEqual(caught.exception.review_code,'EXCHANGE_RECEIPT_MISSING')
+
     def test_ready_marker_bad_digest_replacement_and_hardlink_block(self):
         self.prepare(); receipt,_ = self.envelopes(); self.publish(self.wait_args.receipt,receipt)
         path = self.wait_args.receipt
