@@ -100,9 +100,9 @@ class QuotaFreshnessWindowTest(_StoreCase):
         self.assertFalse(wa.fresh_quota_fail(self.store, 'opencode-developer'))
         self.assertIsNone(wa.quota_refusal(self.store, 'opencode-developer'))
 
-        # 29 minutes ago: still fresh, reads FAIL, fresh_quota_fail is True, still refuses.
+        # 20 minutes ago: still fresh, reads FAIL, fresh_quota_fail is True, still refuses.
         self.observe('claude', 'CLAUDE_QUOTA_EXHAUSTED', QUOTA,
-                     now=self.now - timedelta(minutes=29))
+                     now=self.now - timedelta(minutes=20))
         self.assertEqual(self.quota('claude-developer')['status'], 'FAIL')
         self.assertTrue(wa.fresh_quota_fail(self.store, 'claude-developer'))
         self.assertEqual(wa.quota_refusal(self.store, 'claude-developer'), wa.REFUSAL_CODE)
@@ -110,13 +110,13 @@ class QuotaFreshnessWindowTest(_StoreCase):
 
 class RecordOwnerRecoveryTest(_StoreCase):
     def test_recovery_after_fresh_fail_clears_refusal(self):
-        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=self.now)
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA,
+                     now=self.now - timedelta(minutes=5))
         self.assertTrue(wa.fresh_quota_fail(self.store, 'opencode-developer'))
         self.assertEqual(self.quota('opencode-developer')['status'], 'FAIL')
 
-        recovery_now = self.now + timedelta(minutes=5)
         result = wa.record_owner_recovery(
-            self.store, 'opencode-developer', VALID_RELAY_URL, now=recovery_now)
+            self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now)
 
         self.assertFalse(wa.fresh_quota_fail(self.store, 'opencode-developer'))
         entry = self.quota('opencode-developer')
@@ -124,8 +124,8 @@ class RecordOwnerRecoveryTest(_StoreCase):
         self.assertEqual(entry['source'], 'AUTHORIZED_OPERATION')
         expected_sha = hashlib.sha256(VALID_RELAY_URL.encode('utf-8')).hexdigest()
         self.assertEqual(entry['evidence_sha256'], expected_sha)
-        self.assertEqual(entry['observed_at'], wa._stamp(recovery_now))
-        self.assertEqual(entry['fresh_until'], wa._stamp(recovery_now + wa.FRESH_FOR))
+        self.assertEqual(entry['observed_at'], wa._stamp(self.now))
+        self.assertEqual(entry['fresh_until'], wa._stamp(self.now + wa.FRESH_FOR))
 
         self.assertEqual(result['worker'], 'opencode-developer')
         self.assertEqual(result['owner_relay_url'], VALID_RELAY_URL)
