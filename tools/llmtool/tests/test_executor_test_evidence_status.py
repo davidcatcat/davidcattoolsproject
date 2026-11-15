@@ -153,6 +153,14 @@ class RemoteEvidenceStatusTests(unittest.TestCase):
         got = status(receipt('FAIL', AB, entries, failures=['test_a']))
         self.assertEqual(got[:2], (ev.STEP_STOP, ev.EVIDENCE_INVALID))
 
+    def test_deeply_nested_stored_receipt_is_invalid_not_raised(self):
+        nested = []
+        for _ in range(100000):
+            nested = [nested]
+        deep = receipt('PASS', AB, clean())
+        deep['note'] = nested
+        self.assertEqual(status(deep), (ev.STEP_STOP, ev.EVIDENCE_INVALID, (), None))
+
 
 if __name__ == '__main__':
     unittest.main()
