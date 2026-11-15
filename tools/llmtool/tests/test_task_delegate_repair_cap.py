@@ -861,6 +861,8 @@ def _no_work(**overrides):
         'artifact': None,
         'artifact_sha256': None,
         'execution': {'status': 'BLOCKED', 'cleanup_status': 'CONFIRMED'},
+        'read_paths': ['src/main.py'],
+        'write_paths': ['src/main.py'],
         'usage': None,
     }
     developer.update(overrides)
@@ -872,12 +874,17 @@ class LaunchedNoWorkRepairCountTests(unittest.TestCase):
 
     def setUp(self):
         self.diff = ([], b'')
+        self.status = ()
         _patch_trust_and_binding(
             self, binding=(SimpleNamespace(root='/d6'), SimpleNamespace(head=_HEAD)))
         started = patch.object(task_submission_cli.task_completion, '_worktree_diff',
                                side_effect=lambda root, head: self.diff)
         started.start()
         self.addCleanup(started.stop)
+        started_status = patch.object(task_submission_cli, '_git_status_paths',
+                                      side_effect=lambda root: self.status)
+        started_status.start()
+        self.addCleanup(started_status.stop)
 
     def _store(self, developer, *, count=_REVIEW_LIMIT):
         # One record more than repair #2: skipping it leaves repair #2, which a
@@ -1014,6 +1021,18 @@ class LaunchedNoWorkRepairCountTests(unittest.TestCase):
         store.records[self._NEWEST]['developer'] = _no_work()
         task_submission_cli._check_delegate_repair_cap(_no_high_debug(), store)
         self.assertEqual(store.writes, [])
+
+    def test_record_without_write_paths_counts(self):
+        for value in (None, [], [1]):
+            with self.subTest(value=value):
+                self._assert_counted(_no_work(write_paths=value))
+        developer = _no_work()
+        del developer['write_paths']
+        self._assert_counted(developer)
+
+    def test_ignored_write_path_overlap_counts(self):
+        self.status = ('src/',)
+        self._assert_counted(_no_work())
 
 
 class HighDebugRunBindingTests(unittest.TestCase):
