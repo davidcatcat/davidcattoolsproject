@@ -29,6 +29,12 @@ A required check must be SUCCESS. A check that does not apply to the PR is recor
 
 Manual commands are recovery only: use the [manual recovery flow](../../skills/ai-team-delivery/pm-continuation.md#manual-recovery-flow) when `task advance` cannot run. Review FAIL, AI Debug, split and Owner notification rules are in the [PM Continuation Contract](../../skills/ai-team-delivery/pm-continuation.md).
 
+A review repair claim whose dispatch outcome was not recorded stays `UNKNOWN`, and llmtool does not treat it as dispatched.
+It settles only through `llmtool task repair TASK --executor-task D6 --pr N --recover-claim REPAIR_TASK_ID` (#1928).
+That sets the claim `DISPATCHED` in one locked TaskStore update, only after evidence checks E1-E5 pass: the claim, the repair Task's identity, its dispatch audit, its VERIFIED execution session, and the registered D6 and HEAD.
+It dispatches nothing and changes no repair count; a failed check leaves the claim `UNKNOWN`.
+Never edit the TaskStore by hand or write a receipt to settle a claim.
+
 ## Owner outcome reports and decision boundary (2026-10-19)
 
 Read the [Owner-approved outcome and reporting contract](../../docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md) when planning a milestone, review handoff or release disposition. Reuse Issue #120 and existing PR evidence. The Claude PM provides progress on request, reports major events, submits a short **evidence-backed** G1/M1b, G2/Worker Live, G3/M2 closed-loop or G4/three-task Mac-pilot report when the corresponding outcome actually passes, and escalates **only** changes to product/scope, permissions/data egress, costs, accepted material risk or the final GO/LIMITED GO/NO-GO. Otherwise keep authorized development moving. Two completed task packages with no real gate progress trigger a priority correction, not extra process or an automatic STOP. Report/notification/Owner ACK are separate observed states; a GitHub comment cannot wake ChatGPT or a Mac CLI. This policy does not add a daemon, tool, product gate or llmtool F2/Host authority.
