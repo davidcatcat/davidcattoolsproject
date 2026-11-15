@@ -393,6 +393,57 @@ def _validate_remote_receipt(raw, *, sha, modules):
     return receipt
 
 
+_MODULE_RESULT_KEYS = frozenset(('module', 'ran', 'skipped', 'final'))
+_FINAL_SKIPPED = re.compile(r'skipped=(\d+)')
+_PASSING_SKIP_FINAL = re.compile(r'OK \(skipped=[1-9][0-9]{0,5}\)')
+
+
+def _final_skipped(final):
+    match = _FINAL_SKIPPED.search(final)
+    return int(match.group(1)) if match else 0
+
+
+def _module_result_ok(entry, module, final):
+    if type(final) is not str or type(entry) is not dict or set(entry) != _MODULE_RESULT_KEYS:
+        return False
+    ran, skipped = entry['ran'], entry['skipped']
+    if type(ran) is not int or type(skipped) is not int or ran < 0 or skipped < 0:
+        return False
+    if entry['module'] != module or entry['final'] != final:
+        return False
+    return skipped == _final_skipped(final)
+
+
+def valid_module_results(receipt):
+    """#2119 WP-1 part (a), not wired: check receipt module_results per design section 3.
+
+    A receipt without the field is accepted, so pre-WP-1 receipts stay valid.
+    Otherwise there is one {module, ran, skipped, final} entry per executed
+    module, in modules order, and one per final line. ran and skipped are ints
+    >= 0 with no rule between them. final equals the receipt final at the same
+    index and skipped equals its skipped= count. sum(ran) equals ran_total. On
+    PASS the entries cover every module and every final passes. The caller has
+    already checked the other receipt fields.
+    """
+    if 'module_results' not in receipt:
+        return True
+    entries = receipt['module_results']
+    modules, finals = receipt.get('modules'), receipt.get('final')
+    if type(entries) is not list or type(modules) is not list or type(finals) is not list:
+        return False
+    if len(entries) != len(finals) or len(entries) > len(modules):
+        return False
+    if not all(map(_module_result_ok, entries, modules, finals)):
+        return False
+    total = receipt.get('ran_total')
+    if type(total) is not int or sum(entry['ran'] for entry in entries) != total:
+        return False
+    if receipt.get('result') != 'PASS':
+        return True
+    passing = [final.endswith('OK') or _PASSING_SKIP_FINAL.fullmatch(final) for final in finals]
+    return len(entries) == len(modules) and all(passing)
+
+
 def _record_outcome(store, task_id, task, *, result, code, executor_task, sha, modules):
     safe_executor = executor_task if type(executor_task) is str and _TASK.fullmatch(executor_task) else None
     safe_sha = sha if type(sha) is str and _SHA.fullmatch(sha) else None
