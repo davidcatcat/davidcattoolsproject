@@ -60,6 +60,10 @@ _RECEIPT_FIELDS = frozenset((
     'identity', 'started_at', 'ended_at', 'elapsed_s', 'ran_total', 'final',
     'failures', 'log_bytes', 'log_sha256', 'remote_log_path'))
 _RECEIPT_FIELDS_WITH_EXCERPT = _RECEIPT_FIELDS | frozenset(('failure_excerpt',))
+# #2119 WP-1: module_results is optional until every producer emits it.
+_MODULE_RESULTS_FIELD = frozenset(('module_results',))
+_RECEIPT_SHAPES = (_RECEIPT_FIELDS, _RECEIPT_FIELDS_WITH_EXCERPT)
+_RECEIPT_SHAPES += tuple(shape | _MODULE_RESULTS_FIELD for shape in _RECEIPT_SHAPES)
 
 
 def _valid_failure_excerpt(value):
@@ -341,10 +345,10 @@ def _validate_remote_receipt(raw, *, sha, modules):
         return None
     try:
         receipt = json.loads(raw.decode('utf-8'))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except Exception:
         return None
     if (type(receipt) is not dict or
-            set(receipt) not in (_RECEIPT_FIELDS, _RECEIPT_FIELDS_WITH_EXCERPT)):
+            set(receipt) not in _RECEIPT_SHAPES):
         return None
     if 'failure_excerpt' in receipt:
         excerpt = receipt['failure_excerpt']
@@ -390,6 +394,8 @@ def _validate_remote_receipt(raw, *, sha, modules):
         return None
     if receipt['result'] in ('FAIL', 'TIMEOUT', 'SHA_MISMATCH') and receipt['exit_code'] == 0:
         return None
+    if not valid_module_results(receipt):
+        return None
     return receipt
 
 
@@ -404,7 +410,7 @@ def _final_skipped(final):
 
 
 def _module_result_ok(entry, module, final):
-    if type(module) is not str or type(final) is not str:
+    if type(module) is not str or type(final) is not str or len(final) > 512:
         return False
     if type(entry) is not dict or set(entry) != _MODULE_RESULT_KEYS:
         return False
@@ -786,6 +792,8 @@ def run_incident_remote_test(incident_id, *, sha, modules=(), root=None,
     parsed = _validate_remote_receipt(stdout, sha=sha, modules=selected)
     if parsed is None:
         return finish('UNKNOWN', 'RECEIPT_INVALID')
+    # #2119 WP-1: keep the incident receipt shape unchanged (design section 5.2).
+    parsed.pop('module_results', None)
     screened = _screen_incident_receipt(parsed)
     if screened is None:
         return finish('UNKNOWN', INCIDENT_RECEIPT_SENSITIVE)

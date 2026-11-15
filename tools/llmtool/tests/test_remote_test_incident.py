@@ -440,6 +440,13 @@ class IncidentRemoteTestTests(unittest.TestCase):
         self.assertEqual(len(attempts), 2)
         self.assertEqual(len(self.stored()[incident_store.REMOTE_TESTS]), 1)
 
+    def test_module_results_are_stripped_before_the_incident_screen(self):
+        entries = [dict(module='test_alpha', ran=3, skipped=0, final='OK')]
+        result = self.run_it(transport=self.transport(self.receipt(module_results=entries)))
+        self.assertEqual(result['result'], 'PASS')
+        [entry] = self.stored()[incident_store.REMOTE_TESTS]
+        self.assertNotIn('module_results', entry['receipt'])
+
 
 class IncidentStoreRemoteTestTests(unittest.TestCase):
     def setUp(self):
