@@ -326,7 +326,53 @@ _DEVELOPER_NO_CHANGES_FIELDS = frozenset(('no_changes_diagnosis',))
 _NO_CHANGES_DIAGNOSIS_FIELDS = frozenset(('reason', 'write_attempted', 'num_turns'))
 _NO_CHANGES_REASON_MAX_CHARS = 200
 _NO_CHANGES_MAX_TURNS = 1_000_000
-_DEVELOPER_OPTIONAL_FIELDS = _DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS
+# #1502 WP-F: delivery evidence binding on developer. Optional on every shape;
+# legacy records omit it.
+_DEVELOPER_CARD_DELIVERY_FIELDS = frozenset(('card_delivery',))
+_CARD_DELIVERY_FIELDS = frozenset((
+    'route', 'pin_commit', 'prefix_sha256', 'session_id', 'prepared_id', 'state',
+))
+_CARD_DELIVERY_EXEMPT_FIELDS = frozenset(('route', 'state'))
+_CARD_DELIVERY_CARD_ROUTES = frozenset(('claude', 'agy', 'opencode'))
+_CARD_DELIVERY_STATES = frozenset(('PREPARED', 'DELIVERED'))
+_DEVELOPER_OPTIONAL_FIELDS = (
+    _DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS |
+    _DEVELOPER_CARD_DELIVERY_FIELDS
+)
+
+
+def _valid_card_delivery(developer):
+    """#1502 WP-F: strict shape of developer.card_delivery."""
+    cd = developer.get('card_delivery')
+    if type(cd) is not dict:
+        return False
+    profile = developer.get('provider_profile')
+    cd_keys = frozenset(cd)
+    if cd_keys == _CARD_DELIVERY_EXEMPT_FIELDS:
+        return (profile == 'gw-agent' and
+                cd.get('route') == 'gw-agent' and
+                cd.get('state') == 'NOT_DELIVERED')
+    if cd_keys == _CARD_DELIVERY_FIELDS:
+        if profile not in _CARD_DELIVERY_CARD_ROUTES:
+            return False
+        if cd.get('route') != profile:
+            return False
+        if cd.get('state') not in _CARD_DELIVERY_STATES:
+            return False
+        pin = cd.get('pin_commit')
+        if type(pin) is not str or re.fullmatch(r'[0-9a-f]{40}', pin) is None:
+            return False
+        digest = cd.get('prefix_sha256')
+        if type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None:
+            return False
+        session_id = cd.get('session_id')
+        if session_id != developer.get('session_id'):
+            return False
+        prepared_id = cd.get('prepared_id')
+        if type(prepared_id) is not str or re.fullmatch(r'[0-9a-f]{32}', prepared_id) is None:
+            return False
+        return True
+    return False
 
 
 def _valid_no_changes_diagnosis(developer):
@@ -2502,6 +2548,9 @@ def _validate(record, *, strict=True):
                     frozenset(developer) - _DEVELOPER_OPTIONAL_FIELDS
                     not in _DEVELOPER_RECORD_SHAPES):
                 _fail()
+            if ('card_delivery' in developer and
+                    not _valid_card_delivery(developer)):
+                _fail()
             if ('no_changes_diagnosis' in developer and
                     not _valid_no_changes_diagnosis(developer)):
                 _fail()
@@ -3721,6 +3770,11 @@ class TaskStore:
                 'completion_events' in record or 'completion_event_tombstones' in record or
                 'pm_session_adoptions' in record):
             _fail()
+        developer = record.get('developer') if type(record) is dict else None
+        if type(developer) is dict and 'card_delivery' in developer:
+            cd = developer['card_delivery']
+            if type(cd) is dict and cd.get('state') == 'DELIVERED':
+                _fail()
         record = dict(record)
         # The owner gate runs first: a denied developer is cleared, so the
         # record gains no D6 and its audited denial never waits on, or is
@@ -3831,6 +3885,28 @@ class TaskStore:
         if type(expected) is not dict or not expected:
             _fail()
         return self._update(task_id, expected=expected, changes=changes)
+
+    def commit_card_delivery(self, task_id, *, prepared_id=None, expected=None):
+        """Move card_delivery state from PREPARED to DELIVERED by compare-and-set."""
+        current = self.get(task_id)
+        developer = current.get('developer')
+        if type(developer) is not dict:
+            raise TaskStoreConflict('developer record missing')
+        card_delivery = developer.get('card_delivery')
+        if type(card_delivery) is not dict or card_delivery.get('state') != 'PREPARED':
+            raise TaskStoreConflict('card_delivery not prepared')
+        if prepared_id is not None and card_delivery.get('prepared_id') != prepared_id:
+            raise TaskStoreConflict('card_delivery prepared_id mismatch')
+        new_card_delivery = dict(card_delivery, state='DELIVERED')
+        new_developer = dict(developer, card_delivery=new_card_delivery)
+        update_expected = dict(expected) if expected else {}
+        update_expected.setdefault('record_sha256', current['record_sha256'])
+        return self._update(
+            task_id,
+            expected=update_expected,
+            changes={'developer': new_developer},
+            trusted_card_delivery_commit=True,
+        )
 
     def recover_review_repair_claim(self, task_id, repair_task_id, *, executor_task, pr_number,
                                     expected_sha256):
@@ -5407,6 +5483,7 @@ class TaskStore:
                        trusted_completion_events=False, trusted_abandonment=False,
                        abandonment_pm_session_id=None, trusted_pm_session_adoption=False,
                        trusted_codex_launch=False, trusted_opencode_launch=False,
+                       trusted_card_delivery_commit=False,
                        trusted_split=None, split_child_max=None, high_debug_finalize=None,
                        trusted_file_ops_evidence=False, trusted_file_ops_reservation=False):
         # Refused here, not by the writable-field check: the dispatch gate
@@ -5442,6 +5519,8 @@ class TaskStore:
             _fail('CODEX_LAUNCH_IDENTITY_FORBIDDEN')
         if (trusted_codex_launch or trusted_opencode_launch) and set(changes) != {'developer'}:
             _fail('CODEX_LAUNCH_IDENTITY_INVALID')
+        if trusted_card_delivery_commit and set(changes) != {'developer'}:
+            _fail()
         if 'dispatch_audit' in changes and not trusted_dispatch_audit:
             _fail()
         if 'merge_attempt' in changes:
@@ -5556,6 +5635,36 @@ class TaskStore:
                         execution.get('status') != 'RUNNING' or
                         old.get('execution') is not None):
                     _fail('CODEX_LAUNCH_IDENTITY_INVALID')
+            if 'developer' in changes:
+                proposed_dev = changes['developer']
+                old_dev = current.get('developer')
+                if type(proposed_dev) is dict:
+                    if old_dev is None or proposed_dev.get('assignment_id') != old_dev.get('assignment_id'):
+                        if trusted_card_delivery_commit:
+                            _fail()
+                        if 'card_delivery' in proposed_dev:
+                            cd = proposed_dev['card_delivery']
+                            if type(cd) is dict and cd.get('state') == 'DELIVERED':
+                                _fail()
+                    else:
+                        old_cd = old_dev.get('card_delivery')
+                        new_cd = proposed_dev.get('card_delivery')
+                        if trusted_card_delivery_commit:
+                            if type(old_cd) is not dict or old_cd.get('state') != 'PREPARED':
+                                raise TaskStoreConflict('card_delivery not prepared')
+                            if type(new_cd) is not dict or new_cd.get('state') != 'DELIVERED':
+                                _fail()
+                            if {k: v for k, v in new_cd.items() if k != 'state'} != {k: v for k, v in old_cd.items() if k != 'state'}:
+                                _fail()
+                            if {k: v for k, v in proposed_dev.items() if k != 'card_delivery'} != {k: v for k, v in old_dev.items() if k != 'card_delivery'}:
+                                _fail()
+                        else:
+                            if ('card_delivery' in old_dev) != ('card_delivery' in proposed_dev):
+                                _fail()
+                            if old_cd != new_cd:
+                                _fail()
+                elif trusted_card_delivery_commit:
+                    _fail()
             if 'merge_attempt' in changes:
                 old_attempt = current.get('merge_attempt')
                 new_attempt = changes['merge_attempt']
