@@ -69,5 +69,45 @@ class BotApiTransportTests(unittest.TestCase):
                 kwargs = dict(offset=1, allowed_updates=['message'], limit=1)
                 self.refused(code, transport.get_updates, **kwargs)
 
+    def test_send_outcomes(self):
+        limited = {'ok': False, 'error_code': 429, 'parameters': {'retry_after': 7}}
+        cases = [({'ok': True, 'result': {'message_id': 1}}, {'status': 'SENT'})]
+        refused = {'ok': False, 'error_code': 403, 'description': SECRET_TEXT}
+        cases += [(refused, {'status': 'FAILED'})]
+        cases += [(limited, {'status': 'RATE_LIMITED', 'retry_after': 7})]
+        cases += [({'ok': False, 'error_code': 429}, {'status': 'FAILED'})]
+        for reply, expected in cases:
+            with self.subTest(expected=expected):
+                transport, http = self.transport(reply)
+                self.assertEqual(transport.send('owner', 'hello'), expected)
+                self.assertEqual(http.calls, [('sendMessage', {'chat_id': CHAT, 'text': 'hello'})])
+
+    def test_send_never_returns_or_leaks_the_chat_value(self):
+        transport, _http = self.transport({'ok': True, 'result': {'message_id': 1}})
+        self.assertNotIn(CHAT, repr(transport.send('owner', 'hello')))
+        self.assertNotIn(CHAT, repr(vars(transport)))
+
+    def test_send_unknown_alias_is_failed_without_a_call(self):
+        transport, http = self.transport({'ok': True, 'result': {}})
+        self.assertEqual(transport.send('stranger', 'hello'), {'status': 'FAILED'})
+        self.assertEqual(http.calls, [])
+
+    def test_send_bad_arguments_and_unreadable_replies_refuse(self):
+        transport, http = self.transport({'ok': True, 'result': {}})
+        for alias, text in (('', 'x'), ('owner', ''), ('owner', 'x' * 4097), ('owner', None)):
+            with self.subTest(alias=alias):
+                self.refused(api.ARGUMENT_INVALID, transport.send, alias, text)
+        self.assertEqual(http.calls, [])
+        for reply, code in ((OSError(SECRET_TEXT), api.CALL_FAILED), ('x', api.REPLY_INVALID)):
+            with self.subTest(code=code):
+                bad_transport, _http = self.transport(reply)
+                self.refused(code, bad_transport.send, 'owner', 'hello')
+        self.refused(api.REPLY_INVALID, self.transport({'ok': True})[0].send, 'owner', 'hello')
+
+    def test_constructor_needs_callables(self):
+        self.refused(api.ARGUMENT_INVALID, api.BotApiTransport, None, resolve)
+        self.refused(api.ARGUMENT_INVALID, api.BotApiTransport, FakeHttp({}), 'x')
+
+
 if __name__ == '__main__':
     unittest.main()
