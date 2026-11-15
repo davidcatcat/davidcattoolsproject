@@ -155,10 +155,96 @@ class ClaudeRouteTests(unittest.TestCase):
         parsed = self.route.parse_output(b'not-json', b'rate limit reached', '')
         self.assertEqual(parsed, {'status': 'error', 'summary': '', 'session_id': None,
                                   'usage': None, 'raw': {}})
+        with self.assertRaises(RouteError) as caught:
+            self.route.validate_status(parsed)
+        self.assertEqual(caught.exception.code, 'CLAUDE_QUOTA_EXHAUSTED')
         with self.subTest(subtype='error_max_turns'):
             with self.assertRaises(RouteError) as caught:
                 self.run_case(stdout=self.envelope(is_error=True, subtype='error_max_turns'))
             self.assertEqual(caught.exception.code, 'CLAUDE_STATUS_FAILED')
+
+    def test_non_json_quota_stderr_ends_quota_exhausted_via_validate_status_2158(self):
+        # Fixed, non-secret fake output; no provider is called.
+        stderr_text = b'usage limit reached for this fake account'
+        for stdout in (b'not-json', b'', b'\xff\xfe'):
+            with self.subTest(stdout=stdout):
+                parsed = self.route.parse_output(stdout, stderr_text, '')
+                # parse_output keeps its main behaviour: the fallback dict.
+                self.assertEqual(parsed, {'status': 'error', 'summary': '',
+                                          'session_id': None, 'usage': None, 'raw': {}})
+                self.assertIsNone(self.route._model_usage)
+                self.assertNotIn('usage limit', repr(parsed))
+                self.assertNotIn('fake account', repr(parsed))
+                self.assertIsNone(self.route.provider_evidence(parsed))
+                self.assertFalse(self.route.provider_quota_reported(parsed))
+                with self.assertRaises(RouteError) as caught:
+                    self.route.validate_status(parsed)
+                exc = caught.exception
+                self.assertEqual(exc.code, 'CLAUDE_QUOTA_EXHAUSTED')
+                # No stderr text is stored or returned.
+                for value in (str(exc), repr(exc.args), repr(exc.observed_facts),
+                              repr(exc.progress), repr(exc.blocked_reason),
+                              repr(exc.provider_evidence)):
+                    self.assertNotIn('usage limit', value)
+                    self.assertNotIn('fake account', value)
+                self.assertEqual(exc.observed_facts, {})
+                self.assertIsNone(exc.progress)
+                self.assertIsNone(exc.blocked_reason)
+                self.assertIsNone(exc.provider_evidence)
+
+    def test_quota_fallback_match_is_exact_2158(self):
+        # Only the exact fallback shape maps to CLAUDE_QUOTA_EXHAUSTED.
+        fallback = {'status': 'error', 'summary': '', 'session_id': None,
+                    'usage': None, 'raw': {}}
+        near_misses = (dict(fallback, session_id=self.session),
+                       dict(fallback, raw={'type': 'result'}),
+                       dict(fallback, summary='x'),
+                       dict(fallback, extra=True),
+                       {'status': 'error'}, {})
+        for parsed in near_misses:
+            with self.subTest(parsed=parsed):
+                with self.assertRaises(RouteError) as caught:
+                    self.route.validate_status(parsed)
+                self.assertEqual(caught.exception.code, 'CLAUDE_STATUS_FAILED')
+        # A DONE result is never refused, whatever else it carries.
+        self.route.validate_status(dict(fallback, status='DONE'))
+
+    def test_run_route_non_json_quota_stderr_is_quota_exhausted_2158(self):
+        for code in (0, 1):
+            with self.subTest(code=code):
+                with self.assertRaises(RouteError) as caught:
+                    self.run_case(code=code, stdout=b'not-json',
+                                  stderr=b'usage limit reached')
+                self.assertEqual(caught.exception.code, 'CLAUDE_QUOTA_EXHAUSTED')
+                self.assertIsNone(caught.exception.provider_evidence)
+
+    def test_non_json_without_quota_stderr_stays_output_invalid_2158(self):
+        for stderr in (b'', b'unexpected failure', b'connection reset'):
+            with self.subTest(stderr=stderr):
+                with self.assertRaises(RouteError) as caught:
+                    self.route.parse_output(b'not-json', stderr, '')
+                self.assertEqual(caught.exception.code, 'CLAUDE_OUTPUT_INVALID')
+
+    def test_json_error_result_stays_status_failed_2158(self):
+        for updates in ({'is_error': True, 'subtype': 'error_during_execution'},
+                        {'is_error': True, 'subtype': 'success'},
+                        {'is_error': False, 'subtype': 'error_max_turns'}):
+            with self.subTest(updates=updates):
+                parsed = self.route.parse_output(self.envelope(**updates),
+                                                 b'unexpected failure', '')
+                self.assertEqual(parsed['status'], 'error')
+                with self.assertRaises(RouteError) as caught:
+                    self.route.validate_status(parsed)
+                self.assertEqual(caught.exception.code, 'CLAUDE_STATUS_FAILED')
+        parsed = self.route.parse_output(self.envelope(), b'', '')
+        self.assertEqual(parsed['status'], 'DONE')
+        self.assertEqual(parsed['session_id'], self.session)
+        self.assertEqual(parsed['summary'], 'done')
+        self.route.validate_status(parsed)
+        with self.assertRaises(RouteError) as caught:
+            self.run_case(stdout=self.envelope(is_error=True, subtype='error_api',
+                                               result='request failed'))
+        self.assertEqual(caught.exception.code, 'CLAUDE_STATUS_FAILED')
 
     def test_model_usage_and_status_cases(self):
         cases = [({'claude-opus-5-5': {'outputTokens': 1},

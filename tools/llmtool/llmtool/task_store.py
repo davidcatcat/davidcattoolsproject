@@ -229,10 +229,17 @@ _REMOTE_TEST_RECEIPT_FIELDS_WITH_ACTIONS = (
     _REMOTE_TEST_RECEIPT_FIELDS | frozenset(('actions',)))
 _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT_AND_ACTIONS = (
     _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT | frozenset(('actions',)))
-_REMOTE_TEST_RECEIPT_SHAPES = (
+_REMOTE_TEST_RECEIPT_BASE_SHAPES = (
     _REMOTE_TEST_RECEIPT_FIELDS, _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT,
     _REMOTE_TEST_RECEIPT_FIELDS_WITH_ACTIONS,
     _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT_AND_ACTIONS)
+# #2119 design section 3: each shape may also carry the optional per-module
+# evidence. A receipt without it is checked exactly as before.
+_REMOTE_TEST_RECEIPT_SHAPES = (
+    *_REMOTE_TEST_RECEIPT_BASE_SHAPES,
+    *(shape | frozenset(('module_results',))
+      for shape in _REMOTE_TEST_RECEIPT_BASE_SHAPES))
+_REMOTE_TEST_MODULE_RESULT_FIELDS = frozenset(('module', 'ran', 'skipped', 'final'))
 _REMOTE_TEST_FAILURE_EXCERPT_LIMIT = 4096
 _REMOTE_TEST_FAILURE_EXCERPT_LINES = 40
 # GitHub Actions provenance of a hosted remote test run (#1257).
@@ -253,6 +260,26 @@ def _valid_remote_test_failure_excerpt(value):
         return len(value.encode('utf-8')) <= _REMOTE_TEST_FAILURE_EXCERPT_LIMIT
     except UnicodeError:
         return False
+
+
+def _valid_remote_test_module_results(value):
+    """Return whether ``value`` is a structurally valid ``module_results`` list.
+
+    Structure only (#2119 design section 3): a non-empty list of exact
+    ``{module, ran, skipped, final}`` entries. The cross-field rules (order
+    against ``modules``, ``final`` and ``ran_total``) belong to the producer's
+    validator in remote_test.py, which this module must not import.
+    """
+    if type(value) is not list or not value:
+        return False
+    for item in value:
+        if (type(item) is not dict or set(item) != _REMOTE_TEST_MODULE_RESULT_FIELDS or
+                type(item['module']) is not str or not item['module'] or
+                type(item['ran']) is not int or item['ran'] < 0 or
+                type(item['skipped']) is not int or item['skipped'] < 0 or
+                type(item['final']) is not str):
+            return False
+    return True
 
 
 def _valid_remote_test_actions(value):
@@ -1079,6 +1106,8 @@ def _validate_remote_test_receipts(record):
     earlier_sessions = _verified_earlier_pm_sessions(record)
     for receipt in receipts:
         if (type(receipt) is not dict or set(receipt) not in _REMOTE_TEST_RECEIPT_SHAPES or
+                ('module_results' in receipt and
+                 not _valid_remote_test_module_results(receipt['module_results'])) or
                 ('actions' in receipt and
                  (not _valid_remote_test_actions(receipt['actions']) or
                   receipt.get('remote_log_path') is not None)) or
@@ -4443,7 +4472,9 @@ class TaskStore:
 
     def append_remote_test_receipt(self, task_id, receipt):
         """Append one validated remote test receipt idempotently to its Task."""
-        if type(receipt) is not dict or set(receipt) not in _REMOTE_TEST_RECEIPT_SHAPES:
+        if (type(receipt) is not dict or set(receipt) not in _REMOTE_TEST_RECEIPT_SHAPES or
+                ('module_results' in receipt and
+                 not _valid_remote_test_module_results(receipt['module_results']))):
             _fail('REMOTE_TEST_RECEIPT_INVALID')
         for _ in range(5):
             current = self.get(task_id)

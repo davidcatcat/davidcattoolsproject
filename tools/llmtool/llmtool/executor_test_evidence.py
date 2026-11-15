@@ -80,7 +80,7 @@ def _digest_ok(receipt):
     body = {key: value for key, value in receipt.items() if key != 'receipt_digest'}
     try:
         actual = hashlib.sha256(_json_bytes(body)).hexdigest()
-    except (TypeError, ValueError):
+    except Exception:
         return False
     return type(claimed) is str and claimed == actual
 

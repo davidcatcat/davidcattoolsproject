@@ -60,6 +60,10 @@ _RECEIPT_FIELDS = frozenset((
     'identity', 'started_at', 'ended_at', 'elapsed_s', 'ran_total', 'final',
     'failures', 'log_bytes', 'log_sha256', 'remote_log_path'))
 _RECEIPT_FIELDS_WITH_EXCERPT = _RECEIPT_FIELDS | frozenset(('failure_excerpt',))
+# #2119 WP-1: module_results is optional until every producer emits it.
+_MODULE_RESULTS_FIELD = frozenset(('module_results',))
+_RECEIPT_SHAPES = (_RECEIPT_FIELDS, _RECEIPT_FIELDS_WITH_EXCERPT)
+_RECEIPT_SHAPES += tuple(shape | _MODULE_RESULTS_FIELD for shape in _RECEIPT_SHAPES)
 
 
 def _valid_failure_excerpt(value):
@@ -79,6 +83,7 @@ R=re.compile(r"[0-9a-f]{40}\Z"); F=re.compile(r"(?:refs/pull/[0-9]+/head|[A-Za-z
 SENSITIVE=re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|(?:(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}\b|(?<!(?-i:[A-Za-z0-9_]))(?:AKIA|ASIA)[A-Z0-9]{16}(?=(?-i:[^\W\x00-\x7f])))|\bsk-[A-Za-z0-9_-]{12,}|\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|\bxox[abprs]-[A-Za-z0-9-]{20,}|\b(?:bearer|basic)\s+\S+|\b[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@|\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b|[\"']?\b(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|client[_-]?secret|aws_secret_access_key)[\"']?\s*[:=]",re.I)
 if not R.fullmatch(sha) or not F.fullmatch(ref) or not mods or len(mods)>8 or any(not M.fullmatch(x) for x in mods): sys.exit(40)
 started=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z"); begin=time.monotonic(); work_deadline=begin+480; deadline=begin+540; log=b""; result="FAIL"; code=1; tree=None; fetch=None; finals=[]; failures=[]; ran=0; uid=None; log_path=None; work=None
+module_results=[]
 def failure_excerpt(outputs,work,home):
     blocks=[]
     def safe_line(line):
@@ -162,6 +167,13 @@ def final_line(lines):
                  line.endswith("FAILED") or line.startswith("ERROR")), "NO_FINAL")
 def passing_final(line):
     return line.endswith("OK") or re.fullmatch(r"OK \(skipped=[1-9][0-9]{0,5}\)", line) is not None
+def module_result(mod,test_output,final):
+    ran=0
+    for line in test_output.decode("utf8","replace").splitlines():
+        found=re.match(r"Ran (\d+) tests? in ",line.strip())
+        if found: ran=int(found.group(1))
+    skip=re.search(r"skipped=(\d+)",final)
+    return {"module":mod,"ran":ran,"skipped":int(skip.group(1)) if skip else 0,"final":final}
 try: lock_fd=open_lock(os.path.expanduser("~")+"/.llmtool-remote-test.lock")
 except BlockingIOError: sys.exit(75)
 cleanup_source="""import os,re,shutil,stat,sys,time
@@ -226,7 +238,7 @@ try:
                 lines=[x.decode("utf8","replace").strip() for x in test_output.splitlines() if b"Ran " in x or b"OK" in x or b"FAILED" in x or b"ERROR" in x]
                 final=final_line(lines)
                 finals.append(final)
-                ran+=int(re.search(rb"Ran (\d+) tests?",test_output).group(1)) if re.search(rb"Ran (\d+) tests?",test_output) else 0
+                entry=module_result(mod,test_output,final); module_results.append(entry); ran+=entry["ran"]
                 if test.returncode==124:
                     result="TIMEOUT"; code=124; failures.append(mod); break
                 if test.returncode or not passing_final(final):
@@ -255,6 +267,7 @@ cleanup_stale()
 ended=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
 receipt={"result":result,"exit_code":code,"source_sha":sha,"tree":tree,"fetch_head":fetch,"modules":mods,"identity":{"uid":uid},"started_at":started,"ended_at":ended,"elapsed_s":round(time.monotonic()-begin,3),"ran_total":ran,"final":finals[-len(mods)*2:],"failures":failures[:10],"log_bytes":len(log),"log_sha256":hashlib.sha256(log).hexdigest(),"remote_log_path":log_path}
 if result!="PASS": receipt["failure_excerpt"]=failure_excerpt(failed_outputs,work or "<REMOTE_WORKDIR>",os.path.expanduser("~"))
+if module_results: receipt["module_results"]=module_results[-len(mods)*2:]
 raw=json.dumps(receipt,separators=(",",":"),sort_keys=True).encode()
 print(raw.decode() if len(raw)<=32768 else "{}")
 os.close(lock_fd)
@@ -341,10 +354,10 @@ def _validate_remote_receipt(raw, *, sha, modules):
         return None
     try:
         receipt = json.loads(raw.decode('utf-8'))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except Exception:
         return None
     if (type(receipt) is not dict or
-            set(receipt) not in (_RECEIPT_FIELDS, _RECEIPT_FIELDS_WITH_EXCERPT)):
+            set(receipt) not in _RECEIPT_SHAPES):
         return None
     if 'failure_excerpt' in receipt:
         excerpt = receipt['failure_excerpt']
@@ -390,6 +403,8 @@ def _validate_remote_receipt(raw, *, sha, modules):
         return None
     if receipt['result'] in ('FAIL', 'TIMEOUT', 'SHA_MISMATCH') and receipt['exit_code'] == 0:
         return None
+    if not valid_module_results(receipt):
+        return None
     return receipt
 
 
@@ -404,7 +419,7 @@ def _final_skipped(final):
 
 
 def _module_result_ok(entry, module, final):
-    if type(module) is not str or type(final) is not str:
+    if type(module) is not str or type(final) is not str or len(final) > 512:
         return False
     if type(entry) is not dict or set(entry) != _MODULE_RESULT_KEYS:
         return False
@@ -786,6 +801,8 @@ def run_incident_remote_test(incident_id, *, sha, modules=(), root=None,
     parsed = _validate_remote_receipt(stdout, sha=sha, modules=selected)
     if parsed is None:
         return finish('UNKNOWN', 'RECEIPT_INVALID')
+    # #2119 WP-1: keep the incident receipt shape unchanged (design section 5.2).
+    parsed.pop('module_results', None)
     screened = _screen_incident_receipt(parsed)
     if screened is None:
         return finish('UNKNOWN', INCIDENT_RECEIPT_SENSITIVE)
