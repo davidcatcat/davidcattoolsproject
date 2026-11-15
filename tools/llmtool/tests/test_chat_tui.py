@@ -651,6 +651,11 @@ class WidgetTests(Base):
     def test_sigterm_and_sighup_clean_tui_owned_cli_child_before_exit(self):
         from llmtool.providers.codex_cli import CodexCLIProvider
 
+        # #2074: a test process started as a background job has SIGINT ignored, and the
+        # TUI signal scope keeps an inherited SIG_IGN; give this test a live SIGINT.
+        self.addCleanup(signal.signal, signal.SIGINT,
+                        signal.signal(signal.SIGINT, signal.default_int_handler))
+
         pid_file = self.temp_root / "codex.pid"
         executable = self.temp_root / "fake-codex"
         executable.write_text(
