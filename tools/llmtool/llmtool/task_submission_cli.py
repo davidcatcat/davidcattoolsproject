@@ -7109,6 +7109,16 @@ _PRELAUNCH_REPAIR_REFUSALS = frozenset((
 ))
 
 
+# Post-run zero-work refusals allow-list (#2098 design #2113).
+# Non-zero-exit codes raised only after cleanup is CONFIRMED (opencode_direct_developer.py ~985-1005).
+_POST_RUN_NO_WORK_REFUSALS = frozenset((
+    ('opencode', 'DEVELOPER_OUTCOME_UNKNOWN', 'OPENCODE_PROVIDER_FAILED'),
+    ('opencode', 'DEVELOPER_OUTCOME_UNKNOWN', 'OPENCODE_RATE_LIMITED'),
+    ('opencode', 'DEVELOPER_OUTCOME_UNKNOWN', 'OPENCODE_FREE_LIMIT'),
+    ('opencode', 'DEVELOPER_OUTCOME_UNKNOWN', 'OPENCODE_OUTPUT_TRUNCATED'),
+))
+
+
 def _launched_run_did_no_work(developer, d6_unchanged=None):
     """True only when a launched run's record proves it did no work.
 
@@ -7126,9 +7136,11 @@ def _launched_run_did_no_work(developer, d6_unchanged=None):
     if state == 'BLOCKED':
         ended = True
     elif state == 'DEVELOPER_OUTCOME_UNKNOWN':
-        ended = (type(error_code) is str and
+        ended = ((type(error_code) is str and
                  re.fullmatch(r'[A-Z0-9]+(?:_[A-Z0-9]+)*_(?:BLOCKED|INTERRUPTED)',
-                              error_code) is not None)
+                              error_code) is not None) or
+                 (developer.get('provider_profile'), state, error_code) in
+                 _POST_RUN_NO_WORK_REFUSALS)
     else:
         ended = False
     if not ended:
