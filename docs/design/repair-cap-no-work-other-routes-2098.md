@@ -5,7 +5,7 @@ Proposal only; not a review or acceptance. Source: main at a863ace18f68216a69d9d
 ## 1. Today
 
 - **OpenCode attempted failures**:
-  - In `tools/llmtool/llmtool/task_submission_cli.py:4993-5022`, when direct OpenCode execution fails after a process attempt (`exc.attempted is True`), the failure is persisted as `developer['state'] = 'DEVELOPER_OUTCOME_UNKNOWN'` (`task_submission_cli.py:5000`) with `error_code = exc.direct_opencode_code` (`task_submission_cli.py:5003`).
+  - In `tools/llmtool/llmtool/task_submission_cli.py:4993-5020`, when direct OpenCode execution fails after a process attempt (`exc.attempted is True`), the failure is persisted as `developer['state'] = 'DEVELOPER_OUTCOME_UNKNOWN'` (`task_submission_cli.py:5000`) with `error_code = exc.direct_opencode_code` (`task_submission_cli.py:5003`).
   - Unlike early Claude/AGY failure paths where `execution` was omitted or left `None`, the OpenCode delegate constructs and stores an `execution` dictionary immediately (`task_submission_cli.py:5004-5014`). This dictionary already records `cleanup_status = exc.cleanup_status` (`task_submission_cli.py:5009`).
   - In `tools/llmtool/llmtool/opencode_direct_developer.py:929, 931-932`, `exc.cleanup_status` is populated directly from lifecycle tracking: `cleanup = 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN'`. It is attached to `DirectOpenCodeError` on process non-zero exit (`opencode_direct_developer.py:1001`), process exit missing (`opencode_direct_developer.py:986`), or event parsing failures (`opencode_direct_developer.py:1013`).
   - Thus, OpenCode execution records already affirmatively carry `cleanup_status == 'CONFIRMED'` whenever boundary cleanup completes successfully.
@@ -13,7 +13,8 @@ Proposal only; not a review or acceptance. Source: main at a863ace18f68216a69d9d
 - **gw-agent route failures**:
   - In `tools/llmtool/llmtool/task_submission_cli.py:6229-6265`, `persist_failure(error_code, *, state='DEVELOPER_UNAVAILABLE', provider_evidence=None, interrupted=False)` persists gw-agent route failures. By default, it sets `state = 'DEVELOPER_UNAVAILABLE'` (`task_submission_cli.py:6229, 6235`).
   - When `developer.get('execution')` is already a dictionary (from an observed run), `persist_failure` retains what the run observed (`task_submission_cli.py:6237-6249`), setting `observed = {**developer['execution'], 'status': 'UNKNOWN', 'usage_source': 'UNKNOWN'}` (`task_submission_cli.py:6240-6241`).
-  - Route errors bubbling from `execute(route, ...)` (such as `RouteError as exc` at `task_submission_cli.py:6401-6411`) invoke `persist_failure(code, ...)`. This sets `developer['state'] = 'DEVELOPER_UNAVAILABLE'` with `error_code` prefixed with `DEVELOPER_` (`task_submission_cli.py:6402`), keeping execution status as `'UNKNOWN'`.
+  - For route quota refusals where no execution dict exists, `persist_failure` stores parsed condition evidence with `status = 'UNKNOWN'` (`task_submission_cli.py:6250-6254`).
+  - In all normal post-run failure cases persisted by `persist_failure`, the persisted record retains `state = 'DEVELOPER_UNAVAILABLE'` with an error code, and execution status is kept as `'UNKNOWN'`.
 
 - **Why `_launched_run_did_no_work` never treats either as ended**:
   - In `tools/llmtool/llmtool/task_submission_cli.py:7084-7128`, `_launched_run_did_no_work(developer, d6_unchanged=None)` evaluates whether a launched run has affirmatively proven it did no work.
@@ -59,7 +60,7 @@ Proposal only; not a review or acceptance. Source: main at a863ace18f68216a69d9d
 
 - **Mechanics**:
   - Modify `run_task_opencode_developer` (`task_submission_cli.py:5000`) to persist `state='BLOCKED'` instead of `DEVELOPER_OUTCOME_UNKNOWN` for zero-work errors, or rewrite the error code to end with `_BLOCKED`.
-  - Modify `persist_failure` in `run_task_gw_agent_developer` (`task_submission_cli.py:6229`) to store `state='BLOCKED'` for post-run refusals that yielded no diff.
+  - Modify `persist_failure` in `run_task_gw_agent_developer` (`task_submission_cli.py:6229, 6235`) to store `state='BLOCKED'` for post-run refusals that yielded no diff.
 - **Security effect on the repair cap**:
   - High risk of regression. In the llmtool architecture, `state='BLOCKED'` denotes an intentional dispatch, scope, or policy refusal, whereas `DEVELOPER_UNAVAILABLE` and `DEVELOPER_OUTCOME_UNKNOWN` signify provider availability or execution uncertainties.
   - Conflating runtime provider crashes with policy blocks degrades monitoring, retry policies, and availability classifications.
@@ -98,15 +99,15 @@ Proposal only; not a review or acceptance. Source: main at a863ace18f68216a69d9d
        - `OPENCODE_TIMEOUT` (UNVERIFIED): Process terminated due to execution timeout.
        - `OPENCODE_PARSE_FAILED` (UNVERIFIED): Event output could not be parsed into valid events.
        - `OPENCODE_STEP_LIMIT_EXCEEDED` (UNVERIFIED): Step budget exhausted before emitting diff.
-       - *Prohibited*: `OPENCODE_CLEANUP_UNKNOWN` (`opencode_direct_developer.py:973`) must **NEVER** be allow-listed, as boundary cleanup was not confirmed.
-     - *gw-agent candidates (`provider_profile='gw-agent'`, `state='DEVELOPER_UNAVAILABLE'`) shown by code*:
-       - `DEVELOPER_GW_AGENT_D6_SESSION_REFUSED` (`tools/llmtool/llmtool/task_submission_cli.py:6397`): Note that while stored under `DEVELOPER_OUTCOME_UNKNOWN` at `:6398`, it represents a session bind refusal after execution.
-       - `DEVELOPER_GW_AGENT_D6_BIND_NATIVE_SESSION_HELPER_UNAVAILABLE` (`tools/llmtool/llmtool/task_submission_cli.py:6395`): Helper process unavailable.
-     - *gw-agent candidate codes (UNVERIFIED - not read in allowed code slices)*:
-       - `DEVELOPER_GW_AGENT_HTTP_429` (UNVERIFIED): Upstream rate limiting refusal.
-       - `DEVELOPER_GW_AGENT_QUOTA_EXHAUSTED` (UNVERIFIED): Upstream model quota exhausted.
-       - `DEVELOPER_GW_AGENT_GATEWAY_TIMEOUT` (UNVERIFIED): Gateway timeout prior to response.
-       - *Prohibited*: Codes representing potential workspace modifications (e.g. `GW_AGENT_WRITE_SCOPE_VIOLATION` at `task_submission_cli.py:6360`, `GW_AGENT_OUTPUT_TOO_LARGE` at `task_submission_cli.py:6358`, or `GW_AGENT_AUDIT_INVALID` at `task_submission_cli.py:6362`) must **NEVER** be allow-listed.
+       - *Prohibited*: `OPENCODE_CLEANUP_UNKNOWN` (`opencode_direct_developer.py:973`) and `OPENCODE_ADAPTER_UNKNOWN` (`task_submission_cli.py:5037`) must **NEVER** be allow-listed, as boundary cleanup was not confirmed.
+     - *gw-agent candidates (`provider_profile='gw-agent'`, `state='DEVELOPER_UNAVAILABLE'`)*:
+       - *Shown by code*: In the authorized code slice `tools/llmtool/llmtool/task_submission_cli.py:6225-6300`, `persist_failure` handles failure persistence for gw-agent, setting `state = 'DEVELOPER_UNAVAILABLE'` (`task_submission_cli.py:6229, 6235`). In-flight dispatch refusals are mapped to `DEVELOPER_` prefix at `:6290, 6300`, but pre-launch dispatch denials are already handled by `_PRELAUNCH_REPAIR_REFUSALS` (`task_submission_cli.py:7073-7078`). Specific post-run route error codes for gw-agent originate outside the authorized lines `6225-6300` and are therefore UNVERIFIED.
+       - *gw-agent candidate codes (UNVERIFIED - not read in allowed code slices)*:
+         - `DEVELOPER_GW_AGENT_HTTP_429` (UNVERIFIED): Upstream rate limiting refusal.
+         - `DEVELOPER_GW_AGENT_QUOTA_EXHAUSTED` (UNVERIFIED): Upstream model quota exhausted without patch.
+         - `DEVELOPER_GW_AGENT_GATEWAY_TIMEOUT` (UNVERIFIED): Gateway timeout prior to response.
+         - `DEVELOPER_GW_AGENT_D6_SESSION_REFUSED` (UNVERIFIED): Session refused post-execution.
+         - *Prohibited*: Any codes representing potential workspace modifications (e.g. write scope violations, output limit overflows, or audit integrity failures [all UNVERIFIED - not read in allowed slices]) must **NEVER** be allow-listed.
   4. **Pre-launch and in-flight paths unchanged**:
      - The `_PRELAUNCH_REPAIR_REFUSALS` set (`tools/llmtool/llmtool/task_submission_cli.py:7068-7081`) remains untouched and continues to handle pre-launch dispatch and config refusals without requiring execution records.
      - In-flight runner crashes or unconfirmed cleanups continue to return `False` and count.
@@ -118,7 +119,7 @@ Proposal only; not a review or acceptance. Source: main at a863ace18f68216a69d9d
 Per the TEST DATA RULE (Owner #763 A, `skills/role-cards/common-core.md` §4), all test cases must use synthetic, mock fixtures with zero credential-shaped strings. Provider interactions and D6 checker functions must be mocked or monkeypatched.
 
 1. `test_repair_count_opencode_allowlisted_clean_d6_skipped`:
-   - OpenCode run fails with `state='DEVELOPER_OUTCOME_UNKNOWN'`, `error_code='OPENCODE_PROVIDER_FAILED'`.
+   - OpenCode run fails with `state='DEVELOPER_OUTCOME_UNKNOWN'`, allow-listed code `error_code='OPENCODE_PROVIDER_FAILED'`.
    - `execution` dict has `cleanup_status='CONFIRMED'`, `artifact=None`, `artifact_sha256=None`.
    - `d6_unchanged(source_sha)` returns `True`.
    - Assert: `_launched_run_did_no_work` returns `True`; run is not counted against repair cap.
@@ -137,7 +138,7 @@ Per the TEST DATA RULE (Owner #763 A, `skills/role-cards/common-core.md` §4), a
    - Assert: `_launched_run_did_no_work` returns `False`; run is counted against repair cap.
 
 5. `test_repair_count_gw_agent_allowlisted_clean_d6_skipped`:
-   - gw-agent run fails with `state='DEVELOPER_UNAVAILABLE'`, allow-listed candidate `error_code='DEVELOPER_GW_AGENT_QUOTA_EXHAUSTED'`.
+   - gw-agent run fails with `state='DEVELOPER_UNAVAILABLE'`, allow-listed candidate `error_code='DEVELOPER_GW_AGENT_QUOTA_EXHAUSTED'` (UNVERIFIED candidate code).
    - `execution` dict has `cleanup_status='CONFIRMED'`, `artifact=None`, `artifact_sha256=None`.
    - `d6_unchanged(source_sha)` returns `True`.
    - Assert: `_launched_run_did_no_work` returns `True`; run is not counted against repair cap.
@@ -147,7 +148,7 @@ Per the TEST DATA RULE (Owner #763 A, `skills/role-cards/common-core.md` §4), a
    - Assert: `_launched_run_did_no_work` returns `False`; run is counted against repair cap.
 
 7. `test_repair_count_gw_agent_non_listed_code_counted`:
-   - gw-agent run fails with a non-allowlisted code (e.g. `error_code='DEVELOPER_GW_AGENT_WRITE_SCOPE_VIOLATION'`).
+   - gw-agent run fails with a non-allowlisted code (e.g. `error_code='DEVELOPER_GW_AGENT_UNLISTED_ERROR'`).
    - `cleanup_status='CONFIRMED'`, D6 clean at `source_sha`.
    - Assert: `_launched_run_did_no_work` returns `False`; run is counted against repair cap.
 
