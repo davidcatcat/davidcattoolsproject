@@ -9,7 +9,9 @@ Scope: docs only. This note designs two llmtool changes:
 
 Binding Owner decision: ruling C on #1817. **The disputing PM must never bind or vouch for the arbiter.**
 
-Source read for this note: `f6cb928f` (the Task source commit of this repair). Line numbers refer to that commit. The functions cited here were re-checked at that commit and their lines match. Not every single cited line was re-read. Files outside this Task's read scope are marked UNKNOWN where they matter (`task_store.py`, `review_result.py`, `lineage_counts.py`, `pm_caller.py`, `scripts/d6_worktree_lifecycle.py`, merge-gate code).
+Source read for this note: `208ba7fa` (the Task source commit of this repair). Line numbers refer to that commit. The functions cited here were re-checked at that commit and their lines match. Not every single cited line was re-read. Files outside this Task's read scope are marked UNKNOWN where they matter (`task_store.py`, `review_result.py`, `lineage_counts.py`, `pm_caller.py`, `scripts/d6_worktree_lifecycle.py`, merge-gate code).
+
+`task_store.py` line numbers in §7 PR A1 (`:2083-2097`, `:1477-1487`) come from the formal review of `208ba7fa`. They were **not** re-read here, because that file is outside this Task's read scope. PR A1 re-checks them.
 
 ---
 
@@ -137,13 +139,37 @@ Every refusal before step 7 writes nothing.
     - The session id **only** ever comes from the runtime's own receipt, never from the PM.
 11. **Claim result.**
     - Codex goes to `COMPLETED` with `review_result = {task_id, run_id, contract_digest, head, verdict: 'RULING', outcome, review_text}`.
+    - Today the store accepts only the existing `review_result` fields and the verdicts `PASS`/`FIX`/`FAIL`/`BLOCKED` (the review of `208ba7fa` reports this at `task_store.py:2083-2097`, not re-read here). So this write would be refused. PR A1 extends the schema **only for `purpose: 'dispute_ruling'` claims**: `verdict` may be `RULING` (with `outcome` in `UPHELD`/`WITHDRAWN`, required) or `BLOCKED` (with no `outcome`). Formal claims keep today's exact fields and verdicts, so `RULING` or `outcome` on a formal claim is refused (§7 PR A1).
     - Claude goes to `DISPATCHED`, and its completion is recorded by the existing Claude review-result path. PR A2 must confirm that this path (in `review_result.py`, UNKNOWN here) can carry a ruling body; if not, it adds a ruling branch there.
     - Screened or withheld text records `verdict: 'BLOCKED'` and empty text, as at `:1411-1419`. No ruling follows, and the dispute stays `OPEN`.
     - Any exception records `UNKNOWN` with the session if known, as at `:1431-1491`.
 12. **Post and rule.** For a `COMPLETED` arbiter claim:
-    - llmtool posts the ruling comment itself through `_ensure_verdict_posted` (`review_dispatch.py:1077-1094`), under the existing post receipt and lock. The receipt name is keyed by the arbiter claim (`_verdict_post_name(task_id, claim)`). The caller-posting hand-off (`_reserve_caller_post`, `:1049-1074`) is not used, so the PM never receives ruling text to post.
+    - llmtool posts the ruling comment itself through `_ensure_verdict_posted` (`review_dispatch.py:1077-1094`), under the existing post receipt and lock. The receipt name is already per claim: `_verdict_post_name` is `{task_id}-{reviewer_task}` (`review_dispatch.py:868-875`), and the arbiter claim has its own `reviewer_task`. The caller-posting hand-off (`_reserve_caller_post`, `:1049-1074`) is not used, so the PM never receives ruling text to post.
+    - **Comment matching must change for ruling claims.** A per-claim receipt does not change how comments are matched:
+      - The ruling and the disputed FAIL carry the same binding line, because both bind the same Task, run, contract and head (`_verdict_binding_line`, `review_dispatch.py:997-1015`).
+      - `_find_posted_verdict` (`:1018-1041`) treats any comment by the posting login that contains the binding line, but has a different body, as a conflict. All agents share one login (#926), so the disputed FAIL comment is always such a comment.
+      - `_post_under_lock` then refuses `VERDICT_POST_CONFLICT` (`:1173-1174`) when no exact ruling exists. With the unchanged matcher, the ruling could never be posted.
+    - So `_post_under_lock` chooses the matcher from the claim's own recorded `purpose`. The caller gives no matcher argument, and `purpose` is written by llmtool in step 7.
+      - Formal claims keep `_find_posted_verdict` unchanged.
+      - A `purpose: 'dispute_ruling'` claim uses a new `_find_posted_ruling(comments, login, text, binding_line, *, finding_id, pr, head)`. The finding, PR and head come from the claim's `dispute` and `head_sha`, never from model text.
+    - `_find_posted_ruling` first selects the **bound ruling-shaped** comments. Each of these:
+      - is by the posting login;
+      - carries the binding line as a whole line;
+      - has a `dispute_ruling` marker line or any `Ruling: ` line.
+    - Each selected comment then falls into one of three cases:
+      - **Another finding.** It has exactly one `Ruling:` line, that line parses, and it names another finding, PR or head. It is outside the identity and is ignored.
+      - **This finding.** It has exactly one `Ruling:` line, that line parses, and it names this finding, PR and head. It is in the **ruling identity**.
+      - **Unclear.** Its `Ruling:` line cannot be parsed, it has none, or it has more than one. It counts as a conflict (fail-closed).
+
+      Within the ruling identity, `_find_posted_verdict`'s duplicate and conflict checks stay as they are:
+      - a body byte-equal to `text` is the match;
+      - a second exact match is `VERDICT_POST_DUPLICATE`;
+      - a different body is `VERDICT_POST_CONFLICT`.
+    - Bound comments outside the identity are neither a match nor a conflict for the ruling post. These are the disputed FAIL, any other `review_verdict` comment, and rulings on other findings.
+    - Formal posting is unchanged. `_find_posted_verdict` still treats a ruling comment at the head as a conflict. Today, a later formal verdict at the same head already conflicts with the disputed FAIL comment, so the ruling comment adds no new refusal case.
     - The evidence comment id is the one llmtool's own receipt records, not a URL from the PM. Only a post result of `POSTED` with `verified: True`, or `ALREADY_POSTED`, that carries an integer `comment_id` (`review_dispatch.py:1133-1134`, `:1166-1172`, `:1195-1199`) counts.
-    - `IN_PROGRESS`, `POSTED_UNVERIFIED`, a result without a comment id, or a post failure (`VERDICT_POST_*`) reports `ARBITER_POST_PENDING` and writes no ruling. The dispute stays `OPEN`, and a later `arbitrate` replays step 12 under the same receipt (§2.4). It never posts a second time.
+    - `IN_PROGRESS`, `POSTED_UNVERIFIED`, a result without a comment id, or any other post failure (`VERDICT_POST_*`) reports `ARBITER_POST_PENDING` and writes no ruling. The dispute stays `OPEN`, and a later `arbitrate` replays step 12 under the same receipt (§2.4). It never posts a second time.
+    - `VERDICT_POST_CONFLICT` or `VERDICT_POST_DUPLICATE` within the ruling identity reports `DISPUTE_RULING_POST_CONFLICT` and writes no ruling. The dispute stays `OPEN`, and the PM reports it to the Owner. A replay re-lists the comments and refuses again while the conflict remains. It never posts over a conflict.
     - llmtool builds `evidence_ref` itself as the PR comment URL of the trusted slug (`_dispute_repository`, `task_submission_cli.py:2468-2481`), the PR and that comment id. The URL must pass `valid_review_dispute_ref`, as at `:2491`. The existing refusal of an `evidence_ref` equal to the entry's own (`:2831-2832`) stays.
     - llmtool then runs the existing verification as one internal function `_dispute_rule_verified(...)` factored out of `dispute_rule`: freshness (`:2842-2852`), `_dispute_arbiter_registration`, `_dispute_ruling_claim` and `_dispute_ruling_comment`. The checks stay as they are, with one addition and one change:
       - **Addition:** the claim found must be the entry's own `arbiter_claim` (same `reviewer_task` and `version`) with `purpose: 'dispute_ruling'`.
@@ -178,7 +204,7 @@ A new strict parser, `parse_ruling(text, *, actor, finding_id, pr, head, binding
 |---|---|
 | `CLAIMED` | becomes `UNKNOWN` (outcome uncertain; never replayed) |
 | `DISPATCHED` | reports `ARBITER_PENDING`; no write |
-| `COMPLETED`, not yet ruled | step 12 (post once under receipt, verify, rule); no usable comment id reports `ARBITER_POST_PENDING`, no write |
+| `COMPLETED`, not yet ruled | step 12 (post once under receipt, verify, rule); no usable comment id reports `ARBITER_POST_PENDING`, a conflict or duplicate in the ruling identity reports `DISPUTE_RULING_POST_CONFLICT`; no write in either case |
 | `COMPLETED`, `BLOCKED` | reports `DISPUTE_RULING_WITHHELD`; dispute stays `OPEN` |
 | `UNKNOWN` | reports `ARBITER_OUTCOME_UNKNOWN`; dispute stays `OPEN` |
 
@@ -202,6 +228,12 @@ The `RULED` entry's `ruling` dict keeps today's keys (`task_submission_cli.py:28
 - `comment_id`: from llmtool's own post receipt;
 - `contract_digest`, `run_id`.
 
+Today the store requires the exact existing `ruling` keys (`_valid_review_dispute_ruling`; the review of `208ba7fa` reports it at `task_store.py:1477-1487`, not re-read here). So a `RULED` write with these keys would be refused. PR A1 extends that validator to accept exactly one of two key sets:
+
+- today's keys (existing manually ruled entries);
+- today's keys plus all of the keys above, with `path: 'arbitrate'`.
+
+Both sets are strictly typed (digests are 64 hex, `comment_id` is a positive non-bool int). Any other key, a partial set or another `path` is refused. A3 writes only the `arbitrate` set. Whether the store can also refuse a *new* write of the legacy set is UNKNOWN here. A3 retires the only writer of that shape (§2.5).
 Each dispute entry gets an append-only `history` list. Every transition appends one event:
 
 ```
@@ -300,7 +332,8 @@ The replacement Task is not written. It finds the old dispute through `continues
 |---|---|
 | **Forged session.** PM or another agent presents a session of its choosing. | No option accepts a session. The session comes only from the runtime receipt (`thread.started` / `actual_session_id`), and `_bind_d6` binds it. `_dispute_arbiter_registration` requires the registration's `native_session_id` to equal it (`:2561-2563`). Developer sessions and the first-review session are excluded (`:2564-2571`, `:2850`). |
 | **Forged Reviewer D6.** A D6 created by hand at the head. | llmtool generates `reviewer_task` at claim time and records it on the entry before the D6 exists. Verification uses only that id; any other D6 is never consulted. |
-| **Forged evidence comment.** All agents share one GitHub login (#926), so someone posts a byte-equal comment. | The comment id comes from llmtool's own post receipt, not a URL argument. The poster's duplicate check (`_find_posted_verdict`, `review_dispatch.py:1018-1041`) refuses a second exact copy. `_dispute_ruling_comment` still requires an unedited comment posted after `opened_at`. |
+| **Forged evidence comment.** All agents share one GitHub login (#926), so someone posts a byte-equal comment, or a different ruling for the same finding. | The comment id comes from llmtool's own post receipt, not a URL argument. Within the ruling identity (§2.2 step 12), `_find_posted_ruling` keeps the poster's duplicate and conflict checks (as in `_find_posted_verdict`, `review_dispatch.py:1018-1041`). A second exact copy, or a different ruling-shaped comment for the same finding, PR and head, refuses `DISPUTE_RULING_POST_CONFLICT`. `_dispute_ruling_comment` still requires an unedited comment posted after `opened_at`. |
+| **Disputed FAIL blocks the ruling post.** The FAIL and the ruling share one binding line and one login. | The ruling matcher is chosen from the claim's recorded `purpose`, never from a caller argument. It ignores bound comments outside the ruling identity: the disputed FAIL, other verdicts, and rulings on other findings. Formal posting keeps `_find_posted_verdict` unchanged. |
 | **Wrong head.** The PR moves between open, launch and ruling. | Live head checked at steps 2, 5, 9 and 12. A move refuses `DISPUTE_STALE`. The entry stays `OPEN` on the old head; the history keeps the arbiter claim. |
 | **Replay of an old ruling.** A ruling from another dispute, PR, Task or run. | The ruling header binds finding, PR and head. The binding line binds task, run and contract. The claim binds `dispute.{pr, finding_id, head_sha, review_version}`. One arbiter claim per entry; `RULED` is terminal. |
 | **Replay of `arbitrate`.** It is called twice. | The second call follows the recorded claim (§2.4). A CAS conflict on `record_sha256` refuses the loser before any D6 or launch. |
@@ -325,7 +358,8 @@ The replacement Task is not written. It finds the old dispute through `continues
   - rules from `main` unreadable;
   - dispute text unreadable, edited, created after `opened_at`, screened out or too large;
   - claim CAS conflict; D6 create failure; launch failure; bind failure or timeout;
-  - ruling output invalid or withheld; post receipt unavailable, in progress, unverified or without a comment id; any verification refusal;
+  - ruling output invalid or withheld; post receipt unavailable, in progress, unverified or without a comment id; a conflict or duplicate within the ruling identity, or an unparsable ruling-shaped bound comment; any verification refusal;
+  - store refusal of the arbiter claim's `RULING` result or of the `arbitrate` ruling evidence (A1 schema missing or not matched);
   - arbiter claim without a recorded `reviewer`, or a ruling marker actor that differs from it;
   - Reviewer D6 `result_sha` not equal to the disputed head; generated Reviewer Task or session failing the store's argument shape.
 
@@ -360,11 +394,31 @@ Merge order: A1, A1b, A2 (and A2b if needed), A3. B1 needs only A1. A2 must not 
 
 Files:
 
-- `tools/llmtool/llmtool/task_store.py`: `purpose`/`dispute`/`reviewer` keys on `review_dispatch_claim` (`reviewer` allowed only with `purpose: 'dispute_ruling'`); `arbiter_claim` and append-only `history` on dispute entries; the terminal `SUPERSEDED` state and its `superseded` key for B1, so B1 stays at four files.
+- `tools/llmtool/llmtool/task_store.py`, all store changes that A2, A3 and B1 need, so none of them touches this file:
+  - `purpose`/`dispute`/`reviewer` keys on `review_dispatch_claim`. `reviewer` is allowed only with `purpose: 'dispute_ruling'`, and only as `claude-reviewer` or `codex-reviewer`.
+  - **Arbiter `review_result`** (§2.2 step 11). The review of `208ba7fa` reports the validator at `task_store.py:2083-2097`; A1 re-checks this. On a `purpose: 'dispute_ruling'` claim only, `verdict` may be `RULING`, with a required `outcome` in `UPHELD`/`WITHDRAWN`. It may also be `BLOCKED`, with no `outcome` and empty `review_text`. All other fields stay exactly as today. On a formal claim, `RULING` or any `outcome` key is refused, and today's exact fields and `PASS`/`FIX`/`FAIL`/`BLOCKED` stay.
+  - **`RULED` evidence** (§2.6). The review of `208ba7fa` reports `_valid_review_dispute_ruling` at `task_store.py:1477-1487`; A1 re-checks this. The validator accepts exactly today's key set, or today's set plus the `arbitrate` evidence keys with `path: 'arbitrate'`, strictly typed.
+  - `arbiter_claim` and append-only `history` on dispute entries.
+  - The terminal `SUPERSEDED` state and its `superseded` key, for B1.
 - `tools/llmtool/tests/test_dispute_store_schema.py`.
 
-Tests:
+Tests. These go through the real `TaskStore` write and read path (a temporary store directory, no mock of the store). Ids and digests are fixed placeholder shapes.
 
+- **Round trip, arbiter result.** A `purpose: 'dispute_ruling'` claim moves `CLAIMED` → `COMPLETED` with `review_result.verdict: 'RULING'` and `outcome: 'UPHELD'`, then again with `WITHDRAWN`. Each is written, read back and equal. A withheld `BLOCKED` result with empty text and no `outcome` is accepted and read back too.
+- **Refusals, arbiter result.** The store refuses each of these and keeps the stored record unchanged:
+  - `RULING` without `outcome`;
+  - `outcome` outside `UPHELD`/`WITHDRAWN`;
+  - `outcome` on `BLOCKED`;
+  - an extra `review_result` key;
+  - `RULING` or `outcome` on a formal claim (no `purpose`).
+- **Formal unchanged.** A formal claim with each of `PASS`/`FIX`/`FAIL`/`BLOCKED` still round-trips exactly as today.
+- **Round trip, `RULED` evidence.** An entry moves `OPEN` → `RULED` with the full `arbitrate` key set and is read back equal. An existing entry with today's exact key set still validates.
+- **Refusals, `RULED` evidence.** The store refuses:
+  - a partial `arbitrate` set;
+  - an unknown extra key;
+  - `path` other than `'arbitrate'`;
+  - a non-64-hex `review_text_sha256`, `claim_sha256` or `rules_sha256`;
+  - a non-int or bool `comment_id`.
 - The store refuses a `history` that is shortened or rewritten, an unknown `purpose`, a `reviewer` key on a claim without `purpose: 'dispute_ruling'`, and a `dispute` key without a 64-hex `dispute_text_sha256`.
 - The store accepts `SUPERSEDED` only with a well-formed `superseded` dict and no `ruling` key, and refuses any change to a `RULED` or `SUPERSEDED` entry.
 
@@ -406,6 +460,7 @@ Tests:
 - The arbiter Reviewer D6 is created at the disputed head with the chosen Reviewer key. Its registration `result_sha` equals that head, which pins the §8 point either way.
 - A head move before launch refuses `DISPUTE_STALE` with no launch.
 - The session recorded is the one the injected runtime returned, and bind is called with it.
+- A Codex arbiter run (injected `codex_runner`) is stored through the real `TaskStore` as `COMPLETED`, with `verdict: 'RULING'` and the parsed `outcome`. This relies on the A1 schema, and A2 does not merge before A1.
 - A ruling with the wrong actor, finding, head or binding line refuses `DISPUTE_RULING_OUTPUT_INVALID`.
 - A screen refusal (monkeypatched `_screen_text`) on the ruling records `BLOCKED`, and the dispute stays `OPEN`.
 - The dispute text comment (injected `github_get`) that is edited, created after `opened_at`, or refused by a monkeypatched `_screen_text` refuses before any write, D6 or launch. A valid one has its digest on the stored claim, and the rendered prompt carries that exact text inside the untrusted fence.
@@ -415,7 +470,7 @@ Tests:
 Files:
 
 - `tools/llmtool/llmtool/task_submission_cli.py`: `_dispute_rule_verified`; step 12; `rule` refuses `DISPUTE_RULE_MANUAL_RETIRED`; `ruling` evidence digests.
-- `tools/llmtool/llmtool/review_dispatch.py`: post receipt keyed by arbiter claim; returns comment id.
+- `tools/llmtool/llmtool/review_dispatch.py`: `_find_posted_ruling`; `_post_under_lock` picks the matcher from the claim's recorded `purpose` (§2.2 step 12); the post result returns the comment id. `_find_posted_verdict` is not changed.
 - `tools/llmtool/tests/test_dispute_arbitrate_rule.py`.
 - `tools/llmtool/tests/test_review_dispute.py` (existing dispute tests, if present, updated for retirement only, with no check weakened). If that file has another name, the PR names it; UNKNOWN here.
 
@@ -428,7 +483,10 @@ Tests:
 - The `evidence_ref` passed to verification is built from the trusted slug and the receipt comment id. The PM-supplied value is never consulted.
 - The generated `reviewer_task` and the injected runtime session pass the existing `D6_TASK_ID` / `valid_review_dispute_session` checks. The test pins the shape and keeps the check.
 - `rule` with any arguments refuses `DISPUTE_RULE_MANUAL_RETIRED` and writes nothing.
-- A duplicate exact comment refuses.
+- **Disputed FAIL present.** The injected `comment_lister` already returns, by the same login, the disputed FAIL comment with the same binding line. It also returns a `review_verdict` comment of another version and a ruling on another finding at the same head. The ruling is posted once (injected `comment_poster` called once), the receipt records its comment id, and `RULED` is written. A replay with the posted ruling now in the list returns `ALREADY_POSTED` with the same id and posts nothing.
+- **Conflict within the ruling identity.** The list already holds, by the same login, a different ruling-shaped comment for the same finding, PR and head (or an unparsable one). This refuses `DISPUTE_RULING_POST_CONFLICT`, the poster is never called, and nothing is written.
+- **Duplicate within the ruling identity.** Two exact copies of the ruling in the list refuse `DISPUTE_RULING_POST_CONFLICT`, and nothing is written.
+- **Formal matcher unchanged.** A formal claim posted with the same list still refuses `VERDICT_POST_CONFLICT`, exactly as today. Passing a ruling-shaped list for a formal claim does not switch the matcher.
 - An edited comment, or one posted before `opened_at`, refuses.
 - A Developer session, the first-review session, or a D6 other than the claimed `reviewer_task` refuses.
 - A head move between completion and ruling refuses `DISPUTE_STALE`.
@@ -469,4 +527,5 @@ Files: `CLAUDE.md`, `AGENTS.md`, `skills/ai-team-delivery/pm-continuation.md`. T
 - Which readers of `review_dispatch_claim` in `review_result.py` and merge-gate code select a claim by version (UNKNOWN; out of scope; A1b must cover every one before A2 merges).
 - Which merge-gate code reads `review_disputes` (UNKNOWN; B1 must cover every reader).
 - Whether a Reviewer D6 made by `_create_d6` records `result_sha` equal to its `--base-sha` (UNKNOWN; `d6_worktree_lifecycle.py` is out of scope; A2 pins it, and any lifecycle change is a separate PR).
+- The exact `task_store.py` validators for `review_result` and for the `ruling` dict, and their lines (`:2083-2097`, `:1477-1487` as reported by the review of `208ba7fa`; not re-read here, because the file is out of scope). A1 re-checks them and extends them as §7 PR A1 states.
 - Whether `'reviewer-' + 20 hex` matches `D6_TASK_ID` and runtime session ids pass `valid_review_dispute_session` (UNKNOWN; `task_store.py` is out of scope; A3 pins both; a needed change only widens a pattern to the exact generated shape, in its own reviewed PR).
