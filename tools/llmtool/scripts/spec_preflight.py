@@ -26,6 +26,18 @@ from llmtool.task_submission_cli import (  # noqa: E402
 REPAIR_ROOM_MAX_ACCEPTANCE = 15
 
 
+def check_ascii(spec: dict[str, Any]) -> list[str]:
+    """#2099: gw-agent copies non-ASCII text unreliably; fixed labels of fields that have any."""
+    if spec.get("provider") != "gw-agent":
+        return []
+    fields = [("goal", spec.get("goal"))]
+    fields += [(f"acceptance[{i}]", item) for i, item in enumerate(spec.get("acceptance") or [])]
+    edits = spec.get("edits") if isinstance(spec.get("edits"), list) else []
+    fields += [(f"edits[{i}]", json.dumps(edit, ensure_ascii=False)) for i, edit in enumerate(edits)]
+    return [f"{label}_non_ascii" for label, value in fields
+            if isinstance(value, str) and not value.isascii()]
+
+
 def check(spec: dict[str, Any]) -> list[str]:
     """Return fixed failure labels; never include untrusted field values."""
     failures: list[str] = []
@@ -269,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
         print("SPEC_PREFLIGHT_INVALID")
         return 2
 
-    failures = check(spec)
+    failures = check(spec) + check_ascii(spec)
     if failures:
         print("SPEC_PREFLIGHT_FAIL:" + ",".join(failures))
         return 1
