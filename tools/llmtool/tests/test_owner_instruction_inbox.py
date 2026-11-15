@@ -36,6 +36,7 @@ NOT_ACKABLE = 'OWNER_INBOX_NOT_ACKABLE'
 
 QUEUED, SEEN, ACKED, REVOKED = 'QUEUED', 'SEEN', 'ACKED', 'REVOKED'
 EXPIRED, REQUESTED, REVOKE_ACKED = 'EXPIRED', 'REVOKE_REQUESTED', 'REVOKE_ACKED'
+COMPACTED = 'COMPACTED'
 NOW = 1_000_000
 DAY = 86_400
 TEXT = 'please run the report'
@@ -243,6 +244,8 @@ class ArgumentTests(InboxTestCase):
                                 TEXT, NOW)
                 self.assertCode(ARGUMENT_INVALID, oi.status, path, 'ops', NOW)
                 self.assertCode(ARGUMENT_INVALID, oi.set_enabled, path, True)
+                self.assertCode(ARGUMENT_INVALID, oi.prune_tombstones, path,
+                                0)
 
     def test_alias_pattern(self):
         for alias in ('a', 'ops', 'a1', 'a_b-c', 'z' + 'a' * 31):
@@ -313,6 +316,7 @@ class MissingTests(InboxTestCase):
             (oi.revoke, (self.path, 'ops', code(), NOW)),
             (oi.set_enabled, (self.path, True)),
             (oi.add, (self.path, 'ops', 1, TEXT, NOW)),
+            (oi.prune_tombstones, (self.path, 0)),
         ]
         for func, args in calls:
             with self.subTest(func=func.__name__):
@@ -518,9 +522,10 @@ class AddTests(InboxTestCase):
             oi.ack(self.path, first['code'], NOW)
             self.add(update_id=2, now=NOW + 1)
             result = self.assertNoWrite(self.add, update_id=1, now=NOW + 2)
-            self.assertEqual(result, {'code': first['code'], 'state': ACKED,
-                                      'created': False})
+            self.assertEqual(result, {'code': first['code'],
+                                      'state': COMPACTED, 'created': False})
             self.assertEqual(self.read_doc()['tombstones'], [ident(update_id=1)])
+            self.assertNotIn(COMPACTED, oi.STATES)
 
     def test_history_limit_refuses_compaction(self):
         with mock.patch.object(oi, 'MAX_ENTRIES', 2), \
@@ -783,6 +788,90 @@ class ReadTests(InboxTestCase):
         self.assertCode(NOT_FOUND, oi.status, self.path, 'ops', NOW + 2,
                         'f' * 12)
         self.assertEqual(oi.status(self.path, 'missing', NOW + 2), [])
+
+
+class DeferredStoreTests(InboxTestCase):
+    """#1160 deferred items: expired peek, tombstone pruning, COMPACTED."""
+
+    def setUp(self):
+        super().setUp()
+        self.init()
+
+    def seed_tombstones(self, count):
+        ids = [ident('ops', number) for number in range(1, count + 1)]
+        self.write_raw(document([], ids))
+        return ids
+
+    def test_peek_include_expired_true_and_false(self):
+        first = self.add(update_id=1, now=NOW)
+        old = self.add(update_id=2, now=NOW - DAY)
+        self.assertEqual([item['code'] for item in oi.peek(self.path, NOW)],
+                         [first['code']])
+        self.assertEqual(oi.peek(self.path, NOW, include_expired=True), [
+            {'code': old['code'], 'alias': 'ops',
+             'received_at': NOW - DAY, 'state': EXPIRED, 'text': TEXT},
+            {'code': first['code'], 'alias': 'ops', 'received_at': NOW,
+             'state': QUEUED, 'text': TEXT}])
+        self.assertNoWrite(oi.peek, self.path, NOW, include_expired=True)
+
+    def test_peek_include_expired_must_be_bool(self):
+        for value in (1, 0, 'true', 'yes', None, [], 1.0):
+            with self.subTest(value=repr(value)):
+                self.assertCode(ARGUMENT_INVALID, oi.peek, self.path, NOW,
+                                value)
+
+    def test_prune_keep_zero_removes_all_tombstones(self):
+        self.seed_tombstones(3)
+        self.assertEqual(oi.prune_tombstones(self.path, 0),
+                         {'removed': 3, 'kept': 0})
+        self.assertEqual(self.read_doc()['tombstones'], [])
+
+    def test_prune_partial_keeps_the_newest_tombstones(self):
+        ids = self.seed_tombstones(3)
+        self.assertEqual(oi.prune_tombstones(self.path, 2),
+                         {'removed': 1, 'kept': 2})
+        self.assertEqual(self.read_doc()['tombstones'], ids[-2:])
+
+    def test_prune_above_the_count_writes_nothing(self):
+        ids = self.seed_tombstones(3)
+        result = self.assertNoWrite(oi.prune_tombstones, self.path, 5)
+        self.assertEqual(result, {'removed': 0, 'kept': 3})
+        self.assertEqual(self.read_doc()['tombstones'], ids)
+
+    def test_prune_keep_must_be_a_bounded_int(self):
+        self.seed_tombstones(1)
+        for value in (-1, oi.MAX_TOMBSTONES + 1, True, False, 1.0, '2', None):
+            with self.subTest(value=repr(value)):
+                self.assertNoWrite(self.assertCode, ARGUMENT_INVALID,
+                                   oi.prune_tombstones, self.path, value)
+
+    def test_prune_leaves_entries_untouched(self):
+        first = self.add(update_id=11, now=NOW)
+        self.seed_tombstones(2)
+        data = self.read_doc()
+        data['entries'] = [entry(update_id=11, received_at=NOW)]
+        self.write_raw(json.dumps(data).encode('utf-8'))
+        self.assertEqual(oi.prune_tombstones(self.path, 1),
+                         {'removed': 1, 'kept': 1})
+        self.assertEqual(self.read_doc()['entries'],
+                         [entry(update_id=11, received_at=NOW)])
+        self.assertEqual(oi.peek(self.path, NOW), [
+            {'code': first['code'], 'alias': 'ops', 'received_at': NOW,
+             'state': QUEUED, 'text': TEXT}])
+
+    def test_resend_of_compacted_id_reports_compact_until_pruned(self):
+        with mock.patch.object(oi, 'MAX_ENTRIES', 1):
+            first = self.add(update_id=1)
+            oi.ack(self.path, first['code'], NOW)
+            self.add(update_id=2, now=NOW + 1)
+        result = self.assertNoWrite(self.add, update_id=1, now=NOW + 2)
+        self.assertEqual(result, {'code': first['code'],
+                                  'state': COMPACTED, 'created': False})
+        self.assertEqual(oi.prune_tombstones(self.path, 0),
+                         {'removed': 1, 'kept': 0})
+        # Once pruned the id is unknown again, so only the Telegram cursor
+        # offset and the 120 s window keep the resend out.
+        self.assertTrue(self.add(update_id=1, now=NOW + 3)['created'])
 
 
 class ChangedFileTests(InboxTestCase):

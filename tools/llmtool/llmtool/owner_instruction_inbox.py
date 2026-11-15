@@ -15,7 +15,9 @@ fsync under one exclusive flock on the directory from load through replace;
 it replaces only the loaded identity and is skipped when nothing changed.
 now is a caller int and no clock is read here. At most 200 entries, 20
 unacked, 1000 tombstones and 1 MiB of state; old terminal entries compact
-to tombstones. An error holds one fixed code, never a path, text or input.
+to tombstones. A resend whose id is only in tombstones reports COMPACTED,
+a result-only state that is never stored or accepted on load. An error holds
+one fixed code, never a path, text or input.
 
 Accident guard against same-user agents, not a security boundary. POSIX only;
 standard library and .errors only; no network, CLI or TaskStore.
@@ -33,11 +35,11 @@ import uuid
 from .errors import LLMToolError
 
 __all__ = [
-    'ERROR_CODES', 'EXPIRY_SECONDS', 'MAX_ENTRIES', 'MAX_STATE_BYTES',
-    'MAX_STATUS_LIMIT', 'MAX_TEXT', 'MAX_TOMBSTONES', 'MAX_UNACKED',
-    'MAX_UPDATE_ID', 'SCHEMA_VERSION', 'STATES', 'OwnerInboxError', 'ack',
-    'add', 'init_state', 'instruction_id', 'mark_seen', 'peek', 'revoke',
-    'set_enabled', 'status',
+    'COMPACTED', 'ERROR_CODES', 'EXPIRY_SECONDS', 'MAX_ENTRIES',
+    'MAX_STATE_BYTES', 'MAX_STATUS_LIMIT', 'MAX_TEXT', 'MAX_TOMBSTONES',
+    'MAX_UNACKED', 'MAX_UPDATE_ID', 'SCHEMA_VERSION', 'STATES',
+    'OwnerInboxError', 'ack', 'add', 'init_state', 'instruction_id',
+    'mark_seen', 'peek', 'prune_tombstones', 'revoke', 'set_enabled', 'status',
 ]
 
 SCHEMA_VERSION = 1
@@ -55,6 +57,8 @@ QUEUED, SEEN, ACKED, REVOKED, EXPIRED, REVOKE_REQUESTED, REVOKE_ACKED = (
     'REVOKE_ACKED')
 STATES = frozenset((QUEUED, SEEN, ACKED, REVOKED, EXPIRED,
                     REVOKE_REQUESTED, REVOKE_ACKED))
+# Result only: a compacted id is never stored, so _validate and STATES omit it.
+COMPACTED = 'COMPACTED'
 _LIVE = frozenset((QUEUED, SEEN, REVOKE_REQUESTED))
 _DONE = frozenset((ACKED, REVOKED, EXPIRED, REVOKE_ACKED))
 
@@ -479,7 +483,7 @@ def add(path, alias, update_id, text, now):
         if current is not None:
             return {'code': code, 'state': current['state'], 'created': False}
         if ident in state['tombstones']:
-            return {'code': code, 'state': ACKED, 'created': False}
+            return {'code': code, 'state': COMPACTED, 'created': False}
         live = sum(1 for entry in state['entries'] if entry['state'] in _LIVE)
         _require(live < MAX_UNACKED, FULL)
         entries = state['entries']
@@ -497,12 +501,18 @@ def add(path, alias, update_id, text, now):
     return {'code': code, 'state': QUEUED, 'created': True}
 
 
-def peek(path, now):
-    """Return live entries oldest first; never writes and never includes ids."""
+def peek(path, now, include_expired=False):
+    """Return live entries oldest first; never writes and never includes ids.
+
+    With ``include_expired`` True the EXPIRED entries join the same
+    oldest-first list with the same fields; the default stays live only.
+    """
     path = _state_path(path)
     _require(_is_now(now))
+    _require(type(include_expired) is bool)
     state, _unused = _load(path)
     _expire(state, now)
+    wanted = _LIVE | frozenset((EXPIRED,)) if include_expired else _LIVE
     return [{
         'code': entry['id'][:12],
         'alias': entry['alias'],
@@ -510,7 +520,29 @@ def peek(path, now):
         'state': entry['state'],
         'text': '' if entry['state'] == REVOKE_REQUESTED else entry['text'],
     } for _index, entry in _ordered(state['entries'])
-        if entry['state'] in _LIVE]
+        if entry['state'] in wanted]
+
+
+def prune_tombstones(path, keep):
+    """Keep only the newest ``keep`` tombstones and report the counts.
+
+    ``keep`` is an int 0..MAX_TOMBSTONES and bool is refused. The newest
+    tombstones are the end of the stored list; entries are untouched and a
+    prune that removes nothing writes nothing. Replay protection after a
+    prune rests on the Telegram cursor offset and the 120 s window: a pruned
+    id is no longer known, so only the offset and the window keep it out.
+    """
+    path = _state_path(path)
+    _require(type(keep) is int and 0 <= keep <= MAX_TOMBSTONES)
+    with _writer_lock(path, STATE_MISSING) as lock:
+        state, identity = _load(path)
+        tombstones = state['tombstones']
+        removed = len(tombstones) - keep
+        if removed <= 0:
+            return {'removed': 0, 'kept': len(tombstones)}
+        del tombstones[:removed]
+        _store(path, identity, state, lock)
+    return {'removed': removed, 'kept': keep}
 
 
 def mark_seen(path, code, now):

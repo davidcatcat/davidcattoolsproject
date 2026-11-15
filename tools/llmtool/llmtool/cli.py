@@ -38,6 +38,7 @@ from .roles_cli import add_roles_parser, run_roles
 from .dispatch_check import add_dispatch_check_parser, run_dispatch_check
 from .board_check import add_board_check_parser, run_board_check
 from .trust_cli import add_trust_parser, run_trust
+from .owner_inbox_cli import add_owner_inbox_parser, run_owner_inbox
 
 
 TASK_ACTIONS = {
@@ -193,6 +194,7 @@ def parser_for_cli():
     from .mac_full_due import add_ci_parser
     add_ci_parser(sub)
     add_trust_parser(sub)
+    add_owner_inbox_parser(sub)
     validate = sub.add_parser("validate", help="Assess commands or Context Packets offline; never execute")
     actions = validate.add_subparsers(dest="action", required=True)
     command = actions.add_parser("command", help="Classify a suggested command as data")
@@ -590,6 +592,8 @@ def main(argv=None):
             return run_ci(args)
         if args.command == 'trust':
             return run_trust(args)
+        if args.command == 'owner-inbox':
+            return run_owner_inbox(args)
         if args.command == 'task':
             task_action = TASK_ACTIONS.get(args.action)
             if task_action is not None:
