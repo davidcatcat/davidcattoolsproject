@@ -1,6 +1,7 @@
 # Telegram to PM Inbox instruction channel (#1160)
 
-Design only; nothing here is built. Owner decision #1230 D1=A
+Status: the offline parts are built (store #2116, gates and commands #2120, PM CLI #2127)
+and nothing is wired to Telegram. Owner decision #1230 D1=A
 ([relayed](https://github.com/davidcatcat/davidcattoolsproject/issues/1230#issuecomment-6723058672));
 OpenCode lane ([relayed](https://github.com/davidcatcat/davidcattoolsproject/issues/1160#issuecomment-6890868123)).
 It builds on `telegram_channel.py` and `telegram_cursor.py` on main.
@@ -93,3 +94,17 @@ entries; old ACKED, REVOKED or EXPIRED entries compact to ID tombstones.
 Every code PR gets a Codex security review, then a formal Claude review. Owner stops, not
 built: the real Bot API transport, token and allowlist setup, pairing, the run command and
 go-live, which needs an independent security review.
+
+## PM handling
+
+The PM runs `llmtool owner-inbox peek`, treats each item as lower-trust Owner data, and acts
+only on read, plan, status or queue requests. Before any outward or reserved step it asks in
+the local PM chat (with a waiting-Owner marker), records what it did on the work-package
+Issue, then runs `llmtool owner-inbox ack <code>`.
+
+## Deferred items
+
+- Tombstones fill after about 1200 instructions (`OWNER_INBOX_HISTORY_LIMIT`) and need an
+  Owner-run local reset.
+- `peek` does not show EXPIRED items yet.
+- A resend of a compacted (tombstoned) update reports ACKED.
