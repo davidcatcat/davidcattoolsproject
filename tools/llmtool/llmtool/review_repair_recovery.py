@@ -201,3 +201,55 @@ def verify_recovery(store, root, repair_task_id, *, executor_task, pr_number):
     check_d6(root, repair, claim, registered_d6=review_repair._registered_d6,
              is_ancestor=task_completion._is_ancestor)
     return claim
+
+
+def recover_unknown_claim(*, store, task_id, executor_task, pr_number, repair_task_id):
+    """Recover one UNKNOWN review repair claim as DISPATCHED under the chain lock.
+
+    The chain lock is the one repair_review holds for its counts and claim. The store
+    write (recover_review_repair_claim) reruns E1-E5 inside its own locked update. A
+    claim already DISPATCHED for this executor and PR returns recovered False with no
+    write. Never calls an adapter, delegate or record_pm, and never creates a Task.
+    """
+    from . import lineage_counts
+    from .task_store import TaskStoreConflict
+    try:
+        task = store.get(task_id)
+    except Exception:
+        task = None
+    if type(task) is not dict or task.get('task_id') != task_id:
+        refuse('REPAIR_RECOVERY_ARGUMENT_INVALID')
+    key = lineage_counts.chain_key(store, task)
+    try:
+        release_chain = lineage_counts.acquire_chain_lock(store, key)
+    except Exception:
+        refuse('REPAIR_CHAIN_LOCK_UNAVAILABLE')
+    try:
+        current = store.get(task_id)
+        if lineage_counts.chain_key(store, current) != key:
+            refuse('REPAIR_CLAIM_UNAVAILABLE')
+        found = [item for item in current.get('review_repair_claims') or ()
+                 if type(item) is dict and item.get('repair_task_id') == repair_task_id]
+        if len(found) == 1 and found[0].get('state') == 'DISPATCHED':
+            # A repeat still passes E1 (fields, root, uniqueness) before it is reported.
+            try:
+                others = [store.get(other_id) for other_id in store.task_ids()]
+            except Exception:
+                refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+            as_unknown = [dict(item, state='UNKNOWN') if item is found[0] else item
+                          for item in current['review_repair_claims']]
+            claim = check_claim(dict(current, review_repair_claims=as_unknown), repair_task_id,
+                                executor_task=executor_task, pr_number=pr_number,
+                                others=others)
+            return {'recovered': False, 'claim': dict(claim, state='DISPATCHED')}
+        try:
+            saved = store.recover_review_repair_claim(
+                task_id, repair_task_id, executor_task=executor_task, pr_number=pr_number,
+                expected_sha256=current['record_sha256'])
+        except TaskStoreConflict:
+            refuse('REPAIR_CLAIM_UNAVAILABLE')
+    finally:
+        release_chain()
+    claim = next(item for item in saved['review_repair_claims']
+                 if item.get('repair_task_id') == repair_task_id)
+    return {'recovered': True, 'claim': dict(claim)}
