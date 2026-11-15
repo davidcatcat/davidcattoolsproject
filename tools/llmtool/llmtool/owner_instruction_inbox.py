@@ -263,10 +263,17 @@ def _validate(data):
                  and type(entry['received_at']) is int
                  and entry['received_at'] >= 0
                  and type(entry['state']) is str and entry['state'] in STATES
-                 and type(entry['text']) is str and ident not in known,
+                 and type(entry['text']) is str
+                 and len(entry['text']) <= MAX_TEXT
+                 and '\x00' not in entry['text']
+                 and ident == instruction_id(entry['alias'], entry['update_id'])
+                 and ident not in known,
                  STATE_CORRUPT)
         known.add(ident)
         result.append(dict(entry))
+    # Codex security v91 (CWE-20): the caps that add() enforces also bind on load.
+    _require(sum(1 for item in result if item['state'] in _LIVE) <= MAX_UNACKED,
+             STATE_CORRUPT)
     return {'schema_version': SCHEMA_VERSION, 'enabled': enabled,
             'entries': result, 'tombstones': list(tombstones)}
 

@@ -338,6 +338,7 @@ class CorruptTests(InboxTestCase):
     def test_invalid_documents_are_corrupt(self):
         too_many_entries = [entry(update_id=n) for n in range(201)]
         too_many_tombstones = [ident('ops', n) for n in range(1001)]
+        too_many_live = [entry(update_id=n) for n in range(21)]
         cases = {
             'empty': b'',
             'bad_json': b'{"schema_version":1,',
@@ -385,6 +386,10 @@ class CorruptTests(InboxTestCase):
             'duplicate_tombstone': document([], [ident('ops', 1)] * 2),
             'too_many_entries': document(too_many_entries),
             'too_many_tombstones': document([], too_many_tombstones),
+            'too_many_live': document(too_many_live),
+            'text_too_long': document([entry(text='x' * 2001)]),
+            'text_nul': document([entry(text='a\x00b')]),
+            'id_mismatch': document([entry(ident_value=ident('ops', 2))]),
         }
         for name, data in cases.items():
             with self.subTest(case=name):
