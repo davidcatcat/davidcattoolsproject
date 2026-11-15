@@ -345,7 +345,7 @@ def _validate_remote_receipt(raw, *, sha, modules):
         return None
     try:
         receipt = json.loads(raw.decode('utf-8'))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, ValueError):
         return None
     if (type(receipt) is not dict or
             set(receipt) not in _RECEIPT_SHAPES):

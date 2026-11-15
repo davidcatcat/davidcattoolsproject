@@ -60,6 +60,12 @@ class ValidatorModuleResultsTests(unittest.TestCase):
         self.assertIsNone(validate(raw(module_results=results(), note='x')))
         self.assertIsNone(validate(raw(note='x')))
 
+    def test_oversized_integer_is_refused_not_raised(self):
+        big = b'9' * 5000
+        self.assertIsNone(validate(b'{"ran_total":' + big + b'}'))
+        data = raw(module_results=results()).replace(b'"ran":2', b'"ran":' + big)
+        self.assertIsNone(validate(data))
+
 
 if __name__ == '__main__':
     unittest.main()
