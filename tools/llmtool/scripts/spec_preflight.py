@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,65 @@ def check_ascii(spec: dict[str, Any]) -> list[str]:
     fields += [(f"edits[{i}]", json.dumps(edit, ensure_ascii=False)) for i, edit in enumerate(edits)]
     return [f"{label}_non_ascii" for label, value in fields
             if isinstance(value, str) and not value.isascii()]
+
+
+_OPEN, _CLOSE = "([{", ")]}"
+_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+
+
+def _ends_inside_open_bracket(line: str) -> bool:
+    """True when a line leaves a bracket open; strings and # comments after a space are skipped."""
+    depth, quote, escaped, prev = 0, None, False, " "
+    for char in line:
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+        elif char in "'\"":
+            quote = char
+        elif char == "#" and prev.isspace():
+            break
+        elif char in _OPEN:
+            depth += 1
+        elif char in _CLOSE:
+            depth = max(depth - 1, 0)
+        prev = char
+    return depth > 0
+
+
+def _quoted_lines(text: str) -> list[str]:
+    """Lines of each JSON string literal in text; specs quote file lines this way."""
+    lines: list[str] = []
+    for match in _JSON_STRING.finditer(text):
+        try:
+            value = json.loads(match.group(0))
+        except ValueError:
+            continue
+        lines.extend(value.split("\n"))
+    return lines
+
+
+def check_open_bracket_ends(spec: dict[str, Any]) -> list[str]:
+    """#2124: gw-agent closes a bracket that a spec line leaves open; fixed labels only.
+
+    It checks each JSON string literal in acceptance items, quoted old and new
+    lines alike, and each line of edits new text. It works line by line, so a
+    line inside a triple-quoted string can be refused; that fails closed.
+    Unquoted acceptance prose is not checked.
+    """
+    if spec.get("provider") != "gw-agent":
+        return []
+    fields = [(f"acceptance[{i}]", item) for i, item in enumerate(spec.get("acceptance") or [])]
+    texts = [(label, _quoted_lines(item)) for label, item in fields if isinstance(item, str)]
+    edits = spec.get("edits") if isinstance(spec.get("edits"), list) else []
+    pairs = [(i, edit) for i, edit in enumerate(edits) if isinstance(edit, dict)]
+    news = [(f"edits[{i}]", edit.get("new")) for i, edit in pairs]
+    texts += [(label, new.split("\n")) for label, new in news if isinstance(new, str)]
+    found = [label for label, lines in texts if any(map(_ends_inside_open_bracket, lines))]
+    return [label + "_open_bracket_line_end" for label in found]
 
 
 def check(spec: dict[str, Any]) -> list[str]:
@@ -281,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
         print("SPEC_PREFLIGHT_INVALID")
         return 2
 
-    failures = check(spec) + check_ascii(spec)
+    failures = check(spec) + check_ascii(spec) + check_open_bracket_ends(spec)
     if failures:
         print("SPEC_PREFLIGHT_FAIL:" + ",".join(failures))
         return 1

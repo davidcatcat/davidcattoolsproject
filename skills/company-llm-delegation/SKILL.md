@@ -126,6 +126,7 @@ Home LLM work grows by a ladder (Owner 2026-11-10, #120). The PM logs every call
 - One contiguous region per Task.
 - In agent mode (gw-agent), name the line ranges to read; never ask for a whole large file. Put new tests in a new file.
 - Keep gw-agent spec text ASCII-only. The home LLM has swapped CJK code points when copying text (#2094); `spec_preflight.py` refuses non-ASCII gw-agent fields (#2099). Write any non-ASCII test value as an escape.
+- No gw-agent spec line may leave a bracket open. The home LLM closes a list that the spec continues on the next line (#2124); `spec_preflight.py` refuses such a line in gw-agent edits and in quoted acceptance lines. Use single-line literals and intermediate variables.
 
 ## Invocation
 
