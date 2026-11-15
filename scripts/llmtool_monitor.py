@@ -4166,7 +4166,7 @@ def _ci_path_class(path: str) -> str:
             return "docs"
         return "runtime"
     if (path.endswith(".md") or path in {"AGENTS.md", "CLAUDE.md"}
-            or path.startswith("skills/") or path.startswith("docs/")):
+            or path.startswith(".claude/skills/") or path.startswith("docs/")):
         return "docs"
     return "other"
 
@@ -4189,7 +4189,7 @@ def _linux_ci_path(path: str) -> bool:
     """A path in llmtool-linux-ci.yml's pull_request paths filter (top-level
     tools/llmtool Markdown is excluded, then included again; *.md is top level)."""
     return (path.startswith(("tools/llmtool/", "tools/ec2-runner/", "tools/safe-git/",
-                             "tools/api-agent-gateway/", "tools/ai-loop/", "skills/", "docs/"))
+                             "tools/api-agent-gateway/", "tools/ai-loop/", ".claude/skills/", "docs/"))
             or path in {".github/workflows/llmtool-linux-ci.yml", "AGENTS.md", "CLAUDE.md"}
             or ("/" not in path and path.endswith(".md")))
 

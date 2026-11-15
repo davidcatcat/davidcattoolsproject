@@ -133,7 +133,7 @@ def markdown_lines(path: Path) -> list[str]:
 
 
 def check_frontmatter(repo_path: str, source: str) -> list[str]:
-    if not re.fullmatch(r"skills/[^/]+/SKILL\.md", repo_path):
+    if not re.fullmatch(r"\.claude/skills/[^/]+/SKILL\.md", repo_path):
         return []
     lines = source.splitlines()
     if not lines or lines[0].strip() != "---":
