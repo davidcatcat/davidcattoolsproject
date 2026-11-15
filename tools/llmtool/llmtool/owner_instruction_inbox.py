@@ -1,23 +1,24 @@
 """Private local Owner instruction inbox store (#1160 PR 2).
 
 One JSON file at a caller-given absolute, normalized path holds owner
-instructions from the phone channel: entries (id, alias, update id, received
-time, state, text), 64-hex id tombstones and one enabled flag. It never holds
-a chat id, bot token, path or other credential.
+instructions: schema_version 1, enabled, entries and tombstones. An entry has
+exactly id (64 lowercase hex), alias ([a-z][a-z0-9_-]{0,31}), update_id
+(int 0..2**63-1), received_at (int >= 0), state (QUEUED, SEEN, ACKED,
+REVOKED, EXPIRED, REVOKE_REQUESTED, REVOKE_ACKED) and text (str).
 
-Rules: only init_state creates the file, only when missing, in a directory
-owned by the user and not group/other writable; load fails closed with
-OWNER_INBOX_STATE_MISSING, _STATE_CORRUPT or _STATE_CHANGED and strict JSON
-(duplicate keys refused, unknown or missing fields refused); every write is
-temp file, fsync, atomic replace and directory fsync, under one exclusive
-flock on the state directory from load through replace, replacing only the
-loaded identity and never writing when nothing changed; now is a caller int
-(no clock here); at most 200 entries, 20 unacked, 1000 tombstones and 1 MiB
-of state; old terminal entries compact to tombstones; an error holds one
-fixed code, never a path, text or input value.
+Only init_state creates the file, only when missing, in a directory owned by
+the user and not group or other writable. Load fails closed (missing,
+corrupt or changed) with strict JSON; duplicate keys, unknown or missing
+fields, wrong types (bool is not int), duplicate ids and an id in tombstones
+are refused. Every write is temp file, fsync, atomic replace and directory
+fsync under one exclusive flock on the directory from load through replace;
+it replaces only the loaded identity and is skipped when nothing changed.
+now is a caller int and no clock is read here. At most 200 entries, 20
+unacked, 1000 tombstones and 1 MiB of state; old terminal entries compact
+to tombstones. An error holds one fixed code, never a path, text or input.
 
-This is an accident guard against same-user agents, not a security boundary.
-POSIX only; standard library and .errors only; no network, no CLI.
+Accident guard against same-user agents, not a security boundary. POSIX only;
+standard library and .errors only; no network, CLI or TaskStore.
 """
 
 import contextlib
@@ -55,7 +56,7 @@ QUEUED, SEEN, ACKED, REVOKED, EXPIRED, REVOKE_REQUESTED, REVOKE_ACKED = (
 STATES = frozenset((QUEUED, SEEN, ACKED, REVOKED, EXPIRED,
                     REVOKE_REQUESTED, REVOKE_ACKED))
 _LIVE = frozenset((QUEUED, SEEN, REVOKE_REQUESTED))
-_TERMINAL = frozenset((ACKED, REVOKED, EXPIRED, REVOKE_ACKED))
+_DONE = frozenset((ACKED, REVOKED, EXPIRED, REVOKE_ACKED))
 
 STATE_MISSING = 'OWNER_INBOX_STATE_MISSING'
 STATE_EXISTS = 'OWNER_INBOX_STATE_EXISTS'
@@ -109,8 +110,6 @@ def _require(ok, code=ARGUMENT_INVALID):
         raise _fail(code)
 
 
-# --- argument validation ---------------------------------------------------
-
 def _state_path(path):
     try:
         if isinstance(path, os.PathLike):
@@ -155,8 +154,6 @@ def instruction_id(alias, update_id):
                str(update_id).encode('ascii'))
     return hashlib.sha256(payload).hexdigest()
 
-
-# --- file safety -----------------------------------------------------------
 
 def _check_dir_info(info):
     _require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
@@ -221,13 +218,6 @@ def _discard(temp):
         pass
 
 
-# --- encoding --------------------------------------------------------------
-
-def _empty_state():
-    return {'schema_version': SCHEMA_VERSION, 'enabled': True,
-            'entries': [], 'tombstones': []}
-
-
 def _encode(state):
     payload = json.dumps(state, sort_keys=True, separators=(',', ':'),
                          allow_nan=False, ensure_ascii=True).encode('ascii')
@@ -267,14 +257,14 @@ def _validate(data):
     result = []
     for entry in entries:
         _require(type(entry) is dict and set(entry) == _FIELDS, STATE_CORRUPT)
-        ident, alias, update_id, received_at, state, text = (
-            entry['id'], entry['alias'], entry['update_id'],
-            entry['received_at'], entry['state'], entry['text'])
-        _require(_is_id(ident) and _is_alias(alias)
-                 and _is_update(update_id)
-                 and type(received_at) is int and received_at >= 0
-                 and type(state) is str and state in STATES
-                 and type(text) is str and ident not in known, STATE_CORRUPT)
+        ident = entry['id']
+        _require(_is_id(ident) and _is_alias(entry['alias'])
+                 and _is_update(entry['update_id'])
+                 and type(entry['received_at']) is int
+                 and entry['received_at'] >= 0
+                 and type(entry['state']) is str and entry['state'] in STATES
+                 and type(entry['text']) is str and ident not in known,
+                 STATE_CORRUPT)
         known.add(ident)
         result.append(dict(entry))
     return {'schema_version': SCHEMA_VERSION, 'enabled': enabled,
@@ -289,8 +279,6 @@ def _parse(raw):
         raise _fail(STATE_CORRUPT) from None
     return _validate(data)
 
-
-# --- load and store ----------------------------------------------------------
 
 def _read_bounded(descriptor):
     chunks = []
@@ -415,10 +403,8 @@ def _store(path, identity, state, lock):
             _discard(temp)
 
 
-# --- state helpers -----------------------------------------------------------
-
 def _expire(state, now):
-    """Mark QUEUED or SEEN entries older than 24 h EXPIRED in memory."""
+    """Mark QUEUED or SEEN entries at least 24 h old EXPIRED in memory."""
     for entry in state['entries']:
         if (entry['state'] in (QUEUED, SEEN)
                 and now - entry['received_at'] >= EXPIRY_SECONDS):
@@ -431,17 +417,13 @@ def _ordered(entries):
 
 
 def _find_code(state, code):
-    for entry in state['entries']:
-        if entry['id'][:12] == code:
-            return entry
-    return None
+    return next((entry for entry in state['entries']
+                 if entry['id'][:12] == code), None)
 
 
 def _result(code, entry):
     return {'code': code, 'state': entry['state']}
 
-
-# --- public API ----------------------------------------------------------
 
 def init_state(path):
     """Create an empty, private, enabled state file; refuse if it exists."""
@@ -450,7 +432,8 @@ def init_state(path):
         directory = os.path.dirname(path)
         if os.path.lexists(path):
             raise _fail(STATE_EXISTS)
-        payload = _encode(_empty_state())
+        payload = _encode({'schema_version': SCHEMA_VERSION, 'enabled': True,
+                           'entries': [], 'tombstones': []})
         temp = _temp_path(directory)
         created = False
         try:
@@ -484,18 +467,18 @@ def add(path, alias, update_id, text, now):
         state, identity = _load(path)
         _expire(state, now)
         _require(state['enabled'], DISABLED)
-        current = next((e for e in state['entries'] if e['id'] == ident), None)
+        current = next((entry for entry in state['entries']
+                        if entry['id'] == ident), None)
         if current is not None:
             return {'code': code, 'state': current['state'], 'created': False}
         if ident in state['tombstones']:
-            return {'code': code, 'state': REVOKED, 'created': False}
-        live = sum(1 for entry in state['entries']
-                   if entry['state'] in _LIVE)
+            return {'code': code, 'state': ACKED, 'created': False}
+        live = sum(1 for entry in state['entries'] if entry['state'] in _LIVE)
         _require(live < MAX_UNACKED, FULL)
         entries = state['entries']
         if len(entries) >= MAX_ENTRIES:
-            victim = next((e for _i, e in _ordered(entries)
-                           if e['state'] in _TERMINAL), None)
+            victim = next((entry for _index, entry in _ordered(entries)
+                           if entry['state'] in _DONE), None)
             _require(victim is not None, FULL)
             _require(len(state['tombstones']) < MAX_TOMBSTONES,
                      HISTORY_LIMIT)
@@ -533,7 +516,7 @@ def mark_seen(path, code, now):
         entry = _find_code(state, code)
         _require(entry is not None, NOT_FOUND)
         if entry['state'] == SEEN:
-            return {'code': code, 'state': SEEN}
+            return _result(code, entry)
         _require(entry['state'] == QUEUED, NOT_ACKABLE)
         entry['state'] = SEEN
         _store(path, identity, state, lock)
