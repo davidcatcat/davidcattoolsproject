@@ -221,17 +221,21 @@ class ObserveTest(_StoreCase):
             self.assertEqual(self.quota(worker)['status'], 'UNKNOWN')
 
     def test_reset_at_only_when_provider_reported_for_a_fail(self):
-        reset = self.now + timedelta(hours=2)
-        self.observe('claude', 'CLAUDE_QUOTA_EXHAUSTED', QUOTA, reset_at=wa._stamp(reset))
-        self.assertEqual(self.quota('claude-developer')['fresh_until'], wa._stamp(reset))
-        six = wa._stamp(self.now + wa.FRESH_FOR)
+        reset_2h = self.now + timedelta(hours=2)
+        self.observe('claude', 'CLAUDE_QUOTA_EXHAUSTED', QUOTA, reset_at=wa._stamp(reset_2h))
+        self.assertEqual(self.quota('claude-developer')['fresh_until'],
+                         wa._stamp(self.now + wa.FRESH_FOR))
+        reset_10m = self.now + timedelta(minutes=10)
+        self.observe('claude', 'CLAUDE_QUOTA_EXHAUSTED', QUOTA, reset_at=wa._stamp(reset_10m))
+        self.assertEqual(self.quota('claude-developer')['fresh_until'], wa._stamp(reset_10m))
+        fresh = wa._stamp(self.now + wa.FRESH_FOR)
         for reset_at in (None, 'soon', wa._stamp(self.now - timedelta(hours=1)),
                          self.now + timedelta(days=31)):
             with self.subTest(reset_at=reset_at):
                 self.observe('claude', 'CLAUDE_QUOTA_EXHAUSTED', QUOTA, reset_at=reset_at)
-                self.assertEqual(self.quota('claude-developer')['fresh_until'], six)
-        self.observe('agy', None, AGY_STATUS, reset_at=reset)
-        self.assertEqual(self.quota('agy')['fresh_until'], six)
+                self.assertEqual(self.quota('claude-developer')['fresh_until'], fresh)
+        self.observe('agy', None, AGY_STATUS, reset_at=reset_10m)
+        self.assertEqual(self.quota('agy')['fresh_until'], fresh)
 
     def test_expired_fail_reads_unknown(self):
         self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA,

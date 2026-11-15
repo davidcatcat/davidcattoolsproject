@@ -9,13 +9,16 @@ observation; fresh_quota_fail() reads it back for the delegate gate.
 Observations are evidence only. They never write worker-dispatch.json, never
 re-enable a PAUSED worker and never grant dispatch authority: Owner policy is
 always decided first and separately. One success proves only that request: a
-PASS is fresh for the same bounded window as any other observation.
+PASS is fresh for the same bounded window as any other observation (30 min; a
+provider reset only shortens it).
 """
 
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import re
 
+from .errors import LLMToolError
 from . import worker_dispatch
 
 AVAILABLE = 'AVAILABLE'
@@ -23,7 +26,7 @@ QUOTA_EXHAUSTED = 'QUOTA_EXHAUSTED'
 RATE_LIMITED = 'RATE_LIMITED'
 QUOTA_LAYER = 'quota'
 REFUSAL_CODE = 'WORKER_QUOTA_UNAVAILABLE'
-FRESH_FOR = timedelta(hours=6)
+FRESH_FOR = timedelta(minutes=30)
 MAX_RESET_WINDOW = timedelta(days=30)  # TaskStore WORKER_AVAILABILITY_MAX_AGE_DAYS
 # codex-developer is PAUSED and company-gw is retired: never written.
 NO_WRITE_WORKERS = frozenset(('codex-developer', 'company-gw'))
@@ -116,9 +119,10 @@ def observe(store, record, *, now=None, reset_at=None):
     """Record one outcome as a quota-layer observation; return the result or None.
 
     FAIL for QUOTA_EXHAUSTED/RATE_LIMITED, PASS for AVAILABLE, nothing for None.
-    fresh_until is a provider-reported reset_at when one is given for a FAIL,
-    else observed + 6 h. PAUSED codex-developer and retired company-gw are
-    never written.
+    fresh_until is min(reset, observed + FRESH_FOR) for a FAIL with a valid
+    provider reset, else observed + FRESH_FOR (30 min; a provider reset only
+    shortens it). PASS stays observed + FRESH_FOR. PAUSED codex-developer and
+    retired company-gw are never written.
     """
     worker = worker_key(record)
     result = classify(record)
@@ -128,7 +132,7 @@ def observe(store, record, *, now=None, reset_at=None):
         microsecond=0)
     status = 'PASS' if result == AVAILABLE else 'FAIL'
     reset = _reset_time(reset_at, observed) if status == 'FAIL' else None
-    fresh_until = reset or observed + FRESH_FOR
+    fresh_until = min(reset, observed + FRESH_FOR) if reset is not None else observed + FRESH_FOR
     developer = record['developer']
     digest = hashlib.sha256(json.dumps({
         'task_id': record.get('task_id'), 'assignment_id': developer.get('assignment_id'),
@@ -139,6 +143,41 @@ def observe(store, record, *, now=None, reset_at=None):
         observed_at=_stamp(observed), fresh_until=_stamp(fresh_until),
         source='LOCAL_OBSERVATION', evidence_sha256=digest)
     return result
+
+
+_OWNER_RELAY_URL_RE = re.compile(
+    r'https://github\.com/davidcatcat/davidcattoolsproject/issues/[1-9][0-9]*#issuecomment-[1-9][0-9]*'
+)
+
+
+def record_owner_recovery(store, worker, owner_relay_url, *, now=None):
+    """Record an Owner recovery observation clearing a worker quota refusal.
+
+    Clears a fresh quota FAIL by recording an AUTHORIZED_OPERATION PASS in the
+    TaskStore quota layer, verified against an Owner relay comment URL.
+    Observations are evidence only: this never reads or writes
+    worker-dispatch.json and never overrides an Owner pause.
+    """
+    if worker not in worker_dispatch.WORKERS or worker in NO_WRITE_WORKERS:
+        raise LLMToolError('WORKER_QUOTA_RECOVERY_WORKER_INVALID')
+    if not isinstance(owner_relay_url, str) or not _OWNER_RELAY_URL_RE.fullmatch(owner_relay_url):
+        raise LLMToolError('WORKER_QUOTA_RECOVERY_REF_INVALID')
+    current_time = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(
+        microsecond=0)
+    before = store.get_worker_observations()[worker][QUOTA_LAYER]
+    evidence_sha256 = hashlib.sha256(owner_relay_url.encode('utf-8')).hexdigest()
+    store.record_worker_observation(
+        worker_key=worker, layer=QUOTA_LAYER, status='PASS',
+        observed_at=_stamp(current_time), fresh_until=_stamp(current_time + FRESH_FOR),
+        source='AUTHORIZED_OPERATION', evidence_sha256=evidence_sha256)
+    after = store.get_worker_observations()[worker][QUOTA_LAYER]
+    return {
+        'worker': worker,
+        'owner_relay_url': owner_relay_url,
+        'evidence_sha256': evidence_sha256,
+        'before': before,
+        'after': after,
+    }
 
 
 def fresh_quota_fail(store, worker):
