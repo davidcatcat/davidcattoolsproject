@@ -43,6 +43,7 @@ from .developer_output_normalize import _HUNK
 from . import role_config
 from . import skill_ledger
 from . import skill_manifest
+from . import source_freshness
 from . import trust
 from .developer_routes import (AgyRoute, ClaudeRoute, GwAgentRoute, RouteError, capture_snapshot,
                                UnsupportedBoundary, check_route_model, for_platform,
@@ -4720,9 +4721,20 @@ def _developer_card_prefix(task, registration, provider):
         raise LLMToolError(label + '_SKILL_PIN_FAILED: ' + code) from None
     if type(pinned) is not str or re.fullmatch(r'[0-9a-f]{40}', pinned) is None:
         raise LLMToolError(label + '_SKILL_PIN_FAILED: PIN_INVALID')
+    # #2029: a merge during dispatch can leave the authenticated pin newer than the local fetch.
+    task_completion.ensure_main_commit(registration.root, pinned)
     try:
-        built = skill_manifest.build_role_cards(
-            registration.root, pinned, route, main_ref=skill_manifest.DEFAULT_MAIN_REF)
+        try:
+            built = skill_manifest.build_role_cards(
+                registration.root, pinned, route, main_ref=skill_manifest.DEFAULT_MAIN_REF)
+        except skill_manifest.SkillManifestError as exc:
+            if exc.code in (skill_manifest.SKILL_MANIFEST_COMMIT_NOT_LOCAL,
+                            skill_manifest.SKILL_MANIFEST_COMMIT_NOT_ON_MAIN):
+                source_freshness._fetch_origin_main(registration.root)
+                built = skill_manifest.build_role_cards(
+                    registration.root, pinned, route, main_ref=skill_manifest.DEFAULT_MAIN_REF)
+            else:
+                raise
     except skill_manifest.SkillManifestError as exc:
         if exc.code == skill_manifest.SKILL_MANIFEST_PATH_MISSING:
             raise LLMToolError(label + '_ROLE_CARD_MISSING') from None
