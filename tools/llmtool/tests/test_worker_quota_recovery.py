@@ -42,6 +42,29 @@ VALID_RELAY_URL = (
 )
 
 
+def _make_comment(
+    *,
+    issue=2129,
+    comment_id=6894474079,
+    worker='opencode-developer',
+    marker='<!-- activity: type=pm_progress actor=PM target=Owner status=ANSWERED -->',
+    created_at=None,
+    updated_at=None,
+    body_extra='',
+):
+    body = marker + '\n' + worker + body_extra
+    created = created_at or '2026-11-15T14:00:00Z'
+    updated = updated_at or created
+    return {
+        'id': comment_id,
+        'html_url': f'https://github.com/davidcatcat/davidcattoolsproject/issues/{issue}#issuecomment-{comment_id}',
+        'issue_url': f'https://api.github.com/repos/davidcatcat/davidcattoolsproject/issues/{issue}',
+        'created_at': created,
+        'updated_at': updated,
+        'body': body,
+    }
+
+
 def _developer(profile, code=None, evidence=None, usage=None, usage_source='UNKNOWN',
                state='BLOCKED', status='BLOCKED'):
     execution = None
@@ -110,14 +133,23 @@ class QuotaFreshnessWindowTest(_StoreCase):
 
 class RecordOwnerRecoveryTest(_StoreCase):
     def test_recovery_after_fresh_fail_clears_refusal(self):
-        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA,
-                     now=self.now - timedelta(minutes=5))
+        fail_time = self.now - timedelta(minutes=10)
+        comment_time = self.now - timedelta(minutes=2)
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=fail_time)
         self.assertTrue(wa.fresh_quota_fail(self.store, 'opencode-developer'))
         self.assertEqual(self.quota('opencode-developer')['status'], 'FAIL')
 
-        result = wa.record_owner_recovery(
-            self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now)
+        fake_comment = _make_comment(
+            created_at=wa._stamp(comment_time),
+            updated_at=wa._stamp(comment_time),
+        )
+        fake_github_get = mock.Mock(return_value=fake_comment)
 
+        result = wa.record_owner_recovery(
+            self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+            github_get=fake_github_get)
+
+        fake_github_get.assert_called_once_with('issues/comments/6894474079')
         self.assertFalse(wa.fresh_quota_fail(self.store, 'opencode-developer'))
         entry = self.quota('opencode-developer')
         self.assertEqual(entry['status'], 'PASS')
@@ -160,15 +192,311 @@ class RecordOwnerRecoveryTest(_StoreCase):
                 self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_WORKER_INVALID')
                 self.assertFalse(self.sidecar().exists())
 
+    def test_refusal_no_fail_asserts_unchanged(self):
+        # 1. Store has no observation (UNKNOWN)
+        self.assertEqual(self.quota('opencode-developer')['status'], 'UNKNOWN')
+        with self.assertRaises(LLMToolError) as caught:
+            wa.record_owner_recovery(self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now)
+        self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_NO_FAIL')
+        self.assertEqual(self.quota('opencode-developer')['status'], 'UNKNOWN')
+
+        # 2. Store has PASS
+        self.observe('opencode', None, STEP_USAGE, now=self.now - timedelta(minutes=15))
+        self.assertEqual(self.quota('opencode-developer')['status'], 'PASS')
+        with self.assertRaises(LLMToolError) as caught:
+            wa.record_owner_recovery(self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now)
+        self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_NO_FAIL')
+        self.assertEqual(self.quota('opencode-developer')['status'], 'PASS')
+
+        # 3. Store has expired FAIL (reads UNKNOWN)
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=self.now - timedelta(minutes=35))
+        self.assertEqual(self.quota('opencode-developer')['status'], 'UNKNOWN')
+        with self.assertRaises(LLMToolError) as caught:
+            wa.record_owner_recovery(self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now)
+        self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_NO_FAIL')
+        self.assertEqual(self.quota('opencode-developer')['status'], 'UNKNOWN')
+
+    def test_refusal_reader_raises_asserts_unchanged(self):
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=self.now - timedelta(minutes=10))
+        before_obs = self.quota('opencode-developer')
+        fake_get = mock.Mock(side_effect=RuntimeError('network error'))
+        with self.assertRaises(LLMToolError) as caught:
+            wa.record_owner_recovery(
+                self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                github_get=fake_get)
+        self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_UNAVAILABLE')
+        self.assertEqual(self.quota('opencode-developer'), before_obs)
+
+    def test_refusal_reader_non_dict_asserts_unchanged(self):
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=self.now - timedelta(minutes=10))
+        before_obs = self.quota('opencode-developer')
+        for bad_val in ([], 'string', None, 123, True):
+            with self.subTest(bad_val=bad_val):
+                fake_get = mock.Mock(return_value=bad_val)
+                with self.assertRaises(LLMToolError) as caught:
+                    wa.record_owner_recovery(
+                        self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                        github_get=fake_get)
+                self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_UNAVAILABLE')
+                self.assertEqual(self.quota('opencode-developer'), before_obs)
+
+    def test_refusal_missing_field_asserts_unchanged(self):
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=self.now - timedelta(minutes=10))
+        before_obs = self.quota('opencode-developer')
+        comment_time = wa._stamp(self.now - timedelta(minutes=2))
+        for field in ('body', 'html_url', 'issue_url', 'created_at', 'updated_at'):
+            with self.subTest(missing_field=field):
+                c = _make_comment(created_at=comment_time, updated_at=comment_time)
+                del c[field]
+                with self.assertRaises(LLMToolError) as caught:
+                    wa.record_owner_recovery(
+                        self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                        github_get=mock.Mock(return_value=c))
+                self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_UNAVAILABLE')
+                self.assertEqual(self.quota('opencode-developer'), before_obs)
+            with self.subTest(non_str_field=field):
+                c = _make_comment(created_at=comment_time, updated_at=comment_time)
+                c[field] = 123
+                with self.assertRaises(LLMToolError) as caught:
+                    wa.record_owner_recovery(
+                        self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                        github_get=mock.Mock(return_value=c))
+                self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_UNAVAILABLE')
+                self.assertEqual(self.quota('opencode-developer'), before_obs)
+
+    def test_refusal_html_url_mismatch_asserts_unchanged(self):
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=self.now - timedelta(minutes=10))
+        before_obs = self.quota('opencode-developer')
+        c = _make_comment(
+            comment_id=9999999,
+            created_at=wa._stamp(self.now - timedelta(minutes=2)),
+            updated_at=wa._stamp(self.now - timedelta(minutes=2)),
+        )
+        with self.assertRaises(LLMToolError) as caught:
+            wa.record_owner_recovery(
+                self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                github_get=mock.Mock(return_value=c))
+        self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_REF_INVALID')
+        self.assertEqual(self.quota('opencode-developer'), before_obs)
+
+    def test_refusal_issue_url_mismatch_asserts_unchanged(self):
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=self.now - timedelta(minutes=10))
+        before_obs = self.quota('opencode-developer')
+        c = _make_comment(
+            created_at=wa._stamp(self.now - timedelta(minutes=2)),
+            updated_at=wa._stamp(self.now - timedelta(minutes=2)),
+        )
+        c['issue_url'] = 'https://api.github.com/repos/davidcatcat/davidcattoolsproject/issues/9999'
+        with self.assertRaises(LLMToolError) as caught:
+            wa.record_owner_recovery(
+                self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                github_get=mock.Mock(return_value=c))
+        self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_REF_INVALID')
+        self.assertEqual(self.quota('opencode-developer'), before_obs)
+
+    def test_refusal_marker_missing_or_altered_asserts_unchanged(self):
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=self.now - timedelta(minutes=10))
+        before_obs = self.quota('opencode-developer')
+        comment_time = wa._stamp(self.now - timedelta(minutes=2))
+
+        # Missing marker
+        c = _make_comment(marker='', created_at=comment_time, updated_at=comment_time)
+        with self.assertRaises(LLMToolError) as caught:
+            wa.record_owner_recovery(
+                self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                github_get=mock.Mock(return_value=c))
+        self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_MARKER')
+        self.assertEqual(self.quota('opencode-developer'), before_obs)
+
+        # Altered marker (PENDING instead of ANSWERED)
+        altered_1 = '<!-- activity: type=pm_progress actor=PM target=Owner status=PENDING -->'
+        c = _make_comment(marker=altered_1, created_at=comment_time, updated_at=comment_time)
+        with self.assertRaises(LLMToolError) as caught:
+            wa.record_owner_recovery(
+                self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                github_get=mock.Mock(return_value=c))
+        self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_MARKER')
+        self.assertEqual(self.quota('opencode-developer'), before_obs)
+
+        # Altered marker (Codex instead of PM)
+        altered_2 = '<!-- activity: type=pm_progress actor=Codex target=Owner status=ANSWERED -->'
+        c = _make_comment(marker=altered_2, created_at=comment_time, updated_at=comment_time)
+        with self.assertRaises(LLMToolError) as caught:
+            wa.record_owner_recovery(
+                self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                github_get=mock.Mock(return_value=c))
+        self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_MARKER')
+        self.assertEqual(self.quota('opencode-developer'), before_obs)
+
+    def test_refusal_wrong_worker_asserts_unchanged(self):
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=self.now - timedelta(minutes=10))
+        before_obs = self.quota('opencode-developer')
+        c = _make_comment(
+            worker='claude-developer',
+            created_at=wa._stamp(self.now - timedelta(minutes=2)),
+            updated_at=wa._stamp(self.now - timedelta(minutes=2)),
+        )
+        with self.assertRaises(LLMToolError) as caught:
+            wa.record_owner_recovery(
+                self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                github_get=mock.Mock(return_value=c))
+        self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_WORKER_MISSING')
+        self.assertEqual(self.quota('opencode-developer'), before_obs)
+
+    def test_refusal_partial_key_asserts_unchanged(self):
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=self.now - timedelta(minutes=10))
+        before_obs = self.quota('opencode-developer')
+        comment_time = wa._stamp(self.now - timedelta(minutes=2))
+        for extra in ('-extra', '_tail', '-worker'):
+            with self.subTest(extra=extra):
+                c = _make_comment(
+                    worker='opencode-developer' + extra,
+                    created_at=comment_time,
+                    updated_at=comment_time,
+                )
+                with self.assertRaises(LLMToolError) as caught:
+                    wa.record_owner_recovery(
+                        self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                        github_get=mock.Mock(return_value=c))
+                self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_WORKER_MISSING')
+                self.assertEqual(self.quota('opencode-developer'), before_obs)
+
+    def test_refusal_edited_comment_asserts_unchanged(self):
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=self.now - timedelta(minutes=10))
+        before_obs = self.quota('opencode-developer')
+        c = _make_comment(
+            created_at=wa._stamp(self.now - timedelta(minutes=5)),
+            updated_at=wa._stamp(self.now - timedelta(minutes=2)),
+        )
+        with self.assertRaises(LLMToolError) as caught:
+            wa.record_owner_recovery(
+                self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                github_get=mock.Mock(return_value=c))
+        self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_EDITED')
+        self.assertEqual(self.quota('opencode-developer'), before_obs)
+
+    def test_refusal_created_at_equal_or_before_fail_asserts_stale_and_unchanged(self):
+        fail_time = self.now - timedelta(minutes=5)
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=fail_time)
+        before_obs = self.quota('opencode-developer')
+
+        # Equal
+        c_equal = _make_comment(
+            created_at=wa._stamp(fail_time),
+            updated_at=wa._stamp(fail_time),
+        )
+        with self.assertRaises(LLMToolError) as caught:
+            wa.record_owner_recovery(
+                self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                github_get=mock.Mock(return_value=c_equal))
+        self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_STALE')
+        self.assertEqual(self.quota('opencode-developer'), before_obs)
+
+        # Before
+        c_before = _make_comment(
+            created_at=wa._stamp(fail_time - timedelta(seconds=1)),
+            updated_at=wa._stamp(fail_time - timedelta(seconds=1)),
+        )
+        with self.assertRaises(LLMToolError) as caught:
+            wa.record_owner_recovery(
+                self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                github_get=mock.Mock(return_value=c_before))
+        self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_STALE')
+        self.assertEqual(self.quota('opencode-developer'), before_obs)
+
+    def test_refusal_malformed_timestamp_asserts_unavailable_and_unchanged(self):
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=self.now - timedelta(minutes=10))
+        before_obs = self.quota('opencode-developer')
+        bad_timestamps = [
+            'not-a-timestamp',
+            '2026-11-15T12:00:00+00:00',
+            '2026-11-15T12:00:00.000Z',
+            '2026-02-29T12:00:00Z',
+            '2026-13-01T12:00:00Z',
+        ]
+        for bad_ts in bad_timestamps:
+            with self.subTest(bad_ts=bad_ts):
+                c = _make_comment(created_at=bad_ts, updated_at=bad_ts)
+                with self.assertRaises(LLMToolError) as caught:
+                    wa.record_owner_recovery(
+                        self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                        github_get=mock.Mock(return_value=c))
+                self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_UNAVAILABLE')
+                self.assertEqual(self.quota('opencode-developer'), before_obs)
+
+    def test_refusal_same_comment_reused_after_newer_fail_asserts_stale(self):
+        fail1_time = self.now - timedelta(minutes=20)
+        comment_time = self.now - timedelta(minutes=15)
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=fail1_time)
+
+        comment = _make_comment(
+            created_at=wa._stamp(comment_time),
+            updated_at=wa._stamp(comment_time),
+        )
+        # First recovery succeeds
+        wa.record_owner_recovery(
+            self.store, 'opencode-developer', VALID_RELAY_URL,
+            now=self.now - timedelta(minutes=14),
+            github_get=mock.Mock(return_value=comment))
+        self.assertEqual(self.quota('opencode-developer')['status'], 'PASS')
+
+        # Newer FAIL occurs
+        fail2_time = self.now - timedelta(minutes=10)
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=fail2_time)
+        self.assertEqual(self.quota('opencode-developer')['status'], 'FAIL')
+        fail2_obs = self.quota('opencode-developer')
+
+        # Reusing the same comment (created at comment_time < fail2_time) refuses STALE
+        with self.assertRaises(LLMToolError) as caught:
+            wa.record_owner_recovery(
+                self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                github_get=mock.Mock(return_value=comment))
+        self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_STALE')
+        self.assertEqual(self.quota('opencode-developer'), fail2_obs)
+
+    def test_refusal_concurrent_newer_fail_during_fetch_asserts_changed_and_survives(self):
+        fail1_time = self.now - timedelta(minutes=20)
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=fail1_time)
+        newer_fail_time = self.now - timedelta(minutes=5)
+
+        def fake_github_get(path):
+            # Concurrently inject a newer FAIL during fetch
+            self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=newer_fail_time)
+            return _make_comment(
+                created_at=wa._stamp(self.now - timedelta(minutes=10)),
+                updated_at=wa._stamp(self.now - timedelta(minutes=10)),
+            )
+
+        with self.assertRaises(LLMToolError) as caught:
+            wa.record_owner_recovery(
+                self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                github_get=fake_github_get)
+        self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_CHANGED')
+
+        # The newer FAIL survives in the store
+        entry = self.quota('opencode-developer')
+        self.assertEqual(entry['status'], 'FAIL')
+        self.assertEqual(entry['observed_at'], wa._stamp(newer_fail_time))
+
 
 class OwnerPausePrecedenceAndCliTest(_StoreCase):
     def test_paused_still_wins_and_policy_unchanged(self):
         worker_policy_fixture.update(self.policy_path, 'opencode-developer', 'PAUSED')
         policy_bytes_before = self.policy_path.read_bytes()
 
-        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=self.now)
+        fail_time = self.now - timedelta(minutes=10)
+        comment_time = self.now - timedelta(minutes=2)
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=fail_time)
+
+        fake_comment = _make_comment(
+            created_at=wa._stamp(comment_time),
+            updated_at=wa._stamp(comment_time),
+        )
+        fake_github_get = mock.Mock(return_value=fake_comment)
+
         result = wa.record_owner_recovery(
-            self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now)
+            self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+            github_get=fake_github_get)
 
         self.assertEqual(result['after']['status'], 'PASS')
         self.assertEqual(self.quota('opencode-developer')['status'], 'PASS')
@@ -183,11 +511,21 @@ class OwnerPausePrecedenceAndCliTest(_StoreCase):
         self.assertEqual(self.policy_path.read_bytes(), policy_bytes_before)
 
     def test_cli_handler_success_and_error(self):
+        fail_time = self.now - timedelta(minutes=10)
+        comment_time = self.now - timedelta(minutes=2)
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=fail_time)
+
+        fake_comment = _make_comment(
+            created_at=wa._stamp(comment_time),
+            updated_at=wa._stamp(comment_time),
+        )
+
         # 0 return and one JSON line output on success
         args = SimpleNamespace(worker='opencode-developer', owner_relay=VALID_RELAY_URL)
         stdout = io.StringIO()
         stderr = io.StringIO()
-        with mock.patch('sys.stdout', stdout), mock.patch('sys.stderr', stderr):
+        with mock.patch('llmtool.task_completion._github_get', return_value=fake_comment), \
+                mock.patch('sys.stdout', stdout), mock.patch('sys.stderr', stderr):
             code = run_worker_quota_recovered(args, store=self.store)
 
         self.assertEqual(code, 0)

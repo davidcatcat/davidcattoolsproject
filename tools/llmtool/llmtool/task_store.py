@@ -4907,8 +4907,10 @@ class TaskStore:
 
     def record_worker_observation(self, *, worker_key, layer, status,
                                   observed_at, fresh_until, source,
-                                  evidence_sha256):
+                                  evidence_sha256, expected=None):
         """Persist one bounded technical observation without granting authority."""
+        if expected is not None and not isinstance(expected, dict):
+            _fail('WORKER_AVAILABILITY_INVALID')
         candidate = {
             'worker_key': worker_key, 'layer': layer, 'status': status,
             'observed_at': observed_at, 'fresh_until': fresh_until,
@@ -4929,6 +4931,18 @@ class TaskStore:
         try:
             lock_fd = self._lock_worker_availability(directory, exclusive=True)
             record = self._read_worker_availability_at(directory)
+            current_item = next((item for item in record['observations']
+                                if (item['worker_key'], item['layer']) ==
+                                (worker_key, layer)), None)
+            if expected is not None:
+                if current_item is None:
+                    raise LLMToolError('WORKER_AVAILABILITY_CHANGED')
+                fields = ('status', 'observed_at', 'fresh_until', 'source', 'evidence_sha256')
+                if any(k not in expected or current_item.get(k) != expected[k] for k in fields):
+                    raise LLMToolError('WORKER_AVAILABILITY_CHANGED')
+                for extra in ('worker_key', 'layer'):
+                    if extra in expected and expected[extra] != current_item.get(extra):
+                        raise LLMToolError('WORKER_AVAILABILITY_CHANGED')
             observations = [item for item in record['observations']
                             if (item['worker_key'], item['layer']) !=
                             (worker_key, layer)]

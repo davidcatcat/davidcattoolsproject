@@ -146,30 +146,102 @@ def observe(store, record, *, now=None, reset_at=None):
 
 
 _OWNER_RELAY_URL_RE = re.compile(
-    r'https://github\.com/davidcatcat/davidcattoolsproject/issues/[1-9][0-9]*#issuecomment-[1-9][0-9]*'
+    r'https://github\.com/davidcatcat/davidcattoolsproject/issues/([1-9][0-9]*)#issuecomment-([1-9][0-9]*)'
 )
+_OWNER_RECOVERY_MARKER = '<!-- activity: type=pm_progress actor=PM target=Owner status=ANSWERED -->'
 
 
-def record_owner_recovery(store, worker, owner_relay_url, *, now=None):
+def _parse_strict_utc(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.strptime(value, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+    if parsed.strftime('%Y-%m-%dT%H:%M:%SZ') != value:
+        return None
+    return parsed
+
+
+def record_owner_recovery(store, worker, owner_relay_url, *, now=None, github_get=None):
     """Record an Owner recovery observation clearing a worker quota refusal.
 
     Clears a fresh quota FAIL by recording an AUTHORIZED_OPERATION PASS in the
     TaskStore quota layer, verified against an Owner relay comment URL.
     Observations are evidence only: this never reads or writes
-    worker-dispatch.json and never overrides an Owner pause.
+    worker-dispatch.json and never overrides PAUSED. All agents share the same
+    GitHub login (#926/S2), so the marker check is an accident guard, not proof
+    of Owner authorship.
     """
     if worker not in worker_dispatch.WORKERS or worker in NO_WRITE_WORKERS:
         raise LLMToolError('WORKER_QUOTA_RECOVERY_WORKER_INVALID')
-    if not isinstance(owner_relay_url, str) or not _OWNER_RELAY_URL_RE.fullmatch(owner_relay_url):
+    if not isinstance(owner_relay_url, str):
         raise LLMToolError('WORKER_QUOTA_RECOVERY_REF_INVALID')
+    match = _OWNER_RELAY_URL_RE.fullmatch(owner_relay_url)
+    if match is None:
+        raise LLMToolError('WORKER_QUOTA_RECOVERY_REF_INVALID')
+    issue_number = match.group(1)
+    comment_id = match.group(2)
+
+    before = store.get_worker_observations()[worker][QUOTA_LAYER]
+    if before.get('status') != 'FAIL':
+        raise LLMToolError('WORKER_QUOTA_RECOVERY_NO_FAIL')
+
+    if github_get is None:
+        from . import task_completion
+        github_get = task_completion._github_get
+
+    try:
+        comment = github_get(f'issues/comments/{comment_id}')
+    except Exception:
+        raise LLMToolError('WORKER_QUOTA_RECOVERY_UNAVAILABLE') from None
+
+    if not isinstance(comment, dict):
+        raise LLMToolError('WORKER_QUOTA_RECOVERY_UNAVAILABLE')
+
+    for field in ('body', 'html_url', 'issue_url', 'created_at', 'updated_at'):
+        if not isinstance(comment.get(field), str):
+            raise LLMToolError('WORKER_QUOTA_RECOVERY_UNAVAILABLE')
+
+    if comment['html_url'] != owner_relay_url:
+        raise LLMToolError('WORKER_QUOTA_RECOVERY_REF_INVALID')
+
+    expected_issue_suffix = f'/repos/davidcatcat/davidcattoolsproject/issues/{issue_number}'
+    if not comment['issue_url'].endswith(expected_issue_suffix):
+        raise LLMToolError('WORKER_QUOTA_RECOVERY_REF_INVALID')
+
+    if _OWNER_RECOVERY_MARKER not in comment['body'].splitlines():
+        raise LLMToolError('WORKER_QUOTA_RECOVERY_MARKER')
+
+    worker_pattern = r'(?<![A-Za-z0-9_-])' + re.escape(worker) + r'(?![A-Za-z0-9_-])'
+    if not re.search(worker_pattern, comment['body']):
+        raise LLMToolError('WORKER_QUOTA_RECOVERY_WORKER_MISSING')
+
+    created_at_dt = _parse_strict_utc(comment['created_at'])
+    updated_at_dt = _parse_strict_utc(comment['updated_at'])
+    if created_at_dt is None or updated_at_dt is None:
+        raise LLMToolError('WORKER_QUOTA_RECOVERY_UNAVAILABLE')
+
+    if comment['updated_at'] != comment['created_at']:
+        raise LLMToolError('WORKER_QUOTA_RECOVERY_EDITED')
+
+    fail_observed_dt = _parse_strict_utc(before.get('observed_at'))
+    if fail_observed_dt is None or created_at_dt <= fail_observed_dt:
+        raise LLMToolError('WORKER_QUOTA_RECOVERY_STALE')
+
     current_time = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(
         microsecond=0)
-    before = store.get_worker_observations()[worker][QUOTA_LAYER]
     evidence_sha256 = hashlib.sha256(owner_relay_url.encode('utf-8')).hexdigest()
-    store.record_worker_observation(
-        worker_key=worker, layer=QUOTA_LAYER, status='PASS',
-        observed_at=_stamp(current_time), fresh_until=_stamp(current_time + FRESH_FOR),
-        source='AUTHORIZED_OPERATION', evidence_sha256=evidence_sha256)
+    try:
+        store.record_worker_observation(
+            worker_key=worker, layer=QUOTA_LAYER, status='PASS',
+            observed_at=_stamp(current_time), fresh_until=_stamp(current_time + FRESH_FOR),
+            source='AUTHORIZED_OPERATION', evidence_sha256=evidence_sha256,
+            expected=before)
+    except LLMToolError as exc:
+        if str(exc) == 'WORKER_AVAILABILITY_CHANGED' or getattr(exc, 'task_store_error_code', None) == 'WORKER_AVAILABILITY_CHANGED':
+            raise LLMToolError('WORKER_QUOTA_RECOVERY_CHANGED') from None
+        raise
     after = store.get_worker_observations()[worker][QUOTA_LAYER]
     return {
         'worker': worker,
