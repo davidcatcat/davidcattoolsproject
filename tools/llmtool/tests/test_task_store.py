@@ -5277,24 +5277,31 @@ class FileOpsTaskStoreTests(unittest.TestCase):
         self.assertEqual(loaded['file_ops'], fops_rec)
 
     def test_file_ops_validator_refuses_malformed_fields(self):
-        base = self._active_record()
-        fops = self._valid_file_ops(base)
+        control_rec = self._active_record()
+        control_fops = self._valid_file_ops(control_rec)
+        control_rec['file_ops'] = control_fops
+        control_rec['record_sha256'] = task_store_module._digest(control_rec)
+        validated = task_store_module._validate(control_rec)
+        self.assertEqual(validated['file_ops'], control_fops)
+
         malformed_cases = (
-            ('not a dict', 'not-a-dict'),
-            ('extra key', dict(fops, extra=1)),
-            ('missing ops', {'ops_sha256': fops['ops_sha256'], 'contract_digest': fops['contract_digest']}),
-            ('missing ops_sha256', {'ops': fops['ops'], 'contract_digest': fops['contract_digest']}),
-            ('missing contract_digest', {'ops': fops['ops'], 'ops_sha256': fops['ops_sha256']}),
-            ('ops not list', dict(fops, ops='delete')),
-            ('ops malformed list', dict(fops, ops=[{'op': 'invalid'}])),
-            ('ops unnormalized', dict(fops, ops=[{'op': 'delete', 'path': 'tools/sample.txt', 'extra': 1}])),
-            ('ops_sha256 wrong', dict(fops, ops_sha256='0' * 64)),
-            ('contract_digest not 64-hex', dict(fops, contract_digest='short')),
-            ('contract_digest mismatch', dict(fops, contract_digest='f' * 64)),
+            ('not a dict', lambda fops: 'not-a-dict'),
+            ('extra key', lambda fops: dict(fops, extra=1)),
+            ('missing ops', lambda fops: {'ops_sha256': fops['ops_sha256'], 'contract_digest': fops['contract_digest']}),
+            ('missing ops_sha256', lambda fops: {'ops': fops['ops'], 'contract_digest': fops['contract_digest']}),
+            ('missing contract_digest', lambda fops: {'ops': fops['ops'], 'ops_sha256': fops['ops_sha256']}),
+            ('ops not list', lambda fops: dict(fops, ops='delete')),
+            ('ops malformed list', lambda fops: dict(fops, ops=[{'op': 'invalid'}])),
+            ('ops unnormalized', lambda fops: dict(fops, ops=[{'op': 'delete', 'path': 'tools/sample.txt', 'extra': 1}])),
+            ('ops_sha256 wrong', lambda fops: dict(fops, ops_sha256='0' * 64)),
+            ('contract_digest not 64-hex', lambda fops: dict(fops, contract_digest='short')),
+            ('contract_digest mismatch', lambda fops: dict(fops, contract_digest='f' * 64 if fops['contract_digest'] != 'f' * 64 else '0' * 64)),
         )
-        for label, bad_fops in malformed_cases:
+        for label, builder in malformed_cases:
             with self.subTest(case=label):
                 rec = self._active_record()
+                rec_fops = self._valid_file_ops(rec)
+                bad_fops = builder(rec_fops)
                 rec['file_ops'] = bad_fops
                 rec['record_sha256'] = task_store_module._digest(rec)
                 with self.assertRaises(LLMToolError) as caught:
