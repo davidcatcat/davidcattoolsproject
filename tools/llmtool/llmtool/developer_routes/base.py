@@ -64,6 +64,7 @@ class RouteError(LLMToolError):
         # Only run_route sets this, and only from the route's parsed output.
         self.provider_evidence = (dict(provider_evidence)
                                   if provider_evidence is not None else None)
+        self.execution_facts = None
 
 
 # Design c6876861575 items 1-2: the evidence a route may return from its own
@@ -698,6 +699,15 @@ def _exit_diagnostic(code, stderr):
     return reason
 
 
+def _post_run_execution_facts(code, stdout, started, execute):
+    return {
+        'process_exit_code': code if type(code) is int else None,
+        'stdout_sha256': hashlib.sha256(stdout).hexdigest() if type(stdout) is bytes else None,
+        'elapsed_ms': int((time.monotonic() - started) * 1000),
+        'cleanup_status': 'CONFIRMED' if getattr(execute, 'last_cleanup_status', None) == 'CONFIRMED' else 'UNKNOWN',
+    }
+
+
 def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
               runner=None, boundary, snapshot, on_launch=None):
     """Run one route only after dispatch, D6, and OS write-boundary checks.
@@ -878,100 +888,105 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         except (OSError, UnicodeError, TypeError):
             log_text = ''
     shutil.rmtree(private_tmp, ignore_errors=True)
-    if (type(code) is not int or type(stdout) is not bytes or type(stderr) is not bytes or
-            len(stdout) > MAX_STDOUT_BYTES or len(stderr) > MAX_STDERR_BYTES):
-        raise RouteError(_route_code(route, 'RUNNER_RESULT_INVALID'))
     try:
-        after = snapshot(value['root'])
-        after_git = task_completion.collect_git_snapshot(value['root'])
-    except Exception:
-        raise _git_state_refusal(route, 'SNAPSHOT') from None
-    changed_paths = _changed_files(before, after)
-    changed = changed_paths[:200]
-    # Git identity/state changes must be classified before cleanliness so a
-    # newly-created commit is not mislabeled as ordinary D6 dirtiness. The
-    # specific label goes first: a new commit also changes the identity.
-    label = _git_state_difference(before, after)
-    if label is None and _git_signature(before_git) != _git_signature(after_git):
-        label = 'IDENTITY'
-    if label is not None:
-        raise _git_state_refusal(route, label)
-    allowed = set(value['write_paths'])
-    try:
-        after_status_paths = set(_git_status_paths(value['root']))
-    except Exception:
-        raise _git_state_refusal(route, 'SNAPSHOT') from None
-    new_status_paths = after_status_paths - before_status_paths
-    scope_violation = (any(path not in allowed for path in new_status_paths) or
-                       any(path not in allowed for path in changed_paths) or
-                       _changed_symlink(before, after, changed_paths))
-    try:
-        parsed = route.parse_output(stdout, stderr, log_text)
-    except RouteError:
+        if (type(code) is not int or type(stdout) is not bytes or type(stderr) is not bytes or
+                len(stdout) > MAX_STDOUT_BYTES or len(stderr) > MAX_STDERR_BYTES):
+            raise RouteError(_route_code(route, 'RUNNER_RESULT_INVALID'))
+        try:
+            after = snapshot(value['root'])
+            after_git = task_completion.collect_git_snapshot(value['root'])
+        except Exception:
+            raise _git_state_refusal(route, 'SNAPSHOT') from None
+        changed_paths = _changed_files(before, after)
+        changed = changed_paths[:200]
+        # Git identity/state changes must be classified before cleanliness so a
+        # newly-created commit is not mislabeled as ordinary D6 dirtiness. The
+        # specific label goes first: a new commit also changes the identity.
+        label = _git_state_difference(before, after)
+        if label is None and _git_signature(before_git) != _git_signature(after_git):
+            label = 'IDENTITY'
+        if label is not None:
+            raise _git_state_refusal(route, label)
+        allowed = set(value['write_paths'])
+        try:
+            after_status_paths = set(_git_status_paths(value['root']))
+        except Exception:
+            raise _git_state_refusal(route, 'SNAPSHOT') from None
+        new_status_paths = after_status_paths - before_status_paths
+        scope_violation = (any(path not in allowed for path in new_status_paths) or
+                           any(path not in allowed for path in changed_paths) or
+                           _changed_symlink(before, after, changed_paths))
+        try:
+            parsed = route.parse_output(stdout, stderr, log_text)
+        except RouteError:
+            raise
+        except Exception:
+            raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
+        if not isinstance(parsed, Mapping):
+            raise RouteError(_route_code(route, 'OUTPUT_INVALID'))
+        try:
+            route.validate_exit(code, parsed)
+        except RouteError:
+            raise
+        except Exception:
+            raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
+        try:
+            quota = route.quota_exhausted(parsed, stderr)
+        except Exception:
+            raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
+        quota_progress = {
+            'state': 'QUOTA_EXHAUSTED', 'head_sha': after_git.head or 'UNKNOWN',
+            'changed_files': list(changed), 'unfinished_checks': ['UNKNOWN'],
+            'session_id': parsed.get('session_id')}
+        if scope_violation:
+            raise RouteError(_route_code(route, 'WRITE_SCOPE_VIOLATION'),
+                             facts={'changed_files': changed},
+                             progress=quota_progress if quota else None)
+        if quota:
+            facts = {}
+            gateway_code = getattr(route, '_gateway_code', None)
+            if type(gateway_code) is str and re.fullmatch(r'[A-Z0-9_]{1,48}', gateway_code):
+                facts['gateway_code'] = gateway_code
+            # The classifier (and so the refusal code) is unchanged. Evidence is
+            # separate provenance: only a parsed provider field gives it, never
+            # stderr text or a synthetic/unrelated result (v92 F1/RCA). A
+            # signal-terminated process (negative exit) is an interruption or
+            # host termination and gives none.
+            raise RouteError(_route_code(route, 'QUOTA_EXHAUSTED'),
+                             progress=quota_progress, facts=facts,
+                             provider_evidence=(_quota_evidence(route, parsed) if code >= 0
+                                                else None))
+        try:
+            route.validate_status(parsed)
+        except RouteError:
+            raise
+        except Exception:
+            raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
+        try:
+            verified = route.verified_model(log_text, value['model'])
+        except Exception:
+            raise RouteError(_route_code(route, 'MODEL_UNVERIFIED')) from None
+        if verified is None:
+            raise RouteError(_route_code(route, 'MODEL_UNVERIFIED'))
+        if verified != value['model']:
+            raise RouteError(_route_code(route, 'MODEL_MISMATCH'))
+        if code < 0:
+            raise RouteError(_route_code(route, 'INTERRUPTED'))
+        if code != 0:
+            raise RouteError(_route_code(route, 'EXIT_NONZERO'), blocked_reason=(
+                _exit_diagnostic(code, stderr) if route.name == 'agy' else None))
+        try:
+            stdout_hash = hashlib.sha256(stdout).hexdigest()
+            elapsed = int((time.monotonic() - started) * 1000)
+            return RouteResult(route.name, str(parsed.get('status', 'DONE')),
+                               str(parsed.get('summary', '')), parsed.get('session_id'),
+                               verified, value['effort'], parsed.get('usage'), changed,
+                               code, stdout_hash, elapsed,
+                               getattr(execute, 'last_cleanup_status', 'UNKNOWN'), dict(proof),
+                               _result_evidence(route, parsed))
+        except Exception:
+            raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
+    except RouteError as exc:
+        if exc.execution_facts is None:
+            exc.execution_facts = _post_run_execution_facts(code, stdout, started, execute)
         raise
-    except Exception:
-        raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
-    if not isinstance(parsed, Mapping):
-        raise RouteError(_route_code(route, 'OUTPUT_INVALID'))
-    try:
-        route.validate_exit(code, parsed)
-    except RouteError:
-        raise
-    except Exception:
-        raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
-    try:
-        quota = route.quota_exhausted(parsed, stderr)
-    except Exception:
-        raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
-    quota_progress = {
-        'state': 'QUOTA_EXHAUSTED', 'head_sha': after_git.head or 'UNKNOWN',
-        'changed_files': list(changed), 'unfinished_checks': ['UNKNOWN'],
-        'session_id': parsed.get('session_id')}
-    if scope_violation:
-        raise RouteError(_route_code(route, 'WRITE_SCOPE_VIOLATION'),
-                         facts={'changed_files': changed},
-                         progress=quota_progress if quota else None)
-    if quota:
-        facts = {}
-        gateway_code = getattr(route, '_gateway_code', None)
-        if type(gateway_code) is str and re.fullmatch(r'[A-Z0-9_]{1,48}', gateway_code):
-            facts['gateway_code'] = gateway_code
-        # The classifier (and so the refusal code) is unchanged. Evidence is
-        # separate provenance: only a parsed provider field gives it, never
-        # stderr text or a synthetic/unrelated result (v92 F1/RCA). A
-        # signal-terminated process (negative exit) is an interruption or
-        # host termination and gives none.
-        raise RouteError(_route_code(route, 'QUOTA_EXHAUSTED'),
-                         progress=quota_progress, facts=facts,
-                         provider_evidence=(_quota_evidence(route, parsed) if code >= 0
-                                            else None))
-    try:
-        route.validate_status(parsed)
-    except RouteError:
-        raise
-    except Exception:
-        raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
-    try:
-        verified = route.verified_model(log_text, value['model'])
-    except Exception:
-        raise RouteError(_route_code(route, 'MODEL_UNVERIFIED')) from None
-    if verified is None:
-        raise RouteError(_route_code(route, 'MODEL_UNVERIFIED'))
-    if verified != value['model']:
-        raise RouteError(_route_code(route, 'MODEL_MISMATCH'))
-    if code < 0:
-        raise RouteError(_route_code(route, 'INTERRUPTED'))
-    if code != 0:
-        raise RouteError(_route_code(route, 'EXIT_NONZERO'), blocked_reason=(
-            _exit_diagnostic(code, stderr) if route.name == 'agy' else None))
-    try:
-        stdout_hash = hashlib.sha256(stdout).hexdigest()
-        elapsed = int((time.monotonic() - started) * 1000)
-        return RouteResult(route.name, str(parsed.get('status', 'DONE')),
-                           str(parsed.get('summary', '')), parsed.get('session_id'),
-                           verified, value['effort'], parsed.get('usage'), changed,
-                           code, stdout_hash, elapsed,
-                           getattr(execute, 'last_cleanup_status', 'UNKNOWN'), dict(proof),
-                           _result_evidence(route, parsed))
-    except Exception:
-        raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
