@@ -147,6 +147,20 @@ class RemoteEvidenceStatusTests(unittest.TestCase):
         legacy = receipt('FAIL', AB, failures=['test_a'])
         self.assertEqual(status(legacy)[:3], (ev.STEP_RUN, ev.EVIDENCE_LEGACY, ()))
 
+    def test_long_final_in_module_results_is_invalid_not_raised(self):
+        final = 'FAILED (skipped=' + '9' * 5000 + ')'
+        entries = [entry('test_a', 1, final), entry('test_b', 1, 'OK')]
+        got = status(receipt('FAIL', AB, entries, failures=['test_a']))
+        self.assertEqual(got[:2], (ev.STEP_STOP, ev.EVIDENCE_INVALID))
+
+    def test_deeply_nested_stored_receipt_is_invalid_not_raised(self):
+        nested = []
+        for _ in range(100000):
+            nested = [nested]
+        deep = receipt('PASS', AB, clean())
+        deep['note'] = nested
+        self.assertEqual(status(deep), (ev.STEP_STOP, ev.EVIDENCE_INVALID, (), None))
+
 
 if __name__ == '__main__':
     unittest.main()

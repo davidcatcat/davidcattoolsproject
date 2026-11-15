@@ -86,6 +86,12 @@ class ValidModuleResultsTests(unittest.TestCase):
         nameless = receipt('PASS', [entry(None, 1, 'OK')], modules=(None,))
         self.assertFalse(rt.valid_module_results(nameless))
 
+    def test_long_final_is_refused_not_raised(self):
+        huge = receipt('FAIL', [entry('test_a', 1, 'OK (skipped=' + '9' * 5000 + ')')])
+        self.assertFalse(rt.valid_module_results(huge))
+        self.assertTrue(rt.valid_module_results(receipt('FAIL', [entry('test_a', 1, 'F' * 512)])))
+        self.assertFalse(rt.valid_module_results(receipt('FAIL', [entry('test_a', 1, 'F' * 513)])))
+
 
 if __name__ == '__main__':
     unittest.main()

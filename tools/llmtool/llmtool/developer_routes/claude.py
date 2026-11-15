@@ -39,6 +39,21 @@ def _is_canonical_uuid(value):
         return False
 
 
+def _quota_fallback():
+    """The fixed result for a quota stderr with non-JSON stdout; no stderr text."""
+    return {'status': 'error', 'summary': '', 'session_id': None, 'usage': None,
+            'raw': {}}
+
+
+def _is_quota_fallback(parsed):
+    """Only the exact quota-fallback shape. A parsed CLI result always has a
+    canonical session_id and a non-empty raw object, so it never matches."""
+    try:
+        return dict(parsed) == _quota_fallback()
+    except Exception:
+        return False
+
+
 class ClaudeRoute(DeveloperRoute):
     name = 'claude'
     worker_key = 'claude-developer'
@@ -100,9 +115,11 @@ class ClaudeRoute(DeveloperRoute):
             obj = json.loads(stdout.decode('utf-8'), object_pairs_hook=_unique_pairs,
                              parse_constant=_reject_constant)
         except (UnicodeError, ValueError, TypeError, RecursionError):
+            # A quota stderr with non-JSON stdout gives the fixed quota-fallback
+            # result; validate_status maps it to CLAUDE_QUOTA_EXHAUSTED (#2158).
+            # No stderr text is stored or returned.
             if _QUOTA.search(stderr.decode('utf-8', 'replace')):
-                return {'status': 'error', 'summary': '', 'session_id': None,
-                        'usage': None, 'raw': {}}
+                return _quota_fallback()
             raise RouteError('CLAUDE_OUTPUT_INVALID') from None
         if (type(obj) is not dict or obj.get('type') != 'result' or
                 type(obj.get('is_error')) is not bool or type(obj.get('subtype')) is not str or
@@ -165,6 +182,11 @@ class ClaudeRoute(DeveloperRoute):
 
     def validate_status(self, parsed):
         if parsed.get('status') != 'DONE':
+            # #2158: the quota-fallback result (quota stderr, non-JSON stdout)
+            # is a quota refusal, so worker_availability records it. Only the
+            # fixed code is kept.
+            if _is_quota_fallback(parsed):
+                raise RouteError('CLAUDE_QUOTA_EXHAUSTED')
             raise RouteError('CLAUDE_STATUS_FAILED')
 
     def provider_basis(self, parsed):
@@ -180,8 +202,9 @@ class ClaudeRoute(DeveloperRoute):
     def provider_quota_reported(self, parsed):
         """Only a parsed Claude CLI JSON error result with api_error_status 429.
 
-        Stderr text, the synthetic stderr-fallback result and result text are
-        never evidence; quota_exhausted still classifies them as before.
+        Stderr text and result text are never evidence; quota_exhausted still
+        classifies them as before. The quota-fallback result (raw {}, no
+        session) is never evidence.
         """
         raw = parsed.get('raw')
         return (type(raw) is dict and raw.get('type') == 'result' and
