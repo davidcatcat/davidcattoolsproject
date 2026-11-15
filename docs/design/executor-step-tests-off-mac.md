@@ -1,6 +1,6 @@
 # Executor-step tests off the Mac (#1817)
 
-Status: 待實作（WP-1 to WP-5）. This change is design only; it contains no code.
+Status: 待實作（WP-1 to WP-6）. This change is design only; it contains no code.
 Status marks follow `CLAUDE.md`: `現行` = current behaviour, read from source at
 `e06a7903` (the all-skip FAIL lines in 1.4, gap 6 and 4.3 were read at
 `223f4cf3`); `待實作（WP-x）` = decided, ships with that work package (WP-n is
@@ -405,10 +405,10 @@ WP-4, the PM searches the repo for them.
   - It needs a PM answer to two questions:
     1. Does "TUI never automatic" also exclude EC2 and hosted runs?
     2. Is a macOS hosted job acceptable?
-  - It is not part of WP-1 to WP-5. Until it exists, every Task that declares a
+  - It is not part of WP-1 to WP-6. Until it exists, every Task that declares a
     Darwin-only TUI module stops for the PM at completion.
 
-## 5. Rollout and compatibility（待實作（WP-1 to WP-5））
+## 5. Rollout and compatibility（待實作（WP-1 to WP-6））
 
 ### 5.1 Deferral item: reuse, no new shape
 
@@ -447,6 +447,8 @@ WP-4, the PM searches the repo for them.
   unexecuted module no longer clears completion, and gap 1 closes.
 - **WP-5**: the remaining `LOCAL` fallback is removed (0.6). Every executor
   path now produces either deferral items, a docs-only item or a stop.
+- **WP-6**: docs only. This note's status marks are updated after WP-5 is on
+  `main`. No behaviour change.
 
 Each step is backward compatible with the one before it. No release has a
 producer emitting a shape that a merged consumer rejects, and no consumer
@@ -517,8 +519,21 @@ The current split stays.
 
 ## 7. PR plan
 
-Each PR touches at most 4 files and merges only after the one before it. Tests
-follow the test data rule (Owner #763 A): fixtures use hex SHAs, hex IDs,
+Each PR touches at most 4 files and merges only after the one before it. No
+code PR (PR 1 to PR 5) edits this note; its status marks change only in PR 6.
+
+File allocation:
+
+| PR | WP | files | count |
+|---|---|---|---|
+| 1 | WP-1 | `remote_test.py`, its test module; only if needed (UNKNOWN): `task_store.py` and its test module | 2, at most 4 |
+| 2 | WP-2 | `scripts/remote_test_receipt.py`, its test module | 2 |
+| 3 | WP-3 | `executor_test_evidence.py` (new), `test_executor_test_evidence.py` (new) | 2 |
+| 4 | WP-4 | `task_submission_cli.py`, `task_advance.py`, `test_task_submission_cli.py`, the advance test module | 4 |
+| 5 | WP-5 | `task_completion.py`, `test_task_completion.py`, `task_submission_cli.py`, `test_task_submission_cli.py` | 4 |
+| 6 | WP-6 | `docs/design/executor-step-tests-off-mac.md` | 1 |
+
+Tests follow the test data rule (Owner #763 A): fixtures use hex SHAs, hex IDs,
 module names, counts and unittest summary lines only; there are no
 credential-shaped strings, refusal flows inject the screen function, and no
 production check is disabled. Test module names marked UNKNOWN are outside
@@ -684,7 +699,7 @@ Changes:
   callback), and the `()` result of `_remote_receipt_test_policy`. Each one
   either defers or stops with `TEST_REMOTE_MODULE_UNSUPPORTED` /
   `TEST_SCOPE_MISSING`; none runs tests.
-- The PR updates this note's status marks.
+- This note is not edited here; its status marks change in PR 6.
 
 Tests:
 
@@ -696,6 +711,23 @@ Tests:
 - a scripts test or 9 modules gives `UNSUPPORTED`, not a local run;
 - a static check confirms that `task_completion.py` and the executor paths in
   `task_submission_cli.py` build no `unittest` argv.
+
+### PR 6: status marks（待實作（WP-6））
+
+Precondition: PR 5 merged.
+
+Files:
+
+- `docs/design/executor-step-tests-off-mac.md` (this note, docs only).
+
+Changes:
+
+- Each section marked `待實作（WP-1）` to `待實作（WP-5）` becomes `現行`, with
+  the `main` commit it was read at, once that work package is on `main`.
+- The header status line and section 0 are re-read from source at that
+  commit; the hosted macOS route stays `待後續`.
+
+Tests: none. Docs CI only.
 
 ### Hosted macOS route（待後續）
 
