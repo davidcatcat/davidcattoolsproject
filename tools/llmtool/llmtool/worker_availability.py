@@ -145,10 +145,14 @@ def observe(store, record, *, now=None, reset_at=None):
     return result
 
 
-_OWNER_RELAY_URL_RE = re.compile(
-    r'https://github\.com/davidcatcat/davidcattoolsproject/issues/([1-9][0-9]*)#issuecomment-([1-9][0-9]*)'
-)
+_SLUG_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$')
 _OWNER_RECOVERY_MARKER = '<!-- activity: type=pm_progress actor=PM target=Owner status=ANSWERED -->'
+
+
+def _relay_url_re(slug):
+    return re.compile(
+        r'https://github\.com/' + re.escape(slug) + r'/issues/([1-9][0-9]*)#issuecomment-([1-9][0-9]*)'
+    )
 
 
 def _parse_strict_utc(value):
@@ -177,7 +181,14 @@ def record_owner_recovery(store, worker, owner_relay_url, *, now=None, github_ge
         raise LLMToolError('WORKER_QUOTA_RECOVERY_WORKER_INVALID')
     if not isinstance(owner_relay_url, str):
         raise LLMToolError('WORKER_QUOTA_RECOVERY_REF_INVALID')
-    match = _OWNER_RELAY_URL_RE.fullmatch(owner_relay_url)
+    try:
+        from . import task_completion
+        slug = task_completion._trusted_slug()
+    except Exception:
+        raise LLMToolError('WORKER_QUOTA_RECOVERY_REF_INVALID') from None
+    if not isinstance(slug, str) or not _SLUG_RE.match(slug):
+        raise LLMToolError('WORKER_QUOTA_RECOVERY_REF_INVALID')
+    match = _relay_url_re(slug).fullmatch(owner_relay_url)
     if match is None:
         raise LLMToolError('WORKER_QUOTA_RECOVERY_REF_INVALID')
     issue_number = match.group(1)
@@ -191,7 +202,6 @@ def record_owner_recovery(store, worker, owner_relay_url, *, now=None, github_ge
         raise LLMToolError('WORKER_QUOTA_RECOVERY_NO_FAIL')
 
     if github_get is None:
-        from . import task_completion
         github_get = task_completion._github_get
 
     try:
@@ -209,8 +219,7 @@ def record_owner_recovery(store, worker, owner_relay_url, *, now=None, github_ge
     if comment['html_url'] != owner_relay_url:
         raise LLMToolError('WORKER_QUOTA_RECOVERY_REF_INVALID')
 
-    expected_issue_suffix = f'/repos/davidcatcat/davidcattoolsproject/issues/{issue_number}'
-    if not comment['issue_url'].endswith(expected_issue_suffix):
+    if comment['issue_url'] != 'https://api.github.com/repos/' + slug + '/issues/' + issue_number:
         raise LLMToolError('WORKER_QUOTA_RECOVERY_REF_INVALID')
 
     if _OWNER_RECOVERY_MARKER not in comment['body'].splitlines():

@@ -26,6 +26,7 @@ for path in (ROOT, Path(__file__).resolve().parent):
 
 from llmtool.cli import run_worker_quota_recovered
 from llmtool.errors import LLMToolError
+from llmtool import task_completion
 from llmtool import task_store
 from llmtool import worker_availability as wa
 from llmtool import worker_dispatch
@@ -60,7 +61,7 @@ def _make_comment(
     return {
         'id': comment_id,
         'html_url': f'https://github.com/davidcatcat/davidcattoolsproject/issues/{issue}#issuecomment-{comment_id}',
-        'issue_url': f'https://api.github.com/repos/davidcatcat/davidcattoolsproject/issues/{issue}',
+        'issue_url': f"https://api.github.com/repos/{REPO['slug']}/issues/{issue}",
         'created_at': created,
         'updated_at': updated,
         'body': body,
@@ -102,6 +103,9 @@ class _StoreCase(unittest.TestCase):
         patcher = mock.patch.object(worker_dispatch, 'repository_config', return_value=REPO)
         patcher.start()
         self.addCleanup(patcher.stop)
+        slug_patcher = mock.patch.object(task_completion, '_trusted_slug', return_value=REPO['slug'])
+        slug_patcher.start()
+        self.addCleanup(slug_patcher.stop)
         self.now = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(minutes=1)
 
     def quota(self, worker):
@@ -288,13 +292,69 @@ class RecordOwnerRecoveryTest(_StoreCase):
             created_at=wa._stamp(self.now - timedelta(minutes=2)),
             updated_at=wa._stamp(self.now - timedelta(minutes=2)),
         )
-        c['issue_url'] = 'https://api.github.com/repos/davidcatcat/davidcattoolsproject/issues/9999'
+        c['issue_url'] = f"https://api.github.com/repos/{REPO['slug']}/issues/9999"
         with self.assertRaises(LLMToolError) as caught:
             wa.record_owner_recovery(
                 self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
                 github_get=mock.Mock(return_value=c))
         self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_REF_INVALID')
         self.assertEqual(self.quota('opencode-developer'), before_obs)
+
+    def test_refusal_trusted_slug_raises_asserts_unchanged(self):
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=self.now - timedelta(minutes=10))
+        before_obs = self.quota('opencode-developer')
+        fake_get = mock.Mock()
+        with mock.patch.object(task_completion, '_trusted_slug', side_effect=LLMToolError('TRUST_UNAVAILABLE')):
+            with self.assertRaises(LLMToolError) as caught:
+                wa.record_owner_recovery(
+                    self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                    github_get=fake_get)
+        self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_REF_INVALID')
+        self.assertEqual(self.quota('opencode-developer'), before_obs)
+        fake_get.assert_not_called()
+
+    def test_refusal_trusted_slug_none_asserts_unchanged(self):
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=self.now - timedelta(minutes=10))
+        before_obs = self.quota('opencode-developer')
+        fake_get = mock.Mock()
+        with mock.patch.object(task_completion, '_trusted_slug', return_value=None):
+            with self.assertRaises(LLMToolError) as caught:
+                wa.record_owner_recovery(
+                    self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                    github_get=fake_get)
+        self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_REF_INVALID')
+        self.assertEqual(self.quota('opencode-developer'), before_obs)
+        fake_get.assert_not_called()
+
+    def test_refusal_trusted_slug_malformed_asserts_unchanged(self):
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=self.now - timedelta(minutes=10))
+        before_obs = self.quota('opencode-developer')
+        fake_get = mock.Mock()
+        malformed_slugs = ['a/b/c', '', 'owner with spaces/repo', 'bad-slug', '/repo', 'owner/']
+        for bad_slug in malformed_slugs:
+            with self.subTest(bad_slug=bad_slug):
+                fake_get.reset_mock()
+                with mock.patch.object(task_completion, '_trusted_slug', return_value=bad_slug):
+                    with self.assertRaises(LLMToolError) as caught:
+                        wa.record_owner_recovery(
+                            self.store, 'opencode-developer', VALID_RELAY_URL, now=self.now,
+                            github_get=fake_get)
+                self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_REF_INVALID')
+                self.assertEqual(self.quota('opencode-developer'), before_obs)
+                fake_get.assert_not_called()
+
+    def test_refusal_relay_url_different_repo_slug_asserts_unchanged(self):
+        self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=self.now - timedelta(minutes=10))
+        before_obs = self.quota('opencode-developer')
+        fake_get = mock.Mock()
+        diff_url = 'https://github.com/differentowner/differentrepo/issues/2129#issuecomment-6894474079'
+        with self.assertRaises(LLMToolError) as caught:
+            wa.record_owner_recovery(
+                self.store, 'opencode-developer', diff_url, now=self.now,
+                github_get=fake_get)
+        self.assertEqual(str(caught.exception), 'WORKER_QUOTA_RECOVERY_REF_INVALID')
+        self.assertEqual(self.quota('opencode-developer'), before_obs)
+        fake_get.assert_not_called()
 
     def test_refusal_marker_missing_or_altered_asserts_unchanged(self):
         self.observe('opencode', 'OPENCODE_FREE_LIMIT', QUOTA, now=self.now - timedelta(minutes=10))
