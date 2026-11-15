@@ -16,9 +16,12 @@ closed. Records hold metadata only: no question, evidence or report text and
 no path. Design: docs/design/wp5-no-pr-high-debug-entry-1943.md §3.7-3.8.
 Nothing calls this module yet (WP-5 PR1).
 
-Confinement (security repair 1): the state root (the Task store root's
-parent) is reached from ``/`` one component at a time with ``O_NOFOLLOW`` and
-``O_DIRECTORY``, so no component may be a symlink; it must be owned by the
+Confinement (security repair 1, formal finding F1): a root must be absolute
+with no empty, ``.`` or ``..`` component, judged on the text as given and
+never after abspath, normpath or realpath. The state root (the Task store
+root's parent) is then reached from ``/`` one component at a time, each one
+lstat'ed and opened with ``O_NOFOLLOW`` and ``O_DIRECTORY``, so every
+component must exist and none may be a symlink; it must be owned by the
 user and not group- or world-writable. A supplied Task store root is opened
 the same way and must be owned by the user and exactly 0700. Every later step
 (create, link, replace, read) works relative to the opened ledger directory
@@ -114,15 +117,41 @@ def _refuse(code, detail=None):
     raise error from None
 
 
-def _absolute(value):
-    """Absolute, normalised form of a path argument; symlinks are not resolved."""
+def _root_text(value):
+    """The text of a root argument; anything that is not a usable path refuses ARGUMENT_INVALID."""
     try:
         text = os.fspath(value)
     except TypeError:
         _refuse(ARGUMENT_INVALID, 'root must be a path')
     if type(text) is not str or not text or '\x00' in text:
         _refuse(ARGUMENT_INVALID, 'root must be a path')
-    return Path(os.path.abspath(text))
+    return text
+
+
+def _clean_absolute(text):
+    """True when ``text`` is absolute and has no empty, ``.`` or ``..`` component.
+
+    Judged on the text exactly as given. A root is never passed through
+    abspath, normpath or realpath first: a lexical ``..`` would hide a symlink
+    (``base/link/../tasks``) or a missing directory (``base/missing/../tasks``)
+    from the component walk, since the kernel resolves ``..`` after ``link``.
+    """
+    if not text.startswith('/'):
+        return False
+    return all(part not in ('', '.', '..') for part in text[1:].split('/'))
+
+
+def _checked_root(value):
+    """A Task store root as an absolute Path, shape-checked before any normalisation.
+
+    A non-path refuses ARGUMENT_INVALID; a relative path or one with an empty,
+    ``.`` or ``..`` component refuses LEDGER_INVALID. The text is then used
+    unchanged, so the component walk sees every name the kernel would.
+    """
+    text = _root_text(value)
+    if not _clean_absolute(text):
+        _refuse(LEDGER_INVALID, 'root must be absolute with no empty, . or .. component')
+    return Path(text)
 
 
 def _platform_ready():
@@ -139,7 +168,18 @@ _PLATFORM_READY = _platform_ready()
 
 
 def _open_walk(name, dir_fd):
-    """Open one directory component, never through a symlink; returns (fd, fstat)."""
+    """lstat, then open, one directory component, never through a symlink; returns (fd, fstat).
+
+    The component must exist and be a real directory (not a symlink) by
+    lstat relative to its opened parent; the opened descriptor must be that
+    same directory.
+    """
+    try:
+        seen = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        _refuse(LEDGER_INVALID, 'path component missing')
+    if not stat.S_ISDIR(seen.st_mode):
+        _refuse(LEDGER_INVALID, 'path component not a real directory')
     try:
         fd = os.open(name, _WALK_FLAGS, dir_fd=dir_fd)
     except OSError:
@@ -149,7 +189,8 @@ def _open_walk(name, dir_fd):
     except OSError:
         os.close(fd)
         _refuse(LEDGER_INVALID, 'path component unusable')
-    if not stat.S_ISDIR(info.st_mode):
+    if (not stat.S_ISDIR(info.st_mode) or info.st_ino != seen.st_ino or
+            info.st_dev != seen.st_dev):
         os.close(fd)
         _refuse(LEDGER_INVALID, 'path component not a real directory')
     return fd, info
@@ -176,10 +217,10 @@ def _confine(store):
         _refuse(LEDGER_INVALID, 'platform cannot confine the ledger')
     supplied = store is not None
     if supplied:
-        store = _absolute(store)
+        store = _checked_root(store)
     else:
         from . import task_store
-        store = _absolute(task_store.default_root())
+        store = _checked_root(task_store.default_root())
     if not store.name:
         _refuse(LEDGER_INVALID, 'Task store root unusable')
     state = store.parent
@@ -203,9 +244,11 @@ def ledger_directory(root=None):
     """The ledger directory beside Task store ``root``; None means the default store.
 
     The ledger sits in the private llmtool state root that holds high_debug's
-    ``high-debug-screen`` records (the Task store root's parent). A supplied
-    ``root`` must be an existing real directory, owned by the user, exactly
-    0700 and with no symlink in any component of its path. In every case the
+    ``high-debug-screen`` records (the Task store root's parent). A root (the
+    supplied one or the default) must be absolute with no empty, ``.`` or
+    ``..`` component, judged before any normalisation. A supplied ``root``
+    must be an existing real directory, owned by the user, exactly 0700 and
+    with no symlink in any component of its path. In every case the
     state root must be symlink-free, owned by the user and not group- or
     world-writable. Anything else refuses LEDGER_INVALID. Nothing is created.
     """
@@ -566,7 +609,8 @@ def reserve(wp, *, now=None, root=None):
 
     Call after every local check and just before launch. Returns a
     ``Reservation``. Refuses WP_USED (with the slot state and report digest)
-    when the WP was ever reserved, WEEK_CAP when the week has no free slot,
+    when the WP was ever reserved (also when another caller reserved it while
+    this call found the week full), WEEK_CAP when the week has no free slot,
     LEDGER_INVALID for a bad ledger or root and ARGUMENT_INVALID for a bad
     ``wp``, ``now`` or ``root`` type. ``root`` is the Task store root, as for
     the screen records; see ``ledger_directory`` for its confinement.
@@ -574,7 +618,7 @@ def reserve(wp, *, now=None, root=None):
     if not _valid_wp(wp):
         _refuse(ARGUMENT_INVALID, 'wp must match [A-Za-z0-9._-]{1,64}')
     moment = _utc(now)
-    store = None if root is None else _absolute(root)
+    store = None if root is None else _checked_root(root)
     week = iso_week(moment)
     stamp = moment.isoformat()
     with _ledger(store, create=True) as (directory, dfd):
@@ -584,6 +628,12 @@ def reserve(wp, *, now=None, root=None):
             _refuse_used(_check_wp_record(existing, wp))
         # A full or bad week refuses here, before the WP slot is taken.
         if not _week_has_free_slot(dfd, week):
+            # Another caller for this WP may have reserved it (taking the last
+            # week slot) after the read above: report that WP as used, with
+            # its state and digest, rather than as a week cap.
+            existing = _read_slot(dfd, wp_name)
+            if existing is not None:
+                _refuse_used(_check_wp_record(existing, wp))
             _refuse(WEEK_CAP, 'week=%s limit=%d' % (week, WEEK_LIMIT))
         record = {'schema': _WP_SCHEMA, 'wp': wp, 'state': RESERVED, 'week': week,
                   'week_slot': None, 'reserved_at': stamp, 'finished_at': None,
@@ -622,7 +672,8 @@ def _valid_handle(handle):
     if type(handle) is not Reservation:
         return False
     root = handle.root
-    if root is not None and (not isinstance(root, Path) or _absolute(root) != root):
+    if root is not None and (not isinstance(root, Path) or
+                             not _clean_absolute(os.fspath(root))):
         return False
     return (_valid_wp(handle.wp) and type(handle.week) is str and
             _WEEK.fullmatch(handle.week) is not None and

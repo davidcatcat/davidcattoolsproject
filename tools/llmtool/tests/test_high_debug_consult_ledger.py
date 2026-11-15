@@ -206,6 +206,36 @@ class ConsultLedgerTest(unittest.TestCase):
         self.assertIn('state=FAILED', str(error))
         self.assertIn('week_slot=none', str(error))
 
+    def test_same_wp_reserved_while_the_week_fills_refuses_wp_used_not_week_cap(self):
+        # Formal finding F2: slots 1-9 are taken; a rival for the same WP wins
+        # between this call's first WP read and its week scan, taking slot 10.
+        for i in range(1, 10):
+            self.reserve('wp%02d' % i)
+        real_scan = consult._week_has_free_slot
+        scans, rival = [], []
+
+        def rival_wins_before_the_scan(dfd, week):
+            scans.append(week)
+            if len(scans) == 1:
+                # The nested call is the rival; its own scan is the second one.
+                rival.append(self.reserve('contested'))
+            return real_scan(dfd, week)
+
+        with mock.patch.object(consult, '_week_has_free_slot',
+                               side_effect=rival_wins_before_the_scan):
+            error = self.refuses(consult.WP_USED, self.reserve, 'contested')
+        self.assertEqual(scans, [WEEK, WEEK])
+        self.assertEqual(rival[0].week_slot, 10)
+        self.assertIn('state=RESERVED', str(error))
+        self.assertIn('week_slot=10', str(error))
+        self.assertIn('report_sha256=none', error.high_debug_detail)
+        # The loser wrote nothing: the rival's slots stand as it left them.
+        record = self.load('wp-contested.json')
+        self.assertEqual((record['state'], record['week_slot']), ('RESERVED', 10))
+        self.assertEqual(self.load('week-2026-W46-10.json')['wp'], 'contested')
+        self.assertEqual(len(self.names('week-')), 10)
+        self.assertEqual(self.names('.consult-'), [])
+
     def test_two_processes_same_wp_exactly_one_wins(self):
         outcomes = sorted(self.run_race(['shared-wp', 'shared-wp']))
         self.assertEqual(outcomes, [('REFUSED', consult.WP_USED), ('RESERVED', 1)])
@@ -462,6 +492,48 @@ class ConsultLedgerTest(unittest.TestCase):
         self.refuses(consult.LEDGER_INVALID, consult.reserve, 'wp5', now=NOW,
                      root=plain / 'tasks')
         self.refuses(consult.ARGUMENT_INVALID, consult.reserve, 'wp5', now=NOW, root=5)
+        self.assertFalse(self.ledger.exists())
+
+    # supplied root shape (formal finding F1)
+
+    def test_dot_dot_after_a_symlink_refuses_before_any_normalisation(self):
+        elsewhere = self.base / 'elsewhere'
+        (elsewhere / 'inner').mkdir(mode=0o700, parents=True)
+        (elsewhere / 'tasks').mkdir(mode=0o700)
+        for path in (elsewhere, elsewhere / 'inner', elsewhere / 'tasks'):
+            os.chmod(path, 0o700)
+        os.symlink(elsewhere / 'inner', self.base / 'link')
+        # Lexically base/tasks; the kernel would follow link and reach elsewhere/tasks.
+        dotted = str(self.base) + '/link/../tasks'
+        for root in (dotted, Path(dotted)):
+            with self.subTest(root=type(root).__name__):
+                self.refuses(consult.LEDGER_INVALID, consult.ledger_directory, root)
+                self.refuses(consult.LEDGER_INVALID, consult.reserve, 'wp5', now=NOW,
+                             root=root)
+        self.assertFalse(self.ledger.exists())
+        self.assertFalse((elsewhere / consult.LEDGER_DIR).exists())
+        # The plain base/tasks root still passes.
+        self.assertEqual(consult.ledger_directory(self.root), self.ledger)
+        self.assertEqual(consult.ledger_directory(str(self.root)), self.ledger)
+        self.assertEqual(self.reserve('wp5').week_slot, 1)
+
+    def test_dot_dot_after_a_missing_directory_refuses(self):
+        self.assertFalse((self.base / 'missing').exists())
+        dotted = str(self.base) + '/missing/../tasks'
+        self.refuses(consult.LEDGER_INVALID, consult.ledger_directory, dotted)
+        self.refuses(consult.LEDGER_INVALID, consult.reserve, 'wp5', now=NOW, root=dotted)
+        self.assertFalse(self.ledger.exists())
+        self.assertFalse((self.base / 'missing').exists())
+
+    def test_relative_empty_or_dot_component_root_refuses_ledger_invalid(self):
+        text = str(self.root)
+        for root in ('tasks', './tasks', Path('tasks'), text + '/', str(self.base) + '//tasks',
+                     str(self.base) + '/./tasks', '/' + text, '/'):
+            with self.subTest(root=root):
+                self.refuses(consult.LEDGER_INVALID, consult.ledger_directory, root)
+                self.refuses(consult.LEDGER_INVALID, consult.reserve, 'wp5', now=NOW,
+                             root=root)
+        self.refuses(consult.ARGUMENT_INVALID, consult.reserve, 'wp5', now=NOW, root='')
         self.assertFalse(self.ledger.exists())
 
     def test_default_root_uses_the_task_store_state_root(self):
