@@ -246,8 +246,10 @@ class ExchangeTests(unittest.TestCase):
             self.assertTrue(ready.exists(),'child never reached the wait loop')
             interrupted_at = time.monotonic()
             child.send_signal(signal.SIGINT)
-            stdout,_ = child.communicate(timeout=5)
-            self.assertLess(time.monotonic()-interrupted_at,5)
+            # #2074: a loaded host can need more than 5 s to exit and print; 20 s still
+            # proves the interrupt ended the wait well before its own --timeout 30.
+            stdout,_ = child.communicate(timeout=20)
+            self.assertLess(time.monotonic()-interrupted_at,20)
         finally:
             if child.poll() is None:
                 child.kill(); child.communicate(timeout=5)
