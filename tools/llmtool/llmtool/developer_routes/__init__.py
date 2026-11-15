@@ -22,9 +22,18 @@ __all__ = [
     'check_route_model', 'check_registry_role_model', 'REGISTRY_ROLES',
     'resolve_route_timeout', 'resolve_route_max_diff_bytes',
     'DEFAULT_TIMEOUT_SECONDS', 'HARD_TIMEOUT_CAP_SECONDS',
+    'DEFAULT_ROLE_TIMEOUT_SECONDS', 'DEFAULT_REMOTE_TEST_TIMEOUT_SECONDS',
+    'role_timeout', 'remote_test_timeout',
     'SandboxExecBoundary', 'UnsupportedBoundary', 'WriteBoundary',
     'for_platform',
 ]
+
+DEFAULT_ROLE_TIMEOUT_SECONDS = 1800
+DEFAULT_REMOTE_TEST_TIMEOUT_SECONDS = 1800
+
+
+def _timeout_value_ok(v):
+    return type(v) is int and 1 <= v <= HARD_TIMEOUT_CAP_SECONDS
 
 _MAX_ALLOWED_MODELS = 16
 _GENERIC_MODEL_PATTERN = r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}'
@@ -106,13 +115,18 @@ def _role_models(roles):
     normalized = {}
     for role, model_ok in _ROLE_MODEL_CHECKS.items():
         entry = roles[role]
-        if type(entry) is not dict or set(entry) != {'allowed_models'}:
+        if type(entry) is not dict or set(entry) not in ({'allowed_models'}, {'allowed_models', 'timeout'}):
             raise RouteError('ROUTE_CONFIG_INVALID')
         models = entry['allowed_models']
         if (type(models) is not list or len(models) != 1 or
                 not model_ok(models[0])):
             raise RouteError('ROUTE_CONFIG_INVALID')
-        normalized[role] = {'allowed_models': list(models)}
+        if 'timeout' in entry:
+            if not _timeout_value_ok(entry['timeout']):
+                raise RouteError('ROUTE_CONFIG_INVALID')
+            normalized[role] = {'allowed_models': list(models), 'timeout': entry['timeout']}
+        else:
+            normalized[role] = {'allowed_models': list(models)}
     return normalized
 
 
@@ -214,12 +228,15 @@ def load_route_config(path=None):
                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
     except (OSError, UnicodeError, ValueError, TypeError, RecursionError):
         raise RouteError('ROUTE_CONFIG_INVALID') from None
-    # 'roles' is optional so older fixtures still load; when present it is
-    # validated strictly (#1502 WP-E).
-    if (type(value) is not dict or set(value) - {'roles'} != {'schema_version', 'routes'} or
+    # 'roles' and 'remote_test_timeout' are optional so older fixtures still
+    # load; when present they are validated strictly (#1502 WP-E, #1815).
+    if (type(value) is not dict or set(value) - {'roles', 'remote_test_timeout'} != {'schema_version', 'routes'} or
             type(value.get('schema_version')) is not int or value['schema_version'] != 1 or
             type(value.get('routes')) is not dict):
         raise RouteError('ROUTE_CONFIG_INVALID')
+    if 'remote_test_timeout' in value:
+        if not _timeout_value_ok(value['remote_test_timeout']):
+            raise RouteError('ROUTE_CONFIG_INVALID')
     routes = value['routes']
     if ('agy' not in routes or set(routes) - {'agy', 'claude', 'gw-agent', 'opencode'} or
             type(routes['agy']) is not dict or
@@ -311,7 +328,28 @@ def load_route_config(path=None):
     result = {'schema_version': 1, 'routes': normalized}
     if 'roles' in value:
         result['roles'] = _role_models(value['roles'])
+    if 'remote_test_timeout' in value:
+        result['remote_test_timeout'] = value['remote_test_timeout']
     return result
+
+
+def role_timeout(role, path=None):
+    """Return the timeout in seconds configured for role or DEFAULT_ROLE_TIMEOUT_SECONDS."""
+    if role not in REGISTRY_ROLES:
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    config = load_route_config(path)
+    roles = config.get('roles')
+    if type(roles) is dict and role in roles:
+        timeout = roles[role].get('timeout')
+        if timeout is not None:
+            return timeout
+    return DEFAULT_ROLE_TIMEOUT_SECONDS
+
+
+def remote_test_timeout(path=None):
+    """Return the remote test timeout in seconds or DEFAULT_REMOTE_TEST_TIMEOUT_SECONDS."""
+    config = load_route_config(path)
+    return config.get('remote_test_timeout', DEFAULT_REMOTE_TEST_TIMEOUT_SECONDS)
 
 
 def _unique_config_pairs(pairs):
