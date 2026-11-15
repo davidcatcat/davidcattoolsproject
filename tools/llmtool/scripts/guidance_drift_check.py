@@ -255,7 +255,7 @@ RULE_SCHEMAS: dict[str, Any] = {
         "test_fail_max": Int(0),
         "review_fail_max": Int(0),
         "waiting_notify_after_hours": Int(1),
-    }),
+    }, {"timeout_continuation_max": Int(0, 3)}),
     "worker-dispatch.json": Obj({
         "schema_version": Const(1),
         "workers": MapOf(WORKER_DISPATCH_ENTRY, min_items=1),

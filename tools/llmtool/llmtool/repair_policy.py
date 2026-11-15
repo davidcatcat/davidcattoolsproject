@@ -17,6 +17,8 @@ UNKNOWN = 'UNKNOWN'
 POLICY_KEYS = ('repair_max', 'parent_debug_max', 'group_debug_max', 'child_max',
                'replan_max', 'test_fail_max', 'review_fail_max',
                'waiting_notify_after_hours')
+# #1815 T3: optional limits as key -> (min, max); an absent key keeps its caller default.
+OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
 _MAX_BYTES = 4096
 
 
@@ -45,7 +47,10 @@ def load_policy(path=None):
         data = json.loads(raw.decode('utf-8'))
     except (OSError, ValueError, UnicodeError):
         _refuse('POLICY_INVALID')
-    if (type(data) is not dict or set(data) != {'schema_version', *POLICY_KEYS} or
+    allowed = {'schema_version', *POLICY_KEYS, *OPTIONAL_POLICY_LIMITS}
+    if (type(data) is not dict or not {'schema_version', *POLICY_KEYS} <= set(data) <= allowed or
+            any(key in data and (type(data[key]) is not int or not low <= data[key] <= high)
+                for key, (low, high) in OPTIONAL_POLICY_LIMITS.items()) or
             type(data['schema_version']) is not int or data['schema_version'] != 1 or
             any(type(data[key]) is not int or not 0 <= data[key] <= 1000
                 for key in POLICY_KEYS)):
