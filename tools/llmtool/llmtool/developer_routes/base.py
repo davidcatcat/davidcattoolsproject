@@ -708,17 +708,41 @@ def _post_run_execution_facts(code, stdout, started, execute):
     }
 
 
+def _fire_delivered(route, on_delivered):
+    """Call ``on_delivered`` once; its RouteError passes through unchanged."""
+    if on_delivered is None:
+        return
+    try:
+        on_delivered()
+    except RouteError:
+        raise
+    except Exception:
+        raise RouteError(_route_code(route, 'DELIVERY_CALLBACK_FAILED')) from None
+
+
 def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
-              runner=None, boundary, snapshot, on_launch=None):
+              runner=None, boundary, snapshot, on_launch=None, on_delivered=None):
     """Run one route only after dispatch, D6, and OS write-boundary checks.
 
     ``on_launch`` (optional, no arguments) is called once at the launch
     boundary: after request validation, the dispatch/D6 gate, write-boundary
     verification and route input preparation, right before the process
     starts. No refusal before that point calls it.
+
+    ``on_delivered`` (optional, no arguments) is called once at the delivery
+    boundary (#1502 WP-F design section 2.2 step 5): after every
+    provider-result check has passed (output parsed, status, model evidence
+    equal to the requested model, exit 0) and before the RouteResult is
+    built. The process the runner starts may be a wrapper, so the runner
+    starting is not delivery. It is never passed to a runner, so boundary
+    probes cannot fire it. A RouteError it raises is re-raised with its own
+    code; any other exception gives <ROUTE>_DELIVERY_CALLBACK_FAILED. Either
+    way no RouteResult is returned.
     """
     started = time.monotonic()
     if on_launch is not None and not callable(on_launch):
+        raise RouteError(_route_code(route, 'REQUEST_INVALID'))
+    if on_delivered is not None and not callable(on_delivered):
         raise RouteError(_route_code(route, 'REQUEST_INVALID'))
     try:
         value = route.validate_request(request)
@@ -975,6 +999,8 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         if code != 0:
             raise RouteError(_route_code(route, 'EXIT_NONZERO'), blocked_reason=(
                 _exit_diagnostic(code, stderr) if route.name == 'agy' else None))
+        # Delivery boundary: every provider-result check above has passed.
+        _fire_delivered(route, on_delivered)
         try:
             stdout_hash = hashlib.sha256(stdout).hexdigest()
             elapsed = int((time.monotonic() - started) * 1000)
