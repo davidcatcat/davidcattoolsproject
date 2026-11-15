@@ -68,7 +68,11 @@ A refused local commit must not reach origin, including in history. This is a PM
 - **Route 2, the refused item:** it stays blocked, and no Reviewer opinion releases it. It may restart only when all of these hold: the screen fix is merged; the fixed screen is installed and verified; the original source still exists; its digest matches the recorded digest exactly; the fixed screen rescans that same source with no hit.
   Then at most one new compliant Task starts from latest `main` under the rules above. A missing source, a digest mismatch, a hit or incomplete verification keeps it blocked. A second screen fix in the same rule family is an Owner question (`R-SECURITY`).
 
-Never resend refused content, rewrite sensitive data to pass the screen, or fabricate a Developer response that can no longer be retrieved. [NOT LIVE] (#1943 WP-4): the digest-bound rescan of Developer output; `screen-recover` covers `task high-debug` only.
+Never resend refused content, rewrite sensitive data to pass the screen, or fabricate a Developer response that can no longer be retrieved.
+Refused Developer output (`DEVELOPER_OUTPUT_SENSITIVE`) has no digest-bound rescan: the route 2 code for Developer output is dropped (Owner scope decision, #1943 c6894302255) and is re-evaluated only if a screener false positive blocks real work again.
+`screen-recover` covers `task high-debug` only, so a refused Developer output is never released by a rescan and stays blocked.
+The PM handles a suspected false positive with the existing evidence only: record the metadata disposition above, then start at most one new independent Developer Task from latest `main` on an `ALLOWED` route under the #763 A rule.
+That Task carries the rule name, line and classification, never the refused content; a refusal of that Task stops the item (no third Task).
 
 ### Confirmed refusals (Owner O5, #1943)
 
