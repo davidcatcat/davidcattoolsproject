@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 
 MARKER = re.compile(r"<!--\s*activity:([^<>]{0,300}?)-->")
 OWNER_FIELD = re.compile(
@@ -15,6 +16,20 @@ OWNER_FIELD = re.compile(
 )
 REPO_SLUG = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}\Z")
 GATED_LINE = re.compile(r"<!-- owner-ask: v=1 reserved_row=(R-[A-Z]{2,12}) -->")
+# #1943 P0: bounded day-window fetch, ask classes and the PM chat ask source.
+DAY = 86400
+PAGE_TIMEOUT = 30
+MAX_PAGES_PER_DAY = 50
+WAIT_HORIZON = 7 * DAY
+NOTICE_STATUSES = ("NOTICE", "ANSWERED")
+# PM chat ask prefix (ni xu yao zuo + fullwidth colon) and the nothing-to-do text.
+CHAT_ASK = "".join(map(chr, (0x4F60, 0x9700, 0x8981, 0x505A, 0xFF1A)))
+CHAT_NOTHING = "".join(map(chr, (0x76EE, 0x524D, 0x6C92, 0x6709)))
+CHAT_WINDOW = 3600
+MAX_TRANSCRIPT_FILES = 2000
+MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024
+NOT_COUNTED = ("claude_web_chat", "sub_pm_relay_chat")
+
 
 
 class AuditError(Exception):
@@ -45,7 +60,8 @@ def repository_slug(explicit: str | None = None) -> str:
     return slug
 
 
-def fetch_comments(repo: str, since: str) -> list[dict]:
+def _fetch_page(repo: str, start: str, page: int, timeout: int) -> list[dict]:
+    """#1943 P0: one page of issue comments updated since start, oldest created first."""
     result = _run(["gh", "api", "--paginate", "--slurp",
                    f"repos/{repo}/issues/comments?since={since}&per_page=100"])
     if result.returncode:
