@@ -440,8 +440,12 @@ class WorkerDispatchTests(unittest.TestCase):
         return {'task_id': 'a' * 32, 'run_id': 'b' * 32,
                 'developer': {'provider_profile': 'agy', 'model': model}}
 
-    def test_real_policy_refuses_claude_reviewer_and_advance_falls_back_to_codex(self):
-        from llmtool import review_dispatch, task_advance
+    # The task advance fallback half of these cases lives in
+    # test_gw_agent_route_wiring.RealPolicyReviewerFallbackTests: importing
+    # task_advance here would make ci_mac_modules select this module for #781
+    # (test_ci_mac_modules uses it as the unrelated control).
+    def test_real_policy_refuses_claude_reviewer_and_admits_codex_reviewer(self):
+        from llmtool import review_dispatch
         # A non-Claude, non-Codex author (family "other").
         task = self._review_task('gemini-2.5-pro')
         # Control: under the shared all-ALLOWED policy the default is claude-reviewer.
@@ -455,28 +459,12 @@ class WorkerDispatchTests(unittest.TestCase):
             with self.assertRaises(LLMToolError) as default:
                 review_dispatch._select_reviewer(task)
             self.assertEqual(default.exception.review_dispatch_code, 'REVIEWER_NOT_ALLOWED')
-            # The existing #1831 P1 advance fallback admits codex-reviewer.
-            self.assertEqual(task_advance._reviewer_fallback(task, default.exception),
-                             ('codex-reviewer', 'REVIEWER_NOT_ALLOWED'))
             self.assertEqual(review_dispatch._select_reviewer(task, 'codex-reviewer'),
                              'codex-reviewer')
             # A Claude-authored Task keeps its codex-reviewer default.
             self.assertEqual(
                 review_dispatch._select_reviewer(self._review_task('claude-sonnet-5-5-medium')),
                 'codex-reviewer')
-
-    def test_real_policy_leaves_a_codex_authored_task_without_a_reviewer(self):
-        # Family separation forbids codex-reviewer for a Codex-family author, so
-        # with claude-reviewer paused the fallback has no alternate (advance then
-        # reports REVIEWER_UNAVAILABLE). Pinned so the consequence stays visible.
-        from llmtool import review_dispatch, task_advance
-        task = self._review_task('gpt-6-luna')
-        with self._real_policy():
-            with self.assertRaises(LLMToolError) as default:
-                review_dispatch._select_reviewer(task)
-            self.assertEqual(default.exception.review_dispatch_code, 'REVIEWER_NOT_ALLOWED')
-            self.assertEqual(task_advance._reviewer_fallback(task, default.exception),
-                             (None, 'REVIEWER_NOT_ALLOWED'))
 
     def test_paused_agy_row_refuses_every_agy_taskstore_entry_point(self):
         returned = {'review_return': {'state': 'RETURNED',
