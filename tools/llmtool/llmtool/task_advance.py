@@ -2338,8 +2338,9 @@ def _claude_status_failed_executor(repair_record):
     A Claude Developer that stopped with CLAUDE_STATUS_FAILED and recorded no
     native session id and no diff may still have run and changed its D6, so
     derive_repair_state keeps it UNKNOWN. This only names the D6 that decide
-    must read before it may retry; a record with a session id or a diff, or
-    with no executor Task id, gives None and stays UNKNOWN.
+    must read before it may retry; a record with a session id or a diff, with
+    no executor Task id, or whose process cleanup is not CONFIRMED (it might
+    still write to the D6) gives None and stays UNKNOWN.
     """
     if type(repair_record) is not dict:
         return None
@@ -2349,17 +2350,71 @@ def _claude_status_failed_executor(repair_record):
         return None
     execution = developer.get('execution')
     if (type(execution) is not dict or execution.get('native_session_id') is not None or
-            execution.get('diff_sha256') is not None):
+            execution.get('diff_sha256') is not None or
+            execution.get('cleanup_status') != 'CONFIRMED'):
         return None
     executor = developer.get('executor_task_id')
     return executor if type(executor) is str and executor else None
 
 
-def _repair_d6_unchanged(current_repair, d6):
-    """True only when the repair Task's executor D6 is clean at the claim head (#2188).
+_REPAIR_OTHERS_LIMIT = 64 * 1024
+_REPAIR_WALK_LIMIT = 200000
 
-    Read fresh with task_completion.collect_git_snapshot. Any missing value,
-    read error or mismatch gives False, so the claim stays REPAIR_OUTCOME_UNKNOWN.
+
+def _nested_git_entry(root):
+    """True when any entry named .git (any case) lies below root, other than root/.git.
+
+    git status and ls-files skip every .git entry, yet one can redirect a later
+    Git command run below it. Symlinks are not followed. A walk past
+    _REPAIR_WALK_LIMIT entries also gives True; a read error raises.
+    """
+    def fail(error):
+        raise error
+    seen = 0
+    for current, dirs, files in os.walk(root, onerror=fail, followlinks=False):
+        names = list(dirs) + list(files)
+        seen += len(names)
+        if seen > _REPAIR_WALK_LIMIT:
+            return True
+        if current == root:
+            # root/.git is the D6 worktree link, already bound by the snapshot.
+            dirs[:] = [name for name in dirs if name != '.git']
+            names = [name for name in names if name != '.git']
+        if any(name.casefold() == '.git' for name in names):
+            return True
+    return False
+
+
+def _repair_workspace_untouched(root):
+    """True only when root holds its tracked files and nothing else (#2188, #2217 v91).
+
+    A clean git status still hides git-ignored files, empty directories,
+    nested .git entries and changes to skip-worktree or assume-unchanged
+    files; any of them left by a failed repair could reach the next attempt
+    in this D6. So this needs: no untracked path at all, read with no exclude
+    rule (ignored files and empty directories count); every index entry a
+    plain 'H' (no skip-worktree, assume-unchanged or unmerged entry); and no
+    .git entry below the root. The Claude route only has file tools
+    (developer_routes/claude.py build_argv), so its writes land in files.
+    A Git read error or oversized output raises.
+    """
+    others = task_completion._git(root, ('ls-files', '-z', '--others', '--directory'),
+                                  limit=_REPAIR_OTHERS_LIMIT)
+    if others != b'':
+        return False
+    entries = task_completion._git(root, ('ls-files', '-z', '-v', '--cached'),
+                                   limit=task_completion._GIT_LIMIT)
+    if any(not entry.startswith(b'H ') for entry in entries.split(b'\0') if entry):
+        return False
+    return not _nested_git_entry(root)
+
+
+def _repair_d6_unchanged(current_repair, d6):
+    """True only when the repair Task's executor D6 is untouched at the claim head (#2188).
+
+    Read fresh with task_completion.collect_git_snapshot (clean, same head,
+    same binding), then _repair_workspace_untouched. Any missing value, read
+    error or mismatch gives False, so the claim stays REPAIR_OUTCOME_UNKNOWN.
     """
     if type(current_repair) is not dict or type(d6) is not dict:
         return False
@@ -2373,11 +2428,13 @@ def _repair_d6_unchanged(current_repair, d6):
         registration = task_completion.read_d6_registration(
             executor, common_dir, allowed_states=task_completion._D6_EVIDENCE_STATES)
         snapshot = task_completion.collect_git_snapshot(registration.root)
-        return (getattr(snapshot, 'clean', None) is True and
+        if not (getattr(snapshot, 'clean', None) is True and
                 getattr(snapshot, 'head', None) == head and
                 getattr(snapshot, 'root', None) == registration.root and
                 getattr(snapshot, 'common_dir', None) == registration.common_dir and
-                getattr(snapshot, 'branch', None) == registration.branch)
+                getattr(snapshot, 'branch', None) == registration.branch):
+            return False
+        return _repair_workspace_untouched(registration.root) is True
     except Exception:
         return False
 
@@ -2518,7 +2575,8 @@ def decide(record, d6, pr, related):
             if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
                     current_repair.get('repair_state') == 'UNKNOWN'):
                 # #2188: a Claude status failure retries only when its D6 is
-                # clean at the claim head; the retry records a new counted claim.
+                # untouched at the claim head (_repair_d6_unchanged); the retry
+                # goes through review_repair like every other REPAIR_RETRY.
                 if _repair_d6_unchanged(current_repair, d6):
                     return 'REPAIR_RETRY'
                 return 'REPAIR_OUTCOME_UNKNOWN'
