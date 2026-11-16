@@ -244,6 +244,27 @@ class HighDebugNoPRTests(unittest.TestCase):
         self.assertEqual(self.post(False), (True, ['pr']))
         self.github_get.assert_not_called()
 
+    def test_no_completion_refuses_a_d6_the_task_does_not_hold(self):
+        other = dict(executor_task_id='other')
+        cases = [None, {}, other, dict(direct_result_callback=other)]
+        cases.append(dict(direct_result_callback='x'))
+        for developer in cases:
+            with self.subTest(developer=developer):
+                code, reader = self.refusal(_NoPRStore(developer=developer))
+                self.assertEqual(code, 'HIGH_DEBUG_D6_NOT_BOUND')
+                reader.assert_not_called()
+                self.poster.assert_not_called()
+
+    def test_task_holds_d6_reads_the_developer_and_its_callback(self):
+        holders = [dict(developer=HOLDER), dict(developer=dict(executor_task_id='executor'))]
+        for task in holders:
+            self.assertTrue(high_debug._task_holds_d6(task, 'executor'))
+        other = dict(executor_task_id='other')
+        others = [{}, dict(developer='x'), dict(developer=other)]
+        others.append(dict(developer=dict(direct_result_callback=other)))
+        for task in others:
+            self.assertFalse(high_debug._task_holds_d6(task, 'executor'))
+
 
 class FormalRcaConsumerNoPRTests(unittest.TestCase):
     def setUp(self):
