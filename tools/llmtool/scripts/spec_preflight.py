@@ -298,21 +298,27 @@ def check_read_scope(spec: dict[str, Any], repo: str | Path) -> list[str]:
 
     failures: list[str] = []
 
-    has_code_write = any(
-        isinstance(w, str)
+    code_writes = [
+        _norm_path(w) for w in writes
+        if isinstance(w, str)
         and _norm_path(w).endswith(".py")
         and (_norm_path(w).startswith("tools/") or _norm_path(w).startswith("scripts/"))
         and not _norm_path(w).startswith("tools/llmtool/tests/")
-        for w in writes
-    )
-    if has_code_write:
+    ]
+    if code_writes:
+        # #2206 follow-up: monitor code in scripts/ keeps its tests in scripts/test_*.py;
+        # accept those only when every code write is under scripts/.
+        test_dirs = ["tools/llmtool/tests/"]
+        if all(w.startswith("scripts/") for w in code_writes):
+            test_dirs.append("scripts/")
         has_test_module = any(
             isinstance(r, str)
-            and _norm_path(r).startswith("tools/llmtool/tests/test_")
+            and _norm_path(r).startswith(test_dir + "test_")
             and _norm_path(r).endswith(".py")
-            and "/" not in _norm_path(r)[len("tools/llmtool/tests/test_"):]
+            and "/" not in _norm_path(r)[len(test_dir + "test_"):]
             and (repo_dir / _norm_path(r)).is_file()
             for r in reads
+            for test_dir in test_dirs
         )
         if not has_test_module:
             failures.append("read_no_test_module")

@@ -334,6 +334,85 @@ class SpecPreflightReadScopeTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(out, "SPEC_PREFLIGHT_OK\n")
 
+    def _scripts_repo(self, tmp: str) -> Path:
+        repo = Path(tmp)
+        (repo / "scripts").mkdir(parents=True)
+        (repo / "tools" / "llmtool" / "scripts").mkdir(parents=True)
+        (repo / "scripts" / "monitor.py").write_text("# m\n", encoding="utf-8")
+        (repo / "scripts" / "test_monitor.py").write_text("# t\n", encoding="utf-8")
+        (repo / "tools" / "llmtool" / "scripts" / "helper.py").write_text("# h\n", encoding="utf-8")
+        return repo
+
+    def test_scripts_write_accepts_scripts_test_module(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._scripts_repo(tmp)
+            spec = dict(BASE_SPEC,
+                        write=["scripts/monitor.py"],
+                        read=["scripts/monitor.py", "scripts/test_monitor.py"],
+                        acceptance=["Update scripts/monitor.py; cover it in scripts/test_monitor.py."])
+
+            failures = check_read_scope(spec, repo)
+            self.assertEqual(failures, [])
+
+            code, out = self._run_main(spec, repo)
+            self.assertEqual(code, 0)
+            self.assertEqual(out, "SPEC_PREFLIGHT_OK\n")
+
+    def test_scripts_write_without_test_read_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._scripts_repo(tmp)
+            spec = dict(BASE_SPEC,
+                        write=["scripts/monitor.py"],
+                        read=["scripts/monitor.py"],
+                        acceptance=["Update scripts/monitor.py."])
+
+            failures = check_read_scope(spec, repo)
+            self.assertEqual(failures, ["read_no_test_module"])
+
+            code, out = self._run_main(spec, repo)
+            self.assertEqual(code, 1)
+            self.assertEqual(out, "SPEC_PREFLIGHT_FAIL:read_no_test_module\n")
+
+    def test_llmtool_write_with_only_scripts_test_read_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._scripts_repo(tmp)
+            spec = dict(BASE_SPEC,
+                        write=["tools/llmtool/scripts/helper.py"],
+                        read=["tools/llmtool/scripts/helper.py", "scripts/test_monitor.py"],
+                        acceptance=["Update tools/llmtool/scripts/helper.py."])
+
+            failures = check_read_scope(spec, repo)
+            self.assertEqual(failures, ["read_no_test_module"])
+
+            code, out = self._run_main(spec, repo)
+            self.assertEqual(code, 1)
+            self.assertEqual(out, "SPEC_PREFLIGHT_FAIL:read_no_test_module\n")
+
+    def test_mixed_scripts_and_llmtool_writes_need_llmtool_test_module(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._scripts_repo(tmp)
+            spec = dict(BASE_SPEC,
+                        write=["scripts/monitor.py", "tools/llmtool/scripts/helper.py"],
+                        read=["scripts/monitor.py", "tools/llmtool/scripts/helper.py",
+                              "scripts/test_monitor.py"],
+                        acceptance=["Update scripts/monitor.py and tools/llmtool/scripts/helper.py."])
+
+            failures = check_read_scope(spec, repo)
+            self.assertEqual(failures, ["read_no_test_module"])
+
+    def test_scripts_write_rejects_missing_or_nested_scripts_test(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._scripts_repo(tmp)
+            (repo / "scripts" / "sub").mkdir()
+            (repo / "scripts" / "sub" / "test_nested.py").write_text("# t\n", encoding="utf-8")
+            for test_read in ("scripts/sub/test_nested.py", "scripts/test_absent.py"):
+                with self.subTest(test_read=test_read):
+                    spec = dict(BASE_SPEC,
+                                write=["scripts/monitor.py", test_read],
+                                read=["scripts/monitor.py", test_read],
+                                acceptance=["Update scripts/monitor.py."])
+                    self.assertEqual(check_read_scope(spec, repo), ["read_no_test_module"])
+
 
 if __name__ == "__main__":
     unittest.main()
