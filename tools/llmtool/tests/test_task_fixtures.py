@@ -1,12 +1,12 @@
 """Tests for the shared developer Task fixtures in ``task_fixtures`` (#1502)."""
 
+import copy
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from llmtool import worker_dispatch
-from llmtool.errors import LLMToolError
-from llmtool.task_store import TaskStore
+from llmtool.task_store import TaskStore, TaskStoreConflict
 
 import review_trust_fixture
 import task_fixtures
@@ -62,16 +62,33 @@ class TaskFixturesTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             task_fixtures.developer_assignment('company-gw')
 
-    def test_developer_passed_straight_to_create_is_refused(self):
-        # The wrong pattern this module replaces: create never stores a developer.
-        task = task_fixtures.pm_responded_task()
-        task['developer'] = task_fixtures.developer_assignment('codex')
-        with self.assertRaises((LLMToolError, worker_dispatch.WorkerDispatchDenied)):
-            self.store.create(task)
-        # A refusal may still leave the audited, developer-free Task on disk;
-        # it must never hold the developer that was passed in.
-        if task['task_id'] in self.store.task_ids():
-            self.assertIsNone(self.store.get(task['task_id'])['developer'])
+    def test_create_with_developer_stores_the_assignment_and_refuses_a_second(self):
+        # Capture the exact record developer_assignment returns inside the fixture.
+        returned = []
+
+        def recording_assignment(*args, **kwargs):
+            developer = real_assignment(*args, **kwargs)
+            returned.append(copy.deepcopy(developer))
+            return developer
+
+        real_assignment = task_fixtures.developer_assignment
+        with mock.patch.object(task_fixtures, 'developer_assignment',
+                               side_effect=recording_assignment):
+            saved = task_fixtures.create_with_developer(self.store, 'codex')
+        self.assertEqual(len(returned), 1)
+        self.assertEqual(saved['developer'], returned[0])
+        stored = self.store.get(saved['task_id'])
+        self.assertEqual(stored['developer'], returned[0])
+
+        # The create-then-assign precondition: a second developer is refused
+        # and the stored record is unchanged.
+        with self.assertRaises(TaskStoreConflict):
+            self.store.compare_and_update(
+                saved['task_id'], expected={'developer': None},
+                developer=task_fixtures.developer_assignment('codex'))
+        after = self.store.get(saved['task_id'])
+        self.assertEqual(after['developer'], returned[0])
+        self.assertEqual(after['record_sha256'], stored['record_sha256'])
 
 
 if __name__ == '__main__':

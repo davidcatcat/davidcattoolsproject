@@ -1,11 +1,13 @@
 """Shared TaskStore Task fixtures carrying a developer record (#1502).
 
-Rule: never pass a developer record to ``TaskStore.create`` in tests. Use
-``create_with_developer``. It creates the Task without a developer, then sets
-the developer with ``store.compare_and_update(task_id, expected={'developer':
-None}, developer=...)``, which is the supported path through the dispatch gate
-and the developer transition checks. ``test_task_fixtures`` shows that a
-developer passed straight to ``create`` is refused.
+Prefer ``create_with_developer`` over passing a developer record to
+``TaskStore.create`` in tests. It follows the supported create-then-assign
+sequence: create the Task without a developer, then set the developer with
+``store.compare_and_update(task_id, expected={'developer': None},
+developer=...)``, the path that runs the dispatch gate and the developer
+transition checks. ``test_task_fixtures`` shows that the developer is stored as
+given and that the ``expected={'developer': None}`` precondition refuses a
+second developer.
 
 The records copy ``TaskStoreTests._codex_dispatch_task`` and
 ``_developer_assignment`` in ``test_task_store.py``. Each provider gets the
