@@ -121,6 +121,84 @@ class HighDebugNoPRTests(unittest.TestCase):
         self.github_get.assert_any_call('issues/42')
         self.assertIn('Issue: 42 (no PR)', prompts[0])
 
+    def refusal(self, store, **changes):
+        reader, runner, create = mock.Mock(), mock.Mock(), mock.Mock()
+        options = self.issue_options(store, runner=runner, create_d6=create)
+        options['read_registration'] = reader
+        options.update(changes)
+        with self.assertRaises(LLMToolError) as caught:
+            high_debug.run_high_debug(**options)
+        self.assertEqual((store.entries, store.events), ([], []))
+        runner.assert_not_called()
+        create.assert_not_called()
+        return caught.exception.high_debug_code, reader
+
+    def test_trust_failure_refuses_d6_unavailable_before_any_registry_read(self):
+        completion = high_debug.task_completion
+        failing = LLMToolError('TRUST_FAILED')
+        with patch.object(completion, '_trust_config', side_effect=failing):
+            code, reader = self.refusal(_NoPRStore())
+        self.assertEqual(code, 'HIGH_DEBUG_D6_UNAVAILABLE')
+        reader.assert_not_called()
+        self.poster.assert_not_called()
+
+    def test_registry_failure_refuses_d6_unavailable(self):
+        self.repo()
+        broken = mock.Mock(side_effect=OSError('registry'))
+        code, _reader = self.refusal(_NoPRStore(), read_registration=broken)
+        self.assertEqual(code, 'HIGH_DEBUG_D6_UNAVAILABLE')
+
+    def test_mismatched_completion_refuses_without_the_canonical_fallback(self):
+        other = dict(executor_task_id='other', evidence=dict(common_dir='/tmp/x'))
+        for completion in (other, {'executor_task_id': 'executor'}, 'bad'):
+            with self.subTest(completion=completion):
+                code, reader = self.refusal(_NoPRStore(completion=completion))
+                self.assertEqual(code, 'HIGH_DEBUG_D6_UNAVAILABLE')
+                reader.assert_not_called()
+
+    def test_invalid_target_combinations_refuse_before_any_entry(self):
+        cases = [dict(issue_number=42, failed_corrections=2, early_reason=None)]
+        cases.append(dict(issue_number=42, family='pr-1'))
+        cases.append(dict(issue_number=None, pr_number=17))
+        broken = dict(issue_number=None, pr_number=17, failed_corrections=2, early_reason=None)
+        cases.append(broken)
+        cases.append(dict(issue_number=None))
+        cases.append(dict(pr_number=17))
+        cases.append(dict(issue_number=True))
+        for changes in cases:
+            with self.subTest(changes=changes):
+                code, _reader = self.refusal(_NoPRStore(), **changes)
+                self.assertEqual(code, 'HIGH_DEBUG_ARGUMENT_INVALID')
+                self.poster.assert_not_called()
+
+    def cli_args(self, **changes):
+        args = SimpleNamespace(task_id=TASK, executor_task='executor', evidence_file=None)
+        args.route, args.pr, args.issue, args.family = 'codex', None, 42, 'no-pr'
+        args.failed_corrections, args.early = None, 'pre-pr-failure'
+        for key, value in changes.items():
+            setattr(args, key, value)
+        return args
+
+    def test_cli_invalid_target_combinations_refuse(self):
+        cases = [dict(issue=None), dict(pr=17), dict(failed_corrections=2, early=None)]
+        cases += [dict(family='pr-1'), dict(pr=17, issue=None)]
+        for changes in cases:
+            with self.subTest(changes=changes):
+                args = self.cli_args(**changes)
+                with self.assertRaises(LLMToolError) as caught:
+                    task_submission_cli.run_task_high_debug(args, store=_NoPRStore())
+                code = caught.exception.high_debug_code
+                self.assertEqual(code, 'HIGH_DEBUG_ARGUMENT_INVALID')
+
+    def test_cli_passes_the_issue_target(self):
+        target = 'llmtool.high_debug.run_high_debug_with_fallback'
+        with patch(target, return_value={'status': 'RCA_CONFIRMED'}) as fallback:
+            result = task_submission_cli.run_task_high_debug(self.cli_args(), store=_NoPRStore())
+        self.assertEqual(result, {'status': 'RCA_CONFIRMED'})
+        kwargs = fallback.call_args.kwargs
+        got = (kwargs['issue_number'], kwargs['pr_number'], kwargs['family'])
+        self.assertEqual(got, (42, None, 'no-pr'))
+
 
 if __name__ == '__main__':
     unittest.main()
