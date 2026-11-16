@@ -213,17 +213,17 @@ class StoreStartFailureTests(unittest.TestCase):
         self.root = task_fixtures.create_with_developer(self.store, 'agy')['task_id']
 
     def lineage_member(self, kind, **developer_changes):
-        """A Task with lineage kind, then an AGY developer set to developer_changes."""
-        task = task_fixtures.pm_responded_task(route='agy')
-        self.store.create(task)
-        task_id = task['task_id']
+        """A Task whose AGY developer record carries developer_changes, then lineage kind.
+
+        The developer is stored in one create-then-assign step
+        (create_with_developer, expected={'developer': None}), as
+        test_task_store.py stores an AGY BLOCKED or DEVELOPER_RESPONDED record.
+        A second step from DEVELOPER_PENDING would be a dispatch transition the
+        worker gate refuses outside the adapter.
+        """
+        task_id = task_fixtures.create_with_developer(
+            self.store, 'agy', **developer_changes)['task_id']
         record_lineage(self.store, task_id, lineage(kind, self.root))
-        pending = self.store.compare_and_update(
-            task_id, expected={'developer': None},
-            developer=task_fixtures.developer_assignment('agy'))['developer']
-        developer = dict(pending, **developer_changes)
-        self.store.compare_and_update(task_id, expected={'developer': pending},
-                                      developer=developer)
         return task_id
 
     def start_failed(self, kind='replan', **changes):
