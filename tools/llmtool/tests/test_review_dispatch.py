@@ -35,6 +35,7 @@ def _runtime_parts(*pieces):
 
 
 import review_trust_fixture
+import worker_policy_fixture
 
 
 _MODULE_PATCHES = []
@@ -1315,6 +1316,10 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertNotIn('e' * 64, json.dumps(claim))
 
     def test_reviewer_selection_is_cross_family_and_unknown_is_refused(self):
+        # #1692: the shared all-ALLOWED policy, not the live worker-dispatch.json
+        # (#289 c6922657359 paused claude-reviewer there; the real-file cases live
+        # in test_worker_dispatch and test_gw_agent_route_wiring).
+        worker_policy_fixture.install(self)
         executor = SimpleNamespace(
             result_sha=HEAD, root='/repo/worktree', common_dir='/repo/.git', branch='task')
         snapshot = SimpleNamespace(
@@ -1392,6 +1397,10 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertNotIn('review_dispatch_claim', self.store.get(TASK))
 
     def test_dirty_executor_refuses_before_claim_or_adapter_calls(self):
+        # #1692: the default claude-reviewer must pass the gate so the dirty
+        # executor check is reached; use the shared all-ALLOWED policy, not the
+        # live worker-dispatch.json (#289 c6922657359 paused claude-reviewer).
+        worker_policy_fixture.install(self)
         task = {
             'task_id': TASK, 'run_id': 'run',
             'task_binding': {'contract_digest': 'd' * 64},
