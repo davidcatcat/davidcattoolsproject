@@ -12,6 +12,14 @@ Repair 3 (after formal review v4 F1) read `merge_train_ops.py` and
 re-checked the `task_advance.py` definitions cited below (`:423`, `:499`,
 `:572`, `:1180`, `:1291`, `:1482`, `:1639`, `:2385`, `:2620`, `:2736`, `:2801`,
 `:2887`, `:3118`) at that commit. They match.
+The D3 replan (root `4159a550`, after child #2211 stalled) re-read the six
+files at `e2f2fc23`: `merge_train_ops.py` in full, `review_dispatch.py:1207`–
+`:1344`, `task_advance.py:499`–`:572`, `:1180`–`:1224` and `:1600`–`:1659`, and
+`sensitive-paths.json`. They match the citations below, with one correction:
+the claim append at `review_dispatch.py:1329` expects the `record_sha256` of
+the Task read at `:1218`, the first line of `dispatch_review`. It does not
+re-read the Task just before the append (§2.5, §3.3). §7 maps the review
+findings to the sections that resolve them.
 
 Read scope: `review_dispatch.py`, `review_result.py`, `review_repair.py`,
 `task_advance.py`, `merge_train_ops.py` and `tools/llmtool/sensitive-paths.json`
@@ -175,10 +183,12 @@ comment text alone resolves anything.
   - `review_result.py:261` (UNKNOWN → DISPATCHED settle)
   - `review_result.py:399` (`record_completion_event`)
 
-  The claim append at `review_dispatch.py:1329` does expect `record_sha256`,
-  but it re-reads the Task first. So after the merge claim is written, a new
-  review claim or REVIEWER event can still land before or during the merge
-  call. Nothing in TaskStore forbids it.
+  The claim append at `review_dispatch.py:1329` expects the `record_sha256` of
+  the Task that `dispatch_review` read at its start (`:1218`). It appends
+  `claims + [claim]`, so the claim list keeps its order. A dispatch that starts
+  after the merge claim is written reads the new digest and passes that check.
+  So after the merge claim is written, a new review claim or REVIEWER event can
+  still land before or during the merge call. Nothing in TaskStore forbids it.
 - Other readers that treat every claim or REVIEWER event as formal:
   - `_head_review_claim` (`:2098`)
   - `_blocked_fallback_reviewer` (`:2511`, counts all claims at the head)
@@ -292,7 +302,10 @@ own fence design.
 So kind awareness must land before any security record can be written.
 `_merge_once` needs a fence that review writers honour (§3.7). The train route
 must not merge a PR that needs a security PASS at all (§3.6), so it never has
-to read a security verdict.
+to read a security verdict. The train's final member check must also be
+final: nothing after it may turn the member's merged head into one that needs
+a security PASS. §3.4 defines `required` so that this holds without a train
+fence.
 
 ## 3. Design
 
@@ -343,11 +356,25 @@ to read a security verdict.
   ambiguous, and `review_kind` returns `None` for it, which fails closed. Whether
   any such claim exists in a live store is UNKNOWN. PR 1 makes such a claim
   fail closed and rewrites no record. The PM checks live stores for such
-  claims before PR 4 lands.
+  claims before PR 3 lands. PR 3 is the first PR that writes security claims
+  in production.
 
 ### 3.3 Security dispatch and result
 
 - `dispatch_review(..., kind="security")`:
+  - **Precondition (only where required):** before it writes a claim, the
+    dispatch calls `security_required(task, pr, head, github_get)` (§3.4) on the
+    Task snapshot it read at `:1218`. Any answer other than "required"
+    refuses: not required gives `SECURITY_REVIEW_NOT_REQUIRED`, and unknown
+    gives `SECURITY_REVIEW_REQUIRED_UNKNOWN`. No claim is written, no D6 is
+    created and no Reviewer starts. The claim append (`:1329`) already expects
+    that snapshot's `record_sha256`, so the sticky part of the answer and the
+    append act on the same record. The rule-file part depends only on the
+    exact head. `dispatch_review` is the only writer of security claims; PR 2
+    adds a test that no other code path writes `review_kind: "security"`.
+    This precondition is what lets the train route work without a fence
+    (§3.6). It also means no one can start a security review on a head that
+    does not need one; see §6.
   - **Route:** the Reviewer is always `codex-reviewer`. It passes the unchanged
     `_select_reviewer` family and policy check. If the Developer family is
     Codex, the dispatch is refused `SECURITY_REVIEWER_SAME_FAMILY`; there is no
@@ -394,19 +421,56 @@ to read a security verdict.
 
 - `_advance_step` computes `related['security']`, which holds two values:
   - **`required`**: computed by one shared helper,
-    `_security_required(record, number, github_get)`. It is true when either of
-    these holds:
-    - The PR files at the head touch a rule file as defined in §3.6. The files
-      are read through `_pr_files`, and both `filename` and
-      `previous_filename` are checked.
-    - Any security claim already exists for this PR, at any head. This makes
-      the requirement sticky, so a repair cannot escape a FAIL by dropping the
-      rule file.
+    `security_required(record, number, head, github_get)`, which returns
+    `True`, `False` or `None` (unknown). For head `H` of PR `N` it is true when
+    either of these holds:
+    - **Rule file:** the PR files at `H` touch a rule file as defined in §3.6.
+      Both `filename` and `previous_filename` are checked.
+    - **Sticky:** the Task record holds a security claim for PR `N` that was
+      appended to `review_dispatch_claim` before the first formal claim at
+      `(N, H)`. If there is no formal claim at `(N, H)` yet, any security claim
+      for PR `N`, at any head, counts. So a repair cannot escape a security
+      FAIL by dropping the rule file: the repair head has no formal claim when
+      advance reaches it, and the security stage comes before formal dispatch.
+      Even if a formal claim is made first, the old security claim was
+      appended before it and still counts.
 
-    An unreadable file list, or `PR_FILES_TOO_MANY`, means required (fail
-    closed). The merge gate (§3.6) and the train refusal (§3.6) call the same
-    helper, so advance, merge and train cannot disagree about which PRs need
-    a security PASS.
+    **Exact head.** `_pr_files` (`task_advance.py:499`) reads the PR's current
+    file list, not the list at a given head. So the helper reads the PR, then
+    the file list, then the PR again. It answers unknown (`None`) unless both
+    PR reads show `H` as the head. An unreadable file list,
+    `PR_FILES_TOO_MANY`, an unknown claim kind (§3.1) or an exception also
+    give `None`. Every caller treats `None` as required for routing and as a
+    refusal for merge and dispatch (fail closed).
+
+    **Why order and not "any claim at any time".** Two properties follow
+    because the claim list is append-only and keeps its order
+    (`review_dispatch.py:1329` appends `claims + [claim]`). Whether TaskStore
+    ever reorders or deletes claim entries was not read (`task_store.py`).
+    PR 1 confirms it and adds a store test.
+    - *Monotone:* `required(N, H)` never goes from true to false. The rule-file
+      part is fixed for `H`. Before the first formal claim at `(N, H)` the
+      sticky part counts every security claim. When that formal claim is
+      appended, every security claim that existed is still ahead of it.
+    - *Frozen once a formal claim exists:* after the first formal claim at
+      `(N, H)`, later security claims are appended after it and do not count.
+      So `required(N, H)` no longer changes. A security claim at `(N, H)` itself
+      can only be created where `required(N, H)` is already true (the §3.3
+      precondition).
+
+    Every train member has a formal PASS claim at its recorded head
+    (`_merge_pass_claim`, `merge_train_ops.py:188`). So a member's answer is
+    frozen when the train checks it, and nothing after the check can change it
+    (§3.6).
+
+    The helper lives in `review_result.py`. It imports `sensitive_paths`, and
+    reaches `task_advance._pr_files` through a function-level import, the
+    pattern `review_dispatch.py:388` uses for `review_result`, so that
+    `review_dispatch` can call it without a module import cycle
+    (`task_advance` imports `review_dispatch` at `:19`). Security dispatch
+    (§3.3), advance routing, the direct merge gate and the train refusal
+    (§3.6) all call this one helper. So they cannot disagree about which heads
+    need a security PASS.
   - **`latest`**: the newest security claim at `(pr, head)` and its bound
     outcome, built by a security-aware `_review_outcomes`.
 - `decide` inserts a security stage after the EC2 PASS and before
@@ -423,8 +487,9 @@ to read a security verdict.
 
 - An unresolved bound security FAIL means the newest security claim at the
   current head has a `REVIEW_FAIL` event. While one exists, advance never
-  dispatches a formal review. This holds even when the review is not required,
-  because a bound FAIL is a fact about the head.
+  dispatches a formal review. A security claim at a head exists only where
+  the head was required when the claim was made (§3.3), and `required` never
+  turns false (§3.4). So a bound FAIL always sits on a required head.
 - A formal claim that already exists at the head is left alone. A FAIL is
   routed to repair first anyway: when both kinds FAIL, `REPAIR_SECURITY_REVIEW`
   wins.
@@ -459,8 +524,10 @@ to read a security verdict.
 
 - `_merge_once` calls a new `_merge_security_claim(record, number, head, events)`
   right after `_merge_pass_claim`, on both the normal path and the Owner
-  exception path. `_advance_step` passes it `related['security']`. It runs only
-  when `related['security'].required` is true, and it returns one refusal code
+  exception path. It evaluates `security_required` (§3.4) on the same record
+  snapshot that the merge reservation expects (§3.7). From PR 4 it takes that
+  answer from `related['security']`, which is computed on that snapshot. A
+  true or unknown answer runs the checks below, which return one refusal code
   or `None`. It refuses in these cases:
   - **`MERGE_SECURITY_REVIEW_MISSING`**: there is no security claim at
     `(pr, head)`.
@@ -472,8 +539,9 @@ to read a security verdict.
       outcome is `REVIEW_PASS`.
   - **`MERGE_SECURITY_NEWER_REVIEW_EXISTS`**: a newer security claim or event
     exists at that head, in any state. This mirrors `_merge_pass_claim`.
-  - **`MERGE_SECURITY_REQUIRED_UNKNOWN`**: the PR file list cannot be read
-    completely.
+  - **`MERGE_SECURITY_REQUIRED_UNKNOWN`**: `security_required` answers
+    unknown (file list unreadable or incomplete, head moved between its reads,
+    unknown claim kind, exception).
 - The gate reads TaskStore and the stored Codex output only. PR comments are
   never an input. That is the fix for the CWE-345 finding: posting a PASS-shaped
   comment changes no record, so it cannot open the gate.
@@ -488,8 +556,8 @@ to read a security verdict.
     This includes `tools/llmtool/worker-dispatch.json`, `task_advance.py` and
     the review modules. Its contents at `b4bcb11e` are listed in §2.5. Its
     matcher semantics are UNKNOWN to this design (`sensitive_paths.py` not
-    read). The PR that adds `_security_required` reads `sensitive_paths.py`
-    and the registry and confirms them.
+    read). The PR that adds `security_required` (PR 2) reads
+    `sensitive_paths.py` and the registry and confirms them.
   - **The review-rules set:** `AGENTS.md`, `CLAUDE.md`, or a path under
     `.claude/skills/`. This is the set `_REVIEW_RULES_HEADER`
     (`review_dispatch.py:102`) calls rule files. It is kept as a floor in case
@@ -507,52 +575,68 @@ to read a security verdict.
   member reservation and has no reservation recovery. Train-level security
   enforcement is a later design (§6).
   - **Admission.** The train build's member admission in `merge_train.py`
-    (not read; the function is UNKNOWN here) calls `_security_required` for
-    each candidate PR on that candidate's Task record. A true answer refuses
-    the build with `TRAIN_MEMBER_SECURITY_REVIEW_REQUIRED` and the candidate's
-    Task ID. An unknown answer (unreadable file list, `PR_FILES_TOO_MANY`, an
-    exception) refuses it with `TRAIN_MEMBER_SECURITY_REQUIRED_UNKNOWN`. No
-    train record is written in either case. PR 4 adds `merge_train.py` to its
-    read and write paths.
+    (not read; the function is UNKNOWN here) calls `security_required` for
+    each candidate PR at the candidate's head, on that candidate's Task
+    record. A true answer refuses the build with
+    `TRAIN_MEMBER_SECURITY_REVIEW_REQUIRED` and the candidate's Task ID. An
+    unknown answer refuses it with `TRAIN_MEMBER_SECURITY_REQUIRED_UNKNOWN`.
+    No train record is written in either case. PR 3 adds `merge_train.py` to
+    its read and write paths. Admission is an early refusal only. The merge
+    decision does not rely on it.
   - **Final member check.** `_member_unchanged` returns a refusal code or
     `None` instead of a bool. It has one caller, `_merge_locked` (`:363`),
     which refuses the whole train with that code and the member's Task ID.
-    After its existing checks (`merge_attempt`, `_open_at`,
-    `_merge_pass_claim`), which keep the code `TRAIN_MEMBER_CHANGED`, it calls
-    `_security_required` on the member record it has just re-read:
+    After its existing checks (`merge_attempt` `:177`, `_open_at` `:179`,
+    `_merge_pass_claim` `:188`–`:191`), which keep the code
+    `TRAIN_MEMBER_CHANGED`, it calls
+    `security_required(record, member['pr'], member['head'], github_get)` on
+    the member record it has just re-read:
     - required: `TRAIN_MEMBER_SECURITY_REVIEW_REQUIRED`;
-    - unknown: `TRAIN_MEMBER_SECURITY_REQUIRED_UNKNOWN`.
+    - unknown, including a member head that moved between the helper's two
+      PR reads: `TRAIN_MEMBER_SECURITY_REQUIRED_UNKNOWN`.
 
     It also refuses `TRAIN_MEMBER_CHANGED` when the member record has a
     `merge_reservation` in any state (fail closed). The check runs before the
     train claim (`:397`), so a refusal makes no claim and no merge call.
-    Admission alone is not enough: a member Task can gain a security claim
-    after the train is built, and the merge decision must not trust a check
-    made at build time.
-  - **Exact head.** `_pr_files` (`task_advance.py:499`) reads the PR's
-    current file list, not the list at a given head. So the member check
-    reads the member PR again after the file list read and refuses
-    `TRAIN_MEMBER_CHANGED` unless `_open_at` still holds at the recorded head.
   - **Train PR delta.** Before the claim, `_merge_locked` also applies the
     §3.6 rule-file set to the train PR's own file list, read between two
     `_open_at(…, train_head)` reads. A rule file refuses
-    `TRAIN_SECURITY_REVIEW_REQUIRED`, and an unreadable or too-long list
-    refuses `TRAIN_SECURITY_REQUIRED_UNKNOWN`. The merge call matches
-    `train_head` (`:404`), so the content checked here is the content that
-    merges. That makes the rule-file part of the refusal independent of the
-    member reads.
-  - **Why no train fence.** The rule-file part of `required` depends only on
-    the exact heads, which the merge call pins. The sticky part (a security
-    claim on the member record) is read at the final member check. A security
-    claim first created between that check and the train merge call is not
-    seen. Advance never creates one for a member that touches no rule file
-    and has no security claim (§3.4: not required, so no
-    `DISPATCH_SECURITY_REVIEW`). So only a manual
-    `review-dispatch --kind security` in that window can create one. This is
-    a known limit of the train route, left to the later train design (§6).
-  - The same PR (PR 4) adds the `_merge_once` gate, the direct merge
-    reservation (§3.7) and the train refusal. No commit on `main` has one of
-    them without the others.
+    `TRAIN_SECURITY_REVIEW_REQUIRED`, and an unreadable or too-long list, or a
+    moved head, refuses `TRAIN_SECURITY_REQUIRED_UNKNOWN`. The merge call
+    matches `train_head` (`:404`), so the content checked here is the content
+    that merges. This is a second check of the rule-file part that does not
+    depend on the member reads or on `train_delta_verified` (`:359`).
+  - **Why no time window (no train fence needed).** The train merges, for
+    each member, the content of its recorded head `H`. `train_delta_verified`
+    (`:359`) checks that the train head is built from exactly those heads, and
+    the merge call is pinned to `train_head` (`:404`). The final member check
+    found `required(N, H)` false. Nothing after it can make it true:
+    - The rule-file part is a function of `H` alone, and `H` is pinned. The
+      train PR delta check confirms it on the merged content itself.
+    - The member passed `_merge_pass_claim` at `H`, so a formal claim exists at
+      `(N, H)`. By §3.4 `required(N, H)` is then frozen: a security claim
+      appended later, at any head, is behind that formal claim and does not
+      count.
+    - A security claim at `(N, H)` itself cannot be created. The §3.3
+      precondition refuses `SECURITY_REVIEW_NOT_REQUIRED`, because
+      `required(N, H)` is false and stays false. This holds for advance, the
+      CLI and any manual dispatch, because the precondition is in
+      `dispatch_review`, the only writer of security claims.
+    - A security claim at a newer head `H2` of the same PR (after a push) is
+      about content the train does not merge. The member PR is then closed
+      unmerged by `close_train` (`merge_train_ops.py:434`–`:465`). `H2` can
+      only merge through its own advance, under the §3.6 gate.
+
+    So the final member check is the merge decision, and it cannot go stale:
+    there is no point between it and the merge call at which a PR whose
+    merged head needs a security PASS could merge. The earlier draft's known
+    gap (a manual security dispatch between the final member check and the
+    train merge call) is closed by the precondition plus the frozen `required`
+    rule, not by a fence.
+  - The same PR (PR 3) adds the `_merge_once` gate, the direct merge
+    reservation (§3.7), the train refusal and the security CLI entry points.
+    No commit on `main` can write a security claim through a supported entry
+    point without both merge routes refusing or gating it (§4).
 
 ### 3.7 Merge reservation on the direct route (fence between the final check and the merge)
 
@@ -576,7 +660,7 @@ merges a PR that needs a security review (§3.6).
   meaning and readers. `_merge_once` writes both fields in one write.
 - **Acquisition.** One `compare_and_update` under the existing TaskStore
   per-Task lock. It expects the `record_sha256` of the exact snapshot on which
-  `_merge_pass_claim`, `_security_required` and `_merge_security_claim` were
+  `_merge_pass_claim`, `security_required` and `_merge_security_claim` were
   evaluated. `evidence` names the claim versions and event ids that were
   accepted. The write is refused in these cases:
   - **`MERGE_RESERVATION_CONFLICT`**: the snapshot changed (any review write
@@ -645,7 +729,7 @@ merges a PR that needs a security review (§3.6).
     snapshot and replaces the reservation through a write that expects the
     old one. A stale `RESERVED` with no live process stays fenced until one of
     the reads above applies. Whether `merge_attempt` `CLAIMED` is reconciled
-    today is UNKNOWN; PR 4 does not add a retry from `RESERVED`.
+    today is UNKNOWN; PR 3 does not add a retry from `RESERVED`.
 
   Recovery never replays an uncertain merge to clear a reservation, and no
   comment releases one. A failed release write leaves the reservation active
@@ -688,21 +772,24 @@ merges a PR that needs a security review (§3.6).
   Codex claim. A PR comment is a publication copy and resolves nothing.
 - **I4:** at any head with an unresolved bound security FAIL, no formal Reviewer
   starts, and repair is reachable through bound events.
-- **I5:** a PR that touches a rule file (§3.6: the sensitive-paths registry or
-  the review-rules set), or that ever had a security claim, merges through
-  llmtool only through single-PR `task advance` (`_merge_once`, on the normal
-  and Owner exception paths), and only when the newest bound security verdict
-  at the exact merge head is PASS. On that route it holds at the merge call,
-  not only at the check, because of I7. The train route refuses such a PR
+- **I5:** a head `H` of PR `N` with `required(N, H)` true or unknown (§3.4:
+  it touches a rule file from the sensitive-paths registry or the review-rules
+  set, or it is sticky from an earlier security claim) merges through llmtool
+  only through single-PR `task advance` (`_merge_once`, on the normal and
+  Owner exception paths). It merges there only when the newest bound security
+  verdict at `H` is PASS. On that route this holds at the merge call, not
+  only at the check, because of I7. The train route refuses such a head
   (I5a).
-- **I5a:** a merge train never merges a member that touches a rule file, or
-  whose Task holds a security claim at the final member check, whatever its
-  security verdict. A rule file in the train PR's own delta refuses the
-  train. The one known gap is a security claim first created by a manual
-  dispatch, on a member that touches no rule file, between the final member
-  check and the train merge call (§3.6, §6).
-- **I6:** an unknown kind, file list, registry answer, dispute target, record
-  state or reservation state fails closed.
+- **I5a:** a merge train never merges a member head whose `required` answer
+  at the final member check is true or unknown, whatever its security
+  verdict. A rule file in the train PR's own delta refuses the train. Because
+  `required(N, H)` is frozen once a formal claim exists at `(N, H)` (§3.4), and
+  every member has one, the answer cannot change between the final member
+  check and the merge call. There is no time window on this route (§3.6).
+- **I5b:** a security claim is created only at a head where `required` is
+  already true (§3.3), and `required` never turns from true to false (§3.4).
+- **I6:** an unknown kind, file list, head, registry answer, dispute target,
+  record state or reservation state fails closed.
 - **I7:** from a successful direct-route reservation until it is `RELEASED`,
   the Task's merge gate inputs for that PR cannot change. A review write that
   commits before the reservation makes the reservation fail. TaskStore
@@ -713,8 +800,24 @@ merges a PR that needs a security review (§3.6).
 
 ## 4. Ordered PRs
 
-Each PR leaves `main` consistent. No writer lands before its readers, and the
-gate lands last. Tests follow the test data rule (Owner #763 A):
+Each PR leaves `main` consistent, and no writer lands before its readers. The
+order also leaves no time window, because no supported entry point can write
+a security claim until both merge routes enforce or refuse it:
+
+- PR 2 adds the security dispatch and result code, but no caller: no CLI
+  option and no advance step. In production, nothing can write a security
+  claim after PR 2.
+- PR 3 adds the CLI entry points in the same PR as the direct gate, the
+  reservation fence and the train refusal. The first commit on which a
+  security claim can be written is therefore also the first commit on which
+  a head that needs one cannot merge without a bound PASS, on either route.
+- PR 4 adds advance automation (routing and repair) on top. It changes how
+  quickly a PASS is reached, not whether merge needs one.
+
+Before PR 3, rule-file PRs merge under the existing PM convention. That is
+the starting state this design replaces, not a window it opens.
+
+Tests follow the test data rule (Owner #763 A):
 
 - Fixtures use the shared TaskStore helpers (`create_with_developer`, #2196),
   hex task, run and head ids, and injected `github_get`, `codex_runner`,
@@ -725,6 +828,10 @@ gate lands last. Tests follow the test data rule (Owner #763 A):
 
 ### PR 1: kind-aware readers and version ranges (no new writer)
 
+- **Observable outcome:** no behaviour change for existing records. A
+  hand-built security claim or event is ignored by every formal reader, and
+  a dispatch at a version outside its kind's range is refused
+  `REVIEW_VERSION_RANGE_INVALID`.
 - **Files:**
   - `task_store.py`: optional `review_kind` on claims and REVIEWER events, with
     validation. The current event schema is outside this Task's scope
@@ -779,6 +886,10 @@ gate lands last. Tests follow the test data rule (Owner #763 A):
   - The range refusals behave as specified.
   - Formal event ids for unchanged records are byte-identical (regression).
   - A legacy unkinded claim at version ≥ 91 fails closed.
+  - Claim order (store test for §3.4): after an append and after each claim
+    state transition, `review_dispatch_claim` keeps every earlier entry at its
+    position. If `task_store.py` can reorder or drop entries, the PR returns
+    SPEC_MISMATCH instead of weakening §3.4.
   - Disputes:
     - With a formal FAIL at v2 and a COMPLETED security claim at v91 on the
       same head, a formal dispute targets v2.
@@ -794,18 +905,27 @@ gate lands last. Tests follow the test data rule (Owner #763 A):
       findings as before (regression).
 - **Invariants kept:** I1, I2, I6.
 
-### PR 2: bound security dispatch and result
+### PR 2: `security_required`, bound security dispatch and result (no caller)
 
+- **Observable outcome:** none in production, because nothing calls the new
+  code. In tests, `dispatch_review(kind="security")` on a required head gives a
+  COMPLETED security claim and one bound event. On a head that is not
+  required it is refused `SECURITY_REVIEW_NOT_REQUIRED`.
 - **Files:**
-  - `review_dispatch.py`: `kind` on `dispatch_review`; Codex-only route;
-    security marker, binding line and accept line in
+  - `review_result.py`: `security_required` (§3.4, §3.6), which uses
+    `sensitive_paths.is_sensitive` (fail closed) plus the review-rules set,
+    the order-based sticky rule and the exact-head PR, files, PR reads.
+    `sensitive_paths.py` and `tools/llmtool/sensitive-paths.json` are added
+    to this PR's read paths only (no change to either). Also
+    `_security_verdict`, `record_review_result(kind=…)` with no comment read,
+    and the kind in the event identity, payload and `secreview-` session id.
+  - `review_dispatch.py`: `kind` on `dispatch_review`; the §3.3 precondition
+    (`SECURITY_REVIEW_NOT_REQUIRED`, `SECURITY_REVIEW_REQUIRED_UNKNOWN`); the
+    Codex-only route; the security marker, binding line and accept line in
     `_parse_codex_review_inner`; `_verdict_binding_line` and
     `_find_posted_verdict` take the kind; claim `review_kind`.
-  - `review_result.py`: `_security_verdict`; `record_review_result(kind=…)`
-    with no comment read; kind in the event identity, payload and
-    `secreview-` session id.
-  - `task_submission_cli.py`: `review-dispatch --kind security`,
-    `review-result --kind security`, and the security prompt rendering.
+  - No CLI option and no advance step. `task_submission_cli.py` and
+    `task_advance.py` do not call the security paths in this PR.
 - **Tests:**
   - A canned Codex JSONL PASS or FAIL gives a COMPLETED security claim and one
     kind-security event. Replaying it creates no second event.
@@ -817,30 +937,25 @@ gate lands last. Tests follow the test data rule (Owner #763 A):
   - A security body is not classified by the formal `_comment_verdict`, and the
     reverse also holds.
   - A binding mismatch is refused `VERDICT_BINDING_MISMATCH`.
-- **Invariants kept:** I1, I3. Nothing calls this from advance yet.
-
-### PR 3: advance routing and repair
-
-- **Files:**
-  - `task_advance.py`:
-    - `_security_required` (§3.4, §3.6), which uses
-      `sensitive_paths.is_sensitive` (fail closed) plus the review-rules set;
-      `sensitive_paths.py` and `tools/llmtool/sensitive-paths.json` are added
-      to this PR's read paths only (no change to either);
-    - `related['security']` (from `_security_required`, sticky);
-    - the `decide` security stage;
-    - the step bodies `DISPATCH_SECURITY_REVIEW`,
-      `RECORD_SECURITY_REVIEW_RESULT` and `REPAIR_SECURITY_REVIEW`;
-    - the publication-copy post, using `_caller_posts_verdict` unchanged.
-  - `review_repair.py`: `_failed_security_event`; `kind` on `repair_review`;
-    the packet `review_kind`; the `auto_review` kind; the repair acceptance
-    text.
-- **Tests:** `decide` table tests cover every row of §3.4 and check the
-  following:
-  - No formal `DISPATCH_REVIEW` happens while a bound security FAIL is at the
-    head.
-  - The rule-file, sticky and unreadable-files cases set `required`. The
-    rule-file cases use the real registry, not a stub, and cover:
+  - Single writer: a source scan of `tools/llmtool/llmtool/` finds the
+    security `review_kind` value written only in `dispatch_review`.
+  - Precondition: `dispatch_review(kind="security")` at a head that touches no
+    rule file, on a Task with no security claim, is refused
+    `SECURITY_REVIEW_NOT_REQUIRED`. The record is unchanged, and the injected
+    `create_d6` and `codex_runner` are never called. An unreadable file list
+    is refused `SECURITY_REVIEW_REQUIRED_UNKNOWN` the same way.
+  - Frozen rule (§3.4): a Task with a formal claim at `(N, H)`, where `H`
+    touches no rule file, then a security claim at another head `H2` that
+    touches a rule file. `security_required` at `H` stays false, and a
+    dispatch at `H` (PR head moved back to `H` through the injected
+    `github_get`) is refused `SECURITY_REVIEW_NOT_REQUIRED`.
+  - Sticky rule: a security claim at `H0`, then a repair head `H1` that touches
+    no rule file, gives required at `H1`. This holds both with no formal claim
+    at `H1` and with a formal claim at `H1` appended after the `H0` security
+    claim.
+  - Exact head: a PR read, a file read and a second PR read whose head
+    differs give unknown.
+  - Rule-file cases use the real registry, not a stub, and cover:
     - an exact rule: a PR that changes only
       `tools/llmtool/worker-dispatch.json`;
     - a module the registry lists: a PR that changes only
@@ -858,33 +973,40 @@ gate lands last. Tests follow the test data rule (Owner #763 A):
       to return `None`, gives `required`;
     - a path the registry does not match, and no security claim, gives not
       required.
-  - The #2194/#2197 shape works: a bound security FAIL now repairs.
-  - A comment-only security FAIL still refuses `REVIEW_FAIL_EVENT_MISSING`.
-  - A formal FAIL and a security FAIL on one head count as one valid FAIL.
-  - The auto limit applies to security repairs.
-  - The `auto_review` re-dispatch is a security review at the next security
-    version.
-- **Invariants kept:** I1, I3, I4, I6.
+- **Invariants kept:** I1, I3, I5b, I6. No production caller exists, so no
+  security claim can be written on `main` after this PR.
 
-### PR 4: direct merge gate and reservation, train refusal, and migration
+### PR 3: direct merge gate and reservation, train refusal, CLI, and migration
 
+- **Observable outcome:** a PR whose head needs a security PASS no longer
+  merges through llmtool without a bound PASS at that exact head.
+  `task advance` refuses `MERGE_SECURITY_REVIEW_*`, and a merge train refuses
+  `TRAIN_MEMBER_SECURITY_*` or `TRAIN_SECURITY_*`. The PM can produce the
+  bound PASS with `review-dispatch --kind security` and
+  `review-result --kind security`.
 - **Files:**
+  - `task_submission_cli.py`: `review-dispatch --kind security`,
+    `review-result --kind security`, and the security prompt rendering
+    (§3.3). These are the first production callers of the PR 2 code, so they
+    land with the gates below.
   - `task_store.py` (not read): the `merge_reservation` field and its
     validation; the acquisition refusals (`MERGE_RESERVATION_CONFLICT`,
     `MERGE_RESERVED_BY_OTHER`); the `TASK_MERGE_RESERVED` fence in
     `compare_and_update` and `record_completion_event`; the single state
     transition with its fixed set of reasons (§3.7).
   - `task_advance.py`: `_merge_security_claim`, and its call in `_merge_once`
-    on both paths, using `_security_required` from PR 3. The reservation
-    replaces the expected-digest write at `:1639`, and the outcome writes
-    update it. Reconciliation reads for `RESERVED` and `UNKNOWN`
-    reservations.
+    on both paths. It uses `review_result.security_required` from PR 2,
+    evaluated on the same record snapshot the reservation expects. The
+    reservation replaces the expected-digest write at `:1639`, and the outcome
+    writes update it. Reconciliation reads for `RESERVED` and `UNKNOWN`
+    reservations. `related['security']` is not added yet (PR 4); `_merge_once`
+    computes the answer itself.
   - `merge_train_ops.py`: `_member_unchanged` returns a refusal code or
-    `None`, adds the `_security_required` refusal, the exact-head re-read
-    and the `merge_reservation` refusal; `_merge_locked` refuses with the
-    member's code and adds the train PR delta check before the claim
-    (§3.6 train route). No train phase, reservation or recovery state is
-    added.
+    `None`, and adds the `security_required` refusal (which includes the
+    exact-head reads) and the `merge_reservation` refusal. `_merge_locked`
+    refuses with the member's code and adds the train PR delta check before
+    the claim (§3.6 train route). No train phase, reservation or recovery
+    state is added.
   - `merge_train.py` (not read): the admission refusal (§3.6). The PR adds
     it to its read and write paths and names the admission function.
   - `review_dispatch.py` and `review_result.py`: map `TASK_MERGE_RESERVED`
@@ -923,15 +1045,24 @@ gate lands last. Tests follow the test data rule (Owner #763 A):
     member to a train.
   - A member with a bound security FAIL at its head is refused the same way.
   - A member that touches no rule file at its recorded head, but whose Task
-    holds a security claim at an older head (the sticky rule), is refused the
-    same way.
+    holds a security claim at an older head, appended before the formal claim
+    at the recorded head (the sticky rule), is refused the same way.
   - A rule-file member with a PASS-shaped security comment and no claim (the
     forgery case on the train) is refused the same way.
   - A member whose file list is unreadable, or `PR_FILES_TOO_MANY`, or for
     which `sensitive_paths.is_sensitive` is monkeypatched to raise, is
     refused `TRAIN_MEMBER_SECURITY_REQUIRED_UNKNOWN`.
   - A member PR whose head moves between the file list read and the re-read
-    (injected `github_get`) is refused `TRAIN_MEMBER_CHANGED`.
+    (injected `github_get`) is refused
+    `TRAIN_MEMBER_SECURITY_REQUIRED_UNKNOWN`.
+  - **No window after the final member check.** For a member that touches no
+    rule file and has no security claim, the injected `gh_runner`, when it
+    receives `pr merge`, first calls `dispatch_review(kind="security")` for
+    that member at its recorded head. The dispatch is refused
+    `SECURITY_REVIEW_NOT_REQUIRED`, and the member record is unchanged. A
+    second run does the same with a new member head `H2` that touches a rule
+    file. That claim is written, `security_required` at the recorded head is
+    still false afterwards, and the merged train content is the recorded head.
   - A member Task that holds a `merge_reservation` and no `merge_attempt` is
     refused `TRAIN_MEMBER_CHANGED`.
   - A train PR whose own file list contains a rule file, while every member
@@ -979,7 +1110,51 @@ gate lands last. Tests follow the test data rule (Owner #763 A):
     accepted again. An open unmerged PR at the head stays fenced. A release
     write that fails leaves the reservation active. No recovery path calls
     `gh_runner` with `pr merge`.
-- **Invariants kept:** I5 and I5a (both routes in one PR), I6, I7.
+  - CLI: `review-dispatch --kind security` at a non-rule-file head with no
+    security claim is refused `SECURITY_REVIEW_NOT_REQUIRED`.
+- **Invariants kept:** I3, I5, I5a and I5b (both routes and the first
+  production writer in one PR), I6, I7.
+
+### PR 4: advance routing and repair
+
+- **Observable outcome:** `task advance` dispatches, records and repairs
+  security reviews by itself, before the formal review. A bound security FAIL
+  (the #2194/#2197 shape) drives a bounded repair instead of refusing
+  `REVIEW_FAIL_EVENT_MISSING`.
+- **Files:**
+  - `task_advance.py`:
+    - `related['security']` (from `review_result.security_required`, with
+      the latest security claim and its bound outcome);
+    - the `decide` security stage (§3.4);
+    - the step bodies `DISPATCH_SECURITY_REVIEW`,
+      `RECORD_SECURITY_REVIEW_RESULT` and `REPAIR_SECURITY_REVIEW`;
+    - the publication-copy post, using `_caller_posts_verdict` unchanged;
+    - `_merge_once` takes `related['security']` instead of computing the
+      answer itself. The gate is unchanged.
+  - `review_repair.py`: `_failed_security_event`; `kind` on `repair_review`;
+    the packet `review_kind`; the `auto_review` kind; the repair acceptance
+    text.
+- **Tests:** `decide` table tests cover every row of §3.4 and check the
+  following:
+  - No formal `DISPATCH_REVIEW` happens while a bound security FAIL is at the
+    head.
+  - A rule-file head with no security claim gives `DISPATCH_SECURITY_REVIEW`
+    before `DISPATCH_REVIEW`. A repair head after a security FAIL that drops
+    the rule file still gives `DISPATCH_SECURITY_REVIEW` (sticky).
+  - A non-rule-file head with no security claim falls through to the formal
+    flow unchanged.
+  - The #2194/#2197 shape works: a bound security FAIL now repairs.
+  - A comment-only security FAIL still refuses `REVIEW_FAIL_EVENT_MISSING`.
+  - A formal FAIL and a security FAIL on one head count as one valid FAIL.
+  - The auto limit applies to security repairs.
+  - The `auto_review` re-dispatch is a security review at the next security
+    version.
+  - End to end on one Task: a rule-file PR goes from security dispatch to
+    bound PASS, then formal PASS, then `_merge_once` merges (injected
+    `codex_runner` and `gh_runner`). The same Task with a bound security FAIL
+    never reaches the `pr merge` call.
+- **Invariants kept:** I1, I3, I4, I5, I6. The merge gates from PR 3 are
+  unchanged.
 
 ## 5. Migration
 
@@ -988,29 +1163,46 @@ gate lands last. Tests follow the test data rule (Owner #763 A):
   importing one would let comment text resolve a gate (I3).
 - **Open PRs with comment-only security verdicts (#2194, #2197 and any other
   open PR; the full list is UNKNOWN):**
-  - After PR 3, the next `llmtool task advance` at the current head sees
-    `required` (rule file touched) and dispatches a bound security review
-    (`DISPATCH_SECURITY_REVIEW`).
-  - The earlier PM comment stays as history. It is not read, and it is not
-    repaired from.
-  - The bound review's FAIL drives repair, and its PASS clears the gate.
+  - Before PR 3 lands, the PM lists every open PR that carries a comment-only
+    security verdict, with its current head and whether that head touches a
+    rule file (§3.6).
+  - A PR whose current head touches a rule file is `required` by the
+    rule-file part, whatever its comments say. From PR 3, `_merge_once`
+    refuses it `MERGE_SECURITY_REVIEW_MISSING`, and a train refuses it
+    `TRAIN_MEMBER_SECURITY_REVIEW_REQUIRED`, until a bound security PASS
+    exists at its exact head.
+    - Between PR 3 and PR 4 the PM runs
+      `review-dispatch --kind security` and `review-result --kind security` at
+      that head. The precondition admits it, because the head is required.
+    - From PR 4, the next `llmtool task advance` does this by itself
+      (`DISPATCH_SECURITY_REVIEW`).
+  - A bound FAIL between PR 3 and PR 4 cannot be auto-repaired yet:
+    `repair_review(kind="security")` arrives in PR 4. The PR stays unmergeable
+    (fail closed) until PR 4 lands or the PM pushes a fix that gets a bound
+    PASS. From PR 4 the bound FAIL drives repair.
+  - The earlier PM comment stays as history. It is not read, it is not
+    repaired from, and it does not make a head `required`.
   - Manual `task repair` from the old comment still refuses
     `REVIEW_FAIL_EVENT_MISSING`. That is correct, not a regression.
+  - A PR whose current head no longer touches a rule file, and which has no
+    bound security claim, is not `required`. Its comment-only FAIL does not
+    carry over, because importing a comment would break I3. The precondition
+    also refuses a voluntary security review on that head. The PM reports
+    each such PR in the list above, and the Owner decides in PM chat whether
+    it may merge (§6).
 - **Version label overlap:** older comments may already say `v91`. New bound
   security claims also number from 91. This is safe for two reasons:
   security classification never reads comments, and the bound publication copy
   carries the distinct security marker and binding line. The only reader of
   comment version labels, `_may_be_review_verdict`, checks formal versions
   (< 91) only.
-- **Between PR 3 and PR 4:** advance already routes security FAILs, but no
-  merge route is gated yet, neither `_merge_once` nor the train. A comment-only
-  security verdict is advisory from PR 3 on. The PM should rely on the bound
-  result instead. Before PR 2 no security claim can exist, so PR 1 alone
-  changes no merge outcome.
-- **PR 4 rollout:** open rule-file PRs without a bound security PASS at their
-  head are refused `MERGE_SECURITY_REVIEW_MISSING` until advance runs the bound
-  review. Advance can do that by itself after PR 3, so no manual step is
-  needed.
+- **Before PR 3:** PR 1 and PR 2 add no production writer of security
+  records, so they change no merge outcome. Rule-file PRs merge under the
+  existing PM convention until PR 3. That is the starting state, not a window
+  this design opens (§4).
+- **PR 3 rollout:** open rule-file PRs without a bound security PASS at their
+  head are refused `MERGE_SECURITY_REVIEW_MISSING`. Until PR 4 the PM runs the
+  bound review through the CLI. From PR 4, advance runs it.
   - Open or queued merge trains that hold a member needing a security review
     are refused `TRAIN_MEMBER_SECURITY_REVIEW_REQUIRED`, whatever that
     member's security state. The PM rebuilds the train without that member,
@@ -1019,22 +1211,27 @@ gate lands last. Tests follow the test data rule (Owner #763 A):
   - The registry (§3.6) covers more than the review-rules set, for example
     llmtool modules. Open PRs that touch only registry paths need a bound
     security review too. Their number is UNKNOWN here. The PM lists them
-    before PR 4 lands.
-- **Existing merge attempts at PR 4 rollout:** a Task with `merge_attempt` in
+    before PR 3 lands.
+- **Existing merge attempts at PR 3 rollout:** a Task with `merge_attempt` in
   `CLAIMED` or `UNKNOWN` state and no `merge_reservation` is treated as
   holding an active direct reservation for that PR and head (fail closed).
   It is reconciled by the reads in §3.7. No record is rewritten in advance.
   Train records gain no new field, so existing train states need no
-  migration. The PM deploys PR 4 when no merge or train operation is in
-  flight; whether one is in flight at that time is checked then, and is
-  UNKNOWN here.
+  migration. The PM deploys PR 3 when no merge or train operation is in
+  flight. Whether one is in flight is checked at that time; it is UNKNOWN
+  here.
 - **Merged PRs:** no retroactive action.
-- **Rollback:** reverting PR 4 removes only the direct gate, the train
-  refusal and the reservation fence. A stored `merge_reservation` field must then be ignored, or the
-  revert must wait until none is active; which applies depends on the
-  TaskStore schema (UNKNOWN here). Reverting PR 2 or PR 3
-  leaves stored security records that PR 1 readers still ignore for formal
-  purposes. PR 1 must therefore be reverted last, if at all.
+- **Rollback:**
+  - Reverting PR 4 removes only advance automation. The PR 3 gates still
+    hold, and the PM runs the CLI again.
+  - Reverting PR 3 removes the gates, the fence and the CLI together, so
+    nothing can write a new security claim without a gate. A stored
+    `merge_reservation` field must then be ignored, or the revert must wait
+    until none is active. Which of the two applies depends on the TaskStore
+    schema (UNKNOWN here).
+  - PR 4 must be reverted before PR 3, and PR 3 before PR 2.
+  - Stored security records that remain are ignored for formal purposes by
+    the PR 1 readers, so PR 1 must be reverted last, if at all.
 
 ## 6. Out of scope
 
@@ -1047,14 +1244,16 @@ gate lands last. Tests follow the test data rule (Owner #763 A):
 - Post-merge closure on the train path (`_merged_review_target`,
   `_train_member_merged`, `_closed_train_member_head`) stays formal-only. It
   closes Tasks after a merge and does not decide whether to merge. The train
-  refusal itself is in scope (§3.6, PR 4).
+  refusal itself is in scope (§3.6, PR 3).
 - **Train-level security enforcement is a later design.** In this design a
   merge train never merges a PR that needs a security review, even with a
   bound security PASS. Such PRs merge only through single-PR `task advance`
-  (§3.6). A later design may let a train merge members with a bound security
-  PASS. It would need a fence across several member Tasks and its own crash
-  recovery, and it would close the manual-dispatch gap in I5a. It would touch
-  at least these `merge_train_ops.py` functions:
+  (§3.6). The refusal has no time window (§3.6, I5a), so the later design is
+  a feature, not a fix. A later design may let a train merge members with a
+  bound security PASS. That would need a fence across several member Tasks,
+  because a required member's newest security verdict can still change after
+  a check, and its own crash recovery. It would touch at least these
+  `merge_train_ops.py` functions:
   - `merge_train` and `_acquire_operation_lock` (exclusion across trains and
     against direct merges of the same member);
   - `_merge_locked` (per-member security gate and member fencing before the
@@ -1084,3 +1283,35 @@ gate lands last. Tests follow the test data rule (Owner #763 A):
 - Whether an Owner exception may waive the security gate. This design keeps the
   gate on that path too (fail closed) until the Owner decides.
 - Importing or backfilling historic comment-only verdicts.
+- A voluntary security review of a head that is not `required`, and a PM
+  marker that makes a head `required`. The §3.3 precondition refuses the
+  first, and that refusal is what keeps the train route free of a time
+  window. A later design that adds such a marker must also keep `required`
+  frozen once a formal claim exists (§3.4). For example, it could allow the
+  marker only before the first formal claim at that head. Until then, the
+  Owner decides case by case in PM chat (§5).
+
+## 7. Review findings and where they are resolved
+
+Source limits. The texts of the codex-reviewer reviews (PR #2205 v2, v3 and
+v4, and PR #2211 v1) are not in this Task's read scope. This table maps each
+finding as this document's repair notes record it (the header, "per review
+v2" in §2.5, "after formal review v4 F1"), together with the Task acceptance
+items that restate the open #2211 v1 points. Finding IDs other than v4 F1 are
+not recorded in the readable sources, so the table names the topic instead
+of guessing an ID. The PM checks the table against the review comments
+before the formal review. Any finding the table does not cover is UNKNOWN
+here and must be returned as a repair item.
+
+| Review | Finding (as recorded) | Status | Resolved in |
+|---|---|---|---|
+| #2205 (issue #2202, CWE-345) | A comment-only security verdict can be forged and opens the gate | Resolved | §3.3 (verdict only from a COMPLETED Codex claim), §3.6 (gate reads TaskStore only), I3 |
+| #2205 (#2194, #2197) | A security FAIL cannot drive bounded repair (`REVIEW_FAIL_EVENT_MISSING`) | Resolved | §3.5, PR 4 |
+| #2205 v2 / v3 (reported facts) | Formal readers would treat security records as formal: completion selector, `_newer_claim_pending`, formal acceptance, next version, `_dispute_fail_verdict`, `withdrawn_findings` | Resolved | §2.8, §3.1, §3.2, §3.8, I1, PR 1 |
+| #2205 v2 | The rule-file set must be the existing registry (`AGENTS.md:113`, `tools/llmtool/sensitive-paths.json`), not a hand list | Resolved | §3.6 (rule file set), PR 2 registry tests |
+| #2205 (window) | A review write can land between the final merge check and `gh pr merge` on the direct route | Resolved | §3.7 (reservation and TaskStore fence), I7 |
+| #2205 v4 F1 | Merge trains bypass any gate added only to `_merge_once` | Resolved | §2.6, §3.6 (train route: refuse, do not gate), I5a, PR 3 |
+| #2211 v1 (Task acceptance 2) | A train could merge a member when a security claim is first created by a manual dispatch between the final member check and the merge call (the "known gap" of the #2211 revision) | Resolved | §3.3 (precondition), §3.4 (order-based, frozen `required`), §3.6 ("Why no time window"), I5a, I5b, PR 3 window test |
+| #2211 v1 (Task acceptance 2) | Rollout window: the old PR order had an ungated period in which bound security claims could be written while no merge route enforced them | Resolved | §4 (order: PR 2 has no caller; PR 3 lands the CLI with both gates), §5 |
+| #2211 v1 (Task acceptance 3) | Migration of PRs that already carry comment-only verdicts | Resolved | §5 (list before PR 3, CLI then advance, no import, the dropped-rule-file case to the Owner) |
+| #2211 (exact head) | `_pr_files` reads the current file list, not the list at a head | Resolved | §3.4 (PR, files, PR reads in `security_required`), §3.6 train PR delta |
