@@ -3812,6 +3812,11 @@ class TaskStore:
             _fail('TASK_FILE_OPS_EVIDENCE_FORBIDDEN')
         if type(record) is dict and 'file_ops_reservation' in record:
             _fail('TASK_FILE_OPS_RESERVATION_FORBIDDEN')
+        if type(record) is dict and 'review_dispatch_claim' in record:
+            claims = record['review_dispatch_claim']
+            claims_list = [claims] if type(claims) is dict else claims if type(claims) is list else []
+            if any(type(c) is dict and c.get('review_kind') == 'security' for c in claims_list):
+                _fail('REVIEW_DISPATCH_CLAIM_INVALID')
         if (type(record) is not dict or 'dispatch_audit' in record or
                 'completion_events' in record or 'completion_event_tombstones' in record or
                 'pm_session_adoptions' in record):
@@ -4416,7 +4421,7 @@ class TaskStore:
             binding.update(github_metadata)
         if review_kind is not None:
             if (source != 'REVIEWER' or type(review_kind) is not str or
-                    review_kind not in ('formal', 'security')):
+                    review_kind != 'formal'):
                 _fail('COMPLETION_EVENT_INVALID')
             binding['review_kind'] = review_kind
         for _ in range(5):
@@ -5740,7 +5745,8 @@ class TaskStore:
                 if type(old_claims) is list and type(new_claims) is list:
                     if len(new_claims) == len(old_claims) + 1 and new_claims[:-1] == old_claims:
                         allowed_claim_transition = (type(new_claims[-1]) is dict and
-                                                    new_claims[-1].get('state') == 'CLAIMED')
+                                                    new_claims[-1].get('state') == 'CLAIMED' and
+                                                    new_claims[-1].get('review_kind') != 'security')
                     elif len(new_claims) == len(old_claims):
                         changed = [index for index, (before, after) in
                                    enumerate(zip(old_claims, new_claims)) if before != after]
@@ -5750,6 +5756,8 @@ class TaskStore:
                             allowed_claim_transition = (
                                 before.get('state') == 'CLAIMED' and
                                 after.get('state') in ('UNKNOWN', 'DISPATCHED', 'COMPLETED') and
+                                before.get('review_kind') != 'security' and
+                                after.get('review_kind') != 'security' and
                                 all(before.get(key) == after.get(key) for key in (
                                     'executor_task', 'pr', 'head_sha', 'version',
                                     'account_mode', 'account', 'claimed_at',
@@ -5770,6 +5778,8 @@ class TaskStore:
                                     'binding_mismatch_keys' not in before and
                                     'bind_failure_reason' not in before and
                                     type(before.get('native_session_id')) is str and
+                                    before.get('review_kind') != 'security' and
+                                    after.get('review_kind') != 'security' and
                                     set(after) == set(before) and
                                     all(before.get(key) == after.get(key) for key in before
                                         if key not in ('state', 'updated_at')) and

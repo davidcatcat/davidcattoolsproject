@@ -4938,7 +4938,59 @@ class TaskStoreTests(unittest.TestCase):
         self.assertNotIn('review_kind', saved['review_dispatch_claim'][0])
         task_store_module._validate(saved)
 
-        # Valid review_kind values 'formal' and 'security'
+        # Formal review_kind can be written via compare_and_update
+        formal_claim = dict(base_claim, version=2, review_kind='formal')
+        saved2 = self.store.compare_and_update(
+            task['task_id'], expected={'record_sha256': saved['record_sha256']},
+            review_dispatch_claim=[base_claim, formal_claim])
+        self.assertEqual(saved2['review_dispatch_claim'][1]['review_kind'], 'formal')
+        task_store_module._validate(saved2)
+
+        # TaskStore refuses a new security-kind review_dispatch_claim at the mutation boundary
+        sec_claim = dict(base_claim, version=3, review_kind='security')
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.compare_and_update(
+                task['task_id'], expected={'record_sha256': saved2['record_sha256']},
+                review_dispatch_claim=[base_claim, formal_claim, sec_claim])
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'REVIEW_DISPATCH_CLAIM_TRANSITION_INVALID')
+
+        # TaskStore refuses create() with a security-kind claim
+        bad_task = self._codex_dispatch_task()
+        bad_task['review_dispatch_claim'] = [dict(base_claim, review_kind='security')]
+        with self.assertRaises(LLMToolError) as caught_create:
+            self.store.create(bad_task)
+        self.assertEqual(caught_create.exception.task_store_error_code,
+                         'REVIEW_DISPATCH_CLAIM_INVALID')
+
+        # Existing records with security-kind claim and event still load and validate
+        existing_task = self._codex_dispatch_task()
+        existing_sec_claim = dict(base_claim, review_kind='security')
+        existing_sec_event = {
+            'event_id': 's' * 32, 'task_id': existing_task['task_id'],
+            'run_id': existing_task['run_id'],
+            'pm_session_id': existing_task['pm_session_id'],
+            'session_id': 'review-' + 's' * 32, 'source': 'REVIEWER',
+            'source_sha': 'a' * 40, 'sequence': 0, 'payload_sha256': 'f' * 64,
+            'review_kind': 'security', 'state': 'PENDING',
+            'received_at': '2026-10-27T00:00:00Z', 'consumed_at': None,
+            'pm_decision_sha256': None, 'acked_at': None, 'dispatch_intent': None,
+        }
+        existing_task['review_dispatch_claim'] = [existing_sec_claim]
+        existing_task['completion_events'] = [existing_sec_event]
+        existing_task['record_sha256'] = task_store_module._digest(existing_task)
+        self.store._ensure_root()
+        path = self.store.root / f"{existing_task['task_id']}.json"
+        path.write_bytes(task_store_module._json_bytes(existing_task))
+        os.chmod(path, 0o600)
+
+        loaded = self.store.get(existing_task['task_id'])
+        self.assertEqual(loaded['task_id'], existing_task['task_id'])
+        self.assertEqual(loaded['review_dispatch_claim'][0]['review_kind'], 'security')
+        self.assertEqual(loaded['completion_events'][0]['review_kind'], 'security')
+        task_store_module._validate(loaded)
+
+        # Valid review_kind values 'formal' and 'security' for validator
         for kind in ('formal', 'security'):
             with self.subTest(kind=kind):
                 candidate = dict(base_claim, review_kind=kind)
@@ -4965,12 +5017,22 @@ class TaskStoreTests(unittest.TestCase):
             session_id='review-' + 'e' * 32, source='REVIEWER',
             source_sha='a' * 40, sequence=0, payload_sha256='f' * 64)
 
-        # Valid review_kind 'formal' and 'security' on REVIEWER event
+        # Valid review_kind 'formal' on REVIEWER event; fresh 'security' is refused
         first = self.store.record_completion_event(
             task['task_id'], review_kind='formal', **event_args)
         self.assertTrue(first['created'])
         self.assertEqual(first['event']['review_kind'], 'formal')
         task_store_module._validate(self.store.get(task['task_id']))
+
+        # Fresh write of review_kind='security' on REVIEWER event is refused
+        event_args_sec = dict(
+            event_id='s' * 32, run_id=task['run_id'],
+            session_id='review-' + 's' * 32, source='REVIEWER',
+            source_sha='a' * 40, sequence=1, payload_sha256='f' * 64)
+        with self.assertRaises(LLMToolError) as sec_fresh:
+            self.store.record_completion_event(
+                task['task_id'], review_kind='security', **event_args_sec)
+        self.assertEqual(sec_fresh.exception.task_store_error_code, 'COMPLETION_EVENT_INVALID')
 
         # Event without review_kind loads and validates
         task2 = self._codex_dispatch_task()
@@ -4996,11 +5058,11 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(len(loaded_task2['completion_events']), 1)
         self.assertNotIn('review_kind', loaded_task2['completion_events'][0])
 
-        # Replaying legacy event with review_kind='security' fails closed with conflict
-        with self.assertRaises(LLMToolError) as conflict:
+        # Calling record_completion_event with review_kind='security' is refused at mutation boundary
+        with self.assertRaises(LLMToolError) as sec_call:
             self.store.record_completion_event(
                 task2['task_id'], review_kind='security', **event_args2)
-        self.assertEqual(conflict.exception.task_store_error_code, 'COMPLETION_EVENT_CONFLICT')
+        self.assertEqual(sec_call.exception.task_store_error_code, 'COMPLETION_EVENT_INVALID')
 
         # Invalid review_kind on REVIEWER event
         task3 = self._codex_dispatch_task()
