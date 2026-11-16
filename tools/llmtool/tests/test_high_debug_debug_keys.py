@@ -14,6 +14,23 @@ from llmtool.errors import LLMToolError
 REPORT = ''.join('## ' + heading + '\nDetails.\n' for heading in high_debug.REPORT_SECTIONS) + 'RCA_CONFIRMED'
 
 
+def _codex_quota_first(claude_runner):
+    """A runner whose first launch is a Codex attempt reporting a real quota failure.
+
+    PR #2222: Claude Debug runs only as the fallback of this run's Codex
+    Debug, so the Claude runner is reached through that fallback.
+    """
+    launches = []
+
+    def runner(**kwargs):
+        launches.append(True)
+        if len(launches) == 1:
+            return subprocess.CompletedProcess([], 1, stdout=b'',
+                                               stderr=b"You've hit your usage limit.\n")
+        return claude_runner(**kwargs)
+    return runner
+
+
 class _Store:
     def __init__(self):
         self.entries, self.events, self.served = [], [], set()
@@ -69,9 +86,17 @@ class RunHighDebugTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def _run(self, route, runner, *, resolve=None, allowed=True):
+        """Run one Debug. Route 'claude' is the authorized fallback (PR #2222):
+        the Codex attempt of the same run reports a real quota failure first."""
         registration = SimpleNamespace(result_sha='a' * 40, root=str(self.root),
                                        common_dir=str(self.root / '.git'))
         store = _Store()
+        if route == 'claude':
+            runner = _codex_quota_first(runner)
+            debug = high_debug.run_high_debug_with_fallback
+            route = 'codex'
+        else:
+            debug = high_debug.run_high_debug
         resolve = resolve or (lambda role: {'role': role, 'source': 'roles', 'account': 'acct',
                                             'config_dir': '/safe/claude', 'provider': 'claude'})
         with patch.object(high_debug.worker_dispatch, 'evaluate',
@@ -80,7 +105,7 @@ class RunHighDebugTests(unittest.TestCase):
              patch.object(high_debug.task_completion, 'collect_git_snapshot',
                           return_value=SimpleNamespace(head='a' * 40)):
             try:
-                high_debug.run_high_debug(
+                debug(
                     store=store, task_id='a' * 32, executor_task='executor', pr_number=17,
                     family='family', failed_corrections=2, runner=runner,
                     create_d6=lambda **_kwargs: str(self.root), repo_root=str(self.root),
@@ -118,17 +143,27 @@ class RunHighDebugTests(unittest.TestCase):
         def runner(**_kwargs):
             refused.append(True)
             raise RuntimeError('stop after the account choice')
-        code, _store, evaluate, _roles = self._run('claude', runner, resolve=resolve)
+        code, store, evaluate, _roles = self._run('claude', runner, resolve=resolve)
         evaluate.assert_called_with('claude-debug', None, 'a' * 32)
+        # Claude Debug ran only as the fallback of this run's Codex quota failure.
+        self.assertEqual([call.args for call in evaluate.call_args_list],
+                         [('codex-debug', None, 'a' * 32), ('claude-debug', None, 'a' * 32)])
+        self.assertEqual(store.entries[0]['report'], 'HIGH_DEBUG_QUOTA_EXHAUSTED')
         self.assertEqual(calls, ['claude-debug', 'reviewer'])
         self.assertEqual(code, 'HIGH_DEBUG_RUN_FAILED')
         self.assertEqual(refused, [True])
+        self.assertEqual(high_debug._CLAUDE_GRANTS, set())
 
     def test_configured_claude_debug_role_is_used_alone(self):
+        launched = []
         def runner(**_kwargs):
+            launched.append(True)
             raise RuntimeError('stop')
-        _code, _store, _evaluate, roles = self._run('claude', runner)
+        _code, store, _evaluate, roles = self._run('claude', runner)
         self.assertEqual([call.args[0] for call in roles.call_args_list], ['claude-debug'])
+        self.assertEqual(launched, [True])
+        self.assertEqual([entry['model_requested'] for entry in store.entries],
+                         [high_debug._CODEX_MODEL, high_debug._CLAUDE_MODEL])
 
 
 if __name__ == '__main__':
