@@ -949,7 +949,8 @@ def add_task_submission_parsers(actions):
                                'deterministic redaction owner exception'))
     advance.add_argument('--executor-task', metavar='D6',
                          help=('with --merge and --owner-exception only: '
-                               'registered D6 Executor task id'))
+                               'registered D6 Executor task id; the executor '
+                               'identity is checked on every owner-exception merge'))
     advance.add_argument('--integration-pr', type=int,
                          help='merged integration PR containing the reviewed head')
     advance.add_argument('--reviewer-session-done', action='store_true',
