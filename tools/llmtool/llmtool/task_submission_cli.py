@@ -7238,6 +7238,9 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
     run_high_debug records for this entry, live or compacted to a tombstone.
     """
     from .high_debug import REPORT_SECTIONS, _has_report_section, _outcome_status
+    # #1943 WP-5: a no-PR Debug is a diagnosis only, never repair evidence.
+    if entry.get('no_pr') is True:
+        raise ValueError
 
     completion = diagnosis_task.get('completion')
     if (type(completion) is not dict or type(executor_task) is not str or
@@ -7311,6 +7314,7 @@ def _check_repair_packet_rca(packet, store, executor_task):
                 completion.get('executor_task_id') != executor_task or
                 type(entries) is not list or
                 not any(type(entry) is dict and
+                        entry.get('no_pr') is not True and
                         entry.get('status') == 'RCA_CONFIRMED' and
                         entry.get('examined_sha') == failed_head and
                         entry.get('report_sha256') == report_sha256
@@ -7507,7 +7511,10 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment):
                 diagnosis_task.get('task_id') != high_debug_task or
                 type(entries) is not list or not entries):
             raise ValueError
-        entry = entries[-1]
+        matching = [e for e in entries if not (type(e) is dict and e.get('no_pr') is True)]
+        if not matching:
+            raise ValueError
+        entry = matching[-1]
         d6 = entry.get('d6')
         examined_sha = entry.get('examined_sha')
         family = entry.get('family')
