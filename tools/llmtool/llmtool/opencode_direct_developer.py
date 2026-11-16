@@ -592,6 +592,17 @@ def _await_exit_without_reap(process, *, deadline):
         _reject('OPENCODE_TIMEOUT')
 
 
+# #1817: a run that spent every agent step is exhausted even when the forced
+# no-tools turn appended a closing summary. Only these provider conditions
+# outrank exhaustion; a generic provider failure or an in-stream error event
+# (for example a tool refused because tools are disabled after the last step)
+# does not.
+_STEP_LIMIT_PRECEDENCE = frozenset((
+    'TOOL_DENIED', 'OPENCODE_AUTH_REQUIRED', 'OPENCODE_FREE_LIMIT',
+    'OPENCODE_RATE_LIMITED',
+))
+
+
 def parse_json_events(raw, *, step_limit=DEFAULT_AGENT_STEPS):
     """Validate OpenCode's newline-delimited JSON output; never infer success from prose."""
     step_limit = _validate_steps(step_limit)
@@ -601,6 +612,15 @@ def parse_json_events(raw, *, step_limit=DEFAULT_AGENT_STEPS):
         _reject('OPENCODE_OUTPUT_TOO_LARGE')
     events, complete = _json_event_prefix(raw)
     classified = _classify_provider_events(events)
+    if classified in _STEP_LIMIT_PRECEDENCE:
+        raise DirectOpenCodeError(classified,
+                                  provider_evidence=condition_evidence(classified))
+    observed_step_finishes = sum(1 for event in events
+                                 if event.get('type') == 'step_finish')
+    if observed_step_finishes >= step_limit:
+        # Parsed step usage travels with the refusal, exactly as before.
+        raise DirectOpenCodeError('OPENCODE_STEPS_EXHAUSTED',
+                                  provider_evidence=step_usage_evidence(events))
     if classified is not None:
         raise DirectOpenCodeError(classified,
                                   provider_evidence=condition_evidence(classified))
@@ -647,10 +667,6 @@ def parse_json_events(raw, *, step_limit=DEFAULT_AGENT_STEPS):
     if sid is None:
         _reject('OPENCODE_OUTPUT_INCOMPLETE')
     output_text = ''.join(text)
-    if not output_text and step_finishes >= step_limit:
-        # Parsed step usage travels with the refusal.
-        raise DirectOpenCodeError('OPENCODE_STEPS_EXHAUSTED',
-                                  provider_evidence=step_usage_evidence(events))
     usage = (None if not usage_known or step_finishes == 0 else {
         'prompt_tokens': input_tokens,
         'completion_tokens': output_tokens,
