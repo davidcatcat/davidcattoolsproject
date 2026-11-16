@@ -273,12 +273,72 @@ def chain_debug_used(store, task, entries, is_used):
     return used, used
 
 
+def _evidence_has_result(evidence):
+    """True when completion-style evidence names any result head, or is in doubt."""
+    if evidence is None:
+        return False
+    if type(evidence) is not dict:
+        return True
+    result = evidence.get('result')
+    if result is not None and type(result) is not dict:
+        return True
+    if evidence.get('result_head') is not None:
+        return True
+    return result is not None and result.get('result_head') is not None
+
+
+def _developer_start_failed(record):
+    """#2188: True only when the Task's Developer failed before it ran.
+
+    The developer record must be BLOCKED with no native session id, no
+    artifact, no artifact digest and no result SHA. A native session id is
+    developer.execution.native_session_id; a result SHA is a claude_result
+    head, an execution diff, or a result head in the Task's completion
+    evidence or the developer's result callback evidence. A progress record
+    (a run that started, then hit its quota) is never a start failure. Any
+    field of the wrong type is doubt and gives False.
+    """
+    developer = record.get('developer')
+    if type(developer) is not dict or developer.get('state') != 'BLOCKED':
+        return False
+    if developer.get('artifact') is not None or developer.get('artifact_sha256') is not None:
+        return False
+    execution = developer.get('execution')
+    if execution is not None:
+        if type(execution) is not dict:
+            return False
+        if (execution.get('native_session_id') is not None or
+                execution.get('diff_sha256') is not None or
+                execution.get('diff_base_sha') is not None):
+            return False
+    if 'claude_result' in developer or 'progress' in developer:
+        # A Claude result head, or a quota progress record of a run that started.
+        return False
+    if 'direct_result_callback' in developer:
+        callback = developer['direct_result_callback']
+        if type(callback) is not dict or _evidence_has_result(callback.get('evidence')):
+            return False
+    completion = record.get('completion')
+    if completion is not None:
+        if type(completion) is not dict or _evidence_has_result(completion.get('evidence')):
+            return False
+    return True
+
+
 def check_continues(store, task_id, predecessor):
     """Refuse, with a fixed code, a --continues link that breaks the chain shape.
 
     Refused: a malformed or unknown Task, the Task itself, a predecessor that is
     a split child or REPLAN of another lineage, a predecessor that already has a
     successor, a cycle and a chain over MAX_CHAIN Tasks. Any read doubt refuses.
+
+    #2188: a split child or REPLAN predecessor is accepted only when its
+    Developer failed to start (_developer_start_failed: BLOCKED, no native
+    session id, no artifact or artifact digest, no result SHA); every other
+    child or REPLAN predecessor still refuses CONTINUES_LINEAGE_CONFLICT. The
+    successor inherits nothing new: its lineage is not copied, and its repair
+    counts stay the chain-wide, fail-closed counts of lineage_counts, with the
+    predecessor's claims counted as for any other chain Task.
     """
     if not _hex32(predecessor):
         _refuse('CONTINUES_TASK_INVALID')
@@ -297,7 +357,8 @@ def check_continues(store, task_id, predecessor):
     if type(record) is not dict or record.get('task_id') != predecessor:
         _refuse('CONTINUES_CHAIN_INVALID')
     lineage = record.get('lineage')
-    if type(lineage) is dict and lineage.get('kind') in ('child', 'replan'):
+    if (type(lineage) is dict and lineage.get('kind') in ('child', 'replan') and
+            not _developer_start_failed(record)):
         _refuse('CONTINUES_LINEAGE_CONFLICT')
     if 'lineage' in record and type(lineage) is not dict:
         _refuse('CONTINUES_CHAIN_INVALID')
