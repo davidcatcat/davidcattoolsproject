@@ -7214,20 +7214,33 @@ _HIGH_DEBUG_MODELS = frozenset(('gpt-6.1-sol', 'claude-opus-5-5'))
 
 
 def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
-                                  executor_task):
+                                  executor_task, predecessor_executors=None):
     """Raise ValueError unless ``entry`` is bound to the run behind it (#914).
 
     The High Debug Task must be the original Task of the executor D6 being
-    repaired; the stored report must match its digest, carry every required
-    section and itself say RCA_CONFIRMED; the observed model must be the
-    High Debug model; and the Task must hold the HIGH_DEBUG completion event
-    run_high_debug records for this entry, live or compacted to a tombstone.
+    repaired or a verified continuation predecessor (#2190); the stored report
+    must match its digest, carry every required section and itself say
+    RCA_CONFIRMED; the observed model must be the High Debug model; and the
+    Task must hold the HIGH_DEBUG completion event run_high_debug records for
+    this entry, live or compacted to a tombstone.
     """
     from .high_debug import REPORT_SECTIONS, _has_report_section, _outcome_status
 
+    allowed_executors = set()
+    if isinstance(executor_task, str):
+        allowed_executors.add(executor_task)
+    elif isinstance(executor_task, (set, frozenset, list, tuple)):
+        allowed_executors.update(e for e in executor_task if isinstance(e, str))
+    if predecessor_executors is not None:
+        if isinstance(predecessor_executors, str):
+            allowed_executors.add(predecessor_executors)
+        elif isinstance(predecessor_executors, (set, frozenset, list, tuple)):
+            allowed_executors.update(e for e in predecessor_executors if isinstance(e, str))
+    if not allowed_executors:
+        raise ValueError
     completion = diagnosis_task.get('completion')
-    if (type(completion) is not dict or type(executor_task) is not str or
-            completion.get('executor_task_id') != executor_task):
+    if (type(completion) is not dict or
+            completion.get('executor_task_id') not in allowed_executors):
         raise ValueError
     model_observed = entry.get('model_observed')
     if (type(model_observed) is not str or
@@ -7515,7 +7528,7 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment):
             raise ValueError
         # High Debug D6 names are derived from their executor D6, attempt
         # number, and examined HEAD. Recompute the name to bind this entry to
-        # the executor D6 being repaired.
+        # the executor D6 being repaired or a verified continuation predecessor (#2190).
         from .high_debug import _d6_name
         match = (re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', d6)
                  if type(d6) is str else None)
@@ -7524,11 +7537,46 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment):
         if (entry.get('status') != 'RCA_CONFIRMED' or
                 type(examined_sha) is not str or
                 re.fullmatch(r'[0-9a-f]{40}', examined_sha) is None or
-                attempt_match is None or
-                d6 != _d6_name(executor_task, int(attempt_match.group(1)), examined_sha)):
+                attempt_match is None):
+            raise ValueError
+        attempt = int(attempt_match.group(1))
+        task_id = getattr(args, 'task_id', None)
+        predecessor_executors = []
+        if task_id is not None and store is not None:
+            try:
+                task_record = store.get(task_id)
+            except Exception:
+                task_record = None
+            if type(task_record) is dict:
+                from . import lineage_counts
+                chain = lineage_counts.chain_records(store, task_record)
+                if chain is not None:
+                    for pred in chain[1:]:
+                        pred_completion = pred.get('completion') if type(pred) is dict else None
+                        pred_executor = (pred_completion.get('executor_task_id')
+                                         if type(pred_completion) is dict else None)
+                        if type(pred_executor) is str and pred_executor not in predecessor_executors:
+                            predecessor_executors.append(pred_executor)
+        allowed_executors = []
+        if type(executor_task) is str:
+            allowed_executors.append(executor_task)
+        for pe in predecessor_executors:
+            if pe not in allowed_executors:
+                allowed_executors.append(pe)
+        diagnosis_completion = diagnosis_task.get('completion')
+        diagnosis_executor = (diagnosis_completion.get('executor_task_id')
+                              if type(diagnosis_completion) is dict else None)
+        matched_executor = None
+        for candidate in allowed_executors:
+            if (d6 == _d6_name(candidate, attempt, examined_sha) and
+                    diagnosis_executor == candidate):
+                matched_executor = candidate
+                break
+        if matched_executor is None:
             raise ValueError
         _require_bound_high_debug_run(
-            diagnosis_task, high_debug_task, entry, executor_task)
+            diagnosis_task, high_debug_task, entry, executor_task,
+            predecessor_executors=predecessor_executors)
     except Exception:
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
     if d6_binding is None:
