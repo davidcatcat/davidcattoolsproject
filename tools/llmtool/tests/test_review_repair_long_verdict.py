@@ -282,7 +282,7 @@ class ReviewRepairLongVerdictTests(unittest.TestCase):
         normal_valid = _comment('FAIL', comment_id=8, head=HEAD, version=1)
         oversized_discussion = {
             'id': 10,
-            'body': 'This is general PR discussion without verdict line.\n' + ('log data\n' * 5000),
+            'body': 'This is general PR discussion without verdict line.\n' + ('log data\n' * 10000),
             'created_at': '2026-10-27T02:00:00Z',
             'updated_at': '2026-10-27T02:00:00Z',
         }

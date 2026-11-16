@@ -25,9 +25,13 @@ def comment_status_matches(comment, head=None, version=None):
     body = comment.get('body') if type(comment) is dict else comment if type(comment) is str else None
     if type(body) is not str or head is None or version is None:
         return False
+    try:
+        ver_int = int(version)
+    except (ValueError, TypeError):
+        return False
     for line in body.splitlines():
         match = _VERDICT_VERSION_HEAD.fullmatch(line.strip())
-        if match is not None and match.group(3) == head and int(match.group(2)) == int(version):
+        if match is not None and match.group(3) == head and int(match.group(2)) == ver_int:
             return True
     return False
 
