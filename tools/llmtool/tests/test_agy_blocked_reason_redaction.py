@@ -235,6 +235,7 @@ class AgyBlockedReasonRedactionTests(unittest.TestCase):
         record_old = make_task_record(task_id_old, run_id_old, developer=dev_old)
         record_old_file = store_root / f'{task_id_old}.json'
         record_old_file.write_text(json.dumps(record_old, ensure_ascii=False, indent=2), encoding='utf-8')
+        record_old_file.chmod(0o600)
 
         # Reading the old record succeeds and preserves its stored reason.
         fetched_old = store.get(task_id_old)
