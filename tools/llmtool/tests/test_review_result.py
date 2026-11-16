@@ -667,19 +667,19 @@ class ReviewKindTests(unittest.TestCase):
 
     def test_record_review_result_replay_legacy_claim_and_event_succeeds_without_rewriting_record(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            store = _store(temp_dir, claim_state='COMPLETED')
+            # A legacy record: a Codex claim written CLAIMED, then COMPLETED with
+            # its stored verdict, all before review_kind existed. TaskStore only
+            # accepts the COMPLETED claim through the CLAIMED -> COMPLETED step.
+            store = _store(temp_dir, claim_state='CLAIMED', account_mode='CODEX_CLI')
             task = store.get(TASK)
-            legacy_claim = task['review_dispatch_claim'][0]
-            self.assertNotIn('review_kind', legacy_claim)
+            digest = task['task_binding']['contract_digest']
+            claimed = task['review_dispatch_claim'][0]
+            self.assertNotIn('review_kind', claimed)
 
-            body = (
-                '<!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->\n'
-                f'Verdict: PASS | Version: v1 | HEAD: {HEAD}\n'
-                'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n'
-                f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} '
-                f'contract={CONTRACT} head={HEAD}\n')
+            body = _comment(actor='Codex')['body'].replace(CONTRACT, digest)
+            legacy_claim = dict(claimed, state='COMPLETED', native_session_id='review-session')
             legacy_claim['review_result'] = {
-                'task_id': TASK, 'run_id': RUN, 'contract_digest': CONTRACT,
+                'task_id': TASK, 'run_id': RUN, 'contract_digest': digest,
                 'head': HEAD, 'verdict': 'PASS', 'review_text': body,
             }
             identity = {'task': TASK, 'run': RUN, 'head': HEAD,
@@ -703,10 +703,14 @@ class ReviewKindTests(unittest.TestCase):
                 review_dispatch_claim=[legacy_claim])
 
             seeded_task = store.get(TASK)
+            self.assertEqual(seeded_task['review_dispatch_claim'][0]['state'], 'COMPLETED')
             self.assertNotIn('review_kind', seeded_task['review_dispatch_claim'][0])
             self.assertNotIn('review_kind', seeded_task['completion_events'][0])
+            seeded_claims = seeded_task['review_dispatch_claim']
+            seeded_events = seeded_task['completion_events']
 
-            family_store = FamilyStore(store, 'codex')
+            # A Codex verdict counts only for a cross-family (Claude) Developer.
+            family_store = FamilyStore(store, 'claude')
             res = review_result.record_review_result(
                 store=family_store, task_id=TASK, executor_task=EXECUTOR, pr_number=PR,
                 version=1, kind='formal')
@@ -718,6 +722,8 @@ class ReviewKindTests(unittest.TestCase):
             self.assertNotIn('review_kind', after_task['review_dispatch_claim'][0])
             self.assertNotIn('review_kind', after_task['completion_events'][0])
             self.assertEqual(len(after_task['completion_events']), 1)
+            self.assertEqual(after_task['review_dispatch_claim'], seeded_claims)
+            self.assertEqual(after_task['completion_events'], seeded_events)
 
             with self.assertRaises(LLMToolError) as caught:
                 review_result.record_review_result(
