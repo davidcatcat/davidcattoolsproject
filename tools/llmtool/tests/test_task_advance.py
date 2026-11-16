@@ -3235,6 +3235,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
                  'conclusion': 'success'}]} if path.startswith('commits/') else
             [{'filename': 'src/module.py'}] if path.endswith('/files?per_page=100') else
+            [] if path.startswith('issues/17/comments?') else
             pr))
         result = task_advance._merge_once(store=store, record=record, number=17,
             head=HEAD, pr=pr, events=[event], github_get=github_get_green,
@@ -3280,6 +3281,8 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                      'conclusion': 'success'}]}
             if path.endswith('/files?per_page=100'):
                 return [{'filename': 'src/module.py'}]
+            if path.startswith('issues/17/comments?'):
+                return []
             return current
         result = task_advance._merge_once(store=store, record=record, number=17,
             head=HEAD, pr=pr, events=[event],
@@ -3321,6 +3324,8 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                      'conclusion': 'success'}]}
             if path.endswith('/files?per_page=100'):
                 return [{'filename': 'src/module.py'}]
+            if path.startswith('issues/17/comments?'):
+                return []
             return opened if sum(call[1] == 'merge' for call in calls) == 0 else merged
         def failed_merge(_root, args):
             calls.append(args)
@@ -3390,6 +3395,8 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                      'conclusion': 'success'}]}
             if path.endswith('/files?per_page=100'):
                 return [{'filename': 'src/module.py'}]
+            if path.startswith('issues/17/comments?'):
+                return []
             return pr
         return task_advance._merge_once(store=Store(), record=record, number=17,
             head=HEAD, pr=pr, events=[event], github_get=github_get,
@@ -3434,6 +3441,8 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                     return checks
                 if path.endswith('/files?per_page=100'):
                     return [{'filename': 'src/module.py'}]
+                if path.startswith('issues/17/comments?'):
+                    return []
                 return pr
             def gh_runner(_root, args):
                 calls.append(args)
@@ -3497,6 +3506,8 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 return checks
             if path.endswith('/files?per_page=100'):
                 return [{'filename': 'src/module.py'}]
+            if path.startswith('issues/17/comments?'):
+                return []
             return pr
         def gh_runner(_root, args):
             gh_calls.append(args)
@@ -3550,6 +3561,8 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 return checks
             if path.endswith('/files?per_page=100'):
                 return [{'filename': 'src/module.py'}]
+            if path.startswith('issues/17/comments?'):
+                return []
             return pr
         def gh_runner(_root, args):
             gh_calls.append(args)
