@@ -672,6 +672,7 @@ class BootstrapSourceAllowanceTests(unittest.TestCase):
 
     def test_record_d6_result_forwards_write_paths(self):
         called = {}
+        executed = []
 
         def mock_record_result(**kwargs):
             called.update(kwargs)
@@ -679,7 +680,9 @@ class BootstrapSourceAllowanceTests(unittest.TestCase):
 
         with patch("importlib.util.spec_from_file_location") as mock_spec:
             mock_module = type("M", (), {"record_result": mock_record_result})
-            mock_loader = type("L", (), {"exec_module": lambda _m: None})
+            mock_loader = type("L", (), {
+                "exec_module": lambda self, module: executed.append(module),
+            })
             mock_spec.return_value = type("S", (), {"loader": mock_loader()})
             with patch("importlib.util.module_from_spec", return_value=mock_module):
                 result = task_advance._record_d6_result(
@@ -687,6 +690,7 @@ class BootstrapSourceAllowanceTests(unittest.TestCase):
                     write_paths=["tools/llmtool/pyproject.toml"])
 
         self.assertEqual(result, "abc")
+        self.assertEqual(executed, [mock_module])
         self.assertEqual(called, {
             "task_id": "t1",
             "canonical_root": "/canon",
