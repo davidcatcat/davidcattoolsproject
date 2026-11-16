@@ -486,32 +486,69 @@ class TaskAdvanceRoleTimeoutRealStoreTests(unittest.TestCase):
         task_id = new_id()
         run_id = new_id()
         contract_digest = hashlib.sha256(b'contract').hexdigest()
+        request = 'Test role timeout task.'
+        request_sha = hashlib.sha256(request.encode()).hexdigest()
         task = make_task_record(
-            task_id, run_id, 'pm-session', 'pm-profile', 'Test role timeout task.',
-            state='PM_PENDING', provider_type='openai-compatible', model='test-model',
+            task_id, run_id, 'pm-' + new_id(), 'pm-profile', request,
+            state='PM_RESPONDED', provider_type='openai-compatible', model='test-model',
             backend='NO_NATIVE_SESSION_ID_EXPOSED',
-            request_sha=hashlib.sha256(b'req').hexdigest(),
+            request_sha=request_sha,
         )
-        task['task_binding'] = {'contract_digest': contract_digest}
-        task['developer'] = {
-            'state': 'DEVELOPER_DISPATCHING',
-            'provider_profile': route,
-            'error_code': code,
-            'source_sha': HEAD,
+        task.update(
+            pm_route_binding={'type': 'openai-compatible', 'model': 'test-model', 'base_url': None},
+            response='PM returned a bounded task.',
+            error_code=None,
+            pm_assignment={'schema_version': 1, 'route': route, 'risk': 'LOW',
+                           'goal': request, 'acceptance': ['test acceptance']},
+            task_binding={'contract_digest': contract_digest},
+        )
+        self.store.create(task)
+
+        developer = {
             'assignment_id': new_id(),
-            'session_id': 'session-1',
-            'executor_task_id': 'executor-1',
+            'selection_source': 'PM',
+            'state': 'DEVELOPER_PENDING',
+            'provider_profile': route,
+            'provider_type': 'agy-cli' if route == 'agy' else None,
+            'model': None,
+            'backend_session_semantics': 'CLI_REPORTED_SESSION_ID' if route == 'agy' else 'NO_NATIVE_SESSION_ID_EXPOSED',
+            'session_id': 'dev-' + new_id(),
+            'source_sha': HEAD,
+            'source_sha_binding': 'D6_REGISTRY_OBSERVED',
             'read_paths': ['src/module.py'],
             'write_paths': ['src/module.py'],
             'acceptance': ['test acceptance'],
+            'context_sha256': hashlib.sha256(b'context').hexdigest(),
+            'egress_basis': 'Approved non-sensitive test context.',
+            'input_bytes': 10,
+            'max_tokens': None,
+            'artifact_format': 'unified_diff',
+            'artifact': None,
+            'artifact_sha256': None,
+            'usage': None,
+            'error_code': code,
+            'created_at': '2026-10-23T00:00:00Z',
+            'executor_task_id': 'executor-1',
             'execution': {
                 'status': 'TIMEOUT',
+                'native_session_id': None,
+                'process_exit_code': None,
+                'stdout_sha256': None,
+                'elapsed_ms': None,
                 'cleanup_status': 'CONFIRMED',
+                'usage_source': 'UNKNOWN',
+                'source_bytes': None,
+                'source_file_count': None,
+                'source_manifest_sha256': None,
                 'diff_base_sha': HEAD,
                 'diff_sha256': EMPTY_DIFF_SHA256,
             },
         }
-        self.store.create(task)
+        if route in ('agy', 'claude'):
+            developer['owner_assignment_ref'] = None
+
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            self.store.compare_and_update(task_id, expected={'developer': None}, developer=developer)
         return task_id
 
     def test_real_store_timeout_retry_transition_and_audit(self):
