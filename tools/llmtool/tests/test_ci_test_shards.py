@@ -305,7 +305,7 @@ class CiTestShardsTests(unittest.TestCase):
             "tools/ai-loop/**",
             "AGENTS.md",
             "CLAUDE.md",
-            "skills/**",
+            ".claude/skills/**",
             "docs/**",
             "tools/llmtool/*.md",
             "*.md",
@@ -401,8 +401,8 @@ class CiTestShardsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             (temp / "scripts").mkdir()
-            skills_dir = temp / "skills"
-            skills_dir.mkdir()
+            skills_dir = temp / ".claude" / "skills"
+            skills_dir.mkdir(parents=True)
 
             fake_python = temp / "fake_python"
             fake_python.write_text(
@@ -420,7 +420,7 @@ class CiTestShardsTests(unittest.TestCase):
                 "if [ \"$FAKE_PYTHON_FAIL\" = \"skills\" ]; then\n"
                 "  for arg in \"$@\"; do\n"
                 "    case \"$arg\" in\n"
-                "      skills*) exit 1 ;;\n"
+                "      .claude/skills*) exit 1 ;;\n"
                 "    esac\n"
                 "  done\n"
                 "fi\n"
@@ -483,7 +483,7 @@ class CiTestShardsTests(unittest.TestCase):
             lines3 = log3.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(lines3), 2)
             self.assertIn("discover -s scripts", lines3[0])
-            self.assertIn("discover -s skills/my_skill", lines3[1])
+            self.assertIn("discover -s .claude/skills/my_skill", lines3[1])
 
             # Case 4: a failing skills run gives nonzero
             log4 = temp / "log4.txt"
@@ -502,7 +502,7 @@ class CiTestShardsTests(unittest.TestCase):
             lines4 = log4.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(lines4), 2)
             self.assertIn("discover -s scripts", lines4[0])
-            self.assertIn("discover -s skills/my_skill", lines4[1])
+            self.assertIn("discover -s .claude/skills/my_skill", lines4[1])
 
 
 import shutil

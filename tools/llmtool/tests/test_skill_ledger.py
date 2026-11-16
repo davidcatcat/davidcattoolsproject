@@ -956,7 +956,7 @@ class SkillLedgerTests(unittest.TestCase):
         older = self.main_commit
         self.pin(older)
         newer_files = dict(CARD_FILES)
-        newer_files['skills/role-cards/developer.md'] = b'newer developer card\n'
+        newer_files['.claude/skills/role-cards/developer.md'] = b'newer developer card\n'
         newer = self.commit_cards(newer_files)
         # GitHub main has advanced too; the pin is immutable and main is not reread.
         pinned, main_read = self.pin(newer)
@@ -984,7 +984,7 @@ class SkillLedgerTests(unittest.TestCase):
         self.card_repo()
         ancestor = self.main_commit
         newer_files = dict(CARD_FILES)
-        newer_files['skills/role-cards/developer.md'] = b'newer developer card\n'
+        newer_files['.claude/skills/role-cards/developer.md'] = b'newer developer card\n'
         newer = self.commit_cards(newer_files)
         self.pin(newer)
         before = self.path.read_bytes()
@@ -1113,7 +1113,7 @@ class SkillLedgerTests(unittest.TestCase):
         self.card_repo()
         self.git('checkout', '-q', '-b', 'side')
         side_files = dict(CARD_FILES)
-        side_files['skills/role-cards/developer.md'] = b'side branch card\n'
+        side_files['.claude/skills/role-cards/developer.md'] = b'side branch card\n'
         side = self.commit_cards(side_files, update_main=False)
         for run_id, commit, code in (
                 # #1931: a pinned commit absent from the repository is NOT_LOCAL.

@@ -615,7 +615,7 @@ class ModelNameTests(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
 
     def test_wrong_model_in_each_normative_doc_fails(self):
-        for relative in ("AGENTS.md", "CLAUDE.md", "skills/demo/SKILL.md",
+        for relative in ("AGENTS.md", "CLAUDE.md", ".claude/skills/demo/SKILL.md",
                          "docs/governance/rule.md", "tools/llmtool/WORKFLOW.md"):
             with self.subTest(doc=relative):
                 self.write_doc(relative, "Use `gpt-9-wrong` for this route.\n")

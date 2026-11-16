@@ -78,7 +78,7 @@ class DocsCheckTests(unittest.TestCase):
         self.assertTrue(any("sensitive-content" in item for item in self.findings("pass" + "word: newly-added\n")))
 
     def test_bad_skill_frontmatter(self):
-        skill = self.repo / "skills" / "sample" / "SKILL.md"
+        skill = self.repo / ".claude" / "skills" / "sample" / "SKILL.md"
         skill.parent.mkdir(parents=True)
         skill.write_text("---\nname: sample\ndescription: ''\n---\n", encoding="utf-8")
         self.commit()
@@ -105,10 +105,10 @@ class DocsCheckTests(unittest.TestCase):
         )
 
     def test_model_check_uses_checked_root_allowlist(self):
-        skill = self.repo / "skills" / "sample" / "SKILL.md"
+        skill = self.repo / ".claude" / "skills" / "sample" / "SKILL.md"
         skill.parent.mkdir(parents=True)
         skill.write_text("---\nname: sample\ndescription: d\n---\nUse `gpt-9-wrong`.\n", encoding="utf-8")
-        self.assertIn("skills/sample/SKILL.md: MODEL_NOT_ALLOWED gpt-9-wrong", self.findings("# Good\n"))
+        self.assertIn(".claude/skills/sample/SKILL.md: MODEL_NOT_ALLOWED gpt-9-wrong", self.findings("# Good\n"))
 
     def test_link_inside_fenced_code_is_ignored(self):
         self.assertFalse(self.findings("```md\n[example](missing.md)\n```\n"))

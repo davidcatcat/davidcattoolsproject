@@ -120,7 +120,7 @@ class TaskAdvanceMergeDocsRuleTests(unittest.TestCase):
         return task_advance._merge_checks({}, 17, HEAD, pr, github_get)
 
     def test_skills_json_and_docs_markdown_need_only_docs_check(self):
-        self.assertIsNone(self._checks(['skills/x.json', 'docs/y.md'], ['check (docs)']))
+        self.assertIsNone(self._checks(['.claude/skills/x.json', 'docs/y.md'], ['check (docs)']))
 
     def test_deep_llmtool_markdown_needs_code_checks(self):
         self.assertEqual(
@@ -5136,8 +5136,8 @@ class RequiredLinuxChecksUnionTests(unittest.TestCase):
                    'tools/llmtool/llmtool/deep/z.md', 'tools/llmtool/llmtool/x.py',
                    'tools/api-agent-gateway/app.py', 'tools/api-agent-gateway/README.md',
                    'tools/ai-loop/loop.py', 'tools/ai-loop/README.md',
-                   '.github/workflows/llmtool-linux-ci.yml', 'skills/x/SKILL.md',
-                   'skills/x/tool.py', 'skills/x/data.json', 'scripts/tool.sh']
+                   '.github/workflows/llmtool-linux-ci.yml', '.claude/skills/x/SKILL.md',
+                   '.claude/skills/x/tool.py', '.claude/skills/x/data.json', 'scripts/tool.sh']
         sets = [[path] for path in samples] + [
             [first, second] for index, first in enumerate(samples)
             for second in samples[index + 1:]]

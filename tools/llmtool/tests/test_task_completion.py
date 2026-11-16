@@ -3818,6 +3818,8 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertFalse(task_completion._docs_only_ci(['tools/llmtool/x/y.md']))
         self.assertTrue(task_completion._docs_only_ci(['tools/llmtool/README.md']))
         self.assertFalse(task_completion._docs_only_ci(['tools/llmtool/x.py']))
+        self.assertTrue(task_completion._docs_only_ci(['.claude/skills/x/SKILL.md']))
+        self.assertFalse(task_completion._docs_only_ci(['.claude/skills/x/tool.py']))
         self.assertFalse(task_completion._docs_only_ci(None))
 
         checks = {'total_count': 1, 'check_runs': [{
