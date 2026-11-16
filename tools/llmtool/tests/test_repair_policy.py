@@ -26,6 +26,28 @@ class PolicyFileTests(unittest.TestCase):
         self.assertEqual(rp.load_policy(), dict(GOOD, timeout_continuation_max=1))
         self.assertEqual(rp.policy_path().name, 'policy.json')
 
+    def test_packing_ships_policy_json_to_the_installed_location(self):
+        # Fail if pyproject stops shipping policy.json to policy_path()'s third candidate.
+        import sysconfig as _sc
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        pkg = Path(rp.__file__).resolve().parent.name
+        toml = (root / 'pyproject.toml').read_text('utf-8')
+        files, in_data = [], False
+        for line in toml.splitlines():
+            stripped = line.strip()
+            if stripped.startswith('['):
+                in_data = stripped == '[tool.setuptools.data-files]'
+                files = []
+            elif in_data and stripped and not stripped.startswith('#') and '=' in stripped:
+                dest, source = (part.strip() for part in stripped.split('=', 1))
+                names = source.strip('[]').replace('"', '').replace("'", '').split(',')
+                files.extend((dest, name.strip()) for name in names if name.strip())
+        third = Path(_sc.get_path('data')) / pkg / rp.policy_path().name
+        self.assertTrue(any(Path(_sc.get_path('data')) / dest / name == third
+                            for dest, name in files), files)
+        self.assertTrue((root / 'policy.json').is_file())
+
     def test_valid_file_loads(self):
         self.assertEqual(rp.load_policy(self._write(GOOD)), GOOD)
 
