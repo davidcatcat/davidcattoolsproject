@@ -200,6 +200,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(config['profile']['allowed_data_classes'], ['synthetic', 'public_repo'])
         self.assertEqual(config['profile']['data_class_map'],
                          {'SYNTHETIC': 'synthetic', 'PUBLIC_REPO': 'public_repo'})
+        self.assertEqual(config['profile']['timeout_seconds'], 1800)
+        self.assertEqual(config['profile']['timeout_seconds'], config['default_timeout'])
         self.assertEqual(config['authorization_ref'],
             'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6760670167')
         with tempfile.TemporaryDirectory() as temp:
@@ -1051,6 +1053,9 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                          'http://10.20.30.40:8080/v1')
         self.assertEqual(seen['post_path'], '/v1/chat/completions')
         self.assertEqual(seen['prepared_profile']['http_allow_hosts'], ['10.20.30.40'])
+        # #1817: the configured per-call timeout reaches the gateway profile.
+        self.assertEqual(seen['profile']['timeout_seconds'], 1800)
+        self.assertEqual(seen['prepared_profile']['timeout_seconds'], 1800)
         self.assertEqual(set(seen['task']['budgets']), {
             'max_turns', 'max_input_tokens', 'max_output_tokens', 'max_wall_seconds',
             'max_tool_result_bytes', 'max_sent_bytes'})
@@ -1077,6 +1082,55 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             self.assertEqual(removed, [old.name])
             self.assertFalse(old.exists())
             self.assertTrue(recent.exists())
+
+
+class GwAgentProfileTimeoutTests(unittest.TestCase):
+    """#1817: the profile's timeout_seconds is serialized for the gateway as is."""
+
+    def _serialized_profile(self, profile):
+        with tempfile.TemporaryDirectory() as package_root, \
+             tempfile.TemporaryDirectory() as route_tmp:
+            (Path(package_root) / 'api_agent_gateway').mkdir()
+            config = load_route_config()['routes']['gw-agent']
+            config['package_path'] = package_root
+            config['profile'] = profile
+            route = GwAgentRoute(config)
+            task = {'schema_version': 1, 'task_id': 'b' * 32, 'source_sha': 'a' * 40,
+                    'goal': 'Edit src.py.', 'acceptance': ['record the result'],
+                    'read_paths': ['src.py'], 'write_paths': ['src.py'],
+                    'budgets': {'max_turns': 4, 'max_input_tokens': 10000,
+                                'max_output_tokens': 1000, 'max_wall_seconds': 60,
+                                'max_tool_result_bytes': 4096, 'max_sent_bytes': 100000},
+                    'egress_basis': 'Synthetic test content.', 'data_class': 'synthetic',
+                    'findings': []}
+            request = {'root': str(Path.cwd()), 'task': task}
+            with patch.object(route, '_load_credential', return_value=None):
+                route._prepare_files(route_tmp, request)
+            written = json.loads((Path(route_tmp) / 'profiles.json').read_text(encoding='utf-8'))
+        return written['profiles'][config['profile_name']]
+
+    def _shipped_profile(self):
+        profile = copy.deepcopy(load_route_config()['routes']['gw-agent']['profile'])
+        profile['base_url'] = 'http://127.0.0.1:9/v1'
+        return profile
+
+    def test_shipped_profile_serializes_timeout_seconds_1800(self):
+        serialized = self._serialized_profile(self._shipped_profile())
+        self.assertIs(type(serialized['timeout_seconds']), int)
+        self.assertEqual(serialized['timeout_seconds'], 1800)
+        self.assertEqual(serialized['timeout_seconds'],
+                         load_route_config()['routes']['gw-agent']['default_timeout'])
+
+    def test_profile_without_timeout_seconds_serializes_without_it(self):
+        with_timeout = self._serialized_profile(self._shipped_profile())
+        profile = self._shipped_profile()
+        del profile['timeout_seconds']
+        without_timeout = self._serialized_profile(profile)
+        self.assertNotIn('timeout_seconds', without_timeout)
+        # Nothing else changes: the gateway default applies exactly as before.
+        expected = dict(with_timeout)
+        del expected['timeout_seconds']
+        self.assertEqual(without_timeout, expected)
 
 
 class GwAgentShippedServedModelTests(unittest.TestCase):
