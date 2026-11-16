@@ -778,7 +778,7 @@ class ClaudeBgDispatchTests(unittest.TestCase):
 
     def test_reviewer_launch_has_no_file_editing_tools_and_developer_launch_is_unchanged(self):
         self.assertEqual(dispatch_tool.REVIEWER_DISALLOWED_TOOLS_ARG,
-                         '--disallowedTools=Edit,Write,NotebookEdit')
+                         '--disallowedTools=Edit,Write,NotebookEdit,Skill')
         for name, expected in (('claude-reviewer', [dispatch_tool.REVIEWER_DISALLOWED_TOOLS_ARG]),
                                ('claude-developer', [])):
             with self.subTest(name=name):
@@ -799,6 +799,44 @@ class ClaudeBgDispatchTests(unittest.TestCase):
                     self.assertLess(argv.index(expected[0]), argv.index('-n'))
                 self.assertEqual(argv[-2:], ['--', 'work'])
                 self.assertEqual(self.parsed(), [{'add_dirs': [self.root], 'prompt': 'work'}])
+
+    def test_reviewer_launch_denies_skill_and_other_role_argv_is_unchanged(self):
+        # #1502 WP-H E7: project skills must not steer the background Reviewer.
+        def launch_argv(name):
+            self.reset()
+            self.scenario(after=[[row('NEW-SESSION', name=name, cwd=self.root)]],
+                          transcripts=[{'session': 'NEW-SESSION', 'new_action': True}])
+            model_args = ['--model', REVIEW_MODEL] if name == 'claude-reviewer' else []
+            code, receipt = self.run_tool('dispatch', '--new', '--name', name,
+                                          '--task-id', 'executor-task', '--prompt', 'work',
+                                          *model_args)
+            self.assertEqual(code, 0, receipt)
+            [launch] = self.launches()
+            argv = list(launch['argv'])
+            # The new session id is random and the role is the name: normalise both.
+            argv[argv.index('--session-id') + 1] = 'SESSION-ID'
+            argv[argv.index('-n') + 1] = 'ROLE'
+            return argv
+
+        reviewer_argv = launch_argv('claude-reviewer')
+        developer_argv = launch_argv('claude-developer')
+        reviewer_limits = [arg for arg in reviewer_argv if arg.startswith('--disallowedTools')]
+        self.assertEqual(len(reviewer_limits), 1)
+        denied = reviewer_limits[0].split('=', 1)[1].split(',')
+        self.assertIn('Skill', denied)
+        for tool in ('Edit', 'Write', 'NotebookEdit'):
+            self.assertIn(tool, denied)
+        # The developer argv carries no tool limit at all and no Skill mention.
+        self.assertFalse(any(arg.startswith('--disallowedTools') or 'Skill' in arg
+                             for arg in developer_argv))
+        # Apart from the Reviewer-only model and tool limit, both argvs are identical.
+        model_at = reviewer_argv.index('--model')
+        self.assertEqual(reviewer_argv[model_at + 1], REVIEW_MODEL)
+        reviewer_rest = (reviewer_argv[:model_at] +
+                         [arg for arg in reviewer_argv[model_at + 2:]
+                          if arg not in reviewer_limits])
+        self.assertEqual(reviewer_rest, developer_argv)
+        self.assertEqual(developer_argv[-2:], ['--', 'work'])
 
     def test_watch_returns_on_report_and_stops_a_blocked_session(self):
         report = self.home / 'report.md'
