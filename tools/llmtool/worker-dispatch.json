@@ -47,7 +47,7 @@
       "dispatch": "PAUSED",
       "decided_by": "Owner",
       "decided_at": "2026-11-17",
-      "reason": "Owner instruction, relayed by PM on #289:pause the Claude formal Reviewer; formal reviews use codex-reviewer through the existing task advance Reviewer fallback",
+      "reason": "Owner instruction, relayed by PM on #289: pause the Claude formal Reviewer; formal reviews use codex-reviewer through the existing task advance Reviewer fallback",
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6922657359"
     },
     "codex-reviewer": {
