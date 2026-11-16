@@ -4,10 +4,32 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 import re
 import subprocess
 import sys
 import time
+
+try:
+    from llmtool.scripts.pm_owner_marker import RESERVED_ROWS
+except ImportError:
+    try:
+        from pm_owner_marker import RESERVED_ROWS
+    except ImportError:
+        _scripts_dir = Path(__file__).resolve().parent
+        _pkg_dir = _scripts_dir.parent
+        _tools_dir = _pkg_dir.parent
+        for _p in (str(_scripts_dir), str(_pkg_dir), str(_tools_dir)):
+            if _p not in sys.path:
+                sys.path.insert(0, _p)
+        try:
+            from pm_owner_marker import RESERVED_ROWS
+        except Exception:
+            RESERVED_ROWS = (
+                "R-SCOPE", "R-RELEASE", "R-SPEND", "R-EGRESS", "R-SECURITY", "R-CRED",
+                "R-ROOT", "R-MACOS", "R-REVIEWER", "R-DISPATCH", "R-ACCEPT", "R-BUDGET",
+                "R-STOP", "R-OTHER",
+            )
 
 MARKER = re.compile(r"<!--\s*activity:([^<>]{0,300}?)-->")
 OWNER_FIELD = re.compile(
@@ -168,7 +190,7 @@ def audit(comments: list[dict], since: str, until: str, chat=None, effective_tas
         body = c.get("body", "")
         lines = body.splitlines() if isinstance(body, str) else []
         match = GATED_LINE.fullmatch(lines[1]) if len(lines) >= 2 else None
-        if match:
+        if match and match.group(1) in RESERVED_ROWS:
             gated += 1
             row = match.group(1)
             rows[row] = rows.get(row, 0) + 1
@@ -311,7 +333,7 @@ def metrics(counted, gated, ungated, rows, chat, effective_tasks) -> dict:
     result["gate_coverage"] = round(gated / len(counted), 4) if counted else None
     invalid = ungated + chat_only
     result["invalid_escalation_rate"] = round(invalid / decisions, 4) if decisions else None
-    result["true_reserved"] = sum(n for row, n in rows.items() if row != "R-OTHER")
+    result["true_reserved"] = sum(n for row, n in rows.items() if row != "R-OTHER" and row in RESERVED_ROWS)
     per_task = "UNKNOWN"
     if type(effective_tasks) is int and effective_tasks > 0:
         per_task = round(decisions * 100 / effective_tasks, 2)
