@@ -1804,21 +1804,33 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
 # #1502 WP-B: a Claude Debug refusal that means the route cannot run now.
 _CLAUDE_DEBUG_UNAVAILABLE = DEBUG_FALLBACK_CODES | {
     'HIGH_DEBUG_DISPATCH_REFUSED', 'HIGH_DEBUG_ACCOUNT_UNCONFIGURED'}
+# #1502 WP-B, Codex v995 audit of #1630 (CWE-862): a caller never picks Claude
+# Debug directly. It runs only after this run's Codex Debug was refused with a
+# DEBUG_FALLBACK_CODES code (quota exhausted or login failed).
+CLAUDE_ROUTE_REFUSED = 'HIGH_DEBUG_CLAUDE_ROUTE_REFUSED'
 
 
 def run_high_debug_with_fallback(*, route='codex', **kwargs):
     """Run AI Debug; switch from Codex to Claude only on DEBUG_FALLBACK_CODES.
 
-    Every other refusal stops as before and nothing is resent. When neither
-    route can run, refuse with HIGH_DEBUG_WAITING, a reason code (AUTH first,
-    then QUOTA, else ROUTE_UNAVAILABLE), the time and a resume condition.
+    An explicit Claude route is refused with CLAUDE_ROUTE_REFUSED before any
+    Task read, D6, entry or provider call: Claude Debug runs only as the
+    fallback of a Codex Debug in this same run that reported quota exhausted
+    or login failure. Every other refusal stops as before and nothing is
+    resent. When neither route can run, refuse with HIGH_DEBUG_WAITING, a
+    reason code (AUTH first, then QUOTA, else ROUTE_UNAVAILABLE), the time and
+    a resume condition.
     """
+    if route == 'claude':
+        _refuse(CLAUDE_ROUTE_REFUSED,
+                'claude_debug_requires=codex_quota_exhausted_or_login_failed')
     try:
         return run_high_debug(route=route, **kwargs)
     except LLMToolError as error:
         first = getattr(error, 'high_debug_code', None)
         if route != 'codex' or first not in DEBUG_FALLBACK_CODES:
             raise
+    # Reached only when this run's Codex attempt was refused with a fallback code.
     try:
         return run_high_debug(route='claude', **kwargs)
     except LLMToolError as error:

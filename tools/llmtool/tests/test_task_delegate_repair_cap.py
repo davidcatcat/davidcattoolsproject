@@ -1269,7 +1269,7 @@ class HighDebugRunBindingTests(unittest.TestCase):
 
 
 class HighDebugRouteTests(unittest.TestCase):
-    """The high-debug action routes to Codex by default and forwards the route."""
+    """The high-debug action routes to Codex by default; a direct Claude route is refused."""
 
     def _parser(self):
         parser = argparse.ArgumentParser()
@@ -1303,8 +1303,19 @@ class HighDebugRouteTests(unittest.TestCase):
             task_submission_cli.run_task_high_debug(args, store=object())
         return runner.call_args.kwargs
 
-    def test_route_is_forwarded(self):
-        self.assertEqual(self._run(route='claude')['route'], 'claude')
+    def test_codex_route_is_forwarded(self):
+        self.assertEqual(self._run(route='codex')['route'], 'codex')
+
+    def test_direct_claude_route_is_refused_without_a_run(self):
+        # Codex v995 audit of #1630: Claude Debug runs only as the fallback
+        # after a Codex quota or login failure, never on a direct request.
+        args = SimpleNamespace(task_id='a' * 32, executor_task='executor', pr=17,
+                               family='family', early='reason', route='claude')
+        with patch('llmtool.high_debug.run_high_debug') as runner:
+            with self.assertRaises(LLMToolError) as caught:
+                task_submission_cli.run_task_high_debug(args, store=object())
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_CLAUDE_ROUTE_REFUSED')
+        runner.assert_not_called()
 
     def test_missing_route_forwards_codex(self):
         self.assertEqual(self._run()['route'], 'codex')
