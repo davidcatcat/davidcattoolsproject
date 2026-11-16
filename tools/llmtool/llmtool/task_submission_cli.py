@@ -1033,7 +1033,13 @@ def add_task_submission_parsers(actions):
     choice.add_argument('--failed-corrections', type=int)
     choice.add_argument('--early')
     high_debug.add_argument('--evidence-file')
-    high_debug.add_argument('--route', choices=('codex', 'claude'), default='codex')
+    # 'claude' stays a parseable choice so a direct request is refused with the
+    # stable HIGH_DEBUG_CLAUDE_ROUTE_REFUSED code: Claude Debug runs only as the
+    # automatic fallback after a Codex quota or login failure (#1502 WP-B).
+    high_debug.add_argument('--route', choices=('codex', 'claude'), default='codex',
+                            help=('Debug route (default codex). claude is refused: Claude Debug '
+                                  'runs only as the automatic fallback after Codex Debug '
+                                  'reports quota exhausted or login failure'))
     dispute = actions.add_parser(
         'dispute', help=('Record a PM dispute, deferral or arbiter ruling of one formal '
                          'review finding; never runs a review'))
