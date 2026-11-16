@@ -13,7 +13,10 @@ from llmtool.developer_routes.base import capture_snapshot, run_route, _exit_dia
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore, _validate, _digest
 from llmtool.task_verification import parse_task_contract
-from llmtool.tests import worker_policy_fixture
+try:
+    import worker_policy_fixture
+except ImportError:
+    from tests import worker_policy_fixture
 
 MODEL = load_route_config()['routes']['agy']['default_model']
 
