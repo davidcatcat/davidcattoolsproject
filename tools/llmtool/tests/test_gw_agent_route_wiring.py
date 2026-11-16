@@ -20,6 +20,7 @@ from unittest.mock import Mock, patch
 from llmtool import (
     gw_agent_sessions,
     review_dispatch,
+    task_advance,
     task_completion,
     task_status,
     task_submission_cli,
@@ -35,6 +36,7 @@ from llmtool import task_store
 
 import _chain_gate_fixture
 import review_trust_fixture
+import worker_policy_fixture
 
 
 def setUpModule():
@@ -409,6 +411,11 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             'route': 'gw-agent', 'reason_code': 'ROUTE_NOT_SUPPORTED'})
 
     def test_gw_agent_uses_claude_formal_reviewer(self):
+        # The default Reviewer route for a gw-agent author, under the shared
+        # all-ALLOWED test policy (#1692), never the live worker-dispatch.json
+        # (#289 c6922657359 paused claude-reviewer there; see
+        # RealPolicyReviewerFallbackTests).
+        worker_policy_fixture.install(self)
         task = {'task_id': 'a' * 32, 'run_id': 'b' * 32,
             'task_binding': {'contract_digest': 'c' * 64},
             'completion': {'executor_task_id': 'executor-d6',
@@ -1161,6 +1168,66 @@ class GwAgentShippedServedModelTests(unittest.TestCase):
                 self.assertEqual(caught.exception.role_config_code,
                                  'ROLE_MODEL_NOT_ALLOWED')
                 self.assertIn('ROLE_MODEL_NOT_ALLOWED', str(caught.exception))
+
+
+class RealPolicyReviewerFallbackTests(unittest.TestCase):
+    """#289 c6922657359: the live worker-dispatch.json pauses claude-reviewer.
+
+    Decisions go through the real reader, parser and gate on the repository
+    policy file; only the trusted repository config is pinned. Formal reviews
+    for a non-Claude author reach codex-reviewer through the existing #1831 P1
+    task advance Reviewer fallback.
+    """
+
+    def setUp(self):
+        policy = patch.object(worker_dispatch, '_POLICY_PATH',
+                              Path(worker_dispatch._DEFAULT_POLICY_PATH))
+        policy.start()
+        self.addCleanup(policy.stop)
+        repository = patch.object(worker_dispatch, 'repository_config',
+            return_value={'slug': 'davidcatcat/davidcattoolsproject',
+                          'dispatch_issue': 289, 'dispatch_evidence_pr': 283})
+        repository.start()
+        self.addCleanup(repository.stop)
+
+    @staticmethod
+    def _task(developer):
+        return {'task_id': 'a' * 32, 'run_id': 'b' * 32, 'developer': developer}
+
+    def test_gw_agent_author_review_falls_back_to_codex_reviewer(self):
+        task = self._task({'provider_profile': 'gw-agent'})
+        # An explicit claude-reviewer request is refused by the real row.
+        with self.assertRaises(LLMToolError) as explicit:
+            review_dispatch._select_reviewer(task, 'claude-reviewer')
+        self.assertEqual(explicit.exception.review_dispatch_code, 'REVIEWER_NOT_ALLOWED')
+        # The default Reviewer for a gw-agent author is claude-reviewer: refused too.
+        with self.assertRaises(LLMToolError) as default:
+            review_dispatch._select_reviewer(task)
+        self.assertEqual(default.exception.review_dispatch_code, 'REVIEWER_NOT_ALLOWED')
+        # The existing advance fallback admits codex-reviewer.
+        self.assertEqual(task_advance._reviewer_fallback(task, default.exception),
+                         ('codex-reviewer', 'REVIEWER_NOT_ALLOWED'))
+        self.assertEqual(review_dispatch._select_reviewer(task, 'codex-reviewer'),
+                         'codex-reviewer')
+
+    def test_other_family_author_review_falls_back_to_codex_reviewer(self):
+        task = self._task({'provider_profile': 'agy', 'model': 'gemini-2.5-pro'})
+        with self.assertRaises(LLMToolError) as default:
+            review_dispatch._select_reviewer(task)
+        self.assertEqual(default.exception.review_dispatch_code, 'REVIEWER_NOT_ALLOWED')
+        self.assertEqual(task_advance._reviewer_fallback(task, default.exception),
+                         ('codex-reviewer', 'REVIEWER_NOT_ALLOWED'))
+
+    def test_codex_authored_task_has_no_fallback_reviewer(self):
+        # Family separation forbids codex-reviewer for a Codex-family author, so
+        # with claude-reviewer paused the fallback has no alternate (advance then
+        # reports REVIEWER_UNAVAILABLE). Pinned so the consequence stays visible.
+        task = self._task({'provider_profile': 'agy', 'model': 'gpt-6-luna'})
+        with self.assertRaises(LLMToolError) as default:
+            review_dispatch._select_reviewer(task)
+        self.assertEqual(default.exception.review_dispatch_code, 'REVIEWER_NOT_ALLOWED')
+        self.assertEqual(task_advance._reviewer_fallback(task, default.exception),
+                         (None, 'REVIEWER_NOT_ALLOWED'))
 
 
 class _NoSandboxBoundary:
