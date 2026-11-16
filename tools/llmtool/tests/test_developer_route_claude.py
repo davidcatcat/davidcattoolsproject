@@ -344,6 +344,19 @@ class ClaudeRouteTests(unittest.TestCase):
         result, _calls = self.run_case(stdout=self.envelope(result='quota mentioned, success'))
         self.assertEqual(result.status, 'DONE')
 
+    def test_spend_limit_is_quota_and_ordinary_failure_is_not_2158(self):
+        for text in ('Spend limit reached for this fake org', 'monthly spend-limit exceeded'):
+            with self.subTest(text=text):
+                envelope = self.envelope(is_error=True, subtype='error_api', result=text)
+                failed = self.route.parse_output(envelope, b'', '')
+                self.assertTrue(self.route.quota_exhausted(failed, b''))
+        with self.assertRaises(RouteError) as caught:
+            self.run_case(code=1, stdout=b'not-json', stderr=b'spend limit reached')
+        self.assertEqual(caught.exception.code, 'CLAUDE_QUOTA_EXHAUSTED')
+        ordinary = self.envelope(is_error=True, subtype='error_api', result='unexpected failure')
+        parsed = self.route.parse_output(ordinary, b'', '')
+        self.assertFalse(self.route.quota_exhausted(parsed, b'connection reset'))
+
     def test_route_config_accepts_optional_claude_and_rejects_bad_entries(self):
         config = load_route_config()
         self.assertEqual(config['routes']['claude']['default_model'], 'claude-opus-5-5')
