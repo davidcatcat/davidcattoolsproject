@@ -1,4 +1,5 @@
 """Isolated contract checks for the one-shot high-debug workflow."""
+import functools
 import tempfile
 import unittest
 import subprocess
@@ -1984,6 +1985,179 @@ class HighDebugTests(unittest.TestCase):
         # The grant was spent by that one Claude run; none is left behind.
         self.assertEqual(high_debug._CLAUDE_GRANTS, set())
 
+    @staticmethod
+    def _coded_error(code):
+        error = LLMToolError('refused')
+        error.high_debug_code = code
+        return error
+
+    def _assert_unconfirmed_refusal(self, error):
+        self.assertEqual(error.high_debug_code, 'HIGH_DEBUG_CLAUDE_ROUTE_REFUSED')
+        self.assertEqual(error.high_debug_detail,
+                         'claude_debug_requires=codex_quota_exhausted_or_login_failed'
+                         ' codex_attempt=UNCONFIRMED')
+        self.assertEqual(high_debug._CLAUDE_GRANTS, set())
+
+    def test_fallback_code_raised_before_the_codex_attempt_never_authorizes_claude(self):
+        # PR #2222 v92 (CWE-862): a quota or login code raised by the Task read
+        # or by dispatch, before any Codex attempt, starts no Claude Debug.
+        for code in sorted(high_debug.DEBUG_FALLBACK_CODES):
+            for where in ('task_read', 'dispatch'):
+                with self.subTest(code=code, where=where):
+                    runner, create = unittest.mock.Mock(), unittest.mock.Mock()
+                    if where == 'task_read':
+                        store = unittest.mock.Mock()
+                        store.get.side_effect = self._coded_error(code)
+                        evaluate_options = {'return_value': SimpleNamespace(allowed=True)}
+                    else:
+                        store = _Store()
+                        evaluate_options = {'side_effect': self._coded_error(code)}
+                    with patch.object(high_debug.worker_dispatch, 'evaluate',
+                                      **evaluate_options) as evaluate, \
+                         patch.object(high_debug.role_config, 'resolve_role') as resolve, \
+                         patch.object(high_debug, '_run_claude') as launch_claude, \
+                         patch.object(high_debug, '_run_codex') as launch_codex, \
+                         patch.object(high_debug, 'run_high_debug',
+                                      wraps=high_debug.run_high_debug) as wrapped:
+                        with self.assertRaises(LLMToolError) as caught:
+                            high_debug.run_high_debug_with_fallback(
+                                store=store, task_id='a' * 32, executor_task='executor',
+                                pr_number=17, family='family', failed_corrections=2,
+                                runner=runner, create_d6=create)
+                    self._assert_unconfirmed_refusal(caught.exception)
+                    self.assertEqual([call.kwargs['route'] for call in wrapped.call_args_list],
+                                     ['codex'])
+                    if where == 'task_read':
+                        evaluate.assert_not_called()
+                    else:
+                        evaluate.assert_called_once_with('codex-debug', None, 'a' * 32)
+                        self.assertEqual(store.entries, [])
+                    for called in (resolve, launch_claude, launch_codex, runner, create):
+                        called.assert_not_called()
+                    self._poster.assert_not_called()
+
+    def test_fallback_code_raised_after_a_successful_codex_attempt_never_authorizes_claude(self):
+        # The Codex attempt ran and succeeded; a quota code raised later by
+        # the store is not that attempt's failure, so no Claude Debug starts.
+        report = ''.join('## ' + heading + '\nDetails.\n'
+                         for heading in high_debug.REPORT_SECTIONS) + 'RCA_CONFIRMED'
+        root = self._repo()
+        registration = SimpleNamespace(result_sha='a' * 40, root=str(root),
+                                       common_dir=str(root / '.git'))
+        test = self
+
+        class FailingEventStore(_Store):
+            def record_completion_event(self, _task_id, **_event):
+                raise test._coded_error('HIGH_DEBUG_QUOTA_EXHAUSTED')
+
+        store = FailingEventStore()
+        launches = []
+
+        def runner(*, prompt, cwd, output_path):
+            launches.append(cwd)
+            Path(output_path).write_text(report, encoding='utf-8')
+            return subprocess.CompletedProcess([], 0, stdout=b'', stderr=b'')
+
+        with patch.object(high_debug.worker_dispatch, 'evaluate',
+                          return_value=SimpleNamespace(allowed=True)), \
+             patch.object(high_debug.role_config, 'resolve_role') as resolve, \
+             patch.object(high_debug, '_run_claude') as launch_claude, \
+             patch.object(high_debug.task_completion, 'collect_git_snapshot',
+                          return_value=SimpleNamespace(head='a' * 40)), \
+             patch.object(high_debug, 'run_high_debug',
+                          wraps=high_debug.run_high_debug) as wrapped:
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.run_high_debug_with_fallback(
+                    store=store, task_id='a' * 32, executor_task='executor',
+                    pr_number=17, family='family', failed_corrections=2,
+                    runner=runner, create_d6=lambda **_kwargs: str(root),
+                    repo_root=str(root),
+                    read_registration=lambda *_args, **_kwargs: registration)
+        self._assert_unconfirmed_refusal(caught.exception)
+        self.assertEqual([call.kwargs['route'] for call in wrapped.call_args_list], ['codex'])
+        self.assertEqual(len(launches), 1)
+        self.assertEqual([entry['status'] for entry in store.entries], ['RCA_CONFIRMED'])
+        resolve.assert_not_called()
+        launch_claude.assert_not_called()
+
+    def test_real_codex_login_failure_falls_back_to_claude(self):
+        # The attempt record is filled in only from the Codex runner's own
+        # result; a real login failure still switches to Claude.
+        report = ''.join('## ' + heading + '\nDetails.\n'
+                         for heading in high_debug.REPORT_SECTIONS) + 'RCA_CONFIRMED'
+        root = self._repo()
+        registration = SimpleNamespace(result_sha='a' * 40, root=str(root),
+                                       common_dir=str(root / '.git'))
+        store = _Store()
+        launches = []
+
+        def runner(*, prompt, cwd, output_path):
+            launches.append(cwd)
+            if len(launches) == 1:
+                return subprocess.CompletedProcess([], 1, stdout=b'',
+                                                   stderr=b'not logged in\n')
+            return self._claude_completed(report)
+
+        role_settings = {'role': 'reviewer', 'source': 'roles', 'account': 'reviewer-account',
+                         'config_dir': '/safe/claude', 'provider': 'claude'}
+        with patch.object(high_debug.worker_dispatch, 'evaluate',
+                          return_value=SimpleNamespace(allowed=True)), \
+             patch.object(high_debug.role_config, 'resolve_role', return_value=role_settings), \
+             patch.object(high_debug.task_completion, 'collect_git_snapshot',
+                          return_value=SimpleNamespace(head='a' * 40)), \
+             redirect_stdout(StringIO()) as output:
+            high_debug.run_high_debug_with_fallback(
+                store=store, task_id='a' * 32, executor_task='executor',
+                pr_number=17, family='family', failed_corrections=2,
+                runner=runner, create_d6=lambda **_kwargs: str(root), repo_root=str(root),
+                read_registration=lambda *_args, **_kwargs: registration)
+        self.assertEqual(len(launches), 2)
+        self.assertEqual(store.entries[0]['report'], 'HIGH_DEBUG_AUTH_FAILED')
+        self.assertEqual(store.entries[1]['model_requested'], high_debug._CLAUDE_MODEL)
+        self.assertEqual(json.loads(output.getvalue())['status'], 'RCA_CONFIRMED')
+        self.assertEqual(high_debug._CLAUDE_GRANTS, set())
+
+    def test_codex_attempt_record_is_filled_only_by_the_codex_runner_result(self):
+        # Codex runner results that are not fallback codes leave it empty.
+        root = self._repo()
+        real = high_debug.run_high_debug
+        for name, kwargs in (('exit_1', {'returncode': 1}),
+                             ('launch_error', {'runner_error': OSError('launch failed')})):
+            with self.subTest(case=name):
+                attempt = high_debug._CodexAttempt('a' * 32)
+                with patch.object(high_debug, 'run_high_debug',
+                                  functools.partial(real, codex_attempt=attempt)):
+                    code, _created = self._failing_case(_Store(), root, **kwargs)
+                self.assertEqual(code, 'HIGH_DEBUG_RUN_FAILED')
+                self.assertIsNone(attempt.code)
+
+    def test_run_high_debug_refuses_an_invalid_codex_attempt_record(self):
+        filled = high_debug._CodexAttempt('a' * 32)
+        filled.code = 'HIGH_DEBUG_QUOTA_EXHAUSTED'
+        cases = {
+            'prefilled': (filled, 'codex'),
+            'look_alike': (SimpleNamespace(task_id='a' * 32, code=None), 'codex'),
+            'other_task': (high_debug._CodexAttempt('b' * 32), 'codex'),
+            'unknown_route': (high_debug._CodexAttempt('a' * 32), 'other'),
+        }
+        for name, (attempt, route) in cases.items():
+            with self.subTest(attempt=name):
+                store, create, runner = (unittest.mock.Mock(), unittest.mock.Mock(),
+                                         unittest.mock.Mock())
+                with self.assertRaises(LLMToolError) as caught:
+                    high_debug.run_high_debug(
+                        store=store, task_id='a' * 32, executor_task='executor',
+                        pr_number=17, family='family', failed_corrections=2,
+                        runner=runner, create_d6=create, route=route,
+                        codex_attempt=attempt)
+                self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_ARGUMENT_INVALID')
+                self.assertEqual(store.mock_calls, [])
+                create.assert_not_called()
+                runner.assert_not_called()
+        # The Claude route keeps its own refusal first, with or without a record.
+        error = self._direct_claude_refusal(codex_attempt=high_debug._CodexAttempt('a' * 32))
+        self.assertEqual(error.high_debug_code, 'HIGH_DEBUG_CLAUDE_ROUTE_REFUSED')
+
     def test_unknown_route_refuses_before_create_d6(self):
         create, runner = unittest.mock.Mock(), unittest.mock.Mock()
         with self.assertRaises(LLMToolError) as caught:
@@ -2167,8 +2341,11 @@ class HighDebugTests(unittest.TestCase):
                                  ['codex'])
         # After a real fallback code, a refused Claude Debug model (unlisted or
         # cross-family) still stops with its own code, never HIGH_DEBUG_WAITING.
-        def staged(*, route, **rest):
+        def staged(*, route, codex_attempt=None, **rest):
             if route == 'codex':
+                # Stands in for a Codex runner that ran and reported quota
+                # exhausted: run_high_debug records it on the attempt.
+                codex_attempt.code = 'HIGH_DEBUG_QUOTA_EXHAUSTED'
                 high_debug._refuse('HIGH_DEBUG_QUOTA_EXHAUSTED')
             return real(route=route, **rest)
         for model in ('claude-unlisted-model', high_debug._CODEX_MODEL):

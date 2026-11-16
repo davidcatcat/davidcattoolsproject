@@ -45,14 +45,27 @@ class _Store:
         return {'created': True}
 
 
+def codex_attempt_reported(kwargs, code):
+    """Stand in for run_high_debug's Codex runner reporting ``code`` itself.
+
+    PR #2222 v92: only that runner result fills in the attempt record; a
+    fake that raises a fallback code without it proves no Codex attempt.
+    """
+    attempt = kwargs.get('codex_attempt')
+    if code in high_debug.DEBUG_FALLBACK_CODES and attempt is not None:
+        attempt.code = code
+
+
 class FallbackTests(unittest.TestCase):
-    def _run(self, outcomes, route='codex'):
+    def _run(self, outcomes, route='codex', attempt_ran=True):
         calls = []
         def fake(*, route, **kwargs):
             calls.append(route)
             outcome = outcomes[route]
             if outcome is None:
                 return 'ran-' + route
+            if attempt_ran:
+                codex_attempt_reported(kwargs, outcome)
             raise refusal(outcome)
         with patch.object(high_debug, 'run_high_debug', side_effect=fake):
             try:
@@ -65,6 +78,47 @@ class FallbackTests(unittest.TestCase):
             with self.subTest(code=code):
                 result, error, calls = self._run({'codex': code, 'claude': None})
                 self.assertEqual((result, error, calls), ('ran-claude', None, ['codex', 'claude']))
+
+    def test_fallback_code_without_a_codex_attempt_is_refused_without_switch(self):
+        # PR #2222 v92 (CWE-862): the code alone, raised before or outside the
+        # Codex attempt, issues no grant and starts no Claude Debug.
+        for code in sorted(high_debug.DEBUG_FALLBACK_CODES):
+            with self.subTest(code=code):
+                result, error, calls = self._run({'codex': code, 'claude': None},
+                                                 attempt_ran=False)
+                self.assertIsNone(result)
+                self.assertEqual(error.high_debug_code, 'HIGH_DEBUG_CLAUDE_ROUTE_REFUSED')
+                self.assertTrue(error.high_debug_detail.endswith(' codex_attempt=UNCONFIRMED'))
+                self.assertEqual(calls, ['codex'])
+                self.assertEqual(high_debug._CLAUDE_GRANTS, set())
+
+    def test_attempt_record_with_another_code_is_refused_without_switch(self):
+        # The Codex attempt reported login failure, but the raised code is
+        # quota: the code was not that attempt's result.
+        calls = []
+        def fake(*, route, **kwargs):
+            calls.append(route)
+            codex_attempt_reported(kwargs, 'HIGH_DEBUG_AUTH_FAILED')
+            raise refusal('HIGH_DEBUG_QUOTA_EXHAUSTED')
+        with patch.object(high_debug, 'run_high_debug', side_effect=fake):
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.run_high_debug_with_fallback(task_id='a' * 32)
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_CLAUDE_ROUTE_REFUSED')
+        self.assertEqual(calls, ['codex'])
+
+    def test_each_call_gets_a_fresh_empty_attempt_record(self):
+        seen = []
+        def fake(*, route, **kwargs):
+            seen.append(kwargs.get('codex_attempt'))
+            return 'ran-' + route
+        with patch.object(high_debug, 'run_high_debug', side_effect=fake):
+            high_debug.run_high_debug_with_fallback(task_id='a' * 32)
+            high_debug.run_high_debug_with_fallback(task_id='a' * 32)
+        self.assertEqual(len(seen), 2)
+        self.assertIsNot(seen[0], seen[1])
+        for attempt in seen:
+            self.assertIs(type(attempt), high_debug._CodexAttempt)
+            self.assertEqual((attempt.task_id, attempt.code), ('a' * 32, None))
 
     def test_other_codex_refusals_stop_without_switch(self):
         for code in ('HIGH_DEBUG_RUN_FAILED', 'HIGH_DEBUG_REPORT_INVALID',
@@ -92,10 +146,16 @@ class FallbackTests(unittest.TestCase):
 
     def test_allowed_fallback_passes_the_same_request_to_claude(self):
         seen = []
+        attempts = []
         def fake(*, route, **kwargs):
+            attempts.append(kwargs.get('codex_attempt'))
+            if route == 'codex':
+                codex_attempt_reported(kwargs, 'HIGH_DEBUG_AUTH_FAILED')
+            attempt = kwargs.pop('codex_attempt', None)
             grant = kwargs.pop('claude_fallback', None)
             seen.append((route, kwargs, grant))
             if route == 'codex':
+                self.assertEqual(attempt.code, 'HIGH_DEBUG_AUTH_FAILED')
                 raise refusal('HIGH_DEBUG_AUTH_FAILED')
             # The grant is live while the Claude run uses it.
             self.assertIn(grant, high_debug._CLAUDE_GRANTS)
@@ -105,8 +165,11 @@ class FallbackTests(unittest.TestCase):
                 task_id='a' * 32, family='family'), 'ran-claude')
         self.assertEqual([route for route, _kwargs, _grant in seen], ['codex', 'claude'])
         self.assertEqual(seen[0][1], seen[1][1])
-        # Codex gets no grant; Claude gets one bound to this Task and the
-        # Codex fallback code, revoked once the Claude run returns.
+        # Codex gets an attempt record and no grant; Claude gets no attempt
+        # record and a grant bound to this Task and the Codex fallback code,
+        # revoked once the Claude run returns.
+        self.assertIs(type(attempts[0]), high_debug._CodexAttempt)
+        self.assertIsNone(attempts[1])
         self.assertIsNone(seen[0][2])
         grant = seen[1][2]
         self.assertIs(type(grant), high_debug._ClaudeFallbackGrant)
@@ -118,6 +181,7 @@ class FallbackTests(unittest.TestCase):
         seen = []
         def fake(*, route, **kwargs):
             if route == 'codex':
+                codex_attempt_reported(kwargs, 'HIGH_DEBUG_QUOTA_EXHAUSTED')
                 raise refusal('HIGH_DEBUG_QUOTA_EXHAUSTED')
             seen.append(kwargs['claude_fallback'])
             raise refusal('HIGH_DEBUG_RUN_FAILED')
@@ -137,6 +201,20 @@ class FallbackTests(unittest.TestCase):
                 with self.assertRaises(LLMToolError) as caught:
                     high_debug.run_high_debug_with_fallback(task_id='a' * 32,
                                                             claude_fallback=grant)
+                self.assertEqual(caught.exception.high_debug_code,
+                                 'HIGH_DEBUG_ARGUMENT_INVALID')
+                run.assert_not_called()
+
+    def test_caller_supplied_attempt_record_is_refused_and_runs_nothing(self):
+        # PR #2222 v92: only the fallback makes an attempt record.
+        filled = high_debug._CodexAttempt('a' * 32)
+        filled.code = 'HIGH_DEBUG_QUOTA_EXHAUSTED'
+        for attempt in (None, filled, high_debug._CodexAttempt('a' * 32)):
+            with self.subTest(attempt=attempt), \
+                 patch.object(high_debug, 'run_high_debug') as run:
+                with self.assertRaises(LLMToolError) as caught:
+                    high_debug.run_high_debug_with_fallback(task_id='a' * 32,
+                                                            codex_attempt=attempt)
                 self.assertEqual(caught.exception.high_debug_code,
                                  'HIGH_DEBUG_ARGUMENT_INVALID')
                 run.assert_not_called()
