@@ -324,6 +324,11 @@ _DISPATCH_AUDIT_FIELDS = frozenset((
 _DISPATCH_AUDIT_BINDING_FIELDS = frozenset((
     'assignment_id', 'source_sha', 'contract_digest',
 ))
+# #1019 A11 row 41: the phase of a ROLE_TIMEOUT_RETRY entry, on no other action.
+_DISPATCH_AUDIT_PHASE_FIELDS = frozenset(('retry_phase',))
+# Design section 3.5 part 2: a write that is not the stored audit unchanged
+# followed by zero or more new entries is refused with this code.
+AUDIT_NOT_APPEND_ONLY = 'TASK_STORE_AUDIT_NOT_APPEND_ONLY'
 _LEGACY_DEVELOPER_FIELDS = frozenset((
     'assignment_id', 'selection_source', 'state', 'provider_profile',
     'provider_type', 'model', 'backend_session_semantics', 'session_id',
@@ -810,6 +815,30 @@ def _fail(code='TASK_STORE_INVALID', *, holder_task_id=None):
     error.task_store_code = category
     error.task_store_error_code = safe_code
     raise error from None
+
+
+def _audit_entry_text(entry):
+    return json.dumps(entry, ensure_ascii=True, sort_keys=True, separators=(',', ':'),
+                      allow_nan=False)
+
+
+def _check_audit_append_only(stored, proposed):
+    """#1019 A11 row 41, design section 3.5 part 2: the dispatch audit is append-only.
+
+    proposed must be the stored audit, every entry unchanged and in order,
+    followed by zero or more new entries. Any rewrite, reorder, removal or
+    trim is refused with AUDIT_NOT_APPEND_ONLY; entries compare as canonical
+    JSON, so a retyped value (1 for True) is a change too."""
+    if (type(stored) is not list or type(proposed) is not list or
+            len(proposed) < len(stored)):
+        _fail(AUDIT_NOT_APPEND_ONLY)
+    try:
+        unchanged = all(_audit_entry_text(before) == _audit_entry_text(after)
+                        for before, after in zip(stored, proposed))
+    except (TypeError, ValueError):
+        unchanged = False
+    if not unchanged:
+        _fail(AUDIT_NOT_APPEND_ONLY)
 
 
 def _valid_reported_text(value, limit):
@@ -2312,10 +2341,15 @@ def _validate(record, *, strict=True):
             _fail()
         seen_attempts = set()
         for entry in audit:
+            # #1019 A11 row 41: only a ROLE_TIMEOUT_RETRY entry has, and must
+            # have, retry_phase; every other entry keeps its earlier shapes.
+            role_retry = (type(entry) is dict and type(entry.get('action')) is str and
+                          entry['action'] == 'ROLE_TIMEOUT_RETRY')
+            phase_field = _DISPATCH_AUDIT_PHASE_FIELDS if role_retry else frozenset()
             if (type(entry) is not dict or set(entry) not in (
-                    _DISPATCH_AUDIT_FIELDS,
-                    _DISPATCH_AUDIT_FIELDS | _DISPATCH_AUDIT_BINDING_FIELDS,
-                    _DISPATCH_AUDIT_FIELDS | _DISPATCH_AUDIT_BINDING_FIELDS |
+                    _DISPATCH_AUDIT_FIELDS | phase_field,
+                    _DISPATCH_AUDIT_FIELDS | _DISPATCH_AUDIT_BINDING_FIELDS | phase_field,
+                    _DISPATCH_AUDIT_FIELDS | _DISPATCH_AUDIT_BINDING_FIELDS | phase_field |
                     frozenset(('authorization_id',))) or
                     type(entry['attempt_id']) is not str or
                     re.fullmatch(r'[0-9a-f]{32}', entry['attempt_id']) is None or
@@ -2325,7 +2359,12 @@ def _validate(record, *, strict=True):
                     entry['action'] not in (
                         'DISPATCH', 'RETRY', 'REASSIGN', 'RECOVERY', 'REPAIR',
                         'TIMEOUT_CONTINUATION', 'REVIEWER_HANDOFF', 'REVIEWER_RETRY',
-                        'COMMITTED_RESULT_CARRY') or
+                        'COMMITTED_RESULT_CARRY', 'ROLE_TIMEOUT_RETRY') or
+                    (role_retry and (
+                        type(entry['retry_phase']) is not str or
+                        entry['retry_phase'] not in ('TRANSITION', 'ADAPTER') or
+                        ('authorization_id' in entry and
+                         entry['retry_phase'] != 'ADAPTER'))) or
                     entry['decision'] not in ('ALLOWED', 'BLOCKED') or
                     type(entry['reason_code']) is not str or
                     re.fullmatch(r'[A-Z0-9_]{1,64}', entry['reason_code']) is None or
@@ -2806,9 +2845,18 @@ def _validate(record, *, strict=True):
                             execution['cleanup_status'] not in ('CONFIRMED', 'UNKNOWN') or
                             execution['usage_source'] not in ('CLI_REPORTED', 'UNKNOWN')):
                         _fail()
+                    # #1019 A11 row 41: a route's own exact timeout code may also
+                    # record its diff evidence (design section 3.4), with the
+                    # same status, shape and base checks as the Codex timeout.
+                    from .role_timeout import ROUTE_TIMEOUT_CODES
+                    profile = developer.get('provider_profile')
+                    diff_route = ((profile == 'codex' and
+                                   developer.get('error_code') == 'CODEX_TIMEOUT_WITH_CHANGES') or
+                                  (type(profile) is str and profile in ROUTE_TIMEOUT_CODES and
+                                   type(developer.get('error_code')) is str and
+                                   developer['error_code'] == ROUTE_TIMEOUT_CODES[profile]))
                     if set(execution) in _DEVELOPER_EXECUTION_DIFF_SHAPES and (
-                            developer.get('error_code') != 'CODEX_TIMEOUT_WITH_CHANGES' or
-                            developer.get('provider_profile') != 'codex' or
+                            not diff_route or
                             execution['status'] != 'TIMEOUT' or
                             type(execution.get('diff_sha256')) is not str or
                             re.fullmatch(r'[0-9a-f]{64}', execution['diff_sha256']) is None or
@@ -5551,6 +5599,8 @@ class TaskStore:
                         _fail('TASK_STORE_BUSY')
                     time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
             current = self._read_at(directory, task_id)
+            # Design section 3.5 part 2: every write below keeps this audit as its prefix.
+            stored_audit = copy.deepcopy(current.get('dispatch_audit', []))
             current_line = current.get('lineage')
             if (type(current_line) is dict and current_line.get('state') == 'PENDING' and
                     trusted_split not in ('FINALIZE', 'RELEASE')):
@@ -5752,6 +5802,8 @@ class TaskStore:
                     _fail('HIGH_DEBUG_IMMUTABLE')
             from . import worker_dispatch
             if trusted_dispatch_audit:
+                if 'dispatch_audit' in changes:
+                    _check_audit_append_only(stored_audit, changes['dispatch_audit'])
                 prior_audit = list(current.get('dispatch_audit', []))
                 requested_audit = changes.get('dispatch_audit')
                 if (type(requested_audit) is list and
@@ -5764,6 +5816,7 @@ class TaskStore:
                         blocked = {**attempted, 'decision': 'BLOCKED',
                                    'reason_code': refusal}
                         current['dispatch_audit'] = prior_audit + [blocked]
+                        _check_audit_append_only(stored_audit, current['dispatch_audit'])
                         current['updated_at'] = datetime.now(timezone.utc).replace(
                             microsecond=0).isoformat().replace('+00:00', 'Z')
                         current['record_sha256'] = _digest(current)
@@ -5791,6 +5844,7 @@ class TaskStore:
                         denied, 'REASSIGN',
                         binding=worker_dispatch._assignment_audit_binding(
                             current, old_developer))]
+                _check_audit_append_only(stored_audit, current['dispatch_audit'])
                 current['updated_at'] = datetime.now(timezone.utc).replace(
                     microsecond=0).isoformat().replace('+00:00', 'Z')
                 current['record_sha256'] = _digest(current)
@@ -5803,6 +5857,7 @@ class TaskStore:
                     'WORKER_ASSIGNMENT_CLEAR_FORBIDDEN')
             dispatch_denial = worker_dispatch.authorize_task_store_change(current, changes, expected)
             if dispatch_denial is not None:
+                _check_audit_append_only(stored_audit, current.get('dispatch_audit', []))
                 current['updated_at'] = datetime.now(timezone.utc).replace(
                     microsecond=0).isoformat().replace('+00:00', 'Z')
                 current['record_sha256'] = _digest(current)
@@ -5831,6 +5886,7 @@ class TaskStore:
             if trusted_split == 'RELEASE':
                 # An uncommitted reservation leaves no lineage at all behind.
                 del current['lineage']
+            _check_audit_append_only(stored_audit, current.get('dispatch_audit', []))
             current['updated_at'] = datetime.now(timezone.utc).replace(
                 microsecond=0).isoformat().replace('+00:00', 'Z')
             current['record_sha256'] = _digest(current)

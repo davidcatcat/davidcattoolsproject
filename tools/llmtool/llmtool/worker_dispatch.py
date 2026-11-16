@@ -15,6 +15,7 @@ import uuid
 
 from .errors import LLMToolError
 from .config import repository_config
+from . import role_timeout
 
 POLICY_SCHEMA_VERSION = 1
 MAX_POLICY_BYTES = 64 * 1024
@@ -49,9 +50,13 @@ DISPATCH_STATES = frozenset(('ALLOWED', 'PAUSED', 'OWNER_ASSIGNMENT_ONLY'))
 AUDIT_ACTIONS = frozenset((
     'DISPATCH', 'RETRY', 'REASSIGN', 'RECOVERY', 'REPAIR',
     'TIMEOUT_CONTINUATION', 'REVIEWER_HANDOFF', 'REVIEWER_RETRY',
-    'COMMITTED_RESULT_CARRY',
+    'COMMITTED_RESULT_CARRY', 'ROLE_TIMEOUT_RETRY',
 ))
+# #1019 A11 row 41: a ROLE_TIMEOUT_RETRY entry names the writer that made it.
+RETRY_PHASES = frozenset(('TRANSITION', 'ADAPTER'))
 MAX_TIMEOUT_CONTINUATIONS_PER_TASK = 1  # default; policy.json timeout_continuation_max (#1815)
+# SHA-256 of an empty diff: the recorded no-write evidence of a role timeout.
+_EMPTY_DIFF_SHA256 = hashlib.sha256(b'').hexdigest()
 MAX_COMMITTED_CARRIES = 1  # per Developer assignment (#1148)
 def _policy_candidates():
     """List policy locations for this actual module layout, in authority order."""
@@ -303,8 +308,16 @@ def timeout_continuation_max():
         return None
 
 
-def audit_entry(decision, action, *, binding=None, authorization_id=None):
+def audit_entry(decision, action, *, binding=None, authorization_id=None, retry_phase=None):
     if type(action) is not str or action not in AUDIT_ACTIONS:
+        raise WorkerDispatchDenied('WORKER_DISPATCH_ACTION_INVALID')
+    # #1019 A11 row 41: ROLE_TIMEOUT_RETRY needs its phase; no other action has one.
+    # A transition entry never carries an authorization_id.
+    if action == 'ROLE_TIMEOUT_RETRY':
+        if (type(retry_phase) is not str or retry_phase not in RETRY_PHASES or
+                (retry_phase == 'TRANSITION' and authorization_id is not None)):
+            raise WorkerDispatchDenied('WORKER_DISPATCH_ACTION_INVALID')
+    elif retry_phase is not None:
         raise WorkerDispatchDenied('WORKER_DISPATCH_ACTION_INVALID')
     entry = {
         'attempt_id': uuid.uuid4().hex,
@@ -315,6 +328,8 @@ def audit_entry(decision, action, *, binding=None, authorization_id=None):
         'policy_sha256': decision.policy_sha256,
         'at': datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z'),
     }
+    if retry_phase is not None:
+        entry['retry_phase'] = retry_phase
     if binding is not None:
         if (type(binding) is not dict or set(binding) != set(_AUDIT_BINDING_FIELDS) or
                 type(binding['assignment_id']) is not str or
@@ -364,7 +379,9 @@ def _latest_transition_authorization(record, worker_key, action, binding):
     for entry in reversed(audit):
         if (type(entry) is dict and stored_worker_id(entry.get('worker_key')) == worker_key and
                 entry.get('action') == action and entry.get('decision') == 'ALLOWED' and
-                'authorization_id' not in entry and _matches_assignment_binding(entry, binding)):
+                'authorization_id' not in entry and _matches_assignment_binding(entry, binding) and
+                # #1019 A11 row 41: an adapter-phase entry is never a transition.
+                (action != 'ROLE_TIMEOUT_RETRY' or entry.get('retry_phase') == 'TRANSITION')):
             return entry.get('attempt_id')
     return None
 
@@ -431,8 +448,11 @@ def authorize_dispatch(store, task_id, worker_key, action='DISPATCH'):
         state_code = 'WORKER_DISPATCH_AUTHORIZATION_CONSUMED'
     if state_code is not None:
         decision = PolicyDecision(worker_key, False, state_code, decision.policy_sha256)
+    # #1019 A11 row 41: the adapter entry of a role retry is always phase ADAPTER,
+    # allowed or blocked, with or without a transition found.
     entry = audit_entry(decision, action, binding=binding,
-                        authorization_id=authorization_id)
+                        authorization_id=authorization_id,
+                        retry_phase='ADAPTER' if action == 'ROLE_TIMEOUT_RETRY' else None)
     try:
         append = getattr(store, 'append_dispatch_audit')
         saved = append(task_id, entry, expected={
@@ -574,6 +594,82 @@ def _committed_carry_valid(current, changes, expected, old, new):
                 'd6_base': base, 'carried_head': head})
 
 
+def _is_role_timeout_record(developer):
+    """True only when developer's error_code is its own route's exact timeout code."""
+    if type(developer) is not dict:
+        return False
+    route, code = developer.get('provider_profile'), developer.get('error_code')
+    if (type(route) is not str or type(code) is not str or
+            route not in role_timeout.ROUTE_TIMEOUT_CODES):
+        return False
+    return role_timeout.classify(route, code) == role_timeout.ROLE_TIMEOUT
+
+
+_ROLE_TIMEOUT_SCOPE_FIELDS = ('executor_task_id', 'read_paths', 'write_paths', 'acceptance')
+
+
+def _no_result_evidence(container):
+    """True when a completion or callback carries no result head and no carry."""
+    if container is None:
+        return True
+    if type(container) is not dict:
+        return False
+    evidence = container.get('evidence')
+    return evidence is None or (type(evidence) is dict and
+                                evidence.get('result_head') is None and
+                                evidence.get('carried_result') is None)
+
+
+def _role_timeout_retry_valid(current, changes, expected, old, new):
+    """Design section 3.1 and 3.3: a clean role timeout re-dispatched unchanged.
+
+    The fresh D6 check of section 3.4 belongs to advance (PR 2); this checks
+    the recorded evidence only. Any check that cannot be made fails."""
+    if not (type(expected) is dict and 'developer' in expected and expected['developer'] == old and
+            _is_role_timeout_record(old) and type(new) is dict and
+            new.get('state') == 'DEVELOPER_DISPATCHING' and
+            all(old.get(field) == new.get(field)
+                for field in _DEVELOPER_IDENTITY_FIELDS + _ROLE_TIMEOUT_SCOPE_FIELDS) and
+            _assignment_audit_binding(current, new) is not None):
+        return False
+    execution = old.get('execution')
+    if not (type(execution) is dict and execution.get('status') == 'TIMEOUT' and
+            execution.get('cleanup_status') == 'CONFIRMED' and
+            type(execution.get('diff_base_sha')) is str and
+            execution['diff_base_sha'] == old.get('source_sha') and
+            type(execution.get('diff_sha256')) is str and
+            execution['diff_sha256'] == _EMPTY_DIFF_SHA256):
+        return False
+    if not all(_no_result_evidence(item) for item in (
+            current.get('completion'), changes.get('completion', current.get('completion')),
+            old.get('direct_result_callback'), new.get('direct_result_callback'))):
+        return False
+    # No committed result carry (#1148) for this assignment; an entry without
+    # an assignment counts as this one.
+    assignment_id = old.get('assignment_id')
+    return not any(type(item) is dict and item.get('action') == 'COMMITTED_RESULT_CARRY' and
+                   item.get('decision') != 'BLOCKED' and
+                   item.get('assignment_id') in (None, assignment_id)
+                   for item in current.get('dispatch_audit', []))
+
+
+def _timeout_cap_decision(decision, worker_key, audit, policy_code, limit_code):
+    """Shared timeout budget (design section 3.3): logical attempts in this Task record.
+
+    The cap is timeout_continuation_max(); an unreadable or non-int value
+    refuses policy_code. A count that cannot be computed counts as used up."""
+    limit = timeout_continuation_max()
+    if type(limit) is not int or limit < 0:
+        return PolicyDecision(worker_key, False, policy_code, decision.policy_sha256)
+    try:
+        used = role_timeout.count_timeout_attempts(audit)
+    except role_timeout.RoleTimeoutError:
+        used = None
+    if used is None or used >= limit:
+        return PolicyDecision(worker_key, False, limit_code, decision.policy_sha256)
+    return decision
+
+
 def task_store_attempts(current, changes):
     """Return every gated worker/action touched by one TaskStore transition."""
     old, new = current.get('developer'), changes.get('developer')
@@ -628,6 +724,17 @@ def task_store_attempts(current, changes):
             new_developer.get('state') == 'DEVELOPER_DISPATCHING' and
             new_developer.get('assignment_id') != old_developer.get('assignment_id')):
         attempts.append(('codex-developer', 'TIMEOUT_CONTINUATION'))
+        return attempts
+
+    # #1019 A11 row 41: a route's own timeout re-dispatched to DISPATCHING. It
+    # is a ROLE_TIMEOUT_RETRY, never a RETRY or RECOVERY. Identity and scope
+    # are checked by the gate below, which refuses a changed field with
+    # WORKER_ROLE_TIMEOUT_RETRY_PRECONDITION (design section 6, test 19).
+    if (_is_role_timeout_record(old_developer) and
+            old_developer.get('state') != 'DEVELOPER_DISPATCHING' and
+            new_developer.get('state') == 'DEVELOPER_DISPATCHING'):
+        worker = worker_key_for(old_developer.get('provider_profile'))
+        attempts.append((worker or 'unknown', 'ROLE_TIMEOUT_RETRY'))
         return attempts
 
     if _developer_identity_changed(old_developer, new_developer):
@@ -736,20 +843,21 @@ def authorize_task_store_change(current, changes, expected=None):
                 decision = PolicyDecision(worker_key, False,
                                           'WORKER_TIMEOUT_CONTINUATION_PRECONDITION',
                                           decision.policy_sha256)
-            prior_attempts = sum(
-                1 for item in audit
-                if type(item) is dict and stored_worker_id(item.get('worker_key')) == worker_key and
-                item.get('action') == action)
-            limit = timeout_continuation_max()
-            if limit is None:
-                # #1815 T3: an unreadable policy allows no continuation, under its own code.
+            # #1815 T3: an unreadable policy allows no continuation, under its own
+            # code. #1019 A11 row 41: the cap counts logical timeout attempts of
+            # this Task record, shared with role timeout retries (design 3.3).
+            decision = _timeout_cap_decision(decision, worker_key, audit,
+                                             'WORKER_TIMEOUT_CONTINUATION_POLICY_INVALID',
+                                             'WORKER_TIMEOUT_CONTINUATION_LIMIT')
+        if action == 'ROLE_TIMEOUT_RETRY':
+            if not _role_timeout_retry_valid(current, changes, expected,
+                                             old_developer, new_developer):
                 decision = PolicyDecision(worker_key, False,
-                                          'WORKER_TIMEOUT_CONTINUATION_POLICY_INVALID',
+                                          'WORKER_ROLE_TIMEOUT_RETRY_PRECONDITION',
                                           decision.policy_sha256)
-            elif prior_attempts >= limit:
-                decision = PolicyDecision(worker_key, False,
-                                          'WORKER_TIMEOUT_CONTINUATION_LIMIT',
-                                          decision.policy_sha256)
+            decision = _timeout_cap_decision(decision, worker_key, audit,
+                                             'WORKER_ROLE_TIMEOUT_RETRY_POLICY_INVALID',
+                                             'WORKER_ROLE_TIMEOUT_RETRY_LIMIT')
         if action == 'COMMITTED_RESULT_CARRY':
             prior = sum(1 for item in audit if type(item) is dict and
                         item.get('action') == action and
@@ -790,6 +898,14 @@ def authorize_task_store_change(current, changes, expected=None):
                               'WORKER_RECOVERY_LIMIT_REACHED')
                     decision = PolicyDecision(worker_key, False, reason,
                                               decision.policy_sha256)
+            # #1019 A11 row 41: a role timeout never gets a second budget through
+            # recovery.
+            old_code = old_developer.get('error_code')
+            if (action == 'RECOVERY' and type(old_code) is str and
+                    old_code in role_timeout.ROLE_TIMEOUT_CODES):
+                decision = PolicyDecision(worker_key, False,
+                                          'WORKER_ROLE_TIMEOUT_NOT_RECOVERY',
+                                          decision.policy_sha256)
         if action == 'REASSIGN':
             bound = (type(expected) is dict and 'developer' in expected and
                      expected['developer'] == old_developer)
@@ -801,7 +917,9 @@ def authorize_task_store_change(current, changes, expected=None):
                 decision = PolicyDecision(worker_key, False,
                                           'WORKER_REASSIGN_NEW_ASSIGNMENT_REQUIRED',
                                           decision.policy_sha256)
-        entries.append(audit_entry(decision, action, binding=binding))
+        entries.append(audit_entry(
+            decision, action, binding=binding,
+            retry_phase='TRANSITION' if action == 'ROLE_TIMEOUT_RETRY' else None))
         decisions.append(decision)
     current['dispatch_audit'] = audit + entries
     for decision in decisions:
