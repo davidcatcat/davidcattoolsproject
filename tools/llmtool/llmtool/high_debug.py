@@ -1643,7 +1643,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
             store.finalize_high_debug(task_id, index, entry)
         except Exception:
             detail = (detail + ' ' if detail else '') + 'reservation=UNFINALIZED'
-        if post and not _post_record(entry, pr_number, repo_root, task_id, code,
+        if post and not _post_record(entry, target_number, repo_root, task_id, code,
                                      account=account):
             detail = (detail + ' ' if detail else '') + 'github_record=UNPOSTED'
         if screen_hits is not None:
@@ -1670,7 +1670,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
             failed('HIGH_DEBUG_D6_CREATE_FAILED', post=False)
         _refuse('HIGH_DEBUG_D6_CREATE_FAILED', 'reservation=RESERVED')
     reason = f'failed corrections: {failed_corrections}' if failed_corrections is not None else f'early reason: {early_reason}'
-    prompt = rules_prefix + (f'Task: {task_id}\nPR: {pr_number}\nFamily: {family}\n{reason}\nExamined SHA: {head}\n'
+    prompt = rules_prefix + (f'Task: {task_id}\n{target_line}\nFamily: {family}\n{reason}\nExamined SHA: {head}\n'
               f'Evidence:\n{evidence_text}\n\nRequired report sections, each exactly as its own line:\n'
               + '\n'.join('## ' + section for section in REPORT_SECTIONS) + '\n'
               'The Outcome/cost section must start with exactly one status word alone on its own line: '
@@ -1775,8 +1775,10 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
        'effort_observed':effort,'status':status,'report_sha256':hashlib.sha256(report.encode()).hexdigest(),
        'report':report,'usage':usage,'recorded_at':store._completion_now(),
        'rules_sha256':rules_sha256}
+    if no_pr:
+        entry['no_pr'] = True
     store.finalize_high_debug(task_id, index, entry)
-    posted = _post_record(entry, pr_number, repo_root, task_id, account=account)
+    posted = _post_record(entry, target_number, repo_root, task_id, account=account, issue_only=no_pr is True)
     payload=entry['report_sha256'].encode()
     event_id=hashlib.sha256(('HIGH_DEBUG\0'+task_id+'\0'+head+'\0'+entry['report_sha256']).encode()).hexdigest()[:32]
     result=store.record_completion_event(task_id,event_id=event_id,run_id=task['run_id'],
