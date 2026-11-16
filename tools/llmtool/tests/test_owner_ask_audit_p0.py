@@ -72,5 +72,89 @@ class FetchTests(unittest.TestCase):
                     oa.fetch_comments("a/b", SINCE, UNTIL)
 
 
+class AuditP0Tests(unittest.TestCase):
+    def test_2087_progress_marker_ask_is_counted(self):
+        ask = comment(6893575916, 2087, "2026-11-01T11:23:06Z", PROGRESS_ASK)
+        result = oa.audit([ask], SINCE, UNTIL)
+        self.assertEqual((result["asks"], result["ungated"]), (1, 1))
+
+    def test_code_notice_and_answered_markers_are_not_asks(self):
+        found = [comment(1, 5, "2026-11-01T01:00:00Z", NOTICE)]
+        found.append(comment(2, 5, "2026-11-01T02:00:00Z", ANSWERED))
+        result = oa.audit(found, SINCE, UNTIL)
+        self.assertEqual((result["asks"], result["notices"]), (0, 2))
+
+    def test_duplicate_comment_and_same_hour_cross_entry_ask_count_once(self):
+        first = comment(1, 7, "2026-11-01T03:00:00Z", WAIT, GATE)
+        echo = comment(2, 7, "2026-11-01T03:40:00Z", PROGRESS_ASK)
+        result = oa.audit([first, dict(first), echo], SINCE, UNTIL)
+        self.assertEqual((result["asks"], result["duplicates"], result["gated"]), (1, 1, 1))
+
+    def test_metrics_count_true_reserved_rows(self):
+        found = [comment(1, 7, "2026-11-01T03:00:00Z", WAIT, GATE)]
+        found.append(comment(2, 8, "2026-11-01T05:00:00Z", WAIT, OTHER))
+        found.append(comment(3, 9, "2026-11-01T06:00:00Z", WAIT))
+        got = oa.audit(found, SINCE, UNTIL)["metrics"]
+        self.assertEqual((got["owner_decisions"], got["true_reserved"]), (3, 1))
+        self.assertEqual((got["gate_coverage"], got["invalid_escalation_rate"]), (0.6667, 0.3333))
+
+
+def transcript(directory, *entries):
+    path = Path(directory) / "session.jsonl"
+    path.write_text("\n".join(json.dumps(entry) for entry in entries) + "\n", encoding="utf-8")
+
+
+def said(at, text, kind="assistant"):
+    return dict(type=kind, timestamp=at, message=dict(content=[dict(type="text", text=text)]))
+
+
+class ChatSourceTests(unittest.TestCase):
+    def test_wp8_chat_ask_without_marker_is_counted(self):
+        ask = oa.CHAT_ASK + "choose option A or B"
+        entries = [said("2026-11-02T04:00:00.123Z", ask)]
+        entries.append(said("2026-11-02T05:00:00.000Z", oa.CHAT_ASK + oa.CHAT_NOTHING))
+        entries.append(said("2026-11-02T06:00:00Z", ask, "user"))
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript(tmp, *entries)
+            chat = oa.chat_asks(tmp, SINCE, UNTIL)
+        self.assertEqual(chat, [oa._seconds("2026-11-02T04:00:00Z")])
+        result = oa.audit([], SINCE, UNTIL, chat, 50)
+        counted = dict(status="COUNTED", asks=1, with_marker=0, without_marker=1)
+        self.assertEqual(result["chat"], counted)
+        got = result["metrics"]
+        self.assertEqual((got["owner_decisions"], got["invalid_escalation_rate"]), (1, 1.0))
+        self.assertEqual(got["per_100_effective_tasks"], 2.0)
+
+    def test_chat_ask_near_a_github_marker_is_not_a_second_decision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript(tmp, said("2026-11-02T04:30:00Z", oa.CHAT_ASK + "pick A"))
+            chat = oa.chat_asks(tmp, SINCE, UNTIL)
+        marked = comment(1, 9, "2026-11-02T04:00:00Z", WAIT, GATE)
+        result = oa.audit([marked], SINCE, UNTIL, chat)
+        self.assertEqual(result["chat"]["with_marker"], 1)
+        got = result["metrics"]
+        self.assertEqual((got["owner_decisions"], got["gate_coverage"]), (1, 1.0))
+
+    def test_missing_chat_source_is_unknown_not_zero(self):
+        self.assertIsNone(oa.chat_asks("/nonexistent/llmtool-transcripts", SINCE, UNTIL))
+        result = oa.audit([], SINCE, UNTIL)
+        self.assertEqual(result["chat"], dict(status="UNKNOWN"))
+        got = result["metrics"]
+        self.assertEqual((got["complete"], got["per_100_effective_tasks"]), (False, "UNKNOWN"))
+        self.assertEqual(got["not_counted"][0], dict(entry="pm_chat", count="UNKNOWN"))
+
+    def test_cli_passes_chat_and_effective_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript(tmp, said("2026-11-02T04:00:00Z", oa.CHAT_ASK + "pick A"))
+            args = ["--since", SINCE, "--until", UNTIL, "--repo", "a/b", "--chat-transcripts", tmp]
+            with mock.patch.object(oa, "fetch_comments", return_value=[]) as fetch:
+                with mock.patch("sys.stdout", new_callable=StringIO) as out:
+                    code = oa.main(args + ["--effective-tasks", "10"])
+        self.assertEqual(code, 0)
+        fetch.assert_called_once_with("a/b", SINCE, UNTIL)
+        summary = json.loads(out.getvalue().splitlines()[0])
+        self.assertEqual(summary["metrics"]["per_100_effective_tasks"], 10.0)
+
+
 if __name__ == "__main__":
     unittest.main()
