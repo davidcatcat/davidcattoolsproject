@@ -2,8 +2,9 @@
 
 docs/design/a11-row41-timeout-retry-1019.md section 6: audit_entry (test 5),
 the dispatch gate (tests 13-23), the regressions for the four findings R1-R4
-at limits 2 and 3, and TaskStore persistence S1-S3 through the real TaskStore
-in a temporary directory. The store is never mocked; only the timeout cap
+at limits 2 and 3, TaskStore persistence S1-S3 and the review repair F1 (a
+stored nested result head refuses the retry) through the real TaskStore in a
+temporary directory. The store is never mocked; only the timeout cap
 (worker_dispatch.timeout_continuation_max) is injected, and the Owner worker
 policy is the shared all-ALLOWED test policy (#1692), set PAUSED or
 OWNER_ASSIGNMENT_ONLY explicitly where a refusal is checked.
@@ -39,6 +40,7 @@ CODEX_LIMIT = 'WORKER_TIMEOUT_CONTINUATION_LIMIT'
 NOT_APPEND_ONLY = 'TASK_STORE_AUDIT_NOT_APPEND_ONLY'
 SOURCE_SHA = 'a' * 40
 OTHER_SHA = 'b' * 40
+RESULT_HEAD = 'e' * 40
 EMPTY_DIFF_SHA256 = hashlib.sha256(b'').hexdigest()
 BINDING_FIELDS = ('assignment_id', 'source_sha', 'contract_digest')
 TIMEOUT_EXECUTION = {
@@ -461,10 +463,31 @@ class DispatchGateTests(RoleTimeoutStoreCase):
             for label, completion in (
                     ('result head', {'evidence': {'result_head': 'd' * 40}}),
                     ('carried result', {'evidence': {'carried_result': {'mode': 'X'}}}),
+                    ('nested result head', {'evidence': {'result': {'result_head': 'd' * 40}}}),
+                    ('nested result without a head', {'evidence': {'result': {
+                        'result_mode': 'UNCOMMITTED_WORKTREE', 'result_head': None}}}),
+                    ('nested result empty', {'evidence': {'result': {}}}),
+                    ('nested result malformed', {'evidence': {'result': ['x']}}),
+                    ('nested result a string', {'evidence': {'result': 'd' * 40}}),
+                    ('evidence not a dict', {'evidence': ['x']}),
                     ('not a dict', ['x'])):
                 with self.subTest(completion=label):
                     changed = dict(copy.deepcopy(record), completion=completion)
                     self.assertEqual(gate(changed)[0], PRECONDITION)
+                with self.subTest(callback=label):
+                    changed = copy.deepcopy(record)
+                    changed['developer']['direct_result_callback'] = completion
+                    old = changed['developer']
+                    self.assertEqual(gate(changed, changes={'developer': dispatching(old)},
+                                          expected={'developer': old})[0], PRECONDITION)
+            # Positive control: no evidence, or evidence without any result.
+            for label, completion in (('no completion', None),
+                                      ('no evidence', {'evidence': None}),
+                                      ('result none', {'evidence': {'result': None}}),
+                                      ('empty evidence', {'evidence': {}})):
+                with self.subTest(clean=label):
+                    changed = dict(copy.deepcopy(record), completion=completion)
+                    self.assertIsNone(gate(changed)[0])
             carried = copy.deepcopy(record)
             carry = dict(carried['dispatch_audit'][0], action='COMMITTED_RESULT_CARRY',
                          attempt_id=new_id())
@@ -858,6 +881,55 @@ class TaskStoreAuditTests(RoleTimeoutStoreCase):
                 saved = self.store.append_dispatch_audit(task_id, entry)
                 self.assertEqual(saved['dispatch_audit'][-1], entry)
         task_store_module._validate(dict(self.store.get(task_id)))
+
+    def store_completion(self, task_id, evidence):
+        """Write a WAITING_REVIEW completion through the real TaskStore."""
+        completion = {'state': 'WAITING_REVIEW', 'executor_task_id': None,
+                      'reviewer_task_id': None, 'evidence': evidence,
+                      'missing_gates': [], 'pm_dispatch': 'NOT_STARTED',
+                      'pm_response': None, 'pm_recommendation': None,
+                      'pm_usage': None, 'pm_error_code': None}
+        saved = self.store.compare_and_update(task_id, expected={'completion': None},
+                                              completion=completion)
+        self.assertEqual(saved['completion'], completion)
+        return saved
+
+    def test_f1_stored_nested_result_head_refuses_the_retry(self):
+        """Review finding F1: the canonical result head at evidence.result.result_head."""
+        for label, evidence in (
+                ('nested result head', {'result': {'result_head': RESULT_HEAD}}),
+                ('nested result without a head', {'result': {
+                    'result_mode': 'UNCOMMITTED_WORKTREE', 'result_head': None}}),
+                ('nested result malformed', {'result': ['x']})):
+            with self.subTest(evidence=label):
+                task_id = self.timed_out_task()
+                stored = self.store_completion(task_id, evidence)
+                reopened = TaskStore(self.root)
+                with limit(3):
+                    self.assertDenied(PRECONDITION, self.retry_transition, task_id, reopened)
+                record = TaskStore(self.root).get(task_id)
+                self.assertEqual(record['developer'], stored['developer'])
+                self.assertEqual(record['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+                self.assertEqual(record['completion'], stored['completion'])
+                entry = record['dispatch_audit'][-1]
+                self.assertEqual((entry['action'], entry['decision'], entry['reason_code'],
+                                  entry['retry_phase']),
+                                 (ROLE, 'BLOCKED', PRECONDITION, 'TRANSITION'))
+                self.assertEqual(len(record['dispatch_audit']),
+                                 len(stored['dispatch_audit']) + 1)
+
+    def test_f1_stored_completion_without_result_still_allows_the_retry(self):
+        """Positive control: a stored completion with no result does not block."""
+        for label, evidence in (('no evidence', None), ('empty evidence', {})):
+            with self.subTest(evidence=label):
+                task_id = self.timed_out_task()
+                self.store_completion(task_id, evidence)
+                with limit(3):
+                    saved = self.retry_transition(task_id, TaskStore(self.root))
+                self.assertEqual(saved['developer']['state'], 'DEVELOPER_DISPATCHING')
+                entry = saved['dispatch_audit'][-1]
+                self.assertEqual((entry['action'], entry['decision'], entry['retry_phase']),
+                                 (ROLE, 'ALLOWED', 'TRANSITION'))
 
     def test_diff_evidence_is_accepted_only_with_the_routes_own_timeout_code(self):
         for code in ('AGY_UNAVAILABLE', 'CLAUDE_TIMEOUT', 'GW_AGENT_TIMEOUT', 'AGY_TIMEOUT_X'):

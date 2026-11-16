@@ -609,15 +609,25 @@ _ROLE_TIMEOUT_SCOPE_FIELDS = ('executor_task_id', 'read_paths', 'write_paths', '
 
 
 def _no_result_evidence(container):
-    """True when a completion or callback carries no result head and no carry."""
+    """True when a completion or callback carries no result and no carry.
+
+    Design section 3.1 item 6. A result head is checked both at the top level
+    of the evidence and in the canonical nested result (a stored completion
+    keeps it at evidence.result.result_head, task_store.py). Any present
+    nested result counts as result evidence, whatever its shape: a result
+    without a head (an uncommitted worktree result) is still a result, and a
+    malformed one cannot be shown to be empty. Anything unreadable fails."""
     if container is None:
         return True
     if type(container) is not dict:
         return False
     evidence = container.get('evidence')
-    return evidence is None or (type(evidence) is dict and
-                                evidence.get('result_head') is None and
-                                evidence.get('carried_result') is None)
+    if evidence is None:
+        return True
+    return (type(evidence) is dict and
+            evidence.get('result_head') is None and
+            evidence.get('carried_result') is None and
+            evidence.get('result') is None)
 
 
 def _role_timeout_retry_valid(current, changes, expected, old, new):
