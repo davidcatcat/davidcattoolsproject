@@ -225,6 +225,68 @@ def owner_wait(comments: list[dict], asks: list[dict]) -> dict:
             "mean_seconds": (total / len(waits)) if waits else None}
 
 
+def _unique(comments: list[dict]) -> list[dict]:
+    """#1943 P0: one copy of each comment, by (issue, comment id)."""
+    seen, unique = set(), []
+    for c in comments:
+        key = (_issue_number(c.get("issue_url")), c.get("id")) if isinstance(c, dict) else None
+        if key is None or key not in seen:
+            unique.append(c)
+        if key is not None:
+            seen.add(key)
+    return unique
+
+
+def _ask_key(comment: dict) -> tuple:
+    """#1943 P0: one Owner ask per Issue per clock hour, across markers and entries."""
+    return (_issue_number(comment.get("issue_url")), str(comment.get("created_at", ""))[:13])
+
+
+def _chat_line_asks(raw: str, start: int, end: int) -> list[int]:
+    try:
+        entry = json.loads(raw)
+    except (ValueError, RecursionError):
+        return []
+    message = entry.get("message") if type(entry) is dict else None
+    if type(message) is not dict or entry.get("type") != "assistant":
+        return []
+    when = _seconds(str(entry.get("timestamp", ""))[:19] + "Z")
+    content = message.get("content")
+    if when is None or not start <= when < end or type(content) is not list:
+        return []
+    texts = [part.get("text") for part in content if type(part) is dict]
+    lines = [line.strip() for text in texts if type(text) is str for line in text.splitlines()]
+    asks = [line for line in lines if line.startswith(CHAT_ASK) and CHAT_NOTHING not in line]
+    return [when] * len(asks)
+
+
+def chat_asks(directory: str, since: str, until: str) -> list[int] | None:
+    """#1943 P0: PM chat lines that ask the Owner, from local Claude Code transcripts.
+
+    Returns the sorted epoch seconds of assistant text lines that start with CHAT_ASK
+    and do not say CHAT_NOTHING. Returns None (UNKNOWN, never zero) when the source
+    cannot be read in full. Only counts and times leave this function, never text.
+    """
+    from pathlib import Path
+    start, end, root = _seconds(since), _seconds(until), Path(directory)
+    if start is None or end is None or not root.is_dir():
+        return None
+    try:
+        files = sorted(root.rglob("*.jsonl"))
+        if len(files) > MAX_TRANSCRIPT_FILES:
+            return None
+        found = []
+        for path in files:
+            if path.stat().st_size > MAX_TRANSCRIPT_BYTES:
+                return None
+            with path.open(encoding="utf-8", errors="replace") as handle:
+                for raw in handle:
+                    found.extend(_chat_line_asks(raw, start, end))
+    except OSError:
+        return None
+    return sorted(found)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--since", required=True)
