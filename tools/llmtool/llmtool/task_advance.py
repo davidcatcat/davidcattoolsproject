@@ -2332,6 +2332,17 @@ def _remote_fail_action(related, result_head):
     return 'REPAIR_REVIEW'
 
 
+def _claude_failed_before_running(execution):
+    """True when the execution record shows Claude never ran (#2188).
+
+    No native session id and no diff: nothing could have changed, so a retry
+    is safe. A record with either one stays UNKNOWN.
+    """
+    return (type(execution) is dict
+            and execution.get('native_session_id') is None
+            and execution.get('diff_sha256') is None)
+
+
 def derive_repair_state(repair_record):
     """Normalize a repair Task record into the state used by the advance loop."""
     if type(repair_record) is not dict:
@@ -2341,6 +2352,9 @@ def derive_repair_state(repair_record):
     # This failure updates only the developer field, so check it before the
     # top-level state, which may still read PM_PENDING.
     if state == 'BLOCKED' and developer.get('error_code') == 'CLAUDE_NO_CHANGES':
+        return 'BLOCKED'
+    if (state == 'BLOCKED' and developer.get('error_code') == 'CLAUDE_STATUS_FAILED'
+            and _claude_failed_before_running(developer.get('execution'))):
         return 'BLOCKED'
     if state == 'DEVELOPER_PENDING' or repair_record.get('state') == 'PM_PENDING':
         return 'PENDING'
