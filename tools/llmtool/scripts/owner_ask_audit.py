@@ -73,7 +73,44 @@ def _fetch_page(repo: str, start: str, page: int, timeout: int) -> list[dict]:
         raise AuditError("gh returned invalid JSON") from exc
     if type(payload) is not list or any(type(item) is not dict for item in payload):
         raise AuditError("gh returned unexpected JSON")
-    return [item for page in payload for item in page]
+    return payload
+
+
+def _stamp(seconds: int) -> str:
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def fetch_comments(repo: str, since: str, until: str) -> list[dict]:
+    """#1943 P0: comments created from since on, one UTC day window at a time.
+
+    Each gh call reads one page with its own timeout, so a 7-day range is many short
+    calls instead of one long paginate. The range runs WAIT_HORIZON past until, but
+    never past now, so later answers still count for owner_wait. Deduped by
+    (issue, comment id).
+    """
+    start, end = _seconds(since), _seconds(until)
+    if start is None or end is None or end <= start:
+        raise AuditError("window is invalid")
+    end = min(end + WAIT_HORIZON, int(time.time()))
+    seen, comments, day = set(), [], start
+    while day < end:
+        day_end = min(day + DAY, end)
+        for page in range(1, MAX_PAGES_PER_DAY + 1):
+            items = _fetch_page(repo, _stamp(day), page, PAGE_TIMEOUT)
+            for item in items:
+                key = (_issue_number(item.get("issue_url")), item.get("id"))
+                created = _seconds(item.get("created_at"))
+                if key not in seen and created is not None and day <= created < day_end:
+                    seen.add(key)
+                    comments.append(item)
+            last = _seconds(items[-1].get("created_at")) if items else None
+            if len(items) < 100 or last is None or last >= day_end:
+                break
+        else:
+            raise AuditError("too many comments in one day")
+        day = day_end
+    return comments
 
 
 def _first_line_marker(body: str) -> dict[str, str] | None:
