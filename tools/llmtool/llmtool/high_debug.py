@@ -1587,6 +1587,9 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
     else:
         _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
 
+    target_number = issue_number if issue_number is not None else pr_number
+    no_pr = True if issue_number is not None else None
+    target_line = f'Issue: {issue_number} (no PR)' if issue_number is not None else 'PR: ' + str(pr_number)
     model_requested = debug_model
     # O7: reserved before any D6 create or provider call; a crash leaves it RESERVED.
     try:
@@ -1597,7 +1600,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
         family=family, failed_corrections=failed_corrections, early_reason=early_reason,
         head=head, d6=d6, code='HIGH_DEBUG_RESERVED', observed='UNKNOWN', effort='UNKNOWN',
         usage='UNKNOWN', recorded_at=reserved_at, model_requested=model_requested,
-        rules_sha256=rules_sha256)
+        rules_sha256=rules_sha256, no_pr=no_pr)
     reservation['status'] = 'RESERVED'
     index = _reserve_debug(store, task_id, entries, reservation)
 
@@ -1612,7 +1615,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
                 early_reason=early_reason, head=head, d6=d6, code=code, report=report,
                 observed=observed, effort=effort, usage=usage,
                 recorded_at=recorded_at, model_requested=model_requested,
-                rules_sha256=rules_sha256)
+                rules_sha256=rules_sha256, no_pr=no_pr)
         try:
             store.finalize_high_debug(task_id, index, entry)
         except Exception:
