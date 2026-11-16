@@ -338,6 +338,7 @@ class PMRuntimeTests(unittest.TestCase):
                                 '--include-partial-messages', '--session-id', SESSION,
                                 '--permission-prompts', 'none', '--permission-mode', 'auto',
                                 '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+                                '--disallowedTools', 'Skill',
                                 '--append-system-prompt', pm_runtime.PM_SESSION_INSTRUCTION])
         self.assertEqual(cwd, self.cwd)
         self.assertEqual([event['type'] for event in events],
