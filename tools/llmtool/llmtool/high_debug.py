@@ -1458,6 +1458,14 @@ def _task_holds_d6(task, executor_task):
     return any(item.get('executor_task_id') == executor_task for item in holders)
 
 
+def _journal_holds_d6(store, task_id, executor_task):
+    """#1943 WP-5 F1: the newest D6 binding-journal entry must name this Task; else fail closed."""
+    try:
+        return store.d6_journal_holder(executor_task) == task_id
+    except Exception:
+        return False
+
+
 def _is_plain_issue(number):
     """#1943 WP-5: True only when GitHub reads the number as an Issue that is not a PR."""
     try:
@@ -1570,8 +1578,9 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
     if issue_number is not None and not _is_plain_issue(issue_number):
         _refuse('HIGH_DEBUG_ISSUE_INVALID')
     no_pr_d6 = issue_number is not None and completion is None
-    # #1943 WP-5: with no completion, the Task itself must name the D6 it debugs.
-    if no_pr_d6 and not _task_holds_d6(task, executor_task):
+    # #1943 WP-5: with no completion, the Task itself must name the D6 it debugs,
+    # and (F1, #2210 c6914242781) be the newest binding-journal holder of that D6.
+    if no_pr_d6 and not (_task_holds_d6(task, executor_task) and _journal_holds_d6(store, task_id, executor_task)):
         _refuse('HIGH_DEBUG_D6_NOT_BOUND')
     if no_pr_d6:
         repo_root = _no_pr_repo_root()

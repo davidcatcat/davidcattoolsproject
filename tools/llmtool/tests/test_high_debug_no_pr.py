@@ -31,6 +31,12 @@ class _NoPRStore(_Store):
         super().__init__()
         self.completion, self.claims = completion, list(claims or [])
         self.entries, self.developer = list(entries or []), developer
+        self.holder = TASK
+
+    def d6_journal_holder(self, executor_task):
+        if isinstance(self.holder, Exception):
+            raise self.holder
+        return self.holder if executor_task == 'executor' else None
 
     def get(self, task_id):
         self.served.add(task_id)
@@ -265,6 +271,24 @@ class HighDebugNoPRTests(unittest.TestCase):
         for task in others:
             self.assertFalse(high_debug._task_holds_d6(task, 'executor'))
 
+    def test_no_completion_refuses_when_another_task_took_over_the_d6(self, holders=('b' * 32, None)):
+        for holder in holders:
+            with self.subTest(holder=holder):
+                store = _NoPRStore()
+                store.holder = holder
+                code, reader = self.refusal(store)
+                self.assertEqual(code, 'HIGH_DEBUG_D6_NOT_BOUND')
+                reader.assert_not_called()
+                self.poster.assert_not_called()
+
+    def test_no_completion_refuses_when_the_journal_is_unreadable(self):
+        unreadable = LLMToolError('TASK_D6_BINDING_SCAN_FAILED')
+        self.test_no_completion_refuses_when_another_task_took_over_the_d6(holders=(unreadable,))
+
+    def test_failed_task_without_completion_that_still_holds_the_d6_runs(self):
+        with patch.dict(HOLDER, state='DEVELOPER_OUTPUT_APPLY_FAILED'):
+            self.test_issue_debug_without_completion_uses_the_trusted_checkout()
+
 
 class FormalRcaConsumerNoPRTests(unittest.TestCase):
     def setUp(self):
@@ -364,6 +388,28 @@ class TaskStoreNoPRTests(unittest.TestCase):
             claims = [first, second]
             self.store.compare_and_update(task_id, expected=expected, review_repair_claims=claims)
         self.assertEqual(caught.exception.task_store_error_code, 'REVIEW_REPAIR_CLAIM_INVALID')
+
+    def journal(self, task_id):
+        directory = self.store._dirfd()
+        try:
+            journal = self.store._read_d6_journal_at(directory)
+            self.store._append_d6_journal_at(directory, journal, task_id, frozenset({'d6-x'}))
+        finally:
+            high_debug.os.close(directory)
+
+    def test_journal_holder_is_the_newest_entry_for_the_d6(self):
+        self.assertIsNone(self.store.d6_journal_holder('d6-x'))
+        for task_id in ('a' * 32, 'b' * 32):
+            self.journal(task_id)
+            self.assertEqual(self.store.d6_journal_holder('d6-x'), task_id)
+        self.assertIsNone(self.store.d6_journal_holder('d6-y'))
+
+    def test_unreadable_journal_fails_closed(self):
+        self.journal('a' * 32)
+        (self.store.root / high_debug.task_store.D6_BINDING_JOURNAL_NAME).write_bytes(b'{x')
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.d6_journal_holder('d6-x')
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_D6_BINDING_SCAN_FAILED')
 
 
 if __name__ == '__main__':

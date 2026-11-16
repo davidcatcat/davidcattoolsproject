@@ -3983,6 +3983,21 @@ class TaskStore:
         return frozenset(value for value in bound if type(value) is str and
                          TaskStore._d6_bind_holds(record, value))
 
+    def d6_journal_holder(self, executor_task_id):
+        """#1943 WP-5 F1: the newest binding-journal Task for this D6, else None; unreadable raises."""
+        digest = _d6_digest(executor_task_id)
+        directory = self._dirfd()
+        try:
+            lock_fd = self._lock_sidecar(directory, D6_BINDING_LOCK_NAME, exclusive=False, code='TASK_D6_BINDING')
+            try:
+                journal = self._read_d6_journal_at(directory)
+            finally:
+                self._unlock_sidecar(lock_fd)
+        finally:
+            os.close(directory)
+        names = [entry['task_id'] for entry in journal['entries'] if entry['d6_sha256'] == digest]
+        return names[-1] if names else None
+
     def _read_d6_journal_at(self, directory):
         """Read the claim journal; anything unreadable refuses the bind."""
         try:
