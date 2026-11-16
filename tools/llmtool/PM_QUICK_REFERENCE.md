@@ -53,13 +53,13 @@ Values live only in the linked source; this page does not copy them.
 | Limit | Single source |
 | --- | --- |
 | Dispatch switch per Worker | [worker-dispatch.json](worker-dispatch.json) |
-| Task text size and acceptance count | [spec_preflight.py](scripts/spec_preflight.py); [Dispatch hygiene](../../.claude/skills/ai-team-delivery/pm-continuation.md#dispatch-hygiene) |
-| Review repair cap and split | [Repair cap](../../.claude/skills/ai-team-delivery/pm-continuation-reference.md#repair-cap) |
-| Test-failure repair count | [Normal delivery flow](WORKFLOW.md#normal-delivery-flow) |
+| Task text size and acceptance count | [spec_preflight.py](scripts/spec_preflight.py) |
+| Review repair cap | [policy.json](policy.json), read by `llmtool/repair_policy.py` |
+| Test-failure repair count | [policy.json](policy.json), read by `llmtool/repair_policy.py` |
 | Quota FAIL freshness | [Quota and Reviewer continuation](../../.claude/skills/ai-team-delivery/pm-continuation-reference.md#quota-and-reviewer-continuation) |
 | New Tasks per sweep, concurrency cap, sweep interval | [Scheduled sweep](../../.claude/skills/ai-team-delivery/pm-continuation.md#scheduled-sweep) |
 | Start-receipt confirmation window | [Transition record](../../.claude/skills/ai-team-delivery/pm-continuation.md#transition-record) |
-| High Debug screen record and batch size | [Sensitive-screen refusals](../../.claude/skills/ai-team-delivery/pm-continuation.md#sensitive-screen-refusals-owner-2026-11-05-981) |
+| High Debug screen record and batch size | [high_debug.py](llmtool/high_debug.py) |
 | Main FULL Mac trigger | [Merge gates](../../CLAUDE.md#merge-gates-and-process-tiers) |
 
 ## Known cases
