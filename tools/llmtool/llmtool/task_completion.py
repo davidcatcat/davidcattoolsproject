@@ -2226,9 +2226,11 @@ def _newer_claim_pending(record, pr_number, head, body):
     if match is None or type(claims) is not list:
         return False
     version = int(match.group(1))
+    from . import review_result
     return any(type(claim) is dict and claim.get('pr') == pr_number and
                claim.get('head_sha') == head and type(claim.get('version')) is int and
                claim['version'] > version and
+               review_result.review_kind(claim) != 'security' and
                claim.get('state') in ('CLAIMED', 'DISPATCHED', 'UNKNOWN')
                for claim in claims)
 
@@ -2680,6 +2682,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                                        claim.get('head_sha') == result_sha and
                                        claim.get('reviewer_task') == reviewer_task_id and
                                        claim.get('version') == version and
+                                       review_result.review_kind(claim) == 'formal' and
                                        claim.get('state') == 'COMPLETED' and
                                        type(claim.get('review_result')) is dict and
                                        claim['review_result'].get('task_id') == task_id and

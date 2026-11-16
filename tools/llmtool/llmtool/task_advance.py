@@ -1185,11 +1185,14 @@ def _merge_pass_claim(record, number, head, events):
                 claim.get('state') not in ('COMPLETED', 'DISPATCHED') or
                 type(claim.get('version')) is not int):
             continue
+        if review_result.review_kind(claim) != 'formal':
+            continue
         result = claim.get('review_result')
         outcome = next((event.get('outcome') or event.get('state') for event in events
                         if type(event) is dict and event.get('source') == 'REVIEWER' and
                         event.get('source_sha') == head and
-                        event.get('version') == claim['version']), None)
+                        event.get('version') == claim['version'] and
+                        review_result.review_kind(event) == 'formal'), None)
         if outcome is None:
             continue
         if claim.get('state') == 'COMPLETED':
@@ -1214,6 +1217,8 @@ def _merge_pass_claim(record, number, head, events):
         if (type(claim) is not dict or claim.get('pr') != number or
                 claim.get('head_sha') != head):
             continue
+        if review_result.review_kind(claim) == 'security':
+            continue
         version = claim.get('version')
         if type(version) is not int or version > top:
             return 'MERGE_NEWER_REVIEW_EXISTS'
@@ -1222,7 +1227,7 @@ def _merge_pass_claim(record, number, head, events):
         return 'MERGE_REVIEW_NOT_PASS'
     if any(type(event) is dict and event.get('source') == 'REVIEWER' and
            event.get('source_sha') == head and type(event.get('version')) is int and
-           event['version'] > top for event in events):
+           event['version'] > top and review_result.review_kind(event) != 'security' for event in events):
         return 'MERGE_NEWER_REVIEW_EXISTS'
     return top
 
@@ -2098,7 +2103,8 @@ def _well_formed_review_refusal(refusal):
 def _head_review_claim(record, number, head):
     """Return the highest-version claim for one PR and head, if any."""
     matching = [claim for claim in _claims(record) if type(claim) is dict and
-                claim.get('pr') == number and claim.get('head_sha') == head]
+                claim.get('pr') == number and claim.get('head_sha') == head and
+                review_result.review_kind(claim) == 'formal']
     return max(matching, key=lambda item: item.get('version', 0), default=None)
 
 
@@ -2399,7 +2405,7 @@ def decide(record, d6, pr, related):
     if (type(result_head) is not str or re.fullmatch(r'[0-9a-f]{40}', result_head) is None or
             d6.get('recorded_result_head') != result_head):
         return 'PUBLISH'
-    claims = _claims(record)
+    claims = [c for c in _claims(record) if review_result.review_kind(c) == 'formal']
     chosen_pr = (pr.get('number') if type(pr) is dict else None)
     if chosen_pr is None and claims:
         chosen_pr = claims[-1].get('pr') if type(claims[-1]) is dict else None
@@ -2437,6 +2443,7 @@ def decide(record, d6, pr, related):
         return 'REVIEW_OUTCOME_UNKNOWN'
     events = [event for event in _events(related) if type(event) is dict and
               event.get('source') == 'REVIEWER' and event.get('source_sha') == result_head and
+              review_result.review_kind(event) == 'formal' and
               event.get('version', claim.get('version')) == claim.get('version')]
     if claim.get('state') in ('DISPATCHED', 'COMPLETED') and not events:
         return 'RECORD_REVIEW_RESULT'
@@ -2510,7 +2517,8 @@ def _reviewer_fallback(record, exc):
 
 def _blocked_fallback_reviewer(record, head):
     """#1831 P2: the other eligible Reviewer while the head has one claim, else None."""
-    if sum(type(item) is dict and item.get('head_sha') == head
+    if sum(type(item) is dict and item.get('head_sha') == head and
+           review_result.review_kind(item) == 'formal'
            for item in _claims(record)) != 1:
         return None
     family = task_completion._reviewer_author_family(record.get('developer'))
@@ -2625,10 +2633,13 @@ def _review_outcomes(record, claims, github_get):
     for claim in claims:
         if type(claim) is not dict:
             continue
+        if result_module.review_kind(claim) != 'formal':
+            continue
         number, version, head = claim.get('pr'), claim.get('version'), claim.get('head_sha')
         events = [event for event in record.get('completion_events', [])
                   if type(event) is dict and event.get('source') == 'REVIEWER' and
-                  event.get('source_sha') == head]
+                  event.get('source_sha') == head and
+                  result_module.review_kind(event) == 'formal']
         if claim.get('state') == 'COMPLETED':
             try:
                 latest, event_id = result_module._completed_claim_result(
@@ -2822,6 +2833,8 @@ def _merged_review_target(record, claims, events, pr, integration_pr, github_get
     for claim in reversed(claims):
         if type(claim) is not dict or claim.get('state') not in ('DISPATCHED', 'COMPLETED'):
             continue
+        if review_result.review_kind(claim) != 'formal':
+            continue
         head = claim.get('head_sha')
         number = claim.get('pr')
         version = claim.get('version')
@@ -2831,7 +2844,8 @@ def _merged_review_target(record, claims, events, pr, integration_pr, github_get
             continue
         if not any(type(event) is dict and event.get('source') == 'REVIEWER' and
                    event.get('source_sha') == head and event.get('version') == version and
-                   (event.get('outcome') or event.get('state')) == 'REVIEW_PASS'
+                   (event.get('outcome') or event.get('state')) == 'REVIEW_PASS' and
+                   review_result.review_kind(event) == 'formal'
                    for event in events):
             continue
         # #1132 item 1: as in decide(), only the newest claim at this PR and head
@@ -2839,7 +2853,8 @@ def _merged_review_target(record, claims, events, pr, integration_pr, github_get
         # older PASS from closing the Task; a newer PASS returned above.
         if any(type(other) is dict and other.get('pr') == number and
                other.get('head_sha') == head and type(other.get('version')) is int and
-               other['version'] > version for other in claims):
+               other['version'] > version and
+               review_result.review_kind(other) != 'security' for other in claims):
             return None
 
         if train is not None:
@@ -3355,7 +3370,8 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
     elif step == 'DISPATCH_REVIEW':
         claims = _claims(record)
         versions = [c.get('version', 0) for c in claims if type(c) is dict and
-                    type(c.get('version')) is int]
+                    type(c.get('version')) is int and
+                    review_result.review_kind(c) == 'formal']
         version = max(versions, default=0) + 1
         invoke = dispatch_review_call or review_dispatch.dispatch_review
         if redispatch_reason is not None:
@@ -3513,58 +3529,66 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                         else:
                             codes.append(code)
     elif step == 'RUN_TASK_COMPLETE':
-        claim = next(c for c in reversed(_claims(record)) if type(c) is dict and
-                     c.get('pr') == number and c.get('head_sha') == d6['result_head'])
-        invoke = run_task_complete_call or task_submission_cli.run_task_complete
-        try:
-            args = Namespace(task_id=task_id, executor_task=executor_task,
-                             reviewer_task=claim.get('reviewer_task'), pr=number)
-            captured = io.StringIO()
-            with contextlib.redirect_stdout(captured):
-                return_code = invoke(args, store=store)
-            emitted = captured.getvalue().strip()
-            try:
-                result = json.loads(emitted) if emitted else {'code': return_code}
-            except (TypeError, ValueError):
-                result = {'code': return_code}
-            fresh = store.get(task_id)
-            completion = fresh.get('completion') or {}
-            missing = completion.get('missing_gates', [])
-            if 'CI' in ' '.join(missing) or any(str(item).startswith(('CI_', 'PR_', 'REQUIRED_CI')) for item in missing):
-                codes.extend(item for item in missing if str(item).startswith(('CI_', 'PR_', 'REQUIRED_CI')))
-                step = 'CI_FAILED' if 'REQUIRED_CI_FAILED' in missing else 'WAITING_CI'
-            elif missing:
-                codes.extend(missing)
-                step = 'WAITING_EXECUTOR'
-            if 'CI_WORKFLOW_JOBS_INVALID' in missing:
+        head_claims = [c for c in reversed(_claims(record)) if type(c) is dict and
+                       c.get('pr') == number and c.get('head_sha') == d6['result_head']]
+        newest = head_claims[0] if head_claims else None
+        if newest is not None and review_result.review_kind(newest) is None:
+            step, codes = 'STOPPED', ['REVIEW_KIND_UNKNOWN']
+        else:
+            claim = next((c for c in head_claims if review_result.review_kind(c) == 'formal'), None)
+            if claim is None:
+                step, codes = 'REFUSED', ['REVIEW_CLAIM_UNAVAILABLE']
+            else:
+                invoke = run_task_complete_call or task_submission_cli.run_task_complete
                 try:
-                    label_result = label_mac_ci_for_skipped_check(
-                        task_id=task_id, store=store, pr_number=number,
-                        github_get=get, merge_gh_runner=label_gh_runner, cwd=cwd)
-                    if type(label_result) is dict:
-                        if label_result.get('step') == 'WAITING_CI':
+                    args = Namespace(task_id=task_id, executor_task=executor_task,
+                                     reviewer_task=claim.get('reviewer_task'), pr=number)
+                    captured = io.StringIO()
+                    with contextlib.redirect_stdout(captured):
+                        return_code = invoke(args, store=store)
+                    emitted = captured.getvalue().strip()
+                    try:
+                        result = json.loads(emitted) if emitted else {'code': return_code}
+                    except (TypeError, ValueError):
+                        result = {'code': return_code}
+                    fresh = store.get(task_id)
+                    completion = fresh.get('completion') or {}
+                    missing = completion.get('missing_gates', [])
+                    if 'CI' in ' '.join(missing) or any(str(item).startswith(('CI_', 'PR_', 'REQUIRED_CI')) for item in missing):
+                        codes.extend(item for item in missing if str(item).startswith(('CI_', 'PR_', 'REQUIRED_CI')))
+                        step = 'CI_FAILED' if 'REQUIRED_CI_FAILED' in missing else 'WAITING_CI'
+                    elif missing:
+                        codes.extend(missing)
+                        step = 'WAITING_EXECUTOR'
+                    if 'CI_WORKFLOW_JOBS_INVALID' in missing:
+                        try:
+                            label_result = label_mac_ci_for_skipped_check(
+                                task_id=task_id, store=store, pr_number=number,
+                                github_get=get, merge_gh_runner=label_gh_runner, cwd=cwd)
+                            if type(label_result) is dict:
+                                if label_result.get('step') == 'WAITING_CI':
+                                    step = 'WAITING_CI'
+                                    codes.append('MAC_CI_LABEL_READY')
+                                elif label_result.get('step') == 'MERGE_REFUSED':
+                                    step = 'WAITING_CI'
+                                    label_codes = label_result.get('codes', [])
+                                    if type(label_codes) is list:
+                                        codes.extend(label_codes)
+                        except Exception:
                             step = 'WAITING_CI'
-                            codes.append('MAC_CI_LABEL_READY')
-                        elif label_result.get('step') == 'MERGE_REFUSED':
-                            step = 'WAITING_CI'
-                            label_codes = label_result.get('codes', [])
-                            if type(label_codes) is list:
-                                codes.extend(label_codes)
-                except Exception:
-                    step = 'WAITING_CI'
-                    codes.append('MAC_CI_LABEL_FAILED')
-        except Exception as exc:
-            codes.append(_refusal(exc, 'completion_code'))
-        if step == 'CI_FAILED':
-            # #1502 WP-D D11: after PASS, route the newest exact-head Mac run.
-            mac_run = _newest_check_run(d6['result_head'], _MAC_CHECK, get)
-            routed = None if mac_run is None else _route_ci_failure(
-                store=store, record=record, task_id=task_id,
-                executor_task=executor_task, number=number, d6=d6, related=related,
-                run=mac_run, fail_code='MAC_CI_FAILED', github_get=get,
-                repair_review_call=repair_review_call)
-            if routed is not None:
-                step, codes, result = routed[0], list(routed[1]), routed[2]
+                            codes.append('MAC_CI_LABEL_FAILED')
+                except Exception as exc:
+                    codes.append(_refusal(exc, 'completion_code'))
+                if step == 'CI_FAILED':
+                    # #1502 WP-D D11: after PASS, route the newest exact-head Mac run.
+                    mac_run = _newest_check_run(d6['result_head'], _MAC_CHECK, get)
+                    routed = None if mac_run is None else _route_ci_failure(
+                        store=store, record=record, task_id=task_id,
+                        executor_task=executor_task, number=number, d6=d6, related=related,
+                        run=mac_run, fail_code='MAC_CI_FAILED', github_get=get,
+                        repair_review_call=repair_review_call)
+                    if routed is not None:
+                        step, codes, result = routed[0], list(routed[1]), routed[2]
     elif step == 'READY_FOR_INTEGRATION':
         try:
             integration = _pr_snapshot(integration_pr, get) if integration_pr is not None else pr
@@ -3606,11 +3630,13 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         # REVIEW_BLOCKED event for a completed session with no posted verdict.
         # Keep that recoverable state actionable on later advance calls.
         claim = next((c for c in reversed(_claims(record)) if type(c) is dict and
-                      c.get('pr') == number and c.get('head_sha') == d6['result_head']), None)
+                      c.get('pr') == number and c.get('head_sha') == d6['result_head'] and
+                      review_result.review_kind(c) == 'formal'), None)
         missing_verdict = (reviewer_session_done and claim is not None and any(
             type(event) is dict and event.get('source') == 'REVIEWER' and
             event.get('source_sha') == claim.get('head_sha') and
             event.get('version') == claim.get('version') and
+            review_result.review_kind(event) == 'formal' and
             (event.get('outcome') or event.get('state')) == 'REVIEW_BLOCKED'
             for event in related['events']))
         if missing_verdict:

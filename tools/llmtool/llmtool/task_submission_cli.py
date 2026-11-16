@@ -2732,13 +2732,18 @@ def _dispute_review_claims(record, pr, head=None):
             (head is None or claim.get('head_sha') == head)]
 
 
-def _dispute_fail_verdict(record, pr, head):
+def _dispute_fail_verdict(record, pr, head, kind='formal'):
     """The latest COMPLETED formal verdict of this PR head, which must be a FAIL."""
     from .review_repair import verdict_findings
+    from .review_result import review_kind
     # An arbiter's ruling claim is not a formal verdict and is never disputed.
-    completed = [claim for claim in _dispute_review_claims(record, pr, head)
+    claims_at_head = _dispute_review_claims(record, pr, head)
+    if any(review_kind(claim) is None for claim in claims_at_head if not _is_ruling_claim(claim)):
+        _dispute_refuse('DISPUTE_TARGET_UNKNOWN')
+    completed = [claim for claim in claims_at_head
                  if claim.get('state') == 'COMPLETED' and type(claim.get('version')) is int and
-                 type(claim.get('review_result')) is dict and not _is_ruling_claim(claim)]
+                 type(claim.get('review_result')) is dict and not _is_ruling_claim(claim) and
+                 review_kind(claim) == kind]
     if not completed:
         _dispute_refuse('DISPUTE_NO_FAIL_VERDICT')
     claim = max(completed, key=lambda item: item['version'])
@@ -2758,20 +2763,21 @@ def _dispute_arbiter(record, claim):
                           first_review_session=claim.get('native_session_id'))
 
 
-def _dispute_append(store, task_id, *, pr, finding_id, evidence_ref, state, current_head):
+def _dispute_append(store, task_id, *, pr, finding_id, evidence_ref, state, current_head, kind='formal'):
     """Append one OPEN or DEFERRED entry for a finding of the recorded FAIL."""
     from .task_store import REVIEW_DISPUTE_DEFERRABLE
     _dispute_arguments(pr, finding_id, evidence_ref)
     record, disputes = _dispute_task(store, task_id)
     head = _dispute_head(record, pr, current_head)
-    claim, findings = _dispute_fail_verdict(record, pr, head)
+    claim, findings = _dispute_fail_verdict(record, pr, head, kind=kind)
     severity = findings.get(finding_id)
     if severity is None:
         _dispute_refuse('DISPUTE_FINDING_NOT_FOUND')
     if state == 'DEFERRED' and severity not in REVIEW_DISPUTE_DEFERRABLE:
         _dispute_refuse('DEFER_BLOCKING_REFUSED')
     same = [item for item in disputes
-            if item.get('pr') == pr and item.get('finding_id') == finding_id]
+            if item.get('pr') == pr and item.get('finding_id') == finding_id and
+            item.get('review_kind', 'formal') == kind]
     if any(item.get('state') == 'RULED' for item in same):
         _dispute_refuse('DISPUTE_ALREADY_RULED')
     for existing in ('OPEN', 'DEFERRED'):
@@ -2779,17 +2785,18 @@ def _dispute_append(store, task_id, *, pr, finding_id, evidence_ref, state, curr
             _dispute_refuse('DISPUTE_ALREADY_' + existing)
     entry = {'finding_id': finding_id, 'pr': pr, 'head_sha': head,
              'review_version': claim['version'], 'severity': severity, 'state': state,
-             'evidence_ref': evidence_ref, 'opened_at': _timestamp()}
+             'evidence_ref': evidence_ref, 'opened_at': _timestamp(),
+             'review_kind': kind}
     store.compare_and_update(task_id, expected={'record_sha256': record.get('record_sha256')},
                              review_disputes=disputes + [entry])
     return record, claim, entry
 
 
-def dispute_open(store, task_id, *, pr, finding_id, evidence_ref, current_head=None):
+def dispute_open(store, task_id, *, pr, finding_id, evidence_ref, current_head=None, kind='formal'):
     """Open a dispute of one finding named by the recorded FAIL verdict of the PR head."""
     record, claim, entry = _dispute_append(
         store, task_id, pr=pr, finding_id=finding_id, evidence_ref=evidence_ref,
-        state='OPEN', current_head=current_head)
+        state='OPEN', current_head=current_head, kind=kind)
     try:
         chosen = _dispute_arbiter(record, claim)
         arbiter = {key: chosen[key] for key in ('reviewer', 'family', 'fresh_session')}
@@ -2801,17 +2808,17 @@ def dispute_open(store, task_id, *, pr, finding_id, evidence_ref, current_head=N
             'arbiter': arbiter, 'review_launched': False}
 
 
-def dispute_defer(store, task_id, *, pr, finding_id, evidence_ref, current_head=None):
+def dispute_defer(store, task_id, *, pr, finding_id, evidence_ref, current_head=None, kind='formal'):
     """Defer one Low or Advisory finding; any other severity is refused."""
     _record_unused, _claim, entry = _dispute_append(
         store, task_id, pr=pr, finding_id=finding_id, evidence_ref=evidence_ref,
-        state='DEFERRED', current_head=current_head)
+        state='DEFERRED', current_head=current_head, kind=kind)
     return {'task_id': task_id, 'state': 'DEFERRED', 'pr': pr, 'finding_id': finding_id,
             'head_sha': entry['head_sha'], 'severity': entry['severity']}
 
 
 def dispute_rule(store, task_id, *, pr, finding_id, outcome, reviewer, reviewer_task,
-                 reviewer_session, evidence_ref, current_head=None, github_get=None):
+                 reviewer_session, evidence_ref, current_head=None, github_get=None, kind='formal'):
     """Record the arbiter's one ruling on an OPEN dispute of the current PR head.
 
     The arbiter must be the Reviewer llmtool chose and its run must not be a
@@ -2833,7 +2840,8 @@ def dispute_rule(store, task_id, *, pr, finding_id, outcome, reviewer, reviewer_
         _dispute_refuse('DISPUTE_ARGUMENT_INVALID')
     record, disputes = _dispute_task(store, task_id)
     same = [(index, item) for index, item in enumerate(disputes)
-            if item.get('pr') == pr and item.get('finding_id') == finding_id]
+            if item.get('pr') == pr and item.get('finding_id') == finding_id and
+            item.get('review_kind', 'formal') == kind]
     if any(item.get('state') == 'RULED' for _, item in same):
         _dispute_refuse('DISPUTE_ALREADY_RULED')
     head = _dispute_head(record, pr, current_head)
@@ -2905,9 +2913,13 @@ def run_task_dispute(args, *, store=None, stdout=None, current_head=None):
         _print(pm_caller.refusal(args.task_id, exc.code), stdout=stdout)
         return 1
     action = getattr(args, 'dispute_action', None)
+    kind = getattr(args, 'kind', 'formal') or 'formal'
     common = {'pr': args.pr, 'finding_id': args.finding,
-              'evidence_ref': args.evidence_ref, 'current_head': current_head}
+              'evidence_ref': args.evidence_ref, 'current_head': current_head,
+              'kind': kind}
     try:
+        if kind != 'formal':
+            _dispute_refuse('DISPUTE_KIND_UNSUPPORTED')
         if action not in _DISPUTE_ACTIONS:
             _dispute_refuse('DISPUTE_ARGUMENT_INVALID')
         if action == 'open':

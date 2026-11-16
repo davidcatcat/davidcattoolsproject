@@ -80,14 +80,16 @@ def dispute_open_on(task, pr, head):
                for item in disputes)
 
 
-def withdrawn_findings(task, pr, head):
+def withdrawn_findings(task, pr, head, kind='formal'):
     """Finding IDs of this PR head that an arbiter ruling WITHDREW."""
     disputes = task.get('review_disputes', []) if type(task) is dict else None
     if type(disputes) is not list:
         return frozenset()
+    from . import review_result
     return frozenset(
         item['finding_id'] for item in disputes
         if type(item) is dict and type(item.get('finding_id')) is str and
+        review_result.review_kind(item) == kind and
         item.get('pr') == pr and item.get('head_sha') == head and
         item.get('state') == 'RULED' and type(item.get('ruling')) is dict and
         item['ruling'].get('outcome') == 'WITHDRAWN' and item['ruling'].get('head_sha') == head)
@@ -331,9 +333,11 @@ def _failed_event(task, *, executor_task, pr_number, github_get):
     candidates = []
     for event in events:
         if (type(event) is not dict or event.get('source') != 'REVIEWER' or
-                event.get('state') != 'PENDING'):
+                event.get('state') != 'PENDING' or
+                review_result.review_kind(event) != 'formal'):
             continue
         matching_claims = [item for item in claims if type(item) is dict and
+                           review_result.review_kind(item) == 'formal' and
                            item.get('executor_task') == executor_task and
                            item.get('pr') == pr_number and
                            item.get('head_sha') == event.get('source_sha') and
@@ -372,6 +376,7 @@ def _failed_event(task, *, executor_task, pr_number, github_get):
         'failed_head': claim['head_sha'], 'version': claim['version'],
         'verdict_comment_id': comment_id, 'findings_count': findings_count,
         'reviewer_text_excerpt_untrusted_data': excerpt,
+        'review_kind': 'formal',
     }
     encoded = json.dumps(packet, ensure_ascii=True, sort_keys=True,
                          separators=(',', ':')).encode('utf-8')
@@ -528,7 +533,8 @@ def _review_gate(task, attempts, packet, family, policy, counts=None):
         _refuse('REPAIR_NO_BLOCKING_FINDING')
     # #1502 WP-D D13: a FAIL whose every blocking finding an arbiter withdrew
     # is not a valid FAIL. Findings without IDs all stay blocking.
-    withdrawn = withdrawn_findings(task, packet.get('pr'), packet['failed_head'])
+    withdrawn = withdrawn_findings(task, packet.get('pr'), packet['failed_head'],
+                                   packet.get('review_kind', 'formal'))
     findings = verdict_findings(text) if withdrawn else None
     if findings:
         blocking = {finding_id for finding_id, severity in findings.items()

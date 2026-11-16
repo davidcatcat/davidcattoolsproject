@@ -158,13 +158,29 @@ def blocking_findings(body):
                   key=lambda fid: int(fid[1:]))
 
 
-def _claim_for(task, *, executor_task, pr_number, version):
+def review_kind(item):
+    """Return 'formal', 'security', or None (untyped/malformed/ambiguous)."""
+    if type(item) is not dict:
+        return None
+    if 'review_kind' in item:
+        kind = item['review_kind']
+        return kind if kind in ('formal', 'security') else None
+    version = item.get('version')
+    if version is None and 'review_version' in item:
+        version = item.get('review_version')
+    if type(version) is int and version >= 91:
+        return None
+    return 'formal'
+
+
+def _claim_for(task, *, executor_task, pr_number, version, kind='formal'):
     claims = task.get('review_dispatch_claim')
     if type(claims) is dict:
         claims = [claims]
     if type(claims) is not list:
         _refuse('REVIEW_RESULT_CLAIM_MISSING')
     matching = [claim for claim in claims if type(claim) is dict and
+                review_kind(claim) == kind and
                 claim.get('executor_task') == executor_task and
                 claim.get('pr') == pr_number and claim.get('version') == version]
     if len(matching) != 1:
@@ -331,7 +347,7 @@ def _inline_copies(pr_number, head, body, *, inline_io, github_get):
 
 def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
                          reviewer_session_done=False, github_get=None, inline_io=None,
-                         common_dir=None):
+                         common_dir=None, kind='formal'):
     """Classify the latest claim-bound verdict and persist one idempotent event.
 
     #1909 item 2: an UNKNOWN claim that would settle needs its Reviewer D6
@@ -339,13 +355,14 @@ def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
     """
     if (type(version) is not int or not 1 <= version <= 9999 or
             type(pr_number) is not int or not 1 <= pr_number <= 9999999 or
-            type(reviewer_session_done) is not bool):
+            type(reviewer_session_done) is not bool or
+            kind not in ('formal', 'security')):
         _refuse('REVIEW_RESULT_ARGUMENT_INVALID')
     task = store.get(task_id)
     if type(task) is not dict or task.get('task_id') != task_id:
         _refuse('REVIEW_RESULT_TASK_INVALID')
     claim, head = _claim_for(task, executor_task=executor_task,
-                             pr_number=pr_number, version=version)
+                             pr_number=pr_number, version=version, kind=kind)
     if (task.get('schema_version') != 2 or
             type(task.get('run_id')) is not str or _HEX32.fullmatch(task['run_id']) is None or
             type(task.get('pm_session_id')) is not str or

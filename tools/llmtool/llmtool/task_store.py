@@ -941,11 +941,14 @@ def _validate_completion_events(record):
         _fail('COMPLETION_EVENT_INVALID')
     ids, sequences, last_sequence = set(), set(), {}
     for event in events:
-        github_fields = set(event) - _COMPLETION_EVENT_FIELDS if type(event) is dict else set()
+        extra_fields = set(event) - _COMPLETION_EVENT_FIELDS if type(event) is dict else set()
+        github_fields = extra_fields == _GITHUB_EVENT_FIELDS and event.get('source') == 'GITHUB'
+        review_kind_field = (extra_fields == {'review_kind'} and
+                             event.get('source') == 'REVIEWER' and
+                             event.get('review_kind') in ('formal', 'security'))
         if (type(event) is not dict or
                 (set(event) != _COMPLETION_EVENT_FIELDS and
-                 not (set(event) == _COMPLETION_EVENT_FIELDS | _GITHUB_EVENT_FIELDS and
-                      event.get('source') == 'GITHUB')) or
+                 not github_fields and not review_kind_field) or
                 not _safe_identifier(event['event_id'], TASK_ID) or
                 event['event_id'] in ids or
                 event['task_id'] != record['task_id'] or
@@ -1562,8 +1565,11 @@ def _validate_review_disputes(record):
     ruled, live, open_keys, repositories = set(), set(), set(), set()
     for item in items:
         if (type(item) is not dict or
-                set(item) not in (_REVIEW_DISPUTE_FIELDS,
-                                  _REVIEW_DISPUTE_FIELDS | frozenset(('ruling',))) or
+                set(item) - frozenset(('review_kind',)) not in (
+                    _REVIEW_DISPUTE_FIELDS,
+                    _REVIEW_DISPUTE_FIELDS | frozenset(('ruling',))) or
+                ('review_kind' in item and
+                 item['review_kind'] not in ('formal', 'security')) or
                 not _safe_identifier(item['finding_id'], REVIEW_DISPUTE_FINDING_ID) or
                 type(item['pr']) is not int or not 1 <= item['pr'] <= 9999999 or
                 type(item['head_sha']) is not str or
@@ -1623,7 +1629,7 @@ def _check_review_disputes_transition(old, new):
             after.get('state') not in ('RULED', 'WITHDRAWN') or
             set(after) - set(before) - {'ruling'} or set(before) - set(after) or
             any(before.get(key) != after.get(key)
-                for key in _REVIEW_DISPUTE_FIELDS - {'state'})):
+                for key in (_REVIEW_DISPUTE_FIELDS | frozenset(('review_kind',))) - {'state'})):
         _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
 
 
@@ -2179,12 +2185,15 @@ def _validate(record, *, strict=True):
         for item in claims:
             if (type(item) is not dict or
                     set(item) - frozenset(('failure_reason', 'binding_mismatch_keys',
-                                           'rules_sha256', 'bind_failure_reason')) not in (
+                                           'rules_sha256', 'bind_failure_reason',
+                                           'review_kind')) not in (
                         _REVIEW_DISPATCH_CLAIM_FIELDS,
                         _REVIEW_DISPATCH_CLAIM_FIELDS | frozenset(('review_result',)),
                         _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS,
                         _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS |
                         frozenset(('review_result',))) or
+                    ('review_kind' in item and
+                     item['review_kind'] not in ('formal', 'security')) or
                     ('failure_reason' in item and
                      not _known_review_failure_reason(item['failure_reason'])) or
                     # #1909 item 1 (security v91): only an UNKNOWN claim, never with failure_reason.
@@ -4377,7 +4386,7 @@ class TaskStore:
 
     def record_completion_event(self, task_id, *, event_id, run_id, session_id,
                                 source, source_sha, sequence, payload_sha256,
-                                github_metadata=None):
+                                github_metadata=None, review_kind=None):
         """Persist a terminal event before any wake; identical replay is inert.
 
         The caller verifies the terminal source separately. This storage API
@@ -4392,9 +4401,14 @@ class TaskStore:
                 type(sequence) is not int or not 0 <= sequence <= 10**9 or
                 not self._completion_hex(payload_sha256, 64)):
             _fail('COMPLETION_EVENT_INVALID')
+        if review_kind is not None:
+            if source != 'REVIEWER' or review_kind not in ('formal', 'security'):
+                _fail('COMPLETION_EVENT_INVALID')
         binding = dict(event_id=event_id, task_id=task_id, run_id=run_id,
                        session_id=session_id, source=source, source_sha=source_sha,
                        sequence=sequence, payload_sha256=payload_sha256)
+        if review_kind is not None:
+            binding['review_kind'] = review_kind
         if github_metadata is not None:
             if (source != 'GITHUB' or type(github_metadata) is not dict or
                     set(github_metadata) != _GITHUB_EVENT_FIELDS or
@@ -4419,7 +4433,9 @@ class TaskStore:
                         False)
             for existing in events:
                 if existing['event_id'] == event_id:
-                    if any(existing[key] != value for key, value in binding.items()):
+                    if any(existing.get(key) != value for key, value in binding.items()):
+                        _fail('COMPLETION_EVENT_CONFLICT')
+                    if ('review_kind' in existing) != ('review_kind' in binding):
                         _fail('COMPLETION_EVENT_CONFLICT')
                     return self._completion_result(existing, False)
             for existing in events + tombstones:
