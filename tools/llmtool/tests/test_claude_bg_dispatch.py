@@ -776,11 +776,12 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.assertEqual(receipt['actual_session_id'], new_id)
         self.assertEqual(os.path.realpath(launch['cwd']), self.root)
 
-    def test_reviewer_launch_has_no_file_editing_tools_and_developer_launch_is_unchanged(self):
+    def test_reviewer_launch_has_no_file_editing_tools_and_developer_launch_denies_only_skill(self):
         self.assertEqual(dispatch_tool.REVIEWER_DISALLOWED_TOOLS_ARG,
                          '--disallowedTools=Edit,Write,NotebookEdit,Skill')
+        self.assertEqual(dispatch_tool.SKILL_DISALLOWED_TOOLS_ARG, '--disallowedTools=Skill')
         for name, expected in (('claude-reviewer', [dispatch_tool.REVIEWER_DISALLOWED_TOOLS_ARG]),
-                               ('claude-developer', [])):
+                               ('claude-developer', [dispatch_tool.SKILL_DISALLOWED_TOOLS_ARG])):
             with self.subTest(name=name):
                 self.reset()
                 self.scenario(after=[[row('NEW-SESSION', name=name, cwd=self.root)]],
@@ -795,13 +796,13 @@ class ClaudeBgDispatchTests(unittest.TestCase):
                 argv = launch['argv']
                 self.assertEqual([arg for arg in argv if arg.startswith('--disallowedTools')],
                                  expected)
-                if expected:
-                    self.assertLess(argv.index(expected[0]), argv.index('-n'))
+                self.assertLess(argv.index(expected[0]), argv.index('-n'))
                 self.assertEqual(argv[-2:], ['--', 'work'])
                 self.assertEqual(self.parsed(), [{'add_dirs': [self.root], 'prompt': 'work'}])
 
-    def test_reviewer_launch_denies_skill_and_other_role_argv_is_unchanged(self):
-        # #1502 WP-H E7: project skills must not steer the background Reviewer.
+    def test_reviewer_and_developer_launches_deny_skill_and_otherwise_differ_only_as_before(self):
+        # #1502 WP-H E7: project skills must steer neither the background
+        # Reviewer nor (prerequisite 3) a background Developer.
         def launch_argv(name):
             self.reset()
             self.scenario(after=[[row('NEW-SESSION', name=name, cwd=self.root)]],
@@ -826,17 +827,55 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.assertIn('Skill', denied)
         for tool in ('Edit', 'Write', 'NotebookEdit'):
             self.assertIn(tool, denied)
-        # The developer argv carries no tool limit at all and no Skill mention.
-        self.assertFalse(any(arg.startswith('--disallowedTools') or 'Skill' in arg
-                             for arg in developer_argv))
-        # Apart from the Reviewer-only model and tool limit, both argvs are identical.
+        # The developer argv carries exactly one tool limit, and it denies only Skill.
+        developer_limits = [arg for arg in developer_argv if arg.startswith('--disallowedTools')]
+        self.assertEqual(developer_limits, ['--disallowedTools=Skill'])
+        # Apart from the Reviewer-only model and the tool limit value, both argvs
+        # are identical, with the tool limit in the same place.
         model_at = reviewer_argv.index('--model')
         self.assertEqual(reviewer_argv[model_at + 1], REVIEW_MODEL)
-        reviewer_rest = (reviewer_argv[:model_at] +
-                         [arg for arg in reviewer_argv[model_at + 2:]
-                          if arg not in reviewer_limits])
+        reviewer_rest = reviewer_argv[:model_at] + reviewer_argv[model_at + 2:]
+        reviewer_rest[reviewer_rest.index(reviewer_limits[0])] = developer_limits[0]
         self.assertEqual(reviewer_rest, developer_argv)
         self.assertEqual(developer_argv[-2:], ['--', 'work'])
+
+    def test_every_accepted_role_launch_denies_skill_for_new_and_resumed_sessions(self):
+        # #1502 WP-H E7 prerequisite 3: whatever role the dispatcher accepts,
+        # the launch argv denies the Skill tool, before `-n` and the `--` prompt.
+        roles = ('claude-reviewer', 'claude-developer', 'claude-developer-ui',
+                 'claude-developer-ui-tools')
+        for name in roles:
+            # Every accepted role resolves to a dispatch-gated Worker key.
+            self.assertIn(dispatch_tool._worker_key(name), ('claude-reviewer', 'claude-developer'))
+            for new_session in (True, False):
+                with self.subTest(name=name, new_session=new_session):
+                    self.reset()
+                    model_args = ['--model', REVIEW_MODEL] if name == 'claude-reviewer' else []
+                    if new_session:
+                        self.scenario(after=[[row('NEW-SESSION', name=name, cwd=self.root)]],
+                                      transcripts=[{'session': 'NEW-SESSION',
+                                                    'new_action': True}])
+                        session_args = ['--new']
+                    else:
+                        self.scenario(
+                            all=[row(TARGET, name=name, status='done', started='OLD',
+                                     cwd=self.cwd)],
+                            before=[], after=[[row(TARGET, name=name, cwd=self.cwd)]],
+                            transcripts=[{'session': TARGET, 'new_action': True}])
+                        session_args = ['--session', TARGET]
+                    code, receipt = self.run_tool('dispatch', *session_args, '--name', name,
+                                                  '--task-id', 'executor-task',
+                                                  '--prompt', 'work', *model_args)
+                    self.assertEqual((code, receipt['result']), (0, 'DELIVERED'), receipt)
+                    [launch] = self.launches()
+                    argv = launch['argv']
+                    limits = [arg for arg in argv if arg.startswith('--disallowedTools')]
+                    self.assertEqual(len(limits), 1, argv)
+                    self.assertIn('Skill', limits[0].split('=', 1)[1].split(','))
+                    self.assertLess(argv.index(limits[0]), argv.index('-n'))
+                    self.assertLess(argv.index(limits[0]), argv.index('--'))
+                    self.assertEqual(argv[argv.index('-n') + 1], name)
+                    self.assertEqual(argv[-2:], ['--', 'work'])
 
     def test_watch_returns_on_report_and_stops_a_blocked_session(self):
         report = self.home / 'report.md'
