@@ -2807,8 +2807,11 @@ def _validate(record, *, strict=True):
                               type(execution['native_session_binding']) is not str or
                               re.fullmatch(r'[A-Z0-9_]{1,64}',
                                            execution['native_session_binding']) is None)) or
+                            # #1019 A11 row 41: OpenCode records its own timeout
+                            # as TIMEOUT too, so an eligible OPENCODE_TIMEOUT can be
+                            # stored with its diff evidence (checked below).
                             execution['status'] not in (
-                                ('SUCCEEDED', 'FAILED', 'UNKNOWN', 'RUNNING')
+                                ('SUCCEEDED', 'FAILED', 'UNKNOWN', 'RUNNING', 'TIMEOUT')
                                 if developer['provider_profile'] == 'opencode' else
                                 ('DONE', 'FAILED', 'UNKNOWN', 'BLOCKED', 'TIMEOUT',
                                  'RUNNING')) or

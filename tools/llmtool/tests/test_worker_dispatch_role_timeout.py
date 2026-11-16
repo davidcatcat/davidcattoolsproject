@@ -2,9 +2,10 @@
 
 docs/design/a11-row41-timeout-retry-1019.md section 6: audit_entry (test 5),
 the dispatch gate (tests 13-23), the regressions for the four findings R1-R4
-at limits 2 and 3, TaskStore persistence S1-S3 and the review repair F1 (a
-stored nested result head refuses the retry) through the real TaskStore in a
-temporary directory. The store is never mocked; only the timeout cap
+at limits 2 and 3, TaskStore persistence S1-S3, the review repair F1 (a
+stored nested result head refuses the retry) and the review v2 repair F1
+(every route's own timeout, OpenCode included, persists, reopens and
+retries) through the real TaskStore in a temporary directory. The store is never mocked; only the timeout cap
 (worker_dispatch.timeout_continuation_max) is injected, and the Owner worker
 policy is the shared all-ALLOWED test policy (#1692), set PAUSED or
 OWNER_ASSIGNMENT_ONLY explicitly where a refusal is checked.
@@ -111,8 +112,46 @@ def dispatching(developer):
 
 
 def timed_out_again(developer):
-    return dict(developer, state='DEVELOPER_OUTCOME_UNKNOWN', error_code='AGY_TIMEOUT',
+    code = role_timeout.ROUTE_TIMEOUT_CODES[developer['provider_profile']]
+    return dict(developer, state='DEVELOPER_OUTCOME_UNKNOWN', error_code=code,
                 execution=dict(TIMEOUT_EXECUTION))
+
+
+# Review v2 finding F1: each route's own timeout record, with the fields its
+# TaskStore shape requires. Fixed, made-up values only.
+ROUTE_PROVIDER_TYPES = {'agy': 'agy-cli', 'opencode': 'opencode-cli',
+                        'gw-agent': 'gw-agent-cli', 'claude': 'claude-cli'}
+CLAUDE_EXECUTOR = 'executor-claude'
+
+
+def waiting_callback(record):
+    """A Claude CLI direct-result callback still waiting for its executor: no result."""
+    return {
+        'state': 'WAITING_EXECUTOR', 'executor_task_id': CLAUDE_EXECUTOR,
+        'evidence': {'task_id': record['task_id'], 'run_id': record['run_id'],
+                     'contract_digest': record['task_binding']['contract_digest'],
+                     'executor_task_id': CLAUDE_EXECUTOR, 'source_sha': SOURCE_SHA,
+                     'execution_mode': 'DIRECT_D6', 'verification_state': 'NOT_STARTED'},
+        'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+        'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+    }
+
+
+def route_timed_out_developer(route, record, **changes):
+    """timed_out_developer for route: its provider type, exact code and own fields."""
+    developer = timed_out_developer(provider_profile=route,
+                                    provider_type=ROUTE_PROVIDER_TYPES[route],
+                                    error_code=role_timeout.ROUTE_TIMEOUT_CODES[route])
+    if route in ('opencode', 'gw-agent'):
+        # Only AGY and Claude records carry owner_assignment_ref.
+        del developer['owner_assignment_ref']
+    if route == 'opencode':
+        developer['max_tokens'] = 1000  # OpenCode dispatch needs a token cap.
+    if route == 'claude':
+        developer.update(executor_task_id=CLAUDE_EXECUTOR,
+                         direct_result_callback=waiting_callback(record))
+    developer.update(changes)
+    return developer
 
 
 def codex_timeout(developer):
@@ -192,9 +231,22 @@ class RoleTimeoutStoreCase(unittest.TestCase):
         return store.compare_and_update(task_id, expected={'developer': old},
                                         developer=dispatching(old))
 
+    def route_timed_out_task(self, route, **changes):
+        """Store route's timed-out Developer through the real TaskStore; return the id."""
+        task = dispatch_task(route)
+        self.store.create(task)
+        record = self.store.get(task['task_id'])
+        saved = self.store.compare_and_update(
+            task['task_id'], expected={'developer': None},
+            developer=route_timed_out_developer(route, record, **changes))
+        self.assertIsNotNone(worker_dispatch._assignment_audit_binding(saved, saved['developer']))
+        return task['task_id']
+
     def adapter_launch(self, task_id, store=None):
-        return worker_dispatch.authorize_dispatch(self.store if store is None else store,
-                                                  task_id, 'agy', action=ROLE)
+        """The adapter launch of the stored route's own worker key."""
+        store = self.store if store is None else store
+        worker = worker_dispatch.worker_key_for(store.get(task_id)['developer']['provider_profile'])
+        return worker_dispatch.authorize_dispatch(store, task_id, worker, action=ROLE)
 
     def time_out_again(self, task_id):
         old = self.store.get(task_id)['developer']
@@ -948,6 +1000,106 @@ class TaskStoreAuditTests(RoleTimeoutStoreCase):
                 task['task_id'], expected={'developer': None},
                 developer=timed_out_developer(execution=dict(TIMEOUT_EXECUTION,
                                                              diff_base_sha=OTHER_SHA)))
+
+
+class RouteTimeoutPersistenceTests(RoleTimeoutStoreCase):
+    """Review v2 finding F1: every route's eligible timeout persists and retries.
+
+    Each route's own timeout record is written, reopened and re-dispatched
+    through the real TaskStore, with adapter authorization and the shared
+    budget, so no route's status whitelist can disagree with the retry gate."""
+
+    def test_every_route_timeout_persists_reopens_and_retries(self):
+        for route in sorted(role_timeout.ROUTE_TIMEOUT_CODES):
+            worker = worker_dispatch.worker_key_for(route)
+            with self.subTest(route=route):
+                task_id = self.route_timed_out_task(route)
+                stored = TaskStore(self.root).get(task_id)['developer']
+                self.assertEqual((stored['provider_profile'], stored['error_code'],
+                                  stored['execution']['status'],
+                                  stored['execution']['diff_sha256']),
+                                 (route, role_timeout.ROUTE_TIMEOUT_CODES[route], 'TIMEOUT',
+                                  EMPTY_DIFF_SHA256))
+                with limit(2):
+                    for attempt in (1, 2):
+                        reopened = TaskStore(self.root)
+                        saved = self.retry_transition(task_id, reopened)
+                        self.assertEqual(saved['developer']['state'], 'DEVELOPER_DISPATCHING')
+                        transition = saved['dispatch_audit'][-1]
+                        self.assertEqual(
+                            (worker_dispatch.stored_worker_id(transition['worker_key']),
+                             transition['action'], transition['decision'],
+                             transition['retry_phase']),
+                            (worker, ROLE, 'ALLOWED', 'TRANSITION'))
+                        self.assertTrue(self.adapter_launch(task_id, TaskStore(self.root)).allowed)
+                        adapter = TaskStore(self.root).get(task_id)['dispatch_audit'][-1]
+                        self.assertEqual(
+                            (worker_dispatch.stored_worker_id(adapter['worker_key']),
+                             adapter['action'], adapter['decision'], adapter['retry_phase'],
+                             adapter['authorization_id']),
+                            (worker, ROLE, 'ALLOWED', 'ADAPTER', transition['attempt_id']))
+                        self.assertEqual(count(TaskStore(self.root).get(task_id)), attempt)
+                        self.time_out_again(task_id)
+                    self.assertDenied(LIMIT, self.retry_transition, task_id, TaskStore(self.root))
+                record = TaskStore(self.root).get(task_id)
+                self.assertEqual(record['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+                self.assertEqual((record['dispatch_audit'][-1]['decision'],
+                                  record['dispatch_audit'][-1]['reason_code']), ('BLOCKED', LIMIT))
+                self.assertEqual([(entry['action'], entry.get('retry_phase'))
+                                  for entry in record['dispatch_audit']],
+                                 [('DISPATCH', None)] + [(ROLE, 'TRANSITION'),
+                                                         (ROLE, 'ADAPTER')] * 2 +
+                                 [(ROLE, 'TRANSITION')])
+                self.assertEqual(count(record), 3)
+
+    def test_every_route_keeps_its_refusals(self):
+        """Unknown cleanup, a non-empty diff and a stored result still refuse per route."""
+        for route in sorted(role_timeout.ROUTE_TIMEOUT_CODES):
+            for label, changes in (
+                    ('cleanup unknown', {'execution': dict(TIMEOUT_EXECUTION,
+                                                           cleanup_status='UNKNOWN')}),
+                    ('non-empty diff', {'execution': dict(TIMEOUT_EXECUTION,
+                                                          diff_sha256='c' * 64)})):
+                with self.subTest(route=route, refused=label):
+                    task_id = self.route_timed_out_task(route, **changes)
+                    with limit(3):
+                        self.assertDenied(PRECONDITION, self.retry_transition, task_id,
+                                          TaskStore(self.root))
+                    record = TaskStore(self.root).get(task_id)
+                    self.assertEqual(record['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+                    self.assertEqual(record['dispatch_audit'][-1]['reason_code'], PRECONDITION)
+            with self.subTest(route=route, refused='other route code'):
+                other = 'AGY_TIMEOUT' if route != 'agy' else 'OPENCODE_TIMEOUT'
+                task = dispatch_task(route)
+                self.store.create(task)
+                record = self.store.get(task['task_id'])
+                with self.assertRaises(LLMToolError):
+                    self.store.compare_and_update(
+                        task['task_id'], expected={'developer': None},
+                        developer=route_timed_out_developer(route, record, error_code=other))
+                self.assertIsNone(self.store.get(task['task_id'])['developer'])
+
+    def test_opencode_timeout_needs_the_timeout_status(self):
+        """An OpenCode timeout is recorded as TIMEOUT; UNKNOWN is never eligible."""
+        task = dispatch_task('opencode')
+        self.store.create(task)
+        record = self.store.get(task['task_id'])
+        # UNKNOWN with diff evidence is refused by the store, as on every route.
+        with self.assertRaises(LLMToolError):
+            self.store.compare_and_update(
+                task['task_id'], expected={'developer': None},
+                developer=route_timed_out_developer(
+                    'opencode', record, execution=dict(TIMEOUT_EXECUTION, status='UNKNOWN')))
+        self.assertIsNone(self.store.get(task['task_id'])['developer'])
+        # UNKNOWN without diff evidence is storable but never a clean timeout.
+        no_diff = {key: value for key, value in TIMEOUT_EXECUTION.items()
+                   if key not in ('diff_sha256', 'diff_base_sha')}
+        task_id = self.route_timed_out_task('opencode',
+                                            execution=dict(no_diff, status='UNKNOWN'))
+        with limit(3):
+            self.assertDenied(PRECONDITION, self.retry_transition, task_id, TaskStore(self.root))
+        self.assertEqual(TaskStore(self.root).get(task_id)['developer']['state'],
+                         'DEVELOPER_OUTCOME_UNKNOWN')
 
 
 if __name__ == '__main__':
