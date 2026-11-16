@@ -941,11 +941,19 @@ def _validate_completion_events(record):
         _fail('COMPLETION_EVENT_INVALID')
     ids, sequences, last_sequence = set(), set(), {}
     for event in events:
-        github_fields = set(event) - _COMPLETION_EVENT_FIELDS if type(event) is dict else set()
+        github_fields = (set(event) & _GITHUB_EVENT_FIELDS) if type(event) is dict else set()
+        is_valid_shape = (
+            set(event) == _COMPLETION_EVENT_FIELDS or
+            (set(event) == _COMPLETION_EVENT_FIELDS | _GITHUB_EVENT_FIELDS and
+             event.get('source') == 'GITHUB') or
+            (set(event) == _COMPLETION_EVENT_FIELDS | frozenset(('review_kind',)) and
+             event.get('source') == 'REVIEWER')
+        ) if type(event) is dict else False
         if (type(event) is not dict or
-                (set(event) != _COMPLETION_EVENT_FIELDS and
-                 not (set(event) == _COMPLETION_EVENT_FIELDS | _GITHUB_EVENT_FIELDS and
-                      event.get('source') == 'GITHUB')) or
+                not is_valid_shape or
+                ('review_kind' in event and
+                 (type(event['review_kind']) is not str or
+                  event['review_kind'] not in ('formal', 'security'))) or
                 not _safe_identifier(event['event_id'], TASK_ID) or
                 event['event_id'] in ids or
                 event['task_id'] != record['task_id'] or
@@ -2179,7 +2187,8 @@ def _validate(record, *, strict=True):
         for item in claims:
             if (type(item) is not dict or
                     set(item) - frozenset(('failure_reason', 'binding_mismatch_keys',
-                                           'rules_sha256', 'bind_failure_reason')) not in (
+                                           'rules_sha256', 'bind_failure_reason',
+                                           'review_kind')) not in (
                         _REVIEW_DISPATCH_CLAIM_FIELDS,
                         _REVIEW_DISPATCH_CLAIM_FIELDS | frozenset(('review_result',)),
                         _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS,
@@ -2198,6 +2207,9 @@ def _validate(record, *, strict=True):
                     ('rules_sha256' in item and
                      (type(item['rules_sha256']) is not str or
                       re.fullmatch(r'[0-9a-f]{64}', item['rules_sha256']) is None)) or
+                    ('review_kind' in item and
+                     (type(item['review_kind']) is not str or
+                      item['review_kind'] not in ('formal', 'security'))) or
                     ('account' in item and
                      (type(item['account']) is not str or
                       _NAME.fullmatch(item['account']) is None)) or
@@ -4377,7 +4389,7 @@ class TaskStore:
 
     def record_completion_event(self, task_id, *, event_id, run_id, session_id,
                                 source, source_sha, sequence, payload_sha256,
-                                github_metadata=None):
+                                github_metadata=None, review_kind=None):
         """Persist a terminal event before any wake; identical replay is inert.
 
         The caller verifies the terminal source separately. This storage API
@@ -4402,6 +4414,11 @@ class TaskStore:
                     not 1 <= github_metadata['issue_number'] <= 9999999):
                 _fail('COMPLETION_EVENT_INVALID')
             binding.update(github_metadata)
+        if review_kind is not None:
+            if (source != 'REVIEWER' or type(review_kind) is not str or
+                    review_kind not in ('formal', 'security')):
+                _fail('COMPLETION_EVENT_INVALID')
+            binding['review_kind'] = review_kind
         for _ in range(5):
             current = self.get(task_id)
             if current['schema_version'] != 2 or current['run_id'] != run_id:
@@ -5732,7 +5749,7 @@ class TaskStore:
                                 all(before.get(key) == after.get(key) for key in (
                                     'executor_task', 'pr', 'head_sha', 'version',
                                     'account_mode', 'account', 'claimed_at',
-                                    'reviewer_task', 'rules_sha256')) and
+                                    'reviewer_task', 'rules_sha256', 'review_kind')) and
                                 (before.get('state') == 'CLAIMED' and
                                  (after.get('state') == 'COMPLETED' or
                                   ('review_result' not in after))) and

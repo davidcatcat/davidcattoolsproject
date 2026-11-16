@@ -573,3 +573,94 @@ class PriorityFindingTests(unittest.TestCase):
 
     def test_no_finding_line_counts_zero(self):
         self.assertEqual(self._findings('no findings\n'), 0)
+
+
+class ReviewKindTests(unittest.TestCase):
+    def test_review_kind_helper(self):
+        # Explicit review_kind values
+        self.assertEqual(review_result.review_kind({'review_kind': 'formal'}), 'formal')
+        self.assertEqual(review_result.review_kind({'review_kind': 'security'}), 'security')
+        self.assertEqual(review_result.review_kind({'review_kind': 'formal', 'version': 95}), 'formal')
+        self.assertEqual(review_result.review_kind({'review_kind': 'security', 'version': 1}), 'security')
+        # Invalid review_kind values return None
+        self.assertIsNone(review_result.review_kind({'review_kind': 'invalid'}))
+        self.assertIsNone(review_result.review_kind({'review_kind': 123}))
+        self.assertIsNone(review_result.review_kind({'review_kind': None}))
+        # Unkinded version ranges
+        self.assertEqual(review_result.review_kind({'version': 1}), 'formal')
+        self.assertEqual(review_result.review_kind({'version': 90}), 'formal')
+        # Legacy unkinded claim at version >= 91 fails closed
+        self.assertIsNone(review_result.review_kind({'version': 91}))
+        self.assertIsNone(review_result.review_kind({'version': 100}))
+        # Non-dict inputs return None
+        self.assertIsNone(review_result.review_kind(None))
+        self.assertIsNone(review_result.review_kind('formal'))
+        self.assertIsNone(review_result.review_kind([1, 2]))
+
+    def test_claim_lookup_by_kind_and_hand_built_security_never_returned_for_formal(self):
+        formal_claim = {
+            'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD, 'version': 1,
+            'state': 'CLAIMED', 'reviewer_task': REVIEWER,
+            'native_session_id': None, 'account_mode': 'DEFAULT_SECOND_ACCOUNT',
+            'review_kind': 'formal',
+            'claimed_at': '2026-10-27T00:00:00Z', 'updated_at': '2026-10-27T00:00:00Z',
+        }
+        security_claim = {
+            'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD, 'version': 91,
+            'state': 'CLAIMED', 'reviewer_task': 'reviewer-sec',
+            'native_session_id': None, 'account_mode': 'CODEX_CLI',
+            'review_kind': 'security',
+            'claimed_at': '2026-10-27T00:00:00Z', 'updated_at': '2026-10-27T00:00:00Z',
+        }
+        legacy_unkinded_v91 = {
+            'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD, 'version': 92,
+            'state': 'CLAIMED', 'reviewer_task': 'reviewer-old',
+            'native_session_id': None, 'account_mode': 'CODEX_CLI',
+            'claimed_at': '2026-10-27T00:00:00Z', 'updated_at': '2026-10-27T00:00:00Z',
+        }
+        task = {
+            'task_id': TASK, 'run_id': RUN,
+            'task_binding': {'contract_digest': CONTRACT},
+            'review_dispatch_claim': [formal_claim, security_claim, legacy_unkinded_v91],
+        }
+
+        # Formal lookup finds formal claim
+        claim, head = review_result._claim_for(
+            task, executor_task=EXECUTOR, pr_number=PR, version=1, kind='formal')
+        self.assertEqual(claim, formal_claim)
+        self.assertEqual(head, HEAD)
+
+        # Formal lookup for security version 91 refuses: hand-built security claim never returned for formal
+        with self.assertRaises(LLMToolError) as caught:
+            review_result._claim_for(
+                task, executor_task=EXECUTOR, pr_number=PR, version=91, kind='formal')
+        self.assertEqual(caught.exception.review_dispatch_code, 'REVIEW_RESULT_CLAIM_MISSING')
+
+        # Security lookup finds security claim
+        claim, head = review_result._claim_for(
+            task, executor_task=EXECUTOR, pr_number=PR, version=91, kind='security')
+        self.assertEqual(claim, security_claim)
+        self.assertEqual(head, HEAD)
+
+        # Security lookup for formal version 1 refuses
+        with self.assertRaises(LLMToolError) as caught:
+            review_result._claim_for(
+                task, executor_task=EXECUTOR, pr_number=PR, version=1, kind='security')
+        self.assertEqual(caught.exception.review_dispatch_code, 'REVIEW_RESULT_CLAIM_MISSING')
+
+        # Legacy unkinded claim at v91+ fails closed for both kinds
+        for kind in ('formal', 'security'):
+            with self.subTest(kind=kind), self.assertRaises(LLMToolError) as caught:
+                review_result._claim_for(
+                    task, executor_task=EXECUTOR, pr_number=PR, version=92, kind=kind)
+            self.assertEqual(caught.exception.review_dispatch_code, 'REVIEW_RESULT_CLAIM_MISSING')
+
+    def test_record_review_result_kind_argument_validation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = _store(temp_dir)
+            with self.assertRaises(LLMToolError) as caught:
+                review_result.record_review_result(
+                    store=store, task_id=TASK, executor_task=EXECUTOR, pr_number=PR,
+                    version=1, kind='invalid', github_get=lambda p: [])
+            self.assertEqual(caught.exception.review_dispatch_code,
+                             'REVIEW_RESULT_ARGUMENT_INVALID')

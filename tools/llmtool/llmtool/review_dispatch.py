@@ -224,7 +224,7 @@ def _resolve_github_login():
 
 
 def _preflight(store, task_id, executor_task, pr_number, version, *, task=None,
-               reviewer=None):
+               reviewer=None, kind='formal'):
     if task is None:
         task = store.get(task_id)
     if (type(task.get('developer')) is dict and
@@ -282,8 +282,16 @@ def _preflight(store, task_id, executor_task, pr_number, version, *, task=None,
     if (type(base) is not dict or type(base.get('sha')) is not str or
             re.fullmatch(r'[0-9a-f]{40}', base['sha']) is None):
         _refuse('REVIEW_PROMPT_PR_UNAVAILABLE')
-    if type(version) is not int or not 1 <= version <= 9999:
+    if type(version) is not int or isinstance(version, bool):
         _refuse('REVIEW_PROMPT_BINDING_MISSING')
+    if kind == 'formal':
+        if not (1 <= version <= 90):
+            _refuse('REVIEW_VERSION_RANGE_INVALID')
+    elif kind == 'security':
+        if not (91 <= version <= 9999):
+            _refuse('REVIEW_VERSION_RANGE_INVALID')
+    else:
+        _refuse('REVIEW_VERSION_RANGE_INVALID')
     return task, executor, head, base['sha'], reviewer_key
 
 
@@ -1236,7 +1244,8 @@ def _post_under_lock(*, fd, directory, name, task, task_id, claim, text, login_r
 def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                     create_d6=None, dispatch_session=None, bind_session=None,
                     prompt_renderer=None, codex_runner=None, reviewer=None,
-                    comment_lister=None, comment_poster=None, post_clock=None):
+                    comment_lister=None, comment_poster=None, post_clock=None,
+                    kind='formal'):
     """Claim once, create a read-only Reviewer D6 and bind its dispatched session.
 
     #1705: a fresh COMPLETED Codex verdict is handed to the caller to post under
@@ -1247,7 +1256,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
     task = store.get(task_id)
     _, executor, head, _base, reviewer_key = _preflight(
         store, task_id, executor_task, pr_number, version, task=task,
-        reviewer=reviewer)
+        reviewer=reviewer, kind=kind)
     # Authorization must be checked before a durable claim is created. The
     # policy is re-read again immediately before each external side effect.
     gate = _policy(task, reviewer_key)
@@ -1260,7 +1269,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
     prior = next((claim for claim in claims if
                   (claim.get('pr'), claim.get('head_sha'), claim.get('version')) == identity), None)
     if prior is not None:
-        if prior.get('executor_task') != executor_task:
+        from . import review_result
+        if prior.get('executor_task') != executor_task or review_result.review_kind(prior) != kind:
             _refuse('REVIEW_DISPATCH_CLAIM_MISMATCH')
         if prior.get('state') == 'COMPLETED':
             result = prior.get('review_result')
@@ -1297,14 +1307,22 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                  claim.get('version') == version and
                  claim.get('head_sha') != head), None)
     if used is not None:
+        from . import review_result
+        if review_result.review_kind(used) != kind:
+            _refuse('REVIEW_DISPATCH_CLAIM_MISMATCH')
         pr_versions = [
             claim['version'] for claim in claims
             if type(claim) is dict and
             claim.get('executor_task') == executor_task and
             claim.get('pr') == pr_number and
-            type(claim.get('version')) is int
+            type(claim.get('version')) is int and
+            review_result.review_kind(claim) == kind
         ]
-        next_version = max(pr_versions) + 1
+        next_version = (max(pr_versions) + 1) if pr_versions else (1 if kind == 'formal' else 91)
+        if kind == 'formal' and next_version > 90:
+            _refuse('REVIEW_VERSION_RANGE_INVALID')
+        elif kind == 'security' and next_version > 9999:
+            _refuse('REVIEW_VERSION_RANGE_INVALID')
         _refuse(
             'REVIEW_DISPATCH_VERSION_USED',
             f'Review version {version} is already used for PR {pr_number} '
@@ -1351,7 +1369,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
              'version': version, 'state': 'CLAIMED', 'reviewer_task': reviewer_task,
              'native_session_id': None, 'account_mode': account_mode,
              'claimed_at': _now(), 'updated_at': _now(),
-             'rules_sha256': rules_sha256}
+             'rules_sha256': rules_sha256, 'review_kind': kind}
     if reviewer_role.get('account') is not None:
         claim['account'] = reviewer_role['account']
     try:
