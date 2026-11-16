@@ -328,10 +328,17 @@ Consumers land before the producer, so no carried marker exists until every cons
    - **Regression test for C4c (codex-reviewer v2 F1):** `_refresh_d6_binding_after_bootstrap`, run
      through the OpenCode dispatch path with ENV-2 bootstrap mocked or injected (no real bootstrap,
      no credential-shaped data), accepts a synthetic D6 that holds a valid carried marker when the
-     Task write paths include the changed bootstrap source. It refuses with
-     `D6_ENV2_PASS_MARKER_MISMATCH` when that path is not in the write paths. A schema-1 marker gives
-     the same result as today. The test asserts the write paths reach C4, so a later caller that drops
-     them fails.
+     Task write paths include the changed bootstrap source. A schema-1 marker gives the same result as
+     today. The test asserts the write paths reach C4, so a later caller that drops them fails. When
+     the changed path is not in the write paths, the test checks each boundary with its own code
+     (codex-reviewer v3 F1); both existing error contracts and the mapping stay as they are, and this
+     design proposes no production error-contract change:
+     - At the OpenCode dispatch boundary it expects `OPENCODE_ENV2_MARKER_INVALID`.
+       `_refresh_d6_binding_after_bootstrap` maps a C4 refusal to that code
+       (`task_submission_cli.py:3812-3813`, reached from the dispatch at `:5012`, as cited by the
+       finding; that file is outside this Task's read paths).
+     - At the C4 consumer, a direct `validate_env2_pass_marker` call with the same synthetic
+       registration, head and write paths refuses with `D6_ENV2_PASS_MARKER_MISMATCH`.
    - **Result-collection tests with the new marker:** `collect_executor_result`,
      `collect_claude_result` and `collect_executor_worktree_result` each run on a synthetic registered
      D6 whose head changes `tools/llmtool/pyproject.toml` (a version bump) and that holds a carried
