@@ -1545,7 +1545,9 @@ def _check_merge_evidence(root, head, squash, train_squash=None):
 def _publication(root, branch, head, squash, train_squash=None):
     """Name the rule proving HEAD's commits are published, or None.
 
-    Uses only local remote-tracking refs; the PM fetches origin first.
+    Uses only local remote-tracking refs; the PM fetches origin first. One
+    filtered ``for-each-ref`` lists every remote ref that contains HEAD, so
+    the Git call count stays constant instead of probing each ref in turn.
     """
     def is_ancestor(commit, ref):
         return _task_git(root, "merge-base", "--is-ancestor", commit, ref,
@@ -1559,14 +1561,14 @@ def _publication(root, branch, head, squash, train_squash=None):
     origin_main = "refs/remotes/origin/main"
     if has_ref(origin_branch) and is_ancestor(head, origin_branch):
         return "origin_branch"
-    refs = _task_git(root, "for-each-ref", "--format=%(refname)",
-                     "refs/remotes/origin/").stdout.splitlines()
+    containing = _task_git(
+        root, "for-each-ref", "--format=%(refname)", "--contains=" + head,
+        "refs/remotes/origin/").stdout.splitlines()
     # The origin fetch refspec maps PR source branches to ordinary tracking refs.
-    for ref in refs:
+    for ref in containing:
         if ref in (origin_branch, origin_main, "refs/remotes/origin/HEAD"):
             continue
-        if has_ref(ref) and is_ancestor(head, ref):
-            return "origin_pr_head"
+        return "origin_pr_head"
     if not has_ref(origin_main):
         return None
     if is_ancestor(head, origin_main):
