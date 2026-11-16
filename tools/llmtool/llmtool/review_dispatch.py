@@ -1251,7 +1251,14 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
     #1705: a fresh COMPLETED Codex verdict is handed to the caller to post under
     a durable caller-owned post receipt. A replay of a COMPLETED claim posts the
     stored text itself, once and verbatim, under the claim's exclusive lock.
+
+    #2199 PR 1 (security v91 F1, CWE-841): only ``kind='formal'`` is accepted.
+    PR 1 adds no security writer, so any other kind is refused
+    ``REVIEW_KIND_UNSUPPORTED`` before the store is read, before any preflight,
+    claim, Reviewer D6 or session. The kind-aware readers below stay in place.
     """
+    if type(kind) is not str or kind != 'formal':
+        _refuse('REVIEW_KIND_UNSUPPORTED')
     clock = post_clock or time.time
     task = store.get(task_id)
     _, executor, head, _base, reviewer_key = _preflight(

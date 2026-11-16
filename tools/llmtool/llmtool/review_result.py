@@ -354,11 +354,17 @@ def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
 
     #1909 item 2: an UNKNOWN claim that would settle needs its Reviewer D6
     to bind the claim's native session (registry under ``common_dir``).
+
+    #2199 PR 1 (security v91 F1, CWE-841): only ``kind='formal'`` is accepted.
+    PR 1 adds no security writer, so any other kind is refused
+    ``REVIEW_KIND_UNSUPPORTED`` before the store or GitHub is read and before
+    any event is written.
     """
+    if type(kind) is not str or kind != 'formal':
+        _refuse('REVIEW_KIND_UNSUPPORTED')
     if (type(version) is not int or not 1 <= version <= 9999 or
             type(pr_number) is not int or not 1 <= pr_number <= 9999999 or
-            type(reviewer_session_done) is not bool or
-            type(kind) is not str or kind not in ('formal', 'security')):
+            type(reviewer_session_done) is not bool):
         _refuse('REVIEW_RESULT_ARGUMENT_INVALID')
     task = store.get(task_id)
     if type(task) is not dict or task.get('task_id') != task_id:

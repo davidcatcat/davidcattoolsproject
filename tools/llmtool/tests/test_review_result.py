@@ -663,7 +663,66 @@ class ReviewKindTests(unittest.TestCase):
                     store=store, task_id=TASK, executor_task=EXECUTOR, pr_number=PR,
                     version=1, kind='invalid', github_get=lambda p: [])
             self.assertEqual(caught.exception.review_dispatch_code,
-                             'REVIEW_RESULT_ARGUMENT_INVALID')
+                             'REVIEW_KIND_UNSUPPORTED')
+
+    def test_record_review_result_refuses_non_formal_kind_before_any_read_or_write(self):
+        # #2199 PR 1 (security v91 F1, CWE-841): record_review_result has no
+        # security writer path. Even with a hand-built COMPLETED security PASS
+        # claim present, every kind but 'formal' is refused with one stable
+        # code before the store or GitHub is read and before any event.
+        security_claim = {
+            'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD, 'version': 91,
+            'state': 'COMPLETED', 'reviewer_task': 'reviewer-sec',
+            'native_session_id': 'review-session', 'account_mode': 'CODEX_CLI',
+            'review_kind': 'security',
+            'claimed_at': '2026-10-27T00:00:00Z', 'updated_at': '2026-10-27T00:00:00Z',
+            'review_result': {
+                'task_id': TASK, 'run_id': RUN, 'contract_digest': CONTRACT,
+                'head': HEAD, 'verdict': 'PASS',
+                'review_text': _comment(version=91)['body']},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = _store(temp_dir)
+            before = store.get(TASK)
+            calls = []
+
+            class SpyStore:
+                def get(self, task_id):
+                    calls.append('get')
+                    record = store.get(task_id)
+                    record['review_dispatch_claim'] = (
+                        list(record['review_dispatch_claim']) + [security_claim])
+                    return record
+
+                def record_completion_event(self, *args, **kwargs):
+                    calls.append('record_completion_event')
+                    return store.record_completion_event(*args, **kwargs)
+
+                def compare_and_update(self, *args, **kwargs):
+                    calls.append('compare_and_update')
+                    return store.compare_and_update(*args, **kwargs)
+
+            def github_get(path):
+                calls.append('github_get')
+                return []
+
+            for kind in ('security', 'invalid', '', 'FORMAL', None, 1):
+                with self.subTest(kind=kind):
+                    calls.clear()
+                    with self.assertRaises(LLMToolError) as caught:
+                        review_result.record_review_result(
+                            store=SpyStore(), task_id=TASK, executor_task=EXECUTOR,
+                            pr_number=PR, version=91, kind=kind,
+                            reviewer_session_done=True, github_get=github_get,
+                            inline_io={'file_lister': lambda *_: calls.append('inline'),
+                                       'comment_lister': lambda *_: calls.append('inline'),
+                                       'poster': lambda *_: calls.append('inline')})
+                    self.assertEqual(caught.exception.review_dispatch_code,
+                                     'REVIEW_KIND_UNSUPPORTED')
+                    self.assertEqual(calls, [])
+                    after = store.get(TASK)
+                    self.assertEqual(after, before)
+                    self.assertEqual(after.get('completion_events', []), [])
 
     def test_record_review_result_replay_legacy_claim_and_event_succeeds_without_rewriting_record(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -725,9 +784,12 @@ class ReviewKindTests(unittest.TestCase):
             self.assertEqual(after_task['review_dispatch_claim'], seeded_claims)
             self.assertEqual(after_task['completion_events'], seeded_events)
 
+            # PR 1 has no security writer: the kind is refused and nothing changes.
             with self.assertRaises(LLMToolError) as caught:
                 review_result.record_review_result(
                     store=family_store, task_id=TASK, executor_task=EXECUTOR, pr_number=PR,
                     version=1, kind='security')
             self.assertEqual(caught.exception.review_dispatch_code,
-                             'REVIEW_RESULT_CLAIM_MISSING')
+                             'REVIEW_KIND_UNSUPPORTED')
+            self.assertEqual(store.get(TASK)['completion_events'], seeded_events)
+            self.assertEqual(store.get(TASK)['review_dispatch_claim'], seeded_claims)
