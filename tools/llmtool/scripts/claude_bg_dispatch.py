@@ -93,8 +93,9 @@ OUTPUT_LIMIT = 4 * 1024 * 1024
 PROMPT_LIMIT = 64 * 1024
 # #1019 row 4: a Claude Reviewer session starts without file-editing tools.
 # Bash stays, because the Reviewer posts its verdict with gh; this is an accident
-# guard, not a containment boundary.
-REVIEWER_DISALLOWED_TOOLS_ARG = "--disallowedTools=Edit,Write,NotebookEdit"
+# guard, not a containment boundary. #1502 WP-H E7: Skill is denied too, so
+# project skills under .claude/skills cannot steer the Reviewer.
+REVIEWER_DISALLOWED_TOOLS_ARG = "--disallowedTools=Edit,Write,NotebookEdit,Skill"
 # There is no backward clock tolerance: the launch time is taken before
 # `claude` runs, so every event of this dispatch is stamped at or after it,
 # and anything earlier (e.g. resumed history) could be mistaken for a receipt.
