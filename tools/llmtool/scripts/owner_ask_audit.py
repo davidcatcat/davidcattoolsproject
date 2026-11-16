@@ -287,16 +287,57 @@ def chat_asks(directory: str, since: str, until: str) -> list[int] | None:
     return sorted(found)
 
 
+def chat_summary(chat: list[int] | None, counted: list[dict]) -> dict:
+    """#1943 P0: chat asks with or without a GitHub ask marker within CHAT_WINDOW."""
+    if chat is None:
+        return {"status": "UNKNOWN"}
+    marked = [when for when in map(_seconds, (c.get("created_at") for c in counted)) if when]
+    near = [when for when in chat if any(abs(mark - when) <= CHAT_WINDOW for mark in marked)]
+    result = {"status": "COUNTED", "asks": len(chat), "with_marker": len(near)}
+    result["without_marker"] = len(chat) - len(near)
+    return result
+
+
+def metrics(counted, gated, ungated, rows, chat, effective_tasks) -> dict:
+    """#1943 P0 metrics. A value that needs a missing source is UNKNOWN, never zero.
+
+    owner_decisions counts GitHub asks plus chat asks without a marker. Gate coverage
+    is over the GitHub entry, which llmtool controls. Invalid escalations are asks
+    without a reserved row. Owner wait time is the separate owner_wait block.
+    """
+    chat_only = chat_summary(chat, counted).get("without_marker", 0)
+    decisions = len(counted) + chat_only
+    result = {"owner_decisions": decisions, "complete": chat is not None}
+    result["gate_coverage"] = round(gated / len(counted), 4) if counted else None
+    invalid = ungated + chat_only
+    result["invalid_escalation_rate"] = round(invalid / decisions, 4) if decisions else None
+    result["true_reserved"] = sum(n for row, n in rows.items() if row != "R-OTHER")
+    per_task = "UNKNOWN"
+    if type(effective_tasks) is int and effective_tasks > 0:
+        per_task = round(decisions * 100 / effective_tasks, 2)
+    result["per_100_effective_tasks"] = per_task
+    not_counted = [{"entry": name, "count": "UNKNOWN"} for name in NOT_COUNTED]
+    if chat is None:
+        not_counted.insert(0, {"entry": "pm_chat", "count": "UNKNOWN"})
+    result["not_counted"] = not_counted
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--since", required=True)
     parser.add_argument("--until", required=True)
     parser.add_argument("--repo")
+    parser.add_argument("--chat-transcripts")
+    parser.add_argument("--effective-tasks", type=int)
     try:
         args = parser.parse_args(argv)
         repo = repository_slug(args.repo)
-        raw = fetch_comments(repo, args.since)
-        result = audit(raw, args.since, args.until)
+        raw = fetch_comments(repo, args.since, args.until)
+        chat = None
+        if args.chat_transcripts:
+            chat = chat_asks(args.chat_transcripts, args.since, args.until)
+        result = audit(raw, args.since, args.until, chat, args.effective_tasks)
         summary = {k: v for k, v in result.items() if k != "items"}
         print(json.dumps(summary, sort_keys=True))
         for item in result["items"]:
