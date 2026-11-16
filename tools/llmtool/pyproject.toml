@@ -24,4 +24,7 @@ namespaces = false
 llmtool = ["skills/*/SKILL.md"]
 
 [tool.setuptools.data-files]
-llmtool = ["worker-dispatch.json"]
+# policy.json is read through repair_policy.policy_path(); the 'data' dest
+# matches the sysconfig data path candidate (PR #1670 audit: installed
+# non-editable runs must find it, not just source checkouts).
+llmtool = ["worker-dispatch.json", "policy.json"]
