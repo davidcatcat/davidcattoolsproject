@@ -39,70 +39,97 @@ def _codex_formal_pass(lines, *, head, version, task_id, run_id, contract_digest
     )
 
 
-def _comment_verdict(comment, *, head, version, task):
+def is_bound_verdict(comment, *, head, version, task):
+    """Whether a comment is a bound verdict for this claimed head and version."""
+    if type(comment) is not dict:
+        return False
     body = comment.get('body')
-    if type(body) is not str or len(body.encode('utf-8', 'replace')) > 65536:
-        return None
+    if type(body) is not str:
+        return False
     lines = [line for line in body.splitlines() if line.strip()]
     if len(lines) < 2:
-        return None
+        return False
     marker = task_completion._VERDICT_MARKER.fullmatch(lines[0])
-    developer = task.get('developer')
+    developer = task.get('developer') if type(task) is dict else None
     if (marker is not None and marker.group(1) == 'Claude' and
             task_completion._reviewer_author_family(developer) == 'claude'):
-        return None
-    codex_formal_pass = False
-    codex_bound = False
+        return False
     if marker is not None and marker.group(1) == 'Codex':
         developer_family = task_completion._reviewer_author_family(developer)
         if developer_family is None or developer_family == 'codex':
-            return None
+            return False
         binding = next((match for line in lines[1:]
                         if (match := _CODEX_BINDING.fullmatch(line)) is not None), None)
-        task_binding = task.get('task_binding')
+        task_binding = task.get('task_binding') if type(task) is dict else None
         codex_bound = (
-            binding is not None and type(task_binding) is dict and
+            binding is not None and type(task_binding) is dict and type(task) is dict and
             binding.group(1) == task.get('task_id') and
             binding.group(2) == task.get('run_id') and
             binding.group(3) == task_binding.get('contract_digest') and
             binding.group(4) == head)
         if not codex_bound:
-            return None
+            return False
     if marker is not None and marker.group(1) == 'Claude':
         # #1898: a Claude verdict bound to another Task or run is not this Task's
         # verdict, so it is ignored as the Codex branch does, never a REVIEW_FAIL.
         binding = next((match for line in lines[1:]
                         if (match := _CODEX_BINDING.fullmatch(line.strip())) is not None), None)
-        if binding is not None and (binding.group(1) != task.get('task_id') or
+        if binding is not None and (type(task) is not dict or
+                                    binding.group(1) != task.get('task_id') or
                                     binding.group(2) != task.get('run_id')):
-            return None
+            return False
     status_line = _VERDICT_VERSION_HEAD.fullmatch(lines[1])
     if status_line is None:
-        return None
+        return False
     status, raw_version, raw_head = status_line.groups()
     if raw_head != head or int(raw_version) != version:
-        return None
+        return False
     marker_matches = marker is not None and marker.group(2) == status
     # A Codex PASS is formal only for a cross-family Task and the exact accept
     # and binding lines required by the Codex Reviewer prompt.
     if marker_matches and marker.group(1) == 'Codex' and status == 'PASS':
+        task_binding = task.get('task_binding') if type(task) is dict else None
+        if (type(task) is not dict or type(task_binding) is not dict or
+                'contract_digest' not in task_binding):
+            return False
         codex_formal_pass = _codex_formal_pass(
-            lines, head=head, version=version, task_id=task['task_id'],
-            run_id=task['run_id'],
-            contract_digest=task['task_binding']['contract_digest'])
+            lines, head=head, version=version, task_id=task.get('task_id'),
+            run_id=task.get('run_id'),
+            contract_digest=task_binding.get('contract_digest'))
         if not codex_formal_pass:
-            return None
+            return False
+    return True
+
+
+_is_bound_verdict = is_bound_verdict
+
+
+def _comment_verdict(comment, *, head, version, task):
+    body = comment.get('body')
+    if type(body) is not str or len(body.encode('utf-8', 'replace')) > 65536:
+        return None
+    if not is_bound_verdict(comment, head=head, version=version, task=task):
+        return None
+    lines = [line for line in body.splitlines() if line.strip()]
+    marker = task_completion._VERDICT_MARKER.fullmatch(lines[0])
+    status = _VERDICT_VERSION_HEAD.fullmatch(lines[1]).group(1)
+    marker_matches = marker is not None and marker.group(2) == status
+    codex_formal_pass = marker_matches and marker.group(1) == 'Codex' and status == 'PASS'
     comment_id = comment.get('id')
     if type(comment_id) is not int or comment_id < 0:
         _refuse('REVIEW_RESULT_INVALID')
 
+    developer = task.get('developer') if type(task) is dict else None
+    task_binding = task.get('task_binding') if type(task) is dict else None
+    contract_digest = task_binding.get('contract_digest') if type(task_binding) is dict else None
     formal_pass = (codex_formal_pass or
                    (marker_matches and marker.group(1) == 'Claude' and status == 'PASS' and
+                    contract_digest is not None and
                     task_completion._review_family_compatible(
                         developer, 'claude-reviewer') and
                     task_completion.is_formal_claude_pass(
-                        body, task_id=task['task_id'], run_id=task['run_id'],
-                        contract_digest=task['task_binding']['contract_digest'],
+                        body, task_id=task.get('task_id'), run_id=task.get('run_id'),
+                        contract_digest=contract_digest,
                         result_sha=head)))
     # Match the strict formal PASS shape used by task_completion. All other
     # bound verdicts are non-passing dispositions, including malformed PASSes.

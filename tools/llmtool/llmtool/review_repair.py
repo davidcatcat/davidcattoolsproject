@@ -328,47 +328,7 @@ def _current_d6_head(task, executor_task, current_head):
     return registration.result_sha
 
 
-def _is_bound_verdict(comment, *, head, version, task):
-    body = comment.get('body')
-    if type(body) is not str:
-        return False
-    lines = [line for line in body.splitlines() if line.strip()]
-    if len(lines) < 2:
-        return False
-    marker = task_completion._VERDICT_MARKER.fullmatch(lines[0])
-    developer = task.get('developer') if type(task) is dict else None
-    if (marker is not None and marker.group(1) == 'Claude' and
-            task_completion._reviewer_author_family(developer) == 'claude'):
-        return False
-    if marker is not None and marker.group(1) == 'Codex':
-        developer_family = task_completion._reviewer_author_family(developer)
-        if developer_family is None or developer_family == 'codex':
-            return False
-        binding = next((match for line in lines[1:]
-                        if (match := review_result._CODEX_BINDING.fullmatch(line)) is not None), None)
-        task_binding = task.get('task_binding') if type(task) is dict else None
-        codex_bound = (
-            binding is not None and type(task_binding) is dict and type(task) is dict and
-            binding.group(1) == task.get('task_id') and
-            binding.group(2) == task.get('run_id') and
-            binding.group(3) == task_binding.get('contract_digest') and
-            binding.group(4) == head)
-        if not codex_bound:
-            return False
-    if marker is not None and marker.group(1) == 'Claude':
-        binding = next((match for line in lines[1:]
-                        if (match := review_result._CODEX_BINDING.fullmatch(line.strip())) is not None), None)
-        if binding is not None and (type(task) is not dict or
-                                    binding.group(1) != task.get('task_id') or
-                                    binding.group(2) != task.get('run_id')):
-            return False
-    status_line = review_result._VERDICT_VERSION_HEAD.fullmatch(lines[1])
-    if status_line is None:
-        return False
-    status, raw_version, raw_head = status_line.groups()
-    if raw_head != head or int(raw_version) != version:
-        return False
-    return True
+_is_bound_verdict = review_result.is_bound_verdict
 
 
 def _failed_event(task, *, executor_task, pr_number, github_get):

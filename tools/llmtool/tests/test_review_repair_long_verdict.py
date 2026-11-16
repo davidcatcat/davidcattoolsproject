@@ -6,11 +6,12 @@ import json
 import unittest
 from unittest.mock import Mock, patch
 
-from llmtool import review_repair, task_store, task_submission_cli
+from llmtool import review_repair, review_result, task_store, task_submission_cli
 from llmtool.errors import LLMToolError
 
 import task_fixtures
 from test_review_repair import (
+    CONTRACT,
     EXECUTOR,
     HEAD,
     PR,
@@ -378,6 +379,152 @@ class ReviewRepairLongVerdictTests(ReviewRepairTests):
             task, [], packet, f'pr-{PR}', policy, verdict_body=long_body
         )
         self.assertIsNone(gate_result)
+
+    def test_shared_binding_predicate_parity_codex_pass(self):
+        task = dict(self.store.get(TASK), task_binding={'contract_digest': CONTRACT})
+        self.store = TempTaskStore(self.temp.name, task)
+
+        # 1. Valid formal Codex PASS
+        body_valid = (
+            f"<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->\n"
+            f"Verdict: PASS | Version: v1 | HEAD: {HEAD}\n"
+            f"FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n"
+            f"LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} contract={CONTRACT} head={HEAD}\n"
+        )
+        comment_valid = {
+            'id': 9,
+            'body': body_valid,
+            'created_at': '2026-10-27T01:00:00Z',
+            'updated_at': '2026-10-27T01:00:00Z',
+        }
+        self.assertTrue(review_result.is_bound_verdict(comment_valid, head=HEAD, version=1, task=task))
+        self.assertTrue(review_repair._is_bound_verdict(comment_valid, head=HEAD, version=1, task=task))
+        verdict_valid = review_result._comment_verdict(comment_valid, head=HEAD, version=1, task=task)
+        self.assertIsNotNone(verdict_valid)
+        self.assertEqual(verdict_valid[2], 'REVIEW_PASS')
+
+        # 2. Malformed Codex PASS (missing FORMAL ACCEPT line)
+        body_malformed = (
+            f"<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->\n"
+            f"Verdict: PASS | Version: v1 | HEAD: {HEAD}\n"
+            f"LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} contract={CONTRACT} head={HEAD}\n"
+        )
+        comment_malformed = {
+            'id': 10,
+            'body': body_malformed,
+            'created_at': '2026-10-27T01:00:00Z',
+            'updated_at': '2026-10-27T01:00:00Z',
+        }
+        self.assertFalse(review_result.is_bound_verdict(comment_malformed, head=HEAD, version=1, task=task))
+        self.assertFalse(review_repair._is_bound_verdict(comment_malformed, head=HEAD, version=1, task=task))
+        self.assertIsNone(review_result._comment_verdict(comment_malformed, head=HEAD, version=1, task=task))
+
+    def test_malformed_oversized_codex_pass_does_not_block_repair(self):
+        task = dict(self.store.get(TASK), task_binding={'contract_digest': CONTRACT})
+        self.store = TempTaskStore(self.temp.name, task)
+
+        # Malformed Codex PASS (missing FORMAL ACCEPT line), but oversized (> 65536 chars)
+        prefix = (
+            f"<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->\n"
+            f"Verdict: PASS | Version: v1 | HEAD: {HEAD}\n"
+            f"LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} contract={CONTRACT} head={HEAD}\n"
+        )
+        body_malformed_oversized = prefix + ("# diagnostic commentary trace\n" * 2500)
+        self.assertGreater(len(body_malformed_oversized), review_repair.MAX_VERDICT_CHARS)
+
+        comment_malformed = {
+            'id': 11,
+            'body': body_malformed_oversized,
+            'created_at': '2026-10-27T01:05:00Z',
+            'updated_at': '2026-10-27T01:05:00Z',
+        }
+
+        # Case A: Only the malformed oversized comment is present -> missing fail event, NOT verdict too long
+        self._assert_refused(
+            'REVIEW_FAIL_EVENT_MISSING',
+            github_get=lambda _path: [comment_malformed],
+        )
+
+        # Case B: Along with a valid bound FAIL verdict -> repair proceeds, selecting the valid FAIL
+        comment_valid_fail = {
+            'id': 12,
+            'body': (
+                f"<!-- activity: type=review_verdict actor=Claude target=PM status=FIX -->\n"
+                f"Verdict: FAIL | Version: v1 | HEAD: {HEAD}\n"
+                f"Finding: F1 [High] src/service.py:10 unhandled exception\n"
+            ),
+            'created_at': '2026-10-27T01:00:00Z',
+            'updated_at': '2026-10-27T01:00:00Z',
+        }
+        result = self.dispatch(github_get=lambda _path: [comment_malformed, comment_valid_fail])
+        self.assertEqual(result['claim']['attempt'], 1)
+        self.assertEqual(result['claim']['state'], 'DISPATCHED')
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0]['packet']['verdict_comment_id'], 12)
+
+    def test_valid_oversized_formal_codex_pass_refuses_too_long(self):
+        task = dict(self.store.get(TASK), task_binding={'contract_digest': CONTRACT})
+        self.store = TempTaskStore(self.temp.name, task)
+
+        prefix = (
+            f"<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->\n"
+            f"Verdict: PASS | Version: v1 | HEAD: {HEAD}\n"
+            f"FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n"
+            f"LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} contract={CONTRACT} head={HEAD}\n"
+        )
+        body_valid_oversized = prefix + ("# valid trace context\n" * 3000)
+        self.assertGreater(len(body_valid_oversized), review_repair.MAX_VERDICT_CHARS)
+
+        comment_valid_oversized = {
+            'id': 11,
+            'body': body_valid_oversized,
+            'created_at': '2026-10-27T01:05:00Z',
+            'updated_at': '2026-10-27T01:05:00Z',
+        }
+
+        self._assert_refused(
+            review_repair.REVIEW_VERDICT_TOO_LONG,
+            github_get=lambda _path: [comment_valid_oversized],
+        )
+
+    def test_shared_binding_predicate_parity_other_shapes(self):
+        task = dict(self.store.get(TASK), task_binding={'contract_digest': CONTRACT})
+
+        # Mismatched HEAD
+        comment_wrong_head = _comment(head='f' * 40)
+        self.assertFalse(review_result.is_bound_verdict(comment_wrong_head, head=HEAD, version=1, task=task))
+        self.assertFalse(review_repair._is_bound_verdict(comment_wrong_head, head=HEAD, version=1, task=task))
+        self.assertIsNone(review_result._comment_verdict(comment_wrong_head, head=HEAD, version=1, task=task))
+
+        # Mismatched version
+        comment_wrong_version = _comment(version=2)
+        self.assertFalse(review_result.is_bound_verdict(comment_wrong_version, head=HEAD, version=1, task=task))
+        self.assertFalse(review_repair._is_bound_verdict(comment_wrong_version, head=HEAD, version=1, task=task))
+        self.assertIsNone(review_result._comment_verdict(comment_wrong_version, head=HEAD, version=1, task=task))
+
+        # Same-family Codex reviewer on Codex developer task
+        codex_task = dict(task, developer=dict(task['developer'], provider_profile='codex'))
+        comment_codex_fail = {
+            'id': 15,
+            'body': (
+                f"<!-- activity: type=review_verdict actor=Codex target=PM status=FIX -->\n"
+                f"Verdict: FAIL | Version: v1 | HEAD: {HEAD}\n"
+                f"LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} contract={CONTRACT} head={HEAD}\n"
+                f"Finding: F1 [High] a.py:1 error\n"
+            ),
+            'created_at': '2026-10-27T01:00:00Z',
+            'updated_at': '2026-10-27T01:00:00Z',
+        }
+        self.assertFalse(review_result.is_bound_verdict(comment_codex_fail, head=HEAD, version=1, task=codex_task))
+        self.assertFalse(review_repair._is_bound_verdict(comment_codex_fail, head=HEAD, version=1, task=codex_task))
+        self.assertIsNone(review_result._comment_verdict(comment_codex_fail, head=HEAD, version=1, task=codex_task))
+
+        # Cross-family Codex FAIL
+        self.assertTrue(review_result.is_bound_verdict(comment_codex_fail, head=HEAD, version=1, task=task))
+        self.assertTrue(review_repair._is_bound_verdict(comment_codex_fail, head=HEAD, version=1, task=task))
+        verdict = review_result._comment_verdict(comment_codex_fail, head=HEAD, version=1, task=task)
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict[2], 'REVIEW_FAIL')
 
 
 if __name__ == '__main__':
