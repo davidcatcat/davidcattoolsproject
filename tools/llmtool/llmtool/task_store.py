@@ -26,6 +26,7 @@ from .action_contract import TaskBinding
 from .diagnostics import validate_provider_usage
 from .errors import LLMToolError
 from . import file_ops
+from . import start_failure
 from .opencode_direct_developer import is_free_model
 from .role_config import _NAME
 from .task_verification import parse_task_contract
@@ -105,7 +106,18 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'abandonment', 'pm_session_adoptions', 'pm_provenance', 'merge_attempt',
     'published_pr', 'repair_cap_override', 'publish_operations',
     'review_exception', 'lineage', 'review_disputes', 'waiting', 'continues',
-    'file_ops', 'file_ops_evidence', 'file_ops_reservation'))
+    'file_ops', 'file_ops_evidence', 'file_ops_reservation',
+    'start_failures', 'repair_packet'))
+# #2188 design section 3: the append-only archive of failed Claude starts.
+MAX_START_FAILURES = 2
+_START_FAILURE_ENTRY_FIELDS = frozenset((
+    'failed_developer', 'record_sha256', 'retry_assignment_id', 'd6_head',
+    'retried_at', 'pm_session_id'))
+# #2188 design section 4: the persisted repair packet is the ASCII string
+# start_failure.canonical(P). It admits every packet a Claude delegate accepts
+# today: canonical(P) is a strict substring of the prompt, which is at most
+# developer_routes.claude.MAX_PROMPT_BYTES (65536) bytes.
+REPAIR_PACKET_MAX_BYTES = 65536
 # Owner-exception merge evidence (#1253, #1519). Only this one exception type
 # is persisted; its evidence is the exact owner_exception.verify() result.
 _REVIEW_EXCEPTION_TYPE = 'OWNER_EXCEPTION_DETERMINISTIC_REDACTION'
@@ -2018,6 +2030,73 @@ def _validate_file_ops_reservation(record):
             _fail('TASK_FILE_OPS_RESERVATION_INVALID')
 
 
+def _validate_start_failures(record):
+    """#2188 design section 3: 1..MAX_START_FAILURES exact archive entries."""
+    entries = record.get('start_failures')
+    if type(entries) is not list or not 1 <= len(entries) <= MAX_START_FAILURES:
+        _fail('START_RETRY_INVALID')
+    retry_ids = set()
+    for item in entries:
+        failed = item.get('failed_developer') if type(item) is dict else None
+        if (type(item) is not dict or set(item) != _START_FAILURE_ENTRY_FIELDS or
+                type(failed) is not dict or
+                failed.get('provider_profile') != 'claude' or
+                failed.get('state') != 'BLOCKED' or
+                not _hex32(failed.get('assignment_id')) or
+                type(item['record_sha256']) is not str or
+                re.fullmatch(r'[0-9a-f]{64}', item['record_sha256']) is None or
+                not _hex32(item['retry_assignment_id']) or
+                item['retry_assignment_id'] == failed['assignment_id'] or
+                item['retry_assignment_id'] in retry_ids or
+                type(item['d6_head']) is not str or
+                re.fullmatch(r'[0-9a-f]{40}', item['d6_head']) is None or
+                not _valid_utc_seconds(item['retried_at']) or
+                not _safe_identifier(item['pm_session_id'], SESSION_ID)):
+            _fail('START_RETRY_INVALID')
+        retry_ids.add(item['retry_assignment_id'])
+
+
+def _validate_repair_packet_text(value):
+    """#2188 design section 4: the stored text is canonical(P) of a valid packet P."""
+    if (type(value) is not str or not value.isascii() or
+            not 1 <= len(value) <= REPAIR_PACKET_MAX_BYTES or
+            start_failure.decode_repair_packet(value) is None):
+        _fail('REPAIR_PACKET_INVALID')
+
+
+def _check_repair_packet_write(current, changes):
+    """#2188 design section 4: repair_packet is set once, with the first developer."""
+    if 'repair_packet' not in changes:
+        return
+    if ('repair_packet' in current or current.get('developer') is not None or
+            type(changes.get('developer')) is not dict):
+        _fail('REPAIR_PACKET_IMMUTABLE')
+
+
+def _check_start_failures_write(current, changes):
+    """#2188 design section 3: start_failures changes only by one START_RETRY append.
+
+    Runs after the dispatch gate, so this write's START_RETRY was ALLOWED
+    there. The appended entry must archive the stored developer and name the
+    new assignment; anything else is refused START_RETRY_INVALID."""
+    if 'start_failures' not in changes:
+        return
+    from . import worker_dispatch
+    stored = current.get('start_failures', [])
+    proposed = changes['start_failures']
+    new_developer = changes.get('developer')
+    if (type(stored) is not list or type(proposed) is not list or
+            len(proposed) != len(stored) + 1 or len(proposed) > MAX_START_FAILURES or
+            proposed[:-1] != stored or type(proposed[-1]) is not dict or
+            type(current.get('developer')) is not dict or
+            proposed[-1].get('failed_developer') != current['developer'] or
+            type(new_developer) is not dict or
+            proposed[-1].get('retry_assignment_id') != new_developer.get('assignment_id') or
+            ('claude-developer', 'START_RETRY') not in
+            worker_dispatch.task_store_attempts(current, changes)):
+        _fail('START_RETRY_INVALID')
+
+
 def _validate(record, *, strict=True):
     keys = set(record) - {'abandonment'} if type(record) is dict else set()
     merge_attempt = record.get('merge_attempt') if type(record) is dict else None
@@ -2049,6 +2128,14 @@ def _validate(record, *, strict=True):
     if 'file_ops_reservation' in keys:
         keys.discard('file_ops_reservation')
         _validate_file_ops_reservation(record)
+    if 'start_failures' in keys:
+        # #2188: optional; a record without it stays valid.
+        keys.discard('start_failures')
+        _validate_start_failures(record)
+    if 'repair_packet' in keys:
+        # #2188: optional; a record without it stays valid.
+        keys.discard('repair_packet')
+        _validate_repair_packet_text(record['repair_packet'])
     if type(record) is dict and 'pm_session_adoptions' in record:
         keys.discard('pm_session_adoptions')
     if (type(record) is not dict or
@@ -2362,7 +2449,7 @@ def _validate(record, *, strict=True):
                     entry['action'] not in (
                         'DISPATCH', 'RETRY', 'REASSIGN', 'RECOVERY', 'REPAIR',
                         'TIMEOUT_CONTINUATION', 'REVIEWER_HANDOFF', 'REVIEWER_RETRY',
-                        'COMMITTED_RESULT_CARRY', 'ROLE_TIMEOUT_RETRY') or
+                        'COMMITTED_RESULT_CARRY', 'ROLE_TIMEOUT_RETRY', 'START_RETRY') or
                     (role_retry and (
                         type(entry['retry_phase']) is not str or
                         entry['retry_phase'] not in ('TRANSITION', 'ADAPTER') or
@@ -3800,6 +3887,12 @@ class TaskStore:
             _fail('TASK_FILE_OPS_EVIDENCE_FORBIDDEN')
         if type(record) is dict and 'file_ops_reservation' in record:
             _fail('TASK_FILE_OPS_RESERVATION_FORBIDDEN')
+        if type(record) is dict and 'start_failures' in record:
+            # #2188: appended to an existing Task by its START_RETRY write only.
+            _fail('START_RETRY_INVALID')
+        if type(record) is dict and 'repair_packet' in record:
+            # #2188: written once, in the update that sets developer from None.
+            _fail('REPAIR_PACKET_IMMUTABLE')
         if (type(record) is not dict or 'dispatch_audit' in record or
                 'completion_events' in record or 'completion_event_tombstones' in record or
                 'pm_session_adoptions' in record):
@@ -5821,6 +5914,8 @@ class TaskStore:
                 elif (type(new_entries) is not list or len(new_entries) != len(old_entries) + 1 or
                         new_entries[:-1] != old_entries):
                     _fail('HIGH_DEBUG_IMMUTABLE')
+            # #2188 design section 4: never changed or removed once written.
+            _check_repair_packet_write(current, changes)
             from . import worker_dispatch
             if trusted_dispatch_audit:
                 if 'dispatch_audit' in changes:
@@ -5884,6 +5979,9 @@ class TaskStore:
                 current['record_sha256'] = _digest(current)
                 self._write(current, create=False)
                 raise dispatch_denial
+            # #2188 design section 3: after the gate, so a refused START_RETRY
+            # keeps its audited denial; this is the store's own backstop.
+            _check_start_failures_write(current, changes)
             immutable = {'schema_version', 'task_id', 'run_id', 'pm_session_id',
                          'created_at', 'task_contract', 'task_binding', 'record_sha256',
                          'continues', 'file_ops'}
