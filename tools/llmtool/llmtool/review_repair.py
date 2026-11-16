@@ -513,13 +513,17 @@ def _policy():
         _refuse('REPAIR_POLICY_INVALID')
 
 
-def _review_gate(task, attempts, packet, family, policy, counts=None):
+def _review_gate(task, attempts, packet, family, policy, counts=None, verdict_text=None):
     """#1502 WP-D (O2, D1, D3): admit one review repair from the valid FAILs per HEAD.
 
     Each earlier review repair claim stands for a valid FAIL on its HEAD and the
     current FAIL adds its own HEAD, so a re-review of one HEAD never counts twice.
     A FAIL whose IDs show no blocking finding is not valid. The second repair needs
     an RCA_CONFIRMED Debug of this family on the failed HEAD; that entry is returned.
+
+    #1686: verdict_text is the full bound verdict body; findings are judged in
+    full, so a blocking finding after the packet's 2000-character excerpt is
+    still seen. Without it the packet excerpt is used, as for other packets.
 
     D14 (spec section 7): the policy decides before the repair limit. A Task whose
     repair_max repairs are used escalates by kind at its next valid FAIL (ROOT
@@ -531,7 +535,8 @@ def _review_gate(task, attempts, packet, family, policy, counts=None):
     Without counts the Task's own attempts are used.
     """
     from . import repair_policy
-    text = packet['reviewer_text_excerpt_untrusted_data']
+    text = (packet['reviewer_text_excerpt_untrusted_data']
+            if verdict_text is None else verdict_text)
     if review_result.blocking_findings(text) == []:
         _refuse('REPAIR_NO_BLOCKING_FINDING')
     # #1502 WP-D D13: a FAIL whose every blocking finding an arbiter withdrew
@@ -833,7 +838,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                                                include_successors=True)
         rca_entry = None
         if not test_failure:
-            rca_entry = _review_gate(task, attempts, packet, family, _policy(), counts=counts)
+            rca_entry = _review_gate(task, attempts, packet, family, _policy(), counts=counts,
+                                     verdict_text=verdict_text)
             if rca_entry is not None:
                 packet = dict(packet,
                               high_debug_report_untrusted_data=rca_entry['report'][:6000],
