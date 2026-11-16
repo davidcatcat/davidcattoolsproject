@@ -62,15 +62,16 @@ def repository_slug(explicit: str | None = None) -> str:
 
 def _fetch_page(repo: str, start: str, page: int, timeout: int) -> list[dict]:
     """#1943 P0: one page of issue comments updated since start, oldest created first."""
-    result = _run(["gh", "api", "--paginate", "--slurp",
-                   f"repos/{repo}/issues/comments?since={since}&per_page=100"])
+    result = _run(["gh", "api",
+                   f"repos/{repo}/issues/comments?since={start}&sort=created&direction=asc"
+                   f"&per_page=100&page={page}"], timeout=timeout)
     if result.returncode:
         raise AuditError("gh failed to read repository data")
     try:
         payload = json.loads(result.stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise AuditError("gh returned invalid JSON") from exc
-    if type(payload) is not list or any(type(page) is not list for page in payload):
+    if type(payload) is not list or any(type(item) is not dict for item in payload):
         raise AuditError("gh returned unexpected JSON")
     return [item for page in payload for item in page]
 
