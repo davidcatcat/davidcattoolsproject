@@ -199,6 +199,51 @@ class HighDebugNoPRTests(unittest.TestCase):
         got = (kwargs['issue_number'], kwargs['pr_number'], kwargs['family'])
         self.assertEqual(got, (42, None, 'no-pr'))
 
+    def test_issue_target_that_is_not_a_plain_issue_refuses_before_any_entry(self):
+        cases = [{'number': 42, 'pull_request': {}}, {'number': 43}, None, ['x']]
+        for value in cases:
+            with self.subTest(value=value):
+                self.github_get.return_value = value
+                code, reader = self.refusal(_NoPRStore())
+                self.assertEqual(code, 'HIGH_DEBUG_ISSUE_INVALID')
+                reader.assert_not_called()
+                self.poster.assert_not_called()
+        self.github_get.side_effect = LLMToolError('GITHUB_EVIDENCE_UNAVAILABLE')
+        code, _reader = self.refusal(_NoPRStore())
+        self.assertEqual(code, 'HIGH_DEBUG_ISSUE_INVALID')
+
+    def test_plain_issue_check_reads_the_issue_endpoint(self):
+        self.assertTrue(high_debug._is_plain_issue(42))
+        self.github_get.assert_called_once_with('issues/42')
+        self.github_get.return_value = {'number': 42, 'pull_request': {'url': 'x'}}
+        self.assertFalse(high_debug._is_plain_issue(42))
+
+    def post(self, issue_only, returncode=0):
+        result = subprocess.CompletedProcess([], returncode, stdout=b'', stderr=b'')
+        completion = high_debug.task_completion
+        which = patch.object(high_debug.shutil, 'which', return_value='/usr/bin/gh')
+        slug = patch.object(completion, '_trusted_slug', return_value='owner/repo')
+        run = patch.object(high_debug.subprocess, 'run', return_value=result)
+        with which, slug, run as runner:
+            posted = _REAL_POST_GITHUB_RECORD(42, 'body', '/repo', issue_only=issue_only)
+        return posted, [call.args[0][1] for call in runner.call_args_list]
+
+    def test_issue_only_post_writes_only_an_issue_comment(self):
+        self.assertEqual(self.post(True), (True, ['issue']))
+        self.github_get.assert_called_once_with('issues/42')
+
+    def test_issue_only_post_never_writes_on_a_pull_request(self):
+        for value in ({'number': 42, 'pull_request': {}}, {'number': 7}):
+            with self.subTest(value=value):
+                self.github_get.return_value = value
+                self.assertEqual(self.post(True), (False, []))
+        self.github_get.side_effect = LLMToolError('GITHUB_EVIDENCE_UNAVAILABLE')
+        self.assertEqual(self.post(True), (False, []))
+
+    def test_pr_target_post_keeps_the_pr_comment_path(self):
+        self.assertEqual(self.post(False), (True, ['pr']))
+        self.github_get.assert_not_called()
+
 
 class FormalRcaConsumerNoPRTests(unittest.TestCase):
     def setUp(self):
