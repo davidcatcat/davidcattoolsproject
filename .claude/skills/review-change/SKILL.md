@@ -63,7 +63,7 @@ llmtool Task closed by `task complete --reviewer-task`, use the
 ## Cloud verification review
 
 For llmtool Cloud/Mac changes, check
-[the development workflow](../../tools/llmtool/WORKFLOW.md).
+[the development workflow](../../../tools/llmtool/WORKFLOW.md).
 Verify the handoff names the tested implementation SHA, distinguishes Cloud/CI/mock
 from Mac/live evidence, and leaves required pending checks merge-blocking. Check for
 changes since validation before accepting old results. Documentation-only work needs

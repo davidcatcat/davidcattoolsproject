@@ -38,7 +38,7 @@ MAX_RULE_BYTES = 262144
 SHA256 = r"[0-9a-f]{64}"
 # Normative documents for the model-name rule (#1502 WP-G). docs/history and
 # docs/reports are archival and are never checked.
-NORMATIVE_DOC_GLOBS = ("AGENTS.md", "CLAUDE.md", "skills/**/*.md", "docs/**/*.md", "tools/llmtool/*.md")
+NORMATIVE_DOC_GLOBS = ("AGENTS.md", "CLAUDE.md", ".claude/skills/**/*.md", "docs/**/*.md", "tools/llmtool/*.md")
 NON_NORMATIVE_DOC_PREFIXES = ("docs/history/", "docs/reports/")
 
 

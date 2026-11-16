@@ -2,7 +2,7 @@
 
 > Owner confirmed: 2026-10-19. This document is the **management/reporting contract**, not a new product milestone, controller, daemon, workflow engine, notification channel, permission grant or acceptance evidence.
 >
-> Authority: the existing [A11 ROADMAP](../../tools/llmtool/ROADMAP.md), [WORKFLOW](../../tools/llmtool/WORKFLOW.md), [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md), [safe-git](../../skills/safe-git/SKILL.md) and Issue [#120](https://github.com/davidcatcat/davidcattoolsproject/issues/120) keep their technical gates. This document defines **when to report outcomes and seek Owner decisions**.
+> Authority: the existing [A11 ROADMAP](../../tools/llmtool/ROADMAP.md), [WORKFLOW](../../tools/llmtool/WORKFLOW.md), [ai-team-delivery](../../.claude/skills/ai-team-delivery/SKILL.md), [safe-git](../../.claude/skills/safe-git/SKILL.md) and Issue [#120](https://github.com/davidcatcat/davidcattoolsproject/issues/120) keep their technical gates. This document defines **when to report outcomes and seek Owner decisions**.
 
 ## 1. Product outcome and division of labor
 

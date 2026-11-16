@@ -9566,7 +9566,7 @@ class PrBoardTests(unittest.TestCase):
             ("scripts/llmtool_monitor.py",): {"mac"},
             ("docs/ci/README.md",): {"docs"},
             ("tools/llmtool/README.md",): {"docs"},      # Linux reads it; macOS does not
-            ("CLAUDE.md", "skills/review-change/SKILL.md"): {"docs"},
+            ("CLAUDE.md", ".claude/skills/review-change/SKILL.md"): {"docs"},
             ("README.md",): {"docs"},
             self.RUNTIME: {"linux", "mac"},
             self.RUNTIME + ("docs/a.md",): {"linux", "mac", "docs"},

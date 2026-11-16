@@ -19,7 +19,7 @@ another source-code review.
 
 Select the buckets relevant to the product/milestone:
 
-- **Smoke:** startup/help/basic happy path and installation/package sanity.
+- **Smoke:** startup/help/happy-path basics and installation/package sanity.
 - **Functional:** documented commands/options, input forms, output schemas and exit codes.
 - **Failure/recovery:** malformed input, missing dependencies, provider/network/config errors, interruption and retry/recovery behavior promised by the contract.
 - **State/concurrency:** repeated runs, parallel operations, persistence/capacity, cleanup/restart and stale state.

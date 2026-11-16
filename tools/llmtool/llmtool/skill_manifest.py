@@ -39,8 +39,8 @@ MAX_SKILL_FILE_SIZE = 1024 * 1024
 MAX_DEVELOPER_PREFIX_SIZE = 14 * 1024
 GIT_READ_TIMEOUT_SECONDS = 10
 
-COMMON_CORE_CARD_PATH = 'skills/role-cards/common-core.md'
-DEVELOPER_CARD_PATH = 'skills/role-cards/developer.md'
+COMMON_CORE_CARD_PATH = '.claude/skills/role-cards/common-core.md'
+DEVELOPER_CARD_PATH = '.claude/skills/role-cards/developer.md'
 # Role-card table (WP-F design 3.7, #1502): common core first, then the
 # Developer card, in prompt order. Every Developer route receives the
 # common-core card. gw-agent has no card delivery yet (its runs record
@@ -56,21 +56,21 @@ _ROLE_CARD_TABLE = {
 
 _BASE_PATHS = (
     'AGENTS.md',
-    'skills/ai-team-delivery/SKILL.md',
+    '.claude/skills/ai-team-delivery/SKILL.md',
 )
 _CLAUDE_BASE_PATHS = (
     'CLAUDE.md',
-    'skills/ai-team-delivery/SKILL.md',
+    '.claude/skills/ai-team-delivery/SKILL.md',
 )
 _PM_PATHS = (
-    'skills/ai-team-delivery/pm-continuation.md',
-    'skills/ai-team-delivery/pm-continuation-reference.md',
+    '.claude/skills/ai-team-delivery/pm-continuation.md',
+    '.claude/skills/ai-team-delivery/pm-continuation-reference.md',
 )
 _REVIEW_PATHS = (
-    'skills/review-change/SKILL.md',
-    'skills/ai-team-delivery/formal-verdict.md',
+    '.claude/skills/review-change/SKILL.md',
+    '.claude/skills/ai-team-delivery/formal-verdict.md',
 )
-_GIT_PATHS = ('skills/safe-git/SKILL.md',)
+_GIT_PATHS = ('.claude/skills/safe-git/SKILL.md',)
 _MANIFEST_TABLE = {
     'pm': {
         'dispatch': _BASE_PATHS + _PM_PATHS,
@@ -389,16 +389,16 @@ def build_role_cards(repo_root, base_commit, route, git_runner=subprocess.run,
     }
 
 
-DEBUG_CARD_PATH = 'skills/role-cards/debug.md'
-HIGH_DEBUG_REPORT_PATH = 'skills/ai-team-delivery/high-debug-report.md'
+DEBUG_CARD_PATH = '.claude/skills/role-cards/debug.md'
+HIGH_DEBUG_REPORT_PATH = '.claude/skills/ai-team-delivery/high-debug-report.md'
 # WP-F design 3.7 Debug row (#1502): common core, the Debug card and the High
 # Debug report procedure, in prompt order. Both Debug routes share this list.
 _DEBUG_CARD_PATHS = (COMMON_CORE_CARD_PATH, DEBUG_CARD_PATH, HIGH_DEBUG_REPORT_PATH)
 MAX_DEBUG_PREFIX_SIZE = 14 * 1024
 
-REVIEWER_CARD_PATH = 'skills/role-cards/reviewer.md'
-REVIEW_CHANGE_SKILL_PATH = 'skills/review-change/SKILL.md'
-FORMAL_VERDICT_PATH = 'skills/ai-team-delivery/formal-verdict.md'
+REVIEWER_CARD_PATH = '.claude/skills/role-cards/reviewer.md'
+REVIEW_CHANGE_SKILL_PATH = '.claude/skills/review-change/SKILL.md'
+FORMAL_VERDICT_PATH = '.claude/skills/ai-team-delivery/formal-verdict.md'
 # WP-F design 3.7 Reviewer row (#1502): common core, the Reviewer card and the
 # two review-gate procedures, in prompt order. Both Reviewer routes share it.
 _REVIEW_CARD_PATHS = (COMMON_CORE_CARD_PATH, REVIEWER_CARD_PATH,

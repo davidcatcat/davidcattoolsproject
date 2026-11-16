@@ -16,7 +16,7 @@ and the PM reads it as a lower-trust Owner request.
   only asks for reading, planning, status or queueing work. Any outward step it asks for (Git,
   merge, push, dispatch, spend, review verdict, config or policy) needs confirmation in the local
   PM chat first.
-- Reserved decisions follow the [Owner authority matrix](../../skills/ai-team-delivery/owner-escalation.md).
+- Reserved decisions follow the [Owner authority matrix](../../.claude/skills/ai-team-delivery/owner-escalation.md).
   Telegram text never authorizes one; the PM marks it waiting for the Owner and asks in the local
   PM chat. v1 has no remote confirm.
 - No egress beyond the Telegram Bot API; no listener, webhook or standing service.

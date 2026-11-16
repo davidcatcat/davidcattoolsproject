@@ -30,7 +30,7 @@ on:
       - 'tools/ai-loop/**'
       - 'AGENTS.md'
       - 'CLAUDE.md'
-      - 'skills/**'
+      - '.claude/skills/**'
       - 'docs/**'
       - 'tools/llmtool/*.md'
       - '*.md'
@@ -51,7 +51,7 @@ on:
       - 'tools/ai-loop/**'
       - 'AGENTS.md'
       - 'CLAUDE.md'
-      - 'skills/**'
+      - '.claude/skills/**'
       - 'docs/**'
       - 'tools/llmtool/*.md'
       - '*.md'
@@ -331,7 +331,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
           "$JOB_PYTHON" -B -m unittest discover -s scripts -p 'test_*.py' < /dev/null
-          folders=$(find skills -name 'test_*.py' -exec dirname {} + | sort -u)
+          folders=$(find .claude/skills -name 'test_*.py' -exec dirname {} + | sort -u)
           if [ -z "$folders" ]; then
             echo "nothing to run"
             exit 0

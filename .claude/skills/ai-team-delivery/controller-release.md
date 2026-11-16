@@ -2,7 +2,7 @@
 
 # Mac operator handoff and frozen paths
 
-ai-loop is a standalone tool documented in [tools/ai-loop/README.md](../../tools/ai-loop/README.md) and is not an llmtool controller.
+ai-loop is a standalone tool documented in [tools/ai-loop/README.md](../../../tools/ai-loop/README.md) and is not an llmtool controller.
 
 ## Mac operator handoff
 

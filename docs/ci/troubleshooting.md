@@ -56,4 +56,4 @@ gh run view <RUN_ID> --log-failed
 
 ## 6. 排查完成前的 STOP 規則
 
-當缺少必需 CI、SHA 不一致、主分支已變動、存在未分類的產品安全失敗或無權限／預算時，保留原始證據，停止受影響的合併／發布，不更改門檻來取得綠燈。對應程序見 [safe-git](../../skills/safe-git/SKILL.md)。
+當缺少必需 CI、SHA 不一致、主分支已變動、存在未分類的產品安全失敗或無權限／預算時，保留原始證據，停止受影響的合併／發布，不更改門檻來取得綠燈。對應程序見 [safe-git](../../.claude/skills/safe-git/SKILL.md)。

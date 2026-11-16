@@ -5,7 +5,7 @@ description: Use when inspecting repository state, fetching or syncing branches,
 
 # Safe Git
 
-Use for Git synchronization and publication. [AGENTS.md](../../AGENTS.md) owns repository-wide authority and privacy rules. Never exceed the task's repository, branch or file scope.
+Use for Git synchronization and publication. [AGENTS.md](../../../AGENTS.md) owns repository-wide authority and privacy rules. Never exceed the task's repository, branch or file scope.
 
 ## Owner D6 — dynamic task-scoped worktrees
 
@@ -18,11 +18,11 @@ Before creating a worktree:
 
 Do not create or retire a D6 tree based only on this summary; follow the complete acceptance, inventory, ignored-file and process-release gates in the linked lifecycle reference. Preserve active, dirty, evidence-bearing or uncertain work. D6 worktree operations must not alter or retire the canonical checkout; its Integrator remains the sole writer.
 
-The old G1–G7 fixed-root pilot is historical and archived in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md); D6 is current. See the linked [Owner decision](../../docs/decisions/llmtool_dynamic_worktree_20261019.md) and [D6 worktree reference](worktree-lifecycle.md) for policy attribution and registry details.
+The old G1–G7 fixed-root pilot is historical and archived in [policy history](../../../docs/history/llmtool-agent-policy-legacy-20261020.md); D6 is current. See the linked [Owner decision](../../../docs/decisions/llmtool_dynamic_worktree_20261019.md) and [D6 worktree reference](worktree-lifecycle.md) for policy attribution and registry details.
 
 ## Task binding and evidence
 
-At task start and completion, bind source, owner, root, branch, HEAD and the permitted file/inventory set. Verify task-base originals and current source; candidate code or a reviewer packet is not itself an acceptance baseline. Do not repin after drift without recording the change and rechecking affected evidence. The existing Owner authorization for Codex `danger-full-access` / `approval_policy=never` is recorded in the [permission-mode decision](../../reports/llmtool_codex_danger_full_access_audit_decision_20261013.md) and [Issue #135](https://github.com/davidcatcat/davidcattoolsproject/issues/135#issuecomment-6152425440); it records authority, not proof of an effective Mac session mode or native audit. Reviewers may report risks but cannot veto or revoke this Owner authorization; keep authority, effective mode and audit evidence separate. It does not waive task scope, D6, secret handling, egress or Git restrictions.
+At task start and completion, bind source, owner, root, branch, HEAD and the permitted file/inventory set. Verify task-base originals and current source; candidate code or a reviewer packet is not itself an acceptance baseline. Do not repin after drift without recording the change and rechecking affected evidence. The existing Owner authorization for Codex `danger-full-access` / `approval_policy=never` is recorded in the [permission-mode decision](../../../reports/llmtool_codex_danger_full_access_audit_decision_20261013.md) and [Issue #135](https://github.com/davidcatcat/davidcattoolsproject/issues/135#issuecomment-6152425440); it records authority, not proof of an effective Mac session mode or native audit. Reviewers may report risks but cannot veto or revoke this Owner authorization; keep authority, effective mode and audit evidence separate. It does not waive task scope, D6, secret handling, egress or Git restrictions.
 
 For runtime-bound tasks, preserve exact interpreter/import provenance, effective permissions and hook evidence separately from user-granted settings. Before accepting a check result, bind it to the candidate SHA and verify the merge-base, source revision and artifact/test provenance; reject stale results. Unknown ownership, source drift, crash, unreleased process/session or ambiguous ignored/untracked data means STOP and preserve the worktree. Published PR-head evidence must match the actual local candidate; do not infer it from a commit claim.
 
