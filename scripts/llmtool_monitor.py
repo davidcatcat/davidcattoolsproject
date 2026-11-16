@@ -299,9 +299,11 @@ def _llmtool_drive_task(command: str) -> str:
     parts = command.split()
     for i in range(len(parts) - 2):
         if parts[i] == "task" and parts[i + 1] in ("drive", "advance"):
-            cand = parts[i + 2]
-            if HEX_TASK_ID.fullmatch(cand):
-                return cand.lower()
+            for cand in parts[i + 2:]:
+                if HEX_TASK_ID.fullmatch(cand):
+                    return cand.lower()
+                if not cand.startswith("-"):
+                    break
     return ""
 
 
@@ -8231,6 +8233,10 @@ def _drive_stage(record: dict | None) -> str:
     if not isinstance(record, dict):
         return "狀態未知"
 
+    stage_val = record.get("stage")
+    if isinstance(stage_val, str) and stage_val.strip() in VALID_DRIVE_STAGES:
+        return stage_val.strip()
+
     candidates = []
     for k in ("stage", "task_stage", "phase", "state"):
         val = record.get(k)
@@ -8252,7 +8258,7 @@ def _drive_stage(record: dict | None) -> str:
                 candidates.append(val.strip())
 
     for val in candidates:
-        if val in VALID_DRIVE_STAGES and val != "狀態未知":
+        if val in VALID_DRIVE_STAGES:
             return val
         v_lower = val.lower()
         if "ec2" in v_lower or "remote_test" in v_lower or "remote-test" in v_lower:
@@ -8301,7 +8307,7 @@ def drive_rows(processes: list[Process], now: float,
         summary_text = _drive_work_summary(record)
         stage_text = _drive_stage(record)
 
-        detail = f"{ai} · {pr_text} · {summary_text} · {stage_text} · 跑了 {elapsed_str} ({task_prefix})"
+        detail = f"{ai} · {pr_text} · {summary_text} · {stage_text} · {elapsed_str} ({task_prefix})"
         age = _elapsed_seconds(proc.elapsed)
         rows.append(OfficeRow("llmtool 推進", WORKING, detail,
                               age if age is not None else 0.0, 80,

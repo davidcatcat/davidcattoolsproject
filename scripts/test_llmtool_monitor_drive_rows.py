@@ -76,6 +76,15 @@ class TestLlmtoolMonitorDriveRows(unittest.TestCase):
         self.assertNotIn("option", repr(proc))
         self.assertNotIn("sample", repr(proc))
 
+        # Flags after `drive` / `advance`
+        ps_out2 = "  102     1   102  00:45 S    python3 -m llmtool task advance --timeout=60 74590be9053e4051909da5a4f0ca51ad\n"
+        snapshot2 = monitor.parse_processes(ps_out2, self_pid=999)
+        self.assertEqual(len(snapshot2.processes), 1)
+        proc2 = snapshot2.processes[0]
+        self.assertEqual(proc2.role, "llmtool drive")
+        self.assertEqual(proc2.drive_task, "74590be9053e4051909da5a4f0ca51ad")
+        self.assertNotIn("timeout", repr(proc2))
+
     def test_fully_known_row(self):
         """A fully known Task record produces a row with AI, PR, summary, stage, time, and Task ID prefix."""
         record = {
@@ -97,7 +106,7 @@ class TestLlmtoolMonitorDriveRows(unittest.TestCase):
         self.assertEqual(row.state, monitor.WORKING)
         self.assertEqual(row.kind, "worker")
         self.assertEqual(row.task, "task 74590be9")
-        expected_detail = "Claude · PR #2201 · Implement user calculator · EC2 測試中 · 跑了 01:23 (74590be9)"
+        expected_detail = "Claude · PR #2201 · Implement user calculator · EC2 測試中 · 01:23 (74590be9)"
         self.assertEqual(row.detail, expected_detail)
 
     def test_all_developer_ai_families(self):
@@ -139,7 +148,7 @@ class TestLlmtoolMonitorDriveRows(unittest.TestCase):
                                 drive_task=task_id)
             rows = monitor.drive_rows([p], self.now, self.root)
             self.assertEqual(len(rows), 1)
-            expected = f"Claude · PR #{300 + idx} · Stage check work · {stage} · 跑了 00:15 ({task_id[:8]})"
+            expected = f"Claude · PR #{300 + idx} · Stage check work · {stage} · 00:15 ({task_id[:8]})"
             self.assertEqual(rows[0].detail, expected)
 
     def test_fallbacks_for_missing_fields_and_long_summary(self):
@@ -165,11 +174,11 @@ class TestLlmtoolMonitorDriveRows(unittest.TestCase):
         rows = monitor.drive_rows([p1, p2], self.now, self.root)
         self.assertEqual(len(rows), 2)
 
-        expected1 = f"狀態未知 · 尚未開 PR · （無摘要） · 狀態未知 · 跑了 00:20 ({task_id1[:8]})"
+        expected1 = f"狀態未知 · 尚未開 PR · （無摘要） · 狀態未知 · 00:20 ({task_id1[:8]})"
         self.assertEqual(rows[0].detail, expected1)
 
         expected_cut = long_summary[:40] + "…"
-        expected2 = f"AGY · PR #555 · {expected_cut} · 審查中 · 跑了 00:40 ({task_id2[:8]})"
+        expected2 = f"AGY · PR #555 · {expected_cut} · 審查中 · 00:40 ({task_id2[:8]})"
         self.assertEqual(rows[1].detail, expected2)
 
     def test_missing_or_unreadable_task_file_gives_row_with_fallbacks(self):
@@ -180,7 +189,7 @@ class TestLlmtoolMonitorDriveRows(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].name, "llmtool 推進")
         self.assertEqual(rows[0].state, monitor.WORKING)
-        expected_missing = "狀態未知 · 尚未開 PR · （無摘要） · 狀態未知 · 跑了 02:10 (9b7253df)"
+        expected_missing = "狀態未知 · 尚未開 PR · （無摘要） · 狀態未知 · 02:10 (9b7253df)"
         self.assertEqual(rows[0].detail, expected_missing)
 
         # Corrupted / invalid JSON file
@@ -191,7 +200,7 @@ class TestLlmtoolMonitorDriveRows(unittest.TestCase):
                                     drive_task="a1b2c3d4e5f60718293a4b5c6d7e8f90")
         rows = monitor.drive_rows([p_corrupt], self.now, self.root)
         self.assertEqual(len(rows), 1)
-        expected_corrupt = "狀態未知 · 尚未開 PR · （無摘要） · 狀態未知 · 跑了 03:15 (a1b2c3d4)"
+        expected_corrupt = "狀態未知 · 尚未開 PR · （無摘要） · 狀態未知 · 03:15 (a1b2c3d4)"
         self.assertEqual(rows[0].detail, expected_corrupt)
 
     def test_other_llmtool_commands_give_no_drive_rows(self):
