@@ -129,7 +129,7 @@ class SkillManifestTests(unittest.TestCase):
         self.assertEqual(len(first['manifest_sha256']), 64)
 
     def test_changed_required_file_changes_digest_at_new_commit(self):
-        self._write_files({'AGENTS.md': b'changed governance\n'})
+        self._write_files({'.claude/skills/ai-team-delivery/SKILL.md': b'changed delivery\n'})
         newer = self._commit()
         changed = build_manifest(self.repo, newer, 'developer', 'develop')
         original = build_manifest(self.repo, self.commit, 'developer', 'develop')
@@ -415,7 +415,7 @@ class SkillManifestTests(unittest.TestCase):
         self._assert_code(SKILL_MANIFEST_NOT_UTF8, self.commit, 'developer', 'develop')
 
     def test_oversized_file_is_refused(self):
-        self._write_files({'AGENTS.md': b'x' * (MAX_SKILL_FILE_SIZE + 1)})
+        self._write_files({'.claude/skills/ai-team-delivery/SKILL.md': b'x' * (MAX_SKILL_FILE_SIZE + 1)})
         self.commit = self._commit()
         content_reads = []
 
