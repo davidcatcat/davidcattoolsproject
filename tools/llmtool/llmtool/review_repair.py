@@ -15,6 +15,8 @@ from .task_store import REVIEW_DISPUTE_DEFERRABLE, REVIEW_DISPUTE_SEVERITIES, _j
 # This same-class repair cap is separate from worker_dispatch's per-dispatch limit of 1.
 MAX_REPAIR_ATTEMPTS = run_budget.MAX_REPAIR_ATTEMPTS
 MAX_EXCERPT_CHARS = 2000
+# #1686: a bound FAIL verdict longer than this is refused, never truncated.
+MAX_VERDICT_BODY_CHARS = 16384
 
 
 def _refuse(code):
@@ -366,6 +368,12 @@ def _failed_event(task, *, executor_task, pr_number, github_get):
             comment_id is None):
         _refuse('REVIEW_FAIL_EVENT_MISSING')
     body = comment.get('body', '')
+    if type(body) is not str:
+        _refuse('REPAIR_VERDICT_BODY_INVALID')
+    # #1686: refuse an over-long verdict, never truncate it, so a blocking
+    # finding anywhere in a bound verdict is still seen by _review_gate.
+    if len(body) > MAX_VERDICT_BODY_CHARS:
+        _refuse('REPAIR_VERDICT_BODY_TOO_LONG')
     excerpt = body[:MAX_EXCERPT_CHARS]
     packet = {
         'task': task['task_id'], 'pr': pr_number, 'executor_task': executor_task,
@@ -377,7 +385,7 @@ def _failed_event(task, *, executor_task, pr_number, github_get):
                          separators=(',', ':')).encode('utf-8')
     if len(encoded) > 8192:
         _refuse('REPAIR_PACKET_INVALID')
-    return packet, event
+    return packet, event, body
 
 
 def _remote_test_failure(task, *, executor_task, pr_number, receipt):
@@ -676,12 +684,14 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     if profile == 'claude' and shutil.which(profile) is None:
         _refuse('RUNTIME_NOT_ON_PATH')
     ci_identity_sha = None
+    verdict_text = None
     if ci_failure is not None:
         packet, ci_identity_sha = _ci_failure(task, executor_task=executor_task,
                                               pr_number=pr_number, ci_failure=ci_failure)
     elif remote_test_receipt is None:
-        packet, _event = _failed_event(task, executor_task=executor_task,
-                                       pr_number=pr_number, github_get=github_get)
+        packet, _event, verdict_text = _failed_event(
+            task, executor_task=executor_task, pr_number=pr_number,
+            github_get=github_get)
     else:
         packet = _remote_test_failure(task, executor_task=executor_task,
                                       pr_number=pr_number, receipt=remote_test_receipt)
