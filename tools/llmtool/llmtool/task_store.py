@@ -171,7 +171,7 @@ _HIGH_DEBUG_FIELDS = frozenset(('family', 'failed_corrections', 'early_reason', 
     'report_sha256', 'report', 'usage', 'recorded_at'))
 # #1502 WP-D O7: a RESERVED entry keeps these values and gets one of these statuses.
 _HIGH_DEBUG_IDENTITY = ('family', 'failed_corrections', 'early_reason', 'examined_sha',
-                        'd6', 'model_requested', 'rules_sha256')
+                        'd6', 'model_requested', 'rules_sha256', 'no_pr')
 _HIGH_DEBUG_FINAL_STATUSES = ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED',
                               'REPORT_INVALID', 'RUN_FAILED')
 
@@ -2136,7 +2136,8 @@ def _validate(record, *, strict=True):
         for item in entries:
             # #1502 WP-F: rules_sha256 is optional so older entries stay valid.
             if (type(item) is not dict or
-                set(item) - {'rules_sha256'} != _HIGH_DEBUG_FIELDS or
+                set(item) - {'rules_sha256', 'no_pr'} != _HIGH_DEBUG_FIELDS or
+                ('no_pr' in item and item['no_pr'] is not True) or
                 ('rules_sha256' in item and
                  (type(item['rules_sha256']) is not str or
                   re.fullmatch(r'[0-9a-f]{64}', item['rules_sha256']) is None)) or
