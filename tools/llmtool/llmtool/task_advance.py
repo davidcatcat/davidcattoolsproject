@@ -1227,6 +1227,76 @@ def _merge_pass_claim(record, number, head, events):
     return top
 
 
+# #2199: a PR comment verdict line at the exact merge head. A FAIL line may
+# carry markup around it (wider match, more refusals); a PASS line that
+# resolves a FAIL must be the whole line.
+MERGE_UNRESOLVED_REVIEW_FAIL = 'MERGE_UNRESOLVED_REVIEW_FAIL'
+MERGE_REVIEW_COMMENTS_UNAVAILABLE = 'MERGE_REVIEW_COMMENTS_UNAVAILABLE'
+_ISSUE_COMMENTS_PER_PAGE = 100
+_ISSUE_COMMENTS_MAX_PAGES = 30
+_HEAD_FAIL_LINE = re.compile(
+    r'Verdict: FAIL \| Version: v([0-9]+) \| HEAD: ([0-9a-f]{40})(?![0-9a-fA-F])')
+_HEAD_PASS_LINE = re.compile(
+    r'Verdict: PASS \| Version: v([0-9]+) \| HEAD: ([0-9a-f]{40})')
+
+
+def _issue_comments(number, github_get):
+    """Return every PR issue comment, or None when the read is not complete.
+
+    Page 1 keeps the historical read path; page N > 1 adds ``&page=N``. A read
+    error, a malformed page or a full last page gives None (fail closed).
+    """
+    comments = []
+    for page in range(1, _ISSUE_COMMENTS_MAX_PAGES + 1):
+        path = f'issues/{number}/comments?per_page={_ISSUE_COMMENTS_PER_PAGE}'
+        if page > 1:
+            path += f'&page={page}'
+        try:
+            batch = github_get(path)
+        except Exception:
+            return None
+        if type(batch) is not list or len(batch) > _ISSUE_COMMENTS_PER_PAGE:
+            return None
+        comments.extend(batch)
+        if len(batch) < _ISSUE_COMMENTS_PER_PAGE:
+            return comments
+    return None
+
+
+def _unresolved_head_fail_code(number, head, github_get):
+    """Refuse while a FAIL verdict at head has no PASS of a higher version (#2199).
+
+    Verdicts for other heads are ignored. Return None, MERGE_UNRESOLVED_REVIEW_FAIL
+    or MERGE_REVIEW_COMMENTS_UNAVAILABLE.
+    """
+    if type(head) is not str or _HEX40.fullmatch(head) is None:
+        return MERGE_REVIEW_COMMENTS_UNAVAILABLE
+    comments = _issue_comments(number, github_get)
+    if comments is None:
+        return MERGE_REVIEW_COMMENTS_UNAVAILABLE
+    fails, passes = [], []
+    for comment in comments:
+        if type(comment) is not dict:
+            return MERGE_REVIEW_COMMENTS_UNAVAILABLE
+        body = comment.get('body')
+        if body is None:
+            # The GitHub schema allows a comment without a body.
+            continue
+        if type(body) is not str:
+            return MERGE_REVIEW_COMMENTS_UNAVAILABLE
+        for line in body.splitlines():
+            for found in _HEAD_FAIL_LINE.finditer(line):
+                if found.group(2) == head:
+                    fails.append(int(found.group(1)))
+            found = _HEAD_PASS_LINE.fullmatch(line.strip())
+            if found is not None and found.group(2) == head:
+                passes.append(int(found.group(1)))
+    # Each FAIL vN needs a PASS vM with M > N; the highest FAIL decides.
+    if fails and (not passes or max(passes) <= max(fails)):
+        return MERGE_UNRESOLVED_REVIEW_FAIL
+    return None
+
+
 # A recorded Owner acceptance is a PM relay comment in this repository.
 _OWNER_ACCEPTANCE_MARKER = ('<!-- activity: type=pm_progress actor=PM target=Owner '
                             'status=ANSWERED -->')
@@ -1539,6 +1609,9 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         review_version = _merge_pass_claim(record, number, head, events)
         if type(review_version) is not int:
             return _merge_refusal(review_version or 'MERGE_REVIEW_NOT_PASS')
+        head_fail_code = _unresolved_head_fail_code(number, head, github_get)
+        if head_fail_code is not None:
+            return _merge_refusal(head_fail_code)
     acceptance_out = {}
     code = _merge_checks(record, number, head, pr, github_get,
                          allow_missing_macos=True, owner_acceptance=owner_acceptance,
