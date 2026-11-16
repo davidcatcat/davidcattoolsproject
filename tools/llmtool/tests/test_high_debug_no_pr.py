@@ -200,5 +200,105 @@ class HighDebugNoPRTests(unittest.TestCase):
         self.assertEqual(got, (42, None, 'no-pr'))
 
 
+class FormalRcaConsumerNoPRTests(unittest.TestCase):
+    def setUp(self):
+        review_trust_fixture.install_for_case(self)
+        worker_policy_fixture.install(self)
+        self.policy = repair_policy.load_policy()
+
+    def test_review_gate_never_takes_a_no_pr_rca(self):
+        body = _comment()['body']
+        packet = dict(reviewer_text_excerpt_untrusted_data=body, failed_head=GATE_HEAD, pr=PR)
+        family = 'pr-%d' % PR
+        stamp = '2026-10-27T03:00:00Z'
+        entry = rca_entry(family=family, examined_sha=GATE_HEAD, recorded_at=stamp)
+        counts = {'review_repairs': 1, 'review_heads': {OLD_HEAD: 'FAIL'}}
+        task = {'task_id': GATE_TASK, 'high_debug': [entry]}
+        found = review_repair._review_gate(task, [], packet, family, self.policy, counts=counts)
+        self.assertEqual(found['status'], 'RCA_CONFIRMED')
+        task['high_debug'] = [dict(entry, no_pr=True)]
+        with self.assertRaises(LLMToolError) as caught:
+            review_repair._review_gate(task, [], packet, family, self.policy, counts=counts)
+        self.assertEqual(caught.exception.review_repair_code, 'REPAIR_DEBUG_REQUIRED')
+
+    def test_bound_run_check_refuses_a_no_pr_entry_first(self):
+        # With no refusal, the None Task below would raise AttributeError instead.
+        check = task_submission_cli._require_bound_high_debug_run
+        with self.assertRaises(ValueError):
+            check(None, TASK, rca_entry(no_pr=True), 'executor')
+
+    def test_repair_packet_rca_never_uses_a_no_pr_entry(self):
+        packet = dict(task=TASK, executor_task='executor', failed_head=HEAD)
+        packet['high_debug_report_sha256'] = REPORT_SHA
+        completion = {'executor_task_id': 'executor'}
+        only_no_pr = _NoPRStore(completion=completion, entries=[rca_entry(no_pr=True)])
+        with self.assertRaises(LLMToolError) as caught:
+            task_submission_cli._check_repair_packet_rca(packet, only_no_pr, 'executor')
+        self.assertEqual(str(caught.exception), 'DELEGATE_HIGH_DEBUG_TASK_INVALID')
+        both = _NoPRStore(completion=completion, entries=[rca_entry(), rca_entry(no_pr=True)])
+        task_submission_cli._check_repair_packet_rca(packet, both, 'executor')
+
+    def test_repair_rca_refuses_when_only_a_no_pr_entry_exists(self):
+        slug = review_trust_fixture.OWNER_SLUG
+        args = SimpleNamespace(executor_task='executor', high_debug_task=TASK, repair_packet=None)
+        args.high_debug_ref = 'https://github.com/%s/issues/1943#issuecomment-1' % slug
+        args.high_debug_family = 'no-pr'
+        completion = {'executor_task_id': 'executor'}
+        store = _NoPRStore(completion=completion, entries=[rca_entry(no_pr=True)])
+        with self.assertRaises(LLMToolError) as caught:
+            task_submission_cli._check_repair_rca(args, store, None, None)
+        self.assertTrue(str(caught.exception).startswith('DELEGATE_HIGH_DEBUG_TASK_INVALID'))
+
+
+class TaskStoreNoPRTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.store = TaskStore(Path(temporary.name).resolve() / 'tasks')
+        review_trust_fixture.install_for_case(self)
+        self.task = task_store_fixtures.TaskStoreTests._codex_dispatch_task(self)
+        self.store.create(self.task)
+
+    def entry(self, **changes):
+        options = dict(family='pr-17', failed_corrections=None, early_reason='review FAIL 2')
+        options.update(head='a' * 40, d6='executor-1-hd1-aaaaaaa', code='HIGH_DEBUG_RUN_FAILED')
+        options.update(observed='UNKNOWN', effort='UNKNOWN', usage='UNKNOWN')
+        options.update(recorded_at='2026-10-27T00:00:30Z', no_pr=True)
+        options.update(changes)
+        return high_debug._failed_entry(**options)
+
+    def test_no_pr_must_be_exactly_true(self):
+        saved = self.store.append_high_debug(self.task['task_id'], self.entry())
+        self.assertIs(saved['high_debug'][0].get('no_pr'), True)
+        for value in (False, 'true', 1):
+            with self.subTest(value=value):
+                bad = dict(self.entry(), no_pr=value)
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.append_high_debug(self.task['task_id'], bad)
+                self.assertEqual(caught.exception.task_store_error_code, 'HIGH_DEBUG_INVALID')
+
+    def test_second_repair_claim_never_binds_a_no_pr_rca(self):
+        task_id = self.task['task_id']
+        entry = dict(self.entry(), status='RCA_CONFIRMED')
+        self.store.append_high_debug(task_id, entry)
+        first = dict(executor_task='executor-1', pr=17, head_sha='b' * 40, version=1, attempt=1)
+        first.update(family='pr-17', state='CLAIMED', repair_task_id=new_id(), comment_id=9)
+        first.update(packet_sha256='b' * 64, claimed_at='2026-10-27T00:00:00Z')
+        for claims in ([first], [dict(first, state='DISPATCHED')]):
+            saved = self.store.get(task_id)
+            expected = {'record_sha256': saved['record_sha256']}
+            self.store.compare_and_update(task_id, expected=expected, review_repair_claims=claims)
+        first = dict(first, state='DISPATCHED')
+        second = dict(first, head_sha='a' * 40, version=2, attempt=2, state='CLAIMED')
+        second.update(repair_task_id=new_id(), claimed_at='2026-10-27T00:01:00Z')
+        second['high_debug_report_sha256'] = entry['report_sha256']
+        saved = self.store.get(task_id)
+        expected = {'record_sha256': saved['record_sha256']}
+        with self.assertRaises(LLMToolError) as caught:
+            claims = [first, second]
+            self.store.compare_and_update(task_id, expected=expected, review_repair_claims=claims)
+        self.assertEqual(caught.exception.task_store_error_code, 'REVIEW_REPAIR_CLAIM_INVALID')
+
+
 if __name__ == '__main__':
     unittest.main()
