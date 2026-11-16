@@ -119,7 +119,7 @@ def _record_body(entry, task_id, refusal_code=None, account=None):
     return '\n'.join(lines)
 
 
-def _post_github_record(pr_number, body, repo_root):
+def _post_github_record(pr_number, body, repo_root, issue_only=False):
     """Post one screened metadata comment with the trusted gh environment."""
     gh = shutil.which('gh', path=task_completion._GH_PATH)
     if gh is None:
@@ -141,6 +141,9 @@ def _post_github_record(pr_number, body, repo_root):
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, shell=False,
             check=False, timeout=30)
 
+    if issue_only:
+        # #1943 WP-5: a no-PR Debug writes only on a verified Issue, never on a PR.
+        return _is_plain_issue(pr_number) and comment('issue').returncode == 0
     # --pr may name an Issue, which `gh pr comment` rejects with a specific
     # message. Retry on the Issue API only for that confirmed case: any other
     # failure may mean GitHub accepted a write whose response was lost, and a
@@ -188,7 +191,7 @@ def _write_unposted(entry, pr_number, task_id, reason, body=None):
         pass
 
 
-def _post_record(entry, pr_number, repo_root, task_id, refusal_code=None, account=None):
+def _post_record(entry, pr_number, repo_root, task_id, refusal_code=None, account=None, issue_only=False):
     """Return whether a comment was posted; never affect the diagnostic result."""
     try:
         body = _record_body(entry, task_id, refusal_code, account=account)
@@ -196,7 +199,7 @@ def _post_record(entry, pr_number, repo_root, task_id, refusal_code=None, accoun
             _write_unposted(entry, pr_number, task_id, 'SCREEN_REJECTED')
             return False
         try:
-            posted = _post_github_record(pr_number, body, repo_root)
+            posted = _post_github_record(pr_number, body, repo_root, issue_only=issue_only)
         except Exception:
             posted = False
         if posted:
@@ -1644,7 +1647,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
         except Exception:
             detail = (detail + ' ' if detail else '') + 'reservation=UNFINALIZED'
         if post and not _post_record(entry, target_number, repo_root, task_id, code,
-                                     account=account):
+                                     account=account, issue_only=no_pr is True):
             detail = (detail + ' ' if detail else '') + 'github_record=UNPOSTED'
         if screen_hits is not None:
             detail = _screen_detail(
