@@ -13,6 +13,7 @@ import errno
 import hashlib
 import json
 import os
+from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
@@ -147,14 +148,26 @@ def make_developer(
     return dev
 
 
+import review_trust_fixture
+import worker_policy_fixture
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
+
+
 class TestTaskStoreCardDelivery(unittest.TestCase):
 
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.store = TaskStore(self.temp_dir.name)
-
-    def tearDown(self):
-        self.temp_dir.cleanup()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve() / 'tasks'
+        self.store = TaskStore(self.root)
+        self.policy_path = worker_policy_fixture.install(self)
 
     def test_card_delivery_prepared_and_exemption_shapes_pass(self):
         # OpenCode PREPARED
