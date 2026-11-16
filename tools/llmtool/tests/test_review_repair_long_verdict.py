@@ -37,6 +37,8 @@ class ReviewRepairLongVerdictTests(ReviewRepairTests):
         self.assertGreaterEqual(review_repair.MAX_VERDICT_CHARS, 16384)
         self.assertLessEqual(review_repair.MAX_VERDICT_CHARS, 65536)
         self.assertEqual(review_repair.MAX_VERDICT_BODY_CHARS, review_repair.MAX_VERDICT_CHARS)
+        self.assertEqual(review_repair.MAX_VERDICT_BYTES, 65536)
+        self.assertEqual(review_repair.REVIEW_RESULT_SIZE_LIMIT, 65536)
         self.assertEqual(review_repair.REVIEW_VERDICT_TOO_LONG, 'REVIEW_VERDICT_TOO_LONG')
         self.assertEqual(review_repair.VERDICT_TOO_LONG_CODE, 'REVIEW_VERDICT_TOO_LONG')
 
@@ -180,6 +182,122 @@ class ReviewRepairLongVerdictTests(ReviewRepairTests):
         self.assertNotIn('review_repair_claims', self.store.get(TASK))
         self.assertEqual(len(self.calls), 0)
 
+    def test_multibyte_verdict_exceeding_bytes_limit_refuses_repair(self):
+        prefix = (
+            f"<!-- activity: type=review_verdict actor=Claude target=PM status=FIX -->\n"
+            f"Verdict: FAIL | Version: v1 | HEAD: {HEAD}\n"
+            f"Finding: F1 [High] src/service.py:10 defect description\n"
+        )
+        # Using 3-byte UTF-8 character '\u4e16'.
+        # 25000 chars * 3 bytes = 75000 bytes > 65536 bytes (review_result size limit),
+        # but 25000 + len(prefix) chars is well within MAX_VERDICT_CHARS (65536).
+        body = prefix + ("\u4e16" * 25000)
+        self.assertLessEqual(len(body), review_repair.MAX_VERDICT_CHARS)
+        self.assertGreater(len(body.encode('utf-8')), review_repair.MAX_VERDICT_BYTES)
+
+        comment = {
+            'id': 9,
+            'body': body,
+            'created_at': '2026-10-27T01:00:00Z',
+            'updated_at': '2026-10-27T01:00:00Z',
+        }
+
+        self._assert_refused(
+            review_repair.REVIEW_VERDICT_TOO_LONG,
+            github_get=lambda _path: [comment],
+        )
+        self.assertNotIn('review_repair_claims', self.store.get(TASK))
+        self.assertEqual(len(self.calls), 0)
+
+    def test_multibyte_verdict_not_older_than_candidate_refuses_repair(self):
+        # Candidate verdict: older valid bound FAIL verdict (comment id 8 at 01:00:00Z)
+        comment_candidate = {
+            'id': 8,
+            'body': (
+                f"<!-- activity: type=review_verdict actor=Claude target=PM status=FIX -->\n"
+                f"Verdict: FAIL | Version: v1 | HEAD: {HEAD}\n"
+                f"Finding: F1 [High] src/service.py:10 earlier finding\n"
+            ),
+            'created_at': '2026-10-27T01:00:00Z',
+            'updated_at': '2026-10-27T01:00:00Z',
+        }
+        # Newer bound verdict (comment id 9 at 01:05:00Z) whose UTF-8 bytes exceed limit
+        prefix = (
+            f"<!-- activity: type=review_verdict actor=Claude target=PM status=FIX -->\n"
+            f"Verdict: FAIL | Version: v1 | HEAD: {HEAD}\n"
+            f"Finding: F2 [High] src/service.py:20 newer finding\n"
+        )
+        body_too_long = prefix + ("\u4e16" * 25000)
+        comment_too_long = {
+            'id': 9,
+            'body': body_too_long,
+            'created_at': '2026-10-27T01:05:00Z',
+            'updated_at': '2026-10-27T01:05:00Z',
+        }
+
+        self._assert_refused(
+            review_repair.REVIEW_VERDICT_TOO_LONG,
+            github_get=lambda _path: [comment_candidate, comment_too_long],
+        )
+        self.assertNotIn('review_repair_claims', self.store.get(TASK))
+        self.assertEqual(len(self.calls), 0)
+
+    def test_older_multibyte_verdict_does_not_block_newer_valid_verdict(self):
+        # Older over-long verdict (comment id 7 at 00:50:00Z)
+        prefix = (
+            f"<!-- activity: type=review_verdict actor=Claude target=PM status=FIX -->\n"
+            f"Verdict: FAIL | Version: v1 | HEAD: {HEAD}\n"
+            f"Finding: F1 [High] src/service.py:10 old finding\n"
+        )
+        comment_old_too_long = {
+            'id': 7,
+            'body': prefix + ("\u4e16" * 25000),
+            'created_at': '2026-10-27T00:50:00Z',
+            'updated_at': '2026-10-27T00:50:00Z',
+        }
+        # Newer valid bound FAIL verdict (comment id 8 at 01:00:00Z)
+        comment_newer_valid = {
+            'id': 8,
+            'body': (
+                f"<!-- activity: type=review_verdict actor=Claude target=PM status=FIX -->\n"
+                f"Verdict: FAIL | Version: v1 | HEAD: {HEAD}\n"
+                f"Finding: F2 [High] src/service.py:20 current finding\n"
+            ),
+            'created_at': '2026-10-27T01:00:00Z',
+            'updated_at': '2026-10-27T01:00:00Z',
+        }
+
+        result = self.dispatch(github_get=lambda _path: [comment_old_too_long, comment_newer_valid])
+        self.assertEqual(result['claim']['attempt'], 1)
+        self.assertEqual(result['claim']['state'], 'DISPATCHED')
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0]['packet']['verdict_comment_id'], 8)
+
+    def test_unrelated_overlong_comment_does_not_block_repair(self):
+        # An over-long comment not bound to this task / head
+        comment_unrelated = {
+            'id': 9,
+            'body': "Non-verdict discussion comment\n" + ("\u4e16" * 25000),
+            'created_at': '2026-10-27T01:05:00Z',
+            'updated_at': '2026-10-27T01:05:00Z',
+        }
+        # Valid bound FAIL verdict
+        comment_valid = {
+            'id': 8,
+            'body': (
+                f"<!-- activity: type=review_verdict actor=Claude target=PM status=FIX -->\n"
+                f"Verdict: FAIL | Version: v1 | HEAD: {HEAD}\n"
+                f"Finding: F1 [High] src/service.py:10 defect description\n"
+            ),
+            'created_at': '2026-10-27T01:00:00Z',
+            'updated_at': '2026-10-27T01:00:00Z',
+        }
+
+        result = self.dispatch(github_get=lambda _path: [comment_unrelated, comment_valid])
+        self.assertEqual(result['claim']['attempt'], 1)
+        self.assertEqual(result['claim']['state'], 'DISPATCHED')
+        self.assertEqual(len(self.calls), 1)
+
     def test_review_gate_directly_checks_verdict_body_and_length(self):
         task = self.store.get(TASK)
         attempts = []
@@ -217,6 +335,19 @@ class ReviewRepairLongVerdictTests(ReviewRepairTests):
         with self.assertRaises(LLMToolError) as caught:
             review_repair._review_gate(
                 task, attempts, packet, f'pr-{PR}', policy, verdict_body=huge_body
+            )
+        self.assertEqual(caught.exception.review_repair_code, review_repair.REVIEW_VERDICT_TOO_LONG)
+
+        # 4. verdict_body with multi-byte text exceeding byte limit -> refuses REVIEW_VERDICT_TOO_LONG
+        multibyte_gate_body = (
+            "Finding: F1 [High] a.py:1 bug\n"
+            + ("\u4e16" * 25000)
+        )
+        self.assertLessEqual(len(multibyte_gate_body), review_repair.MAX_VERDICT_CHARS)
+        self.assertGreater(len(multibyte_gate_body.encode('utf-8')), review_repair.MAX_VERDICT_BYTES)
+        with self.assertRaises(LLMToolError) as caught:
+            review_repair._review_gate(
+                task, attempts, packet, f'pr-{PR}', policy, verdict_body=multibyte_gate_body
             )
         self.assertEqual(caught.exception.review_repair_code, review_repair.REVIEW_VERDICT_TOO_LONG)
 

@@ -17,6 +17,8 @@ MAX_REPAIR_ATTEMPTS = run_budget.MAX_REPAIR_ATTEMPTS
 MAX_EXCERPT_CHARS = 2000
 MAX_VERDICT_CHARS = 65536
 MAX_VERDICT_BODY_CHARS = MAX_VERDICT_CHARS
+MAX_VERDICT_BYTES = 65536
+REVIEW_RESULT_SIZE_LIMIT = MAX_VERDICT_BYTES
 REVIEW_VERDICT_TOO_LONG = 'REVIEW_VERDICT_TOO_LONG'
 VERDICT_TOO_LONG_CODE = REVIEW_VERDICT_TOO_LONG
 
@@ -326,6 +328,49 @@ def _current_d6_head(task, executor_task, current_head):
     return registration.result_sha
 
 
+def _is_bound_verdict(comment, *, head, version, task):
+    body = comment.get('body')
+    if type(body) is not str:
+        return False
+    lines = [line for line in body.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+    marker = task_completion._VERDICT_MARKER.fullmatch(lines[0])
+    developer = task.get('developer') if type(task) is dict else None
+    if (marker is not None and marker.group(1) == 'Claude' and
+            task_completion._reviewer_author_family(developer) == 'claude'):
+        return False
+    if marker is not None and marker.group(1) == 'Codex':
+        developer_family = task_completion._reviewer_author_family(developer)
+        if developer_family is None or developer_family == 'codex':
+            return False
+        binding = next((match for line in lines[1:]
+                        if (match := review_result._CODEX_BINDING.fullmatch(line)) is not None), None)
+        task_binding = task.get('task_binding') if type(task) is dict else None
+        codex_bound = (
+            binding is not None and type(task_binding) is dict and type(task) is dict and
+            binding.group(1) == task.get('task_id') and
+            binding.group(2) == task.get('run_id') and
+            binding.group(3) == task_binding.get('contract_digest') and
+            binding.group(4) == head)
+        if not codex_bound:
+            return False
+    if marker is not None and marker.group(1) == 'Claude':
+        binding = next((match for line in lines[1:]
+                        if (match := review_result._CODEX_BINDING.fullmatch(line.strip())) is not None), None)
+        if binding is not None and (type(task) is not dict or
+                                    binding.group(1) != task.get('task_id') or
+                                    binding.group(2) != task.get('run_id')):
+            return False
+    status_line = review_result._VERDICT_VERSION_HEAD.fullmatch(lines[1])
+    if status_line is None:
+        return False
+    status, raw_version, raw_head = status_line.groups()
+    if raw_head != head or int(raw_version) != version:
+        return False
+    return True
+
+
 def _failed_event(task, *, executor_task, pr_number, github_get):
     claims = task.get('review_dispatch_claim')
     claims = [claims] if type(claims) is dict else claims
@@ -360,21 +405,25 @@ def _failed_event(task, *, executor_task, pr_number, github_get):
         if type(comment) is not dict:
             _refuse('REVIEW_RESULT_COMMENTS_INVALID')
         body = comment.get('body')
-        if type(body) is str and len(body) > MAX_VERDICT_CHARS:
-            lines = [line for line in body.splitlines() if line.strip()]
-            if len(lines) >= 2:
-                status_line = review_result._VERDICT_VERSION_HEAD.fullmatch(lines[1])
-                if status_line is not None:
-                    _, raw_version, raw_head = status_line.groups()
-                    if raw_head == claim['head_sha'] and int(raw_version) == claim['version']:
-                        created_at = comment.get('created_at', '')
-                        updated_at = comment.get('updated_at', created_at)
-                        if type(updated_at) is str and type(comment.get('id')) is int:
-                            too_long.append((updated_at, comment.get('id', 0)))
-        verdict = review_result._comment_verdict(
-            comment, head=claim['head_sha'], version=claim['version'], task=task)
-        if verdict is not None:
-            verdicts.append((verdict, comment))
+        is_too_long = type(body) is str and (
+            len(body) > MAX_VERDICT_CHARS or
+            len(body.encode('utf-8', 'replace')) > MAX_VERDICT_BYTES)
+        if is_too_long:
+            if _is_bound_verdict(comment, head=claim['head_sha'],
+                                 version=claim['version'], task=task):
+                created_at = comment.get('created_at')
+                updated_at = comment.get('updated_at', created_at)
+                comment_id = comment.get('id')
+                if (type(comment_id) is not int or comment_id < 0 or
+                        type(created_at) is not str or type(updated_at) is not str or
+                        not created_at or not updated_at):
+                    _refuse('REVIEW_RESULT_INVALID')
+                too_long.append((updated_at, comment_id))
+        else:
+            verdict = review_result._comment_verdict(
+                comment, head=claim['head_sha'], version=claim['version'], task=task)
+            if verdict is not None:
+                verdicts.append((verdict, comment))
     if not verdicts:
         if too_long:
             _refuse(REVIEW_VERDICT_TOO_LONG)
@@ -387,7 +436,7 @@ def _failed_event(task, *, executor_task, pr_number, github_get):
     if any(item[:2] >= (updated, comment_id) for item in too_long):
         _refuse(REVIEW_VERDICT_TOO_LONG)
     body = comment.get('body', '')
-    if len(body) > MAX_VERDICT_CHARS:
+    if len(body) > MAX_VERDICT_CHARS or len(body.encode('utf-8', 'replace')) > MAX_VERDICT_BYTES:
         _refuse(REVIEW_VERDICT_TOO_LONG)
     excerpt = body[:MAX_EXCERPT_CHARS]
     packet = {
@@ -552,7 +601,7 @@ def _review_gate(task, attempts, packet, family, policy, counts=None, verdict_bo
             if verdict_body is None else verdict_body)
     if text is None:
         text = ''
-    if len(text) > MAX_VERDICT_CHARS:
+    if len(text) > MAX_VERDICT_CHARS or len(text.encode('utf-8', 'replace')) > MAX_VERDICT_BYTES:
         _refuse(REVIEW_VERDICT_TOO_LONG)
     if review_result.blocking_findings(text) == []:
         _refuse('REPAIR_NO_BLOCKING_FINDING')
