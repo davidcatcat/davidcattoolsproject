@@ -98,6 +98,58 @@ class AuditP0Tests(unittest.TestCase):
         self.assertEqual((got["owner_decisions"], got["true_reserved"]), (3, 1))
         self.assertEqual((got["gate_coverage"], got["invalid_escalation_rate"]), (0.6667, 0.3333))
 
+    def test_unknown_reserved_row_is_ungated_and_excluded_from_true_reserved(self):
+        fake = "<!-- owner-ask: v=1 reserved_row=R-FAKE -->"
+        ask = comment(1, 10, "2026-11-01T03:00:00Z", WAIT, fake)
+        result = oa.audit([ask], SINCE, UNTIL)
+        self.assertEqual((result["asks"], result["gated"], result["ungated"]), (1, 0, 1))
+        self.assertEqual(result["rows"], {})
+        self.assertEqual(result["items"], [["2026-11-01T03:00:00Z", 10, 1, "UNGATED"]])
+        self.assertEqual(result["metrics"]["true_reserved"], 0)
+        self.assertEqual(result["metrics"]["gate_coverage"], 0.0)
+        self.assertEqual(result["metrics"]["invalid_escalation_rate"], 1.0)
+
+    def test_each_valid_row_class(self):
+        for i, row in enumerate(oa.RESERVED_ROWS, start=1):
+            line = f"<!-- owner-ask: v=1 reserved_row={row} -->"
+            ask = comment(i, i, f"2026-11-01T{i:02d}:00:00Z", WAIT, line)
+            result = oa.audit([ask], SINCE, UNTIL)
+            self.assertEqual((result["asks"], result["gated"], result["ungated"]), (1, 1, 0))
+            self.assertEqual(result["rows"], {row: 1})
+            self.assertEqual(result["items"][0][3], row)
+            expected_true = 0 if row == "R-OTHER" else 1
+            self.assertEqual(result["metrics"]["true_reserved"], expected_true)
+            self.assertEqual(result["metrics"]["gate_coverage"], 1.0)
+            self.assertEqual(result["metrics"]["invalid_escalation_rate"], 0.0)
+
+    def test_r_other_is_gated_and_excluded_from_true_reserved(self):
+        ask = comment(1, 10, "2026-11-01T03:00:00Z", WAIT, OTHER)
+        result = oa.audit([ask], SINCE, UNTIL)
+        self.assertEqual((result["asks"], result["gated"], result["ungated"]), (1, 1, 0))
+        self.assertEqual(result["rows"], {"R-OTHER": 1})
+        self.assertEqual(result["items"], [["2026-11-01T03:00:00Z", 10, 1, "R-OTHER"]])
+        self.assertEqual(result["metrics"]["true_reserved"], 0)
+        self.assertEqual(result["metrics"]["gate_coverage"], 1.0)
+        self.assertEqual(result["metrics"]["invalid_escalation_rate"], 0.0)
+        self.assertEqual(result["r_other_ratio"], 1.0)
+
+    def test_mixed_rows_with_unknown_r_value(self):
+        scope_line = "<!-- owner-ask: v=1 reserved_row=R-SCOPE -->"
+        fake_line = "<!-- owner-ask: v=1 reserved_row=R-FAKE -->"
+        other_line = "<!-- owner-ask: v=1 reserved_row=R-OTHER -->"
+        found = [
+            comment(1, 7, "2026-11-01T03:00:00Z", WAIT, scope_line),
+            comment(2, 8, "2026-11-01T04:00:00Z", WAIT, other_line),
+            comment(3, 9, "2026-11-01T05:00:00Z", WAIT, fake_line),
+        ]
+        result = oa.audit(found, SINCE, UNTIL)
+        self.assertEqual((result["asks"], result["gated"], result["ungated"]), (3, 2, 1))
+        self.assertEqual(result["rows"], {"R-SCOPE": 1, "R-OTHER": 1})
+        self.assertNotIn("R-FAKE", result["rows"])
+        self.assertEqual(result["metrics"]["true_reserved"], 1)
+        self.assertEqual(result["metrics"]["gate_coverage"], 0.6667)
+        self.assertEqual(result["metrics"]["invalid_escalation_rate"], 0.3333)
+
 
 def transcript(directory, *entries):
     path = Path(directory) / "session.jsonl"
