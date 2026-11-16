@@ -547,6 +547,52 @@ class RuleFileSchemaTests(unittest.TestCase):
                 self.assertIs(type(entry["max_timeout"]), int)
                 self.assertTrue(1 <= entry["default_timeout"] <= entry["max_timeout"] <= 3600)
 
+    @staticmethod
+    def fixture_profile(**changes):
+        profile = {"adapter": "openai-chat-tools", "model": "gpt-6-luna",
+                   "context_cap_tokens": 32768, "max_output_tokens": 16384}
+        for key, value in changes.items():
+            if value is _DELETE:
+                profile.pop(key, None)
+            else:
+                profile[key] = value
+        return profile
+
+    def test_profile_timeout_seconds_is_optional_and_bounded_pass(self):
+        # #1817: the gateway profile may carry an integer timeout_seconds, 1..3600.
+        self.assertEqual(self.route_findings(profile=self.fixture_profile()), [])
+        for value in (1, 120, 600, 1800, 3599, 3600):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    self.route_findings(profile=self.fixture_profile(timeout_seconds=value)), [])
+
+    def test_profile_timeout_seconds_out_of_range_or_non_int_fail(self):
+        prefix = "tools/llmtool/developer-routes.json: RULE_SCHEMA $.routes.fixture.profile"
+        for value in (0, -1, 3601, 10 ** 9, "600", 600.0, 1.5, True, False, None, [600], {"s": 600}):
+            with self.subTest(value=value):
+                self.assertIn(f"{prefix}.timeout_seconds must be an integer >= 1 and <= 3600",
+                              self.route_findings(profile=self.fixture_profile(timeout_seconds=value)))
+
+    def test_profile_timeout_seconds_keeps_unknown_key_checks(self):
+        prefix = "tools/llmtool/developer-routes.json: RULE_SCHEMA $.routes.fixture"
+        self.assertIn(f'{prefix}.profile has unknown key "timeout"',
+                      self.route_findings(profile=self.fixture_profile(timeout=600)))
+        findings = self.route_findings(profile=self.fixture_profile(timeout_seconds=600, extra=True))
+        self.assertIn(f'{prefix}.profile has unknown key "extra"', findings)
+        # The key belongs to the profile only, not to the route entry.
+        self.assertIn(f'{prefix} has unknown key "timeout_seconds"',
+                      self.route_findings(timeout_seconds=600))
+
+    def test_real_gw_agent_profile_timeout_is_1800_and_equals_route_default(self):
+        # #1817 correction: one call is bounded only by the route's Task timeout.
+        repository = Path(__file__).resolve().parents[3]
+        with (repository / "tools" / "llmtool" / "developer-routes.json").open(encoding="utf-8") as stream:
+            route = json.load(stream)["routes"]["gw-agent"]
+        profile = route["profile"]
+        self.assertIs(type(profile["timeout_seconds"]), int)
+        self.assertEqual(profile["timeout_seconds"], 1800)
+        self.assertEqual(profile["timeout_seconds"], route["default_timeout"])
+
     def test_unreadable_duplicate_key_and_non_finite_rule_files_fail(self):
         cases = {
             "bad json": "{",
