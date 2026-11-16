@@ -136,6 +136,7 @@ class ReviewDispatchLargeStreamTests(unittest.TestCase):
             json.dumps({'type': 'thread.started', 'thread_id': THREAD_ID}),
             '{"type": bad json line without closing brace',
             large_filler,
+            large_filler,
             json.dumps({'type': 'item.completed', 'item': {
                 'type': 'agent_message', 'text': json.dumps(_codex_verdict())}}),
         ]
