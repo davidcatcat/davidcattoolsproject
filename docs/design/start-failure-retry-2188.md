@@ -4,7 +4,8 @@ Status: design only (#1502 WP-F unblock). v2 repairs codex-reviewer v1 FAIL (F1 
 F3 PR disposition). Source read: `90b03dde`. Read: `task_submission_cli.py`, `task_store.py`, `task_advance.py`,
 `review_repair.py`, `lineage_counts.py`, `worker_dispatch.py`, `developer_routes/claude.py`. Not read:
 `developer_routes/__init__.py` (`run_route`), `source_freshness.py`, the PM helper scripts, the sensitive-paths registry
-and the open PRs. Facts from those are marked (not read).
+and the open PRs. Facts from those are marked (not read). v3 (from `885aaeb5`) repairs codex-reviewer v2 F1 only: §4
+packet encoding and bound, and its §7 tests.
 
 ## 1. Current behaviour
 
@@ -115,8 +116,34 @@ delegated again. That case is not a start failure.
 - **Persisted packet.** From PR 2, the delegate's first CAS (`:5931`–`:5935`) also writes `repair_packet`, the exact
   `_validate_repair_packet` output (`:5261`–`:5286`, `:5875`–`:5877`) sent to the provider, High Debug fields included.
   - The store accepts `repair_packet` only in the write that sets `developer` from `None`, and never changes or removes it
-    (`REPAIR_PACKET_IMMUTABLE`). Its shape is the same as `:5261`–`:5286`, with canonical JSON ≤ 16384 bytes.
+    (`REPAIR_PACKET_IMMUTABLE`).
   - Its text is reviewer or High Debug text the store already keeps (`task_store.py:2244`, `high_debug.report`).
+- **Packet encoding and bound (v2 F1).**
+  - `canonical(x)` = `json.dumps(x, ensure_ascii=True, sort_keys=True, separators=(',', ':'))`. This is the encoding
+    of the prompt's `TASK_JSON` (`task_submission_cli.py:5886`–`:5887`) and of `packet_sha256` (`review_repair.py:751`–`:753`).
+    Its output is pure ASCII.
+  - `repair_packet` is stored as the string `canonical(P)`, not as a JSON object. It is byte-for-byte the
+    `untrusted_repair_reference` value inside `TASK_JSON`, because nested serialization with the same options is identical.
+    PR 2 computes it once from the validated P and checks that `TASK_JSON` contains it before the CAS.
+    A string is needed because the record encoding (`_json_bytes`, `task_store.py:907`–`:909`) uses `ensure_ascii=False`
+    and then strict UTF-8. A lone surrogate, which `_validate_repair_packet` accepts and `canonical` escapes, would
+    fail that encoding if P were stored as an object. The ASCII string always encodes.
+  - The store requires all of these, else `REPAIR_PACKET_INVALID`: `type` is `str`; `isascii()`;
+    `1 ≤ len ≤ REPAIR_PACKET_MAX_BYTES`; `json.loads` gives a dict that passes the `:5261`–`:5286` rules; and
+    `canonical` of that dict equals the string. That last check makes the stored text the only encoding of P.
+  - `REPAIR_PACKET_MAX_BYTES = 65536` (`task_store.py`). It admits every packet a Claude delegate accepts today.
+    `canonical(P)` is a strict substring of the prompt, so `:5890` (≤ `MAX_PROMPT_BYTES` 65536, `developer_routes/claude.py:17`)
+    and `:5894` (≤ `_CLAUDE_PROMPT_MAX_BYTES` 65535, `:76`) already keep it under 65535 bytes. Retry is Claude-only
+    (§2 check 1), so no other route's limit applies. The old 16384-byte bound rejected valid packets: under
+    `ensure_ascii=True` each BMP non-ASCII character becomes `\uXXXX` (6 bytes). So a 6000-character CJK High Debug
+    excerpt is 36000 bytes, and with a 2000-character CJK reviewer excerpt the packet is about 48400 bytes. A non-BMP
+    character is 12 bytes (a surrogate pair), so 6000 of them (72000 bytes) are refused by `:5890` today and need no admission.
+  - Bindings are unchanged. Every check in "Packet binding" below runs on P = `json.loads(repair_packet)`. Since
+    `canonical(B)` is ASCII, its UTF-8 digest is the `packet_sha256` that `review_repair.py:751`–`:753` computes. The retry
+    passes P to the delegate, which re-validates it and re-serializes the identical bytes into `TASK_JSON`.
+  - Record size. `MAX_RECORD_BYTES` (1 MiB, `task_store.py:55`) and its refusal (`:3731`) are unchanged. In the record,
+    `_json_bytes` escapes `"` and `\` again, so the field takes at most 2 × 65536 bytes, and about 7/6 of its length
+    for CJK text. This is headroom taken from T's later artifact write, which keeps its 512 KiB cap (`:57`).
   - A repair Task recorded before PR 2 has no `repair_packet`. Its retry refuses `START_RETRY_REPAIR_PACKET_UNAVAILABLE`,
     and the PM uses `REPAIR_RETRY`.
 - **Root claim lookup.** As in `review_repair.py:713`–`:734`, retry-start reads every Task in `store.task_ids()` and
@@ -184,6 +211,16 @@ strings. They inject the route, the probe and `_screen_text` outcomes, and never
        `DISPATCH`, and `authorize_dispatch` finds it.
      - `tests/test_task_store_start_failures.py`: append-only, max 2, archive mismatch refused, clear still forbidden,
        a refused write keeps its BLOCKED audit entry, `repair_packet` write-once.
+     - Packet bound and encoding (same file):
+       - A boundary packet is accepted: a repair-2 packet with a 6000-character CJK High Debug excerpt and a 2000-character
+         CJK reviewer excerpt, stored as `canonical(P)` (`ensure_ascii=True`, over 16384 bytes). It also works next to a
+         512 KiB plain-diff artifact.
+       - A packet with a lone-surrogate excerpt is accepted and round-trips exactly.
+       - Each of these refuses `REPAIR_PACKET_INVALID`: a 65537-byte string, a non-ASCII string, a non-canonical string
+         (other key order or spacing), a decoded shape outside `:5261`–`:5286`, and an object instead of a string.
+       - `REPAIR_PACKET_MAX_BYTES >= developer_routes.claude.MAX_PROMPT_BYTES`, so a later prompt-limit raise cannot
+         silently reject packets.
+       - All text is plain or CJK prose, with no credential-shaped strings.
 2. **Wiring.**
    - Files: `task_submission_cli.py` (`repair_packet` persisted at the first CAS, `run_task_retry_start` and parser,
      `expected_failed_developer`).
@@ -193,7 +230,8 @@ strings. They inject the route, the probe and `_screen_text` outcomes, and never
    - **Successful repair-2 retry:** root R holds attempt 2 `DISPATCHED` with `high_debug_report_sha256` H and an
      `RCA_CONFIRMED` entry with digest H at the failed head. T holds the persisted packet and a `CLAUDE_CONFIG_INVALID`
      start failure. With the probe and the route runner injected, the retry is ALLOWED and the injected route receives
-     the packet with H. R's claims are byte-identical afterwards, `lineage_counts` is unchanged, and T ends
+     the packet with H. Its prompt's `TASK_JSON` contains the stored `repair_packet` string byte-for-byte, also for the
+     maximal CJK boundary packet. R's claims are byte-identical afterwards, `lineage_counts` is unchanged, and T ends
      `DEVELOPER_RESPONDED`. A packet with the wrong H refuses `START_RETRY_REPAIR_PACKET_MISMATCH`.
 3. **Advance and continuation diagnostics.** `task_advance.py` (`derive_repair_state` returns `START_FAILED` for checks
    1–5, and step `DEVELOPER_START_FAILED` stops for the PM with no automatic retry). `lineage_counts.py` (the refusal
