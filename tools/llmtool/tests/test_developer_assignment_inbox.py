@@ -700,7 +700,7 @@ class AssignmentChainAcrossAccountsTests(unittest.TestCase):
         self.assertEqual(event['source'], 'DIRECT_D6_DEVELOPER')
         self.assertEqual(event['active_pm_handoff']['state'], 'PM_EVIDENCE_READY')
         self.assertEqual(event['pm_recovery']['resume_argv'],
-                         ['claude', '--resume', self.session])
+                         ['claude', '--resume', self.session, '--disallowedTools', 'Skill'])
         self.assertEqual(view['status'], 'OK')
         self.assertEqual(view['unclaimed_assignments'], [])
         (seen,) = view['claimed_assignments']
