@@ -15,7 +15,6 @@ from .task_store import REVIEW_DISPUTE_DEFERRABLE, REVIEW_DISPUTE_SEVERITIES, _j
 # This same-class repair cap is separate from worker_dispatch's per-dispatch limit of 1.
 MAX_REPAIR_ATTEMPTS = run_budget.MAX_REPAIR_ATTEMPTS
 MAX_EXCERPT_CHARS = 2000
-_VERDICT_BODIES = {}
 
 
 def _refuse(code):
@@ -323,7 +322,8 @@ def _current_d6_head(task, executor_task, current_head):
     return registration.result_sha
 
 
-def _failed_event(task, *, executor_task, pr_number, github_get):
+def _failed_event(task, *, executor_task, pr_number, github_get, body_holder=None,
+                  body_out=None):
     claims = task.get('review_dispatch_claim')
     claims = [claims] if type(claims) is dict else claims
     if type(claims) is not list:
@@ -381,9 +381,14 @@ def _failed_event(task, *, executor_task, pr_number, github_get):
                          separators=(',', ':')).encode('utf-8')
     if len(encoded) > 8192:
         _refuse('REPAIR_PACKET_INVALID')
-    _VERDICT_BODIES[(task['task_id'], pr_number, claim['head_sha'], claim['version'])] = body
-    if type(event) is dict:
-        event['_comment_body'] = body
+    target = body_holder if body_holder is not None else body_out
+    if target is not None:
+        if isinstance(target, list):
+            target.append(body)
+        elif isinstance(target, dict):
+            target['body'] = body
+        elif callable(target):
+            target(body)
     return packet, event
 
 
@@ -530,12 +535,7 @@ def _review_gate(task, attempts, packet, family, policy, counts=None, *, body=No
     Without counts the Task's own attempts are used.
     """
     from . import repair_policy
-    text = body
-    if text is None:
-        key = (task.get('task_id'), packet.get('pr'), packet.get('failed_head'), packet.get('version'))
-        text = _VERDICT_BODIES.get(key)
-    if text is None:
-        text = packet['reviewer_text_excerpt_untrusted_data']
+    text = body if body is not None else packet['reviewer_text_excerpt_untrusted_data']
     if review_result.blocking_findings(text) == []:
         _refuse('REPAIR_NO_BLOCKING_FINDING')
     # #1502 WP-D D13: a FAIL whose every blocking finding an arbiter withdrew
@@ -688,12 +688,14 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     if profile == 'claude' and shutil.which(profile) is None:
         _refuse('RUNTIME_NOT_ON_PATH')
     ci_identity_sha = None
+    body_holder = []
     if ci_failure is not None:
         packet, ci_identity_sha = _ci_failure(task, executor_task=executor_task,
                                               pr_number=pr_number, ci_failure=ci_failure)
     elif remote_test_receipt is None:
         packet, _event = _failed_event(task, executor_task=executor_task,
-                                       pr_number=pr_number, github_get=github_get)
+                                       pr_number=pr_number, github_get=github_get,
+                                       body_holder=body_holder)
     else:
         packet = _remote_test_failure(task, executor_task=executor_task,
                                       pr_number=pr_number, receipt=remote_test_receipt)
@@ -835,7 +837,7 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                                                include_successors=True)
         rca_entry = None
         if not test_failure:
-            body = _event.get('_comment_body') if type(_event) is dict else None
+            body = body_holder[0] if body_holder else None
             rca_entry = _review_gate(task, attempts, packet, family, _policy(), counts=counts,
                                      body=body)
             if rca_entry is not None:

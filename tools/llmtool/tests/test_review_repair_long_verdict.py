@@ -99,6 +99,7 @@ class ReviewRepairLongVerdictTests(unittest.TestCase):
         self.assertEqual(len(packet['reviewer_text_excerpt_untrusted_data']), 2000)
         self.assertEqual(packet['reviewer_text_excerpt_untrusted_data'], body[:2000])
         self.assertNotIn('Finding: F3 [High]', packet['reviewer_text_excerpt_untrusted_data'])
+        self.assertNotIn('_comment_body', self.store.get(TASK)['completion_events'][0])
 
     def test_all_low_or_advisory_findings_anywhere_is_refused(self):
         # A verdict whose findings are all Low or Advisory anywhere is still refused.
@@ -329,6 +330,101 @@ class ReviewRepairLongVerdictTests(unittest.TestCase):
         self.assertEqual(packet['verdict_comment_id'], 12)
         self.assertEqual(packet['failed_head'], HEAD)
         self.assertLessEqual(len(packet['reviewer_text_excerpt_untrusted_data']), 2000)
+        self.assertNotIn('_comment_body', event)
+        self.assertNotIn('_comment_body', task['completion_events'][0])
+
+    def test_no_module_level_cache_and_no_mutation_of_store_objects(self):
+        # review_repair.py keeps no module-level cache of verdict bodies.
+        self.assertFalse(hasattr(review_repair, '_VERDICT_BODIES'))
+
+        # Neither _failed_event nor repair_review mutates or adds keys to event/task dicts.
+        task = _record()
+        task['task_binding'] = {'contract_digest': CONTRACT}
+        padding = ('Discussion line to pad out character count.\n' * 55)
+        body = (
+            '<!-- activity: type=review_verdict actor=Claude target=PM status=FIX -->\n'
+            f'Verdict: FAIL | Version: v1 | HEAD: {HEAD}\n'
+            f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} contract={CONTRACT} head={HEAD}\n'
+            'Finding: F1 [Low] tools/a.py:1 minor style issue\n'
+            f'{padding}'
+            'Finding: F3 [High] tools/b.py:42 blocking correctness bug\n'
+        )
+        comment = {'id': 9, 'body': body, 'created_at': '2026-10-27T01:00:00Z',
+                   'updated_at': '2026-10-27T01:00:00Z'}
+
+        event_copy = dict(task['completion_events'][0])
+        packet, event = review_repair._failed_event(
+            task, executor_task=EXECUTOR, pr_number=PR, github_get=lambda _path: [comment])
+        self.assertEqual(event, event_copy)
+        self.assertNotIn('_comment_body', event)
+        self.assertNotIn('_comment_body', task['completion_events'][0])
+
+        # repair_review leaves stored event unmutated without _comment_body
+        result = self.dispatch(github_get=lambda _path: [comment])
+        self.assertEqual(result['claim']['attempt'], 1)
+        stored_task = self.store.get(TASK)
+        self.assertNotIn('_comment_body', stored_task['completion_events'][0])
+
+    def test_two_consecutive_calls_with_different_verdicts_do_not_share_body(self):
+        # Two consecutive calls with different verdicts do not share a body.
+        padding = ('Discussion line to pad out character count.\n' * 55)
+        body1 = (
+            '<!-- activity: type=review_verdict actor=Claude target=PM status=FIX -->\n'
+            f'Verdict: FAIL | Version: v1 | HEAD: {HEAD}\n'
+            f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} contract={CONTRACT} head={HEAD}\n'
+            'Finding: F1 [Low] tools/a.py:1 minor style\n'
+            f'{padding}'
+            'Finding: F3 [High] tools/b.py:42 blocking issue\n'
+        )
+        comment1 = {'id': 9, 'body': body1, 'created_at': '2026-10-27T01:00:00Z',
+                    'updated_at': '2026-10-27T01:00:00Z'}
+
+        # First call: blocking finding after char 2000 is admitted.
+        result1 = self.dispatch(github_get=lambda _path: [comment1])
+        self.assertEqual(result1['claim']['attempt'], 1)
+        self.assertEqual(len(self.calls), 1)
+
+        # Second call with a fresh task store: all Low/Advisory findings.
+        task2_id = 'b' * 32
+        rec2 = _record()
+        rec2['task_id'] = task2_id
+        body2 = (
+            '<!-- activity: type=review_verdict actor=Claude target=PM status=FIX -->\n'
+            f'Verdict: FAIL | Version: v1 | HEAD: {HEAD}\n'
+            f'LLMTOOL-REVIEW-BINDING v1 task={task2_id} run={RUN} contract={CONTRACT} head={HEAD}\n'
+            'Finding: F1 [Low] tools/a.py:1 minor style\n'
+            f'{padding}'
+            'Finding: F2 [Advisory] tools/b.py:42 advisory only\n'
+        )
+        comment2 = {'id': 10, 'body': body2, 'created_at': '2026-10-27T01:00:00Z',
+                    'updated_at': '2026-10-27T01:00:00Z'}
+
+        store2 = TempTaskStore(self.temp.name, rec2)
+        with patch.object(review_repair.worker_dispatch, 'evaluate',
+                          return_value=type('Decision', (), {'allowed': True})()):
+            with self.assertRaises(LLMToolError) as caught:
+                review_repair.repair_review(
+                    store=store2, task_id=task2_id, executor_task=EXECUTOR,
+                    pr_number=PR, github_get=lambda _path: [comment2],
+                    dispatch_adapter=lambda **request: {'status': 'DISPATCHED', 'head': HEAD},
+                    current_head=lambda _task, _executor: HEAD,
+                    repair_task_recorder=lambda **request: {'task_id': request['repair_task_id']})
+        self.assertEqual(caught.exception.review_repair_code, 'REPAIR_NO_BLOCKING_FINDING')
+        self.assertEqual(len(self.calls), 1)
+
+    def test_review_gate_never_falls_back_to_earlier_body(self):
+        # _review_gate without body falls back only to untrusted excerpt, never prior body.
+        policy = review_repair._policy()
+        task = _record()
+        packet = {
+            'task': TASK, 'pr': PR, 'executor_task': EXECUTOR,
+            'failed_head': HEAD, 'version': 1, 'verdict_comment_id': 9,
+            'findings_count': 1,
+            'reviewer_text_excerpt_untrusted_data': 'Finding: F1 [Low] tools/a.py:1 minor',
+        }
+        with self.assertRaises(LLMToolError) as caught:
+            review_repair._review_gate(task, [], packet, f'pr-{PR}', policy, body=None)
+        self.assertEqual(caught.exception.review_repair_code, 'REPAIR_NO_BLOCKING_FINDING')
 
 
 if __name__ == '__main__':
