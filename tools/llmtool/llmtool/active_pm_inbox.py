@@ -207,7 +207,8 @@ def recovery(record):
     if type(provenance) is not dict or 'pm_native_session_id' not in provenance:
         return None
     if provenance['pm_runtime'] == 'claude-code':
-        argv = ['claude', '--resume', provenance['pm_native_session_id']]
+        session = provenance['pm_native_session_id']
+        argv = ['claude', '--resume', session, '--disallowedTools', 'Skill']
     elif provenance['pm_runtime'] == 'codex':
         argv = ['codex', 'resume', provenance['pm_native_session_id']]
     else:
