@@ -1563,7 +1563,17 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
     debug_model = _admit_debug_model(worker_key, debug_model)
     completion = task.get('completion')
     ev = completion.get('evidence') if type(completion) is dict else None
-    if type(ev) is not dict or completion.get('executor_task_id') != executor_task or type(ev.get('common_dir')) is not str:
+    # #1943 WP-5: an Issue target must be a verified Issue, never a pull request.
+    if issue_number is not None and not _is_plain_issue(issue_number):
+        _refuse('HIGH_DEBUG_ISSUE_INVALID')
+    no_pr_d6 = issue_number is not None and completion is None
+    # #1943 WP-5: with no completion, the Task itself must name the D6 it debugs.
+    if no_pr_d6 and not _task_holds_d6(task, executor_task):
+        _refuse('HIGH_DEBUG_D6_NOT_BOUND')
+    if no_pr_d6:
+        repo_root = _no_pr_repo_root()
+        ev = {'common_dir': os.path.join(repo_root, '.git')}
+    elif type(ev) is not dict or completion.get('executor_task_id') != executor_task or type(ev.get('common_dir')) is not str:
         _refuse('HIGH_DEBUG_D6_UNAVAILABLE')
     try:
         reader = read_registration or task_completion.read_d6_registration
@@ -1573,12 +1583,16 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
         snap = task_completion.collect_git_snapshot(registration.root)
     except Exception:
         _refuse('HIGH_DEBUG_D6_UNAVAILABLE')
+    if no_pr_d6:
+        head = snap.head if isinstance(snap.head, str) and _HEX40.fullmatch(snap.head) else None
+        if head is None:
+            _refuse('HIGH_DEBUG_D6_UNAVAILABLE')
     if not isinstance(head, str) or _HEX40.fullmatch(head) is None or snap.head != head:
         _refuse('HIGH_DEBUG_HEAD_MISMATCH')
     # #1502 WP-D D13: no AI Debug while a dispute on this PR head is OPEN. The
     # refusal records no entry, so it uses no Debug.
     from .review_repair import dispute_open_on
-    if dispute_open_on(task, pr_number, head):
+    if pr_number is not None and dispute_open_on(task, pr_number, head):
         _refuse('DEBUG_DISPUTE_OPEN')
     entries = task.get('high_debug', [])
     if type(entries) is not list or len(entries) >= 8: _refuse('HIGH_DEBUG_LIMIT')
