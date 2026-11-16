@@ -1,8 +1,11 @@
 """Subprocess coverage for the #1943 owner-ask PreToolUse gate hook.
 
-Every refusal case keeps the ungated waiting_owner WAITING marker in plain
-command text or in a readable body file. Tests use temporary files and fixed
-hook JSON; the hook runs with an empty PATH to show it never calls gh.
+The gate fails closed: malformed hook input is refused, command text that
+expands a variable or command substitution is refused because the posted body
+cannot be known, and every body file must be a small regular non-symlink file
+that is read once. Marker cases keep the ungated waiting_owner WAITING marker in
+plain command text or in a regular body file. Tests use temporary files and
+fixed hook JSON; the hook runs with an empty PATH to show it never calls gh.
 """
 import importlib.util
 import json
@@ -62,11 +65,12 @@ class OwnerAskGateHookTests(unittest.TestCase):
         path.write_text(body, encoding="utf-8")
         return path
 
-    def assertRefused(self, stdin_text, *hidden_texts):
+    def assertRefused(self, stdin_text, *hidden_texts, message=None):
+        expected = hook.REFUSAL if message is None else message
         result = self.run_hook(stdin_text)
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertEqual(result.stdout, "")
-        self.assertEqual(result.stderr, hook.REFUSAL + "\n")
+        self.assertEqual(result.stderr, expected + "\n")
         self.assertIn("waiting_owner", result.stderr)
         self.assertIn("owner-ask", result.stderr)
         for text in hidden_texts:
@@ -90,11 +94,14 @@ class OwnerAskGateHookTests(unittest.TestCase):
     def test_non_bash_tool_passes(self):
         self.assertAllowed(hook_payload(f'gh issue comment 17 --body "{UNGATED_BODY}"',
                                         tool_name="Edit"))
+        self.assertAllowed(json.dumps({"tool_name": "Read"}))
+        self.assertAllowed(json.dumps({"tool_name": "Write", "tool_input": None}))
 
     def test_command_without_a_gh_comment_call_passes(self):
         for command in ('echo hello',
                         f'gh issue view 17 --body "{UNGATED_BODY}"',
-                        f'gh pr view 17 --body "{UNGATED_BODY}"'):
+                        f'gh pr view 17 --body "{UNGATED_BODY}"',
+                        'gh issue view 17 --body "$SOMETHING"'):
             with self.subTest(command=command):
                 self.assertAllowed(hook_payload(command))
 
@@ -102,23 +109,52 @@ class OwnerAskGateHookTests(unittest.TestCase):
         self.assertAllowed(hook_payload('gh issue comment 17 --body "Looks fine."'))
         self.assertAllowed(hook_payload('gh pr comment 17 --body "Looks fine."'))
 
-    def test_unreadable_body_file_without_marker_passes(self):
-        missing = self.tmp / "missing-body.md"
-        self.assertAllowed(hook_payload(f"gh issue comment 17 --body-file {missing}"))
-        self.assertAllowed(hook_payload(f"gh issue comment 17 --body-file {missing} ;"))
+    def test_variable_body_is_refused(self):
+        for command in ('gh issue comment 17 --body "$COMMENT_BODY"',
+                        f'gh issue comment 17 --body "$COMMENT_BODY {UNGATED_BODY}"',
+                        f'gh pr comment 18 --body "{GATED_BODY} $COMMENT_BODY"',
+                        'gh pr comment 18 --body-file "$BODY_PATH"'):
+            with self.subTest(command=command):
+                self.assertRefused(hook_payload(command),
+                                   message=hook.REFUSAL_UNKNOWN_TEXT)
 
-    def test_malformed_stdin_passes(self):
+    def test_command_substitution_body_is_refused(self):
+        for command in ('gh issue comment 17 --body "$(cat body.md)"',
+                        f'gh pr comment 17 --body "$(cat body.md) {GATED_BODY}"'):
+            with self.subTest(command=command):
+                self.assertRefused(hook_payload(command),
+                                   message=hook.REFUSAL_UNKNOWN_TEXT)
+
+    def test_backtick_body_is_refused(self):
+        for command in ('gh issue comment 17 --body "`cat body.md`"',
+                        f'gh pr comment 17 --body "`cat body.md` {GATED_BODY}"'):
+            with self.subTest(command=command):
+                self.assertRefused(hook_payload(command),
+                                   message=hook.REFUSAL_UNKNOWN_TEXT)
+
+    def test_malformed_stdin_is_refused(self):
         for stdin_text in ("", "not json at all", '{"tool_name": "Bash"'):
             with self.subTest(stdin_text=stdin_text):
-                self.assertAllowed(stdin_text)
+                self.assertRefused(stdin_text, message=hook.REFUSAL_PAYLOAD)
 
-    def test_valid_json_without_a_bash_command_passes(self):
+    def test_non_object_json_is_refused(self):
+        for stdin_text in ("[]", '"text"', "5", "null"):
+            with self.subTest(stdin_text=stdin_text):
+                self.assertRefused(stdin_text, message=hook.REFUSAL_PAYLOAD)
+
+    def test_bash_payload_without_a_command_is_refused(self):
         for stdin_text in (json.dumps({"tool_name": "Bash"}),
+                           json.dumps({"tool_name": "Bash", "tool_input": None}),
+                           json.dumps({"tool_name": "Bash", "tool_input": []}),
                            json.dumps({"tool_name": "Bash", "tool_input": {}}),
                            json.dumps({"tool_name": "Bash",
-                                       "tool_input": {"command": 5}})):
+                                       "tool_input": {"command": 5}}),
+                           json.dumps({"tool_name": "Bash",
+                                       "tool_input": {"command": None}}),
+                           json.dumps({"tool_name": "Bash",
+                                       "tool_input": {"command": ""}})):
             with self.subTest(stdin_text=stdin_text):
-                self.assertAllowed(stdin_text)
+                self.assertRefused(stdin_text, message=hook.REFUSAL_PAYLOAD)
 
     def test_semicolon_join_without_space_refused_ungated_ask_first(self):
         command = (f'gh issue comment 17 --body "{UNGATED_BODY}"'
@@ -150,7 +186,7 @@ class OwnerAskGateHookTests(unittest.TestCase):
         ))
         self.assertRefused(hook_payload(command), "unmatched")
 
-    def test_heredoc_gated_ask_passes(self):
+    def test_heredoc_body_file_dash_is_refused_even_when_gated(self):
         command = "\n".join((
             "gh issue comment 17 --body-file - <<'EOF'",
             MARKER_ASK,
@@ -158,7 +194,7 @@ class OwnerAskGateHookTests(unittest.TestCase):
             "Question?",
             "EOF",
         ))
-        self.assertAllowed(hook_payload(command))
+        self.assertRefused(hook_payload(command), message=hook.REFUSAL_BODY_FILE)
 
     def test_echo_of_a_comment_call_with_the_marker_is_refused(self):
         command = f'echo gh issue comment 17 --body "{MARKER_ASK}"'
@@ -169,6 +205,57 @@ class OwnerAskGateHookTests(unittest.TestCase):
                    f'gh pr comment 18 --body "{UNGATED_BODY}"')
         self.assertRefused(hook_payload(command))
 
+    def test_missing_body_file_is_refused(self):
+        missing = self.tmp / "missing-body.md"
+        for command in (f"gh issue comment 17 --body-file {missing}",
+                        f"gh issue comment 17 --body-file {missing} ;",
+                        f"gh pr comment 17 -F {missing}"):
+            with self.subTest(command=command):
+                self.assertRefused(hook_payload(command),
+                                   message=hook.REFUSAL_BODY_FILE)
+
+    def test_stdin_body_file_is_refused(self):
+        for command in ("gh issue comment 17 --body-file -",
+                        "gh pr comment 17 --body-file=-",
+                        f'gh pr comment 17 --body "{GATED_BODY}" --body-file -'):
+            with self.subTest(command=command):
+                self.assertRefused(hook_payload(command),
+                                   message=hook.REFUSAL_BODY_FILE)
+
+    def test_directory_body_file_is_refused(self):
+        directory = self.tmp / "body-dir"
+        directory.mkdir()
+        self.assertRefused(
+            hook_payload(f"gh issue comment 17 --body-file {directory}"),
+            message=hook.REFUSAL_BODY_FILE)
+
+    def test_unreadable_body_file_path_is_refused(self):
+        plain = self.write_body("plain.md", GATED_BODY)
+        unreadable = plain / "child.md"
+        self.assertRefused(
+            hook_payload(f"gh issue comment 17 --body-file {unreadable}"),
+            message=hook.REFUSAL_BODY_FILE)
+
+    def test_symlinked_body_file_is_refused(self):
+        target = self.write_body("gated.md", GATED_BODY)
+        link = self.tmp / "linked.md"
+        link.symlink_to(target)
+        self.assertRefused(hook_payload(f"gh issue comment 17 --body-file {link}"),
+                           message=hook.REFUSAL_BODY_FILE)
+
+    def test_oversized_body_file_is_refused(self):
+        oversized = self.tmp / "oversized.md"
+        oversized.write_bytes(b"A" * (65536 + 1))
+        self.assertRefused(
+            hook_payload(f"gh issue comment 17 --body-file {oversized}"),
+            message=hook.REFUSAL_BODY_FILE)
+        self.assertRefused(hook_payload(f"gh pr comment 17 -F {oversized}"),
+                           message=hook.REFUSAL_BODY_FILE)
+
+    def test_body_file_at_the_size_limit_passes(self):
+        body = self.write_body("limit.md", "A" * 65536)
+        self.assertAllowed(hook_payload(f"gh issue comment 17 --body-file {body}"))
+
     def test_readable_body_file_ungated_is_refused(self):
         body = self.write_body("ungated.md", UNGATED_BODY + "\n" + SENTINEL)
         command = f'gh issue comment 17 --body-file "{body}"'
@@ -176,6 +263,10 @@ class OwnerAskGateHookTests(unittest.TestCase):
 
     def test_readable_body_file_gated_passes(self):
         body = self.write_body("gated.md", GATED_BODY)
+        self.assertAllowed(hook_payload(f"gh issue comment 17 --body-file {body}"))
+
+    def test_body_file_text_is_not_shell_expanded(self):
+        body = self.write_body("literal.md", "Cost is $5 and `code` here.")
         self.assertAllowed(hook_payload(f"gh issue comment 17 --body-file {body}"))
 
     def test_body_file_equals_and_short_flag(self):
