@@ -2332,15 +2332,54 @@ def _remote_fail_action(related, result_head):
     return 'REPAIR_REVIEW'
 
 
-def _claude_failed_before_running(execution):
-    """True when the execution record shows Claude never ran (#2188).
+def _claude_status_failed_executor(repair_record):
+    """Return the repair Task's executor Task id for a Claude status failure, else None (#2188).
 
-    No native session id and no diff: nothing could have changed, so a retry
-    is safe. A record with either one stays UNKNOWN.
+    A Claude Developer that stopped with CLAUDE_STATUS_FAILED and recorded no
+    native session id and no diff may still have run and changed its D6, so
+    derive_repair_state keeps it UNKNOWN. This only names the D6 that decide
+    must read before it may retry; a record with a session id or a diff, or
+    with no executor Task id, gives None and stays UNKNOWN.
     """
-    return (type(execution) is dict
-            and execution.get('native_session_id') is None
-            and execution.get('diff_sha256') is None)
+    if type(repair_record) is not dict:
+        return None
+    developer = repair_record.get('developer')
+    if (type(developer) is not dict or developer.get('state') != 'BLOCKED' or
+            developer.get('error_code') != 'CLAUDE_STATUS_FAILED'):
+        return None
+    execution = developer.get('execution')
+    if (type(execution) is not dict or execution.get('native_session_id') is not None or
+            execution.get('diff_sha256') is not None):
+        return None
+    executor = developer.get('executor_task_id')
+    return executor if type(executor) is str and executor else None
+
+
+def _repair_d6_unchanged(current_repair, d6):
+    """True only when the repair Task's executor D6 is clean at the claim head (#2188).
+
+    Read fresh with task_completion.collect_git_snapshot. Any missing value,
+    read error or mismatch gives False, so the claim stays REPAIR_OUTCOME_UNKNOWN.
+    """
+    if type(current_repair) is not dict or type(d6) is not dict:
+        return False
+    executor = current_repair.get('repair_start_failure_executor')
+    head = current_repair.get('head_sha')
+    common_dir = d6.get('common_dir')
+    if (type(executor) is not str or not executor or type(head) is not str or
+            re.fullmatch(r'[0-9a-f]{40}', head) is None or type(common_dir) is not str):
+        return False
+    try:
+        registration = task_completion.read_d6_registration(
+            executor, common_dir, allowed_states=task_completion._D6_EVIDENCE_STATES)
+        snapshot = task_completion.collect_git_snapshot(registration.root)
+        return (getattr(snapshot, 'clean', None) is True and
+                getattr(snapshot, 'head', None) == head and
+                getattr(snapshot, 'root', None) == registration.root and
+                getattr(snapshot, 'common_dir', None) == registration.common_dir and
+                getattr(snapshot, 'branch', None) == registration.branch)
+    except Exception:
+        return False
 
 
 def derive_repair_state(repair_record):
@@ -2353,9 +2392,11 @@ def derive_repair_state(repair_record):
     # top-level state, which may still read PM_PENDING.
     if state == 'BLOCKED' and developer.get('error_code') == 'CLAUDE_NO_CHANGES':
         return 'BLOCKED'
-    if (state == 'BLOCKED' and developer.get('error_code') == 'CLAUDE_STATUS_FAILED'
-            and _claude_failed_before_running(developer.get('execution'))):
-        return 'BLOCKED'
+    # #2188 PR #2215 v91: a status failure does not prove Claude never ran, so
+    # it stays UNKNOWN, even while the top level still reads PM_PENDING.
+    # decide retries it only after reading its D6 clean at the claim head.
+    if state == 'BLOCKED' and developer.get('error_code') == 'CLAUDE_STATUS_FAILED':
+        return 'UNKNOWN'
     if state == 'DEVELOPER_PENDING' or repair_record.get('state') == 'PM_PENDING':
         return 'PENDING'
     if state == 'DEVELOPER_DISPATCHING':
@@ -2397,7 +2438,11 @@ def _pre_review_action(record, d6, pr, related, result_head):
 
 
 def decide(record, d6, pr, related):
-    """Return the next action name using only supplied snapshots."""
+    """Return the next action name using only supplied snapshots.
+
+    One exception (#2188): a review-repair claim marked as a Claude status
+    failure reads its executor D6 before it may retry (_repair_d6_unchanged).
+    """
     if type(record) is not dict:
         return 'DEVELOPER_ATTENTION'
     developer = record.get('developer')
@@ -2472,6 +2517,10 @@ def decide(record, d6, pr, related):
                 return 'WAITING_REPAIR'
             if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
                     current_repair.get('repair_state') == 'UNKNOWN'):
+                # #2188: a Claude status failure retries only when its D6 is
+                # clean at the claim head; the retry records a new counted claim.
+                if _repair_d6_unchanged(current_repair, d6):
+                    return 'REPAIR_RETRY'
                 return 'REPAIR_OUTCOME_UNKNOWN'
             if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
                     current_repair.get('repair_state') == 'RECORD_UNAVAILABLE'):
@@ -3212,7 +3261,12 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                             if type(repair_record) is dict else 'RECORD_UNAVAILABLE')
         except Exception:
             repair_state = 'RECORD_UNAVAILABLE'
-        repair_claims.append(dict(claim, repair_state=repair_state))
+        marked = dict(claim, repair_state=repair_state)
+        start_failure = (_claude_status_failed_executor(repair_record)
+                         if repair_state == 'UNKNOWN' else None)
+        if start_failure is not None:
+            marked['repair_start_failure_executor'] = start_failure
+        repair_claims.append(marked)
     related['repair_claims'] = repair_claims
     try:
         review_outcomes = _review_outcomes(record, _claims(record), get)
