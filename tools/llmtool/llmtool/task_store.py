@@ -4436,7 +4436,11 @@ class TaskStore:
                         False)
             for existing in events:
                 if existing['event_id'] == event_id:
-                    if any(existing[key] != value for key, value in binding.items()):
+                    if existing.get('source') == 'REVIEWER' or source == 'REVIEWER':
+                        if existing.get('review_kind', 'formal') != binding.get('review_kind', 'formal'):
+                            _fail('COMPLETION_EVENT_CONFLICT')
+                    if any(existing.get(key) != value for key, value in binding.items()
+                           if key != 'review_kind'):
                         _fail('COMPLETION_EVENT_CONFLICT')
                     return self._completion_result(existing, False)
             for existing in events + tombstones:

@@ -505,6 +505,102 @@ class ReviewDispatchTests(unittest.TestCase):
                          'REVIEW_DISPATCH_VERSION_USED')
         self.assertIn('use version 92.', str(caught.exception))
 
+    def test_security_dispatch_at_valid_version_passes_every_preflight_and_creates_security_claim(self):
+        self.store.data.update({
+            'developer': {'provider_profile': 'claude'},
+            'run_id': 'c' * 32,
+            'task_binding': {'contract_digest': 'd' * 64},
+        })
+        reviewer = SimpleNamespace(root='/repo/reviewer-d6')
+        preflight_kinds = []
+        original_preflight = (TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer')
+
+        def tracking_preflight(store, task_id, executor_task, pr_number, version, *, task=None, reviewer=None, kind='formal'):
+            preflight_kinds.append(kind)
+            return original_preflight
+
+        created_d6 = []
+        def fake_create(**kw):
+            created_d6.append(kw)
+
+        def run_codex(**kw):
+            return {
+                'thread_id': '0123456789abcdef',
+                'review_text': _codex_review_text(run_id='c' * 32, contract='d' * 64),
+                'verdict': 'PASS',
+            }
+
+        with patch.object(review_dispatch, '_preflight', side_effect=tracking_preflight), \
+                patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                             return_value=SimpleNamespace(allowed=True, reason_code='')), \
+                patch.object(review_dispatch, '_resolve_github_login',
+                             return_value='reviewer-user'), \
+                patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                             return_value=reviewer):
+            result = review_dispatch.dispatch_review(
+                store=self.store, task_id=TASK, executor_task='executor-d6',
+                pr_number=42, version=91, kind='security',
+                create_d6=fake_create, bind_session=lambda **_: None,
+                prompt_renderer=lambda *_: 'prompt', codex_runner=run_codex)
+
+        # Every preflight in the dispatch received kind='security'
+        self.assertEqual(len(preflight_kinds), 2)
+        self.assertEqual(preflight_kinds, ['security', 'security'])
+        # The dispatch at valid security version was not rejected after its claim or Reviewer D6 was created
+        self.assertEqual(len(created_d6), 1)
+        self.assertEqual(result['state'], 'COMPLETED')
+        self.assertEqual(result['version'], 91)
+        self.assertEqual(result['verdict'], 'PASS')
+        claim = self.store.get(TASK)['review_dispatch_claim'][0]
+        self.assertEqual(claim['review_kind'], 'security')
+        self.assertEqual(claim['version'], 91)
+        self.assertEqual(claim['state'], 'COMPLETED')
+
+    def test_kind_and_version_range_refusal_happens_before_claim_or_d6_written(self):
+        self.store.data.update({
+            'developer': {'provider_profile': 'claude'},
+            'run_id': 'c' * 32,
+            'task_binding': {'contract_digest': 'd' * 64},
+        })
+        cases = [
+            ('formal', 91),
+            ('formal', 0),
+            ('formal', 92),
+            ('security', 1),
+            ('security', 90),
+            ('security', 10000),
+            ('invalid_kind', 1),
+        ]
+        executor = SimpleNamespace(
+            result_sha=HEAD, root='/repo/worktree', common_dir='/repo/.git', branch='task')
+        snapshot = SimpleNamespace(
+            head=HEAD, root='/repo/worktree', common_dir='/repo/.git', branch='task',
+            clean=True)
+        pull = {'number': 42, 'head': {'sha': HEAD}, 'base': {'sha': 'c' * 40}}
+
+        for kind, v in cases:
+            with self.subTest(kind=kind, version=v):
+                test_store = DurableFakeStore(self.store.path)
+                created_d6 = []
+                with patch.object(review_dispatch.task_completion, 'validate_task_binding'), \
+                        patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                                     return_value=executor), \
+                        patch.object(review_dispatch.task_completion, 'collect_git_snapshot',
+                                     return_value=snapshot), \
+                        patch.object(review_dispatch.task_completion, '_github_get',
+                                     return_value=pull), \
+                        patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                                     return_value=SimpleNamespace(allowed=True)), \
+                        self.assertRaises(LLMToolError) as caught:
+                    review_dispatch.dispatch_review(
+                        store=test_store, task_id=TASK, executor_task='executor-d6',
+                        pr_number=42, version=v, kind=kind,
+                        create_d6=lambda **kw: created_d6.append(kw))
+                self.assertEqual(caught.exception.review_dispatch_code,
+                                 'REVIEW_VERSION_RANGE_INVALID')
+                self.assertEqual(len(created_d6), 0)
+                self.assertNotIn('review_dispatch_claim', test_store.get(TASK))
+
     def test_legacy_alias_naming_a_codex_account_is_refused_before_any_claim(self):
         # The real resolver on a temporary home: the Owner-style legacy
         # 'reviewer' entry names a Codex account, so dispatch stops at resolve.

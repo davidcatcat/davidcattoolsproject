@@ -1418,7 +1418,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         prompt = rules_prefix + prompt
         # Detect a moved PR/head before starting the Reviewer session.
         _, _, current_head, _, _ = _preflight(
-            store, task_id, executor_task, pr_number, version, reviewer=reviewer_key)
+            store, task_id, executor_task, pr_number, version, reviewer=reviewer_key,
+            kind=kind)
         if current_head != head:
             _refuse('REVIEW_PROMPT_PR_HEAD_MISMATCH')
         gate = _policy(task, reviewer_key)

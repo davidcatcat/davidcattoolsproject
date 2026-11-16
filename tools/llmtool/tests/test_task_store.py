@@ -4985,6 +4985,23 @@ class TaskStoreTests(unittest.TestCase):
         # Event id for unchanged records without review_kind is byte-identical
         self.assertEqual(no_kind['event']['event_id'], 'e' * 32)
 
+        # Legacy event without review_kind replayed with review_kind='formal' succeeds
+        # and treats absent kind as formal without rewriting the record
+        replay = self.store.record_completion_event(
+            task2['task_id'], review_kind='formal', **event_args2)
+        self.assertFalse(replay['created'])
+        self.assertEqual(replay['event']['event_id'], 'e' * 32)
+        self.assertNotIn('review_kind', replay['event'])
+        loaded_task2 = self.store.get(task2['task_id'])
+        self.assertEqual(len(loaded_task2['completion_events']), 1)
+        self.assertNotIn('review_kind', loaded_task2['completion_events'][0])
+
+        # Replaying legacy event with review_kind='security' fails closed with conflict
+        with self.assertRaises(LLMToolError) as conflict:
+            self.store.record_completion_event(
+                task2['task_id'], review_kind='security', **event_args2)
+        self.assertEqual(conflict.exception.task_store_error_code, 'COMPLETION_EVENT_CONFLICT')
+
         # Invalid review_kind on REVIEWER event
         task3 = self._codex_dispatch_task()
         self.store.create(task3)

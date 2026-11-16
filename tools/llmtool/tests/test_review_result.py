@@ -664,3 +664,63 @@ class ReviewKindTests(unittest.TestCase):
                     version=1, kind='invalid', github_get=lambda p: [])
             self.assertEqual(caught.exception.review_dispatch_code,
                              'REVIEW_RESULT_ARGUMENT_INVALID')
+
+    def test_record_review_result_replay_legacy_claim_and_event_succeeds_without_rewriting_record(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = _store(temp_dir, claim_state='COMPLETED')
+            task = store.get(TASK)
+            legacy_claim = task['review_dispatch_claim'][0]
+            self.assertNotIn('review_kind', legacy_claim)
+
+            body = (
+                '<!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->\n'
+                f'Verdict: PASS | Version: v1 | HEAD: {HEAD}\n'
+                'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n'
+                f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} '
+                f'contract={CONTRACT} head={HEAD}\n')
+            legacy_claim['review_result'] = {
+                'task_id': TASK, 'run_id': RUN, 'contract_digest': CONTRACT,
+                'head': HEAD, 'verdict': 'PASS', 'review_text': body,
+            }
+            identity = {'task': TASK, 'run': RUN, 'head': HEAD,
+                        'version': 1, 'outcome': 'REVIEW_PASS', 'comment_id': 0}
+            event_id = hashlib.sha256(json.dumps(
+                identity, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()[:32]
+            payload = {'outcome': 'REVIEW_PASS', 'head': HEAD, 'version': 1,
+                       'comment_id': 0, 'findings_count': 0}
+            payload_sha256 = hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
+
+            seeded = store.record_completion_event(
+                TASK, event_id=event_id, run_id=RUN,
+                session_id='review-' + event_id, source='REVIEWER', source_sha=HEAD,
+                sequence=0, payload_sha256=payload_sha256)
+            self.assertTrue(seeded['created'])
+            self.assertNotIn('review_kind', seeded['event'])
+
+            store.compare_and_update(
+                TASK, expected={'record_sha256': store.get(TASK)['record_sha256']},
+                review_dispatch_claim=[legacy_claim])
+
+            seeded_task = store.get(TASK)
+            self.assertNotIn('review_kind', seeded_task['review_dispatch_claim'][0])
+            self.assertNotIn('review_kind', seeded_task['completion_events'][0])
+
+            res = review_result.record_review_result(
+                store=store, task_id=TASK, executor_task=EXECUTOR, pr_number=PR,
+                version=1, kind='formal')
+            self.assertFalse(res['created'])
+            self.assertEqual(res['state'], 'REVIEW_PASS')
+            self.assertEqual(res['event_id'], event_id)
+
+            after_task = store.get(TASK)
+            self.assertNotIn('review_kind', after_task['review_dispatch_claim'][0])
+            self.assertNotIn('review_kind', after_task['completion_events'][0])
+            self.assertEqual(len(after_task['completion_events']), 1)
+
+            with self.assertRaises(LLMToolError) as caught:
+                review_result.record_review_result(
+                    store=store, task_id=TASK, executor_task=EXECUTOR, pr_number=PR,
+                    version=1, kind='security')
+            self.assertEqual(caught.exception.review_dispatch_code,
+                             'REVIEW_RESULT_CLAIM_MISSING')
