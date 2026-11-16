@@ -27,6 +27,10 @@ _CLAUDE_REVIEW_MODEL = 'claude-sonnet-5-5'
 _CODEX_REVIEW_EFFORT = 'high'
 _CODEX_REVIEW_TIMEOUT = 1800
 _CODEX_REVIEW_MAX_OUTPUT = 1024 * 1024
+# #2212: larger hard ceiling for Codex JSONL output streams; intermediate
+# events are skipped while retained data (thread_id and final message) stays <= 1 MiB.
+_CODEX_REVIEW_STREAM_CEILING = 16 * 1024 * 1024
+_CODEX_REVIEW_HARD_CEILING = _CODEX_REVIEW_STREAM_CEILING
 
 # Fixed names of the check that refused a finished Codex run's output. They are
 # the only failure text a claim stores: never review text, model output or a path.
@@ -315,18 +319,33 @@ def _codex_argv(executable, reviewer_root, *, model=_CODEX_REVIEW_MODEL,
             '-s', 'read-only', '--cd', str(reviewer_root), '-']
 
 
+def _iter_jsonl_lines(raw):
+    """Yield non-empty JSONL lines from bytes split only at b'\n' (#1893)."""
+    start = 0
+    length = len(raw)
+    while start < length:
+        end = raw.find(b'\n', start)
+        if end == -1:
+            end = length
+        line = raw[start:end].decode('utf-8')
+        start = end + 1
+        if line:
+            yield line
+
+
 def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, version=1):
     """Accept one exact, binding-complete Codex review object from JSONL."""
-    if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_MAX_OUTPUT:
+    if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_STREAM_CEILING:
         _refuse('REVIEW_NOT_POSTED', reason='OUTPUT_UNREADABLE')
     final = None
+    final_oversized = False
     thread_id = None
     try:
         # #1893: JSONL lines end only at '\n'; splitlines() would also cut a
         # valid event at a raw U+2028 inside a JSON string.
-        for line in raw.decode('utf-8').split('\n'):
-            if not line:
-                continue
+        # #2212: read stream line by line with a 16 MiB ceiling; retain at most
+        # 1 MiB (final agent message and thread_id); oversized intermediate events skipped.
+        for line in _iter_jsonl_lines(raw):
             event = json.loads(line, object_pairs_hook=_unique_json_object)
             if type(event) is dict and event.get('type') == 'thread.started':
                 current = event.get('thread_id')
@@ -337,13 +356,21 @@ def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, ve
             elif type(event) is dict and event.get('type') == 'item.completed':
                 item = event.get('item')
                 if type(item) is dict and item.get('type') == 'agent_message':
-                    if type(item.get('text')) is not str:
+                    text = item.get('text')
+                    if type(text) is not str:
                         _refuse('REVIEW_NOT_POSTED', reason='MESSAGE_NOT_TEXT')
-                    final = item['text']
+                    if len(text.encode('utf-8')) > _CODEX_REVIEW_MAX_OUTPUT:
+                        final_oversized = True
+                        final = None
+                    else:
+                        final_oversized = False
+                        final = text
     except LLMToolError:
         raise
     except (UnicodeError, ValueError, RecursionError):
         _refuse('REVIEW_NOT_POSTED', reason='OUTPUT_NOT_JSONL')
+    if final_oversized:
+        _refuse('REVIEW_NOT_POSTED', reason='OUTPUT_UNREADABLE')
     if final is None:
         _refuse('REVIEW_NOT_POSTED', reason='NO_FINAL_MESSAGE')
     if thread_id is None:
@@ -402,7 +429,7 @@ def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, ve
 
 def _jsonl_shape(raw):
     """#1163: fixed-word shape of the first non-JSON line; never any output text."""
-    if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_MAX_OUTPUT:
+    if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_STREAM_CEILING:
         return 'OUTPUT_SHAPE unavailable'
     try:
         lines = raw.decode('utf-8').split('\n')
@@ -444,19 +471,21 @@ def _reply_shape(text):
 
 def _codex_final_message(raw):
     """Return the last complete Codex agent message when its JSONL is readable."""
-    if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_MAX_OUTPUT:
+    if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_STREAM_CEILING:
         return None
     final = None
     try:
-        for line in raw.decode('utf-8').split('\n'):
-            if not line:
-                continue
+        for line in _iter_jsonl_lines(raw):
             event = json.loads(line, object_pairs_hook=_unique_json_object)
             item = event.get('item') if type(event) is dict else None
             if (type(event) is dict and event.get('type') == 'item.completed' and
                     type(item) is dict and item.get('type') == 'agent_message' and
                     type(item.get('text')) is str):
-                final = item['text']
+                text = item['text']
+                if len(text.encode('utf-8')) > _CODEX_REVIEW_MAX_OUTPUT:
+                    final = None
+                else:
+                    final = text
     except (UnicodeError, ValueError, RecursionError):
         return final
     return final
