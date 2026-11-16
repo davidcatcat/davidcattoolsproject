@@ -1,7 +1,9 @@
 # Recording results that change D6 bootstrap sources (#1817)
 
-Status: design only. Source: `main` at `d6c1d018`. Defect: #1817 comments c6928715060 and c6928733279.
-References are `file:line` at that commit. "UNKNOWN" marks facts outside this Task's read paths.
+Status: design only, revision 2. This revision fixes codex-reviewer v1 findings F1 (marker consumers) and
+F2 (CARRY must verify the live environment). Source: `main` at `d6c1d018`. Defect: #1817 comments
+c6928715060 and c6928733279. References are `file:line` at that commit. "UNKNOWN" marks facts outside
+this Task's read paths.
 
 ## 1. Problem
 
@@ -19,8 +21,8 @@ Task cannot get an EC2 remote-test grant, a PR or a merge.
 - **record_result** (`tools/llmtool/scripts/d6_worktree_lifecycle.py:904`) refuses
   `env2_approved_tooling_sha` records (`:957-958`) and dirty trees (`:988-990`). It writes the new
   `head_sha` (`:1000-1002`), then runs ENV-2 through `_bootstrap` (`:1007`). On failure it restores the
-  previous record (`:1008-1018`). On success it requires `env2_pass_marker.current_head_sha == head`
-  (`:1021-1025`).
+  previous record, including the previous marker (`:999`, `:1008-1018`). On success it requires
+  `env2_pass_marker.current_head_sha == head` (`:1021-1025`).
 - **ENV-2 launch.** `_bootstrap` (`d6_worktree_lifecycle.py:647`) runs the helper from the pinned dispatcher
   checkout (`:536-548`, `:685-690`). The helper copy in the Task tree is never executed. Any
   `STOP (<code>)` becomes `ENV_BOOTSTRAP_REJECTED:<code>` (`:696-701`).
@@ -33,21 +35,27 @@ Task cannot get an EC2 remote-test grant, a PR or a merge.
   `D6_BOOTSTRAP_SOURCE_MISMATCH`. The check uses only `tooling_sha`; it does not look at the head commit.
 - **The build.** `_invoke_bootstrap` (`d6_worktree_env.py:961`) clears the marker (`:965`), then runs
   `make env-bootstrap` from the **Task tree's** `tools/llmtool/Makefile` with `WORKTREE_ENV_ROOT=../..`
-  (`:987-993`). The byte-equality check is therefore what keeps the build on trusted sources.
+  (`:987-993`). The byte-equality check is therefore what keeps the build on trusted sources. The
+  venv lives in the D6 at `tools/llmtool/.venv/` (`d6_worktree_lifecycle.py:45-46`; publish excludes
+  it, `task_advance.py:1927`). The helper never inspects the venv itself; the build report only
+  carries `cache_fingerprint` (`d6_worktree_env.py:653-659`, `:726-747`).
 - **ENV-2 markers.** The helper writes the PASS marker under the lifecycle lock
-  (`_update_env2_pass_marker`, `d6_worktree_env.py:817-909`). The report must be bound to `head_sha`
-  and `tooling_sha` (`:891-898`). The lifecycle checks the marker at `d6_worktree_lifecycle.py:1021-1025`.
+  (`_update_env2_pass_marker`, `d6_worktree_env.py:817-909`). The marker has exactly nine keys
+  (`:899-909`). The report must be bound to `head_sha` and `tooling_sha` (`:891-898`).
 - **Where write paths live.** They are stored only in the Task store record
   (`developer.write_paths`), checked in `tools/llmtool/llmtool/task_store.py:2900-2910`. Callback
   evidence must stay inside them (`task_store.py:3155-3157`). The D6 registry record has no write paths
   (`d6_worktree_lifecycle.py:783-809`). `remote_test._task_path_modules` uses them only to select
   tests (`tools/llmtool/llmtool/remote_test.py:313-323`).
 - **Downstream gates.** The remote-test grant is bound to the D6 recorded head
-  (`remote_test.py:562-595`). The merge gate requires `recorded_result_head == result_head` and a clean
-  D6 (`task_advance.py:3246-3265`; snapshot at `:2539-2572`).
+  (`remote_test.py:562-595`). The EC2 runner builds a fresh venv from `git archive <sha>`
+  (`remote_test.py:218-231`), so it never uses the D6 venv. The merge gate requires
+  `recorded_result_head == result_head` and a clean D6 (`task_advance.py:3246-3265`; snapshot at
+  `:2539-2572`).
 
-The code matches the goal's premise, so this is not a SPEC_MISMATCH. The fix can stay in the
-ENV-2/lifecycle seam. EC2 and the merge gate already follow the recorded head.
+The code matches the goal's premise, so this is not a SPEC_MISMATCH. The fix stays in the
+ENV-2/lifecycle seam plus the completion marker check (§3.5). EC2 and the merge gate already follow
+the recorded head.
 
 ## 3. Design
 
@@ -82,33 +90,137 @@ ENV-2/lifecycle seam. EC2 and the merge gate already follow the recorded head.
   paths, a stale or missing allowance, approved-tooling records and bad modes. A malformed allowance
   raises `D6_REGISTRY_INVALID`.
 - If there are no allowed changes, the mode is `BUILD` and nothing changes from today. If there is at
-  least one, the mode is `CARRY`.
+  least one, the mode is `CARRY`. The sorted list of allowed changes is `allowed_bootstrap_paths`.
 
 ### 3.3 The environment stays on trusted sources (CARRY mode)
 
-In `CARRY` mode, `_invoke_bootstrap` **does not run make**. It reads no changed bootstrap source as
-build input. The D6 keeps the venv from the last full PASS, which was built from `tooling_sha`
-sources: by `create_worktree` (`d6_worktree_lifecycle.py:835`) or by a later `BUILD` record. Before
-clearing the marker (`d6_worktree_env.py:965`), the helper requires that marker to have
-`result == "PASS"`, the same `task_id` and `root_realpath`, the current `tooling_sha`, a valid
-`environment_fingerprint`, and `report_sha256` equal to the SHA-256 of the current report file.
+In `CARRY` mode, `_invoke_bootstrap` **does not run make** and executes nothing from the Task tree or
+the venv. It reads no changed bootstrap source as build input. The D6 keeps the venv from the last
+full PASS, which was built from `tooling_sha` sources: by `create_worktree`
+(`d6_worktree_lifecycle.py:835`) or by a later `BUILD` record. Before clearing the marker
+(`d6_worktree_env.py:965`), the helper runs three checks in order. Each one fails closed.
 
-It then writes a report bound to the new head with `status: "env_carried"`, the carried
-`cache_fingerprint`, `operations: "NONE"` and `allowed_bootstrap_paths`. It publishes a marker that
-adds `environment_mode: "CARRIED"` and `carried_from_head_sha`. If there is no prior marker, or it does
-not match, the helper refuses with a new code `ENV2_CARRY_MARKER_UNAVAILABLE`. It never falls back to
-building. The PM handles recovery.
+1. **Historical marker.** The registry marker must pass the strict shape and binding rules of §3.5
+   (built or carried), with the same `task_id` and `root_realpath`, the current `tooling_sha`, and
+   `current_head_sha` an ancestor of, or equal to, the new head.
+2. **Historical report.** `report_sha256` must equal the SHA-256 of the current report file, read
+   with the same no-follow, owner-only, `0o600`, single-link rules as `:856-885`. The report must
+   hold a well-formed `venv_identity` (§3.4).
+3. **Live environment (§3.4).** The current `tools/llmtool/.venv` must match `venv_identity`.
+
+If check 1 or 2 fails, the helper refuses with `ENV2_CARRY_MARKER_UNAVAILABLE`. If check 3 fails or
+cannot be completed, it refuses with `ENV2_CARRY_ENVIRONMENT_UNVERIFIED`. It never falls back to
+building. Refusal writes no report and leaves the marker alone; the lifecycle rollback (`:1015`)
+restores the previous record anyway. The PM handles recovery.
+
+After all three pass, the helper clears the marker. It then writes a report and publishes a carried
+marker (§3.5). The report has `schema_version: 2` and the usual binding (`:802-814`), plus
+`result: "PASS"`, `status: "env_carried"`, the carried `cache_fingerprint`, `operations: "NONE"`,
+`carried_from_head_sha`, `allowed_bootstrap_paths` and the re-verified `venv_identity`.
+`carried_from_head_sha` is the head of the last BUILD PASS. On a second CARRY it is copied from the
+earlier carried marker, so it always names the head whose sources built the venv.
 
 So the D6 venv never reflects the Task's changed `pyproject.toml`. That is intended: the result is
-tested on EC2. Executing the changed sources would require a Makefile, `worktree_env.py` and pip
-redesign. That code is outside this Task's read paths, so how much of it could take trusted inputs is
-UNKNOWN. CARRY avoids that redesign.
+tested on EC2 in a fresh venv (`remote_test.py:218-231`). Executing the changed sources would require
+a Makefile, `worktree_env.py` and pip redesign. That code is outside this Task's read paths, so how
+much of it could take trusted inputs is UNKNOWN. CARRY avoids that redesign.
 
-### 3.4 EC2 remote test and merge
+### 3.4 Live venv identity
+
+**Recording.** After every BUILD PASS (`env_created` or `env_reused`), the helper computes
+`venv_identity` from the live venv and adds it to the report before `_atomic_bootstrap_report`
+(`:1025`). The helper copy that does this is the pinned dispatcher copy, so the venv was just built
+from trusted sources. If the venv layout is not as expected, BUILD still passes as today, with
+`venv_identity: "UNKNOWN"`. A later CARRY then refuses. This keeps BUILD behaviour unchanged.
+
+`venv_identity = {schema_version: 1, path: "tools/llmtool/.venv", device, inode, uid,
+pyvenv_cfg_sha256, interpreter_realpath, interpreter_stat: {device, inode, size, mtime_ns},
+site_packages_sha256}`.
+
+**Live check in CARRY** (all must hold, else `ENV2_CARRY_ENVIRONMENT_UNVERIFIED`):
+
+1. `tools/llmtool/.venv` exists, is a directory and not a link, is owned by `os.getuid()`, is not
+   group- or world-writable, and its `(st_dev, st_ino)` equals the recorded `device`, `inode`.
+2. `.venv/pyvenv.cfg` is a regular file, not a link, single link, owner-only, at most 64 KiB, read
+   with `O_NOFOLLOW`. Its SHA-256 equals `pyvenv_cfg_sha256`.
+3. `.venv/bin/python` exists. Its `os.path.realpath` equals `interpreter_realpath`. The target is a
+   regular executable file that is not group- or world-writable, and its `(st_dev, st_ino, st_size,
+   st_mtime_ns)` equals `interpreter_stat`. This catches a removed venv, a replaced venv and an
+   upgraded base interpreter.
+4. There is exactly one `.venv/lib/python<X.Y>/site-packages`, where `X.Y` matches the
+   `cache_fingerprint` version. It has at most 1000 `*.dist-info` directories and none is a link.
+   Each `RECORD` is a regular file of at most 1 MiB, read with `O_NOFOLLOW`. `site_packages_sha256`
+   is the SHA-256 of the canonical JSON of the sorted `[dist_info_name, sha256(RECORD)]` pairs. It
+   must equal the recorded value, so an added, removed or reinstalled package is refused.
+5. The recorded `uid` equals `os.getuid()`, and the report `cache_fingerprint` equals the marker's
+   `environment_fingerprint`.
+
+**Assumptions and limits.** The standard venv layout (`pyvenv.cfg`, `bin/python`,
+`lib/pythonX.Y/site-packages`) is assumed. `worktree_env.py`, which creates the venv, is outside the
+read paths (UNKNOWN). The ENV-2 PR must confirm the layout before coding. If the layout differs, the
+PR changes the fields but keeps the rule "refuse unless verified". A symlinked `.venv` is refused.
+The check does not hash every installed file, so an edit inside a package that leaves its `RECORD`
+unchanged is not detected. The race bound is the same single-writer lease as `:962-963`. The D6 venv
+is not result evidence: EC2 builds its own venv from the head.
+
+### 3.5 Marker schema and every consumer
+
+**Two exact shapes.** Built markers stay exactly as today: `schema_version: 1` and the nine keys of
+`d6_worktree_env.py:899-909`. Existing D6s and BUILD mode are unaffected. A carried marker has
+`schema_version: 2` and exactly twelve keys: the nine plus `environment_mode: "CARRIED"`,
+`carried_from_head_sha` and `allowed_bootstrap_paths`. `submitted_head_sha` and `current_head_sha`
+are the new head. Any other key set, or a version that does not match its key set, is invalid.
+
+**Consumers** (from a search of the read paths for `env2_pass_marker`):
+
+| # | Consumer | Today | Change |
+|---|---|---|---|
+| C1 | `d6_worktree_env._update_env2_pass_marker` (`d6_worktree_env.py:817-909`) | writes the nine-key marker | writes the carried shape in CARRY mode; checks the CARRY report fields (§3.3) in addition to `:891-898` |
+| C2 | ENV-2 CARRY, reading the prior marker (new, §3.3 check 1) | none | the C4 shape rules for both shapes and the C4 `task_id`, `root_realpath`, `tooling_sha`, fingerprint and report-hash bindings; the prior `current_head_sha` must be an ancestor of, or equal to, the new head instead of equal to it |
+| C3 | `d6_worktree_lifecycle.record_result` (`d6_worktree_lifecycle.py:1021-1025`) | requires a dict with `current_head_sha == head` | unchanged for schema 1. For schema 2 it also requires `allowed_bootstrap_paths` to be a subset of `env2_source_allowance.paths`, with `allowance.head_sha == head`, else `D6_RECORD_RESULT_ENV2_MARKER_INVALID` |
+| C4 | `task_completion.validate_env2_pass_marker` (`task_completion.py:740-823`; exact key set `:745-754`) | refuses any marker that does not have exactly the nine keys | accepts both exact shapes with the strict checks below |
+| C4a | result collection through `_collect_registered_result_diff` (`task_completion.py:1355`), used by `collect_executor_result` (`:1386-1399`) and `collect_claude_result` (`:1461-1467`) | calls C4 | passes `write_paths` (already a parameter, `:1335`) to C4 |
+| C4b | `collect_executor_worktree_result` (`task_completion.py:1635`) | calls C4 | passes `write_paths` (already a parameter, `:1601`) to C4 |
+| C5 | `task_completion.read_d6_registration` (`task_completion.py:650-737`) | keeps the marker as an opaque value (`:737`) and reads only named record keys, so it also accepts `env2_source_allowance` | none |
+| C6 | `remote_test.py:563` and `task_advance._d6_snapshot` (`task_advance.py:2556`) | call C5 but never read the marker | none |
+
+`task_store.py` has no marker reference. Repository files outside the read paths (for example
+`tools/llmtool/tests/`, `tools/ec2-runner/`) are UNKNOWN. Before coding, the completion PR must
+search the whole repository for `env2_pass_marker` and `validate_env2_pass_marker` and add any
+further consumer to this table.
+
+**Strict validation of a carried marker in C4** (`validate_env2_pass_marker(..., write_paths)`):
+
+1. Shape (`D6_ENV2_PASS_MARKER_INVALID`): the key set is exactly the twelve keys,
+   `type(schema_version) is int` and `== 2`, and `environment_mode == "CARRIED"`.
+2. All existing checks of `:755-770` and `:772-822` apply unchanged, including the report hash,
+   `head_sha`, `tooling_sha` and the `cache_fingerprint` binding.
+3. Binding (`D6_ENV2_PASS_MARKER_MISMATCH` for every check below):
+   - `registration.env2_approved_tooling_sha is None` and `tooling_sha == registration.source_sha`.
+   - `carried_from_head_sha` is a 40-hex string other than `current_head`.
+     `registration.source_sha` is an ancestor of it or equal to it. It is a strict ancestor of
+     `current_head` (`_is_ancestor`, `:1318`).
+   - `allowed_bootstrap_paths` is a non-empty, sorted list of unique strings. Each one is in
+     `BOOTSTRAP_SOURCES` and in `write_paths`.
+   - `allowed_bootstrap_paths` equals exactly the `BOOTSTRAP_SOURCES` paths that differ in content
+     or mode between `tooling_sha` and `current_head` (`_git` `diff --no-renames --name-only -z`
+     limited to `BOOTSTRAP_SOURCES`). Every required source exists at `current_head`
+     (`_tree_entry`, `:1665`).
+   - The report has `schema_version == 2`, `status == "env_carried"` and `operations == "NONE"`.
+     Its `carried_from_head_sha` and `allowed_bootstrap_paths` equal the marker's. Its
+     `venv_identity` is a dict of the §3.4 shape. C4 checks the shape only; the live venv check is
+     done by ENV-2 under the lock (§3.3).
+4. A schema-1 marker is checked exactly as today. `write_paths` is not used for it.
+
+`task_completion.py` cannot import the script helper, so it holds its own `BOOTSTRAP_SOURCES`
+constant. A test keeps the two copies equal.
+
+### 3.6 EC2 remote test and merge
 
 - **EC2.** After `record_result` succeeds, the existing grant (`remote_test.py:562-597`) binds to the
-  recorded head with no change. How the EC2 runner builds its own environment from the head is in
-  `tools/ec2-runner/` (UNKNOWN here). Its existing trust boundary for PR heads is unchanged.
+  recorded head with no change. The runner builds its own venv from the head archive
+  (`remote_test.py:218-231`). How `tools/ec2-runner/` hosts that run is UNKNOWN here. Its existing
+  trust boundary for PR heads is unchanged.
 - **Merge gate.** No code change is needed (`task_advance.py:3246-3265`). A CARRIED marker makes no
   claim about the head's environment. The evidence is the EC2 run, CI and the formal review. After
   merge, the changed source becomes a trusted tooling source only for D6s created from the new `main`.
@@ -118,35 +230,68 @@ UNKNOWN. CARRY avoids that redesign.
 
 ## 4. Ordered PRs
 
-Rule files are the entries in `tools/llmtool/sensitive-paths.json` and need Codex security review.
-The exact test module names are UNKNOWN because `tools/llmtool/tests/` is outside this Task's read
-paths. Tests follow the Owner #763 A rule: synthetic `pyproject.toml` content such as a version bump,
-and no credential-shaped strings.
+Rule files are the entries in `tools/llmtool/sensitive-paths.json`; `d6_worktree_lifecycle.py`,
+`task_advance.py` and `task_completion.py` are listed there (`sensitive-paths.json:12`, `:20`, `:21`)
+and need Codex security review. The exact test module names are UNKNOWN because `tools/llmtool/tests/`
+is outside this Task's read paths. Tests follow the Owner #763 A rule: synthetic `pyproject.toml`
+content such as a version bump, synthetic venv fixtures in temporary directories, and no
+credential-shaped strings. No production check is relaxed for tests.
+
+Consumers land before the producer, so no carried marker exists until every consumer accepts it.
 
 1. **PR-1 lifecycle binding (rule files: `d6_worktree_lifecycle.py`, `task_advance.py`).**
    - Code: `write_paths` goes through `_record_d6_result` into `record_result`, which writes or removes
-     `env2_source_allowance`.
+     `env2_source_allowance`. C3: the schema-2 check against the allowance.
    - Tests: the allowance is exactly the intersection with `BOOTSTRAP_SOURCES`, bound to the head; an
-     empty intersection or the CLI path removes it; rollback restores the previous allowance; publish
-     passes the Task write paths.
-   - Any `task_completion.read_d6_registration` key check must accept the new key; that file's
-     behaviour is UNKNOWN. ENV-2 on current `main` ignores unknown record keys (`d6_worktree_env.py:244-283`,
-     `:558-577`), so PR-1 alone does not change behaviour.
-2. **PR-2 ENV-2 acceptance and CARRY (`tools/llmtool/scripts/d6_worktree_env.py`; not listed in
-   sensitive-paths.json; security review recommended).**
-   - Code: §3.2 and §3.3.
-   - Tests: an allowed `pyproject.toml` change gives CARRY with the carried marker and make is not
-     called; `D6_BOOTSTRAP_SOURCE_MISMATCH` is kept for a path outside the allowance, a stale allowance
-     head, approved tooling, bytes differing from the head blob, a group-writable mode, a deleted
-     required source and an optional input added without allowance; a missing or mismatched prior
-     marker gives `ENV2_CARRY_MARKER_UNAVAILABLE`; BUILD mode is unchanged.
+     empty intersection or the CLI path removes it; rollback restores the previous allowance and
+     marker; publish passes the Task write paths; C3 accepts a schema-1 marker as today, accepts a
+     schema-2 marker whose paths are inside the allowance, and refuses one with a path outside it or a
+     stale allowance head.
+   - C5 reads only named keys (`task_completion.py:684-737`), and ENV-2 on current `main` ignores
+     unknown record keys (`d6_worktree_env.py:244-283`, `:558-577`). PR-1 alone does not change
+     behaviour.
+2. **PR-2 completion marker validation (rule file: `tools/llmtool/llmtool/task_completion.py`).**
+   - Code: C4 with the two exact shapes and the strict carried checks of §3.5; C4a and C4b pass
+     `write_paths`; the `BOOTSTRAP_SOURCES` constant. First, the repository-wide consumer search of
+     §3.5.
+   - Tests: `validate_env2_pass_marker` unit tests. A schema-1 marker behaves exactly as today. A valid
+     carried marker and report are accepted. Each of these is refused with the stated code: an extra
+     or missing key, a version that does not match its keys, a wrong `environment_mode`,
+     `carried_from_head_sha` equal to the head or not an ancestor, approved tooling, a path outside
+     `BOOTSTRAP_SOURCES` or outside `write_paths`, unsorted or duplicate paths, paths that differ from
+     the actual tooling-to-head bootstrap diff, a missing required source, a report with the wrong
+     `status`, `operations` or carried fields, and a malformed `venv_identity`.
+   - **Result-collection tests with the new marker:** `collect_executor_result`,
+     `collect_claude_result` and `collect_executor_worktree_result` each run on a synthetic registered
+     D6 whose head changes `tools/llmtool/pyproject.toml` (a version bump) and that holds a carried
+     marker and report. They return the result. The same fixture with the path removed from
+     `write_paths` refuses with `D6_ENV2_PASS_MARKER_MISMATCH`. A test asserts the
+     `BOOTSTRAP_SOURCES` constant equals the helper's set.
+   - No carried marker is produced yet, so behaviour on `main` does not change.
+3. **PR-3 ENV-2 acceptance, CARRY and venv identity (`tools/llmtool/scripts/d6_worktree_env.py`; not
+   listed in sensitive-paths.json; security review recommended).**
+   - Code: §3.2, §3.3 and §3.4, and C1 and C2. First, confirm the venv layout in `worktree_env.py`.
+   - Tests: an allowed `pyproject.toml` change gives CARRY with the carried marker and report, and make
+     is not called; BUILD reports now include `venv_identity`, and BUILD is otherwise unchanged;
+     `D6_BOOTSTRAP_SOURCE_MISMATCH` is kept for a path outside the allowance, a stale allowance head,
+     approved tooling, bytes differing from the head blob, a group-writable mode, a deleted required
+     source and an optional input added without allowance; a missing or mismatched prior marker or
+     report gives `ENV2_CARRY_MARKER_UNAVAILABLE`; `ENV2_CARRY_ENVIRONMENT_UNVERIFIED` for a missing
+     venv, a replaced venv directory (new inode), a symlinked venv, a changed `pyvenv.cfg`, a changed
+     interpreter target or stat, an added or removed dist-info, a changed `RECORD`, an oversized file,
+     and a prior report with `venv_identity` absent or `"UNKNOWN"`; a second CARRY keeps the original
+     `carried_from_head_sha`.
+   - **End-to-end test:** `record_result` with write paths that include `tools/llmtool/pyproject.toml`
+     records a CARRY result, C3 accepts it, and the PR-2 collection functions accept the resulting
+     marker for the same D6.
    - **Bootstrap blocker:** this PR changes the helper, which is itself a bootstrap source
      (`:503-511`). Under current `main`, its own `record_result` fails with this same defect. The
-     delivery route needs an Owner decision through the PM (UNKNOWN).
-3. **PR-3, optional (rule file: `tools/llmtool/sensitive-paths.json`).** Add the
+     delivery route needs an Owner decision through the PM (UNKNOWN). D6s created before PR-3 have no
+     `venv_identity`, so they cannot CARRY until a fresh BUILD record; that is the fail-closed outcome.
+4. **PR-4, optional (rule file: `tools/llmtool/sensitive-paths.json`).** Add the
    `BOOTSTRAP_SOURCES` paths so that changes to them also need security review. This needs an
    Owner decision. Test: the sensitive-path classification test for the new entries.
 
-Once PR-1 and PR-2 are on `main` and the dispatcher is pinned to them, a Task such as the #1817
-`pyproject.toml` change can record its result, get an EC2 grant, open a PR and merge through the
-existing gates.
+Once PR-1 to PR-3 are on `main` and the dispatcher is pinned to them, a Task such as the #1817
+`pyproject.toml` change can record its result, pass result collection, get an EC2 grant, open a PR and
+merge through the existing gates.
