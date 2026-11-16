@@ -192,6 +192,7 @@ class Process:
     # A company LLM run (#763): ("gw", work folder, audit file) of a gw-agent
     # gateway; checked tokens only.
     gw: tuple = ()
+    drive_task: str = ""
 
 
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._+-]")
@@ -278,12 +279,34 @@ def _agent_role(exe: str, args: list[str], command: str) -> str | None:
             return "Codex daemon" if "daemon" in words else "Codex APP-SERVER"
         return "Codex CLI"
     if exe == "llmtool":
-        return "llmtool CLI"
+        return _llmtool_role(command)
     if exe == "Runner.Listener":
         return "Actions runner"
     if exe == "Runner.Worker":
         return "Actions runner job"
     return None
+
+
+HEX_TASK_ID = re.compile(r"^[0-9a-fA-F]{32}$")
+
+
+def _llmtool_drive_task(command: str) -> str:
+    """Whether an llmtool CLI command runs `task drive <32hex>` or
+    `task advance <32hex>`. Only that 32-hex Task ID is kept, never any
+    other argv text (see _row_facts)."""
+    if command.startswith("(") and command.endswith(")"):
+        command = command[1:-1]
+    parts = command.split()
+    for i in range(len(parts) - 2):
+        if parts[i] == "task" and parts[i + 1] in ("drive", "advance"):
+            cand = parts[i + 2]
+            if HEX_TASK_ID.fullmatch(cand):
+                return cand.lower()
+    return ""
+
+
+def _llmtool_role(command: str) -> str:
+    return "llmtool drive" if _llmtool_drive_task(command) else "llmtool CLI"
 
 
 def _codex_exec_command(command: str) -> bool:
@@ -315,7 +338,7 @@ def classify(command: str) -> str | None:
     if exe.lower().startswith("python"):
         target = _python_target(args)
         if target == ("module", "llmtool"):
-            return "llmtool CLI"
+            return _llmtool_role(command)
         if target == ("module", "api_agent_gateway") and "run" in args:
             return GW_AGENT_ROLE
         if target is not None and target[0] == "script":
@@ -323,7 +346,7 @@ def classify(command: str) -> str | None:
             if name in ("invoke_once.py", "live_once.py"):
                 return "llmtool HOST"
             if name == "llmtool":
-                return "llmtool CLI"
+                return _llmtool_role(command)
             if name in ("ai_loop.py", "ai-loop.sh"):
                 return "ai-loop controller"
         return None
@@ -428,13 +451,15 @@ def _argv_digest(command: str) -> bytes:
 
 
 def _row_facts(command: str) -> tuple:
-    """(role, safe name, remote-test job, codex exec, gw run) of a command
+    """(role, safe name, remote-test job, codex exec, gw run, drive task) of a command
     line; only these sanitized results are ever stored."""
     role = classify(command)
     job = _remote_test_job(command)
+    drive_task = _llmtool_drive_task(command) if role == "llmtool drive" else ""
     return (role, safe_name(command), job,
             role is not None and role.startswith("Codex CLI") and _codex_exec_command(command),
-            _gw_run_job(command, role))
+            _gw_run_job(command, role),
+            drive_task)
 
 
 def parse_processes(output: str, self_pid: int, remembered: dict | None = None) -> Snapshot:
@@ -524,7 +549,7 @@ def snapshot_from(entries, self_pid: int, remembered: dict | None = None) -> Sna
         if stat.startswith("Z"):
             role += " (zombie)"
         result.append(Process(pid, ppid, pgid, elapsed, stat, role, facts[1], owner, facts[2],
-                              facts[3], facts[4]))
+                              facts[3], facts[4], facts[5] if len(facts) > 5 else ""))
     watched = {g: {pid for pid, row in rows.items() if row[1] == g} for g in groups}
     watched.update(orphans)
     lingering = sorted(
@@ -8090,6 +8115,84 @@ def remote_test_row(processes: list[Process], now: float, root: str | None = Non
                      80, kind="worker", evidence="llmtool 紀錄")
 
 
+def _task_pr(record: dict | None) -> int | None:
+    if not isinstance(record, dict):
+        return None
+    for key in ("pr", "pr_number", "pull_request"):
+        val = record.get(key)
+        if isinstance(val, int) and val > 0:
+            return val
+        if isinstance(val, str) and val.isdigit() and int(val) > 0:
+            return int(val)
+    for section in ("completion", "developer", "lineage"):
+        sub = record.get(section)
+        if isinstance(sub, dict):
+            for key in ("pr", "pr_number", "pull_request"):
+                val = sub.get(key)
+                if isinstance(val, int) and val > 0:
+                    return val
+                if isinstance(val, str) and val.isdigit() and int(val) > 0:
+                    return int(val)
+    return None
+
+
+def _read_task_record(tasks_dir: str, task_id: str) -> dict | None:
+    """Read task record JSON for task_id from tasks_dir, or None if missing/unreadable."""
+    if not tasks_dir:
+        return None
+    for name in (f"{task_id}.json", f"task-{task_id}.json"):
+        path = os.path.join(tasks_dir, name)
+        try:
+            with open(path, "rb") as f:
+                data = json.loads(f.read(1 << 20))
+                if isinstance(data, dict):
+                    return data
+        except (OSError, ValueError, RecursionError):
+            pass
+    try:
+        paths = glob.glob(os.path.join(tasks_dir, "*.json"))
+    except OSError:
+        return None
+    for path in sorted(paths):
+        try:
+            with open(path, "rb") as f:
+                data = json.loads(f.read(1 << 20))
+                if isinstance(data, dict) and data.get("task_id") == task_id:
+                    return data
+        except (OSError, ValueError, RecursionError):
+            continue
+    return None
+
+
+def drive_rows(processes: list[Process], now: float,
+               tasks_dir: str | None = None) -> list[OfficeRow]:
+    """One WORKING row per active `llmtool task drive` or `task advance` process."""
+    tasks_dir = LLMTOOL_TASKS if tasks_dir is None else tasks_dir
+    rows = []
+    for proc in sorted(processes, key=lambda p: p.pid):
+        if proc.role != "llmtool drive":
+            continue
+        task_id = getattr(proc, "drive_task", "")
+        if not task_id:
+            continue
+        task_prefix = task_id[:8]
+        elapsed_str = proc.elapsed if proc.elapsed else "00:00"
+        record = _read_task_record(tasks_dir, task_id)
+        if record is None:
+            detail = f"task {task_prefix} · PR 未確認 · 跑了 {elapsed_str}"
+        else:
+            pr = _task_pr(record)
+            if pr is not None:
+                detail = f"task {task_prefix} · PR #{pr} · 跑了 {elapsed_str}"
+            else:
+                detail = f"task {task_prefix} · 跑了 {elapsed_str}"
+        age = _elapsed_seconds(proc.elapsed)
+        rows.append(OfficeRow("llmtool 推進", WORKING, detail,
+                              age if age is not None else 0.0, 80,
+                              kind="worker", task=f"task {task_prefix}", evidence="程序"))
+    return rows
+
+
 # Company LLM runs (#763 Owner): while a gw-agent Developer run is under way it
 # gets a live row like the Claude and Codex rows, then a 完成 row for
 # OFFICE_DONE_WINDOW; otherwise only its status row stays. No Task file is
@@ -9015,6 +9118,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     if ci_view is not None:
         rows += hosted_ci_rows(ci, ci_view, now)
     rows.append(remote_test_row(processes, now, llmtool_tasks))
+    rows.extend(drive_rows(processes, now, llmtool_tasks))
     gw_runs = gw_rows(processes, now, canonical) + gw_task_rows(now, llmtool_tasks)
     rows += gw_runs
     gw_live: dict = {}
