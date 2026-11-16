@@ -77,6 +77,13 @@ def _base_d6(head):
     }
 
 
+def _exception_d6(head):
+    # #1817: an owner-exception merge always checks the executor identity, so
+    # its D6 is the completion executor's ACTIVE pm-deterministic registration.
+    return dict(_base_d6(head), trusted_agent_id="pm-deterministic",
+                registration_state="ACTIVE")
+
+
 def _make_github_get(head, number, *, check_runs=None, files=None):
     if files is None:
         files = [{"filename": "docs/readme.md"}]
@@ -153,7 +160,7 @@ class TestTaskAdvanceOwnerException(unittest.TestCase):
         record = _base_record(task_id, head)
         store = FakeStore(record)
 
-        with patch.object(task_advance, "_d6_snapshot", return_value=_base_d6(head)), \
+        with patch.object(task_advance, "_d6_snapshot", return_value=_exception_d6(head)), \
              patch.object(owner_exception, "verify", return_value=("OWNER_EXCEPTION_SCOPE", None)):
             gh_runner = FakeGhRunner()
             github_get = _make_github_get(head, number)
@@ -181,7 +188,7 @@ class TestTaskAdvanceOwnerException(unittest.TestCase):
         store = FakeStore(record)
 
         fake_evidence = {"exception_slot": "S2a", "verified_files": ["tools/foo.py"]}
-        with patch.object(task_advance, "_d6_snapshot", return_value=_base_d6(head)), \
+        with patch.object(task_advance, "_d6_snapshot", return_value=_exception_d6(head)), \
              patch.object(owner_exception, "verify", return_value=(None, fake_evidence)), \
              patch.object(task_advance.mac_full_suite, "request_full_suite",
                           return_value=task_advance.mac_full_suite.MAC_FULL_SUITE_DISPATCHED):
@@ -244,7 +251,7 @@ class TestTaskAdvanceOwnerException(unittest.TestCase):
         url = "https://github.com/example/repo/issues/1253#issuecomment-6788268483"
         fake_evidence = {"slot": "S2a"}
 
-        with patch.object(task_advance, "_d6_snapshot", return_value=_base_d6(head)), \
+        with patch.object(task_advance, "_d6_snapshot", return_value=_exception_d6(head)), \
              patch.object(owner_exception, "verify", return_value=(None, fake_evidence)):
             # 1. Failed CI
             failed_checks = [
@@ -495,6 +502,67 @@ class TestOwnerExceptionExecutorTask(unittest.TestCase):
         self.assertEqual(res["step"], "MERGE_REFUSED")
         self.assertEqual(res["codes"], ["OWNER_EXCEPTION_SCOPE"])
         verify.assert_called_once()
+        self.assertFalse(any(c[1][:2] == ["pr", "merge"] for c in gh_runner.calls))
+
+    def test_no_flag_exception_merge_checks_executor(self):
+        # #1817 (Codex v995 on PR #1514, CWE-863): omitting --executor-task no
+        # longer skips the executor identity check.
+        head = "a" * 40
+        cases = {
+            "not_deterministic": _base_d6(head),
+            "wrong_agent": _exception_d6(head) | {"trusted_agent_id": "codex-developer"},
+            "other_task": _exception_d6(head) | {"task_id": "exec-dummy-002"},
+            "not_active": _exception_d6(head) | {"registration_state": "RETIRED"},
+            "binding_unavailable": {"state": "D6_BINDING_UNAVAILABLE",
+                                    "code": "D6_BINDING_UNAVAILABLE"},
+        }
+        for name, d6 in cases.items():
+            with self.subTest(name):
+                store = FakeStore(_base_record("task-exec-5", head))
+                gh_runner = FakeGhRunner()
+                with patch.object(task_advance, "_d6_snapshot", return_value=d6) as snapshot, \
+                     patch.object(owner_exception, "verify") as verify:
+                    res = advance(task_id="task-exec-5", store=store, pr_number=42,
+                                  merge=True, owner_exception=_EXEC_URL,
+                                  github_get=_make_github_get(head, 42),
+                                  merge_gh_runner=gh_runner)
+                self.assertEqual(res["step"], "MERGE_REFUSED")
+                self.assertEqual(res["codes"], ["OWNER_EXCEPTION_EXECUTOR_INVALID"])
+                self.assertEqual(snapshot.call_args.args[1], "exec-dummy-001")
+                self.assertNotIn("allow_cwd_fallback", snapshot.call_args.kwargs)
+                verify.assert_not_called()
+                self.assertFalse(any(c[1][:2] == ["pr", "merge"] for c in gh_runner.calls))
+
+    def test_no_flag_exception_merge_with_matching_executor_proceeds(self):
+        head = "a" * 40
+        store = FakeStore(_base_record("task-exec-6", head))
+        gh_runner = FakeGhRunner()
+        with patch.object(task_advance, "_d6_snapshot", return_value=_exception_d6(head)), \
+             patch.object(owner_exception, "verify",
+                          return_value=("OWNER_EXCEPTION_SCOPE", None)) as verify:
+            res = advance(task_id="task-exec-6", store=store, pr_number=42,
+                          merge=True, owner_exception=_EXEC_URL,
+                          github_get=_make_github_get(head, 42),
+                          merge_gh_runner=gh_runner)
+        # The executor gate passed; the owner-exception verifier ran next.
+        self.assertEqual(res["codes"], ["OWNER_EXCEPTION_SCOPE"])
+        verify.assert_called_once()
+        self.assertFalse(any(c[1][:2] == ["pr", "merge"] for c in gh_runner.calls))
+
+    def test_no_flag_exception_merge_without_executor_refused(self):
+        head = "a" * 40
+        store = FakeStore(_no_executor_record("task-exec-7"))
+        gh_runner = FakeGhRunner()
+        with patch.object(task_advance, "_d6_snapshot") as snapshot, \
+             patch.object(owner_exception, "verify") as verify:
+            res = advance(task_id="task-exec-7", store=store, pr_number=42,
+                          merge=True, owner_exception=_EXEC_URL,
+                          github_get=_make_github_get(head, 42),
+                          merge_gh_runner=gh_runner)
+        self.assertEqual(res["step"], "MERGE_REFUSED")
+        self.assertEqual(res["codes"], ["OWNER_EXCEPTION_EXECUTOR_UNKNOWN"])
+        snapshot.assert_not_called()
+        verify.assert_not_called()
         self.assertFalse(any(c[1][:2] == ["pr", "merge"] for c in gh_runner.calls))
 
     def test_cli_executor_task_parsed_and_passed_to_advance(self):

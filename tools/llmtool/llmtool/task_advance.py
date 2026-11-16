@@ -3181,6 +3181,9 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                                     record, store, None)
     active_executor = completion_executor or executor_task
     using_executor_task = bool(owner_exception is not None and type(executor_task) is str)
+    # #1817 (Codex v995 on PR #1514, CWE-863): an owner-exception merge always
+    # checks the executor identity, whether or not --executor-task was given.
+    exception_merge = bool(merge and owner_exception is not None)
     executor_task = active_executor
     number = _pr_number(record, pr_number)
     get = task_completion._github_get if github_get is None else github_get
@@ -3248,8 +3251,15 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                      _refusal(exc, 'task_store_error_code')]}, record, store,
                 d6.get('result_head') if type(d6) is dict else None)
     if merge:
-        if using_executor_task:
+        if exception_merge:
+            if type(executor_task) is not str or not executor_task:
+                # #1817: no completion executor and no --executor-task; the
+                # executor identity cannot be established, so nothing merges.
+                return _ack_consumed_events(
+                    _merge_refusal('OWNER_EXCEPTION_EXECUTOR_UNKNOWN'),
+                    record, store, None)
             if (type(d6) is not dict or d6.get('state') == 'D6_BINDING_UNAVAILABLE' or
+                    d6.get('task_id') != executor_task or
                     d6.get('trusted_agent_id') != 'pm-deterministic' or
                     not (d6.get('registration_state') == 'ACTIVE' or d6.get('state') == 'ACTIVE') or
                     d6.get('dirty') is True or d6.get('state') == 'DIRTY' or
