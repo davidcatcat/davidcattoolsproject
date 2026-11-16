@@ -2,6 +2,16 @@
 
 Status: design only (docs). No code changes in this PR.
 Source commit read: `0f1014f2` (`main`). Line numbers below are at that commit.
+Repair 1 re-read the four modules at `1639658e`, a docs-only commit on top of
+`0f1014f2`, so the line numbers are unchanged.
+
+Read scope: `review_dispatch.py`, `review_result.py`, `review_repair.py` and
+`task_advance.py` only. Some facts below come from formal review v2 of PR
+#2205 and were **not read in this Task**: `AGENTS.md:113`,
+`tools/llmtool/sensitive-paths.json`, `merge_train_ops.py` and
+`task_submission_cli._dispute_fail_verdict`. Each one is marked "(reported, not
+read)". The PR that changes such a file must add it to its read and write
+paths and confirm the reported behaviour before relying on it.
 
 ## 1. Problem
 
@@ -144,8 +154,43 @@ comment text alone resolves anything.
   - `_merged_review_target` (`:2801`)
   - the `REVIEWER_ATTENTION` missing-verdict check (`:3604`)
   - `_pr_number` (`:2532`)
+- Sensitive paths: `task_advance.py` already imports `sensitive_paths` (`:20`).
+  `_carry_test_file` (`:1291`) calls `sensitive_paths.is_sensitive(path)` and
+  treats any answer other than `False`, including an exception, as sensitive
+  (`:1298`–`:1302`). Per review v2 (reported, not read), `AGENTS.md:113` names
+  `tools/llmtool/sensitive-paths.json` as the rule-file registry. That registry
+  has exact, prefix and glob rules and covers, among others,
+  `tools/llmtool/worker-dispatch.json`, `task_advance.py` and the review
+  modules.
 
-### 2.6 Consequence
+### 2.6 Merge-train route
+
+- Closure after a train merge is read in `task_advance.py`:
+  `_merged_review_target` (`:2801`) with `_train_member_merged` (`:2736`), and
+  `_closed_train_member_head` (`:2887`). Both only close a Task after the merge.
+  They do not decide whether to merge.
+- The train merge itself is in `merge_train_ops.py` (reported, not read).
+  `_member_unchanged` checks each member only through `_merge_pass_claim`.
+  `_merge_locked` then checks the train CI and merges. It does not go through
+  `_merge_once`, so no gate added only to `_merge_once` reaches it.
+
+### 2.7 Disputes
+
+- `review_repair.py` keeps disputes in `task['review_disputes']`, keyed by
+  `(pr, head_sha, finding_id)` with no kind:
+  - `dispute_open_on` (`:72`) blocks every repair at that head while a dispute
+    is OPEN.
+  - `withdrawn_findings` (`:83`) returns the finding IDs that an arbiter ruling
+    WITHDREW at that head. `_review_gate` (`:531`–`:535`) drops them from the
+    blocking set of whichever verdict is being repaired.
+  - `claim_reviewer` (`:125`) recognises only the formal
+    `type=review_verdict` marker. Otherwise it falls back to `account_mode`
+    (`CODEX_CLI` gives `codex-reviewer`).
+- `task_submission_cli._dispute_fail_verdict` (reported, not read) picks the
+  disputed verdict as the COMPLETED claim with the highest version, across all
+  claims and with no kind filter.
+
+### 2.8 Consequence
 
 None of this code knows a review kind. If you simply wrote a security claim or
 event into the existing fields, the formal readers above would take it as a
@@ -154,8 +199,17 @@ formal review:
 - A security FAIL would look like a formal FAIL.
 - A security PASS could satisfy `_merge_pass_claim`.
 - A v91 security claim would push the next formal version to 92.
+- `_dispute_fail_verdict` would always pick a security claim, because security
+  versions are higher (§3.2). A formal dispute would then target the wrong
+  verdict.
+- An arbiter WITHDREW of formal finding `F1` would also drop a security `F1`
+  at the same head from the blocking set, because finding IDs are not unique
+  across kinds.
+- A train merge would accept a member with a formal PASS whatever its security
+  state.
 
-So kind awareness must land before any security record can be written.
+So kind awareness must land before any security record can be written, and
+the merge gate must cover the train route as well as `_merge_once`.
 
 ## 3. Design
 
@@ -234,7 +288,8 @@ So kind awareness must land before any security record can be written.
     - for PASS, the line `SECURITY ACCEPT`.
 
     Findings use the existing `Finding: F<n> [Severity] …` form, so
-    `blocking_findings` and the dispute code work unchanged. The formal
+    `blocking_findings` and `verdict_findings` parse them unchanged. The
+    dispute code does not stay unchanged; it becomes kind-aware (§3.7). The formal
     `_VERDICT_MARKER` and `_CODEX_BINDING` patterns cannot match a security
     body, and the security classifier cannot match a formal body.
   - **Publication:** the result is stored as `review_result` on the COMPLETED
@@ -254,15 +309,20 @@ So kind awareness must land before any security record can be written.
 ### 3.4 Advance routing (security before formal)
 
 - `_advance_step` computes `related['security']`, which holds two values:
-  - **`required`**: true when either of these holds:
-    - The PR files at the head touch a rule file. The files are read through
-      `_pr_files`, and both `filename` and `previous_filename` are checked.
+  - **`required`**: computed by one shared helper,
+    `_security_required(record, number, github_get)`. It is true when either of
+    these holds:
+    - The PR files at the head touch a rule file as defined in §3.6. The files
+      are read through `_pr_files`, and both `filename` and
+      `previous_filename` are checked.
     - Any security claim already exists for this PR, at any head. This makes
       the requirement sticky, so a repair cannot escape a FAIL by dropping the
       rule file.
 
     An unreadable file list, or `PR_FILES_TOO_MANY`, means required (fail
-    closed).
+    closed). The merge gate (§3.6) and the train gate (§3.6) call the same
+    helper, so advance, merge and train cannot disagree about which PRs need
+    a security PASS.
   - **`latest`**: the newest security claim at `(pr, head)` and its bound
     outcome, built by a security-aware `_review_outcomes`.
 - `decide` inserts a security stage after the EC2 PASS and before
@@ -333,25 +393,88 @@ So kind awareness must land before any security record can be written.
 - The gate reads TaskStore and the stored Codex output only. PR comments are
   never an input. That is the fix for the CWE-345 finding: posting a PASS-shaped
   comment changes no record, so it cannot open the gate.
-- Rule file set (constant `RULE_FILE_PATHS` in `task_advance.py`): `AGENTS.md`,
-  `CLAUDE.md`, and every path under `.claude/skills/`. This is the same set
-  `_REVIEW_RULES_HEADER` (`review_dispatch.py:102`) calls rule files. Any wider
-  set is an Owner decision (§6).
+- **Rule file set.** There is no new hand-written path list. A path is a rule
+  file when either of these holds:
+  - **The existing registry:** `sensitive_paths.is_sensitive(path)` returns
+    anything other than `False`, for the same fail-closed reading as
+    `_carry_test_file` (`task_advance.py:1298`–`:1302`). `True`, `None`, a
+    malformed answer and an exception all count as a rule file. The registry is
+    `tools/llmtool/sensitive-paths.json` with its exact, prefix and glob rules,
+    which `AGENTS.md:113` names as the rule-file registry (reported, not read).
+    This includes `tools/llmtool/worker-dispatch.json`, `task_advance.py` and
+    the review modules. Its exact contents and matcher semantics are UNKNOWN to
+    this design. The PR that adds `_security_required` reads
+    `sensitive_paths.py` and the registry and confirms them.
+  - **The review-rules set:** `AGENTS.md`, `CLAUDE.md`, or a path under
+    `.claude/skills/`. This is the set `_REVIEW_RULES_HEADER`
+    (`review_dispatch.py:102`) calls rule files. It is kept as a floor in case
+    the registry does not list one of them. It never narrows the registry.
 
-### 3.7 Invariants
+  The PR author does not choose the set, and a prompt header is not the merge
+  classification. Changes to the registry follow its existing process. Because
+  a registry change is itself a rule-file change, it needs a bound security
+  PASS.
+- **Train route.** The merge train must not bypass the gate (§2.6). PR 4
+  changes `merge_train_ops._member_unchanged` (reported, not read). For every
+  member it calls `_security_required` for that member's PR, then
+  `_merge_security_claim` at the member's recorded head, right after the
+  existing `_merge_pass_claim` check. Any refusal refuses the whole train
+  merge, with the member's code prefixed `TRAIN_MEMBER_`. An example is
+  `TRAIN_MEMBER_MERGE_SECURITY_REVIEW_MISSING`.
+  - `_pr_files` (`task_advance.py:499`) reads the PR's current file list, not
+    the list at a given head. So the train check also refuses
+    `TRAIN_MEMBER_HEAD_MOVED` when the member PR's current head differs from
+    the member's recorded head. The name `_member_unchanged` suggests it
+    already checks this, but that is UNKNOWN here. PR 4 confirms it or adds
+    the check.
+  - It is UNKNOWN here whether `_merge_locked` re-runs `_member_unchanged`
+    inside its lock before it merges. If it does not, PR 4 adds the security
+    check there too. The final check must run under the same lock as the
+    merge call, after the train CI check, so a newer security claim cannot
+    land between check and merge.
+  - The same PR adds both the `_merge_once` gate and the train gate. No commit
+    on `main` has one gate without the other.
 
-- **I1:** a security claim or event is never read as formal, and a formal one is
-  never read as security.
+### 3.7 Kind-aware disputes
+
+- Every new entry in `review_disputes` stores `review_kind`. A missing field
+  means `formal`, so existing disputes keep their meaning.
+- `task_submission_cli._dispute_fail_verdict` (reported, not read) takes
+  `kind` (default `formal`). It considers only COMPLETED claims whose
+  `review_kind(claim)` equals that kind. It refuses when the newest one of
+  that kind is not a FAIL. A claim with `review_kind` `None` makes it refuse
+  `DISPUTE_TARGET_UNKNOWN` (fail closed), and it never falls back to another
+  kind. A formal dispute therefore cannot pick a security claim with a higher
+  version.
+- `withdrawn_findings(task, pr, head, kind)` returns only rulings on disputes
+  of that kind. `_review_gate` passes `packet.review_kind`. A formal `F1`
+  ruling never withdraws a security `F1`, and the reverse also holds.
+- `dispute_open_on` stays per head and kind-blind. An OPEN dispute of either
+  kind blocks repair of both kinds at that head. This fails closed and
+  matches the shared chain lock.
+- Security disputes: `task dispute --kind security` is refused
+  `DISPUTE_KIND_UNSUPPORTED` in this design. A security FAIL is resolved only
+  by a repair and a new bound security review, or by a PM or Owner decision
+  (§6). The kind-aware selection above exists so that the formal dispute path
+  stays correct while security claims exist.
+
+### 3.8 Invariants
+
+- **I1:** a security claim, event or dispute is never read as formal, and a
+  formal one is never read as security.
 - **I2:** formal behaviour, event ids and versions are unchanged for every record
   without a security claim.
 - **I3:** a security verdict exists only as the stored output of a COMPLETED
   Codex claim. A PR comment is a publication copy and resolves nothing.
 - **I4:** at any head with an unresolved bound security FAIL, no formal Reviewer
   starts, and repair is reachable through bound events.
-- **I5:** a PR that touches a rule file, or that ever had a security claim,
-  merges only when the newest bound security verdict at the exact merge head is
-  PASS.
-- **I6:** an unknown kind, file list or record state fails closed.
+- **I5:** a PR that touches a rule file (§3.6: the sensitive-paths registry or
+  the review-rules set), or that ever had a security claim, merges through
+  llmtool only when the newest bound security verdict at the exact merge head
+  is PASS. This holds on every llmtool merge route: `_merge_once` on the normal
+  and Owner exception paths, and the merge train.
+- **I6:** an unknown kind, file list, registry answer, dispute target or record
+  state fails closed.
 
 ## 4. Ordered PRs
 
@@ -374,7 +497,11 @@ gate lands last. Tests follow the test data rule (Owner #763 A):
   - `review_result.py`: `review_kind` helper; `_claim_for` filters by kind.
   - `review_dispatch.py`: version range check in `_preflight`; a prior claim
     with a different kind is refused `REVIEW_DISPATCH_CLAIM_MISMATCH`.
-  - `review_repair.py`: `_failed_event` filters on formal.
+  - `review_repair.py`: `_failed_event` filters on formal;
+    `withdrawn_findings` takes `kind` and `_review_gate` passes it (§3.7).
+  - `task_submission_cli.py` (reported, not read): `_dispute_fail_verdict`
+    filters by kind; new dispute entries store `review_kind`;
+    `--kind security` is refused `DISPUTE_KIND_UNSUPPORTED`.
   - `task_advance.py`: kind filter in the following:
     - `decide`
     - `_merge_pass_claim`
@@ -396,6 +523,19 @@ gate lands last. Tests follow the test data rule (Owner #763 A):
   - The range refusals behave as specified.
   - Formal event ids for unchanged records are byte-identical (regression).
   - A legacy unkinded claim at version ≥ 91 fails closed.
+  - Disputes:
+    - With a formal FAIL at v2 and a COMPLETED security claim at v91 on the
+      same head, a formal dispute targets v2.
+    - With only a security FAIL at the head, a formal dispute is refused, and
+      `--kind security` is refused `DISPUTE_KIND_UNSUPPORTED`.
+    - An unkinded claim at version ≥ 91 makes the dispute refuse
+      `DISPUTE_TARGET_UNKNOWN`.
+    - A formal `F1` WITHDRAWN ruling does not remove security `F1` from the
+      blocking set. `_review_gate`, called with a hand-built security packet
+      whose only blocking finding shares its ID with a withdrawn formal
+      finding, still admits it.
+    - An existing dispute entry without `review_kind` still withdraws formal
+      findings as before (regression).
 - **Invariants kept:** I1, I2, I6.
 
 ### PR 2: bound security dispatch and result
@@ -427,7 +567,11 @@ gate lands last. Tests follow the test data rule (Owner #763 A):
 
 - **Files:**
   - `task_advance.py`:
-    - `related['security']` (from `_pr_files`, sticky);
+    - `_security_required` (§3.4, §3.6), which uses
+      `sensitive_paths.is_sensitive` (fail closed) plus the review-rules set;
+      `sensitive_paths.py` and `tools/llmtool/sensitive-paths.json` are added
+      to this PR's read paths only (no change to either);
+    - `related['security']` (from `_security_required`, sticky);
     - the `decide` security stage;
     - the step bodies `DISPATCH_SECURITY_REVIEW`,
       `RECORD_SECURITY_REVIEW_RESULT` and `REPAIR_SECURITY_REVIEW`;
@@ -439,7 +583,23 @@ gate lands last. Tests follow the test data rule (Owner #763 A):
   following:
   - No formal `DISPATCH_REVIEW` happens while a bound security FAIL is at the
     head.
-  - The rule-file, sticky and unreadable-files cases set `required`.
+  - The rule-file, sticky and unreadable-files cases set `required`. The
+    rule-file cases use the real registry, not a stub, and cover:
+    - an exact rule: a PR that changes only
+      `tools/llmtool/worker-dispatch.json`;
+    - a module the registry lists: a PR that changes only
+      `tools/llmtool/llmtool/task_advance.py`, and one that changes only
+      `tools/llmtool/llmtool/review_dispatch.py`;
+    - one case for each prefix rule and each glob rule in the registry. The
+      exact paths are chosen when the PR reads the registry; they are UNKNOWN
+      here;
+    - a rename whose `previous_filename` alone is sensitive;
+    - the review-rules floor: `AGENTS.md`, `CLAUDE.md` and a
+      `.claude/skills/` file;
+    - fail closed: `sensitive_paths.is_sensitive` monkeypatched to raise, and
+      to return `None`, gives `required`;
+    - a path the registry does not match, and no security claim, gives not
+      required.
   - The #2194/#2197 shape works: a bound security FAIL now repairs.
   - A comment-only security FAIL still refuses `REVIEW_FAIL_EVENT_MISSING`.
   - A formal FAIL and a security FAIL on one head count as one valid FAIL.
@@ -448,11 +608,14 @@ gate lands last. Tests follow the test data rule (Owner #763 A):
     version.
 - **Invariants kept:** I1, I3, I4, I6.
 
-### PR 4: merge gate and migration
+### PR 4: merge gate on every llmtool merge route, and migration
 
 - **Files:**
-  - `task_advance.py`: `RULE_FILE_PATHS`, `_merge_security_claim`, and its call
-    in `_merge_once` on both paths.
+  - `task_advance.py`: `_merge_security_claim`, and its call in `_merge_once`
+    on both paths, using `_security_required` from PR 3.
+  - `merge_train_ops.py` (reported, not read): the per-member security check
+    in `_member_unchanged`, and in `_merge_locked` under the merge lock if
+    `_member_unchanged` does not run there (§3.6, train route).
   - Retiring the comment-posting part of `codex-sec-review-claude.sh`, or
     turning it into a wrapper around `review-dispatch --kind security`. The
     helper's path is UNKNOWN to this design and must be added to that PR's
@@ -464,13 +627,29 @@ gate lands last. Tests follow the test data rule (Owner #763 A):
   - A newer security claim that is FAIL or UNKNOWN.
   - A file list that cannot be read.
   - An Owner exception path with no security PASS.
+  - A PR that changes only `tools/llmtool/worker-dispatch.json` (an exact
+    registry rule, outside the review-rules set) with a formal PASS and no
+    security claim.
 
   These cases are allowed:
   - A bound security PASS at the exact head (merges, with an injected
     `gh_runner`).
   - A non-rule PR with no security claim (unchanged).
   - A PASS at an older head only does not count (refused).
-- **Invariants kept:** I5, I6.
+
+  Train route, with an injected train store and `gh_runner`; the merge call
+  is asserted not to run on every refusal:
+  - A member that touches a rule file, with a formal PASS and no security
+    claim, refuses the train `TRAIN_MEMBER_MERGE_SECURITY_REVIEW_MISSING`.
+  - A member with a formal PASS and a bound security FAIL at its head refuses
+    the train `TRAIN_MEMBER_MERGE_SECURITY_REVIEW_NOT_PASS`.
+  - A member with a newer security claim landing after the first check but
+    before the locked merge is refused under the lock.
+  - A member with a security PASS-shaped comment and no claim is refused (the
+    forgery case on the train).
+  - A train whose rule-file members all have a bound security PASS at their
+    heads, and whose other members need none, merges.
+- **Invariants kept:** I5 (both routes in one PR), I6.
 
 ## 5. Migration
 
@@ -493,13 +672,23 @@ gate lands last. Tests follow the test data rule (Owner #763 A):
   carries the distinct security marker and binding line. The only reader of
   comment version labels, `_may_be_review_verdict`, checks formal versions
   (< 91) only.
-- **Between PR 3 and PR 4:** advance already routes security FAILs, but merge
-  is not gated yet. A comment-only security verdict is advisory from PR 3 on.
-  The PM should rely on the bound result instead.
+- **Between PR 3 and PR 4:** advance already routes security FAILs, but no
+  merge route is gated yet, neither `_merge_once` nor the train. A comment-only
+  security verdict is advisory from PR 3 on. The PM should rely on the bound
+  result instead. Before PR 2 no security claim can exist, so PR 1 alone
+  changes no merge outcome.
 - **PR 4 rollout:** open rule-file PRs without a bound security PASS at their
   head are refused `MERGE_SECURITY_REVIEW_MISSING` until advance runs the bound
   review. Advance can do that by itself after PR 3, so no manual step is
   needed.
+  - Open or queued merge trains that hold such a member are refused
+    `TRAIN_MEMBER_MERGE_SECURITY_REVIEW_MISSING`. Each member's own advance
+    runs its bound review; then the train is retried. Nothing is imported
+    from comments.
+  - The registry (§3.6) covers more than the review-rules set, for example
+    llmtool modules. Open PRs that touch only registry paths need a bound
+    security review too. Their number is UNKNOWN here. The PM lists them
+    before PR 4 lands.
 - **Merged PRs:** no retroactive action.
 - **Rollback:** reverting PR 4 removes only the gate. Reverting PR 2 or PR 3
   leaves stored security records that PR 1 readers still ignore for formal
@@ -513,17 +702,18 @@ gate lands last. Tests follow the test data rule (Owner #763 A):
   the PM or Owner decides.
 - Changes to formal review semantics, the Claude `DISPATCHED` relay
   (`review_transcript.unposted_verdict`), or `_comment_verdict`'s author check.
-- The integration-train path (`READY_FOR_INTEGRATION`,
-  `_merged_review_target`). It does not merge through `_merge_once`, so a
-  security gate there is a follow-up issue. Until then, a train merge of a
-  rule-file PR is not security-gated by llmtool.
+- Post-merge closure on the train path (`_merged_review_target`,
+  `_train_member_merged`, `_closed_train_member_head`) stays formal-only. It
+  closes Tasks after a merge and does not decide whether to merge. The train
+  merge decision itself is in scope (§3.6, PR 4).
 - Merges made outside llmtool (manual GitHub merges, branch protection).
 - Completion gates (`run_task_complete`, `PM_EVIDENCE_READY`).
-- A security-specific dispute arbiter. The existing per-head dispute block
-  applies to both kinds.
-- Requiring security review for every PR, or widening the rule-file set (for
-  example to `tools/llmtool/worker-dispatch.json` or other `.claude/` files).
-  These are Owner decisions.
+- Security disputes and a security-specific dispute arbiter. `task dispute
+  --kind security` is refused `DISPUTE_KIND_UNSUPPORTED` (§3.7). The existing
+  per-head dispute block applies to both kinds.
+- Requiring security review for every PR, or changing the contents of the
+  sensitive-paths registry. This design reads the registry as it is; changes
+  to it follow its existing process and are Owner decisions.
 - Whether an Owner exception may waive the security gate. This design keeps the
   gate on that path too (fail closed) until the Owner decides.
 - Importing or backfilling historic comment-only verdicts.
