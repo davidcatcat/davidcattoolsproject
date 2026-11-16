@@ -224,7 +224,7 @@ class OpenCodeRouteWiringTests(unittest.TestCase):
         # Exactly common core + Developer card; no legacy AGENTS.md core.
         self.assertEqual(prefix, _wrapped(_CARDS))
         self.assertNotIn('path=AGENTS.md', prompt)
-        self.assertNotIn('path=skills/ai-team-delivery/SKILL.md', prompt)
+        self.assertNotIn('path=.claude/skills/ai-team-delivery/SKILL.md', prompt)
         self.assertTrue(prompt.startswith('You are the OpenCode Developer'))
         rule = submission_cli.TEST_DATA_RULE
         self.assertEqual(prompt.count(rule), 1)

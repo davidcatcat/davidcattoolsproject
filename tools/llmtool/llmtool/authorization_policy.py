@@ -57,7 +57,7 @@ class IssuerClass(str, Enum):
 
 class Requirement(str, Enum):
     """Host classification of what an action would need beyond its contract."""
-    # Canonical owner P0 (skills/ai-team-delivery): exactly these three.
+    # Canonical owner P0 (.claude/skills/ai-team-delivery): exactly these three.
     OWNER_P0_PRODUCT_MISMATCH = 'OWNER_P0_PRODUCT_MISMATCH'
     OWNER_P0_ADMIN_PRIVILEGE = 'OWNER_P0_ADMIN_PRIVILEGE'
     OWNER_P0_MACOS_SYSTEM = 'OWNER_P0_MACOS_SYSTEM'

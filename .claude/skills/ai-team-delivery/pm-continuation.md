@@ -1,6 +1,6 @@
 # PM Continuation Contract (normative)
 
-This is the single rule for what the Integrator/PM does after each work result. Other guidance links here instead of restating it. [AGENTS.md](../../AGENTS.md) owns authority and roles. The [delivery workflow](SKILL.md) owns the Task Contract and review gates. The [Owner escalation reference](owner-escalation.md) owns escalation. This contract adds no Git, provider-spend, data-egress or security authority.
+This is the single rule for what the Integrator/PM does after each work result. Other guidance links here instead of restating it. [AGENTS.md](../../../AGENTS.md) owns authority and roles. The [delivery workflow](SKILL.md) owns the Task Contract and review gates. The [Owner escalation reference](owner-escalation.md) owns escalation. This contract adds no Git, provider-spend, data-egress or security authority.
 
 ## Every result gets a next decision
 
@@ -110,7 +110,7 @@ Owner-reserved decisions, new permissions and security boundaries still stop the
 1. **Confirm the cause with evidence:** the exact error code, run/Task ID, observed time and the check that produced it. A stale comment, an assumption or a single indirect signal does not confirm a cause.
 2. **Classify the cause:**
    - transient (timeout, rate limit, interrupted process);
-   - Worker unavailable (quota, login, provider or VPN layer): first read the Owner switch in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json), then confirm live technical state through the [local monitor](../../scripts/llmtool_monitor.py); these are separate evidence.
+   - Worker unavailable (quota, login, provider or VPN layer): first read the Owner switch in [worker-dispatch.json](../../../tools/llmtool/worker-dispatch.json), then confirm live technical state through the [local monitor](../../../scripts/llmtool_monitor.py); these are separate evidence.
    - a defect in the Task itself;
    - missing authority.
 3. **Choose the next action using engineering judgment and record it:** The PM identifies whether the remaining obstacle is primarily missing information/evidence, capability, tooling, safety, authority, feasibility or route availability. Compare the useful next options—gather more evidence, use a qualified Developer or model, try a different technical route, make a bounded repair, or isolate the affected Task—against current Worker availability, task-specific quality evidence, data/privacy permission, D6 ownership, remaining budget and likely total cost/time. A `BLOCKED` result describes the current Task or route under those conditions; it does not establish that all routes or other work are blocked.
@@ -159,7 +159,7 @@ Follow the [quota and Reviewer continuation rules](pm-continuation-reference.md#
 
 ## PM takeover
 
-1. Before any dispatch or merge, read [AGENTS.md](../../AGENTS.md), [ai-team-delivery](SKILL.md), this contract and the [continuation reference](pm-continuation-reference.md).
+1. Before any dispatch or merge, read [AGENTS.md](../../../AGENTS.md), [ai-team-delivery](SKILL.md), this contract and the [continuation reference](pm-continuation-reference.md).
 2. Check that the schedule prompt says to reread [Scheduled sweep](#scheduled-sweep) from `main` on every sweep.
 3. List in-flight Tasks, open PRs and open Owner questions before choosing the next step; follow [Every result gets a next decision](#every-result-gets-a-next-decision) and [Queue and IDLE](#queue-and-idle).
 4. Before retiring a parked D6, record its Debug escalation disposition under [BLOCKED](#blocked-diagnose-then-retry-reassign-or-isolate).
@@ -169,7 +169,7 @@ Follow the [quota and Reviewer continuation rules](pm-continuation-reference.md#
 
 Authorized PM work scope covers open Issues already authorized, Roadmap work, in-flight Tasks, and unfinished PRs, reviews and CI (Owner 2026-11-02, #763). The single work source is the #763 backlog inventory (plus GitHub deltas) within this authorized scope. The PM may split work and choose Developers under current gates, but never expand product scope, permissions, data egress or paid use.
 
-After a work package completes, or after a Task is isolated, the PM runs the [Scheduled sweep](#scheduled-sweep) to advance in-flight work and pick the next executable, authorized item from the #763 inventory that has a Worker permitted by [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) with freshly confirmed live availability. The PM reports **IDLE** only when no in-flight step can move and no backlog item can run. The IDLE report lists every remaining item with its required undispatched-reason class and evidence (see below).
+After a work package completes, or after a Task is isolated, the PM runs the [Scheduled sweep](#scheduled-sweep) to advance in-flight work and pick the next executable, authorized item from the #763 inventory that has a Worker permitted by [worker-dispatch.json](../../../tools/llmtool/worker-dispatch.json) with freshly confirmed live availability. The PM reports **IDLE** only when no in-flight step can move and no backlog item can run. The IDLE report lists every remaining item with its required undispatched-reason class and evidence (see below).
 
 ## Scheduled sweep
 
@@ -177,7 +177,7 @@ This single recurring schedule (about every 5 minutes in the PM session, for exa
 
 1. **Continue in-flight work (uncapped):** advance every active Task, formal review, bounded repair, CI check and merge that can move. The per-sweep cap of 2 applies only to new Developer Tasks in step 3; reviews, repairs, CI checks and merges have no per-sweep cap.
 2. **Check the backlog list:** reconcile the #763 inventory with GitHub deltas (new, reopened and unblocked items) within authorized scope. Never decide from only a few Issues, and never invent low-value Issues.
-3. **Dispatch executable work (1–2 new Tasks):** when executable authorized work and a free Developer exist below the concurrency cap, dispatch at least 1 and at most 2 new Developer Tasks per sweep; a new Task may share a file with an in-flight Task, and only a real conflict on the same lines blocks it, with the later merge resolving any overlap. At the concurrency cap, make no new Developer Task dispatch. The concurrency cap is the maximum concurrent in-flight Developer Tasks set on tracking Issue #763 (bounded by distinct authorized, live-available Developer routes in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) and one writer per D6 Task under [AGENTS.md](../../AGENTS.md)). An Owner wait blocks only its dependent item and never stops other work.
+3. **Dispatch executable work (1–2 new Tasks):** when executable authorized work and a free Developer exist below the concurrency cap, dispatch at least 1 and at most 2 new Developer Tasks per sweep; a new Task may share a file with an in-flight Task, and only a real conflict on the same lines blocks it, with the later merge resolving any overlap. At the concurrency cap, make no new Developer Task dispatch. The concurrency cap is the maximum concurrent in-flight Developer Tasks set on tracking Issue #763 (bounded by distinct authorized, live-available Developer routes in [worker-dispatch.json](../../../tools/llmtool/worker-dispatch.json) and one writer per D6 Task under [AGENTS.md](../../../AGENTS.md)). An Owner wait blocks only its dependent item and never stops other work.
 
 **Board:** every sweep writes `~/.local/state/llmtool/pm-board.json`. Check each row against its real Issue, PR or Task and update its text, not only `updated_at`. A closed Issue leaves the board. A row nobody works on is not `running`: find its next step, dispatch it or move it (Owner 2026-11-07, #763).
 
@@ -190,7 +190,7 @@ This single recurring schedule (about every 5 minutes in the PM session, for exa
 
 `<!-- activity: type=pm_progress actor=PM target=PM status=SWEEP -->`
 
-Sweep records must never use `target=Owner`, so [llmtool_monitor.py](../../scripts/llmtool_monitor.py) star rows for Owner decisions are neither raised nor settled by sweep comments. Each record holds:
+Sweep records must never use `target=Owner`, so [llmtool_monitor.py](../../../scripts/llmtool_monitor.py) star rows for Owner decisions are neither raised nor settled by sweep comments. Each record holds:
 
 - timestamp, sweep run ID, PM session and trigger (`schedule` or `Owner message`);
 - backlog, in-flight and dispatchable counts;
@@ -223,11 +223,11 @@ Record every state transition on the Task's PR or tracking Issue, or in the llmt
 
 For every review conclusion (including a rereview), publish a **new** GitHub comment on the Task's PR or tracking Issue. Begin the comment with the monitor-recognized, whole-line `<!-- activity: type=review_verdict actor=… target=… status=… -->` marker(s), using permitted field values. The **first line after those marker(s)** must be `Verdict: PASS | Version: vN | HEAD: <full-commit-sha>`, `Verdict: FAIL | Version: vN | HEAD: <full-commit-sha>`, or `Verdict: BLOCKED | Version: vN | HEAD: <full-commit-sha>`. Increment `vN` each review round, bind `HEAD` to the exact reviewed revision, and identify formal versus advisory review in the body; **never edit or replace an older verdict comment**.
 
-For other GitHub activity posts, begin the post with whole-line `<!-- activity: type=… actor=… target=… status=… -->` markers when the monitor needs them. The [monitor source](../../scripts/llmtool_monitor.py) defines allowed marker values: for a `BLOCKED` review verdict, its current `review_verdict` marker supports `status=UNKNOWN` (not `status=BLOCKED`); the visible verdict line still reads `Verdict: BLOCKED`.
+For other GitHub activity posts, begin the post with whole-line `<!-- activity: type=… actor=… target=… status=… -->` markers when the monitor needs them. The [monitor source](../../../scripts/llmtool_monitor.py) defines allowed marker values: for a `BLOCKED` review verdict, its current `review_verdict` marker supports `status=UNKNOWN` (not `status=BLOCKED`); the visible verdict line still reads `Verdict: BLOCKED`.
 
 **Sending is not delivery.** A CLI exit code (including `claude --bg` exiting 0 or printing `backgrounded`), a GitHub comment and a SendMessage `success` show only that a dispatch was sent. A dispatch is delivered only when an observed start receipt exists:
 
-- a background Claude session: `claude agents --json` shows it running (`busy` or `idle`) or finished (`state` `done`), and its transcript holds a first action stamped at or after the dispatch time (history carried over by `--resume` does not count); [claude_bg_dispatch.py](../../tools/llmtool/scripts/claude_bg_dispatch.py) checks this and prints the receipt;
+- a background Claude session: `claude agents --json` shows it running (`busy` or `idle`) or finished (`state` `done`), and its transcript holds a first action stamped at or after the dispatch time (history carried over by `--resume` does not count); [claude_bg_dispatch.py](../../../tools/llmtool/scripts/claude_bg_dispatch.py) checks this and prints the receipt;
 - Codex direct: the `task <32-hex>` ID and a running `llmtool task delegate` process, followed by the Codex session ID and first event (or a result line);
 - OpenCode or AGY direct: Task developer state `DEVELOPER_DISPATCHING` with provider `opencode-cli` or `agy-cli`, plus a running delegate process, or a result;
 - home LLM `gw-agent`: the recorded result.
@@ -256,4 +256,4 @@ Formal verdicts are posted with `gh pr comment`, never `gh pr review`, because T
 - notification deduplication and replay protection;
 - confirming Worker status.
 
-Editing documents does not deliver a runtime capability. Current implementation status is tracked in the [Roadmap](../../tools/llmtool/ROADMAP.md) or the relevant Task/Issue. Until a handoff is implemented and verified, the PM performs that step manually. The PM never reports a manual step as automatic.
+Editing documents does not deliver a runtime capability. Current implementation status is tracked in the [Roadmap](../../../tools/llmtool/ROADMAP.md) or the relevant Task/Issue. Until a handoff is implemented and verified, the PM performs that step manually. The PM never reports a manual step as automatic.

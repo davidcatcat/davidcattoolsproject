@@ -3943,7 +3943,7 @@ def main():
         prompt = (authority_notice +
                   ('Implement the newly authorized task, then repair only within its scope. ' if new_task
                    else 'Repair only the existing PR implementation within this task. ')
-                  + 'Read AGENTS.md and skills/implement-feature/SKILL.md. '
+                  + 'Read AGENTS.md and .claude/skills/implement-feature/SKILL.md. '
                   'Do not stage, commit, push, merge, create worktrees, change task scope, or start another slice. '
                   'Only edit allowed_files in task.json. The outer runner owns Git and deterministic tests; '
                   'do not run expensive suites/probes yourself. Write the initial report with pending runner checks, '
@@ -4130,7 +4130,7 @@ def main():
                     raise Stop('commit hooks changed the tested bytes; no review PASS can be inferred')
                 patch = git(root, 'diff', '--no-ext-diff', '--no-textconv', task['base_sha'], head)
                 review_prompt = ('Independently review the ENTIRE cumulative diff against task/AGENTS.md/CLAUDE.md '
-                    'and skills/review-change/SKILL.md. You are read-only; tests were run by the outer runner. '
+                    'and .claude/skills/review-change/SKILL.md. You are read-only; tests were run by the outer runner. '
                     'Do not run commands or edit files. Return NEEDS_DECISION for scope/architecture conflict. '
                     'Use PASS only when no blocking findings. Evidence must cite concrete file/test behavior. '
                     'Do not convert optional improvements into blockers. This is ordinary code review, '

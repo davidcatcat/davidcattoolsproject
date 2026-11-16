@@ -46,7 +46,7 @@ Deliver a working change, not just code generation.
 ## Cloud and Mac verification
 
 For llmtool work in Codex Cloud or on the actual Mac, follow
-[the development workflow](../../tools/llmtool/WORKFLOW.md). On Mac + company VPN,
+[the development workflow](../../../tools/llmtool/WORKFLOW.md). On Mac + company VPN,
 use [company-llm-delegation](../company-llm-delegation/SKILL.md) when bounded
 development-time triage would help; do not duplicate its routing/data rules here.
 Classify required checks before implementation; complete Cloud-capable work and

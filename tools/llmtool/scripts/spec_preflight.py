@@ -268,7 +268,7 @@ def ladder_tier(entries, max_tier=LADDER_MAX_TIER, route=None):
 LADDER_SIZES = {1: (1, 1536, 6), 2: (1, 3072, 10), 3: (2, 6144, 12), 4: (3, 10240, 16),
                 5: (4, 16384, 16), 6: (5, 24576, 16)}
 
-# #2005: the ladder sizes a new file as T4 (skills/company-llm-delegation/SKILL.md).
+# #2005: the ladder sizes a new file as T4 (.claude/skills/company-llm-delegation/SKILL.md).
 NEW_FILE_MIN_TIER = 4
 
 

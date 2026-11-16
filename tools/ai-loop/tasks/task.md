@@ -8,7 +8,7 @@
 - [Issue #97](https://github.com/davidcatcat/davidcattoolsproject/issues/97): D1 offline-only; F2 and real Git ADD NOT AUTHORIZED.
 - [Independent Claude design/Security review](https://github.com/davidcatcat/davidcattoolsproject/issues/97#issuecomment-6100267699): CHANGE, R1–R5.
 - [Coordinator final decision](https://github.com/davidcatcat/davidcattoolsproject/issues/97#issuecomment-6100293002): ACCEPT R1–R4; ACCEPT R5 with canonical P0 correction. This authorizes ONLY D1 source development, not production issuer/real execution. [Fresh repo review](https://github.com/davidcatcat/davidcattoolsproject/issues/97#issuecomment-6100369027) found no new F1 blocker.
-- Read `AGENTS.md`, `CLAUDE.md`, `skills/ai-team-delivery/SKILL.md`, `skills/safe-git/SKILL.md`, `tools/llmtool/ROADMAP.md`, `tools/llmtool/WORKFLOW.md`, `tools/llmtool/llmtool/action_contract.py`, and exact Issue #97 evidence first. D1 is within A11b.3; do not create C milestones.
+- Read `AGENTS.md`, `CLAUDE.md`, `.claude/skills/ai-team-delivery/SKILL.md`, `.claude/skills/safe-git/SKILL.md`, `tools/llmtool/ROADMAP.md`, `tools/llmtool/WORKFLOW.md`, `tools/llmtool/llmtool/action_contract.py`, and exact Issue #97 evidence first. D1 is within A11b.3; do not create C milestones.
 - Single source writer Codex (only allowed-file edits); outer runner stages/commits/publishes Draft PR. Claude provides ordinary independent code review during the run. **Separate** non-author specialist Security and Functional QA gates are still required at the final immutable PR HEAD before merge; normal Claude review and CI are not substitutes.
 
 ## Product goal and only allowed implementation

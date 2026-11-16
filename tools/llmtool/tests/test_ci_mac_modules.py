@@ -482,7 +482,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
             ),
             (
                 "#790",
-                ["skills/ai-team-delivery/pm-continuation.md"],
+                [".claude/skills/ai-team-delivery/pm-continuation.md"],
                 "L0",
                 set(),
                 None,
@@ -596,7 +596,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
             "tools/llmtool/docs/guide.md",
             "AGENTS.md",
             "CLAUDE.md",
-            "skills/ai-team-delivery/pm-continuation.md",
+            ".claude/skills/ai-team-delivery/pm-continuation.md",
             "docs/meetings/2026-11-02-llmtool-governance-and-ai-team-decisions.md",
             "tools/llmtool/README.md",
         ):

@@ -5,7 +5,7 @@ description: Use when an llmtool Developer Task is routed to AGY (Antigravity CL
 
 # AGY direct Developer
 
-AGY is a PM-selected llmtool direct Developer route: `llmtool task delegate --provider agy --mode direct`. Its authorization comes from the current AGY row in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) and [AGENTS.md](../../AGENTS.md); the row has been `ALLOWED` since 2026-10-31. AGY follows the same verified D6 worktree and authentication, actual-model, session and permission checks as OpenCode, and does not require Host D4/G3/M2. Each Task still needs independent formal review from another model family. This skill describes the AGY-specific procedure for one Task.
+AGY is a PM-selected llmtool direct Developer route: `llmtool task delegate --provider agy --mode direct`. Its authorization comes from the current AGY row in [worker-dispatch.json](../../../tools/llmtool/worker-dispatch.json) and [AGENTS.md](../../../AGENTS.md); the row has been `ALLOWED` since 2026-10-31. AGY follows the same verified D6 worktree and authentication, actual-model, session and permission checks as OpenCode, and does not require Host D4/G3/M2. Each Task still needs independent formal review from another model family. This skill describes the AGY-specific procedure for one Task.
 
 ## Part 1: PM — dispatch one Task
 

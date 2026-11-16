@@ -6,7 +6,7 @@
 
 Claude Developer, OpenCode, AGY and home LLM `gw-agent` are Developer routes assigned by the PM only after checking [worker-dispatch.json](worker-dispatch.json); a PAUSED switch forbids dispatch regardless of live health. Codex is Reviewer and AI Debug only and writes no code (O1, #1502); `codex-developer` is `PAUSED` and review repair refuses the Codex route (WP-C). Direct OpenCode work uses a registered D6 task worktree, task-local permissions and a free DeepSeek model. D4/G3/M2 is background and does not block direct Developer work. Company `gw` (home LLM) is a Developer route only through the API Agent Gateway (`gw-agent`): it edits files inside its Task scope with line-range reads; the `company-gw` direct and proposal routes are retired (Owner 2026-11-11, #120). Preserve per-task data screening, no secrets/private data, usage and bounded-repair evidence, independent review and exact-head CI.
 
-The formal Reviewer is from the other model family than the Developer under [AGENTS.md](../../AGENTS.md) (Codex for Claude Developer and PM changes; Claude for non-Claude work such as AGY Gemini models, OpenCode and `gw-agent`); other reviews are advisory. Formal reviews remain exact-head, read-only and subject to all applicable security, CI and Mac-native gates. Owner dispatch switches are in [worker-dispatch.json](worker-dispatch.json); the local monitor at [scripts/llmtool_monitor.py](../../scripts/llmtool_monitor.py) reports live technical state separately. The PM's next-step duty after each result is the [PM Continuation Contract](../../skills/ai-team-delivery/pm-continuation.md). Home LLM unavailability is recorded and does not block unrelated Developers.
+The formal Reviewer is from the other model family than the Developer under [AGENTS.md](../../AGENTS.md) (Codex for Claude Developer and PM changes; Claude for non-Claude work such as AGY Gemini models, OpenCode and `gw-agent`); other reviews are advisory. Formal reviews remain exact-head, read-only and subject to all applicable security, CI and Mac-native gates. Owner dispatch switches are in [worker-dispatch.json](worker-dispatch.json); the local monitor at [scripts/llmtool_monitor.py](../../scripts/llmtool_monitor.py) reports live technical state separately. The PM's next-step duty after each result is the [PM Continuation Contract](../../.claude/skills/ai-team-delivery/pm-continuation.md). Home LLM unavailability is recorded and does not block unrelated Developers.
 
 Declare read and write paths at task claude-bind, including an admitted test module in the read paths (an unchanged test is valid). Order: commit, --record-result-task-id, --bind-native-session-task-id, then task claude-bind.
 
@@ -27,7 +27,7 @@ Declare read and write paths at task claude-bind, including an admitted test mod
 
 A required check must be SUCCESS. A check that does not apply to the PR is recorded NOT_RUN; skipped, cancelled or pending is never PASS. Environment problems (an EC2 timeout, an unreachable runner or EC2, a cancelled or startup-failed CI check) are not test failures: `task advance` reruns an EC2 timeout once on the same commit. A required CI check that ends `timed_out` is a test failure and counts like `failure` (#2094, PR #2108). An EC2, Linux CI or Mac CI failure goes back to the original Developer as a test-failure repair, on a count kept apart from review failures (#1502 WP-D D11; chain-wide caps #2026, #2048); an environment conclusion waits uncounted, and a used-up count stops with `TEST_FAIL_LIMIT_REACHED`.
 
-Manual commands are recovery only: use the [manual recovery flow](../../skills/ai-team-delivery/pm-continuation.md#manual-recovery-flow) when `task advance` cannot run. Review FAIL, AI Debug, split and Owner notification rules are in the [PM Continuation Contract](../../skills/ai-team-delivery/pm-continuation.md).
+Manual commands are recovery only: use the [manual recovery flow](../../.claude/skills/ai-team-delivery/pm-continuation.md#manual-recovery-flow) when `task advance` cannot run. Review FAIL, AI Debug, split and Owner notification rules are in the [PM Continuation Contract](../../.claude/skills/ai-team-delivery/pm-continuation.md).
 
 A review repair claim whose dispatch outcome was not recorded stays `UNKNOWN`, and llmtool does not treat it as dispatched.
 It settles only through `llmtool task repair TASK --executor-task D6 --pr N --recover-claim REPAIR_TASK_ID` (#1928).
@@ -64,6 +64,6 @@ regression test where appropriate, then the affected gate is re-run.
 ## References
 
 - [Repository guidance](../../AGENTS.md)
-- [PM Continuation Contract](../../skills/ai-team-delivery/pm-continuation.md)
+- [PM Continuation Contract](../../.claude/skills/ai-team-delivery/pm-continuation.md)
 - [Roadmap](ROADMAP.md)
 - [Workflow archive](../../docs/history/llmtool-workflow-archive-20261112.md)

@@ -33,10 +33,10 @@ def classify_path(path: str) -> str:
             return "docs"
         return "runtime"
     # Skills Python is code.
-    if path.startswith("skills/") and path.endswith(".py"):
+    if path.startswith(".claude/skills/") and path.endswith(".py"):
         return "other"
     if (path.endswith(".md") or path in {"AGENTS.md", "CLAUDE.md"}
-            or path.startswith("skills/") or path.startswith("docs/")):
+            or path.startswith(".claude/skills/") or path.startswith("docs/")):
         return "docs"
     return "other"
 

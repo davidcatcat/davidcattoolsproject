@@ -58,7 +58,7 @@ cases, but neither mock success nor one live marker substitutes for the other QA
 ## Environment handoff
 
 For llmtool Cloud/Mac work, follow
-[the development workflow](../../tools/llmtool/WORKFLOW.md).
+[the development workflow](../../../tools/llmtool/WORKFLOW.md).
 Run checks requiring the user's VPN, existing CLI sessions, macOS isolation or local
 services on the actual Mac. Record unavailable Cloud checks precisely, then hand off
 the exact implementation SHA, prerequisites, commands and expected markers.

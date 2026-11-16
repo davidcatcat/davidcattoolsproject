@@ -40,14 +40,14 @@ from llmtool.skill_manifest import (
 FILES = {
     'AGENTS.md': b'governance\n',
     'CLAUDE.md': b'claude governance\n',
-    'skills/role-cards/common-core.md': b'common core\n',
-    'skills/role-cards/developer.md': b'developer card\n',
-    'skills/ai-team-delivery/SKILL.md': b'delivery\n',
-    'skills/ai-team-delivery/pm-continuation.md': b'pm\n',
-    'skills/ai-team-delivery/pm-continuation-reference.md': b'reference\n',
-    'skills/review-change/SKILL.md': b'review\n',
-    'skills/ai-team-delivery/formal-verdict.md': b'verdict\n',
-    'skills/safe-git/SKILL.md': b'git\n',
+    '.claude/skills/role-cards/common-core.md': b'common core\n',
+    '.claude/skills/role-cards/developer.md': b'developer card\n',
+    '.claude/skills/ai-team-delivery/SKILL.md': b'delivery\n',
+    '.claude/skills/ai-team-delivery/pm-continuation.md': b'pm\n',
+    '.claude/skills/ai-team-delivery/pm-continuation-reference.md': b'reference\n',
+    '.claude/skills/review-change/SKILL.md': b'review\n',
+    '.claude/skills/ai-team-delivery/formal-verdict.md': b'verdict\n',
+    '.claude/skills/safe-git/SKILL.md': b'git\n',
 }
 # Every Developer route's common core is the common-core card (#1502 WP-F2a,
 # WP-F3 for OpenCode and gw-agent); none uses AGENTS.md as its core.
@@ -129,7 +129,7 @@ class SkillManifestTests(unittest.TestCase):
         self.assertEqual(len(first['manifest_sha256']), 64)
 
     def test_changed_required_file_changes_digest_at_new_commit(self):
-        self._write_files({'AGENTS.md': b'changed governance\n'})
+        self._write_files({'.claude/skills/ai-team-delivery/SKILL.md': b'changed delivery\n'})
         newer = self._commit()
         changed = build_manifest(self.repo, newer, 'developer', 'develop')
         original = build_manifest(self.repo, self.commit, 'developer', 'develop')
@@ -164,14 +164,14 @@ class SkillManifestTests(unittest.TestCase):
         self.assertNotIn('CLAUDE.md', default_paths)
         self.assertIn('CLAUDE.md', claude_paths)
         self.assertNotIn('AGENTS.md', claude_paths)
-        self.assertIn('skills/ai-team-delivery/pm-continuation.md', claude_pm_paths)
-        self.assertIn('skills/ai-team-delivery/pm-continuation-reference.md', claude_pm_paths)
+        self.assertIn('.claude/skills/ai-team-delivery/pm-continuation.md', claude_pm_paths)
+        self.assertIn('.claude/skills/ai-team-delivery/pm-continuation-reference.md', claude_pm_paths)
         self.assertIn('AGENTS.md', default_pm_paths)
         self.assertNotIn('CLAUDE.md', default_pm_paths)
         self.assertIn('CLAUDE.md', claude_pm_paths)
         self.assertNotIn('AGENTS.md', claude_pm_paths)
-        self.assertIn('skills/ai-team-delivery/pm-continuation.md', claude_pm_paths)
-        self.assertIn('skills/ai-team-delivery/pm-continuation-reference.md', claude_pm_paths)
+        self.assertIn('.claude/skills/ai-team-delivery/pm-continuation.md', claude_pm_paths)
+        self.assertIn('.claude/skills/ai-team-delivery/pm-continuation-reference.md', claude_pm_paths)
         self.assertNotEqual(default['manifest_sha256'], claude['manifest_sha256'])
 
     def test_injected_git_runner_is_used(self):
@@ -388,7 +388,7 @@ class SkillManifestTests(unittest.TestCase):
         self._assert_code(SKILL_MANIFEST_GATE_INVALID, self.commit, 'developer', 'unknown')
 
     def test_missing_required_path_is_refused(self):
-        self._git('rm', '-q', 'skills/safe-git/SKILL.md')
+        self._git('rm', '-q', '.claude/skills/safe-git/SKILL.md')
         self.commit = self._commit()
         self._assert_code(
             SKILL_MANIFEST_PATH_MISSING,
@@ -397,14 +397,14 @@ class SkillManifestTests(unittest.TestCase):
 
     def test_symlink_is_not_a_file(self):
         os.remove(os.path.join(self.repo, 'AGENTS.md'))
-        os.symlink('skills/ai-team-delivery/SKILL.md', os.path.join(self.repo, 'AGENTS.md'))
+        os.symlink('.claude/skills/ai-team-delivery/SKILL.md', os.path.join(self.repo, 'AGENTS.md'))
         self.commit = self._commit()
         self._assert_code(SKILL_MANIFEST_NOT_FILE, self.commit, 'developer', 'develop')
 
     def test_tree_at_required_path_is_not_a_file(self):
-        os.remove(os.path.join(self.repo, 'skills/review-change/SKILL.md'))
-        os.makedirs(os.path.join(self.repo, 'skills/review-change/SKILL.md', 'child'))
-        with open(os.path.join(self.repo, 'skills/review-change/SKILL.md', 'child', 'x'), 'wb') as stream:
+        os.remove(os.path.join(self.repo, '.claude/skills/review-change/SKILL.md'))
+        os.makedirs(os.path.join(self.repo, '.claude/skills/review-change/SKILL.md', 'child'))
+        with open(os.path.join(self.repo, '.claude/skills/review-change/SKILL.md', 'child', 'x'), 'wb') as stream:
             stream.write(b'x')
         self.commit = self._commit()
         self._assert_code(SKILL_MANIFEST_NOT_FILE, self.commit, 'developer', 'review')
@@ -415,7 +415,7 @@ class SkillManifestTests(unittest.TestCase):
         self._assert_code(SKILL_MANIFEST_NOT_UTF8, self.commit, 'developer', 'develop')
 
     def test_oversized_file_is_refused(self):
-        self._write_files({'AGENTS.md': b'x' * (MAX_SKILL_FILE_SIZE + 1)})
+        self._write_files({'.claude/skills/ai-team-delivery/SKILL.md': b'x' * (MAX_SKILL_FILE_SIZE + 1)})
         self.commit = self._commit()
         content_reads = []
 
