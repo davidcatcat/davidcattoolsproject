@@ -8164,6 +8164,122 @@ def _read_task_record(tasks_dir: str, task_id: str) -> dict | None:
     return None
 
 
+def _drive_developer_ai(record: dict | None) -> str:
+    """Extract Developer AI (Claude, AGY, home LLM, OpenCode or Codex) from Task record."""
+    if not isinstance(record, dict):
+        return "狀態未知"
+    candidates = []
+    dev = record.get("developer")
+    if isinstance(dev, dict):
+        for k in ("provider_profile", "provider_type", "worker", "worker_id", "route", "name", "model"):
+            candidates.append(dev.get(k))
+    elif isinstance(dev, str):
+        candidates.append(dev)
+
+    pm = record.get("pm_assignment")
+    if isinstance(pm, dict):
+        for k in ("route", "worker", "developer", "ai", "provider_profile"):
+            candidates.append(pm.get(k))
+    elif isinstance(pm, str):
+        candidates.append(pm)
+
+    for k in ("route", "worker", "developer_ai", "ai", "provider_profile", "developer"):
+        val = record.get(k)
+        if isinstance(val, str):
+            candidates.append(val)
+
+    for cand in candidates:
+        if not isinstance(cand, str):
+            continue
+        val = cand.strip().lower()
+        if not val:
+            continue
+        if "claude" in val:
+            return "Claude"
+        if "agy" in val or "antigravity" in val:
+            return "AGY"
+        if "gw" in val or "home" in val or "openai-compatible" in val:
+            return "home LLM"
+        if "opencode" in val:
+            return "OpenCode"
+        if "codex" in val:
+            return "Codex"
+    return "狀態未知"
+
+
+def _drive_work_summary(record: dict | None, limit: int = 40) -> str:
+    """Extract PM assignment work summary (cut to fit) or '（無摘要）'."""
+    if not isinstance(record, dict):
+        return "（無摘要）"
+    pm = record.get("pm_assignment")
+    raw = None
+    if isinstance(pm, dict):
+        raw = pm.get("summary") or pm.get("work_summary")
+    if not raw and isinstance(record.get("summary"), str):
+        raw = record.get("summary")
+    if not isinstance(raw, str) or not raw.strip():
+        return "（無摘要）"
+    clean = _label(raw, limit)
+    return clean if clean else "（無摘要）"
+
+
+VALID_DRIVE_STAGES = frozenset({"EC2 測試中", "等審查", "審查中", "修正中", "狀態未知"})
+
+
+def _drive_stage(record: dict | None) -> str:
+    """Extract stage (EC2 測試中, 等審查, 審查中, 修正中 or 狀態未知) from Task record."""
+    if not isinstance(record, dict):
+        return "狀態未知"
+
+    candidates = []
+    for k in ("stage", "task_stage", "phase", "state"):
+        val = record.get(k)
+        if isinstance(val, str) and val.strip():
+            candidates.append(val.strip())
+
+    lineage = record.get("lineage")
+    if isinstance(lineage, dict):
+        for k in ("stage", "state", "phase"):
+            val = lineage.get(k)
+            if isinstance(val, str) and val.strip():
+                candidates.append(val.strip())
+
+    developer = record.get("developer")
+    if isinstance(developer, dict):
+        for k in ("stage", "state"):
+            val = developer.get(k)
+            if isinstance(val, str) and val.strip():
+                candidates.append(val.strip())
+
+    for val in candidates:
+        if val in VALID_DRIVE_STAGES and val != "狀態未知":
+            return val
+        v_lower = val.lower()
+        if "ec2" in v_lower or "remote_test" in v_lower or "remote-test" in v_lower:
+            return "EC2 測試中"
+        if "review_pending" in v_lower or "review-pending" in v_lower or "waiting_review" in v_lower or "等審查" in val:
+            return "等審查"
+        if "reviewing" in v_lower or "in_review" in v_lower or "in-review" in v_lower or "審查中" in val:
+            return "審查中"
+        if "repair" in v_lower or "fixing" in v_lower or "修正中" in val or "修復中" in val or "repairing" in v_lower:
+            return "修正中"
+
+    request = record.get("request")
+    if isinstance(request, str) and request.startswith("Repair round"):
+        return "修正中"
+
+    dispatches = record.get("remote_test_dispatches")
+    if isinstance(dispatches, list) and dispatches:
+        receipts = record.get("remote_test_receipts")
+        outcomes = record.get("remote_test_outcomes")
+        num_receipts = len(receipts) if isinstance(receipts, list) else 0
+        num_outcomes = len(outcomes) if isinstance(outcomes, list) else 0
+        if len(dispatches) > (num_receipts + num_outcomes):
+            return "EC2 測試中"
+
+    return "狀態未知"
+
+
 def drive_rows(processes: list[Process], now: float,
                tasks_dir: str | None = None) -> list[OfficeRow]:
     """One WORKING row per active `llmtool task drive` or `task advance` process."""
@@ -8178,14 +8294,14 @@ def drive_rows(processes: list[Process], now: float,
         task_prefix = task_id[:8]
         elapsed_str = proc.elapsed if proc.elapsed else "00:00"
         record = _read_task_record(tasks_dir, task_id)
-        if record is None:
-            detail = f"task {task_prefix} · PR 未確認 · 跑了 {elapsed_str}"
-        else:
-            pr = _task_pr(record)
-            if pr is not None:
-                detail = f"task {task_prefix} · PR #{pr} · 跑了 {elapsed_str}"
-            else:
-                detail = f"task {task_prefix} · 跑了 {elapsed_str}"
+
+        ai = _drive_developer_ai(record)
+        pr = _task_pr(record)
+        pr_text = f"PR #{pr}" if pr is not None else "尚未開 PR"
+        summary_text = _drive_work_summary(record)
+        stage_text = _drive_stage(record)
+
+        detail = f"{ai} · {pr_text} · {summary_text} · {stage_text} · 跑了 {elapsed_str} ({task_prefix})"
         age = _elapsed_seconds(proc.elapsed)
         rows.append(OfficeRow("llmtool 推進", WORKING, detail,
                               age if age is not None else 0.0, 80,

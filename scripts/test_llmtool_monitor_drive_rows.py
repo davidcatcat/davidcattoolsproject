@@ -76,48 +76,112 @@ class TestLlmtoolMonitorDriveRows(unittest.TestCase):
         self.assertNotIn("option", repr(proc))
         self.assertNotIn("sample", repr(proc))
 
-    def test_drive_and_advance_processes_give_working_rows_with_task_prefix(self):
-        """Active drive and advance processes give WORKING rows with the Task prefix."""
-        record_pr = {
+    def test_fully_known_row(self):
+        """A fully known Task record produces a row with AI, PR, summary, stage, time, and Task ID prefix."""
+        record = {
             "task_id": "74590be9053e4051909da5a4f0ca51ad",
+            "developer": {"provider_profile": "claude-developer"},
             "pr": 2201,
+            "pm_assignment": {"summary": "Implement user calculator"},
+            "stage": "EC2 測試中",
         }
-        self._write_record("74590be9053e4051909da5a4f0ca51ad.json", record_pr, mtime=self.now - 50.0)
+        self._write_record("74590be9053e4051909da5a4f0ca51ad.json", record, mtime=self.now - 50.0)
 
-        record_no_pr = {
-            "task_id": "8a6142ce683d47f29f0426588dbf28e2",
+        p = monitor.Process(101, 1, 101, "01:23", "S", "llmtool drive",
+                            drive_task="74590be9053e4051909da5a4f0ca51ad")
+        rows = monitor.drive_rows([p], self.now, self.root)
+        self.assertEqual(len(rows), 1)
+
+        row = rows[0]
+        self.assertEqual(row.name, "llmtool 推進")
+        self.assertEqual(row.state, monitor.WORKING)
+        self.assertEqual(row.kind, "worker")
+        self.assertEqual(row.task, "task 74590be9")
+        expected_detail = "Claude · PR #2201 · Implement user calculator · EC2 測試中 · 跑了 01:23 (74590be9)"
+        self.assertEqual(row.detail, expected_detail)
+
+    def test_all_developer_ai_families(self):
+        """All five Developer AI families map to their exact required names."""
+        cases = [
+            ({"developer": {"provider_profile": "claude-developer"}}, "Claude"),
+            ({"pm_assignment": {"route": "agy"}}, "AGY"),
+            ({"developer": {"provider_profile": "gw-agent"}}, "home LLM"),
+            ({"developer": {"provider_type": "openai-compatible"}}, "home LLM"),
+            ({"developer": {"provider_profile": "opencode-developer"}}, "OpenCode"),
+            ({"developer": {"provider_type": "codex-cli"}}, "Codex"),
+            ({"developer": {"provider_profile": "unknown-custom"}}, "狀態未知"),
+        ]
+        for idx, (data, expected_ai) in enumerate(cases):
+            task_id = f"1111222233334444555566667777888{idx}"
+            full_record = dict(data, task_id=task_id, pr=100 + idx, stage="等審查",
+                               pm_assignment=dict(data.get("pm_assignment", {}), summary="Test work"))
+            self._write_record(f"{task_id}.json", full_record, mtime=self.now - 10.0)
+            p = monitor.Process(200 + idx, 1, 200 + idx, "00:30", "S", "llmtool drive",
+                                drive_task=task_id)
+            rows = monitor.drive_rows([p], self.now, self.root)
+            self.assertEqual(len(rows), 1)
+            self.assertTrue(rows[0].detail.startswith(f"{expected_ai} · PR #{100 + idx} · "))
+
+    def test_all_stages(self):
+        """All required stages appear in the expected field."""
+        stages = ["EC2 測試中", "等審查", "審查中", "修正中", "狀態未知"]
+        for idx, stage in enumerate(stages):
+            task_id = f"2222333344445555666677778888999{idx}"
+            record = {
+                "task_id": task_id,
+                "developer": {"provider_profile": "claude-developer"},
+                "pr": 300 + idx,
+                "pm_assignment": {"summary": "Stage check work"},
+                "stage": stage,
+            }
+            self._write_record(f"{task_id}.json", record, mtime=self.now - 10.0)
+            p = monitor.Process(300 + idx, 1, 300 + idx, "00:15", "S", "llmtool drive",
+                                drive_task=task_id)
+            rows = monitor.drive_rows([p], self.now, self.root)
+            self.assertEqual(len(rows), 1)
+            expected = f"Claude · PR #{300 + idx} · Stage check work · {stage} · 跑了 00:15 ({task_id[:8]})"
+            self.assertEqual(rows[0].detail, expected)
+
+    def test_fallbacks_for_missing_fields_and_long_summary(self):
+        """Fallbacks appear when PR, summary, AI, or stage are missing or need cutting."""
+        # Case 1: no PR, no summary, no AI, no stage
+        task_id1 = "33334444555566667777888899990001"
+        self._write_record(f"{task_id1}.json", {"task_id": task_id1}, mtime=self.now - 10.0)
+        p1 = monitor.Process(401, 1, 401, "00:20", "S", "llmtool drive", drive_task=task_id1)
+
+        # Case 2: long summary cut to 40 chars
+        task_id2 = "44445555666677778888999900001112"
+        long_summary = "A quick brown fox jumps over the lazy dog and runs away"
+        record2 = {
+            "task_id": task_id2,
+            "developer": {"provider_profile": "agy"},
+            "pr": 555,
+            "summary": long_summary,
+            "stage": "審查中",
         }
-        self._write_record("8a6142ce683d47f29f0426588dbf28e2.json", record_no_pr, mtime=self.now - 20.0)
-
-        p1 = monitor.Process(101, 1, 101, "01:23", "S", "llmtool drive",
-                             drive_task="74590be9053e4051909da5a4f0ca51ad")
-        p2 = monitor.Process(102, 1, 102, "00:45", "S", "llmtool drive",
-                             drive_task="8a6142ce683d47f29f0426588dbf28e2")
+        self._write_record(f"{task_id2}.json", record2, mtime=self.now - 10.0)
+        p2 = monitor.Process(402, 1, 402, "00:40", "S", "llmtool drive", drive_task=task_id2)
 
         rows = monitor.drive_rows([p1, p2], self.now, self.root)
         self.assertEqual(len(rows), 2)
 
-        row1 = rows[0]
-        self.assertEqual(row1.name, "llmtool 推進")
-        self.assertEqual(row1.state, monitor.WORKING)
-        self.assertEqual(row1.kind, "worker")
-        self.assertEqual(row1.detail, "task 74590be9 · PR #2201 · 跑了 01:23")
+        expected1 = f"狀態未知 · 尚未開 PR · （無摘要） · 狀態未知 · 跑了 00:20 ({task_id1[:8]})"
+        self.assertEqual(rows[0].detail, expected1)
 
-        row2 = rows[1]
-        self.assertEqual(row2.name, "llmtool 推進")
-        self.assertEqual(row2.state, monitor.WORKING)
-        self.assertEqual(row2.kind, "worker")
-        self.assertEqual(row2.detail, "task 8a6142ce · 跑了 00:45")
+        expected_cut = long_summary[:40] + "…"
+        expected2 = f"AGY · PR #555 · {expected_cut} · 審查中 · 跑了 00:40 ({task_id2[:8]})"
+        self.assertEqual(rows[1].detail, expected2)
 
-    def test_missing_or_unreadable_task_file_gives_row_with_pr_unconfirmed(self):
-        """A missing or corrupted Task file still produces a row with 'PR 未確認'."""
+    def test_missing_or_unreadable_task_file_gives_row_with_fallbacks(self):
+        """A missing or corrupted Task file produces a row with fallbacks and Task ID prefix."""
         p_missing = monitor.Process(103, 1, 103, "02:10", "S", "llmtool drive",
                                     drive_task="9b7253df794e58f3a01537699ecf39f3")
         rows = monitor.drive_rows([p_missing], self.now, self.root)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].name, "llmtool 推進")
         self.assertEqual(rows[0].state, monitor.WORKING)
-        self.assertEqual(rows[0].detail, "task 9b7253df · PR 未確認 · 跑了 02:10")
+        expected_missing = "狀態未知 · 尚未開 PR · （無摘要） · 狀態未知 · 跑了 02:10 (9b7253df)"
+        self.assertEqual(rows[0].detail, expected_missing)
 
         # Corrupted / invalid JSON file
         corrupt_path = os.path.join(self.root, "a1b2c3d4e5f60718293a4b5c6d7e8f90.json")
@@ -127,7 +191,8 @@ class TestLlmtoolMonitorDriveRows(unittest.TestCase):
                                     drive_task="a1b2c3d4e5f60718293a4b5c6d7e8f90")
         rows = monitor.drive_rows([p_corrupt], self.now, self.root)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0].detail, "task a1b2c3d4 · PR 未確認 · 跑了 03:15")
+        expected_corrupt = "狀態未知 · 尚未開 PR · （無摘要） · 狀態未知 · 跑了 03:15 (a1b2c3d4)"
+        self.assertEqual(rows[0].detail, expected_corrupt)
 
     def test_other_llmtool_commands_give_no_drive_rows(self):
         """Non-drive llmtool commands produce no drive_rows."""
@@ -164,7 +229,7 @@ class TestLlmtoolMonitorDriveRows(unittest.TestCase):
         self.assertNotIn(extra_word, combined)
         self.assertNotIn(req_text, combined)
         self.assertNotIn(resp_text, combined)
-        self.assertNotIn("Calculator test summary", combined)
+        self.assertIn("Calculator test summary", combined)
         self.assertNotIn("Should pass all tests", combined)
         self.assertIn("74590be9", combined)
 
