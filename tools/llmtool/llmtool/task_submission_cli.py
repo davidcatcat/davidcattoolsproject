@@ -1024,7 +1024,9 @@ def add_task_submission_parsers(actions):
     high_debug = actions.add_parser('high-debug', help='Run one read-only Codex or Claude diagnosis of an Executor D6')
     high_debug.add_argument('task_id')
     high_debug.add_argument('--executor-task', required=True)
-    high_debug.add_argument('--pr', required=True, type=int)
+    target = high_debug.add_mutually_exclusive_group()
+    target.add_argument('--pr', type=int)
+    target.add_argument('--issue', type=int)
     high_debug.add_argument('--family', required=True)
     choice = high_debug.add_mutually_exclusive_group(required=True)
     choice.add_argument('--failed-corrections', type=int)
@@ -2435,8 +2437,20 @@ def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
 
 def run_task_high_debug(args, *, store=None, runner=None, create_d6=None):
     from .high_debug import run_high_debug_with_fallback
+    pr, issue = getattr(args, 'pr', None), getattr(args, 'issue', None)
+    early, corrections = getattr(args, 'early', None), getattr(args, 'failed_corrections', None)
+    family = getattr(args, 'family', None)
+
+    bad = (pr is None) == (issue is None) or (pr is not None and family == 'no-pr')
+    if issue is not None and (corrections is not None or early is None or family != 'no-pr'):
+        bad = True
+    if bad:
+        err = LLMToolError('HIGH_DEBUG_ARGUMENT_INVALID')
+        err.high_debug_code = 'HIGH_DEBUG_ARGUMENT_INVALID'
+        raise err
     return run_high_debug_with_fallback(store=TaskStore() if store is None else store,
-        task_id=args.task_id, executor_task=args.executor_task, pr_number=args.pr,
+        task_id=args.task_id, executor_task=args.executor_task, pr_number=pr,
+        issue_number=issue,
         family=args.family, failed_corrections=getattr(args, 'failed_corrections', None),
         early_reason=getattr(args, 'early', None), evidence=getattr(args, 'evidence_file', None),
         runner=runner, create_d6=create_d6, route=getattr(args, 'route', 'codex'))
