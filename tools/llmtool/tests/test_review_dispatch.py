@@ -557,11 +557,17 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(claim['state'], 'COMPLETED')
 
     def test_kind_and_version_range_refusal_happens_before_claim_or_d6_written(self):
-        self.store.data.update({
+        task_data = {
+            'task_id': TASK,
             'developer': {'provider_profile': 'claude'},
             'run_id': 'c' * 32,
             'task_binding': {'contract_digest': 'd' * 64},
-        })
+            'completion': {'executor_task_id': 'executor-d6',
+                           'evidence': {'common_dir': '/repo/.git'}},
+            'record_sha256': 'c' * 64,
+        }
+        self.store.data.update(task_data)
+        self.store.path.write_text(json.dumps(self.store.data))
         cases = [
             ('formal', 91),
             ('formal', 0),
@@ -594,7 +600,7 @@ class ReviewDispatchTests(unittest.TestCase):
                         self.assertRaises(LLMToolError) as caught:
                     review_dispatch.dispatch_review(
                         store=test_store, task_id=TASK, executor_task='executor-d6',
-                        pr_number=42, version=v, kind=kind,
+                        pr_number=42, version=v, kind=kind, reviewer='codex-reviewer',
                         create_d6=lambda **kw: created_d6.append(kw))
                 self.assertEqual(caught.exception.review_dispatch_code,
                                  'REVIEW_VERSION_RANGE_INVALID')

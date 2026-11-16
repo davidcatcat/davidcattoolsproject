@@ -706,8 +706,9 @@ class ReviewKindTests(unittest.TestCase):
             self.assertNotIn('review_kind', seeded_task['review_dispatch_claim'][0])
             self.assertNotIn('review_kind', seeded_task['completion_events'][0])
 
+            family_store = FamilyStore(store, 'codex')
             res = review_result.record_review_result(
-                store=store, task_id=TASK, executor_task=EXECUTOR, pr_number=PR,
+                store=family_store, task_id=TASK, executor_task=EXECUTOR, pr_number=PR,
                 version=1, kind='formal')
             self.assertFalse(res['created'])
             self.assertEqual(res['state'], 'REVIEW_PASS')
@@ -720,7 +721,7 @@ class ReviewKindTests(unittest.TestCase):
 
             with self.assertRaises(LLMToolError) as caught:
                 review_result.record_review_result(
-                    store=store, task_id=TASK, executor_task=EXECUTOR, pr_number=PR,
+                    store=family_store, task_id=TASK, executor_task=EXECUTOR, pr_number=PR,
                     version=1, kind='security')
             self.assertEqual(caught.exception.review_dispatch_code,
                              'REVIEW_RESULT_CLAIM_MISSING')
