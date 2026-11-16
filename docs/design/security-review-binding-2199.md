@@ -20,13 +20,19 @@ the claim append at `review_dispatch.py:1329` expects the `record_sha256` of
 the Task read at `:1218`, the first line of `dispatch_review`. It does not
 re-read the Task just before the append (§2.5, §3.3). §7 maps the review
 findings to the sections that resolve them.
+Repair 1 of the replan (after formal review v2 of PR #2220) re-read
+`merge_train_ops.py:31`, `:171`–`:191` and `:359`, and `task_advance.py:1291`–
+`:1302`, at `a1544611`. They match. That repair moves train admission to the
+modules that review reports run it (§2.6, §3.6) and gives a sensitive-path
+matcher exception one classification throughout (§3.4, §3.6).
 
 Read scope: `review_dispatch.py`, `review_result.py`, `review_repair.py`,
 `task_advance.py`, `merge_train_ops.py` and `tools/llmtool/sensitive-paths.json`
 only. Some facts below come from formal reviews v2 and v3 of PR #2205 and the
 debug report on v3. They were **not read in this Task**: `AGENTS.md:113`,
-`sensitive_paths.py`, `merge_train.py` (train build and admission),
-`task_completion.py` (`:2215`, `:2681`), `task_store.py` and
+`sensitive_paths.py`, `merge_train.py`, `merge_train_build.py` and
+`merge_train_eligibility.py` (train build and admission; reported by review
+v2 of PR #2220), `task_completion.py` (`:2215`, `:2681`), `task_store.py` and
 `task_submission_cli._dispute_fail_verdict`. Each one is marked "(reported, not
 read)" or "(not read)". The PR that changes such a file must add it to its read
 and write paths and confirm the reported behaviour before relying on it.
@@ -245,8 +251,15 @@ comment text alone resolves anything.
 
   It does not go through `_merge_once`, so no gate added only to `_merge_once`
   reaches it.
-- Train build and admission (which PRs become members) are in `merge_train.py`
-  (not read). The admission function and its checks are UNKNOWN here.
+- Train build and admission (which PRs become members), reported by review v2
+  of PR #2220 (not read): `merge_train_build.build_train` calls
+  `merge_train_eligibility.member_check` for each candidate and excludes a
+  refused candidate. Only the remaining candidates' heads reach
+  `build_candidate` (`merge_train_build.py:204`–`:216`). So a refusal inside
+  `member_check` drops one candidate; it does not refuse the build.
+  `merge_train_ops.py` imports `merge_train` as `_train_build` (`:31`, read)
+  and uses it only for `train_delta_verified` (`:359`, read). This design
+  makes no change to `merge_train.py`.
 - The operation lock excludes only other operations on the same train. Member
   review writes go through the member Task's own TaskStore lock
   (`review_dispatch.py:1329`). The train's compare-and-update (`:397`) checks
@@ -437,11 +450,26 @@ fence.
 
     **Exact head.** `_pr_files` (`task_advance.py:499`) reads the PR's current
     file list, not the list at a given head. So the helper reads the PR, then
-    the file list, then the PR again. It answers unknown (`None`) unless both
-    PR reads show `H` as the head. An unreadable file list,
-    `PR_FILES_TOO_MANY`, an unknown claim kind (§3.1) or an exception also
-    give `None`. Every caller treats `None` as required for routing and as a
-    refusal for merge and dispatch (fail closed).
+    the file list, then the PR again. Unless the sticky part is already true,
+    it answers unknown (`None`) when either PR read does not show `H` as the
+    head. An unreadable file list, `PR_FILES_TOO_MANY`, an unknown claim kind
+    (§3.1), an unknown registry answer for a path (§3.6:
+    `sensitive_paths.is_sensitive` raises or returns anything other than
+    `True` or `False`) or any other exception also give `None`, in the order
+    given below. Every caller treats `None` as a refusal for merge, train and
+    dispatch, and routing stops on it (§3.4 table). All of these fail closed.
+
+    **Combining the parts.** The helper answers in this order:
+    1. The sticky part is true: `True`. It needs no GitHub read.
+    2. An unknown claim kind, a failed exact-head read, or an unreadable or
+       too-long file list: `None`.
+    3. Some path of the list is a rule file (a review-rules floor match or
+       `is_sensitive` is `True`): `True`.
+    4. Some path has an unknown registry answer: `None`.
+    5. Otherwise: `False`.
+
+    So `True` comes only from the record or from a definite match. A matcher
+    exception never gives `True`, and it never gives `False`.
 
     **Why order and not "any claim at any time".** Two properties follow
     because the claim list is append-only and keeps its order
@@ -479,6 +507,7 @@ fence.
   | Security state at the current head | Next step |
   |---|---|
   | Required, and there is no security claim | `DISPATCH_SECURITY_REVIEW` |
+  | `required` is unknown (`None`), and there is no security claim | `SECURITY_REVIEW_REQUIRED_UNKNOWN` (stop; the dispatch precondition would refuse it, and the formal flow is not entered) |
   | Security claim is `COMPLETED`, and there is no security event | `RECORD_SECURITY_REVIEW_RESULT` |
   | Security claim is `CLAIMED` or `UNKNOWN`, with or without a failure reason | `SECURITY_REVIEW_OUTCOME_UNKNOWN` (stop; no automatic security redispatch in this design) |
   | Security event is `REVIEW_FAIL` | Same repair-claim checks as formal (`REPAIR_RETRY`, `WAITING_REPAIR`, …), otherwise `REPAIR_SECURITY_REVIEW` |
@@ -541,16 +570,26 @@ fence.
     exists at that head, in any state. This mirrors `_merge_pass_claim`.
   - **`MERGE_SECURITY_REQUIRED_UNKNOWN`**: `security_required` answers
     unknown (file list unreadable or incomplete, head moved between its reads,
-    unknown claim kind, exception).
+    unknown claim kind, unknown registry answer, exception).
 - The gate reads TaskStore and the stored Codex output only. PR comments are
   never an input. That is the fix for the CWE-345 finding: posting a PASS-shaped
   comment changes no record, so it cannot open the gate.
-- **Rule file set.** There is no new hand-written path list. A path is a rule
-  file when either of these holds:
+- **Rule file set.** There is no new hand-written path list. Each path gets
+  one of three answers: rule file, not a rule file, or unknown. A path is a
+  rule file when either of these holds:
   - **The existing registry:** `sensitive_paths.is_sensitive(path)` returns
-    anything other than `False`, for the same fail-closed reading as
-    `_carry_test_file` (`task_advance.py:1298`–`:1302`). `True`, `None`, a
-    malformed answer and an exception all count as a rule file. The registry is
+    exactly `True`. Exactly `False` means the registry does not list the
+    path. Any other answer (`None`, a malformed value) and any exception make
+    the path's answer **unknown**, unless the review-rules floor below matches
+    it. An unknown path makes `security_required` answer unknown (§3.4
+    step 4), so merge, train and dispatch all refuse with their
+    `*_REQUIRED_UNKNOWN` code. This is the one classification of a matcher
+    exception in this design. It is as fail-closed as `_carry_test_file`
+    (`task_advance.py:1298`–`:1302`), which can only answer yes or no and so
+    counts doubt as sensitive. Here doubt is reported as unknown, which every
+    caller refuses. It does not count as a rule-file match, so it never admits
+    a security dispatch and never makes the rule-file part of `required`
+    true. The registry is
     `tools/llmtool/sensitive-paths.json` with its exact, prefix and glob rules,
     which `AGENTS.md:113` names as the rule-file registry (reported, not read).
     This includes `tools/llmtool/worker-dispatch.json`, `task_advance.py` and
@@ -561,7 +600,9 @@ fence.
   - **The review-rules set:** `AGENTS.md`, `CLAUDE.md`, or a path under
     `.claude/skills/`. This is the set `_REVIEW_RULES_HEADER`
     (`review_dispatch.py:102`) calls rule files. It is kept as a floor in case
-    the registry does not list one of them. It never narrows the registry.
+    the registry does not list one of them. A floor match is a rule file
+    whatever `is_sensitive` answers for that path, including an exception. It
+    never narrows the registry.
 
   The PR author does not choose the set, and a prompt header is not the merge
   classification. Changes to the registry follow its existing process. Because
@@ -574,15 +615,39 @@ fence.
   train. The train route therefore reads no security verdict, needs no
   member reservation and has no reservation recovery. Train-level security
   enforcement is a later design (§6).
-  - **Admission.** The train build's member admission in `merge_train.py`
-    (not read; the function is UNKNOWN here) calls `security_required` for
-    each candidate PR at the candidate's head, on that candidate's Task
-    record. A true answer refuses the build with
-    `TRAIN_MEMBER_SECURITY_REVIEW_REQUIRED` and the candidate's Task ID. An
-    unknown answer refuses it with `TRAIN_MEMBER_SECURITY_REQUIRED_UNKNOWN`.
-    No train record is written in either case. PR 3 adds `merge_train.py` to
-    its read and write paths. Admission is an early refusal only. The merge
-    decision does not rely on it.
+  - **Admission (whole-build refusal before any exclusion).** Admission runs
+    in `merge_train_build.build_train`, which excludes each candidate that
+    `merge_train_eligibility.member_check` refuses before `build_candidate`
+    receives the remaining heads (§2.6, reported, not read). A security
+    refusal added only as one more `member_check` reason would just drop the
+    candidate, and the build would go on with the others. So the change spans
+    both modules:
+    - `merge_train_eligibility.py` gains
+      `security_admission(candidate, store, github_get)`. It re-reads the
+      candidate's Task record and calls `security_required` on that record
+      for the candidate's PR at the candidate's head. It returns
+      `TRAIN_MEMBER_SECURITY_REVIEW_REQUIRED` for true, and
+      `TRAIN_MEMBER_SECURITY_REQUIRED_UNKNOWN` for unknown, for an unreadable
+      or mismatched Task record and for an exception. Otherwise it returns
+      `None`. `member_check` and its exclusion rules are unchanged.
+    - `merge_train_build.build_train` calls `security_admission` for every
+      candidate, in candidate order, **before** its `member_check` loop and so
+      before any candidate is excluded. The first code refuses the whole
+      build with that code and the candidate's PR and Task ID. In that case
+      `member_check` and `build_candidate` are not called and no train record
+      is written. A candidate that `member_check` would also exclude for
+      another reason is still refused for security first, so a candidate
+      that needs a security review is never silently dropped from a train.
+      The refusal uses `build_train`'s existing refusal shape (UNKNOWN here).
+
+    The reason for a whole-build refusal and not an exclusion: the PM gets an
+    explicit code and moves that PR to single-PR `task advance`, instead of a
+    train that quietly leaves it out. PR 3 adds both modules to its read and
+    write paths. It confirms the reported call path (`merge_train_build.py:204`–
+    `:216`) before it changes them; if the code differs, PR 3 returns
+    SPEC_MISMATCH. `merge_train.py` is not changed. Admission is an early
+    refusal only. The merge decision does not rely on it; the final member
+    check below is the decision.
   - **Final member check.** `_member_unchanged` returns a refusal code or
     `None` instead of a bool. It has one caller, `_merge_locked` (`:363`),
     which refuses the whole train with that code and the member's Task ID.
@@ -913,7 +978,8 @@ Tests follow the test data rule (Owner #763 A):
   required it is refused `SECURITY_REVIEW_NOT_REQUIRED`.
 - **Files:**
   - `review_result.py`: `security_required` (§3.4, §3.6), which uses
-    `sensitive_paths.is_sensitive` (fail closed) plus the review-rules set,
+    `sensitive_paths.is_sensitive` (exactly `True` is a rule file, exactly
+    `False` is not, anything else is unknown; §3.6) plus the review-rules set,
     the order-based sticky rule and the exact-head PR, files, PR reads.
     `sensitive_paths.py` and `tools/llmtool/sensitive-paths.json` are added
     to this PR's read paths only (no change to either). Also
@@ -969,8 +1035,16 @@ Tests follow the test data rule (Owner #763 A):
     - a rename whose `previous_filename` alone is sensitive;
     - the review-rules floor: `AGENTS.md`, `CLAUDE.md` and a
       `.claude/skills/` file;
-    - fail closed: `sensitive_paths.is_sensitive` monkeypatched to raise, and
-      to return `None`, gives `required`;
+    - fail closed, with the §3.6 classification: on a Task with no security
+      claim and a PR whose only path is outside the review-rules floor,
+      `sensitive_paths.is_sensitive` monkeypatched to raise, and to return
+      `None`, makes `security_required` answer unknown (`None`), never
+      `True` or `False`. `dispatch_review(kind="security")` there is refused
+      `SECURITY_REVIEW_REQUIRED_UNKNOWN`, with the record unchanged and the
+      injected `create_d6` and `codex_runner` never called;
+    - the same monkeypatch on a PR that also changes `AGENTS.md` (floor), and
+      on a PR with a second path for which the real registry answers `True`,
+      gives `True`; on a Task with a sticky security claim it gives `True`;
     - a path the registry does not match, and no security claim, gives not
       required.
 - **Invariants kept:** I1, I3, I5b, I6. No production caller exists, so no
@@ -1007,8 +1081,14 @@ Tests follow the test data rule (Owner #763 A):
     refuses with the member's code and adds the train PR delta check before
     the claim (§3.6 train route). No train phase, reservation or recovery
     state is added.
-  - `merge_train.py` (not read): the admission refusal (§3.6). The PR adds
-    it to its read and write paths and names the admission function.
+  - `merge_train_eligibility.py` (reported, not read): the new
+    `security_admission`; `member_check` unchanged (§3.6 admission).
+  - `merge_train_build.py` (reported, not read): `build_train` calls
+    `security_admission` for every candidate before its `member_check`
+    exclusion loop and refuses the whole build on the first code (§3.6
+    admission). The PR adds both modules to its read and write paths and
+    confirms `merge_train_build.py:204`–`:216` first. `merge_train.py` is not
+    changed.
   - `review_dispatch.py` and `review_result.py`: map `TASK_MERGE_RESERVED`
     from the store to a refusal with that code. There is no caller-side
     check; the store is the gate.
@@ -1049,9 +1129,12 @@ Tests follow the test data rule (Owner #763 A):
     at the recorded head (the sticky rule), is refused the same way.
   - A rule-file member with a PASS-shaped security comment and no claim (the
     forgery case on the train) is refused the same way.
-  - A member whose file list is unreadable, or `PR_FILES_TOO_MANY`, or for
-    which `sensitive_paths.is_sensitive` is monkeypatched to raise, is
-    refused `TRAIN_MEMBER_SECURITY_REQUIRED_UNKNOWN`.
+  - A member whose file list is unreadable, or `PR_FILES_TOO_MANY`, or whose
+    only path is outside the review-rules floor while
+    `sensitive_paths.is_sensitive` is monkeypatched to raise, is refused
+    `TRAIN_MEMBER_SECURITY_REQUIRED_UNKNOWN`. This matches the PR 2
+    expectation that the same exception makes `security_required` answer
+    unknown (§3.6, one classification).
   - A member PR whose head moves between the file list read and the re-read
     (injected `github_get`) is refused
     `TRAIN_MEMBER_SECURITY_REQUIRED_UNKNOWN`.
@@ -1069,10 +1152,25 @@ Tests follow the test data rule (Owner #763 A):
     read reports none (injected `github_get`), is refused
     `TRAIN_SECURITY_REVIEW_REQUIRED`. An unreadable train PR file list is
     refused `TRAIN_SECURITY_REQUIRED_UNKNOWN`.
-  - Admission: a build with one rule-file candidate is refused
-    `TRAIN_MEMBER_SECURITY_REVIEW_REQUIRED`, and one with an unreadable
-    candidate file list is refused `TRAIN_MEMBER_SECURITY_REQUIRED_UNKNOWN`.
-    No train record is written in either case.
+  - Admission, through `merge_train_build.build_train` with real candidate
+    Task records and a spy on `build_candidate` (injected or monkeypatched;
+    the eligibility and security checks are not stubbed):
+    - **Three candidates:** candidate A changes only
+      `tools/llmtool/worker-dispatch.json` and has a formal PASS; candidates
+      B and C touch no rule file and pass `member_check`. The build is
+      refused `TRAIN_MEMBER_SECURITY_REVIEW_REQUIRED` with A's PR and Task
+      ID. `build_candidate` is never called, no two-member train of B and C
+      is built and no train record is written. The same holds with A placed
+      second and third in candidate order.
+    - A candidate that needs a security review and that `member_check`
+      would also exclude for another reason, next to two eligible
+      candidates, gives the same whole-build refusal and not an exclusion.
+    - A candidate with an unreadable file list, next to two eligible
+      candidates, is refused `TRAIN_MEMBER_SECURITY_REQUIRED_UNKNOWN` the
+      same way.
+    - Three candidates that touch no rule file and hold no security claim
+      build as today, and `member_check` exclusions for other reasons keep
+      their current behaviour (regression).
   - The member refused above as a train member merges through single-PR
     `task advance` once it has a bound security PASS at its exact head
     (`_merge_once`, injected `gh_runner`).
@@ -1143,6 +1241,10 @@ Tests follow the test data rule (Owner #763 A):
     the rule file still gives `DISPATCH_SECURITY_REVIEW` (sticky).
   - A non-rule-file head with no security claim falls through to the formal
     flow unchanged.
+  - A head whose `required` answer is unknown (for example
+    `sensitive_paths.is_sensitive` monkeypatched to raise for its only path)
+    stops with `SECURITY_REVIEW_REQUIRED_UNKNOWN`. Neither
+    `DISPATCH_SECURITY_REVIEW` nor `DISPATCH_REVIEW` is chosen.
   - The #2194/#2197 shape works: a bound security FAIL now repairs.
   - A comment-only security FAIL still refuses `REVIEW_FAIL_EVENT_MISSING`.
   - A formal FAIL and a security FAIL on one head count as one valid FAIL.
@@ -1265,7 +1367,8 @@ Tests follow the test data rule (Owner #763 A):
   - `_finish_merged` (marking member fences merged);
   - `_provenance` (recording each member's security version).
 
-  It would also touch the admission in `merge_train.py` (not read).
+  It would also touch the admission in `merge_train_build.build_train` and
+  `merge_train_eligibility` (reported, not read).
 - Merges made outside llmtool (manual GitHub merges, branch protection).
 - Completion gate semantics (`run_task_complete`, `PM_EVIDENCE_READY`). PR 1
   only filters their claim readers by kind (the `RUN_TASK_COMPLETE` selector,
@@ -1297,9 +1400,11 @@ Source limits. The texts of the codex-reviewer reviews (PR #2205 v2, v3 and
 v4, and PR #2211 v1) are not in this Task's read scope. This table maps each
 finding as this document's repair notes record it (the header, "per review
 v2" in §2.5, "after formal review v4 F1"), together with the Task acceptance
-items that restate the open #2211 v1 points. Finding IDs other than v4 F1 are
-not recorded in the readable sources, so the table names the topic instead
-of guessing an ID. The PM checks the table against the review comments
+items that restate the open #2211 v1 points. It also maps the findings of
+review v2 of PR #2220, this replan's PR, as given in the repair dispatch;
+that review named #2211 v1 F2. Other finding IDs are not recorded in the
+readable sources, so the table names the topic instead of guessing an ID.
+The PM checks the table against the review comments
 before the formal review. Any finding the table does not cover is UNKNOWN
 here and must be returned as a repair item.
 
@@ -1315,3 +1420,6 @@ here and must be returned as a repair item.
 | #2211 v1 (Task acceptance 2) | Rollout window: the old PR order had an ungated period in which bound security claims could be written while no merge route enforced them | Resolved | §4 (order: PR 2 has no caller; PR 3 lands the CLI with both gates), §5 |
 | #2211 v1 (Task acceptance 3) | Migration of PRs that already carry comment-only verdicts | Resolved | §5 (list before PR 3, CLI then advance, no import, the dropped-rule-file case to the Owner) |
 | #2211 (exact head) | `_pr_files` reads the current file list, not the list at a head | Resolved | §3.4 (PR, files, PR reads in `security_required`), §3.6 train PR delta |
+| #2211 v1 F2 | Train admission was planned in the wrong module. Admission runs in `merge_train_build.build_train` through `merge_train_eligibility.member_check`, which excludes refused candidates before `build_candidate` | Resolved | §2.6 (reported admission path), §3.6 admission (`security_admission` before any exclusion, whole-build refusal), PR 3 files (both modules) and the three-candidate tests |
+| #2220 v2 F1 | The admission plan still named `merge_train.py`. With one security-required and two eligible candidates, changing only that module could not refuse the whole build. #2211 v1 F2 was missing from §7 | Resolved | §2.6, §3.6 admission, PR 3 files and admission tests (three candidates, in every order, `build_candidate` never called, no train record), §6, this table |
+| #2220 v2 F2 | The plan classified a `sensitive_paths.is_sensitive` exception two ways: a rule-file match (§3.6, PR 2 test) and unknown (PR 3 train test) | Resolved | One classification: an exception or a non-boolean answer is unknown, outside the review-rules floor (§3.6 rule file set, §3.4 combining order and table row). The PR 2 test (unknown, dispatch refused `SECURITY_REVIEW_REQUIRED_UNKNOWN`), the PR 3 train test (`TRAIN_MEMBER_SECURITY_REQUIRED_UNKNOWN`) and the PR 4 routing test now agree |
