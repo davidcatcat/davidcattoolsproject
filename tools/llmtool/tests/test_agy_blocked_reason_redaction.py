@@ -36,10 +36,18 @@ def make_task_record(task_id, run_id, *, developer=None):
     contract_data = {
         'schema_version': 1,
         'task_id': task_id,
+        'contract_version': 1,
+        'previous_digest': None,
         'goal': 'test goal',
-        'acceptance': ['test acceptance'],
-        'read_paths': ['source.py'],
-        'write_paths': ['source.py'],
+        'authorized_scope': ['source.py'],
+        'forbidden_scope': [],
+        'criteria': [
+            {
+                'criterion_id': 'test_criterion',
+                'kind': 'ARTIFACT',
+                'description': 'test acceptance',
+            }
+        ],
     }
     contract = parse_task_contract(json.dumps(contract_data))
     binding = contract.binding(run_id)
@@ -59,6 +67,7 @@ def make_task_record(task_id, run_id, *, developer=None):
         'task_contract': contract_data,
         'task_binding': {
             'contract_digest': binding.contract_digest,
+            'contract_version': binding.contract_version,
             'task_id': binding.task_id,
             'run_id': binding.run_id,
         },
