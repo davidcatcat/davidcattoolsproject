@@ -1183,6 +1183,7 @@ class PMRuntime:
                     self.pm_session_id, '--permission-prompts', 'none',
                     '--permission-mode', PM_PERMISSION_MODE,
                     '--strict-mcp-config', '--mcp-config', PM_MCP_CONFIG,
+                    '--disallowedTools', 'Skill',
                     '--append-system-prompt', PM_SESSION_INSTRUCTION]
             if model is not None:
                 argv.extend(('--model', model))
