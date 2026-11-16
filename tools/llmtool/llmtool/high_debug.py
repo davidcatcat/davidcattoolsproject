@@ -1464,7 +1464,7 @@ def _is_plain_issue(number):
     return type(issue) is dict and issue.get('number') == number and 'pull_request' not in issue
 
 
-def run_high_debug(*, store, task_id, executor_task, pr_number, family,
+def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_number=None, family,
                    failed_corrections=None, early_reason=None, evidence=None,
                    runner=None, create_d6=None, repo_root=None,
                    read_registration=None, sessions_dir=None,
@@ -1476,7 +1476,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
             type(task_id) is not str or _SCREEN_TASK_ID.fullmatch(task_id) is None or
             type(executor_task) is not str or
             re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', executor_task) is None or
-            type(pr_number) is not int or not 1 <= pr_number <= 9999999 or
+            not _target_ok(pr_number, issue_number, family, failed_corrections) or
             type(family) is not str or re.fullmatch(r'[a-z0-9._-]{1,64}', family) is None):
         _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
     if ((type(failed_corrections) is int and failed_corrections >= 2 and early_reason is None) or
@@ -1496,7 +1496,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     _require_screen_cleared(task_id, family)
     # #1887: the review repair gate finds a confirmed RCA by the repair claim
     # family, so a Debug for a PR that has repair claims must name one of them.
-    claims = task.get('review_repair_claims', [])
+    claims = task.get('review_repair_claims', []) if pr_number is not None else []
     families = sorted({claim.get('family', f"pr-{claim.get('pr')}")
                        for claim in (claims if type(claims) is list else [])
                        if type(claim) is dict and claim.get('pr') == pr_number and
