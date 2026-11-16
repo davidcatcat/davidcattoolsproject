@@ -15,6 +15,10 @@ from .task_store import REVIEW_DISPUTE_DEFERRABLE, REVIEW_DISPUTE_SEVERITIES, _j
 # This same-class repair cap is separate from worker_dispatch's per-dispatch limit of 1.
 MAX_REPAIR_ATTEMPTS = run_budget.MAX_REPAIR_ATTEMPTS
 MAX_EXCERPT_CHARS = 2000
+MAX_VERDICT_CHARS = 65536
+MAX_VERDICT_BODY_CHARS = MAX_VERDICT_CHARS
+REVIEW_VERDICT_TOO_LONG = 'REVIEW_VERDICT_TOO_LONG'
+VERDICT_TOO_LONG_CODE = REVIEW_VERDICT_TOO_LONG
 
 
 def _refuse(code):
@@ -351,21 +355,40 @@ def _failed_event(task, *, executor_task, pr_number, github_get):
     if type(comments) is not list or len(comments) >= 100:
         _refuse('REVIEW_RESULT_COMMENTS_INVALID')
     verdicts = []
+    too_long = []
     for comment in comments:
         if type(comment) is not dict:
             _refuse('REVIEW_RESULT_COMMENTS_INVALID')
+        body = comment.get('body')
+        if type(body) is str and len(body) > MAX_VERDICT_CHARS:
+            lines = [line for line in body.splitlines() if line.strip()]
+            if len(lines) >= 2:
+                status_line = review_result._VERDICT_VERSION_HEAD.fullmatch(lines[1])
+                if status_line is not None:
+                    _, raw_version, raw_head = status_line.groups()
+                    if raw_head == claim['head_sha'] and int(raw_version) == claim['version']:
+                        created_at = comment.get('created_at', '')
+                        updated_at = comment.get('updated_at', created_at)
+                        if type(updated_at) is str and type(comment.get('id')) is int:
+                            too_long.append((updated_at, comment.get('id', 0)))
         verdict = review_result._comment_verdict(
             comment, head=claim['head_sha'], version=claim['version'], task=task)
         if verdict is not None:
             verdicts.append((verdict, comment))
     if not verdicts:
+        if too_long:
+            _refuse(REVIEW_VERDICT_TOO_LONG)
         _refuse('REVIEW_FAIL_EVENT_MISSING')
     (updated, comment_id, outcome, findings_count), comment = max(
         verdicts, key=lambda pair: pair[0][:2])
     if (event.get('source_sha') != claim['head_sha'] or outcome != 'REVIEW_FAIL' or
             comment_id is None):
         _refuse('REVIEW_FAIL_EVENT_MISSING')
+    if any(item[:2] >= (updated, comment_id) for item in too_long):
+        _refuse(REVIEW_VERDICT_TOO_LONG)
     body = comment.get('body', '')
+    if len(body) > MAX_VERDICT_CHARS:
+        _refuse(REVIEW_VERDICT_TOO_LONG)
     excerpt = body[:MAX_EXCERPT_CHARS]
     packet = {
         'task': task['task_id'], 'pr': pr_number, 'executor_task': executor_task,
@@ -377,6 +400,8 @@ def _failed_event(task, *, executor_task, pr_number, github_get):
                          separators=(',', ':')).encode('utf-8')
     if len(encoded) > 8192:
         _refuse('REPAIR_PACKET_INVALID')
+    if isinstance(event, dict):
+        event = dict(event, verdict_body=body)
     return packet, event
 
 
@@ -505,7 +530,7 @@ def _policy():
         _refuse('REPAIR_POLICY_INVALID')
 
 
-def _review_gate(task, attempts, packet, family, policy, counts=None):
+def _review_gate(task, attempts, packet, family, policy, counts=None, verdict_body=None):
     """#1502 WP-D (O2, D1, D3): admit one review repair from the valid FAILs per HEAD.
 
     Each earlier review repair claim stands for a valid FAIL on its HEAD and the
@@ -523,7 +548,9 @@ def _review_gate(task, attempts, packet, family, policy, counts=None):
     Without counts the Task's own attempts are used.
     """
     from . import repair_policy
-    text = packet['reviewer_text_excerpt_untrusted_data']
+    text = packet['reviewer_text_excerpt_untrusted_data'] if verdict_body is None else verdict_body
+    if len(text) > MAX_VERDICT_CHARS:
+        _refuse(REVIEW_VERDICT_TOO_LONG)
     if review_result.blocking_findings(text) == []:
         _refuse('REPAIR_NO_BLOCKING_FINDING')
     # #1502 WP-D D13: a FAIL whose every blocking finding an arbiter withdrew
@@ -676,12 +703,15 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     if profile == 'claude' and shutil.which(profile) is None:
         _refuse('RUNTIME_NOT_ON_PATH')
     ci_identity_sha = None
+    verdict_body = None
     if ci_failure is not None:
         packet, ci_identity_sha = _ci_failure(task, executor_task=executor_task,
                                               pr_number=pr_number, ci_failure=ci_failure)
     elif remote_test_receipt is None:
         packet, _event = _failed_event(task, executor_task=executor_task,
                                        pr_number=pr_number, github_get=github_get)
+        if isinstance(_event, dict):
+            verdict_body = _event.get('verdict_body')
     else:
         packet = _remote_test_failure(task, executor_task=executor_task,
                                       pr_number=pr_number, receipt=remote_test_receipt)
@@ -823,7 +853,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                                                include_successors=True)
         rca_entry = None
         if not test_failure:
-            rca_entry = _review_gate(task, attempts, packet, family, _policy(), counts=counts)
+            rca_entry = _review_gate(task, attempts, packet, family, _policy(),
+                                     counts=counts, verdict_body=verdict_body)
             if rca_entry is not None:
                 packet = dict(packet,
                               high_debug_report_untrusted_data=rca_entry['report'][:6000],
