@@ -35,7 +35,7 @@
         "model": "gw",
         "context_cap_tokens": 32768,
         "max_output_tokens": 16384,
-        "timeout_seconds": 600,
+        "timeout_seconds": 1800,
         "allowed_data_classes": ["synthetic", "public_repo"],
         "data_class_map": {"SYNTHETIC": "synthetic", "PUBLIC_REPO": "public_repo"}
       },

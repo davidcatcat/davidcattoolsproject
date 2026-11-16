@@ -198,7 +198,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(config['profile']['allowed_data_classes'], ['synthetic', 'public_repo'])
         self.assertEqual(config['profile']['data_class_map'],
                          {'SYNTHETIC': 'synthetic', 'PUBLIC_REPO': 'public_repo'})
-        self.assertEqual(config['profile']['timeout_seconds'], 600)
+        self.assertEqual(config['profile']['timeout_seconds'], 1800)
+        self.assertEqual(config['profile']['timeout_seconds'], config['default_timeout'])
         self.assertEqual(config['authorization_ref'],
             'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6760670167')
         with tempfile.TemporaryDirectory() as temp:
@@ -1046,8 +1047,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(seen['post_path'], '/v1/chat/completions')
         self.assertEqual(seen['prepared_profile']['http_allow_hosts'], ['10.20.30.40'])
         # #1817: the configured per-call timeout reaches the gateway profile.
-        self.assertEqual(seen['profile']['timeout_seconds'], 600)
-        self.assertEqual(seen['prepared_profile']['timeout_seconds'], 600)
+        self.assertEqual(seen['profile']['timeout_seconds'], 1800)
+        self.assertEqual(seen['prepared_profile']['timeout_seconds'], 1800)
         self.assertEqual(set(seen['task']['budgets']), {
             'max_turns', 'max_input_tokens', 'max_output_tokens', 'max_wall_seconds',
             'max_tool_result_bytes', 'max_sent_bytes'})
@@ -1106,10 +1107,12 @@ class GwAgentProfileTimeoutTests(unittest.TestCase):
         profile['base_url'] = 'http://127.0.0.1:9/v1'
         return profile
 
-    def test_shipped_profile_serializes_timeout_seconds_600(self):
+    def test_shipped_profile_serializes_timeout_seconds_1800(self):
         serialized = self._serialized_profile(self._shipped_profile())
         self.assertIs(type(serialized['timeout_seconds']), int)
-        self.assertEqual(serialized['timeout_seconds'], 600)
+        self.assertEqual(serialized['timeout_seconds'], 1800)
+        self.assertEqual(serialized['timeout_seconds'],
+                         load_route_config()['routes']['gw-agent']['default_timeout'])
 
     def test_profile_without_timeout_seconds_serializes_without_it(self):
         with_timeout = self._serialized_profile(self._shipped_profile())

@@ -178,7 +178,8 @@ ROUTE_PROFILE = Obj(
         "context_cap_tokens": Int(1),
         "max_output_tokens": Int(1),
         # #1817: per model call timeout handed to the gateway profile; when
-        # absent the gateway applies its own default.
+        # absent the gateway applies its own default. gw-agent sets it to its
+        # route default_timeout so one call is bounded only by the Task.
         "timeout_seconds": Int(1, ROUTE_TIMEOUT_CAP_SECONDS),
         "allowed_data_classes": ListOf(Str(r"[a-z_]+"), min_items=1),
         "data_class_map": MapOf(Str(r"[a-z_]+"), r"[A-Z][A-Z_]*"),
