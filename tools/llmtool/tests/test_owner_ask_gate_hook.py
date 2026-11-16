@@ -96,11 +96,101 @@ class OwnerAskGateHookTest(unittest.TestCase):
         result = run_hook("{not hook json")
         self.assertEqual(0, result.returncode)
 
-    def test_unreadable_body_file_is_refused(self) -> None:
-        missing = self.dir / "absent-body.md"
-        command = "gh issue comment 42 --body-file " + shlex.quote(str(missing))
+    def test_unreadable_relative_body_file_without_marker_passes(self) -> None:
+        command = ("cd " + shlex.quote(str(self.dir)) + " && gh issue comment 42 "
+                   "--body-file unwritten-body.md")
         result = run_hook(payload(command))
-        self.assert_refused(result)
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("", result.stderr)
+
+    def test_unreadable_relative_body_file_with_marker_is_refused(self) -> None:
+        body = MARKER_ASK + "\n\nThe Owner must decide the next step."
+        command = ("cd " + shlex.quote(str(self.dir)) + " && printf '%s\\n' "
+                   + shlex.quote(body) + " > unwritten-body.md"
+                   + " && gh issue comment 42 --body-file unwritten-body.md")
+        result = run_hook(payload(command))
+        self.assert_refused(result, "The Owner must decide the next step.")
+
+    def test_unreadable_tilde_body_file_without_marker_passes(self) -> None:
+        command = "gh issue comment 42 --body-file ~/owner-gate-missing-body.md"
+        result = run_hook(payload(command))
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("", result.stderr)
+    def test_unreadable_variable_body_file_with_marker_is_refused(self) -> None:
+        body = MARKER_ASK + "\n\nThe Owner must decide the next step."
+        command = ("body=" + shlex.quote(body)
+                   + " && gh issue comment 42 --body-file \"$body\"")
+        result = run_hook(payload(command))
+        self.assert_refused(result, "The Owner must decide the next step.")
+
+    def test_ungated_ask_via_body_equals_is_refused(self) -> None:
+        body = MARKER_ASK + "\n\nThe Owner must decide the next step."
+        command = "gh issue comment 42 --body=" + shlex.quote(body)
+        result = run_hook(payload(command))
+        self.assert_refused(result, "The Owner must decide the next step.")
+
+    def test_ungated_ask_via_short_body_flag_is_refused(self) -> None:
+        body = MARKER_ASK + "\n\nThe Owner must decide the next step."
+        command = "gh issue comment 42 -b " + shlex.quote(body)
+        result = run_hook(payload(command))
+        self.assert_refused(result, "The Owner must decide the next step.")
+
+    def test_compound_command_ungated_ask_first_is_refused(self) -> None:
+        body = MARKER_ASK + "\n\nThe Owner must decide the next step."
+        command = ("gh issue comment 42 --body " + shlex.quote(body)
+                   + " ; gh pr comment 7 --body "
+                   + shlex.quote("Routine progress update."))
+        result = run_hook(payload(command))
+        self.assert_refused(result, "The Owner must decide the next step.")
+
+    def test_compound_command_ungated_ask_last_is_refused(self) -> None:
+        body = MARKER_ASK + "\n\nThe Owner must decide the next step."
+        command = ("gh issue comment 42 --body "
+                   + shlex.quote("Routine progress update.")
+                   + " && gh pr comment 7 --body " + shlex.quote(body))
+        result = run_hook(payload(command))
+        self.assert_refused(result, "The Owner must decide the next step.")
+
+    def test_compound_command_all_benign_passes(self) -> None:
+        command = ("gh issue comment 42 --body "
+                   + shlex.quote("Routine progress update.")
+                   + " || gh pr comment 7 -b "
+                   + shlex.quote("Another routine update."))
+        result = run_hook(payload(command))
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("", result.stderr)
+
+    def test_compound_command_all_gated_passes(self) -> None:
+        gated = MARKER_ASK + "\n" + ASK_LINE + "\n\nDecide."
+        command = ("gh issue comment 42 --body " + shlex.quote(gated)
+                   + " | gh pr comment 7 --body "
+                   + shlex.quote("Routine progress update."))
+        result = run_hook(payload(command))
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("", result.stderr)
+
+    def test_body_file_stdin_without_marker_passes(self) -> None:
+        command = ("gh issue comment 42 --body-file - <<'EOF'\n"
+                   "Routine progress update.\n"
+                   "EOF")
+        result = run_hook(payload(command))
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("", result.stderr)
+
+    def test_body_file_stdin_with_marker_is_refused(self) -> None:
+        command = ("gh issue comment 42 --body-file - <<'EOF'\n"
+                   + MARKER_ASK + "\n\nThe Owner must decide the next step.\n"
+                   "EOF")
+        result = run_hook(payload(command))
+        self.assert_refused(result, "The Owner must decide the next step.")
+
+    def test_body_file_stdin_with_gated_ask_passes(self) -> None:
+        command = ("gh pr comment 42 -F - <<'EOF'\n"
+                   + MARKER_ASK + "\n" + ASK_LINE + "\n\nDecide.\n"
+                   "EOF")
+        result = run_hook(payload(command))
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("", result.stderr)
 
 
 if __name__ == "__main__":
