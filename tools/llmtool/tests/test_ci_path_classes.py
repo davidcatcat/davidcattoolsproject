@@ -74,7 +74,7 @@ class CIPathClassTests(unittest.TestCase):
                 "tools/llmtool/llmtool/role_config.py",
                 "tools/llmtool/tests/test_role_config.py",
             ], (True, True, False, False)),
-            ("#790", ["skills/ai-team-delivery/pm-continuation.md"],
+            ("#790", [".claude/skills/ai-team-delivery/pm-continuation.md"],
              (False, True, False, False)),
             ("#791", ["tools/llmtool/worker-dispatch.json",
                        "tools/llmtool/tests/test_worker_dispatch.py"],
@@ -83,7 +83,7 @@ class CIPathClassTests(unittest.TestCase):
                        "tools/ai-loop/README.md"], (True, True, False, True)),
             ("docs-only", ["AGENTS.md", "docs/meetings/2026-11-02-llmtool-governance-and-ai-team-decisions.md"],
              (False, True, False, False)),
-            ("skills-only", ["skills/ai-team-delivery/SKILL.md"],
+            ("skills-only", [".claude/skills/ai-team-delivery/SKILL.md"],
              (False, True, False, False)),
             ("nested llmtool Markdown", ["tools/llmtool/docs/guide.md"],
              (True, True, False, False)),
@@ -116,14 +116,14 @@ class CIPathClassTests(unittest.TestCase):
             ("#789", ["README.md", "tools/llmtool/llmtool/config.py",
                        "tools/llmtool/llmtool/role_config.py",
                        "tools/llmtool/tests/test_role_config.py"], "L3"),
-            ("#790", ["skills/ai-team-delivery/pm-continuation.md"], "L0"),
+            ("#790", [".claude/skills/ai-team-delivery/pm-continuation.md"], "L0"),
             ("#791", ["tools/llmtool/worker-dispatch.json",
                        "tools/llmtool/tests/test_worker_dispatch.py"], "L1"),
             ("#792", [".github/workflows/llmtool-linux-ci.yml",
                        "tools/ai-loop/README.md"], "L3"),
             ("docs-only", ["AGENTS.md",
                             "docs/meetings/2026-11-02-llmtool-governance-and-ai-team-decisions.md"], "L0"),
-            ("skills-only", ["skills/ai-team-delivery/SKILL.md"], "L0"),
+            ("skills-only", [".claude/skills/ai-team-delivery/SKILL.md"], "L0"),
             ("nested llmtool Markdown", ["tools/llmtool/docs/guide.md"], "L0"),
             ("workflow-only", [".github/workflows/llmtool-linux-ci.yml"], "L3"),
             ("mixed", ["docs/meetings/2026-11-02-llmtool-governance-and-ai-team-decisions.md",
@@ -153,10 +153,10 @@ class CIPathClassTests(unittest.TestCase):
         cases = (
             ("scripts/llmtool_monitor.py", "other"),
             ("scripts/test_llmtool_monitor.py", "other"),
-            ("skills/x/tool.py", "other"),
-            ("skills/x/test_tool.py", "other"),
-            ("skills/x/SKILL.md", "docs"),
-            ("skills/x/notes.txt", "docs"),
+            (".claude/skills/x/tool.py", "other"),
+            (".claude/skills/x/test_tool.py", "other"),
+            (".claude/skills/x/SKILL.md", "docs"),
+            (".claude/skills/x/notes.txt", "docs"),
             (".github/workflows/llmtool-mac-ci.yml", "workflow"),
         )
         for path, expected in cases:
@@ -166,8 +166,8 @@ class CIPathClassTests(unittest.TestCase):
     def test_linux_flags_cases(self):
         cases = (
             (["scripts/llmtool_monitor.py"], (True, False, False, False)),
-            (["skills/x/tool.py"], (True, False, False, False)),
-            (["skills/x/SKILL.md"], (False, True, False, False)),
+            ([".claude/skills/x/tool.py"], (True, False, False, False)),
+            ([".claude/skills/x/SKILL.md"], (False, True, False, False)),
             ([".github/workflows/llmtool-mac-ci.yml"], (True, False, False, False)),
         )
         for paths, expected in cases:

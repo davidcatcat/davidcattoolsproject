@@ -5,7 +5,7 @@ This reference preserves the required Mac workspace preflight. Before any source
 ### Required daily executable preflight (B-min)
 
 Before source/Git mutation in a claimed workspace, run the same
-[read-only gate](../../tools/safe-git/preflight.py) used by the regression tests. This does not authorize a workspace, replace task registration, or turn PID attribution into an automated ownership check. First establish the permitted
+[read-only gate](../../../tools/safe-git/preflight.py) used by the regression tests. This does not authorize a workspace, replace task registration, or turn PID attribution into an automated ownership check. First establish the permitted
 task/root and sole writer cooperatively; existing idle PIDs alone are not conflicts.
 
 Use explicit, independently established expected values, not values freshly

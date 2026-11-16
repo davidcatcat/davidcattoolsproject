@@ -268,7 +268,7 @@ def select_test_ids(
             continue
         if not path.startswith("tools/llmtool/"):
             if (path_class == "docs" and (path in {"AGENTS.md", "CLAUDE.md"}
-                                           or path.startswith(("skills/", "docs/")))):
+                                           or path.startswith((".claude/skills/", "docs/")))):
                 continue
             if path_class != "workflow" and _is_other_tool_markdown(path):
                 continue

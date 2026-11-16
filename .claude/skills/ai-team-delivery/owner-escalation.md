@@ -1,6 +1,6 @@
 # Owner escalation reference — authority matrix (2026-10-27)
 
-This is the operational decision boundary for the Integrator/PM. [AGENTS.md](../../AGENTS.md) owns roles and immutable safety gates; [Owner outcome reporting §6](../../docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md#6-decision-authority-and-escalation-boundary) owns material product/release disposition; [PM Continuation Contract](pm-continuation.md) owns next-step behavior. This file reconciles those sources rather than granting new authority.
+This is the operational decision boundary for the Integrator/PM. [AGENTS.md](../../../AGENTS.md) owns roles and immutable safety gates; [Owner outcome reporting §6](../../../docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md#6-decision-authority-and-escalation-boundary) owns material product/release disposition; [PM Continuation Contract](pm-continuation.md) owns next-step behavior. This file reconciles those sources rather than granting new authority.
 
 ## PM may decide without Owner interruption
 
@@ -82,7 +82,7 @@ Only the Owner changes harness permission settings; this grant lets no AI change
 
 ## Owner channel
 
-The Owner never edits anything on GitHub (Owner 2026-11-02). Never ask the Owner to post, comment, label, approve, review, merge or edit on GitHub. Ask in the PM chat. Before asking, post a `waiting_owner` marker (`actor=PM target=Owner status=WAITING`) on the Issue/PR so the monitor shows the open decision. Record the answer as a PM-relayed comment that quotes the Owner's words, says it is relayed, and begins with `<!-- activity: type=pm_progress actor=PM target=Owner status=ANSWERED -->`; this one comment also settles the monitor's open row. Never create an Owner-authored GitHub event, and never treat a PM summary as Owner words. An Owner assignment reference or authorization link in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) or a Task points to that relayed record.
+The Owner never edits anything on GitHub (Owner 2026-11-02). Never ask the Owner to post, comment, label, approve, review, merge or edit on GitHub. Ask in the PM chat. Before asking, post a `waiting_owner` marker (`actor=PM target=Owner status=WAITING`) on the Issue/PR so the monitor shows the open decision. Record the answer as a PM-relayed comment that quotes the Owner's words, says it is relayed, and begins with `<!-- activity: type=pm_progress actor=PM target=Owner status=ANSWERED -->`; this one comment also settles the monitor's open row. Never create an Owner-authored GitHub event, and never treat a PM summary as Owner words. An Owner assignment reference or authorization link in [worker-dispatch.json](../../../tools/llmtool/worker-dispatch.json) or a Task points to that relayed record.
 
 This applies to every Owner decision on every Issue/PR, not to one topic (#812):
 
@@ -94,7 +94,7 @@ Before asking, apply the [Owner ask gate](#owner-ask-gate-owner-o1-1943). Use `p
 
 ## Decision record and continuation
 
-For every reserved choice, PM presents the exact decision, alternatives, user impact, estimated cost/risk (or UNKNOWN), recommendation and HOLD-until-approved disposition. Record the Owner authorization on the Task/Issue; for dispatch switches, update [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) with the binding under its strict schema. Do not treat a comment, proposal or silence as implicit approval. Only the blocked dependency waits. Unrelated already-authorized work must continue under [PM Continuation](pm-continuation.md).
+For every reserved choice, PM presents the exact decision, alternatives, user impact, estimated cost/risk (or UNKNOWN), recommendation and HOLD-until-approved disposition. Record the Owner authorization on the Task/Issue; for dispatch switches, update [worker-dispatch.json](../../../tools/llmtool/worker-dispatch.json) with the binding under its strict schema. Do not treat a comment, proposal or silence as implicit approval. Only the blocked dependency waits. Unrelated already-authorized work must continue under [PM Continuation](pm-continuation.md).
 
 A Reviewer/Worker quota event by itself is **not** permission to buy tokens, silently select another formal Reviewer, expand egress or change dispatch switches. No new escalation classes for routine fees or exports are introduced: any action **outside existing authority** remains a STOP for that action.
 

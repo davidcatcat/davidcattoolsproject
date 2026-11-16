@@ -13,7 +13,7 @@ if common="$(env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
     REPO="$canonical"
   fi
 fi
-SKILLS_DIR="$REPO/skills"
+SKILLS_DIR="$REPO/.claude/skills"
 DESTS=("$HOME/.claude/skills" "$HOME/.agents/skills" "$HOME/.gemini/config/skills")
 
 if [ ! -d "$SKILLS_DIR" ]; then

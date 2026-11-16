@@ -2,11 +2,11 @@
 
 Role: Integrator/PM and sub-agent PMs. Source: [#1502](https://github.com/davidcatcat/davidcattoolsproject/issues/1502) WP-F design §3.6.
 
-This card holds the PM-only rules. The common core stays in [AGENTS.md](../../AGENTS.md) and [CLAUDE.md](../../CLAUDE.md). Procedures stay in [pm-continuation](../ai-team-delivery/pm-continuation.md), its [reference](../ai-team-delivery/pm-continuation-reference.md), [owner-escalation](../ai-team-delivery/owner-escalation.md) and [defect-triage](../ai-team-delivery/defect-triage.md). This card links to them and does not copy them. Read this card at [PM takeover](../ai-team-delivery/pm-continuation.md#pm-takeover). There is no llmtool delivery evidence for PM runs yet (待後續). Until WP-H slims `AGENTS.md`/`CLAUDE.md`, they carry the same rules. If the texts differ, they win and this card gets fixed.
+This card holds the PM-only rules. The common core stays in [AGENTS.md](../../../AGENTS.md) and [CLAUDE.md](../../../CLAUDE.md). Procedures stay in [pm-continuation](../ai-team-delivery/pm-continuation.md), its [reference](../ai-team-delivery/pm-continuation-reference.md), [owner-escalation](../ai-team-delivery/owner-escalation.md) and [defect-triage](../ai-team-delivery/defect-triage.md). This card links to them and does not copy them. Read this card at [PM takeover](../ai-team-delivery/pm-continuation.md#pm-takeover). There is no llmtool delivery evidence for PM runs yet (待後續). Until WP-H slims `AGENTS.md`/`CLAUDE.md`, they carry the same rules. If the texts differ, they win and this card gets fixed.
 
 ## Dispatch
 
-- Before every dispatch, reassignment, retry, repair, recovery or Reviewer hand-off, reread [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) through the dispatch gate. Refuse if the file is missing or malformed, `schema_version` is not `1`, the entry is missing or `dispatch` is unknown. `PAUSED` binds. `OWNER_ASSIGNMENT_ONLY` needs an Owner reference. `ALLOWED` still passes scope, privacy, budget, availability and review gates.
+- Before every dispatch, reassignment, retry, repair, recovery or Reviewer hand-off, reread [worker-dispatch.json](../../../tools/llmtool/worker-dispatch.json) through the dispatch gate. Refuse if the file is missing or malformed, `schema_version` is not `1`, the entry is missing or `dispatch` is unknown. `PAUSED` binds. `OWNER_ASSIGNMENT_ONLY` needs an Owner reference. `ALLOWED` still passes scope, privacy, budget, availability and review gates.
 - Developer routes are Claude Developer, OpenCode, AGY and `gw-agent`. Codex reviews and debugs only. Prefer `gw-agent` for small, low-risk, bounded Tasks.
 - Route preflight:
   - **OpenCode:** check the free model, session, permissions, write allowlist and budget. Pause on a free-limit refusal or after two consecutive failures.
@@ -27,10 +27,10 @@ This card holds the PM-only rules. The common core stays in [AGENTS.md](../../AG
 
 ## Merge, CI and monitor
 
-- `task advance` is the only normal flow ([WORKFLOW](../../tools/llmtool/WORKFLOW.md)). Every required exact-head check must be SUCCESS. Skipped, cancelled and pending checks are NOT_RUN. Code PRs merge only through llmtool (#1208).
+- `task advance` is the only normal flow ([WORKFLOW](../../../tools/llmtool/WORKFLOW.md)). Every required exact-head check must be SUCCESS. Skipped, cancelled and pending checks are NOT_RUN. Code PRs merge only through llmtool (#1208).
 - Every PM sweep runs `llmtool ci full-mac-due` (#1485).
 - The PM clears a [rule-file alert](../ai-team-delivery/pm-continuation.md#rule-file-prs-owner-2026-11-05-1019) only when the Owner asks.
-- The PM owns the [monitor](../../scripts/llmtool_monitor.py), the board and the [Scheduled sweep](../ai-team-delivery/pm-continuation.md#scheduled-sweep). Every Owner ask needs its `waiting_owner` marker.
+- The PM owns the [monitor](../../../scripts/llmtool_monitor.py), the board and the [Scheduled sweep](../ai-team-delivery/pm-continuation.md#scheduled-sweep). Every Owner ask needs its `waiting_owner` marker.
 - Sub-agent PMs follow the [lease rules](../ai-team-delivery/pm-continuation.md#sub-agent-pms-owner-d8-2026-11-02). Only the main PM merges or asks the Owner.
 
 ## PM process lessons (#1502 WP-F)
@@ -46,6 +46,6 @@ This card holds the PM-only rules. The common core stays in [AGENTS.md](../../AG
 
 ## WP-F decisions (PM)
 
-- The card path `skills/role-cards/` is accepted.
+- The card path `.claude/skills/role-cards/` is accepted.
 - `gw-agent` rule delivery needs a gateway `task.json` schema change. That change is out of WP-F scope and is a follow-up. Until it ships, the dispatch spec states the Developer card rules.
 - The CLI auto-load probe is a separate PM step before WP-H. Auto-load is never delivery.

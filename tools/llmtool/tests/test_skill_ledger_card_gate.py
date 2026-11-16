@@ -25,8 +25,8 @@ REPO_ROOT = 'repo-root-read-only-by-fake-builder'
 PREFIX = 'fixed role-card prefix used by ledger gate tests\n'
 PREFIX_DIGEST = hashlib.sha256(PREFIX.encode('utf-8')).hexdigest()
 CARDS = (
-    {'path': 'skills/role-cards/common-core.md', 'sha256': 'a' * 64},
-    {'path': 'skills/role-cards/developer.md', 'sha256': 'b' * 64},
+    {'path': '.claude/skills/role-cards/common-core.md', 'sha256': 'a' * 64},
+    {'path': '.claude/skills/role-cards/developer.md', 'sha256': 'b' * 64},
 )
 BINDING = {
     'task_id': 'task-a', 'run_id': 'run-a', 'session_id': 'session-a',

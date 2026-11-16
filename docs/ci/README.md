@@ -19,7 +19,7 @@
 4. 不在文件加入 Token、密碼、VPN 主機、原始敏感診斷或私人帳務資料。連結可回溯的安全證據，避免複製過期長日誌。
 5. 優先在既定修復完成後，以同一個有審查的文件批次更新；**不要在剛通過 CI 的候選 PR 後面追加純報告 Commit**，否則新 HEAD 須重新驗證。可另開文件專用 PR。
 6. 不用文件宣告取代 Security／Functional／Mac 實機驗收；CI 事件濾除不等於測試通過，也不可用「最近一次綠燈」遮蔽相同 SHA 的紅燈。
-7. 本目錄是經驗庫，不是另外一份 llmtool Roadmap 或可執行 ai-loop 控制器；技術規範以 [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md)、[safe-git](../../skills/safe-git/SKILL.md) 與當前 Workflow 為準。
+7. 本目錄是經驗庫，不是另外一份 llmtool Roadmap 或可執行 ai-loop 控制器；技術規範以 [ai-team-delivery](../../.claude/skills/ai-team-delivery/SKILL.md)、[safe-git](../../.claude/skills/safe-git/SKILL.md) 與當前 Workflow 為準。
 
 自 2026-11-09 起，llmtool Linux 與 Mac CI 改跑 GitHub-hosted runner（Owner [#1253](https://github.com/davidcatcat/davidcattoolsproject/issues/1253)、[#1256](https://github.com/davidcatcat/davidcattoolsproject/issues/1256)）；詳見 [GitHub-hosted CI 2026-11-09](github-actions-guide.md#github-hosted-ci-2026-11-09)。下方 #99 案例保留為歷史。
 

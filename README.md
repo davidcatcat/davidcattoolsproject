@@ -5,7 +5,7 @@ Personal AI-assisted engineering tools and reusable Agent Skills.
 ## CI knowledge base
 
 - [CI Knowledge Base](docs/ci/README.md) — 維運問題、GitHub Actions 用量、成本分析及驗證過的修復經驗。
-- 處理 CI 事件請先查本知識庫；重複可用的結論依 [debug-ci Skill](skills/debug-ci/SKILL.md) 整理。原 Issue、PR、Run 與確切 SHA 保留為可追溯證據。
+- 處理 CI 事件請先查本知識庫；重複可用的結論依 [debug-ci Skill](.claude/skills/debug-ci/SKILL.md) 整理。原 Issue、PR、Run 與確切 SHA 保留為可追溯證據。
 
 ## Skills
 
@@ -29,7 +29,7 @@ This repository currently provides:
 Each skill is stored at:
 
 ```text
-skills/<skill-name>/SKILL.md
+.claude/skills/<skill-name>/SKILL.md
 ```
 
 ## Install locally
@@ -117,7 +117,7 @@ sibling/nested repositories, or alternate local Mac checkouts.
 Owner D6 (2026-10-19) supersedes the historical G7 two-fixed-root limit:
 authorized local Developer Agents may create **multiple task-scoped linked
 worktrees** under the verified dedicated workspace parent, with unique owned
-branches and independent runtime state. The [safe-git policy](skills/safe-git/SKILL.md)
+branches and independent runtime state. The [safe-git policy](.claude/skills/safe-git/SKILL.md)
 governs simple admission, task/PR-bound completion, automatic clean removal,
 and preserve-on-uncertainty. PR opening is not completion; merged-and-accepted
 tasks normally retire immediately after checking no live agent, dirty/ignored
@@ -143,8 +143,8 @@ This development policy does not change llmtool provider capabilities or runtime
 Create:
 
 ```text
-skills/<new-skill>/SKILL.md
-skills/<new-skill>/agents/openai.yaml
+.claude/skills/<new-skill>/SKILL.md
+.claude/skills/<new-skill>/agents/openai.yaml
 ```
 
 `SKILL.md` is the shared workflow/source of truth. `agents/openai.yaml` contains
@@ -164,7 +164,7 @@ Keep the skill focused, define a clear process, and end with checkable completio
 
 ## Tools
 
-- [`tools/llmtool`](tools/llmtool/README.md) — Generic, portable LLM CLI and orchestration foundation. A0–A10 and A11a are DONE/merged; QG-S1 and QG-QA1 are PASS/CLOSED. A11b is IN PROGRESS: A11b.1 PR #32, A11b.2.1 preflight PR #43, A11b.2.2.1 synthetic containment PR #49, and A11b.2.2.2 **private disposable-fixture-only F1 Git ADD PR #84 (`46b17b13`) are DONE/merged**; general F2 real user-repository mutation remains NOT AUTHORIZED. Use [ai-team-delivery](skills/ai-team-delivery/SKILL.md) for user-impact defect triage and bounded repair. P1 failure-usage preservation is DONE/merged via PR #39 (`56799527`). A11c is NOT STARTED and now uses route-by-task evidence rather than a blanket company-first assumption. A12 remains future optional. A2.3 Anthropic HTTP API remains planned. See the [roadmap](tools/llmtool/ROADMAP.md) and [workflow](tools/llmtool/WORKFLOW.md).
+- [`tools/llmtool`](tools/llmtool/README.md) — Generic, portable LLM CLI and orchestration foundation. A0–A10 and A11a are DONE/merged; QG-S1 and QG-QA1 are PASS/CLOSED. A11b is IN PROGRESS: A11b.1 PR #32, A11b.2.1 preflight PR #43, A11b.2.2.1 synthetic containment PR #49, and A11b.2.2.2 **private disposable-fixture-only F1 Git ADD PR #84 (`46b17b13`) are DONE/merged**; general F2 real user-repository mutation remains NOT AUTHORIZED. Use [ai-team-delivery](.claude/skills/ai-team-delivery/SKILL.md) for user-impact defect triage and bounded repair. P1 failure-usage preservation is DONE/merged via PR #39 (`56799527`). A11c is NOT STARTED and now uses route-by-task evidence rather than a blanket company-first assumption. A12 remains future optional. A2.3 Anthropic HTTP API remains planned. See the [roadmap](tools/llmtool/ROADMAP.md) and [workflow](tools/llmtool/WORKFLOW.md).
 - [`tools/nlf`](tools/nlf/README.md) — Natural Language Find: find files from a Chinese or English description (Go, read-only, no LLM).
 
 

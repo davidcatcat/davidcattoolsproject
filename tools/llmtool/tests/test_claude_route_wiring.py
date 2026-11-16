@@ -401,7 +401,7 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         self.assertEqual(prefix, _wrapped(_CARDS))
         self.assertTrue(prompt.startswith('You are the Claude Developer'))
         self.assertNotIn('path=CLAUDE.md', prompt)
-        self.assertNotIn('path=skills/ai-team-delivery/SKILL.md', prompt)
+        self.assertNotIn('path=.claude/skills/ai-team-delivery/SKILL.md', prompt)
         self.assertLessEqual(len(prefix.encode('utf-8')), skill_manifest.MAX_DEVELOPER_PREFIX_SIZE)
         self.assertLess(len(raw), 64 * 1024)
         developer = store.task['developer']

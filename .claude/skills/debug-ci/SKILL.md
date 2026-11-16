@@ -33,7 +33,7 @@ Find the first meaningful failure, reproduce it, and make the smallest correct f
 ## Reusable incident knowledge
 
 Before diagnosing a repeated CI failure or Actions-cost issue, consult the
-[CI Knowledge Base](../../docs/ci/README.md) and compare its historic claim
+[CI Knowledge Base](../../../docs/ci/README.md) and compare its historic claim
 with the **current** workflow, commit, run and billing evidence. After a
 verified fix, update the relevant existing CI page only when the root cause
 or preventive rule can be reused. Include affected SHA, run/PR/Issue links,

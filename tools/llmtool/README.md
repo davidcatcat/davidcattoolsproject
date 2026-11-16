@@ -216,8 +216,8 @@ When the user chooses Codex Cloud, use only the repository checkout configured f
 that Cloud task; discover its actual root instead of assuming `/workspace` is a
 Git repository. Verify repository identity, branch, HEAD and working-tree state.
 Owner D6 dynamic, registered, task-scoped worktrees are the current local
-development workflow. Follow [safe-git's Owner D6 worktree guidance](../../skills/safe-git/SKILL.md#owner-d6--dynamic-task-scoped-worktrees)
-and the [D6 worktree lifecycle](../../skills/safe-git/worktree-lifecycle.md)
+development workflow. Follow [safe-git's Owner D6 worktree guidance](../../.claude/skills/safe-git/SKILL.md#owner-d6--dynamic-task-scoped-worktrees)
+and the [D6 worktree lifecycle](../../.claude/skills/safe-git/worktree-lifecycle.md)
 for registration, ownership and lifecycle requirements. Do not create
 independent clones or sibling/nested repositories. Cloud tasks continue to use
 only their configured checkout. F1 native acceptance remains canonical-only;
@@ -896,7 +896,7 @@ never reads the credential, and `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST` and proxy 
 are not forwarded. Every agent publishes as the same GitHub account and GitHub refuses
 APPROVE from a PR's own author, so the formal Reviewer may publish its verdict as a PR
 conversation comment instead of a PR review, in the one standard
-[formal verdict comment](../../skills/ai-team-delivery/formal-verdict.md) format, posted by
+[formal verdict comment](../../.claude/skills/ai-team-delivery/formal-verdict.md) format, posted by
 the Reviewer D6 record's `github_login`. Only an unedited Claude PASS in exactly that form is
 accepted; a Codex PASS is advisory and ignored. The latest Reviewer disposition wins: any
 other verdict that names the result HEAD (including an edited or malformed one), or a later
@@ -1562,7 +1562,7 @@ validation 與 `complete()`；A2.2 之後擴充 provider，A3 提供 declarative
 
 A3 is DONE and merged to main in `c9159f2`; canonical validation and external review PASS. **Provider != Role != Agent != Skill.** A skill is
 instruction/context data and grants no execution ability. Repository engineering
-workflows in root `skills/*/SKILL.md` are separate and are never loaded by llmtool.
+workflows in root `.claude/skills/*/SKILL.md` are separate and are never loaded by llmtool.
 
 Runtime resources live at `tools/llmtool/llmtool/skills/<directory>/SKILL.md` and
 are included as package data in installations. The fixed package-local root is
@@ -2774,7 +2774,7 @@ stays `False`.
   A model-written contract, `source=USER`, `trusted=true` or a receipt id grants
   nothing. Routine contracted actions do not ask the owner.
 - **Owner P0 and separate authority.** Owner P0 is exactly the three classes in
-  `skills/ai-team-delivery`: product mismatch, admin/root, macOS system. These return
+  `.claude/skills/ai-team-delivery`: product mismatch, admin/root, macOS system. These return
   `WAITING_APPROVAL`, including in non-TTY/background use. New cost and new data export
   are separate authorizations: they `DENY` with `SEPARATE_AUTHORIZATION_REQUIRED` and
   are never implied. An out-of-contract action is `DENY` (`OUT_OF_CONTRACT`), not P0.

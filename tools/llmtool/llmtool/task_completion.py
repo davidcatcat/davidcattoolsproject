@@ -81,7 +81,7 @@ _REVIEW_VERDICTS = frozenset(('PASS', 'FAIL', 'BLOCKED'))
 _GH_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
 # The leading `<!-- activity: ... -->` line every verdict post starts with.
 _VERDICT_ACTIVITY = re.compile(r'<!-- activity: (?:[^>]* )?type=review_verdict(?: [^>]*)? -->')
-# The one standard formal verdict format: skills/ai-team-delivery/formal-verdict.md.
+# The one standard formal verdict format: .claude/skills/ai-team-delivery/formal-verdict.md.
 _VERDICT_MARKER = re.compile(
     r'<!-- activity: type=review_verdict actor=(Claude|Codex) target=PM status=(PASS|FIX|FAIL) -->')
 _VERDICT_STATUS = re.compile(
@@ -1815,8 +1815,10 @@ def _docs_only_ci(paths):
             if (len(relative_parts) == 2 and path.endswith('.md')):
                 return False
             return False
+        if path.startswith('.claude/skills/') and path.endswith('.py'):
+            return False
         if (path.endswith('.md') or path in ('AGENTS.md', 'CLAUDE.md') or
-                path.startswith(('skills/', 'docs/'))):
+                path.startswith(('.claude/skills/', 'docs/'))):
             continue
         return False
     return True
