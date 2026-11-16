@@ -19,6 +19,7 @@ from argparse import Namespace
 from . import active_pm_inbox, github_events, remote_test, review_dispatch, review_repair
 from . import github_identity, review_result, sensitive_paths, task_completion
 from . import lineage_counts, mac_full_suite, repair_policy, review_transcript
+from . import role_timeout, worker_dispatch
 from . import task_submission_cli
 from .ai_github_exec import AiIdentityError, verified_ai_env
 from .errors import LLMToolError
@@ -2536,10 +2537,299 @@ def _pr_number(record, requested):
     return claims[-1].get('pr') if claims and type(claims[-1]) is dict else None
 
 
+_EMPTY_DIFF_SHA256 = hashlib.sha256(b'').hexdigest()
+
+
+def _is_role_timeout_record(developer):
+    """True only when developer is a dict carrying a valid role timeout."""
+    if type(developer) is not dict:
+        return False
+    route = developer.get('provider_profile')
+    code = developer.get('error_code')
+    if (type(route) is not str or type(code) is not str or
+            route not in role_timeout.ROUTE_TIMEOUT_CODES):
+        return False
+    try:
+        return role_timeout.classify(route, code) == role_timeout.ROLE_TIMEOUT
+    except role_timeout.RoleTimeoutError:
+        return False
+
+
+def _no_result_evidence(container):
+    """True when a completion or callback carries no result and no carry."""
+    if container is None:
+        return True
+    if type(container) is not dict:
+        return False
+    evidence = container.get('evidence')
+    if evidence is None:
+        return True
+    return (type(evidence) is dict and
+            evidence.get('result_head') is None and
+            evidence.get('carried_result') is None and
+            evidence.get('result') is None)
+
+
+def classify_role_timeout(record, d6):
+    """Classify Developer record for role timeout handling (design 3.1, 3.2, 3.4).
+
+    Returns one of RETRY_READY, LIMIT, WRITE_AMBIGUOUS, POLICY_INVALID,
+    or NOT_TIMEOUT.
+    """
+    if type(record) is not dict:
+        return 'NOT_TIMEOUT'
+    developer = record.get('developer')
+    if not _is_role_timeout_record(developer):
+        return 'NOT_TIMEOUT'
+
+    # Policy check: limit must be an int >= 0
+    limit = worker_dispatch.timeout_continuation_max()
+    if limit is None or type(limit) is not int or limit < 0:
+        return 'POLICY_INVALID'
+
+    # Write ambiguity check (recorded evidence + fresh D6 check)
+    execution = developer.get('execution')
+    source_sha = developer.get('source_sha')
+    if (type(execution) is not dict or
+            execution.get('status') != 'TIMEOUT' or
+            execution.get('cleanup_status') != 'CONFIRMED' or
+            type(source_sha) is not str or
+            type(execution.get('diff_base_sha')) is not str or
+            execution.get('diff_base_sha') != source_sha or
+            type(execution.get('diff_sha256')) is not str or
+            execution.get('diff_sha256') != _EMPTY_DIFF_SHA256):
+        return 'WRITE_AMBIGUOUS'
+
+    # No completion result or callback result evidence
+    if not _no_result_evidence(record.get('completion')):
+        return 'WRITE_AMBIGUOUS'
+    if not _no_result_evidence(developer.get('direct_result_callback')):
+        return 'WRITE_AMBIGUOUS'
+
+    # No committed result carry for this assignment
+    assignment_id = developer.get('assignment_id')
+    if any(type(item) is dict and item.get('action') == 'COMMITTED_RESULT_CARRY' and
+           item.get('decision') != 'BLOCKED' and
+           item.get('assignment_id') in (None, assignment_id)
+           for item in record.get('dispatch_audit', [])):
+        return 'WRITE_AMBIGUOUS'
+
+    # Fresh D6 check: clean worktree, HEAD == source_sha, no dirty state
+    if (type(d6) is not dict or
+            d6.get('state') == 'D6_BINDING_UNAVAILABLE' or
+            d6.get('dirty') is not False or
+            d6.get('state') == 'DIRTY' or
+            type(d6.get('result_head')) is not str or
+            d6.get('result_head') != source_sha):
+        return 'WRITE_AMBIGUOUS'
+
+    # Logical attempts cap check (shared monotone count)
+    audit = record.get('dispatch_audit', [])
+    try:
+        used = role_timeout.count_timeout_attempts(audit)
+    except role_timeout.RoleTimeoutError:
+        used = None
+    if used is None or used >= limit:
+        return 'LIMIT'
+    return 'RETRY_READY'
+
+
+_classify_role_timeout = classify_role_timeout
+
+
+def _check_quota(worker_key, task_id, quota_gate=None):
+    gate = quota_gate
+    if gate is None:
+        try:
+            from . import worker_quota
+            gate = getattr(worker_quota, 'check_quota', getattr(worker_quota, 'evaluate', None))
+        except Exception:
+            gate = None
+    if gate is None:
+        return None
+    try:
+        try:
+            result = gate(worker_key, task_id=task_id)
+        except TypeError:
+            result = gate(worker_key)
+    except Exception as exc:
+        code = getattr(exc, 'quota_code', getattr(exc, 'code', None))
+        return code or 'QUOTA_FAIL'
+    if result is None or result is True:
+        return None
+    if result is False:
+        return 'QUOTA_FAIL'
+    if isinstance(result, str):
+        return result
+    if isinstance(result, tuple) and len(result) == 2:
+        allowed, code = result
+        if not allowed:
+            return code or 'QUOTA_FAIL'
+        return None
+    if hasattr(result, 'allowed') and not result.allowed:
+        return getattr(result, 'reason_code', getattr(result, 'code', 'QUOTA_FAIL'))
+    return None
+
+
+def _stop_task_on_role_timeout_limit(task_id, store, record):
+    if hasattr(repair_policy, 'owner_notice'):
+        try:
+            repair_policy.owner_notice('STOPPED')
+        except Exception:
+            pass
+    try:
+        expected = {}
+        if 'state' in record:
+            expected['state'] = record['state']
+        store.compare_and_update(task_id, expected=expected, state='STOPPED', error_code='ROLE_TIMEOUT_LIMIT')
+    except Exception:
+        pass
+    record['state'] = 'STOPPED'
+    record['error_code'] = 'ROLE_TIMEOUT_LIMIT'
+    return {
+        'task_id': task_id,
+        'step': 'STOPPED',
+        'result': None,
+        'next': 'STOPPED',
+        'codes': ['ROLE_TIMEOUT_LIMIT'],
+        'acked': [],
+    }
+
+
+def _record_outcome_unknown(store, record, task_id):
+    try:
+        developer = record.get('developer', {})
+        new_dev = dict(developer,
+                       state='DEVELOPER_OUTCOME_UNKNOWN',
+                       error_code='ROLE_TIMEOUT_RETRY_OUTCOME_UNKNOWN')
+        store.compare_and_update(task_id, expected={'developer': developer}, developer=new_dev)
+        record['developer'] = new_dev
+    except Exception:
+        if type(record.get('developer')) is dict:
+            record['developer']['state'] = 'DEVELOPER_OUTCOME_UNKNOWN'
+            record['developer']['error_code'] = 'ROLE_TIMEOUT_RETRY_OUTCOME_UNKNOWN'
+
+
+def _handle_role_timeout(*, task_id, store, record, classification, d6,
+                         timeout_retry=False, quota_gate=None,
+                         launch_developer_call=None):
+    if not timeout_retry:
+        if classification == 'RETRY_READY':
+            return {
+                'task_id': task_id,
+                'step': 'DEVELOPER_TIMEOUT',
+                'result': None,
+                'next': 'DEVELOPER_TIMEOUT',
+                'codes': ['ROLE_TIMEOUT_RETRY_READY'],
+                'acked': [],
+            }
+        if classification == 'LIMIT':
+            return _stop_task_on_role_timeout_limit(task_id, store, record)
+        if classification == 'WRITE_AMBIGUOUS':
+            return {
+                'task_id': task_id,
+                'step': 'DEVELOPER_ATTENTION',
+                'result': None,
+                'next': 'DEVELOPER_ATTENTION',
+                'codes': ['ROLE_TIMEOUT_WRITE_AMBIGUOUS'],
+                'acked': [],
+            }
+        if classification == 'POLICY_INVALID':
+            return _advance_refused(task_id, 'ROLE_TIMEOUT_POLICY_INVALID')
+
+    # Advance with timeout_retry=True
+    if classification == 'LIMIT':
+        return _stop_task_on_role_timeout_limit(task_id, store, record)
+    if classification == 'WRITE_AMBIGUOUS':
+        return {
+            'task_id': task_id,
+            'step': 'DEVELOPER_ATTENTION',
+            'result': None,
+            'next': 'DEVELOPER_ATTENTION',
+            'codes': ['ROLE_TIMEOUT_WRITE_AMBIGUOUS'],
+            'acked': [],
+        }
+    if classification == 'POLICY_INVALID':
+        return _advance_refused(task_id, 'ROLE_TIMEOUT_POLICY_INVALID')
+
+    developer = record.get('developer', {})
+    worker_key = worker_dispatch.worker_key_for(developer.get('provider_profile'))
+    owner_assignment_ref = developer.get('owner_assignment_ref')
+    policy_task_id = record.get('task_id')
+    if (worker_key == 'claude-developer' and
+            developer.get('provider_profile') == 'claude' and
+            type(developer.get('executor_task_id')) is str):
+        policy_task_id = developer['executor_task_id']
+
+    # Pre-check 1: worker_dispatch.evaluate (read-only)
+    decision = worker_dispatch.evaluate(worker_key, owner_assignment_ref, policy_task_id)
+    if not decision.allowed:
+        return _advance_refused(task_id, decision.reason_code)
+
+    # Pre-check 2: quota gate (read-only)
+    quota_code = _check_quota(worker_key, task_id, quota_gate=quota_gate)
+    if quota_code is not None:
+        return _advance_refused(task_id, quota_code)
+
+    # Transition to DEVELOPER_DISPATCHING (audited as ROLE_TIMEOUT_RETRY)
+    old_developer = developer
+    new_developer = dict(old_developer, state='DEVELOPER_DISPATCHING')
+    try:
+        expected = {'developer': old_developer}
+        store.compare_and_update(task_id, expected=expected, developer=new_developer)
+        record['developer'] = new_developer
+    except Exception:
+        _record_outcome_unknown(store, record, task_id)
+        return {
+            'task_id': task_id,
+            'step': 'ROLE_TIMEOUT_RETRY_OUTCOME_UNKNOWN',
+            'result': None,
+            'next': 'ROLE_TIMEOUT_RETRY_OUTCOME_UNKNOWN',
+            'codes': ['ROLE_TIMEOUT_RETRY_OUTCOME_UNKNOWN'],
+            'acked': [],
+        }
+
+    # Authorize adapter dispatch
+    try:
+        worker_dispatch.authorize_dispatch(store, task_id, worker_key, action='ROLE_TIMEOUT_RETRY')
+        if callable(launch_developer_call):
+            launch_developer_call(task_id=task_id, record=record)
+    except Exception:
+        _record_outcome_unknown(store, record, task_id)
+        return {
+            'task_id': task_id,
+            'step': 'ROLE_TIMEOUT_RETRY_OUTCOME_UNKNOWN',
+            'result': None,
+            'next': 'ROLE_TIMEOUT_RETRY_OUTCOME_UNKNOWN',
+            'codes': ['ROLE_TIMEOUT_RETRY_OUTCOME_UNKNOWN'],
+            'acked': [],
+        }
+
+    return {
+        'task_id': task_id,
+        'step': 'WAITING_EXECUTOR',
+        'result': None,
+        'next': 'WAITING_EXECUTOR',
+        'codes': [],
+        'acked': [],
+    }
+
+
 def _d6_snapshot(record, executor_task, allow_cwd_fallback=False, cwd=None):
     completion = record.get('completion') or {}
     evidence = completion.get('evidence') or {}
     common_dir = evidence.get('common_dir')
+    if type(common_dir) is not str and type(record.get('developer')) is dict:
+        dev = record['developer']
+        dev_exec = dev.get('execution') if type(dev.get('execution')) is dict else {}
+        dev_evidence = dev_exec.get('evidence') if type(dev_exec.get('evidence')) is dict else {}
+        if type(dev_evidence.get('common_dir')) is str:
+            common_dir = dev_evidence['common_dir']
+        elif type(dev.get('common_dir')) is str:
+            common_dir = dev['common_dir']
+    if type(common_dir) is not str and type(record.get('pm_assignment')) is dict:
+        if type(record['pm_assignment'].get('common_dir')) is str:
+            common_dir = record['pm_assignment']['common_dir']
     if type(common_dir) is not str and allow_cwd_fallback:
         try:
             cmd = ['git', 'rev-parse', '--path-format=absolute', '--git-common-dir']
@@ -3066,7 +3356,8 @@ def _guarded_call(guard, call):
 def advance(*, task_id, store=None, merge=False, owner_acceptance=None,
             owner_exception=None, executor_task=None, dispatch_review_call=None,
             repair_review_call=None, publish_git_runner=None, publish_gh_runner=None,
-            merge_gh_runner=None, **options):
+            merge_gh_runner=None, timeout_retry=False, quota_gate=None,
+            launch_developer_call=None, **options):
     """Perform one selected action and return a bounded JSON-ready summary.
 
     #1781 (security v91): the step runs holding the Task's advance lease, so no
@@ -3110,6 +3401,9 @@ def advance(*, task_id, store=None, merge=False, owner_acceptance=None,
                 # The label helper keeps the caller's own runner: it re-checks the
                 # Task itself (I4) right before its `pr edit --add-label mac-ci`.
                 label_gh_runner=merge_gh_runner,
+                timeout_retry=timeout_retry,
+                quota_gate=quota_gate,
+                launch_developer_call=launch_developer_call,
                 **options)
         except _ExternalActionRefused as refused:
             return _advance_refused(task_id, refused.code)
@@ -3122,7 +3416,8 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                   github_get=None, cwd=None, publish_git_runner, publish_gh_runner,
                   record_result_call=None, merge_gh_runner, label_gh_runner=None,
                   owner_acceptance=None, owner_exception=None, executor_task=None,
-                  sleep_fn=None, sleep=None):
+                  sleep_fn=None, sleep=None, timeout_retry=False, quota_gate=None,
+                  launch_developer_call=None, **options):
     """One advance step; the caller holds the advance lease and passes guarded runners."""
     try:
         record = store.get(task_id)
@@ -3161,10 +3456,11 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                 {'task_id': task_id, 'step': 'CLOSED', 'result': None,
                  'next': 'CLOSED', 'codes': []}, record, store, closed_head)
     completion_executor = (record.get('completion') or {}).get('executor_task_id')
+    developer_executor = (record.get('developer') or {}).get('executor_task_id')
     if executor_task is not None and type(completion_executor) is str and executor_task != completion_executor:
         return _ack_consumed_events(_merge_refusal('OWNER_EXCEPTION_EXECUTOR_MISMATCH'),
                                     record, store, None)
-    active_executor = completion_executor or executor_task
+    active_executor = completion_executor or executor_task or developer_executor
     using_executor_task = bool(owner_exception is not None and type(executor_task) is str)
     executor_task = active_executor
     number = _pr_number(record, pr_number)
@@ -3276,6 +3572,20 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         if merge_result.get('step') == 'MERGED':
             _lineage_after_merge(merge_result, store, task_id, record, merged_now=True)
         return _ack_consumed_events(merge_result, record, store, d6['result_head'])
+    role_timeout_classification = _classify_role_timeout(record, d6)
+    if role_timeout_classification != 'NOT_TIMEOUT':
+        return _handle_role_timeout(
+            task_id=task_id,
+            store=store,
+            record=record,
+            classification=role_timeout_classification,
+            d6=d6,
+            timeout_retry=timeout_retry,
+            quota_gate=quota_gate,
+            launch_developer_call=launch_developer_call,
+        )
+    if timeout_retry:
+        return _advance_refused(task_id, 'ROLE_TIMEOUT_NOT_TIMEOUT')
     if type(d6) is dict and d6.get('state') == 'D6_BINDING_UNAVAILABLE':
         code = d6.get('code') if type(d6.get('code')) is str else 'D6_BINDING_UNAVAILABLE'
         return _ack_consumed_events(
