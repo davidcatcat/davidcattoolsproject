@@ -701,14 +701,20 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     # #1816: after the Owner policy, before any claim, Task or D6 write.
     if worker_availability.fresh_quota_fail(store, worker):
         _refuse(worker_availability.REFUSAL_CODE)
+    root_id = task.get('root_task_id') or task_id
+    hex_prefix = ''.join(c.lower() for c in str(root_id) if c in '0123456789abcdefABCDEF')[:12]
+    task_family = f'task-{hex_prefix}'
+    derived_families = {task_family}
+    if pr_number is not None:
+        derived_families.add(f'pr-{pr_number}')
     if family is not None:
+        if family not in derived_families:
+            _refuse('REPAIR_FAMILY_INVALID')
         base_family = family
     elif pr_number is not None:
         base_family = f'pr-{pr_number}'
     else:
-        root_id = task.get('root_task_id') or task_id
-        hex_prefix = ''.join(c.lower() for c in str(root_id) if c in '0123456789abcdefABCDEF')[:12]
-        base_family = f'task-{hex_prefix}'
+        base_family = task_family
     if (type(base_family) is not str or
             re.fullmatch(r'[a-z0-9._-]{1,64}', base_family) is None or
             base_family.endswith(EC2_FAMILY_SUFFIX)):
@@ -747,15 +753,12 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         _refuse('REPAIR_CLAIM_UNAVAILABLE')
     stored = [claim for claim in claims if _claim_family(claim) == family]
     if not test_failure:
-        # Review count: every claim in the base family, legacy EC2 claims included.
-        attempts = stored
+        # Review count: every non-EC2 claim (including legacy EC2 claims).
+        attempts = [claim for claim in claims if ec2_claim_kind(claim) != 'NEW']
     else:
-        # Test-failure count (EC2 and CI): the '-ec2' family plus legacy EC2
+        # Test-failure count (EC2 and CI): every '-ec2' claim plus legacy EC2
         # claims stored in base.
-        attempts = [claim for claim in claims
-                    if _claim_family(claim) == family or
-                    (_claim_family(claim) == base_family and
-                     ec2_claim_kind(claim) == 'LEGACY')]
+        attempts = [claim for claim in claims if ec2_claim_kind(claim) in ('NEW', 'LEGACY')]
     packet_version = packet.get('version', 0)
     # A CI claim binds its head and check run, not the untrusted excerpt.
     packet_sha = ci_identity_sha if ci_identity_sha is not None else hashlib.sha256(json.dumps(
@@ -829,7 +832,7 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                     else None)
             if type(used) is not int or used != 0:
                 _refuse('REVIEW_REPAIR_PM_REQUIRED')
-        counts = lineage_counts.lineage_counts(store, task, base_family=base_family,
+        counts = lineage_counts.lineage_counts(store, task, base_family=None,
                                                include_successors=True)
         rca_entry = None
         if not test_failure:

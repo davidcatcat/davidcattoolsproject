@@ -150,10 +150,65 @@ class ReviewRepairPrePrFamilyTests(unittest.TestCase):
             self.dispatch(remote_test_receipt=_receipt(), pr_number=None, family='x' * 61)
         self.assertEqual(caught.exception.review_repair_code, 'REPAIR_FAMILY_INVALID')
 
-        # Valid explicit family is accepted and suffixed with -ec2 for test failures
-        valid_explicit = self.dispatch(
-            remote_test_receipt=_receipt(), pr_number=None, family='custom')
-        self.assertEqual(valid_explicit['claim']['family'], 'custom-ec2')
+        # Custom explicit family is refused (not a derived family for this Task)
+        for custom in ('custom', 'other', 'custom-family', 'x' * 12):
+            with self.subTest(custom=custom):
+                with self.assertRaises(LLMToolError) as caught:
+                    self.dispatch(remote_test_receipt=_receipt(), pr_number=None, family=custom)
+                self.assertEqual(caught.exception.review_repair_code, 'REPAIR_FAMILY_INVALID')
+                with self.assertRaises(LLMToolError) as caught:
+                    self.dispatch(remote_test_receipt=_receipt(), pr_number=PR, family=custom)
+                self.assertEqual(caught.exception.review_repair_code, 'REPAIR_FAMILY_INVALID')
+                with self.assertRaises(LLMToolError) as caught:
+                    self.dispatch(pr_number=PR, family=custom)
+                self.assertEqual(caught.exception.review_repair_code, 'REPAIR_FAMILY_INVALID')
+
+        # Other PR family than this Task's PR is refused
+        with self.assertRaises(LLMToolError) as caught:
+            self.dispatch(remote_test_receipt=_receipt(), pr_number=PR, family='pr-999')
+        self.assertEqual(caught.exception.review_repair_code, 'REPAIR_FAMILY_INVALID')
+
+        # Derived explicit family for this Task is accepted
+        valid_task = self.dispatch(
+            remote_test_receipt=_receipt(), pr_number=None, family=f"task-{'a' * 12}")
+        self.assertEqual(valid_task['claim']['family'], f"task-{'a' * 12}-ec2")
+
+        self.store = TempTaskStore(self.temp.name, _record())
+        valid_pr = self.dispatch(
+            remote_test_receipt=_receipt(), pr_number=PR, family=f'pr-{PR}')
+        self.assertEqual(valid_pr['claim']['family'], f'pr-{PR}-ec2')
+
+    def test_repair_under_task_hex_then_pr_n_reaches_cap(self):
+        # 1. First repair under pre-PR (task-<12hex>-ec2)
+        result1 = self.dispatch(remote_test_receipt=_receipt(), pr_number=None)
+        expected_pre_pr_family = f"task-{'a' * 12}-ec2"
+        self.assertEqual(result1['claim']['family'], expected_pre_pr_family)
+        self.assertEqual(result1['claim']['attempt'], 1)
+
+        # Mark first claim failed so a new attempt can be made
+        record = self.store.get(TASK)
+        record['review_repair_claims'][0]['state'] = 'FAILED'
+        self.store = TempTaskStore(self.temp.name, record)
+
+        # 2. Second repair under PR (pr-<N>-ec2) on the same root
+        result2 = self.dispatch(remote_test_receipt=_receipt(), pr_number=PR)
+        self.assertEqual(result2['claim']['family'], f'pr-{PR}-ec2')
+        self.assertEqual(result2['claim']['attempt'], 1)
+
+        # Mark second claim failed
+        record = self.store.get(TASK)
+        record['review_repair_claims'][-1]['state'] = 'FAILED'
+        self.store = TempTaskStore(self.temp.name, record)
+
+        # 3. Third attempt for the same root reaches the test-failure repair cap (2)
+        with self.assertRaises(LLMToolError) as caught:
+            self.dispatch(remote_test_receipt=_receipt(), pr_number=PR)
+        self.assertEqual(caught.exception.review_repair_code, 'REPAIR_LIMIT_REACHED')
+
+        # Reaches cap if attempted under pre-PR as well
+        with self.assertRaises(LLMToolError) as caught:
+            self.dispatch(remote_test_receipt=_receipt(), pr_number=None)
+        self.assertEqual(caught.exception.review_repair_code, 'REPAIR_LIMIT_REACHED')
 
     def test_claim_family_behavior(self):
         # Keeps returning stored family field when present
