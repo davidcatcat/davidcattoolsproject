@@ -2301,6 +2301,7 @@ def _validate(record, *, strict=True):
             if (second is not None and 'high_debug_report_sha256' in second and
                     not any(type(entry) is dict and entry.get('family') ==
                             second.get('family', f"pr-{second['pr']}") and
+                            entry.get('no_pr') is not True and
                             entry.get('status') == 'RCA_CONFIRMED' and
                             entry.get('examined_sha') == second['head_sha'] and
                             entry.get('report_sha256') ==
@@ -2315,6 +2316,7 @@ def _validate(record, *, strict=True):
                 matching = [entry for entry in record.get('high_debug', [])
                             if type(entry) is dict and entry.get('family') ==
                             third.get('family', f"pr-{third['pr']}") and
+                            entry.get('no_pr') is not True and
                             entry.get('status') == 'RCA_CONFIRMED' and
                             entry.get('examined_sha') == third['head_sha'] and
                             type(entry.get('recorded_at')) is str and

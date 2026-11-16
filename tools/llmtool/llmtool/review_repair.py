@@ -557,6 +557,7 @@ def _review_gate(task, attempts, packet, family, policy, counts=None):
     entries = [entry for entry in task.get('high_debug') or []
                if type(entry) is dict and entry.get('family') == family and
                entry.get('examined_sha') == packet['failed_head'] and
+               entry.get('no_pr') is not True and
                entry.get('status') in ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED')]
     entry = entries[-1] if entries else None
     lineage = task.get('lineage')
