@@ -1,9 +1,12 @@
 # Recording results that change D6 bootstrap sources (#1817)
 
-Status: design only, revision 2. This revision fixes codex-reviewer v1 findings F1 (marker consumers) and
-F2 (CARRY must verify the live environment). Source: `main` at `d6c1d018`. Defect: #1817 comments
-c6928715060 and c6928733279. References are `file:line` at that commit. "UNKNOWN" marks facts outside
-this Task's read paths.
+Status: design only, revision 3. Revision 2 fixed codex-reviewer v1 findings F1 (marker consumers) and
+F2 (CARRY must verify the live environment). Revision 3 fixes codex-reviewer v2 findings F1 (the
+consumer `task_submission_cli._refresh_d6_binding_after_bootstrap` was missing) and F2 (carried
+markers conflicted with the `schema_version != 1` rejection at `task_completion.py:755`). Source:
+`main` at `d6c1d018`. Defect: #1817 comments c6928715060 and c6928733279. References are `file:line`
+at that commit. The revision-3 references in `task_completion.py` and `d6_worktree_env.py` were checked
+again at `d9e6f536`. "UNKNOWN" marks facts outside this Task's read paths.
 
 ## 1. Problem
 
@@ -54,7 +57,8 @@ Task cannot get an EC2 remote-test grant, a PR or a merge.
   `:2539-2572`).
 
 The code matches the goal's premise, so this is not a SPEC_MISMATCH. The fix stays in the
-ENV-2/lifecycle seam plus the completion marker check (§3.5). EC2 and the merge gate already follow
+ENV-2/lifecycle seam plus the completion marker check and its callers, including the OpenCode
+dispatch refresh (§3.5). EC2 and the merge gate already follow
 the recorded head.
 
 ## 3. Design
@@ -169,33 +173,81 @@ is not result evidence: EC2 builds its own venv from the head.
 `d6_worktree_env.py:899-909`. Existing D6s and BUILD mode are unaffected. A carried marker has
 `schema_version: 2` and exactly twelve keys: the nine plus `environment_mode: "CARRIED"`,
 `carried_from_head_sha` and `allowed_bootstrap_paths`. `submitted_head_sha` and `current_head_sha`
-are the new head. Any other key set, or a version that does not match its key set, is invalid.
+are the new head. Any other key set, or a version that does not match its key set, is refused.
 
-**Consumers** (from a search of the read paths for `env2_pass_marker`):
+**Schema matrix.** The key set picks the shape, and the shape fixes every version:
+
+| Shape | Marker `schema_version` | Marker keys | Report `schema_version` | Report `status` | `write_paths` in C4 |
+|---|---|---|---|---|---|
+| Built (BUILD) | `1` | the nine | `1` (`d6_worktree_env.py:727`); C4 does not read it, as today | `env_created` or `env_reused`; C4 does not read it, as today | ignored |
+| Carried (CARRY) | `2` | the twelve | `2`; C4 requires it | `env_carried`; C4 requires it | required |
+
+The D6 registry record itself stays `schema_version: 1` (`d6_worktree_env.py:558-559`); the
+`env2_source_allowance` key of §3.1 does not change the record schema. The BUILD report keeps
+`schema_version: 1` when it gains `venv_identity` (§3.4); C4 ignores report keys it does not name
+(`task_completion.py:816-822`), so existing schema-1 markers and reports stay valid.
+
+**Consumers** (from a search of the read paths for `env2_pass_marker` and
+`validate_env2_pass_marker`, plus the caller named by codex-reviewer v2 F1):
 
 | # | Consumer | Today | Change |
 |---|---|---|---|
 | C1 | `d6_worktree_env._update_env2_pass_marker` (`d6_worktree_env.py:817-909`) | writes the nine-key marker | writes the carried shape in CARRY mode; checks the CARRY report fields (§3.3) in addition to `:891-898` |
 | C2 | ENV-2 CARRY, reading the prior marker (new, §3.3 check 1) | none | the C4 shape rules for both shapes and the C4 `task_id`, `root_realpath`, `tooling_sha`, fingerprint and report-hash bindings; the prior `current_head_sha` must be an ancestor of, or equal to, the new head instead of equal to it |
 | C3 | `d6_worktree_lifecycle.record_result` (`d6_worktree_lifecycle.py:1021-1025`) | requires a dict with `current_head_sha == head` | unchanged for schema 1. For schema 2 it also requires `allowed_bootstrap_paths` to be a subset of `env2_source_allowance.paths`, with `allowance.head_sha == head`, else `D6_RECORD_RESULT_ENV2_MARKER_INVALID` |
-| C4 | `task_completion.validate_env2_pass_marker` (`task_completion.py:740-823`; exact key set `:745-754`) | refuses any marker that does not have exactly the nine keys | accepts both exact shapes with the strict checks below |
-| C4a | result collection through `_collect_registered_result_diff` (`task_completion.py:1355`), used by `collect_executor_result` (`:1386-1399`) and `collect_claude_result` (`:1461-1467`) | calls C4 | passes `write_paths` (already a parameter, `:1335`) to C4 |
-| C4b | `collect_executor_worktree_result` (`task_completion.py:1635`) | calls C4 | passes `write_paths` (already a parameter, `:1601`) to C4 |
+| C4 | `task_completion.validate_env2_pass_marker` (`task_completion.py:740-823`; exact key set `:745-754`; version check `:755`) | refuses any marker that does not have exactly the nine keys, and any `schema_version` other than int `1` | new keyword `write_paths=None`; accepts both exact shapes with the rules below |
+| C4a | result collection through `_collect_registered_result_diff` (`task_completion.py:1355-1356`), used by `collect_executor_result` (`:1386-1399`) and `collect_claude_result` (`:1461-1467`) | calls C4 without `write_paths` | passes `write_paths=write_paths` (already a parameter, `:1335`) |
+| C4b | `collect_executor_worktree_result` (`task_completion.py:1635-1636`) | calls C4 without `write_paths` | passes `write_paths=write_paths` (already a parameter, `:1601`) |
+| C4c | `task_submission_cli._refresh_d6_binding_after_bootstrap` (`task_submission_cli.py:3810-3811`), called by the OpenCode dispatch (`:5009-5012`) after ENV-2 bootstrap | calls C4 without `write_paths` | gains a keyword `write_paths` and passes it to C4. The OpenCode dispatch passes the Task's validated `developer.write_paths` (`task_store.py:2900-2910`), the same list it gives the Developer as write paths |
 | C5 | `task_completion.read_d6_registration` (`task_completion.py:650-737`) | keeps the marker as an opaque value (`:737`) and reads only named record keys, so it also accepts `env2_source_allowance` | none |
 | C6 | `remote_test.py:563` and `task_advance._d6_snapshot` (`task_advance.py:2556`) | call C5 but never read the marker | none |
 
-`task_store.py` has no marker reference. Repository files outside the read paths (for example
-`tools/llmtool/tests/`, `tools/ec2-runner/`) are UNKNOWN. Before coding, the completion PR must
-search the whole repository for `env2_pass_marker` and `validate_env2_pass_marker` and add any
-further consumer to this table.
+`task_store.py` has no marker reference. `task_submission_cli.py` is outside this Task's read paths.
+The C4c location and its OpenCode caller come from the codex-reviewer v2 F1 finding at `d9e6f536`;
+how the OpenCode dispatch holds the write paths at `:5009-5012`, and whether
+`_refresh_d6_binding_after_bootstrap` has other callers, is UNKNOWN here. Other repository files
+outside the read paths (for example `tools/llmtool/tests/`, `tools/ec2-runner/`) are also UNKNOWN.
+Before coding, PR-2 must search the whole repository for `env2_pass_marker`,
+`validate_env2_pass_marker` and `_refresh_d6_binding_after_bootstrap`, and add any further consumer
+or caller to this table with the same rule: pass the Task's validated write paths, or rely on the
+`None` default below.
 
-**Strict validation of a carried marker in C4** (`validate_env2_pass_marker(..., write_paths)`):
+**Argument propagation and the compatible default.** The new signature is
+`validate_env2_pass_marker(registration, *, expected_root, current_head, write_paths=None)`.
 
-1. Shape (`D6_ENV2_PASS_MARKER_INVALID`): the key set is exactly the twelve keys,
-   `type(schema_version) is int` and `== 2`, and `environment_mode == "CARRIED"`.
-2. All existing checks of `:755-770` and `:772-822` apply unchanged, including the report hash,
-   `head_sha`, `tooling_sha` and the `cache_fingerprint` binding.
-3. Binding (`D6_ENV2_PASS_MARKER_MISMATCH` for every check below):
+- For a schema-1 marker, `write_paths` is never read. Every caller, changed or not, behaves exactly as
+  today for every existing D6.
+- For a schema-2 marker, `write_paths` must be a list of strings. If it is `None` or any other type,
+  C4 refuses with `D6_ENV2_PASS_MARKER_MISMATCH`. A caller that cannot supply the Task write paths
+  therefore fails closed on a carried marker, and never accepts one without the write-path binding.
+- C4a, C4b and C4c pass the Task write paths, so all three accept a valid carried marker. Without
+  C4c, an OpenCode repair dispatch on a D6 whose recorded head was CARRIED would refuse after
+  bootstrap, because ENV-2 then republishes a carried marker for the same head (§3.3).
+
+**C4 rules for both shapes.** This replaces the shape and version checks at `:745-755`. The rest of
+`:740-823` is unchanged.
+
+1. Shape (`D6_ENV2_PASS_MARKER_INVALID`, as `:753-754` today): the marker is a dict, and its key set is
+   exactly the nine keys (expected version 1) or exactly the twelve keys (expected version 2).
+2. Version (`D6_ENV2_PASS_MARKER_MISMATCH`, as `:755` today): `type(schema_version) is int` and
+   `schema_version ==` the expected version for the shape. This is the only change to `:755`: the
+   literal `!= 1` becomes `!=` the expected version. A nine-key marker with version 2, or a
+   twelve-key marker with version 1, is refused.
+3. Every other term of `:755-769` applies unchanged to both shapes: `result`, `task_id`,
+   `root_realpath`, `submitted_head_sha == current_head_sha == current_head == registration.result_sha`,
+   `tooling_sha`, `environment_fingerprint` and `report_sha256`.
+4. The report checks of `:772-822` apply unchanged to both shapes: directory and file safety, the
+   report hash, `result`, `task_id`, `root_realpath`, `head_sha`, `tooling_sha` and the
+   `cache_fingerprint` binding.
+5. A schema-1 marker stops here, exactly as today. `write_paths`, the report `schema_version` and the
+   report `status` are not checked for it.
+6. A schema-2 marker must also pass the carried checks below.
+
+**Carried checks in C4** (schema 2 only; `D6_ENV2_PASS_MARKER_MISMATCH` for every check below):
+
+1. `environment_mode == "CARRIED"`, and `write_paths` is a list of strings.
+2. The report has `type(schema_version) is int` and `== 2`.
+3. Binding:
    - `registration.env2_approved_tooling_sha is None` and `tooling_sha == registration.source_sha`.
    - `carried_from_head_sha` is a 40-hex string other than `current_head`.
      `registration.source_sha` is an ancestor of it or equal to it. It is a strict ancestor of
@@ -206,11 +258,16 @@ further consumer to this table.
      or mode between `tooling_sha` and `current_head` (`_git` `diff --no-renames --name-only -z`
      limited to `BOOTSTRAP_SOURCES`). Every required source exists at `current_head`
      (`_tree_entry`, `:1665`).
-   - The report has `schema_version == 2`, `status == "env_carried"` and `operations == "NONE"`.
+   - The report has `status == "env_carried"` and `operations == "NONE"`.
      Its `carried_from_head_sha` and `allowed_bootstrap_paths` equal the marker's. Its
      `venv_identity` is a dict of the §3.4 shape. C4 checks the shape only; the live venv check is
      done by ENV-2 under the lock (§3.3).
-4. A schema-1 marker is checked exactly as today. `write_paths` is not used for it.
+
+The same version pairing binds the other consumers. C1 writes a schema-1 marker with a schema-1 report
+in BUILD mode, and a schema-2 marker with a schema-2 report in CARRY mode. C2 applies C4 rules 1-2 to
+the prior marker, so it accepts either exact shape. C3 does not read `schema_version` today
+(`d6_worktree_lifecycle.py:1021-1025`); it chooses its extra schema-2 check by the twelve-key set and
+`schema_version == 2`, and leaves schema-1 markers exactly as today.
 
 `task_completion.py` cannot import the script helper, so it holds its own `BOOTSTRAP_SOURCES`
 constant. A test keeps the two copies equal.
@@ -231,8 +288,8 @@ constant. A test keeps the two copies equal.
 ## 4. Ordered PRs
 
 Rule files are the entries in `tools/llmtool/sensitive-paths.json`; `d6_worktree_lifecycle.py`,
-`task_advance.py` and `task_completion.py` are listed there (`sensitive-paths.json:12`, `:20`, `:21`)
-and need Codex security review. The exact test module names are UNKNOWN because `tools/llmtool/tests/`
+`task_advance.py`, `task_completion.py` and `task_submission_cli.py` are listed there
+(`sensitive-paths.json:12`, `:20`, `:21`, `:23`) and need Codex security review. The exact test module names are UNKNOWN because `tools/llmtool/tests/`
 is outside this Task's read paths. Tests follow the Owner #763 A rule: synthetic `pyproject.toml`
 content such as a version bump, synthetic venv fixtures in temporary directories, and no
 credential-shaped strings. No production check is relaxed for tests.
@@ -250,17 +307,31 @@ Consumers land before the producer, so no carried marker exists until every cons
    - C5 reads only named keys (`task_completion.py:684-737`), and ENV-2 on current `main` ignores
      unknown record keys (`d6_worktree_env.py:244-283`, `:558-577`). PR-1 alone does not change
      behaviour.
-2. **PR-2 completion marker validation (rule file: `tools/llmtool/llmtool/task_completion.py`).**
-   - Code: C4 with the two exact shapes and the strict carried checks of §3.5; C4a and C4b pass
-     `write_paths`; the `BOOTSTRAP_SOURCES` constant. First, the repository-wide consumer search of
-     §3.5.
-   - Tests: `validate_env2_pass_marker` unit tests. A schema-1 marker behaves exactly as today. A valid
-     carried marker and report are accepted. Each of these is refused with the stated code: an extra
-     or missing key, a version that does not match its keys, a wrong `environment_mode`,
-     `carried_from_head_sha` equal to the head or not an ancestor, approved tooling, a path outside
-     `BOOTSTRAP_SOURCES` or outside `write_paths`, unsorted or duplicate paths, paths that differ from
-     the actual tooling-to-head bootstrap diff, a missing required source, a report with the wrong
-     `status`, `operations` or carried fields, and a malformed `venv_identity`.
+2. **PR-2 completion marker validation (rule files: `tools/llmtool/llmtool/task_completion.py`,
+   `tools/llmtool/llmtool/task_submission_cli.py`).**
+   - Code: C4 with the `write_paths=None` keyword, the shape and version rules and the carried checks
+     of §3.5; C4a and C4b pass `write_paths`; C4c: `_refresh_d6_binding_after_bootstrap` gains a
+     `write_paths` keyword and the OpenCode dispatch (`task_submission_cli.py:5009-5012`) passes the
+     Task's validated `developer.write_paths`; the `BOOTSTRAP_SOURCES` constant. First, the
+     repository-wide consumer and caller search of §3.5.
+   - Tests: `validate_env2_pass_marker` unit tests. The existing schema-1 tests pass unchanged. A
+     schema-1 marker is accepted with `write_paths` omitted, `None` or a list that excludes every
+     bootstrap source, and its report is accepted with `schema_version: 1` with or without
+     `venv_identity`. A valid carried marker and report are accepted. Each of these is refused with
+     the code §3.5 states: an extra or missing key (`INVALID`); a nine-key marker with version 2 or a
+     twelve-key marker with version 1 (`MISMATCH`); a carried marker with `write_paths` omitted or
+     `None`; a carried report with `schema_version: 1`; a wrong `environment_mode`;
+     `carried_from_head_sha` equal to the head or not an ancestor; approved tooling; a path outside
+     `BOOTSTRAP_SOURCES` or outside `write_paths`; unsorted or duplicate paths; paths that differ from
+     the actual tooling-to-head bootstrap diff; a missing required source; a report with the wrong
+     `status`, `operations` or carried fields; and a malformed `venv_identity`.
+   - **Regression test for C4c (codex-reviewer v2 F1):** `_refresh_d6_binding_after_bootstrap`, run
+     through the OpenCode dispatch path with ENV-2 bootstrap mocked or injected (no real bootstrap,
+     no credential-shaped data), accepts a synthetic D6 that holds a valid carried marker when the
+     Task write paths include the changed bootstrap source. It refuses with
+     `D6_ENV2_PASS_MARKER_MISMATCH` when that path is not in the write paths. A schema-1 marker gives
+     the same result as today. The test asserts the write paths reach C4, so a later caller that drops
+     them fails.
    - **Result-collection tests with the new marker:** `collect_executor_result`,
      `collect_claude_result` and `collect_executor_worktree_result` each run on a synthetic registered
      D6 whose head changes `tools/llmtool/pyproject.toml` (a version bump) and that holds a carried
@@ -282,8 +353,8 @@ Consumers land before the producer, so no carried marker exists until every cons
      and a prior report with `venv_identity` absent or `"UNKNOWN"`; a second CARRY keeps the original
      `carried_from_head_sha`.
    - **End-to-end test:** `record_result` with write paths that include `tools/llmtool/pyproject.toml`
-     records a CARRY result, C3 accepts it, and the PR-2 collection functions accept the resulting
-     marker for the same D6.
+     records a CARRY result, C3 accepts it, and the PR-2 collection functions and
+     `_refresh_d6_binding_after_bootstrap` (C4c) accept the resulting marker for the same D6.
    - **Bootstrap blocker:** this PR changes the helper, which is itself a bootstrap source
      (`:503-511`). Under current `main`, its own `record_result` fails with this same defect. The
      delivery route needs an Owner decision through the PM (UNKNOWN). D6s created before PR-3 have no
