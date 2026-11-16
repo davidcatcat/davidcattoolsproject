@@ -93,15 +93,72 @@ class FallbackTests(unittest.TestCase):
     def test_allowed_fallback_passes_the_same_request_to_claude(self):
         seen = []
         def fake(*, route, **kwargs):
-            seen.append((route, kwargs))
+            grant = kwargs.pop('claude_fallback', None)
+            seen.append((route, kwargs, grant))
             if route == 'codex':
                 raise refusal('HIGH_DEBUG_AUTH_FAILED')
+            # The grant is live while the Claude run uses it.
+            self.assertIn(grant, high_debug._CLAUDE_GRANTS)
             return 'ran-claude'
         with patch.object(high_debug, 'run_high_debug', side_effect=fake):
             self.assertEqual(high_debug.run_high_debug_with_fallback(
                 task_id='a' * 32, family='family'), 'ran-claude')
-        self.assertEqual([route for route, _kwargs in seen], ['codex', 'claude'])
+        self.assertEqual([route for route, _kwargs, _grant in seen], ['codex', 'claude'])
         self.assertEqual(seen[0][1], seen[1][1])
+        # Codex gets no grant; Claude gets one bound to this Task and the
+        # Codex fallback code, revoked once the Claude run returns.
+        self.assertIsNone(seen[0][2])
+        grant = seen[1][2]
+        self.assertIs(type(grant), high_debug._ClaudeFallbackGrant)
+        self.assertEqual((grant.task_id, grant.codex_code), ('a' * 32, 'HIGH_DEBUG_AUTH_FAILED'))
+        self.assertNotIn(grant, high_debug._CLAUDE_GRANTS)
+        self.assertFalse(high_debug._consume_claude_grant(grant, 'a' * 32))
+
+    def test_grant_is_revoked_when_the_claude_run_fails(self):
+        seen = []
+        def fake(*, route, **kwargs):
+            if route == 'codex':
+                raise refusal('HIGH_DEBUG_QUOTA_EXHAUSTED')
+            seen.append(kwargs['claude_fallback'])
+            raise refusal('HIGH_DEBUG_RUN_FAILED')
+        with patch.object(high_debug, 'run_high_debug', side_effect=fake):
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.run_high_debug_with_fallback(task_id='a' * 32)
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_RUN_FAILED')
+        self.assertEqual(len(seen), 1)
+        self.assertNotIn(seen[0], high_debug._CLAUDE_GRANTS)
+
+    def test_caller_supplied_grant_is_refused_and_runs_nothing(self):
+        # Only the fallback issues a grant; a caller can never pass one in.
+        for grant in (None, object(), high_debug._ClaudeFallbackGrant(
+                'a' * 32, 'HIGH_DEBUG_QUOTA_EXHAUSTED')):
+            with self.subTest(grant=grant), \
+                 patch.object(high_debug, 'run_high_debug') as run:
+                with self.assertRaises(LLMToolError) as caught:
+                    high_debug.run_high_debug_with_fallback(task_id='a' * 32,
+                                                            claude_fallback=grant)
+                self.assertEqual(caught.exception.high_debug_code,
+                                 'HIGH_DEBUG_ARGUMENT_INVALID')
+                run.assert_not_called()
+
+    def test_direct_module_call_of_the_claude_route_is_refused(self):
+        # PR #2222 v91 (CWE-862): the rule holds in run_high_debug itself, not
+        # only in this wrapper. A direct Claude call starts nothing.
+        # No runner is injected, so the real Claude launcher is the one refused.
+        store = unittest.mock.Mock()
+        create = unittest.mock.Mock()
+        with patch.object(high_debug.worker_dispatch, 'evaluate') as evaluate, \
+             patch.object(high_debug.role_config, 'resolve_role') as resolve, \
+             patch.object(high_debug, '_run_claude') as launch:
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.run_high_debug(
+                    store=store, task_id='a' * 32, executor_task='executor',
+                    pr_number=17, family='family', failed_corrections=2,
+                    create_d6=create, route='claude')
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_CLAUDE_ROUTE_REFUSED')
+        for called in (evaluate, resolve, launch, create):
+            called.assert_not_called()
+        self.assertEqual(store.mock_calls, [])
 
     def test_refused_claude_route_starts_no_provider_or_store_access(self):
         # The real run_high_debug stays reachable; it must never be entered.

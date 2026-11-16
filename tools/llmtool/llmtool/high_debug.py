@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 from datetime import datetime, timezone
 import functools
 
@@ -1475,11 +1476,73 @@ def _is_plain_issue(number):
     return type(issue) is dict and issue.get('number') == number and 'pull_request' not in issue
 
 
+# #1502 WP-B, Codex v995 audit of #1630 and PR #2222 v91 (CWE-862): a caller
+# never picks Claude Debug directly. It runs only after this run's Codex Debug
+# was refused with a DEBUG_FALLBACK_CODES code (quota exhausted or login
+# failed). run_high_debug itself enforces this, for every caller.
+CLAUDE_ROUTE_REFUSED = 'HIGH_DEBUG_CLAUDE_ROUTE_REFUSED'
+_CLAUDE_ROUTE_REFUSED_DETAIL = 'claude_debug_requires=codex_quota_exhausted_or_login_failed'
+
+
+class _ClaudeFallbackGrant:
+    """Proof that this run's Codex Debug of one Task hit a fallback code.
+
+    Only run_high_debug_with_fallback issues one, right after it caught that
+    refusal from run_high_debug(route='codex'). It is bound to the Task, used
+    at most once, and valid only while it is in the issued set, so an object
+    built any other way is not a grant.
+    """
+    __slots__ = ('task_id', 'codex_code')
+
+    def __init__(self, task_id, codex_code):
+        self.task_id = task_id
+        self.codex_code = codex_code
+
+
+_CLAUDE_GRANTS = set()
+_CLAUDE_GRANTS_LOCK = threading.Lock()
+
+
+def _issue_claude_grant(task_id, codex_code):
+    """Record this run's Codex fallback condition; None when there is none."""
+    if type(task_id) is not str or codex_code not in DEBUG_FALLBACK_CODES:
+        return None
+    grant = _ClaudeFallbackGrant(task_id, codex_code)
+    with _CLAUDE_GRANTS_LOCK:
+        _CLAUDE_GRANTS.add(grant)
+    return grant
+
+
+def _revoke_claude_grant(grant):
+    with _CLAUDE_GRANTS_LOCK:
+        _CLAUDE_GRANTS.discard(grant)
+
+
+def _consume_claude_grant(grant, task_id):
+    """True once for an issued grant of task_id with a fallback code; it is then spent."""
+    if type(grant) is not _ClaudeFallbackGrant:
+        return False
+    with _CLAUDE_GRANTS_LOCK:
+        if grant not in _CLAUDE_GRANTS:
+            return False
+        _CLAUDE_GRANTS.discard(grant)
+    return (type(task_id) is str and grant.task_id == task_id and
+            grant.codex_code in DEBUG_FALLBACK_CODES)
+
+
 def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_number=None, family,
                    failed_corrections=None, early_reason=None, evidence=None,
                    runner=None, create_d6=None, repo_root=None,
                    read_registration=None, sessions_dir=None,
-                   route='codex'):
+                   route='codex', claude_fallback=None):
+    # PR #2222 v91 (CWE-862): the Claude route needs this run's recorded Codex
+    # quota or login failure (a grant from run_high_debug_with_fallback). The
+    # refusal comes before any Task read, D6, entry or provider call.
+    if route == 'claude':
+        if not _consume_claude_grant(claude_fallback, task_id):
+            _refuse(CLAUDE_ROUTE_REFUSED, _CLAUDE_ROUTE_REFUSED_DETAIL)
+    elif claude_fallback is not None:
+        _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
     task = store.get(task_id)
     if type(task) is not dict or task.get('task_id') != task_id:
         _refuse('HIGH_DEBUG_TASK_INVALID')
@@ -1804,10 +1867,6 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
 # #1502 WP-B: a Claude Debug refusal that means the route cannot run now.
 _CLAUDE_DEBUG_UNAVAILABLE = DEBUG_FALLBACK_CODES | {
     'HIGH_DEBUG_DISPATCH_REFUSED', 'HIGH_DEBUG_ACCOUNT_UNCONFIGURED'}
-# #1502 WP-B, Codex v995 audit of #1630 (CWE-862): a caller never picks Claude
-# Debug directly. It runs only after this run's Codex Debug was refused with a
-# DEBUG_FALLBACK_CODES code (quota exhausted or login failed).
-CLAUDE_ROUTE_REFUSED = 'HIGH_DEBUG_CLAUDE_ROUTE_REFUSED'
 
 
 def run_high_debug_with_fallback(*, route='codex', **kwargs):
@@ -1816,14 +1875,17 @@ def run_high_debug_with_fallback(*, route='codex', **kwargs):
     An explicit Claude route is refused with CLAUDE_ROUTE_REFUSED before any
     Task read, D6, entry or provider call: Claude Debug runs only as the
     fallback of a Codex Debug in this same run that reported quota exhausted
-    or login failure. Every other refusal stops as before and nothing is
-    resent. When neither route can run, refuse with HIGH_DEBUG_WAITING, a
-    reason code (AUTH first, then QUOTA, else ROUTE_UNAVAILABLE), the time and
-    a resume condition.
+    or login failure. That condition is passed to run_high_debug as a one-use
+    grant, which run_high_debug requires for the Claude route. Every other
+    refusal stops as before and nothing is resent. When neither route can
+    run, refuse with HIGH_DEBUG_WAITING, a reason code (AUTH first, then
+    QUOTA, else ROUTE_UNAVAILABLE), the time and a resume condition.
     """
     if route == 'claude':
-        _refuse(CLAUDE_ROUTE_REFUSED,
-                'claude_debug_requires=codex_quota_exhausted_or_login_failed')
+        _refuse(CLAUDE_ROUTE_REFUSED, _CLAUDE_ROUTE_REFUSED_DETAIL)
+    if 'claude_fallback' in kwargs:
+        # Only this function issues a grant; a caller never supplies one.
+        _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
     try:
         return run_high_debug(route=route, **kwargs)
     except LLMToolError as error:
@@ -1831,8 +1893,12 @@ def run_high_debug_with_fallback(*, route='codex', **kwargs):
         if route != 'codex' or first not in DEBUG_FALLBACK_CODES:
             raise
     # Reached only when this run's Codex attempt was refused with a fallback code.
+    grant = _issue_claude_grant(kwargs.get('task_id'), first)
     try:
-        return run_high_debug(route='claude', **kwargs)
+        try:
+            return run_high_debug(route='claude', claude_fallback=grant, **kwargs)
+        finally:
+            _revoke_claude_grant(grant)
     except LLMToolError as error:
         second = getattr(error, 'high_debug_code', None)
         if second not in _CLAUDE_DEBUG_UNAVAILABLE:

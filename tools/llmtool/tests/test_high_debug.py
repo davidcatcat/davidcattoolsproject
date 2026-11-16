@@ -34,6 +34,16 @@ def _stub_debug_rules(test):
     test.addCleanup(patcher.stop)
 
 
+def _codex_fallback_grant(test, task_id='a' * 32, code='HIGH_DEBUG_QUOTA_EXHAUSTED'):
+    """The grant run_high_debug_with_fallback issues after this run's Codex
+    Debug was refused with ``code``. PR #2222 v91: run_high_debug refuses the
+    Claude route without it; these tests drive that route directly with it.
+    """
+    grant = high_debug._issue_claude_grant(task_id, code)
+    test.addCleanup(high_debug._revoke_claude_grant, grant)
+    return grant
+
+
 def _keyword_lines(count):
     """``count`` lines, each one distinct keyword_assign screen hit."""
     # synthetic-fixture: screen-tool test
@@ -1722,7 +1732,7 @@ class HighDebugTests(unittest.TestCase):
                 pr_number=17, family='family', failed_corrections=2,
                 runner=actual_runner, create_d6=create,
                 read_registration=lambda *_args, **_kwargs: registration,
-                route='claude')
+                route='claude', claude_fallback=_codex_fallback_grant(self))
             return result, store, mock_eval, mock_resolve
 
     def test_codex_route_create_keeps_the_original_no_agent_id_signature(self):
@@ -1836,11 +1846,143 @@ class HighDebugTests(unittest.TestCase):
                         high_debug.run_high_debug(
                             store=store, task_id='a' * 32, executor_task='executor',
                             pr_number=17, family='family', failed_corrections=2,
-                            runner=runner, create_d6=create, route='claude')
+                            runner=runner, create_d6=create, route='claude',
+                            claude_fallback=_codex_fallback_grant(self))
                 self.assertEqual(caught.exception.high_debug_code,
                                  'HIGH_DEBUG_ACCOUNT_UNCONFIGURED')
                 create.assert_not_called()
                 runner.assert_not_called()
+
+    def _direct_claude_refusal(self, **extra):
+        """Call run_high_debug with route='claude' directly; return the refusal code.
+
+        PR #2222 v91 (CWE-862): no Task read, dispatch, role, D6, entry,
+        subprocess or provider call may happen.
+        """
+        store = unittest.mock.Mock()
+        create, runner = unittest.mock.Mock(), unittest.mock.Mock()
+        with patch.object(high_debug.worker_dispatch, 'evaluate') as evaluate, \
+             patch.object(high_debug.role_config, 'resolve_role') as resolve, \
+             patch.object(high_debug.subprocess, 'run') as run:
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.run_high_debug(
+                    store=store, task_id='a' * 32, executor_task='executor',
+                    pr_number=17, family='family', failed_corrections=2,
+                    runner=runner, create_d6=create, route='claude', **extra)
+        for called in (evaluate, resolve, run, runner, create):
+            called.assert_not_called()
+        self.assertEqual(store.mock_calls, [])
+        self._poster.assert_not_called()
+        return caught.exception
+
+    def test_direct_claude_route_without_codex_fallback_is_refused(self):
+        error = self._direct_claude_refusal()
+        self.assertEqual(error.high_debug_code, 'HIGH_DEBUG_CLAUDE_ROUTE_REFUSED')
+        self.assertEqual(error.high_debug_code, high_debug.CLAUDE_ROUTE_REFUSED)
+        self.assertEqual(error.high_debug_detail,
+                         'claude_debug_requires=codex_quota_exhausted_or_login_failed')
+
+    def test_direct_claude_route_with_an_invalid_grant_is_refused(self):
+        spent = _codex_fallback_grant(self)
+        self.assertTrue(high_debug._consume_claude_grant(spent, 'a' * 32))
+        cases = {
+            'none': None,
+            'not_issued': high_debug._ClaudeFallbackGrant('a' * 32, 'HIGH_DEBUG_QUOTA_EXHAUSTED'),
+            'look_alike': SimpleNamespace(task_id='a' * 32, codex_code='HIGH_DEBUG_AUTH_FAILED'),
+            'other_task': _codex_fallback_grant(self, task_id='b' * 32),
+            'spent': spent,
+            'flag': True,
+        }
+        for name, grant in cases.items():
+            with self.subTest(grant=name):
+                self._poster.reset_mock()
+                self.assertEqual(self._direct_claude_refusal(claude_fallback=grant).high_debug_code,
+                                 'HIGH_DEBUG_CLAUDE_ROUTE_REFUSED')
+
+    def test_only_fallback_codes_issue_a_grant_and_a_grant_is_used_once(self):
+        for code in ('HIGH_DEBUG_RUN_FAILED', 'HIGH_DEBUG_WROTE_FILES',
+                     'HIGH_DEBUG_DISPATCH_REFUSED', 'ROLE_MODEL_NOT_ALLOWED', None):
+            with self.subTest(code=code):
+                self.assertIsNone(high_debug._issue_claude_grant('a' * 32, code))
+        self.assertIsNone(high_debug._issue_claude_grant(None, 'HIGH_DEBUG_QUOTA_EXHAUSTED'))
+        for code in sorted(high_debug.DEBUG_FALLBACK_CODES):
+            with self.subTest(code=code):
+                grant = _codex_fallback_grant(self, code=code)
+                self.assertFalse(high_debug._consume_claude_grant(grant, 'b' * 32))
+                # A use for the wrong Task spends it too.
+                self.assertFalse(high_debug._consume_claude_grant(grant, 'a' * 32))
+                grant = _codex_fallback_grant(self, code=code)
+                self.assertTrue(high_debug._consume_claude_grant(grant, 'a' * 32))
+                self.assertFalse(high_debug._consume_claude_grant(grant, 'a' * 32))
+
+    def test_codex_route_refuses_a_claude_grant(self):
+        create, runner = unittest.mock.Mock(), unittest.mock.Mock()
+        store = unittest.mock.Mock()
+        with self.assertRaises(LLMToolError) as caught:
+            high_debug.run_high_debug(
+                store=store, task_id='a' * 32, executor_task='executor',
+                pr_number=17, family='family', failed_corrections=2,
+                runner=runner, create_d6=create, route='codex',
+                claude_fallback=_codex_fallback_grant(self))
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_ARGUMENT_INVALID')
+        self.assertEqual(store.mock_calls, [])
+        create.assert_not_called()
+        runner.assert_not_called()
+
+    def test_real_codex_quota_failure_falls_back_to_claude(self):
+        # The allowed path end to end: the real Codex attempt reports quota
+        # exhausted, and the same run's Claude Debug then runs and records.
+        report = ''.join('## ' + heading + '\nDetails.\n'
+                         for heading in high_debug.REPORT_SECTIONS) + 'RCA_CONFIRMED'
+        root = self._repo()
+        registration = SimpleNamespace(result_sha='a' * 40, root=str(root),
+                                       common_dir=str(root / '.git'))
+        store = _Store()
+        launches, created = [], []
+
+        def runner(*, prompt, cwd, output_path):
+            launches.append(len(store.entries))
+            if len(launches) == 1:
+                return subprocess.CompletedProcess([], 1, stdout=b'',
+                                                   stderr=b'usage limit reached\n')
+            return self._claude_completed(report)
+
+        def create(**kwargs):
+            created.append((kwargs['task_id'], kwargs.get('agent_id')))
+            return str(root)
+
+        role_settings = {'role': 'reviewer', 'source': 'roles', 'account': 'reviewer-account',
+                         'config_dir': '/safe/claude', 'provider': 'claude'}
+        with patch.object(high_debug.worker_dispatch, 'evaluate',
+                          return_value=SimpleNamespace(allowed=True)) as evaluate, \
+             patch.object(high_debug.role_config, 'resolve_role', return_value=role_settings), \
+             patch.object(high_debug.task_completion, 'collect_git_snapshot',
+                          return_value=SimpleNamespace(head='a' * 40)), \
+             patch.object(high_debug, 'run_high_debug',
+                          wraps=high_debug.run_high_debug) as wrapped, \
+             redirect_stdout(StringIO()) as output:
+            high_debug.run_high_debug_with_fallback(
+                store=store, task_id='a' * 32, executor_task='executor',
+                pr_number=17, family='family', failed_corrections=2,
+                runner=runner, create_d6=create, repo_root=str(root),
+                read_registration=lambda *_args, **_kwargs: registration)
+        self.assertEqual([call.kwargs['route'] for call in wrapped.call_args_list],
+                         ['codex', 'claude'])
+        self.assertEqual([call.args[0] for call in evaluate.call_args_list],
+                         ['codex-debug', 'claude-debug'])
+        # Entries seen at each launch: Codex's own reservation, then the
+        # recorded Codex RUN_FAILED plus Claude's reservation.
+        self.assertEqual(launches, [1, 2])
+        self.assertEqual(created, [('executor-hd1-aaaaaaa', None),
+                                   ('executor-hd2-aaaaaaa', 'claude-high-debug-claude-opus-5-5')])
+        self.assertEqual([entry['status'] for entry in store.entries],
+                         ['RUN_FAILED', 'RCA_CONFIRMED'])
+        self.assertEqual(store.entries[0]['report'], 'HIGH_DEBUG_QUOTA_EXHAUSTED')
+        self.assertEqual(store.entries[0]['model_requested'], high_debug._CODEX_MODEL)
+        self.assertEqual(store.entries[1]['model_requested'], high_debug._CLAUDE_MODEL)
+        self.assertEqual(json.loads(output.getvalue())['status'], 'RCA_CONFIRMED')
+        # The grant was spent by that one Claude run; none is left behind.
+        self.assertEqual(high_debug._CLAUDE_GRANTS, set())
 
     def test_unknown_route_refuses_before_create_d6(self):
         create, runner = unittest.mock.Mock(), unittest.mock.Mock()
@@ -1898,6 +2040,7 @@ class HighDebugTests(unittest.TestCase):
     def _debug_refusal(self, *, route, resolved=None, resolve=None):
         create, runner = unittest.mock.Mock(), unittest.mock.Mock()
         store = _Store()
+        grant = {'claude_fallback': _codex_fallback_grant(self)} if route == 'claude' else {}
         with patch.object(high_debug.worker_dispatch, 'evaluate',
                           return_value=SimpleNamespace(allowed=True)), \
              patch.object(high_debug.role_config, 'resolve_role',
@@ -1907,7 +2050,7 @@ class HighDebugTests(unittest.TestCase):
                 high_debug.run_high_debug(
                     store=store, task_id='a' * 32, executor_task='executor',
                     pr_number=17, family='family', failed_corrections=2,
-                    runner=runner, create_d6=create, route=route)
+                    runner=runner, create_d6=create, route=route, **grant)
         create.assert_not_called()
         runner.assert_not_called()
         self.assertEqual(store.entries, [])
