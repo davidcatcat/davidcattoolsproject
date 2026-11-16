@@ -378,7 +378,7 @@ class ActivePMInboxTests(unittest.TestCase):
         self.assertIs(provenance['session_restored'], False)
         self.assertEqual(view['pm_recovery'], {
             'runtime': 'claude-code', 'cwd': str(self.pm_cwd),
-            'resume_argv': ['claude', '--resume', self.session]})
+            'resume_argv': ['claude', '--resume', self.session, '--disallowedTools', 'Skill']})
 
     def test_record_pm_refuses_unverified_or_malformed_sessions_without_task(self):
         other_dir = self.base / 'other-root'
@@ -465,7 +465,7 @@ class ActivePMInboxTests(unittest.TestCase):
         self.assertEqual(event['source'], 'DIRECT_D6_DEVELOPER')
         self.assertIs(event['current'], True)
         self.assertEqual(event['active_pm_handoff'], view['active_pm_handoff'])
-        self.assertEqual(event['pm_recovery']['resume_argv'][-1], self.session)
+        self.assertEqual(event['pm_recovery']['resume_argv'][2], self.session)
 
     def test_peek_reports_ready_event_without_writing_then_sees_recorded_event(self):
         task = self._ready_task()
