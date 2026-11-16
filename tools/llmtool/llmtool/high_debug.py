@@ -1130,7 +1130,7 @@ def _claude_usage(raw_usage):
 def _failed_entry(*, family, failed_corrections, early_reason, head, d6, code,
                   report=None,
                   observed, effort, usage, recorded_at, model_requested='gpt-6.1-sol',
-                  rules_sha256=None):
+                  rules_sha256=None, no_pr=None):
     """The high_debug entry recording one attempt that did not finish.
 
     ``rules_sha256`` (the digest of the rule prefix sent) is recorded when given.
@@ -1144,6 +1144,8 @@ def _failed_entry(*, family, failed_corrections, early_reason, head, d6, code,
              'report': stored_report, 'usage': usage, 'recorded_at': recorded_at}
     if rules_sha256 is not None:
         entry['rules_sha256'] = rules_sha256
+    if no_pr is True:
+        entry['no_pr'] = True
     return entry
 
 
@@ -1421,6 +1423,45 @@ def _reserve_debug(store, task_id, entries, reservation):
         return len(entries)
     finally:
         release()
+
+
+def _target_ok(pr_number, issue_number, family, failed_corrections):
+    """#1943 WP-5: exactly one of a PR and an Issue; an Issue only for family no-pr and --early."""
+    if (pr_number is None) == (issue_number is None):
+        return False
+    number = issue_number if pr_number is None else pr_number
+    if type(number) is not int or not 1 <= number <= 9999999:
+        return False
+    if issue_number is not None:
+        return family == 'no-pr' and failed_corrections is None
+    return family != 'no-pr'
+
+
+def _no_pr_repo_root():
+    """#1943 WP-5: the trusted canonical repository root for a no-PR Debug, else refuse."""
+    try:
+        config = task_completion._trust_config()
+        trust.verify_repository(config)
+        return config.canonical_root
+    except Exception:
+        _refuse('HIGH_DEBUG_D6_UNAVAILABLE')
+
+
+def _task_holds_d6(task, executor_task):
+    """#1943 WP-5: True when the Task's developer record or its result callback names the D6."""
+    developer = task.get('developer') if type(task.get('developer')) is dict else {}
+    callback = developer.get('direct_result_callback')
+    holders = [developer, callback if type(callback) is dict else {}]
+    return any(item.get('executor_task_id') == executor_task for item in holders)
+
+
+def _is_plain_issue(number):
+    """#1943 WP-5: True only when GitHub reads the number as an Issue that is not a PR."""
+    try:
+        issue = task_completion._github_get(f'issues/{number}')
+    except Exception:
+        return False
+    return type(issue) is dict and issue.get('number') == number and 'pull_request' not in issue
 
 
 def run_high_debug(*, store, task_id, executor_task, pr_number, family,
