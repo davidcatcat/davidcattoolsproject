@@ -130,12 +130,13 @@ def _issue_number(url: str) -> int:
     return int(found.group(1)) if found else 0
 
 
-def audit(comments: list[dict], since: str, until: str) -> dict:
+def audit(comments: list[dict], since: str, until: str, chat=None, effective_tasks=None) -> dict:
+    comments = _unique(comments)
     window_comments = [
         c for c in comments
         if isinstance(c, dict) and since <= str(c.get("created_at", "")) < until
     ]
-    corrections, candidates, misused = [], [], 0
+    corrections, candidates, misused, notices = [], [], 0, 0
     for c in window_comments:
         marker = _first_line_marker(c.get("body", ""))
         if not marker:
@@ -143,7 +144,7 @@ def audit(comments: list[dict], since: str, until: str) -> dict:
         m_type, status = marker.get("type", ""), marker.get("status", "")
         if m_type == "waiting_owner" and status == "ANSWERED":
             misused += 1
-        elif (m_type == "waiting_owner" and marker.get("actor") == "PM" and
+        elif (marker.get("actor") == "PM" and
               marker.get("target") == "Owner" and status in ("WAITING", "BLOCKED", "UNKNOWN")):
             candidates.append(c)
         elif m_type == "audit_correction":
