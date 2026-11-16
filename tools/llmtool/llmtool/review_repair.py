@@ -548,7 +548,10 @@ def _review_gate(task, attempts, packet, family, policy, counts=None, verdict_bo
     Without counts the Task's own attempts are used.
     """
     from . import repair_policy
-    text = packet['reviewer_text_excerpt_untrusted_data'] if verdict_body is None else verdict_body
+    text = (packet.get('reviewer_text_excerpt_untrusted_data', '')
+            if verdict_body is None else verdict_body)
+    if text is None:
+        text = ''
     if len(text) > MAX_VERDICT_CHARS:
         _refuse(REVIEW_VERDICT_TOO_LONG)
     if review_result.blocking_findings(text) == []:
@@ -712,6 +715,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                                        pr_number=pr_number, github_get=github_get)
         if isinstance(_event, dict):
             verdict_body = _event.get('verdict_body')
+        elif hasattr(_event, 'verdict_body'):
+            verdict_body = getattr(_event, 'verdict_body')
     else:
         packet = _remote_test_failure(task, executor_task=executor_task,
                                       pr_number=pr_number, receipt=remote_test_receipt)

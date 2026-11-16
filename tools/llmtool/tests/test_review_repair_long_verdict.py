@@ -24,6 +24,11 @@ from test_review_repair import (
     tearDownModule,
 )
 
+if not hasattr(TempTaskStore, 'create'):
+    def _temp_task_store_create(self, task):
+        return self.put(task)
+    TempTaskStore.create = _temp_task_store_create
+
 
 class ReviewRepairLongVerdictTests(ReviewRepairTests):
     """Test suite covering long verdict handling and findings beyond 2000 chars."""
@@ -219,6 +224,29 @@ class ReviewRepairLongVerdictTests(ReviewRepairTests):
         dev_task = task_fixtures.create_with_developer(self.store, 'agy')
         self.assertEqual(dev_task['developer']['provider_profile'], 'agy')
         self.assertEqual(dev_task['developer']['state'], 'DEVELOPER_PENDING')
+
+    def test_task_fixtures_create_with_developer_long_verdict_gate(self):
+        task = task_fixtures.create_with_developer(self.store, 'agy')
+        long_body = (
+            "Finding: F1 [Low] a.py:1 style\n"
+            + ("# filler line\n" * 150)
+            + "Finding: F2 [High] b.py:2 bounds error\n"
+        )
+        packet = {
+            'task': task['task_id'],
+            'pr': PR,
+            'executor_task': EXECUTOR,
+            'failed_head': HEAD,
+            'version': 1,
+            'verdict_comment_id': 9,
+            'findings_count': 2,
+            'reviewer_text_excerpt_untrusted_data': long_body[:2000],
+        }
+        policy = {'repair_max': 2, 'review_fail_max': 3}
+        gate_result = review_repair._review_gate(
+            task, [], packet, f'pr-{PR}', policy, verdict_body=long_body
+        )
+        self.assertIsNone(gate_result)
 
 
 if __name__ == '__main__':
