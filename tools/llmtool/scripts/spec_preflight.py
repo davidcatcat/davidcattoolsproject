@@ -275,39 +275,59 @@ REPO_PATH_PATTERN = re.compile(
 )
 
 
+def _norm_path(path: Any) -> str:
+    if not isinstance(path, str):
+        return ""
+    return path.replace("\\", "/").removeprefix("./")
+
+
 def check_read_scope(spec: dict[str, Any], repo: str | Path) -> list[str]:
     """Check read scope covers acceptance paths and tests when --repo is given."""
     repo_dir = Path(repo)
-    writes = spec.get("write") if isinstance(spec.get("write"), list) else []
-    reads = spec.get("read") if isinstance(spec.get("read"), list) else []
+    raw_writes = spec.get("write")
+    if not isinstance(raw_writes, list):
+        raw_writes = spec.get("write_paths")
+    writes = raw_writes if isinstance(raw_writes, list) else []
+
+    raw_reads = spec.get("read")
+    if not isinstance(raw_reads, list):
+        raw_reads = spec.get("read_paths")
+    reads = raw_reads if isinstance(raw_reads, list) else []
+
     acceptance = spec.get("acceptance") if isinstance(spec.get("acceptance"), list) else []
 
     failures: list[str] = []
 
     has_code_write = any(
-        isinstance(w, str) and w.replace("\\", "/").endswith(".py")
-        and not w.replace("\\", "/").startswith("tools/llmtool/tests/")
+        isinstance(w, str)
+        and _norm_path(w).endswith(".py")
+        and (_norm_path(w).startswith("tools/") or _norm_path(w).startswith("scripts/"))
+        and not _norm_path(w).startswith("tools/llmtool/tests/")
         for w in writes
     )
     if has_code_write:
         has_test_module = any(
             isinstance(r, str)
-            and r.replace("\\", "/").startswith("tools/llmtool/tests/test_")
-            and r.replace("\\", "/").endswith(".py")
-            and "/" not in r.replace("\\", "/")[len("tools/llmtool/tests/test_"):]
-            and (repo_dir / r).is_file()
+            and _norm_path(r).startswith("tools/llmtool/tests/test_")
+            and _norm_path(r).endswith(".py")
+            and "/" not in _norm_path(r)[len("tools/llmtool/tests/test_"):]
+            and (repo_dir / _norm_path(r)).is_file()
             for r in reads
         )
         if not has_test_module:
             failures.append("read_no_test_module")
 
-    read_write_set = {p for p in reads if isinstance(p, str)} | {p for p in writes if isinstance(p, str)}
+    read_write_set = {
+        _norm_path(p) for p in reads if isinstance(p, str)
+    } | {
+        _norm_path(p) for p in writes if isinstance(p, str)
+    }
     missing_acceptance_path = False
     for item in acceptance:
         if not isinstance(item, str):
             continue
         for path in REPO_PATH_PATTERN.findall(item):
-            if path not in read_write_set:
+            if _norm_path(path) not in read_write_set:
                 missing_acceptance_path = True
                 break
         if missing_acceptance_path:
@@ -315,9 +335,11 @@ def check_read_scope(spec: dict[str, Any], repo: str | Path) -> list[str]:
     if missing_acceptance_path:
         failures.append("acceptance_path_not_in_read")
 
-    write_set = {p for p in writes if isinstance(p, str)}
+    write_set = {_norm_path(p) for p in writes if isinstance(p, str)}
     missing_read_path = any(
-        isinstance(r, str) and r not in write_set and not (repo_dir / r).is_file()
+        isinstance(r, str)
+        and _norm_path(r) not in write_set
+        and not (repo_dir / _norm_path(r)).exists()
         for r in reads
     )
     if missing_read_path:
@@ -424,7 +446,7 @@ def main(argv: list[str] | None = None) -> int:
                 print("SPEC_PREFLIGHT_INVALID:EDIT_LINE_HINT_MISSING:-1")
                 return 2
 
-    if repo_given and ladder_log is None:
+    if repo_given:
         scope_failures = check_read_scope(spec, repo=repo_dir)
         if scope_failures:
             print("SPEC_PREFLIGHT_FAIL:" + ",".join(scope_failures))

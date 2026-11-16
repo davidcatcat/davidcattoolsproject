@@ -244,3 +244,96 @@ class SpecPreflightReadScopeTests(unittest.TestCase):
             code, out = self._run_main(spec, repo)
             self.assertEqual(code, 1)
             self.assertEqual(out, "SPEC_PREFLIGHT_FAIL:read_no_test_module,acceptance_path_not_in_read,read_path_missing\n")
+
+    def test_main_without_repo_does_not_check_read_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            spec_file = Path(tmp) / "spec.json"
+            spec = dict(BASE_SPEC,
+                        write=["tools/llmtool/scripts/helper.py"],
+                        read=[],
+                        acceptance=["Update helper."])
+            spec_file.write_text(json.dumps(spec), encoding="utf-8")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = main([str(spec_file)])
+            self.assertEqual(code, 0)
+            self.assertEqual(buf.getvalue(), "SPEC_PREFLIGHT_OK\n")
+
+    def test_main_with_repo_and_ladder_refuses_no_test_module(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "tools" / "llmtool" / "scripts").mkdir(parents=True)
+            (repo / "tools" / "llmtool" / "scripts" / "helper.py").write_text("# h\n", encoding="utf-8")
+
+            spec_file = repo / "spec.json"
+            ladder_file = repo / "ladder.jsonl"
+            ladder_file.write_text(
+                json.dumps({"task": "task-001", "tier": 1, "attempts": 1, "outcome": "SOLVED"}) + "\n",
+                encoding="utf-8"
+            )
+
+            spec = dict(BASE_SPEC,
+                        write=["tools/llmtool/scripts/helper.py"],
+                        read=["tools/llmtool/scripts/helper.py"],
+                        acceptance=["Update tools/llmtool/scripts/helper.py."])
+            spec_file.write_text(json.dumps(spec), encoding="utf-8")
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = main([str(spec_file), "--repo", str(repo), "--ladder", str(ladder_file)])
+            self.assertEqual(code, 1)
+            self.assertEqual(buf.getvalue(), "SPEC_PREFLIGHT_FAIL:read_no_test_module\n")
+
+    def test_main_with_repo_and_ladder_passes_valid_code_spec(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "tools" / "llmtool" / "scripts").mkdir(parents=True)
+            (repo / "tools" / "llmtool" / "tests").mkdir(parents=True)
+            (repo / "tools" / "llmtool" / "scripts" / "helper.py").write_text("# h\n", encoding="utf-8")
+            (repo / "tools" / "llmtool" / "tests" / "test_helper.py").write_text("# t\n", encoding="utf-8")
+
+            spec_file = repo / "spec.json"
+            ladder_file = repo / "ladder.jsonl"
+            ladder_file.write_text(
+                json.dumps({"task": "task-001", "tier": 1, "attempts": 1, "outcome": "SOLVED"}) + "\n",
+                encoding="utf-8"
+            )
+
+            spec = dict(BASE_SPEC,
+                        write=["tools/llmtool/scripts/helper.py"],
+                        read=["tools/llmtool/scripts/helper.py", "tools/llmtool/tests/test_helper.py"],
+                        acceptance=["Update tools/llmtool/scripts/helper.py."])
+            spec_file.write_text(json.dumps(spec), encoding="utf-8")
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = main([str(spec_file), "--repo", str(repo), "--ladder", str(ladder_file)])
+            self.assertEqual(code, 0)
+            self.assertIn("SPEC_PREFLIGHT_OK:tier=", buf.getvalue())
+
+    def test_read_paths_and_write_paths_fallback_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "tools" / "llmtool" / "scripts").mkdir(parents=True)
+            (repo / "tools" / "llmtool" / "tests").mkdir(parents=True)
+            (repo / "tools" / "llmtool" / "scripts" / "helper.py").write_text("# h\n", encoding="utf-8")
+            (repo / "tools" / "llmtool" / "tests" / "test_helper.py").write_text("# t\n", encoding="utf-8")
+
+            spec = {
+                "request": "Implement formatting helper for report generation",
+                "summary": "Provide string formatting utility",
+                "goal": "Support clean report generation formatting",
+                "acceptance": ["Update tools/llmtool/scripts/helper.py."],
+                "write_paths": ["tools/llmtool/scripts/helper.py"],
+                "read_paths": ["tools/llmtool/scripts/helper.py", "tools/llmtool/tests/test_helper.py"],
+            }
+            failures = check_read_scope(spec, repo)
+            self.assertEqual(failures, [])
+
+            code, out = self._run_main(spec, repo)
+            self.assertEqual(code, 0)
+            self.assertEqual(out, "SPEC_PREFLIGHT_OK\n")
+
+
+if __name__ == "__main__":
+    unittest.main()
