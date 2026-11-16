@@ -180,10 +180,15 @@ class ReviewKindReadersTest(unittest.TestCase):
             'review_kind': 'security',
             'session_id': 'rev-sec-session',
         }
-        record_sec = dict(record, review_dispatch_claim=[sec_claim])
-        # Only security FAIL present -> _failed_event returns None
-        self.assertIsNone(
-            review_repair._failed_event(record_sec, PR_NUM, HEAD, [sec_event])
+        record_sec = dict(record, review_dispatch_claim=[sec_claim], completion_events=[sec_event])
+        # Only security FAIL present -> _failed_event raises REVIEW_FAIL_EVENT_MISSING
+        with self.assertRaises(LLMToolError) as ctx:
+            review_repair._failed_event(
+                record_sec, executor_task='d6-exec-1', pr_number=PR_NUM, github_get=None
+            )
+        self.assertEqual(
+            getattr(ctx.exception, 'review_repair_code', None),
+            'REVIEW_FAIL_EVENT_MISSING',
         )
 
     def test_blocked_fallback_reviewer_ignores_security_claim(self):
@@ -413,7 +418,7 @@ class ReviewKindReadersTest(unittest.TestCase):
         # Formal kind: version 91 raises REVIEW_VERSION_RANGE_INVALID
         with self.assertRaises(LLMToolError) as ctx:
             review_dispatch._preflight(
-                record, self.store, task_id, executor_task, PR_NUM, 91, kind='formal'
+                self.store, task_id, executor_task, PR_NUM, 91, task=record, kind='formal'
             )
         self.assertEqual(
             getattr(ctx.exception, 'review_dispatch_code', None),
@@ -423,7 +428,7 @@ class ReviewKindReadersTest(unittest.TestCase):
         # Security kind: version 1 raises REVIEW_VERSION_RANGE_INVALID
         with self.assertRaises(LLMToolError) as ctx:
             review_dispatch._preflight(
-                record, self.store, task_id, executor_task, PR_NUM, 1, kind='security'
+                self.store, task_id, executor_task, PR_NUM, 1, task=record, kind='security'
             )
         self.assertEqual(
             getattr(ctx.exception, 'review_dispatch_code', None),
@@ -433,7 +438,7 @@ class ReviewKindReadersTest(unittest.TestCase):
         # Security kind: version 10000 raises REVIEW_VERSION_RANGE_INVALID
         with self.assertRaises(LLMToolError) as ctx:
             review_dispatch._preflight(
-                record, self.store, task_id, executor_task, PR_NUM, 10000, kind='security'
+                self.store, task_id, executor_task, PR_NUM, 10000, task=record, kind='security'
             )
         self.assertEqual(
             getattr(ctx.exception, 'review_dispatch_code', None),
@@ -447,14 +452,16 @@ class ReviewKindReadersTest(unittest.TestCase):
         prior_formal_claim = {
             'pr': PR_NUM,
             'head_sha': HEAD,
-            'version': 1,
+            'version': 91,
+            'executor_task': 'd6-exec-1',
             'state': 'CLAIMED',
             'review_kind': 'formal',
         }
         self.store.update(task_id, review_dispatch_claim=prior_formal_claim)
 
+        preflight_val = (record, SimpleNamespace(root='/fake/root'), HEAD, 'b' * 40, 'claude-reviewer')
         # Dispatch security review when prior claim is formal
-        with patch.object(review_dispatch, '_preflight', return_value=None):
+        with patch.object(review_dispatch, '_preflight', return_value=preflight_val):
             with self.assertRaises(LLMToolError) as ctx:
                 review_dispatch.dispatch_review(
                     store=self.store,

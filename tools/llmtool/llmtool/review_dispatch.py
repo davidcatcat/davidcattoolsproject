@@ -17,7 +17,7 @@ import sys
 import time
 
 from .errors import LLMToolError
-from . import developer_routes, github_identity, role_config, skill_manifest, task_completion, worker_dispatch
+from . import developer_routes, github_identity, review_result, role_config, skill_manifest, task_completion, worker_dispatch
 
 
 # #1502 WP-E R1: the fallbacks equal the roles registry's listed models and,
@@ -225,6 +225,16 @@ def _resolve_github_login():
 
 def _preflight(store, task_id, executor_task, pr_number, version, *, task=None,
                reviewer=None, kind='formal'):
+    if type(version) is not int:
+        _refuse('REVIEW_PROMPT_BINDING_MISSING')
+    if kind == 'formal':
+        if not 1 <= version <= 90:
+            _refuse('REVIEW_VERSION_RANGE_INVALID')
+    elif kind == 'security':
+        if not 91 <= version <= 9999:
+            _refuse('REVIEW_VERSION_RANGE_INVALID')
+    else:
+        _refuse('REVIEW_VERSION_RANGE_INVALID')
     if task is None:
         task = store.get(task_id)
     if (type(task.get('developer')) is dict and
@@ -282,16 +292,6 @@ def _preflight(store, task_id, executor_task, pr_number, version, *, task=None,
     if (type(base) is not dict or type(base.get('sha')) is not str or
             re.fullmatch(r'[0-9a-f]{40}', base['sha']) is None):
         _refuse('REVIEW_PROMPT_PR_UNAVAILABLE')
-    if type(version) is not int or not 1 <= version <= 9999:
-        _refuse('REVIEW_PROMPT_BINDING_MISSING')
-    if kind == 'formal':
-        if not 1 <= version <= 90:
-            _refuse('REVIEW_VERSION_RANGE_INVALID')
-    elif kind == 'security':
-        if not 91 <= version <= 9999:
-            _refuse('REVIEW_VERSION_RANGE_INVALID')
-    else:
-        _refuse('REVIEW_VERSION_RANGE_INVALID')
     return task, executor, head, base['sha'], reviewer_key
 
 
