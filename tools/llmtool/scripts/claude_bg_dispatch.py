@@ -96,6 +96,9 @@ PROMPT_LIMIT = 64 * 1024
 # guard, not a containment boundary. #1502 WP-H E7: Skill is denied too, so
 # project skills under .claude/skills cannot steer the Reviewer.
 REVIEWER_DISALLOWED_TOOLS_ARG = "--disallowedTools=Edit,Write,NotebookEdit,Skill"
+# #1502 WP-H E7 prerequisite 3: every other launched role (every Claude
+# Developer name) is denied Skill too, so project skills cannot steer it either.
+SKILL_DISALLOWED_TOOLS_ARG = "--disallowedTools=Skill"
 # There is no backward clock tolerance: the launch time is taken before
 # `claude` runs, so every event of this dispatch is stamped at or after it,
 # and anything earlier (e.g. resumed history) could be mistaken for a receipt.
@@ -459,7 +462,8 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
         "launched_at": None, "receipt_at": None, "status": None, "state": None,
         "first_action": None, "stop": {"attempted": False}, "warnings": [],
     }
-    tool_limit = [REVIEWER_DISALLOWED_TOOLS_ARG] if role == "claude-reviewer" else []
+    tool_limit = ([REVIEWER_DISALLOWED_TOOLS_ARG] if role == "claude-reviewer"
+                  else [SKILL_DISALLOWED_TOOLS_ARG])
     model_args = ["--model", launch_model] if launch_model is not None else []
     argv = ([claude, "--bg"] + session_args + model_args + tool_limit +
             # `--add-dir` is variadic: `--` ends it so the prompt stays the prompt.
