@@ -147,14 +147,19 @@ def audit(comments: list[dict], since: str, until: str, chat=None, effective_tas
         elif (marker.get("actor") == "PM" and
               marker.get("target") == "Owner" and status in ("WAITING", "BLOCKED", "UNKNOWN")):
             candidates.append(c)
+        elif marker.get("target") == "Owner" and status in NOTICE_STATUSES:
+            notices += 1
         elif m_type == "audit_correction":
             corrections.append(str(c.get("body", "")))
 
-    counted, corrected = [], 0
-    for c in candidates:
+    counted, corrected, keys, duplicates = [], 0, set(), 0
+    for c in sorted(candidates, key=lambda item: str(item.get("created_at", ""))):
         if any(str(c.get("id", "")) in body for body in corrections):
             corrected += 1
+        elif _ask_key(c) in keys:
+            duplicates += 1
         else:
+            keys.add(_ask_key(c))
             counted.append(c)
 
     rows: dict[str, int] = {}
@@ -179,7 +184,9 @@ def audit(comments: list[dict], since: str, until: str, chat=None, effective_tas
         "window": [since, until], "comments": len(window_comments), "asks": asks,
         "misused": misused, "corrected": corrected, "gated": gated, "ungated": ungated,
         "rows": rows, "r_other_ratio": ratio, "r_other_over_limit": ratio > 0.10, "items": items,
-        "owner_wait": owner_wait(comments, counted),
+        "owner_wait": owner_wait(comments, counted), "notices": notices,
+        "duplicates": duplicates, "chat": chat_summary(chat, counted),
+        "metrics": metrics(counted, gated, ungated, rows, chat, effective_tasks),
     }
 
 
