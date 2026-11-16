@@ -7524,6 +7524,11 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment):
                 raise ValueError
         except (TypeError, ValueError):
             raise ValueError from None
+        if isinstance(newest_assignment, str):
+            try:
+                newest_assignment = datetime.strptime(newest_assignment, '%Y-%m-%dT%H:%M:%SZ')
+            except (TypeError, ValueError):
+                raise ValueError from None
         if newest_assignment is None or recorded_stamp <= newest_assignment:
             raise ValueError
         # High Debug D6 names are derived from their executor D6, attempt

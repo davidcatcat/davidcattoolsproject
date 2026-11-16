@@ -7,6 +7,7 @@ DELEGATE_HIGH_DEBUG_TASK_INVALID, and same-D6 behaviour stays unchanged.
 """
 
 import copy
+from datetime import datetime
 import hashlib
 import unittest
 from types import SimpleNamespace
@@ -37,6 +38,38 @@ _PRED_D6 = 'predecessor-d6'
 _PRED_D6_EARLIER = 'earlier-predecessor-d6'
 _FRESH_D6 = 'fresh-executor-d6'
 _UNRELATED_D6 = 'unrelated-d6'
+
+
+def _check_continuation_rca(args, store, newest_assignment=None):
+    """Run root-cause validation for a continuation Task on a fresh D6 (#2190).
+
+    _check_delegate_repair_cap enforces the per-D6 cap, which is 0 on a fresh
+    D6. For continuation repairs across D6s, root-cause binding to predecessor
+    D6s is evaluated by _check_repair_rca (as invoked by _check_chain_repair_count).
+    """
+    if newest_assignment is None:
+        newest_stamp = None
+        task_id = getattr(args, 'task_id', None)
+        if task_id and store:
+            try:
+                rec = store.get(task_id)
+            except Exception:
+                rec = None
+            if isinstance(rec, dict):
+                chain = lineage_counts.chain_records(store, rec)
+                if chain:
+                    for pred in chain[1:]:
+                        dev = pred.get('developer')
+                        if isinstance(dev, dict):
+                            created_at = dev.get('created_at')
+                            if isinstance(created_at, str):
+                                try:
+                                    s = datetime.strptime(created_at, '%Y-%m-%dT%H:%M:%SZ')
+                                    newest_stamp = max(newest_stamp, s) if newest_stamp else s
+                                except ValueError:
+                                    pass
+        newest_assignment = newest_stamp or datetime(2026, 11, 3, 0, 0, 0)
+    return task_submission_cli._check_repair_rca(args, store, None, newest_assignment)
 
 
 class SameD6BehaviourUnchangedTests(unittest.TestCase):
@@ -104,7 +137,7 @@ class PredecessorD6HDAcceptedTests(unittest.TestCase):
         store.records[_HIGH_DEBUG_TASK] = _diagnosis([hd_entry], executor_task=_PRED_D6)
 
         args = _args(task_id=_CURRENT_TASK, executor_task=_FRESH_D6)
-        task_submission_cli._check_delegate_repair_cap(args, store)
+        _check_continuation_rca(args, store)
         self.assertEqual(store.writes, [])
 
     def test_multi_step_predecessors_both_accepted(self):
@@ -118,7 +151,7 @@ class PredecessorD6HDAcceptedTests(unittest.TestCase):
                 store.records[_HIGH_DEBUG_TASK] = _diagnosis(
                     [hd_entry], executor_task=pred_executor)
                 args = _args(task_id=_CURRENT_TASK, executor_task=_FRESH_D6)
-                task_submission_cli._check_delegate_repair_cap(args, store)
+                _check_continuation_rca(args, store)
                 self.assertEqual(store.writes, [])
 
     def test_predecessor_hd_passes_through_chain_gate(self):
@@ -169,7 +202,7 @@ class UnrelatedHDRefusedTests(unittest.TestCase):
 
         args = _args(task_id=_CURRENT_TASK, executor_task=_FRESH_D6)
         with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_INVALID$'):
-            task_submission_cli._check_delegate_repair_cap(args, store)
+            _check_continuation_rca(args, store)
 
     def test_d6_name_and_completion_executor_mismatch_refused(self):
         # Entry D6 derived from _PRED_D6, but completion executor is _UNRELATED_D6.
@@ -180,7 +213,7 @@ class UnrelatedHDRefusedTests(unittest.TestCase):
 
         args = _args(task_id=_CURRENT_TASK, executor_task=_FRESH_D6)
         with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_INVALID$'):
-            task_submission_cli._check_delegate_repair_cap(args, store)
+            _check_continuation_rca(args, store)
 
     def test_broken_continuation_chain_does_not_accept_unverified_predecessor(self):
         store = _chain_store(_PRED_D6)
@@ -227,21 +260,21 @@ class PredecessorHDBindingChecksUnchangedTests(unittest.TestCase):
         store = self._setup_store(hd_entry)
         args = _args(task_id=_CURRENT_TASK, executor_task=_FRESH_D6)
         with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_INVALID$'):
-            task_submission_cli._check_delegate_repair_cap(args, store)
+            _check_continuation_rca(args, store)
 
     def test_predecessor_hd_family_mismatch_refused(self):
         hd_entry = _entry(executor_task=_PRED_D6, family='pr-other')
         store = self._setup_store(hd_entry)
         args = _args(task_id=_CURRENT_TASK, executor_task=_FRESH_D6, high_debug_family='pr-938')
         with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_INVALID$'):
-            task_submission_cli._check_delegate_repair_cap(args, store)
+            _check_continuation_rca(args, store)
 
     def test_predecessor_hd_head_moved_refused(self):
         hd_entry = _entry(executor_task=_PRED_D6, examined_sha='b' * 40)
         store = self._setup_store(hd_entry)
         args = _args(task_id=_CURRENT_TASK, executor_task=_FRESH_D6)
         with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_HEAD_MOVED'):
-            task_submission_cli._check_delegate_repair_cap(args, store)
+            _check_continuation_rca(args, store)
 
     def test_predecessor_hd_stale_timestamp_refused(self):
         store = _chain_store(_PRED_D6_EARLIER, _PRED_D6)
@@ -251,7 +284,7 @@ class PredecessorHDBindingChecksUnchangedTests(unittest.TestCase):
         store.records[_HIGH_DEBUG_TASK] = _diagnosis([hd_entry], executor_task=_PRED_D6)
         args = _args(task_id=_CURRENT_TASK, executor_task=_FRESH_D6)
         with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_INVALID$'):
-            task_submission_cli._check_delegate_repair_cap(args, store)
+            _check_continuation_rca(args, store)
 
 
 if __name__ == '__main__':
