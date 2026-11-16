@@ -163,22 +163,38 @@ class AgyBlockedReasonRedactionTests(unittest.TestCase):
 
     def test_run_route_failed_agy_run_stores_no_stderr_in_blocked_reason(self):
         sensitive_stderr = b'INTERNAL ERROR: proprietary transaction failure on account record 54321'
+        # A parseable AGY result (valid conversation_id, non-quota status) so
+        # the run reaches the exit-code check instead of AGY_OUTPUT_INVALID.
+        stdout = json.dumps({'conversation_id': 'conv-test-0001',
+                             'status': 'ERROR'}).encode('utf-8')
 
         def runner(argv, cwd, env, timeout):
             Path(argv[argv.index('--log-file') + 1]).write_text(self.log.read_text())
-            return 3, b'', sensitive_stderr
+            return 3, stdout, sensitive_stderr
 
-        with mock.patch.object(self.route, 'verified_model', wraps=self.route.verified_model):
+        with mock.patch.object(self.route, 'verified_model',
+                               wraps=self.route.verified_model) as verified:
             with self.assertRaises(RouteError) as caught:
                 run_route(self.route, self.request(), gate=lambda: True,
                           runner=runner, boundary=Boundary(True),
                           snapshot=capture_snapshot)
+        verified.assert_called_once()
 
-        self.assertEqual(caught.exception.code, 'AGY_EXIT_NONZERO')
-        self.assertEqual(caught.exception.blocked_reason, 'exit_code=3')
-        self.assertNotIn('INTERNAL', caught.exception.blocked_reason)
-        self.assertNotIn('proprietary', caught.exception.blocked_reason)
-        self.assertNotIn('54321', caught.exception.blocked_reason)
+        exc = caught.exception
+        self.assertEqual(exc.code, 'AGY_EXIT_NONZERO')
+        self.assertEqual(exc.blocked_reason, 'exit_code=3')
+        self.assertEqual(exc.execution_facts['process_exit_code'], 3)
+        # No stderr text in any field the caller may persist.
+        persisted = json.dumps([exc.blocked_reason, exc.observed_facts, exc.progress,
+                                exc.provider_evidence, exc.execution_facts])
+        for fragment in ('INTERNAL', 'proprietary', 'transaction', '54321'):
+            self.assertNotIn(fragment, persisted)
+
+        # The reason the route produced is accepted by the TaskStore write check.
+        dev = make_agy_developer('2' * 32, blocked_reason=exc.blocked_reason)
+        record = make_task_record('0' * 32, '1' * 32, developer=dev)
+        self.assertEqual(_validate(record, strict=True)['developer']['blocked_reason'],
+                         'exit_code=3')
 
     def test_task_store_strict_validation_accepts_clean_exit_code_and_refuses_stderr_tail(self):
         task_id = '0' * 32
@@ -227,15 +243,31 @@ class AgyBlockedReasonRedactionTests(unittest.TestCase):
     def test_task_store_file_persistence_and_existing_records_readable(self):
         store_root = self.temp_root / 'store'
         store = TaskStore(root=store_root)
+        store._ensure_root()
+
+        # TaskStore.create runs the dispatch gate on a created developer, which
+        # is not under test here. _write is the store's own persistence path: it
+        # runs the strict write-time validation and the atomic 0600 file write.
 
         # 1. Storing a new record with clean exit_code blocked_reason succeeds.
         task_id_new = 'a' * 32
         run_id_new = 'b' * 32
         dev_new = make_agy_developer('c' * 32, blocked_reason='exit_code=2')
         record_new = make_task_record(task_id_new, run_id_new, developer=dev_new)
-        store.create(record_new)
+        store._write(record_new, create=True)
         fetched_new = store.get(task_id_new)
         self.assertEqual(fetched_new['developer']['blocked_reason'], 'exit_code=2')
+
+        # A new record carrying free-form stderr text is refused and not stored.
+        task_id_bad = 'd' * 32
+        dev_bad = make_agy_developer(
+            '9' * 32, blocked_reason='exit_code=1 stderr_tail=customer account error')
+        record_bad = make_task_record(task_id_bad, '8' * 32, developer=dev_bad)
+        with self.assertRaises(LLMToolError):
+            store._write(record_bad, create=True)
+        self.assertFalse((store_root / f'{task_id_bad}.json').exists())
+        self.assertEqual(sorted(path.name for path in store_root.iterdir()),
+                         [f'{task_id_new}.json'])
 
         # 2. Writing an old-format record directly to disk simulating historical storage.
         task_id_old = 'e' * 32
@@ -266,7 +298,10 @@ class AgyBlockedReasonRedactionTests(unittest.TestCase):
         task_id = '3' * 32
         run_id = '4' * 32
 
-        # Claude isolation block.
+        # Claude isolation block: the Claude CLI developer shape (execution,
+        # owner_assignment_ref, executor_task_id and a direct_result_callback
+        # still waiting for the executor).
+        contract_digest = make_task_record(task_id, run_id)['task_binding']['contract_digest']
         claude_dev = {
             'assignment_id': '5' * 32,
             'selection_source': 'PM',
@@ -292,8 +327,27 @@ class AgyBlockedReasonRedactionTests(unittest.TestCase):
             'write_paths': ['source.py'],
             'acceptance': ['test acceptance'],
             'owner_assignment_ref': None,
+            'execution': None,
             'executor_task_id': 'd6-task-1',
-            'direct_result_callback': {'executor_task_id': 'd6-task-1'},
+            'direct_result_callback': {
+                'state': 'WAITING_EXECUTOR',
+                'executor_task_id': 'd6-task-1',
+                'evidence': {
+                    'task_id': task_id,
+                    'run_id': run_id,
+                    'contract_digest': contract_digest,
+                    'executor_task_id': 'd6-task-1',
+                    'source_sha': '0' * 40,
+                    'execution_mode': 'DIRECT_D6',
+                    'verification_state': 'NOT_STARTED',
+                },
+                'missing_gates': [],
+                'pm_dispatch': 'NOT_STARTED',
+                'pm_response': None,
+                'pm_recommendation': None,
+                'pm_usage': None,
+                'pm_error_code': None,
+            },
             'blocked_reason': 'BOUNDARY_UNVERIFIED',
         }
         claude_record = make_task_record(task_id, run_id, developer=claude_dev)
