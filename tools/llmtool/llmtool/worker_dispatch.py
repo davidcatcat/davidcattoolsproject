@@ -678,19 +678,26 @@ _START_RETRY_EMPTY_FIELDS = (
 )
 
 
-def _start_retry_valid(current, changes, expected, old, new):
+def _start_retry_valid(current, changes, expected, old, new, d6_unchanged=None):
     """#2188 design section 3: one Claude start failure D re-dispatched as a new assignment.
 
-    Checks the recorded evidence only (section 2 checks 1-5). The live D6
-    check 6 belongs to the CLI, as the role-timeout retry keeps its fresh D6
-    check out of the gate. Any check that cannot be made fails."""
+    Checks section 2 checks 1-6. Live D6 check 6 requires an injected
+    d6_unchanged probe that returns True; an unknown, raising or failing probe
+    refuses (fail closed). Any check that cannot be made fails."""
+    probe = d6_unchanged
+    if probe is None and type(expected) is dict:
+        probe = expected.get('d6_unchanged')
+    try:
+        valid_start = start_failure.classify(current, probe).start_failure
+    except Exception:
+        valid_start = False
     if not (type(current) is dict and type(changes) is dict and
             type(old) is dict and type(new) is dict and
             type(expected) is dict and
             'developer' in expected and expected['developer'] == old and
             'completion' in expected and
             expected['completion'] == current.get('completion') and
-            start_failure.record_checks(current).start_failure and
+            valid_start and
             set(changes) == {'developer', 'start_failures'} and
             new.get('state') == 'DEVELOPER_PENDING' and
             all(field in new and new[field] is None for field in _START_RETRY_EMPTY_FIELDS) and
@@ -868,7 +875,7 @@ def worker_key_for(provider_profile):
     return None
 
 
-def authorize_task_store_change(current, changes, expected=None):
+def authorize_task_store_change(current, changes, expected=None, d6_unchanged=None):
     """Atomically audit every policy result before a TaskStore transition."""
     attempts = task_store_attempts(current, changes)
     if not attempts:
@@ -943,7 +950,8 @@ def authorize_task_store_change(current, changes, expected=None):
             # #2188 design section 3: the Owner policy above, then the recorded
             # start failure, then the per-Task cap of earlier ALLOWED retries.
             if not _start_retry_valid(current, changes, expected,
-                                      old_developer, new_developer):
+                                      old_developer, new_developer,
+                                      d6_unchanged=d6_unchanged):
                 decision = PolicyDecision(worker_key, False,
                                           'WORKER_START_RETRY_PRECONDITION',
                                           decision.policy_sha256)

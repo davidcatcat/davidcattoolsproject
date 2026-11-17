@@ -192,7 +192,7 @@ class StartFailureStoreTests(unittest.TestCase):
         self._fail_start(task['task_id'], code)
         return task['task_id']
 
-    def _retry(self, task_id, *, entry_overrides=None, **changes):
+    def _retry(self, task_id, *, entry_overrides=None, d6_unchanged=None, **changes):
         current = self.store.get(task_id)
         failed = current['developer']
         retry = retry_of(failed)
@@ -200,10 +200,13 @@ class StartFailureStoreTests(unittest.TestCase):
         values = {'developer': retry,
                   'start_failures': current.get('start_failures', []) + [entry]}
         values.update(changes)
+        if d6_unchanged is None:
+            d6_unchanged = lambda source, write_paths=None: True
         return self.store.d6_bind_compare_and_update(
             task_id, executor_task_id=D6,
             expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': failed,
-                      'completion': current['completion']},
+                      'completion': current['completion'],
+                      'd6_unchanged': d6_unchanged},
             **values)
 
     def assertStoreCode(self, caught, code):
@@ -269,13 +272,42 @@ class StartFailureStoreTests(unittest.TestCase):
         with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
             self.store.d6_bind_compare_and_update(
                 task_id, executor_task_id=D6,
-                expected={'developer': failed, 'completion': current['completion']},
+                expected={'developer': failed, 'completion': current['completion'],
+                          'd6_unchanged': lambda s, write_paths=None: True},
                 developer=retry, start_failures=[dict(stored[0], d6_head='d' * 40),
                                                  archive_entry(current, failed, retry)])
         self.assertEqual(caught.exception.dispatch_code, 'WORKER_START_RETRY_PRECONDITION')
         saved = self.store.get(task_id)
         self.assertEqual(saved['start_failures'], stored)
         self.assertEqual(saved['developer'], failed)
+
+    def test_store_retry_refuses_when_d6_probe_fails_or_missing(self):
+        task_id = self._failed_task()
+        # Changed D6 probe refuses
+        with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
+            self._retry(task_id, d6_unchanged=lambda s, write_paths=None: False)
+        self.assertEqual(caught.exception.dispatch_code, 'WORKER_START_RETRY_PRECONDITION')
+        self.assertEqual(self.store.get(task_id)['dispatch_audit'][-1]['decision'], 'BLOCKED')
+
+        # Raising probe refuses
+        def raising(s, write_paths=None):
+            raise RuntimeError('probe failed')
+        with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
+            self._retry(task_id, d6_unchanged=raising)
+        self.assertEqual(caught.exception.dispatch_code, 'WORKER_START_RETRY_PRECONDITION')
+        self.assertEqual(self.store.get(task_id)['dispatch_audit'][-1]['decision'], 'BLOCKED')
+
+        # Missing probe in raw call refuses
+        current = self.store.get(task_id)
+        failed = current['developer']
+        retry = retry_of(failed)
+        with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
+            self.store.d6_bind_compare_and_update(
+                task_id, executor_task_id=D6,
+                expected={'developer': failed, 'completion': current['completion']},
+                developer=retry, start_failures=[archive_entry(current, failed, retry)])
+        self.assertEqual(caught.exception.dispatch_code, 'WORKER_START_RETRY_PRECONDITION')
+        self.assertEqual(self.store.get(task_id)['dispatch_audit'][-1]['decision'], 'BLOCKED')
 
     def test_entry_that_does_not_archive_the_stored_developer_is_refused(self):
         task_id = self._failed_task()

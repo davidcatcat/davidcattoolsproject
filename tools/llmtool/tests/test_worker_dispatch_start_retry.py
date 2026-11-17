@@ -116,7 +116,7 @@ class StartRetryGateTests(unittest.TestCase):
         worker_policy_fixture.set_dispatch(self.policy, worker, state)
         worker_policy_fixture.write(self.policy_path, self.policy)
 
-    def _case(self, *, failed=None, stored=None, audit=None):
+    def _case(self, *, failed=None, stored=None, audit=None, probe=None):
         failed = blocked(claude_developer()) if failed is None else failed
         current = {'task_id': new_id(), 'record_sha256': 'e' * 64,
                    'task_binding': {'contract_digest': CONTRACT},
@@ -127,12 +127,16 @@ class StartRetryGateTests(unittest.TestCase):
         retry = retry_of(failed)
         changes = {'developer': retry,
                    'start_failures': list(stored or []) + [archive_entry(current, failed, retry)]}
+        if probe is None:
+            probe = lambda source_sha, write_paths=None: True
         expected = {'developer': copy.deepcopy(failed),
-                    'completion': copy.deepcopy(current['completion'])}
+                    'completion': copy.deepcopy(current['completion']),
+                    'd6_unchanged': probe}
         return current, changes, expected
 
-    def _decide(self, current, changes, expected):
-        denial = worker_dispatch.authorize_task_store_change(current, changes, expected)
+    def _decide(self, current, changes, expected, d6_unchanged=None):
+        denial = worker_dispatch.authorize_task_store_change(
+            current, changes, expected, d6_unchanged=d6_unchanged)
         return (None if denial is None else denial.dispatch_code), current['dispatch_audit'][-1]
 
     def test_valid_retry_is_allowed_and_audited_under_the_new_binding(self):
@@ -165,20 +169,63 @@ class StartRetryGateTests(unittest.TestCase):
                          ('START_RETRY', 'BLOCKED', 'WORKER_START_RETRY_PRECONDITION'))
 
     def test_unbound_expected_refuses_precondition(self):
+        probe = lambda source_sha, write_paths=None: True
         for name, build in (
                 ('no expected', lambda failed, completion: None),
-                ('no developer', lambda failed, completion: {'completion': completion}),
-                ('no completion', lambda failed, completion: {'developer': failed}),
+                ('no developer', lambda failed, completion: {'completion': completion, 'd6_unchanged': probe}),
+                ('no completion', lambda failed, completion: {'developer': failed, 'd6_unchanged': probe}),
                 ('other developer', lambda failed, completion: {
                     'developer': dict(failed, error_code='CLAUDE_ENV_INVALID'),
-                    'completion': completion}),
+                    'completion': completion, 'd6_unchanged': probe}),
                 ('other completion', lambda failed, completion: {
-                    'developer': failed, 'completion': dict(completion, state='WAITING_PM')})):
+                    'developer': failed, 'completion': dict(completion, state='WAITING_PM'),
+                    'd6_unchanged': probe})):
             with self.subTest(case=name):
                 current, changes, _expected = self._case()
                 self._assert_precondition(current, changes, build(
                     copy.deepcopy(current['developer']),
                     copy.deepcopy(current['completion'])))
+
+    def test_live_d6_unchanged_probe_enforced_by_gate(self):
+        # Pass: a probe that returns True allows START_RETRY.
+        current, changes, expected = self._case(probe=lambda s, write_paths=None: True)
+        self.assertIsNone(self._decide(current, changes, expected)[0])
+
+        # Changed D6: a probe that returns False refuses WORKER_START_RETRY_PRECONDITION.
+        current, changes, expected = self._case(probe=lambda s, write_paths=None: False)
+        self._assert_precondition(current, changes, expected)
+
+        # Raising probe: refuses WORKER_START_RETRY_PRECONDITION (fail closed).
+        def raising_probe(s, write_paths=None):
+            raise RuntimeError('probe failed')
+        current, changes, expected = self._case(probe=raising_probe)
+        self._assert_precondition(current, changes, expected)
+
+        # Unknown / missing probe: refuses WORKER_START_RETRY_PRECONDITION (fail closed).
+        current, changes, expected = self._case()
+        del expected['d6_unchanged']
+        self._assert_precondition(current, changes, expected)
+
+        # None / non-True probe: refuses WORKER_START_RETRY_PRECONDITION.
+        for bad_probe in (lambda s, write_paths=None: None,
+                          lambda s, write_paths=None: 1,
+                          lambda s, write_paths=None: 'true'):
+            with self.subTest(bad_probe=bad_probe):
+                current, changes, expected = self._case(probe=bad_probe)
+                self._assert_precondition(current, changes, expected)
+
+        # Explicit d6_unchanged argument passed to authorize_task_store_change.
+        current, changes, expected = self._case()
+        del expected['d6_unchanged']
+        denial, _ = self._decide(current, changes, expected,
+                                 d6_unchanged=lambda s, write_paths=None: True)
+        self.assertIsNone(denial)
+        denial, entry = self._decide(current, changes, expected,
+                                     d6_unchanged=lambda s, write_paths=None: False)
+        self.assertEqual(denial, 'WORKER_START_RETRY_PRECONDITION')
+        denial, entry = self._decide(current, changes, expected,
+                                     d6_unchanged=raising_probe)
+        self.assertEqual(denial, 'WORKER_START_RETRY_PRECONDITION')
 
     def test_non_start_code_and_native_session_refuse_precondition(self):
         for code in sorted(start_failure.NEVER_START_FAILURE_CODES) + ['CLAUDE_TIMEOUT']:
@@ -441,7 +488,8 @@ class StartRetryStoreFlowTests(unittest.TestCase):
         saved = self.store.d6_bind_compare_and_update(
             task_id, executor_task_id=D6,
             expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': failed,
-                      'completion': current['completion']},
+                      'completion': current['completion'],
+                      'd6_unchanged': lambda s, write_paths=None: True},
             developer=retry, start_failures=[archive_entry(current, failed, retry)])
         entry = saved['dispatch_audit'][-1]
         self.assertEqual((entry['action'], entry['decision'], entry['assignment_id']),
@@ -473,7 +521,8 @@ class StartRetryStoreFlowTests(unittest.TestCase):
         with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
             self.store.d6_bind_compare_and_update(
                 task_id, executor_task_id=D6,
-                expected={'developer': failed, 'completion': current['completion']},
+                expected={'developer': failed, 'completion': current['completion'],
+                          'd6_unchanged': lambda s, write_paths=None: True},
                 developer=retry, start_failures=[archive_entry(current, failed, retry)])
         self.assertEqual(caught.exception.dispatch_code, 'WORKER_START_RETRY_PRECONDITION')
         saved = self.store.get(task_id)

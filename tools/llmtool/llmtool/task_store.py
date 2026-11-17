@@ -4233,7 +4233,7 @@ class TaskStore:
             os.close(directory)
 
     def _d6_bind(self, task_id, *, executor_task_id, expected, holds,
-                 abandoned_target_code, **changes):
+                 abandoned_target_code, d6_unchanged=None, **changes):
         if (type(executor_task_id) is not str or not executor_task_id or
                 type(expected) is not dict or not expected):
             _fail('TASK_D6_BINDING_SCAN_FAILED')
@@ -4248,7 +4248,8 @@ class TaskStore:
             _fail('TASK_D6_BINDING_SCAN_FAILED')
         if target.get('abandonment') is not None:
             _fail(abandoned_target_code)
-        if any(target.get(key) != value for key, value in expected.items()):
+        if any(target.get(key) != value for key, value in expected.items()
+               if key != 'd6_unchanged'):
             raise TaskStoreConflict() from None
 
         def commit(claims):
@@ -4260,7 +4261,8 @@ class TaskStore:
                 update_expected['record_sha256'] = target['record_sha256']
                 try:
                     return self._update(task_id, expected=update_expected,
-                                        changes=dict(changes), d6_claims=claims)
+                                        changes=dict(changes), d6_claims=claims,
+                                        d6_unchanged=d6_unchanged)
                 except TaskStoreConflict:
                     if self.get(task_id).get('abandonment') is not None:
                         _fail(abandoned_target_code)
@@ -4273,20 +4275,22 @@ class TaskStore:
         return self._d6_commit(task_id, frozenset((executor_task_id,)), holds, commit)
 
     def claude_bind_compare_and_update(self, task_id, *, executor_task_id,
-                                       expected, **changes):
+                                       expected, d6_unchanged=None, **changes):
         """Atomically ensure a D6 is not already held by another live Task."""
         return self._d6_bind(
             task_id, executor_task_id=executor_task_id, expected=expected,
             holds=self._claude_bind_holds,
-            abandoned_target_code='CLAUDE_TASK_ABANDONED', **changes)
+            abandoned_target_code='CLAUDE_TASK_ABANDONED',
+            d6_unchanged=d6_unchanged, **changes)
 
     def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
-                                   expected, **changes):
+                                   expected, d6_unchanged=None, **changes):
         """Atomically bind a direct-route Task to an available D6 executor."""
         return self._d6_bind(
             task_id, executor_task_id=executor_task_id, expected=expected,
             holds=self._d6_bind_holds,
-            abandoned_target_code='TASK_D6_ALREADY_BOUND', **changes)
+            abandoned_target_code='TASK_D6_ALREADY_BOUND',
+            d6_unchanged=d6_unchanged, **changes)
 
     def record_published_pr(self, task_id, pr, head_sha):
         """Record or replace the PR linked to this Task's published HEAD."""
@@ -5579,21 +5583,24 @@ class TaskStore:
                               current['task_id'], line['split_op']):
             _fail('SPLIT_COMMITTED')
 
-    def _update(self, task_id, *, expected, changes, d6_claims=None, **trusted):
+    def _update(self, task_id, *, expected, changes, d6_claims=None,
+                d6_unchanged=None, **trusted):
         """Commit one change; a commit gaining a live D6 goes through ``_d6_commit``."""
         if d6_claims is not None:
             return self._update_record(task_id, expected=expected, changes=changes,
-                                       d6_claims=d6_claims, **trusted)
+                                       d6_claims=d6_claims, d6_unchanged=d6_unchanged,
+                                       **trusted)
         try:
             return self._update_record(task_id, expected=expected, changes=changes,
-                                       d6_claims=frozenset(), **trusted)
+                                       d6_claims=frozenset(), d6_unchanged=d6_unchanged,
+                                       **trusted)
         except _D6ClaimRequired as required:
             claims = required.claims
         return self._d6_commit(
             task_id, claims, self._d6_bind_holds,
             lambda authorized: self._update_record(
                 task_id, expected=expected, changes=changes,
-                d6_claims=authorized, **trusted))
+                d6_claims=authorized, d6_unchanged=d6_unchanged, **trusted))
 
     def _update_record(self, task_id, *, expected, changes, d6_claims, claim_recovery=None,
                        trusted_dispatch_audit=False,
@@ -5601,7 +5608,8 @@ class TaskStore:
                        abandonment_pm_session_id=None, trusted_pm_session_adoption=False,
                        trusted_codex_launch=False, trusted_opencode_launch=False,
                        trusted_split=None, split_child_max=None, high_debug_finalize=None,
-                       trusted_file_ops_evidence=False, trusted_file_ops_reservation=False):
+                       trusted_file_ops_evidence=False, trusted_file_ops_reservation=False,
+                       d6_unchanged=None):
         # Refused here, not by the writable-field check: the dispatch gate
         # before that check can write its audit to the record.
         if _D6_CLAIM_ARGUMENTS & set(changes):
@@ -5724,7 +5732,8 @@ class TaskStore:
                 _fail('TASK_LINEAGE_PENDING')
             _check_lineage_merge_claim(current, changes)
             if expected is not None and any(current.get(key) != value
-                                            for key, value in expected.items()):
+                                            for key, value in expected.items()
+                                            if key != 'd6_unchanged'):
                 raise TaskStoreConflict() from None
             if claim_recovery is not None:
                 # #1928: E1-E5 on the record read under this lock; the change is built here.
@@ -5971,7 +5980,8 @@ class TaskStore:
                         'WORKER_DISPATCH_AUDIT_UNAVAILABLE') from None
                 raise worker_dispatch.WorkerDispatchDenied(
                     'WORKER_ASSIGNMENT_CLEAR_FORBIDDEN')
-            dispatch_denial = worker_dispatch.authorize_task_store_change(current, changes, expected)
+            dispatch_denial = worker_dispatch.authorize_task_store_change(
+                current, changes, expected, d6_unchanged=d6_unchanged)
             if dispatch_denial is not None:
                 _check_audit_append_only(stored_audit, current.get('dispatch_audit', []))
                 current['updated_at'] = datetime.now(timezone.utc).replace(
