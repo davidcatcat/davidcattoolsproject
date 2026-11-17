@@ -17,22 +17,13 @@ from llmtool import lineage_counts
 from llmtool import task_submission_cli
 from llmtool.errors import LLMToolError
 
-try:
-    from tests.test_task_delegate_repair_cap import (
-        _Store, _entry, _diagnosis, _event, _args, _no_high_debug,
-        _patch_trust_and_binding, _chain_store, _binding, _lock_patches,
-        _assert_released, _use_policy, _record_id,
-        _CURRENT_TASK, _HIGH_DEBUG_TASK, _EXECUTOR_TASK, _HIGH_DEBUG_REF, _HEAD,
-        _POLICY, _REPAIR_TWO, _REVIEW_LIMIT,
-    )
-except ImportError:
-    from .test_task_delegate_repair_cap import (
-        _Store, _entry, _diagnosis, _event, _args, _no_high_debug,
-        _patch_trust_and_binding, _chain_store, _binding, _lock_patches,
-        _assert_released, _use_policy, _record_id,
-        _CURRENT_TASK, _HIGH_DEBUG_TASK, _EXECUTOR_TASK, _HIGH_DEBUG_REF, _HEAD,
-        _POLICY, _REPAIR_TWO, _REVIEW_LIMIT,
-    )
+from test_task_delegate_repair_cap import (
+    _Store, _entry, _diagnosis, _event, _args, _no_high_debug,
+    _patch_trust_and_binding, _chain_store, _binding, _lock_patches,
+    _assert_released, _use_policy, _record_id,
+    _CURRENT_TASK, _HIGH_DEBUG_TASK, _EXECUTOR_TASK, _HIGH_DEBUG_REF, _HEAD,
+    _POLICY, _REPAIR_TWO, _REVIEW_LIMIT,
+)
 
 _PRED_D6 = 'predecessor-d6'
 _PRED_D6_EARLIER = 'earlier-predecessor-d6'
