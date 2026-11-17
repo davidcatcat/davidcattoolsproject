@@ -137,6 +137,52 @@ def _role_models(roles):
     return normalized
 
 
+def _gw_agent_budgets_ok(budgets):
+    """Return True when budgets has valid gw-agent budget keys and ranges (#2281 L9)."""
+    if type(budgets) is not dict:
+        return False
+    keys = set(budgets)
+    valid_direct_keys = {'max_turns', 'max_input_tokens', 'max_output_tokens',
+                         'max_wall_seconds', 'max_tool_result_bytes', 'max_sent_bytes'}
+    valid_multiplier_keys = {'max_turns', 'max_input_tokens_multiplier',
+                            'max_output_tokens_multiplier', 'max_wall_seconds',
+                            'max_tool_result_bytes', 'max_sent_bytes'}
+    if keys != valid_direct_keys and keys != valid_multiplier_keys:
+        return False
+    max_turns = budgets.get('max_turns')
+    if type(max_turns) is not int or type(max_turns) is bool or not 1 <= max_turns <= 1000:
+        return False
+    max_wall_seconds = budgets.get('max_wall_seconds')
+    if (type(max_wall_seconds) is not int or type(max_wall_seconds) is bool or
+            not 1 <= max_wall_seconds <= 86400):
+        return False
+    max_tool_result_bytes = budgets.get('max_tool_result_bytes')
+    if (type(max_tool_result_bytes) is not int or type(max_tool_result_bytes) is bool or
+            not 256 <= max_tool_result_bytes <= 1048576):
+        return False
+    max_sent_bytes = budgets.get('max_sent_bytes')
+    if (type(max_sent_bytes) is not int or type(max_sent_bytes) is bool or
+            not 1024 <= max_sent_bytes <= 512 * 1024 * 1024):
+        return False
+    if 'max_input_tokens' in budgets:
+        val = budgets['max_input_tokens']
+        if type(val) is not int or type(val) is bool or not 1 <= val <= 50_000_000:
+            return False
+    if 'max_input_tokens_multiplier' in budgets:
+        val = budgets['max_input_tokens_multiplier']
+        if type(val) is not int or type(val) is bool or val < 1:
+            return False
+    if 'max_output_tokens' in budgets:
+        val = budgets['max_output_tokens']
+        if type(val) is not int or type(val) is bool or not 1 <= val <= 5_000_000:
+            return False
+    if 'max_output_tokens_multiplier' in budgets:
+        val = budgets['max_output_tokens_multiplier']
+        if type(val) is not int or type(val) is bool or val < 1:
+            return False
+    return True
+
+
 def _allowed_models_ok(value, default_model, model_ok):
     """Return True when value is exactly [default_model], a valid one-item list.
 
@@ -306,7 +352,7 @@ def load_route_config(path=None):
         gw = routes['gw-agent']
         expected_gw = {'package_path', 'default_model', 'allowed_models', 'default_effort',
                        'profile_name', 'profile', 'authorization_ref',
-                       'allowed_data_classes'}
+                       'allowed_data_classes', 'budgets'}
         if (set(gw) - ROUTE_LIMIT_KEYS != expected_gw or
                 type(gw.get('package_path')) is not str or
                 not (gw['package_path'].startswith('/') or
@@ -327,9 +373,11 @@ def load_route_config(path=None):
                 not gw['authorization_ref'].strip() or
                 not _allowed_models_ok(gw.get('allowed_models'), gw['default_model'],
                                        _generic_model_ok) or
+                not _gw_agent_budgets_ok(gw.get('budgets')) or
                 gw['profile'].get('model') not in gw['allowed_models']):
             raise RouteError('ROUTE_CONFIG_INVALID')
         normalized['gw-agent'] = dict(gw)
+        normalized['gw-agent']['budgets'] = dict(gw['budgets'])
         normalized['gw-agent']['allowed_models'] = list(gw['allowed_models'])
     if 'opencode' in routes:
         opencode = routes['opencode']

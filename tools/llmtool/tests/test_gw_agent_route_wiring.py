@@ -1012,7 +1012,11 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                               'authorization_ref': 'pm-task-ref',
                               'default_model': 'gw-agent-default',
                               'allowed_models': ['gw-agent-default', 'authorized-model'],
-                              'default_effort': 'low'}}}), \
+                              'default_effort': 'low',
+                              'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
+                                          'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                                          'max_tool_result_bytes': 262144,
+                                          'max_sent_bytes': 16777216}}}}), \
              patch.dict(os.environ, {'HOME': str(config_home)}), \
              patch.object(task_submission_cli, '_gw_agent_endpoint', return_value=({
                  'type': 'openai-compatible', 'model': 'authorized-model',
@@ -1060,13 +1064,68 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             'max_turns', 'max_input_tokens', 'max_output_tokens', 'max_wall_seconds',
             'max_tool_result_bytes', 'max_sent_bytes'})
         self.assertNotIn('stdout_bytes', seen['task']['budgets'])
-        # Per-Task budgets scale with the route caps (#120): 8 x 32768 and 4 x 16384.
+        # Per-Task budgets come from the gw-agent route in developer-routes.json (#2281 L9).
         self.assertEqual(seen['task']['budgets']['max_input_tokens'], 262144)
         self.assertEqual(seen['task']['budgets']['max_output_tokens'], 65536)
-        self.assertEqual(seen['task']['budgets']['max_turns'], 16)
+        self.assertEqual(seen['task']['budgets']['max_turns'], 512)
         self.assertEqual(developer['usage']['prompt_tokens'], 1)
         self.assertEqual(developer['usage']['completion_tokens'], 2)
         self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
+
+    def test_delegate_refuses_when_route_budgets_missing_or_invalid(self):
+        task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
+            'state': 'PM_RESPONDED', 'response': 'PM response', 'request': 'synthetic task',
+            'task_binding': {'contract_digest': 'c' * 64},
+            'pm_assignment': {'route': 'gw-agent', 'risk': 'LOW', 'goal': 'goal',
+                              'acceptance': ['record result']},
+            'developer': None}
+
+        class Store:
+            def get(self, _task_id):
+                return dict(task)
+
+        registration = SimpleNamespace(task_id='executor-d6', root='/repo/worktree',
+            common_dir='/repo/.git', branch='task-branch', trusted_agent_id='codex',
+            session_ref='session-ref', native_session_id=None)
+        snapshot = SimpleNamespace(head='d' * 40)
+        args = Namespace(task_id='a' * 32, mode='direct', context_stdin=False,
+            data_class='SYNTHETIC', egress_basis='Approved non-sensitive context.',
+            acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
+            read_path=['src.py'], write_path=['src.py'])
+        gateway_profile = {'adapter': 'openai-chat-tools', 'base_url': 'http://10.20.30.40:8080/v1',
+                           'model': 'authorized-model', 'context_cap_tokens': 32768,
+                           'max_output_tokens': 16384, 'auth_env': None}
+        base_route = {
+            'allowed_data_classes': ['synthetic', 'public_repo'],
+            'profile': gateway_profile,
+            'profile_name': 'llmtool-direct',
+            'authorization_ref': 'pm-task-ref',
+            'default_model': 'authorized-model',
+            'allowed_models': ['authorized-model'],
+            'default_effort': 'low',
+        }
+        cases = (
+            {},  # missing budgets
+            {'budgets': None},
+            {'budgets': 'not-a-dict'},
+            {'budgets': {'max_turns': 0}},  # invalid value
+        )
+        for extra in cases:
+            mock_route = dict(base_route, **extra)
+            with self.subTest(extra=extra), \
+                 patch.object(task_completion, 'validate_task_binding'), \
+                 patch.object(task_submission_cli, '_delegate_d6_binding',
+                              return_value=(registration, snapshot)), \
+                 patch.object(task_submission_cli, '_assignment_paths',
+                              return_value=(['src.py'], ['src.py'])), \
+                 patch.object(task_submission_cli, 'load_route_config',
+                              return_value={'routes': {'gw-agent': mock_route}}), \
+                 patch.object(task_submission_cli, '_gw_agent_endpoint', return_value=({
+                     'type': 'openai-compatible', 'model': 'authorized-model',
+                     'base_url': 'http://10.20.30.40:8080'}, {'max_tokens': 49152})):
+                with self.assertRaisesRegex(
+                        LLMToolError, 'gateway profile is unavailable or invalid'):
+                    task_submission_cli.run_task_gw_agent_delegate(args, store=Store())
 
     def test_old_audit_copies_are_removed_and_recent_copies_retained(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1789,6 +1848,61 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertEqual(developer['model'], 'qwen3.8-27b')
         self.assertEqual(developer['usage']['served_model'], 'qwen3.8-27b')
         self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
+
+    def test_delegate_refuses_when_route_budgets_missing_or_invalid(self):
+        task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
+            'state': 'PM_RESPONDED', 'response': 'PM response', 'request': 'synthetic task',
+            'task_binding': {'contract_digest': 'c' * 64},
+            'pm_assignment': {'route': 'gw-agent', 'risk': 'LOW', 'goal': 'goal',
+                              'acceptance': ['record result']},
+            'developer': None}
+
+        class Store:
+            def get(self, _task_id):
+                return dict(task)
+
+        registration = SimpleNamespace(task_id='executor-d6', root='/repo/worktree',
+            common_dir='/repo/.git', branch='task-branch', trusted_agent_id='codex',
+            session_ref='session-ref', native_session_id=None)
+        snapshot = SimpleNamespace(head='d' * 40)
+        args = Namespace(task_id='a' * 32, mode='direct', context_stdin=False,
+            data_class='SYNTHETIC', egress_basis='Approved non-sensitive context.',
+            acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
+            read_path=['src.py'], write_path=['src.py'])
+        gateway_profile = {'adapter': 'openai-chat-tools', 'base_url': 'http://10.20.30.40:8080/v1',
+                           'model': 'authorized-model', 'context_cap_tokens': 32768,
+                           'max_output_tokens': 16384, 'auth_env': None}
+        base_route = {
+            'allowed_data_classes': ['synthetic', 'public_repo'],
+            'profile': gateway_profile,
+            'profile_name': 'llmtool-direct',
+            'authorization_ref': 'pm-task-ref',
+            'default_model': 'authorized-model',
+            'allowed_models': ['authorized-model'],
+            'default_effort': 'low',
+        }
+        cases = (
+            {},  # missing budgets
+            {'budgets': None},
+            {'budgets': 'not-a-dict'},
+            {'budgets': {'max_turns': 0}},  # invalid value
+        )
+        for extra in cases:
+            mock_route = dict(base_route, **extra)
+            with self.subTest(extra=extra), \
+                 patch.object(task_completion, 'validate_task_binding'), \
+                 patch.object(task_submission_cli, '_delegate_d6_binding',
+                              return_value=(registration, snapshot)), \
+                 patch.object(task_submission_cli, '_assignment_paths',
+                              return_value=(['src.py'], ['src.py'])), \
+                 patch.object(task_submission_cli, 'load_route_config',
+                              return_value={'routes': {'gw-agent': mock_route}}), \
+                 patch.object(task_submission_cli, '_gw_agent_endpoint', return_value=({
+                     'type': 'openai-compatible', 'model': 'authorized-model',
+                     'base_url': 'http://10.20.30.40:8080'}, {'max_tokens': 49152})):
+                with self.assertRaisesRegex(
+                        LLMToolError, 'gateway profile is unavailable or invalid'):
+                    task_submission_cli.run_task_gw_agent_delegate(args, store=Store())
 
     def test_gateway_profile_model_outside_allowed_models_is_refused(self):
         # #1773 (CWE-863): the real repo route lists only its default model; a

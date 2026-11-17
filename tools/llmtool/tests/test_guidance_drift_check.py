@@ -361,6 +361,18 @@ class RuleFileSchemaTests(unittest.TestCase):
         routes["routes"]["fixture"]["max_source_total_bytes"] = 2097152
         self.assertEqual(self.findings_after("developer-routes.json", routes), [])
 
+    def test_budgets_accepted(self):
+        routes = fixture_routes()
+        routes["routes"]["fixture"]["budgets"] = {
+            "max_turns": 512,
+            "max_input_tokens": 262144,
+            "max_output_tokens": 65536,
+            "max_wall_seconds": 600,
+            "max_tool_result_bytes": 262144,
+            "max_sent_bytes": 16777216,
+        }
+        self.assertEqual(self.findings_after("developer-routes.json", routes), [])
+
     def test_unknown_top_level_key_fails_for_each_rule_file(self):
         for name, value in self.valid.items():
             with self.subTest(name=name):
@@ -408,6 +420,16 @@ class RuleFileSchemaTests(unittest.TestCase):
                 **routes["routes"]["fixture"], "max_source_total_bytes": True}}}, "must be an integer >= 1"),
             ("developer-routes.json", {**routes, "routes": {"fixture": {
                 **routes["routes"]["fixture"], "max_source_total_bytes": "2097152"}}}, "must be an integer >= 1"),
+            ("developer-routes.json", {**routes, "routes": {"fixture": {
+                **routes["routes"]["fixture"], "budgets": "not-a-dict"}}}, "must be an object"),
+            ("developer-routes.json", {**routes, "routes": {"fixture": {
+                **routes["routes"]["fixture"], "budgets": {
+                    "max_turns": 0, "max_wall_seconds": 600, "max_tool_result_bytes": 262144,
+                    "max_sent_bytes": 16777216}}}}, "must be an integer >= 1"),
+            ("developer-routes.json", {**routes, "routes": {"fixture": {
+                **routes["routes"]["fixture"], "budgets": {
+                    "max_turns": 1001, "max_wall_seconds": 600, "max_tool_result_bytes": 262144,
+                    "max_sent_bytes": 16777216}}}}, "must be an integer >= 1 and <= 1000"),
             ("developer-routes.json", {**routes, "routes": {}}, "at least 1"),
             ("sensitive-paths.json", {**self.valid["sensitive-paths.json"], "exact": "x"}, "must be a list"),
             ("sensitive-paths.json", {**self.valid["sensitive-paths.json"], "exact": [1]}, "non-empty string"),

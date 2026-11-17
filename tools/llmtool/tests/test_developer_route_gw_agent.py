@@ -243,6 +243,10 @@ class GwAgentRouteTests(unittest.TestCase):
                     'profile': {'model': 'fake-model', 'auth_env': None},
                     'authorization_ref': 'pm-task-ref',
                     'allowed_data_classes': ['synthetic'],
+                    'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
+                                'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                                'max_tool_result_bytes': 262144,
+                                'max_sent_bytes': 16777216},
                     'default_timeout': 600, 'max_timeout': 600,
                 },
             },
@@ -476,7 +480,8 @@ class GwAgentRouteTests(unittest.TestCase):
                  ('egress_basis', ' ', 'GW_AGENT_TASK_EGRESS_BASIS_INVALID'),
                  ('budgets', None, 'GW_AGENT_TASK_BUDGETS_INVALID'),
                  ('budgets', budgets(extra=1), 'GW_AGENT_TASK_BUDGETS_INVALID'),
-                 ('budgets', budgets(max_turns=0), 'GW_AGENT_TASK_BUDGET_MAX_TURNS_INVALID'))
+                 ('budgets', budgets(max_turns=0), 'GW_AGENT_TASK_BUDGET_MAX_TURNS_INVALID'),
+                 ('budgets', budgets(max_turns=1001), 'GW_AGENT_TASK_BUDGET_MAX_TURNS_INVALID'))
         for field, value, code in cases:
             request = self.request()
             if field is None:
@@ -487,6 +492,13 @@ class GwAgentRouteTests(unittest.TestCase):
                 with self.assertRaises(RouteError) as caught:
                     self.route.validate_request(request)
                 self.assertEqual(caught.exception.code, code)
+
+    def test_gateway_task_budgets_max_turns_accepts_512_and_1000(self):
+        for turns in (512, 1000):
+            req = self.request()
+            req['task']['budgets']['max_turns'] = turns
+            validated = self.route.validate_request(req)
+            self.assertEqual(validated['task']['budgets']['max_turns'], turns)
 
     def test_null_gateway_task_identity_retains_bounded_refusal_diagnostic(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1329,6 +1341,10 @@ class GwAgentDelegateDataClassTests(unittest.TestCase):
         snapshot = SimpleNamespace(head='c' * 40)
         route_config = {'routes': {'gw-agent': {
             'allowed_data_classes': ['synthetic', 'public_repo'],
+            'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
+                        'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                        'max_tool_result_bytes': 262144,
+                        'max_sent_bytes': 16777216},
             'profile': {'context_cap_tokens': 10000, 'max_output_tokens': 1000}}}}
         args = Namespace(task_id=task['task_id'], mode='direct', context_stdin=False,
                          egress_basis='Task authorized source files only.',

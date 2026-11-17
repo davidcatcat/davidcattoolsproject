@@ -208,6 +208,21 @@ DEVELOPER_ROUTE = TimeoutPair(Obj(
         "max_prompt_bytes": Int(1),
         "max_source_file_bytes": Int(1),
         "max_source_total_bytes": Int(1),
+        # #2281 L9: gw-agent per-Task budgets object.
+        "budgets": Obj(
+            {
+                "max_turns": Int(1, 1000),
+                "max_wall_seconds": Int(1, 86400),
+                "max_tool_result_bytes": Int(256, 1048576),
+                "max_sent_bytes": Int(1024, 512 * 1024 * 1024),
+            },
+            {
+                "max_input_tokens": Int(1, 50_000_000),
+                "max_input_tokens_multiplier": Int(1),
+                "max_output_tokens": Int(1, 5_000_000),
+                "max_output_tokens_multiplier": Int(1),
+            },
+        ),
     },
 ))
 # Review/AI Debug role model registry (#1502 WP-E). The route loader checks
