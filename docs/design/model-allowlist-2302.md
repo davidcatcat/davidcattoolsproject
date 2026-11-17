@@ -22,7 +22,7 @@ Read-only inventory and split proposal for Owner #2302. This is not a review or 
 | `review_authority.py` | `35-47` | Review authority check tied to the reviewer model. |
 | `providers/claude_cli.py` | `403-407` | Claude provider model selection. |
 | `high_debug.py` | `997-1021`, `1136` | High Debug model selection; line `1136` defaults to `gpt-6.1-sol`. |
-| `claude_bg_dispatch.py` (top-level scripts directory) | `168-179`, `431-439` | Background Claude dispatch model selection. |
+| `tools/llmtool/scripts/claude_bg_dispatch.py` | `168-179`, `431-439` | Background Claude dispatch model selection. |
 | `roles_cli.py` | `25-54` | `llmtool roles` output; no model source is shown. |
 | `task_advance.py` | `2524-2525` | Uses `ROLE_MODEL_NOT_ALLOWED` as the Reviewer-fallback trigger. |
 
@@ -35,7 +35,7 @@ Read-only inventory and split proposal for Owner #2302. This is not a review or 
 
 ## 4. Model recording today
 
-OpenCode is not in `role_config.ROUTE_ROLES` (`18-24`). Its model comes from the `opencode-developer` provider profile, then the role, then `opencode_direct_developer.MODEL` (line `30`). The `developer-routes.json` `opencode.default_model` is unused at dispatch and there is no observed-model check. AGY and Claude observed model is checked in `developer_routes/base.py` `1228-1234`. High Debug already records `model_requested` and `model_observed`.
+OpenCode is not in `role_config.ROUTE_ROLES` (`18-24`). Its model comes from the resolved role model, else the `opencode-developer` provider profile, else `opencode_direct_developer.MODEL` (line `30`). The `developer-routes.json` `opencode.default_model` is unused at dispatch and there is no observed-model check. AGY and Claude observed model is checked in `developer_routes/base.py` `1228-1234`. High Debug already records `model_requested` and `model_observed`.
 
 ## 5. Guidance drift
 
