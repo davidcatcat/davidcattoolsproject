@@ -534,5 +534,179 @@ class TestLlmtoolMonitorState(unittest.TestCase):
         self.assertEqual(third["section"], "live")
 
 
+class TestMainIncidentMonitor(unittest.TestCase):
+    """Tests for main CI incident rows in llmtool_monitor (#1706 R7)."""
+
+    def _make_record(
+        self,
+        incident_id="mi-1111111111111111111111111111111111111111",
+        outcome="UNKNOWN_OPEN",
+        obs_class="CODE",
+        candidate_rows=None,
+    ):
+        if candidate_rows is None:
+            candidate_rows = [{"pr": 42}, {"pr": 43}]
+        return {
+            "schema_version": 1,
+            "incident_id": incident_id,
+            "created_at": "2026-11-17T08:00:00Z",
+            "pm_session_id": "pm-session-1",
+            "signal": ["check (Linux 3.14)"],
+            "last_good_head": "1111111111111111111111111111111111111111",
+            "observations": [
+                {
+                    "observed_at": "2026-11-17T08:00:00Z",
+                    "signal": ["check (Linux 3.14)"],
+                    "failing_head": "2222222222222222222222222222222222222222",
+                    "failing_runs": [{"kind": "check (Linux 3.14)", "id": 100, "conclusion": "failure"}],
+                    "class": obs_class,
+                    "evidence": [],
+                    "range": None,
+                    "candidate_rows": candidate_rows,
+                    "attribution": {"attribution": "BATCH", "rows": candidate_rows},
+                    "closure_available": False,
+                }
+            ],
+            "confirmations": [],
+            "outcome": outcome,
+            "outcome_events": [],
+        }
+
+    def _make_fake_github(self):
+        fake_health = mon.MainHealth(
+            sha="abcdef1",
+            title="test commit",
+            committed_at=1000.0,
+            linux=("completed", "success", "abcdef1"),
+            mac=("completed", "success", 1000.0, "abcdef1"),
+        )
+        fake_github = unittest.mock.Mock()
+        fake_github.main_health = fake_health
+        fake_github.main_error = ""
+        fake_github.pending = []
+        return fake_github
+
+    def test_one_open_incident(self):
+        """One open incident displays an alert row starting with 'main incident <id>:' with class and candidate PR count."""
+        open_rec = self._make_record()
+        fake_github = self._make_fake_github()
+
+        with unittest.mock.patch.object(mon.main_incident_store, "find_open", return_value=[open_rec]):
+            lines = mon.main_incident_lines()
+            self.assertEqual(len(lines), 1)
+            text, style = lines[0]
+            self.assertEqual(style, "!")
+            self.assertTrue(text.startswith("main incident mi-1111111111111111111111111111111111111111:"))
+            self.assertIn("CODE", text)
+            self.assertIn("2 candidate PR rows", text)
+
+            # Test office_top: incident row is next to existing main-health row
+            top_rows = mon.office_top(fake_github, [], 2000.0)
+            main_health_idx = next(i for i, (t, s) in enumerate(top_rows) if "main abcdef1" in t)
+            incident_idx = next(i for i, (t, s) in enumerate(top_rows) if text in t)
+            self.assertEqual(incident_idx, main_health_idx + 1)
+            self.assertEqual(top_rows[incident_idx][1], "!")
+
+            # Test newest observation is selected when multiple observations exist
+            multi_obs_rec = self._make_record()
+            multi_obs_rec["observations"].append({
+                "observed_at": "2026-11-17T09:00:00Z",
+                "signal": ["check (Linux 3.14)"],
+                "failing_head": "3333333333333333333333333333333333333333",
+                "failing_runs": [{"kind": "check (Linux 3.14)", "id": 101, "conclusion": "failure"}],
+                "class": "ENV",
+                "evidence": [],
+                "range": None,
+                "candidate_rows": [{"pr": 99}],
+                "attribution": {"attribution": "SINGLE", "pr": 99, "rows": [{"pr": 99}]},
+                "closure_available": True,
+            })
+            with unittest.mock.patch.object(mon.main_incident_store, "find_open", return_value=[multi_obs_rec]):
+                lines_multi = mon.main_incident_lines()
+                self.assertEqual(len(lines_multi), 1)
+                text_m, _ = lines_multi[0]
+                self.assertIn("ENV", text_m)
+                self.assertIn("1 candidate PR rows", text_m)
+
+            # Test office_state serialization
+            state = mon.office_state(
+                top=top_rows,
+                owner=[],
+                prs=[],
+                stuck=[],
+                generated_at="2026-11-17T12:00:00Z",
+                data_age=None,
+            )
+            top_texts = [item["text"] for item in state["top"]]
+            self.assertTrue(any(text in t for t in top_texts))
+
+    def test_open_plus_resolved(self):
+        """Open plus resolved or superseded incidents only show the UNKNOWN_OPEN incident row."""
+        open_rec = self._make_record(incident_id="mi-1111111111111111111111111111111111111111", outcome="UNKNOWN_OPEN")
+        resolved_rec = self._make_record(incident_id="mi-2222222222222222222222222222222222222222", outcome="RESOLVED")
+        superseded_rec = self._make_record(incident_id="mi-3333333333333333333333333333333333333333", outcome="SUPERSEDED")
+
+        fake_github = self._make_fake_github()
+
+        with unittest.mock.patch.object(
+            mon.main_incident_store,
+            "find_open",
+            return_value=[open_rec, resolved_rec, superseded_rec],
+        ):
+            lines = mon.main_incident_lines()
+            self.assertEqual(len(lines), 1)
+            self.assertTrue(lines[0][0].startswith("main incident mi-1111111111111111111111111111111111111111:"))
+
+            top_rows = mon.office_top(fake_github, [], 2000.0)
+            displayed_texts = [t for t, _ in top_rows]
+            self.assertTrue(any("mi-1111111111111111111111111111111111111111" in t for t in displayed_texts))
+            self.assertFalse(any("mi-2222222222222222222222222222222222222222" in t for t in displayed_texts))
+            self.assertFalse(any("mi-3333333333333333333333333333333333333333" in t for t in displayed_texts))
+
+    def test_no_store(self):
+        """When store has no open incidents or directory does not exist, no incident row is shown."""
+        fake_github = self._make_fake_github()
+
+        with unittest.mock.patch.object(mon.main_incident_store, "find_open", return_value=[]):
+            lines = mon.main_incident_lines()
+            self.assertEqual(lines, [])
+
+            top_rows = mon.office_top(fake_github, [], 2000.0)
+            self.assertFalse(any("main incident" in t for t, _ in top_rows))
+            self.assertFalse(any("unreadable" in t for t, _ in top_rows))
+
+    def test_refused_store(self):
+        """When find_open() refuses, monitor renders an alert row with refusal code and no traceback."""
+        fake_github = self._make_fake_github()
+
+        class FakeRefusal(Exception):
+            incident_code = "INCIDENT_RECORD_UNAVAILABLE"
+
+        with unittest.mock.patch.object(mon.main_incident_store, "find_open", side_effect=FakeRefusal("INCIDENT_RECORD_UNAVAILABLE")):
+            lines = mon.main_incident_lines()
+            self.assertEqual(len(lines), 1)
+            text, style = lines[0]
+            self.assertEqual(style, "!")
+            self.assertIn("incident store is unreadable", text)
+            self.assertIn("INCIDENT_RECORD_UNAVAILABLE", text)
+
+            top_rows = mon.office_top(fake_github, [], 2000.0)
+            self.assertTrue(any("incident store is unreadable" in t and "INCIDENT_RECORD_UNAVAILABLE" in t for t, s in top_rows))
+
+        class FakeInvalid(Exception):
+            incident_code = "INCIDENT_RECORD_INVALID"
+
+        with unittest.mock.patch.object(mon.main_incident_store, "find_open", side_effect=FakeInvalid("INCIDENT_RECORD_INVALID")):
+            lines = mon.main_incident_lines()
+            self.assertEqual(len(lines), 1)
+            text, style = lines[0]
+            self.assertEqual(style, "!")
+            self.assertIn("incident store is unreadable", text)
+            self.assertIn("INCIDENT_RECORD_INVALID", text)
+
+            top_rows = mon.office_top(fake_github, [], 2000.0)
+            self.assertTrue(any("incident store is unreadable" in t and "INCIDENT_RECORD_INVALID" in t for t, s in top_rows))
+
+
 if __name__ == "__main__":
     unittest.main()
