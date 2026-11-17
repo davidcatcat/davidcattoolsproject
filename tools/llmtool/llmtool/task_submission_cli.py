@@ -4435,8 +4435,8 @@ def _bind_direct_native_session(registration, developer, completion, session_for
         try:
             bind_code = _bind_codex_native_session(registration, session)
             if (bind_code == 'D6_BIND_NATIVE_SESSION_HELPER_UNAVAILABLE' and
-                    developer.get('provider_profile') == 'gw-agent'):
-                # #1895: a gw-agent bind helper that timed out or did not start is
+                    developer.get('provider_profile') in ('gw-agent', 'opencode')):
+                # #1895, #1817: a bind helper that timed out or did not start is
                 # retried exactly once. A first helper that bound and was then
                 # stopped makes the retry answer ALREADY_SET; the read-back below
                 # still accepts only this run's session.
