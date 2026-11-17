@@ -24,6 +24,20 @@ class BudgetTests(GatewayCase):
         self.assertEqual(len(self.server.requests), 2)
         self.assertEqual(result['turns'], 2)
 
+    def test_max_turns_accepts_512_and_documented_ceiling_1000(self):
+        # #2281 L9: max_turns accepts 512 and up to documented ceiling 1000.
+        for turns in (512, 1000):
+            with self.subTest(turns=turns):
+                self.server.script = [reply(tool_call('finish', summary='ok'))]
+                code, result, _ = self.run_task(self.budgets(max_turns=turns))
+                self.assertEqual(code, 0)
+                self.assertEqual(result['status'], 'DONE')
+
+    def test_max_turns_exceeding_ceiling_refused(self):
+        # #2281 L9: max_turns above ceiling 1000 is refused as TASK_INVALID.
+        code, result, _ = self.run_task(self.budgets(max_turns=1001))
+        self.assertEqual((code, result['status'], result['code']), (5, 'POLICY_REFUSED', 'TASK_INVALID'))
+
     def test_sent_bytes_budget_stops_before_sending(self):
         self.assert_budget(self.run_task(self.budgets(max_sent_bytes=1024)), 'SENT_BYTES_EXCEEDED')
         self.assertEqual(self.server.requests, [])

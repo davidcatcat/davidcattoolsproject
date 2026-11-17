@@ -361,6 +361,18 @@ class RuleFileSchemaTests(unittest.TestCase):
         routes["routes"]["fixture"]["max_source_total_bytes"] = 2097152
         self.assertEqual(self.findings_after("developer-routes.json", routes), [])
 
+    def test_budgets_accepted(self):
+        routes = fixture_routes()
+        routes["routes"]["fixture"]["budgets"] = {
+            "max_turns": 512,
+            "max_input_tokens": 262144,
+            "max_output_tokens": 65536,
+            "max_wall_seconds": 600,
+            "max_tool_result_bytes": 262144,
+            "max_sent_bytes": 16777216,
+        }
+        self.assertEqual(self.findings_after("developer-routes.json", routes), [])
+
     def test_unknown_top_level_key_fails_for_each_rule_file(self):
         for name, value in self.valid.items():
             with self.subTest(name=name):
@@ -408,6 +420,16 @@ class RuleFileSchemaTests(unittest.TestCase):
                 **routes["routes"]["fixture"], "max_source_total_bytes": True}}}, "must be an integer >= 1"),
             ("developer-routes.json", {**routes, "routes": {"fixture": {
                 **routes["routes"]["fixture"], "max_source_total_bytes": "2097152"}}}, "must be an integer >= 1"),
+            ("developer-routes.json", {**routes, "routes": {"fixture": {
+                **routes["routes"]["fixture"], "budgets": "not-a-dict"}}}, "must be an object"),
+            ("developer-routes.json", {**routes, "routes": {"fixture": {
+                **routes["routes"]["fixture"], "budgets": {
+                    "max_turns": 0, "max_wall_seconds": 600, "max_tool_result_bytes": 262144,
+                    "max_sent_bytes": 16777216}}}}, "must be an integer >= 1"),
+            ("developer-routes.json", {**routes, "routes": {"fixture": {
+                **routes["routes"]["fixture"], "budgets": {
+                    "max_turns": 1001, "max_wall_seconds": 600, "max_tool_result_bytes": 262144,
+                    "max_sent_bytes": 16777216}}}}, "must be an integer >= 1 and <= 1000"),
             ("developer-routes.json", {**routes, "routes": {}}, "at least 1"),
             ("sensitive-paths.json", {**self.valid["sensitive-paths.json"], "exact": "x"}, "must be a list"),
             ("sensitive-paths.json", {**self.valid["sensitive-paths.json"], "exact": [1]}, "non-empty string"),
@@ -621,6 +643,46 @@ class RuleFileSchemaTests(unittest.TestCase):
         self.assertIs(type(profile["timeout_seconds"]), int)
         self.assertEqual(profile["timeout_seconds"], 1800)
         self.assertEqual(profile["timeout_seconds"], route["default_timeout"])
+
+    def test_gw_agent_budgets_schema_accepts_valid_direct_and_multiplier_objects(self):
+        # #2281 L9: developer-routes schema accepts budgets object with direct or multiplier tokens.
+        direct_budgets = {
+            "max_turns": 512, "max_input_tokens": 262144, "max_output_tokens": 65536,
+            "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216,
+        }
+        multiplier_budgets = {
+            "max_turns": 512, "max_input_tokens_multiplier": 8, "max_output_tokens_multiplier": 4,
+            "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216,
+        }
+        self.assertEqual(self.route_findings(budgets=direct_budgets), [])
+        self.assertEqual(self.route_findings(budgets=multiplier_budgets), [])
+
+    def test_gw_agent_budgets_schema_rejects_invalid_budgets(self):
+        prefix = "tools/llmtool/developer-routes.json: RULE_SCHEMA $.routes.fixture.budgets"
+        cases = [
+            ({"max_turns": 0, "max_input_tokens": 262144, "max_output_tokens": 65536,
+              "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
+             f"{prefix}.max_turns must be an integer >= 1 and <= 1000"),
+            ({"max_turns": 1001, "max_input_tokens": 262144, "max_output_tokens": 65536,
+              "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
+             f"{prefix}.max_turns must be an integer >= 1 and <= 1000"),
+            ({"max_turns": 512, "max_input_tokens": 50_000_001, "max_output_tokens": 65536,
+              "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
+             f"{prefix}.max_input_tokens must be an integer >= 1 and <= 50000000"),
+            ({"max_turns": 512, "max_input_tokens_multiplier": 0, "max_output_tokens": 65536,
+              "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
+             f"{prefix}.max_input_tokens_multiplier must be an integer >= 1"),
+            ({"max_turns": 512, "max_output_tokens": 5_000_001, "max_input_tokens": 262144,
+              "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
+             f"{prefix}.max_output_tokens must be an integer >= 1 and <= 5000000"),
+            ({"max_turns": 512, "max_output_tokens_multiplier": 0, "max_input_tokens": 262144,
+              "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
+             f"{prefix}.max_output_tokens_multiplier must be an integer >= 1"),
+        ]
+        for bad_budgets, expected in cases:
+            with self.subTest(budgets=bad_budgets):
+                findings = self.route_findings(budgets=bad_budgets)
+                self.assertIn(expected, findings)
 
     def test_unreadable_duplicate_key_and_non_finite_rule_files_fail(self):
         cases = {

@@ -43,6 +43,14 @@
       },
       "authorization_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6760670167",
       "allowed_data_classes": ["synthetic", "public_repo"],
+      "budgets": {
+        "max_turns": 512,
+        "max_input_tokens": 262144,
+        "max_output_tokens": 65536,
+        "max_wall_seconds": 600,
+        "max_tool_result_bytes": 262144,
+        "max_sent_bytes": 16777216
+      },
       "default_timeout": 1800,
       "max_timeout": 3600
     },

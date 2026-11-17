@@ -36,7 +36,8 @@ _TASK_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z')
 _SOURCE_SHA = re.compile(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\Z')
 _GATEWAY_DATA_CLASS = {'SYNTHETIC': 'synthetic', 'PUBLIC_REPO': 'public_repo'}
 _GATEWAY_BUDGETS = {
-    'max_turns': (1, 500), 'max_input_tokens': (1, 50_000_000),
+    'max_turns': (1, 1000),  # Documented gateway ceiling; accepts 512 (#2281 L9).
+    'max_input_tokens': (1, 50_000_000),
     'max_output_tokens': (1, 5_000_000), 'max_wall_seconds': (1, 86_400),
     'max_tool_result_bytes': (256, 1_048_576),
     'max_sent_bytes': (1024, 512 * 1024 * 1024),

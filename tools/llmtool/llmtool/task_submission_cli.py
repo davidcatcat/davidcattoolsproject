@@ -6214,6 +6214,36 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                               if type(profile) is dict else None)
         route_output_cap = (profile.get('max_output_tokens')
                             if type(profile) is dict else None)
+        route_budgets = route_config.get('budgets') if type(route_config) is dict else None
+        if type(route_budgets) is not dict:
+            raise ValueError
+        max_turns = route_budgets.get('max_turns')
+        max_input_tokens_budget = (
+            route_budgets.get('max_input_tokens')
+            if 'max_input_tokens' in route_budgets
+            else (route_budgets.get('max_input_tokens_multiplier', 0) * context_cap_tokens
+                  if type(route_budgets.get('max_input_tokens_multiplier')) is int else None)
+        )
+        max_output_tokens_budget = (
+            route_budgets.get('max_output_tokens')
+            if 'max_output_tokens' in route_budgets
+            else (route_budgets.get('max_output_tokens_multiplier', 0) * route_output_cap
+                  if type(route_budgets.get('max_output_tokens_multiplier')) is int else None)
+        )
+        max_wall_seconds = route_budgets.get('max_wall_seconds')
+        max_tool_result_bytes = route_budgets.get('max_tool_result_bytes')
+        max_sent_bytes = route_budgets.get('max_sent_bytes')
+        budget_bounds = (
+            (max_turns, 1, 1000),
+            (max_input_tokens_budget, 1, 50_000_000),
+            (max_output_tokens_budget, 1, 5_000_000),
+            (max_wall_seconds, 1, 86400),
+            (max_tool_result_bytes, 256, 1048576),
+            (max_sent_bytes, 1024, 512 * 1024 * 1024),
+        )
+        for val, low, high in budget_bounds:
+            if type(val) is not int or type(val) is bool or not low <= val <= high:
+                raise ValueError
         if (company_provider.get('type') != 'openai-compatible' or
                 type(model) is not str or not model or type(base_url) is not str or
                 not base_url or type(max_output_tokens) is not int or
@@ -6274,11 +6304,13 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         'task_id': task['task_id'], 'source_sha': snapshot.head,
         'goal': assignment['goal'], 'acceptance': acceptance + [TEST_DATA_RULE],
         'read_paths': read_paths, 'write_paths': write_paths,
-        # Per-Task totals over all turns scale with the route caps (#120).
-        'budgets': {'max_turns': 16, 'max_input_tokens': 8 * context_cap_tokens,
-                    'max_output_tokens': 4 * route_output_cap, 'max_wall_seconds': 600,
-                    'max_tool_result_bytes': 262144,
-                    'max_sent_bytes': 16 * 1024 * 1024},
+        # Per-Task budgets come from the gw-agent route in developer-routes.json (#2281 L9).
+        'budgets': {'max_turns': max_turns,
+                    'max_input_tokens': max_input_tokens_budget,
+                    'max_output_tokens': max_output_tokens_budget,
+                    'max_wall_seconds': max_wall_seconds,
+                    'max_tool_result_bytes': max_tool_result_bytes,
+                    'max_sent_bytes': max_sent_bytes},
         'egress_basis': egress_basis, 'data_class': gateway_data_class,
         'findings': [],
     }

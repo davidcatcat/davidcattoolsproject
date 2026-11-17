@@ -26,7 +26,7 @@ EXIT_USAGE = 2
 EXIT_INTERNAL = 1
 
 BUDGET_LIMITS = {
-    'max_turns': (1, 500),
+    'max_turns': (1, 1000),  # Documented gateway ceiling; accepts 512 (#2281 L9).
     'max_input_tokens': (1, 50_000_000),
     'max_output_tokens': (1, 5_000_000),
     'max_wall_seconds': (1, 86_400),

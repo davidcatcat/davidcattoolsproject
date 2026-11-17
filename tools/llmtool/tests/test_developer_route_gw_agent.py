@@ -243,6 +243,10 @@ class GwAgentRouteTests(unittest.TestCase):
                     'profile': {'model': 'fake-model', 'auth_env': None},
                     'authorization_ref': 'pm-task-ref',
                     'allowed_data_classes': ['synthetic'],
+                    'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
+                                'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                                'max_tool_result_bytes': 262144,
+                                'max_sent_bytes': 16777216},
                     'default_timeout': 600, 'max_timeout': 600,
                 },
             },
@@ -278,6 +282,97 @@ class GwAgentRouteTests(unittest.TestCase):
         with self.assertRaises(RouteError) as caught:
             GwAgentRoute(dict(self.route.config, profile=profile_without_auth_env))
         self.assertEqual(caught.exception.code, 'GW_AGENT_CONFIG_INVALID')
+
+    def test_route_config_validates_gw_agent_budgets(self):
+        route_config = {
+            'schema_version': 1,
+            'routes': {
+                'agy': {'executable': 'agy', 'default_model': 'agy-model',
+                        'allowed_models': ['agy-model'],
+                        'default_effort': 'low', 'denied_dirs': ['.gemini'],
+                        'state_dirs': {'policy': 'private-temp-only'},
+                        'default_timeout': 600, 'max_timeout': 600},
+                'gw-agent': {
+                    'package_path': str(Path(self.temp.name) / 'gateway'),
+                    'default_model': 'fake-model', 'allowed_models': ['fake-model'],
+                    'default_effort': 'low',
+                    'profile_name': 'fake',
+                    'profile': {'model': 'fake-model', 'auth_env': None,
+                                'context_cap_tokens': 32768, 'max_output_tokens': 16384},
+                    'authorization_ref': 'pm-task-ref',
+                    'allowed_data_classes': ['synthetic'],
+                    'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
+                                'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                                'max_tool_result_bytes': 262144,
+                                'max_sent_bytes': 16777216},
+                    'default_timeout': 600, 'max_timeout': 600,
+                },
+            },
+        }
+        path = Path(self.temp.name) / 'developer-routes.json'
+        path.write_text(json.dumps(route_config))
+        self.assertEqual(
+            load_route_config(path)['routes']['gw-agent']['budgets']['max_turns'], 512)
+
+        # Multiplier keys also accepted
+        multiplier_budgets = {
+            'max_turns': 512, 'max_input_tokens_multiplier': 8,
+            'max_output_tokens_multiplier': 4, 'max_wall_seconds': 600,
+            'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216}
+        route_config['routes']['gw-agent']['budgets'] = multiplier_budgets
+        path.write_text(json.dumps(route_config))
+        self.assertEqual(
+            load_route_config(path)['routes']['gw-agent']['budgets']['max_input_tokens_multiplier'], 8)
+
+        # Multipliers exceeding token ceilings are refused (#2281 L9 repair 2)
+        exceeding_input_multiplier = dict(multiplier_budgets, max_input_tokens_multiplier=2000)
+        route_config['routes']['gw-agent']['budgets'] = exceeding_input_multiplier
+        path.write_text(json.dumps(route_config))
+        with self.assertRaises(RouteError) as caught:
+            load_route_config(path)
+        self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
+
+        exceeding_output_multiplier = dict(multiplier_budgets, max_output_tokens_multiplier=400)
+        route_config['routes']['gw-agent']['budgets'] = exceeding_output_multiplier
+        path.write_text(json.dumps(route_config))
+        with self.assertRaises(RouteError) as caught:
+            load_route_config(path)
+        self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
+
+        # Multipliers without profile token caps are refused
+        route_config['routes']['gw-agent']['profile'] = {'model': 'fake-model', 'auth_env': None}
+        route_config['routes']['gw-agent']['budgets'] = multiplier_budgets
+        path.write_text(json.dumps(route_config))
+        with self.assertRaises(RouteError) as caught:
+            load_route_config(path)
+        self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
+        route_config['routes']['gw-agent']['profile'] = {
+            'model': 'fake-model', 'auth_env': None,
+            'context_cap_tokens': 32768, 'max_output_tokens': 16384}
+
+        # Missing or invalid budgets fails closed with ROUTE_CONFIG_INVALID
+        invalid_cases = (
+            None,
+            'not-a-dict',
+            {},
+            {'max_turns': 0, 'max_input_tokens': 262144, 'max_output_tokens': 65536,
+             'max_wall_seconds': 600, 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
+            {'max_turns': 1001, 'max_input_tokens': 262144, 'max_output_tokens': 65536,
+             'max_wall_seconds': 600, 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
+            {'max_turns': True, 'max_input_tokens': 262144, 'max_output_tokens': 65536,
+             'max_wall_seconds': 600, 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
+            {'max_turns': 512, 'max_input_tokens': 0, 'max_output_tokens': 65536,
+             'max_wall_seconds': 600, 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
+        )
+        for invalid in invalid_cases:
+            if invalid is None:
+                route_config['routes']['gw-agent'].pop('budgets', None)
+            else:
+                route_config['routes']['gw-agent']['budgets'] = invalid
+            path.write_text(json.dumps(route_config))
+            with self.subTest(budgets=invalid), self.assertRaises(RouteError) as caught:
+                load_route_config(path)
+            self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
 
     def test_invalid_package_paths_raise_route_error(self):
         package_file = Path(self.temp.name) / 'package-file'
@@ -476,7 +571,8 @@ class GwAgentRouteTests(unittest.TestCase):
                  ('egress_basis', ' ', 'GW_AGENT_TASK_EGRESS_BASIS_INVALID'),
                  ('budgets', None, 'GW_AGENT_TASK_BUDGETS_INVALID'),
                  ('budgets', budgets(extra=1), 'GW_AGENT_TASK_BUDGETS_INVALID'),
-                 ('budgets', budgets(max_turns=0), 'GW_AGENT_TASK_BUDGET_MAX_TURNS_INVALID'))
+                 ('budgets', budgets(max_turns=0), 'GW_AGENT_TASK_BUDGET_MAX_TURNS_INVALID'),
+                 ('budgets', budgets(max_turns=1001), 'GW_AGENT_TASK_BUDGET_MAX_TURNS_INVALID'))
         for field, value, code in cases:
             request = self.request()
             if field is None:
@@ -487,6 +583,13 @@ class GwAgentRouteTests(unittest.TestCase):
                 with self.assertRaises(RouteError) as caught:
                     self.route.validate_request(request)
                 self.assertEqual(caught.exception.code, code)
+
+    def test_gateway_task_budgets_max_turns_accepts_512_and_1000(self):
+        for turns in (512, 1000):
+            req = self.request()
+            req['task']['budgets']['max_turns'] = turns
+            validated = self.route.validate_request(req)
+            self.assertEqual(validated['task']['budgets']['max_turns'], turns)
 
     def test_null_gateway_task_identity_retains_bounded_refusal_diagnostic(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1329,6 +1432,10 @@ class GwAgentDelegateDataClassTests(unittest.TestCase):
         snapshot = SimpleNamespace(head='c' * 40)
         route_config = {'routes': {'gw-agent': {
             'allowed_data_classes': ['synthetic', 'public_repo'],
+            'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
+                        'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                        'max_tool_result_bytes': 262144,
+                        'max_sent_bytes': 16777216},
             'profile': {'context_cap_tokens': 10000, 'max_output_tokens': 1000}}}}
         args = Namespace(task_id=task['task_id'], mode='direct', context_stdin=False,
                          egress_basis='Task authorized source files only.',
