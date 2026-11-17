@@ -4581,7 +4581,7 @@ def _opencode_developer_profile():
     try:
         steps = opencode_direct_developer._validate_steps(steps)
     except opencode_direct_developer.DirectOpenCodeError:
-        raise LLMToolError('opencode-developer profile steps must be an integer from 3 to 50') \
+        raise LLMToolError('opencode-developer profile steps must be an integer from 3 to 1000') \
             from None
     model = provider['model']
     if model is None:

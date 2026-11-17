@@ -24,15 +24,15 @@ def step_finishes(count, *, tokens=None):
 
 
 class StepLimitClassificationTests(unittest.TestCase):
-    # Default limit (12) and one configured limit (5).
-    LIMITS = ((None, 12), (5, 5))
+    # #289: every case passes an explicit limit matching its fixture, so no
+    # case depends on the production default. The ceiling (1000) and one
+    # small configured limit (5).
+    LIMITS = ((1000, 1000), (5, 5))
 
-    def parse(self, raw, step_limit=None):
-        if step_limit is None:
-            return parse_json_events(raw)
+    def parse(self, raw, step_limit):
         return parse_json_events(raw, step_limit=step_limit)
 
-    def assert_refused(self, raw, expected, *, step_limit=None):
+    def assert_refused(self, raw, expected, *, step_limit):
         with self.assertRaises(DirectOpenCodeError) as caught:
             self.parse(raw, step_limit)
         self.assertEqual(caught.exception.direct_opencode_code, expected)
