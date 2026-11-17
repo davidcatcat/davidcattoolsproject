@@ -1,9 +1,13 @@
 # Telegram to PM Inbox instruction channel (#1160)
 
-Status: the offline parts are built (store #2116, gates and commands #2120, PM CLI #2127)
-and nothing is wired to Telegram. Owner decision #1230 D1=A
+Status: the offline parts are built (store #2116, gates and commands #2120, PM CLI #2127,
+deferred items #2134); a pure Bot API transport adapter (#2146) and the wiring function
+`telegram_link.run_once` (#2250) are on main. There is no run command, token or network call,
+so nothing is connected to Telegram. Owner decision #1230 D1=A
 ([relayed](https://github.com/davidcatcat/davidcattoolsproject/issues/1230#issuecomment-6723058672));
-OpenCode lane ([relayed](https://github.com/davidcatcat/davidcattoolsproject/issues/1160#issuecomment-6890868123)).
+OpenCode lane
+([relayed](https://github.com/davidcatcat/davidcattoolsproject/issues/1160#issuecomment-6890868123),
+[Owner relay](https://github.com/davidcatcat/davidcattoolsproject/issues/1160#issuecomment-6936776824)).
 It builds on `telegram_channel.py` and `telegram_cursor.py` on main.
 
 ## Goal and limits
@@ -90,10 +94,13 @@ entries; old ACKED, REVOKED or EXPIRED entries compact to ID tombstones.
    with a fake transport.
 4. `llmtool owner-inbox peek|ack|status|disable` for the PM, with a test.
 5. Docs: ROADMAP A12.1 and the PM handling note.
+6. `telegram_bot_api.py` adapter and test (#2146).
+7. Design deferred list and the `/do` COMPACTED test (#2151).
+8. `telegram_link.py` `run_once` wiring and `test_telegram_link.py` (#2250).
 
 Every code PR gets a Codex security review, then a formal Claude review. Owner stops, not
-built: the real Bot API transport, token and allowlist setup, pairing, the run command and
-go-live, which needs an independent security review.
+built: the real Bot API network call (egress), the token and allowlist setup (slice 3),
+pairing, the run command and go-live, which needs an independent security review.
 
 ## PM handling
 
