@@ -2092,7 +2092,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 ('helper-refused', {'answer': 'D6_BIND_NATIVE_SESSION_REFUSED'},
                  ['ses_Abc123'], None),
                 ('helper-unavailable', {'answer': 'D6_BIND_NATIVE_SESSION_HELPER_UNAVAILABLE'},
-                 ['ses_Abc123'], None),
+                 ['ses_Abc123', 'ses_Abc123'], None),
                 ('read-back-differs', {'stored': 'ses_Other999'},
                  ['ses_Abc123'], 'ses_Other999')):
             with self.subTest(case=name):
