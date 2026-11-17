@@ -105,10 +105,26 @@ class DocsCheckTests(unittest.TestCase):
         )
 
     def test_model_check_uses_checked_root_allowlist(self):
+        # The fixture configures only the gpt family; another family fails.
         skill = self.repo / ".claude" / "skills" / "sample" / "SKILL.md"
         skill.parent.mkdir(parents=True)
-        skill.write_text("---\nname: sample\ndescription: d\n---\nUse `gpt-9-wrong`.\n", encoding="utf-8")
-        self.assertIn(".claude/skills/sample/SKILL.md: MODEL_NOT_ALLOWED gpt-9-wrong", self.findings("# Good\n"))
+        skill.write_text("---\nname: sample\ndescription: d\n---\nUse `llama-9-wrong`.\n", encoding="utf-8")
+        self.assertIn(".claude/skills/sample/SKILL.md: MODEL_NOT_ALLOWED llama-9-wrong", self.findings("# Good\n"))
+
+    def test_same_family_model_switch_passes_docs_check(self):
+        # #2302: a same-family model other than the route default passes, with
+        # no allowed_models on the route and a role that has only a default_model.
+        routes = self.repo / "tools" / "llmtool" / "developer-routes.json"
+        data = json.loads(routes.read_text(encoding="utf-8"))
+        del data["routes"]["fixture"]["allowed_models"]
+        data["roles"] = {"fixture-reviewer": {"default_model": "gpt-7-x"}}
+        routes.write_text(json.dumps(data), encoding="utf-8")
+        skill = self.repo / ".claude" / "skills" / "sample" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("---\nname: sample\ndescription: d\n---\nUse `gpt-9-next`.\n", encoding="utf-8")
+        findings = self.findings("# Good\n")
+        self.assertEqual([item for item in findings if "MODEL_" in item or "RULE_" in item], [], findings)
+        self.assertEqual(docs_check.guidance_drift_check.check(self.repo), [])
 
     def test_link_inside_fenced_code_is_ignored(self):
         self.assertFalse(self.findings("```md\n[example](missing.md)\n```\n"))
