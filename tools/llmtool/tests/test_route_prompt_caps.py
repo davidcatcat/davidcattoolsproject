@@ -228,7 +228,9 @@ class RoutePromptCapsTests(unittest.TestCase):
             env=env,
         )
         self.assertEqual(proc.returncode, 0, f"Process failed: {proc.stderr}\n{proc.stdout}")
-        self.assertIn("llmtool", proc.stdout)
+        self.assertIn("Read-only, provider-agnostic LLM CLI foundation.", proc.stdout)
+        self.assertIn("{ask,", proc.stdout)
+        self.assertIn("task", proc.stdout)
 
     def test_fresh_process_startup_with_malformed_route_file(self):
         malformed_path = self.root / "malformed_routes.json"
@@ -282,7 +284,9 @@ class RoutePromptCapsTests(unittest.TestCase):
             env=env,
         )
         self.assertEqual(proc.returncode, 0, f"Process failed: {proc.stderr}\n{proc.stdout}")
-        self.assertIn("llmtool", proc.stdout)
+        self.assertIn("Read-only, provider-agnostic LLM CLI foundation.", proc.stdout)
+        self.assertIn("{ask,", proc.stdout)
+        self.assertIn("task", proc.stdout)
 
 
 if __name__ == "__main__":
