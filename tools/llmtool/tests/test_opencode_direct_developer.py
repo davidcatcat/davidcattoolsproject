@@ -164,11 +164,16 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
                              'OPENCODE_STEPS_INVALID')
 
     def test_no_final_text_after_step_limit_has_distinct_error(self):
-        raw = '\n'.join([self.event('step_finish', part={}) for _ in range(1000)]).encode()
-        with self.assertRaises(DirectOpenCodeError) as caught:
-            parse_json_events(raw)
-        self.assertEqual(caught.exception.direct_opencode_code,
-                         'OPENCODE_STEPS_EXHAUSTED')
+        # The step_limit is stated explicitly and matches the fixture's
+        # step_finish count; the production default is not relied on.
+        for step_limit in (3, 1000):
+            with self.subTest(step_limit=step_limit):
+                raw = '\n'.join([self.event('step_finish', part={})
+                                 for _ in range(step_limit)]).encode()
+                with self.assertRaises(DirectOpenCodeError) as caught:
+                    parse_json_events(raw, step_limit=step_limit)
+                self.assertEqual(caught.exception.direct_opencode_code,
+                                 'OPENCODE_STEPS_EXHAUSTED')
 
     def test_json_event_parser_binds_one_session_and_reports_usage(self):
         raw = ('\n'.join((
@@ -195,7 +200,7 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
             self.event('step_finish', part={}),
             self.event('step_finish', part={}),
         )) + '\n').encode()
-        summary = summarize_events(raw)
+        summary = summarize_events(raw, step_limit=23)
         self.assertEqual(summary['event_counts'],
                          {'step_start': 1, 'tool_use': 3, 'step_finish': 3})
         self.assertEqual(summary['text_chars'], 0)
@@ -203,7 +208,7 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertEqual(summary['edit_tool_uses'], 2)
         self.assertEqual(summary['edited_file_count'], 2)
         self.assertEqual(summary['step_finishes'], 3)
-        self.assertEqual(summary['step_limit'], 1000)
+        self.assertEqual(summary['step_limit'], 23)
 
     def test_summarize_events_reports_other_and_integer_only(self):
         marker = 'marker-0123456789'
@@ -226,10 +231,10 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
 
     def test_summarize_events_counts_valid_prefix_on_malformed_line(self):
         raw = (self.event('step_start') + '\n' + '{not-json').encode()
-        summary = summarize_events(raw)
+        summary = summarize_events(raw, step_limit=23)
         self.assertEqual(summary['event_counts'], {'step_start': 1})
         self.assertEqual(summary['step_finishes'], 0)
-        self.assertEqual(summary['step_limit'], 1000)
+        self.assertEqual(summary['step_limit'], 23)
 
     def test_output_cap_is_16_mib_and_parser_accepts_output_over_1_mib(self):
         self.assertEqual(MAX_OUTPUT_BYTES, 16 * 1024 * 1024)
