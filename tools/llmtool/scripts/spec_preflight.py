@@ -268,6 +268,92 @@ def ladder_tier(entries, max_tier=LADDER_MAX_TIER, route=None):
 LADDER_SIZES = {1: (1, 1536, 6), 2: (1, 3072, 10), 3: (2, 6144, 12), 4: (3, 10240, 16),
                 5: (4, 16384, 16), 6: (5, 24576, 16)}
 
+REPO_PATH_PATTERN = re.compile(
+    r"(?<![a-zA-Z0-9_./-])"
+    r"((?:tools|scripts|docs|\.claude)/[a-zA-Z0-9_/-]+(?:\.[a-zA-Z0-9_/-]+)*\.(?:py|md|json))"
+    r"(?![a-zA-Z0-9_/-]|\.[a-zA-Z0-9])"
+)
+
+
+def _norm_path(path: Any) -> str:
+    if not isinstance(path, str):
+        return ""
+    return path.replace("\\", "/").removeprefix("./")
+
+
+def check_read_scope(spec: dict[str, Any], repo: str | Path) -> list[str]:
+    """Check read scope covers acceptance paths and tests when --repo is given."""
+    repo_dir = Path(repo)
+    raw_writes = spec.get("write")
+    if not isinstance(raw_writes, list):
+        raw_writes = spec.get("write_paths")
+    writes = raw_writes if isinstance(raw_writes, list) else []
+
+    raw_reads = spec.get("read")
+    if not isinstance(raw_reads, list):
+        raw_reads = spec.get("read_paths")
+    reads = raw_reads if isinstance(raw_reads, list) else []
+
+    acceptance = spec.get("acceptance") if isinstance(spec.get("acceptance"), list) else []
+
+    failures: list[str] = []
+
+    code_writes = [
+        _norm_path(w) for w in writes
+        if isinstance(w, str)
+        and _norm_path(w).endswith(".py")
+        and (_norm_path(w).startswith("tools/") or _norm_path(w).startswith("scripts/"))
+        and not _norm_path(w).startswith("tools/llmtool/tests/")
+    ]
+    if code_writes:
+        # #2206 follow-up: monitor code in scripts/ keeps its tests in scripts/test_*.py;
+        # accept those only when every code write is under scripts/.
+        test_dirs = ["tools/llmtool/tests/"]
+        if all(w.startswith("scripts/") for w in code_writes):
+            test_dirs.append("scripts/")
+        has_test_module = any(
+            isinstance(r, str)
+            and _norm_path(r).startswith(test_dir + "test_")
+            and _norm_path(r).endswith(".py")
+            and "/" not in _norm_path(r)[len(test_dir + "test_"):]
+            and (repo_dir / _norm_path(r)).is_file()
+            for r in reads
+            for test_dir in test_dirs
+        )
+        if not has_test_module:
+            failures.append("read_no_test_module")
+
+    read_write_set = {
+        _norm_path(p) for p in reads if isinstance(p, str)
+    } | {
+        _norm_path(p) for p in writes if isinstance(p, str)
+    }
+    missing_acceptance_path = False
+    for item in acceptance:
+        if not isinstance(item, str):
+            continue
+        for path in REPO_PATH_PATTERN.findall(item):
+            if _norm_path(path) not in read_write_set:
+                missing_acceptance_path = True
+                break
+        if missing_acceptance_path:
+            break
+    if missing_acceptance_path:
+        failures.append("acceptance_path_not_in_read")
+
+    write_set = {_norm_path(p) for p in writes if isinstance(p, str)}
+    missing_read_path = any(
+        isinstance(r, str)
+        and _norm_path(r) not in write_set
+        and not (repo_dir / _norm_path(r)).exists()
+        for r in reads
+    )
+    if missing_read_path:
+        failures.append("read_path_missing")
+
+    return failures
+
+
 # #2005: the ladder sizes a new file as T4 (.claude/skills/company-llm-delegation/SKILL.md).
 NEW_FILE_MIN_TIER = 4
 
@@ -365,6 +451,12 @@ def main(argv: list[str] | None = None) -> int:
                     target.read_bytes().count(b"\n") >= LARGE_FILE_LINES):
                 print("SPEC_PREFLIGHT_INVALID:EDIT_LINE_HINT_MISSING:-1")
                 return 2
+
+    if repo_given:
+        scope_failures = check_read_scope(spec, repo=repo_dir)
+        if scope_failures:
+            print("SPEC_PREFLIGHT_FAIL:" + ",".join(scope_failures))
+            return 1
 
     if ladder_log is None:
         print("SPEC_PREFLIGHT_OK")

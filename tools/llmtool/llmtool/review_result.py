@@ -20,6 +20,30 @@ _CODEX_BINDING = re.compile(
 _PRIORITY_FINDING = re.compile(r'^(?:\*\*)?\[P[0-3]\]')
 
 
+def comment_status_matches(comment, head=None, version=None):
+    """True if comment's verdict status line names head and version."""
+    body = comment.get('body') if type(comment) is dict else comment if type(comment) is str else None
+    if type(body) is not str or head is None or version is None:
+        return False
+    try:
+        ver_int = int(version)
+    except (ValueError, TypeError):
+        return False
+    for line in body.splitlines():
+        match = _VERDICT_VERSION_HEAD.fullmatch(line.strip())
+        if match is not None and match.group(3) == head and int(match.group(2)) == ver_int:
+            return True
+    return False
+
+
+def is_verdict_too_long(comment, head=None, version=None):
+    """True if comment exceeds size limits and its status line names head and version."""
+    body = comment.get('body') if type(comment) is dict else comment if type(comment) is str else None
+    if type(body) is not str or (len(body) <= 65536 and len(body.encode('utf-8', 'replace')) <= 65536):
+        return False
+    return comment_status_matches(body, head=head, version=version)
+
+
 def _refuse(code):
     error = LLMToolError('Review result is unavailable; details omitted')
     error.review_dispatch_code = code

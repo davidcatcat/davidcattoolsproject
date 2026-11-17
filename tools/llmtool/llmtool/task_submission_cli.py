@@ -949,7 +949,8 @@ def add_task_submission_parsers(actions):
                                'deterministic redaction owner exception'))
     advance.add_argument('--executor-task', metavar='D6',
                          help=('with --merge and --owner-exception only: '
-                               'registered D6 Executor task id'))
+                               'registered D6 Executor task id; the executor '
+                               'identity is checked on every owner-exception merge'))
     advance.add_argument('--integration-pr', type=int,
                          help='merged integration PR containing the reviewed head')
     advance.add_argument('--reviewer-session-done', action='store_true',
@@ -1024,13 +1025,21 @@ def add_task_submission_parsers(actions):
     high_debug = actions.add_parser('high-debug', help='Run one read-only Codex or Claude diagnosis of an Executor D6')
     high_debug.add_argument('task_id')
     high_debug.add_argument('--executor-task', required=True)
-    high_debug.add_argument('--pr', required=True, type=int)
+    target = high_debug.add_mutually_exclusive_group()
+    target.add_argument('--pr', type=int)
+    target.add_argument('--issue', type=int)
     high_debug.add_argument('--family', required=True)
     choice = high_debug.add_mutually_exclusive_group(required=True)
     choice.add_argument('--failed-corrections', type=int)
     choice.add_argument('--early')
     high_debug.add_argument('--evidence-file')
-    high_debug.add_argument('--route', choices=('codex', 'claude'), default='codex')
+    # 'claude' stays a parseable choice so a direct request is refused with the
+    # stable HIGH_DEBUG_CLAUDE_ROUTE_REFUSED code: Claude Debug runs only as the
+    # automatic fallback after a Codex quota or login failure (#1502 WP-B).
+    high_debug.add_argument('--route', choices=('codex', 'claude'), default='codex',
+                            help=('Debug route (default codex). claude is refused: Claude Debug '
+                                  'runs only as the automatic fallback after Codex Debug '
+                                  'reports quota exhausted or login failure'))
     dispute = actions.add_parser(
         'dispute', help=('Record a PM dispute, deferral or arbiter ruling of one formal '
                          'review finding; never runs a review'))
@@ -2435,8 +2444,20 @@ def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
 
 def run_task_high_debug(args, *, store=None, runner=None, create_d6=None):
     from .high_debug import run_high_debug_with_fallback
+    pr, issue = getattr(args, 'pr', None), getattr(args, 'issue', None)
+    early, corrections = getattr(args, 'early', None), getattr(args, 'failed_corrections', None)
+    family = getattr(args, 'family', None)
+
+    bad = (pr is None) == (issue is None) or (pr is not None and family == 'no-pr')
+    if issue is not None and (corrections is not None or early is None or family != 'no-pr'):
+        bad = True
+    if bad:
+        err = LLMToolError('HIGH_DEBUG_ARGUMENT_INVALID')
+        err.high_debug_code = 'HIGH_DEBUG_ARGUMENT_INVALID'
+        raise err
     return run_high_debug_with_fallback(store=TaskStore() if store is None else store,
-        task_id=args.task_id, executor_task=args.executor_task, pr_number=args.pr,
+        task_id=args.task_id, executor_task=args.executor_task, pr_number=pr,
+        issue_number=issue,
         family=args.family, failed_corrections=getattr(args, 'failed_corrections', None),
         early_reason=getattr(args, 'early', None), evidence=getattr(args, 'evidence_file', None),
         runner=runner, create_d6=create_d6, route=getattr(args, 'route', 'codex'))
@@ -4414,8 +4435,8 @@ def _bind_direct_native_session(registration, developer, completion, session_for
         try:
             bind_code = _bind_codex_native_session(registration, session)
             if (bind_code == 'D6_BIND_NATIVE_SESSION_HELPER_UNAVAILABLE' and
-                    developer.get('provider_profile') == 'gw-agent'):
-                # #1895: a gw-agent bind helper that timed out or did not start is
+                    developer.get('provider_profile') in ('gw-agent', 'opencode')):
+                # #1895, #1817: a bind helper that timed out or did not start is
                 # retried exactly once. A first helper that bound and was then
                 # stopped makes the retry answer ALREADY_SET; the read-back below
                 # still accepts only this run's session.
@@ -7225,6 +7246,9 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
     this entry, live or compacted to a tombstone.
     """
     from .high_debug import REPORT_SECTIONS, _has_report_section, _outcome_status
+    # #1943 WP-5: a no-PR Debug is a diagnosis only, never repair evidence.
+    if entry.get('no_pr') is True:
+        raise ValueError
 
     allowed_executors = set()
     if isinstance(executor_task, str):
@@ -7310,6 +7334,7 @@ def _check_repair_packet_rca(packet, store, executor_task):
                 completion.get('executor_task_id') != executor_task or
                 type(entries) is not list or
                 not any(type(entry) is dict and
+                        entry.get('no_pr') is not True and
                         entry.get('status') == 'RCA_CONFIRMED' and
                         entry.get('examined_sha') == failed_head and
                         entry.get('report_sha256') == report_sha256
@@ -7506,7 +7531,10 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment):
                 diagnosis_task.get('task_id') != high_debug_task or
                 type(entries) is not list or not entries):
             raise ValueError
-        entry = entries[-1]
+        matching = [e for e in entries if not (type(e) is dict and e.get('no_pr') is True)]
+        if not matching:
+            raise ValueError
+        entry = matching[-1]
         d6 = entry.get('d6')
         examined_sha = entry.get('examined_sha')
         family = entry.get('family')

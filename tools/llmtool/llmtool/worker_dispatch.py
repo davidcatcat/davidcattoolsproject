@@ -16,6 +16,7 @@ import uuid
 from .errors import LLMToolError
 from .config import repository_config
 from . import role_timeout
+from . import start_failure
 
 POLICY_SCHEMA_VERSION = 1
 MAX_POLICY_BYTES = 64 * 1024
@@ -50,8 +51,10 @@ DISPATCH_STATES = frozenset(('ALLOWED', 'PAUSED', 'OWNER_ASSIGNMENT_ONLY'))
 AUDIT_ACTIONS = frozenset((
     'DISPATCH', 'RETRY', 'REASSIGN', 'RECOVERY', 'REPAIR',
     'TIMEOUT_CONTINUATION', 'REVIEWER_HANDOFF', 'REVIEWER_RETRY',
-    'COMMITTED_RESULT_CARRY', 'ROLE_TIMEOUT_RETRY',
+    'COMMITTED_RESULT_CARRY', 'ROLE_TIMEOUT_RETRY', 'START_RETRY',
 ))
+# #2188 design section 3: at most this many ALLOWED START_RETRY entries per Task.
+MAX_START_RETRIES_PER_TASK = 2
 # #1019 A11 row 41: a ROLE_TIMEOUT_RETRY entry names the writer that made it.
 RETRY_PHASES = frozenset(('TRANSITION', 'ADAPTER'))
 MAX_TIMEOUT_CONTINUATIONS_PER_TASK = 1  # default; policy.json timeout_continuation_max (#1815)
@@ -663,6 +666,71 @@ def _role_timeout_retry_valid(current, changes, expected, old, new):
                    for item in current.get('dispatch_audit', []))
 
 
+# #2188 design section 3: the new developer of a start retry keeps these of D.
+_START_RETRY_SAME_FIELDS = (
+    'selection_source', 'provider_profile', 'backend_session_semantics', 'source_sha',
+    'source_sha_binding', 'owner_assignment_ref', 'executor_task_id', 'read_paths',
+    'write_paths', 'acceptance', 'egress_basis',
+)
+# ... and has none of these yet (a fresh PENDING assignment).
+_START_RETRY_EMPTY_FIELDS = (
+    'provider_type', 'model', 'artifact', 'execution', 'usage', 'error_code',
+)
+
+
+def _start_retry_valid(current, changes, expected, old, new, d6_unchanged=None):
+    """#2188 design section 3: one Claude start failure D re-dispatched as a new assignment.
+
+    Checks section 2 checks 1-6. Live D6 check 6 requires an injected
+    d6_unchanged probe that returns True; an unknown, raising or failing probe
+    refuses (fail closed). Any check that cannot be made fails."""
+    probe = d6_unchanged
+    if probe is None and type(expected) is dict:
+        probe = expected.get('d6_unchanged')
+    try:
+        valid_start = start_failure.classify(current, probe).start_failure
+    except Exception:
+        valid_start = False
+    if not (type(current) is dict and type(changes) is dict and
+            type(old) is dict and type(new) is dict and
+            type(expected) is dict and
+            'developer' in expected and expected['developer'] == old and
+            'completion' in expected and
+            expected['completion'] == current.get('completion') and
+            valid_start and
+            set(changes) == {'developer', 'start_failures'} and
+            new.get('state') == 'DEVELOPER_PENDING' and
+            all(field in new and new[field] is None for field in _START_RETRY_EMPTY_FIELDS) and
+            all(field in old and field in new and old[field] == new[field]
+                for field in _START_RETRY_SAME_FIELDS) and
+            _assignment_audit_binding(current, new) is not None):
+        return False
+    assignment_id, session_id = new.get('assignment_id'), new.get('session_id')
+    if not (type(assignment_id) is str and _TASK_ID.fullmatch(assignment_id) is not None and
+            assignment_id != old.get('assignment_id') and
+            type(session_id) is str and session_id != old.get('session_id')):
+        return False
+    stored = current.get('start_failures', [])
+    if type(stored) is not list:
+        return False
+    for entry in stored:
+        archived = entry.get('failed_developer') if type(entry) is dict else None
+        if (type(archived) is not dict or
+                assignment_id in (archived.get('assignment_id'),
+                                  entry.get('retry_assignment_id')) or
+                session_id == archived.get('session_id')):
+            return False
+    proposed = changes['start_failures']
+    if not (type(proposed) is list and len(proposed) == len(stored) + 1 and
+            proposed[:-1] == stored):
+        return False
+    added = proposed[-1]
+    record_sha256 = current.get('record_sha256')
+    return (type(added) is dict and added.get('failed_developer') == old and
+            added.get('retry_assignment_id') == assignment_id and
+            type(record_sha256) is str and added.get('record_sha256') == record_sha256)
+
+
 def _timeout_cap_decision(decision, worker_key, audit, policy_code, limit_code):
     """Shared timeout budget (design section 3.3): logical attempts in this Task record.
 
@@ -747,6 +815,16 @@ def task_store_attempts(current, changes):
         attempts.append((worker or 'unknown', 'ROLE_TIMEOUT_RETRY'))
         return attempts
 
+    # #2188 design section 3: a BLOCKED Claude developer moved back to PENDING
+    # is a START_RETRY. Before this branch every such write was refused
+    # (REASSIGN needs an old PENDING state, RETRY allows none), so it removes
+    # no refusal; the gate below admits only a recorded start failure.
+    if (old_developer.get('provider_profile') == 'claude' and
+            old_developer.get('state') == 'BLOCKED' and
+            new_developer.get('state') == 'DEVELOPER_PENDING'):
+        attempts.append(('claude-developer', 'START_RETRY'))
+        return attempts
+
     if _developer_identity_changed(old_developer, new_developer):
         worker = worker_key_for(new_developer.get('provider_profile'))
         attempts.append((worker or 'unknown', 'REASSIGN'))
@@ -797,7 +875,7 @@ def worker_key_for(provider_profile):
     return None
 
 
-def authorize_task_store_change(current, changes, expected=None):
+def authorize_task_store_change(current, changes, expected=None, d6_unchanged=None):
     """Atomically audit every policy result before a TaskStore transition."""
     attempts = task_store_attempts(current, changes)
     if not attempts:
@@ -868,6 +946,21 @@ def authorize_task_store_change(current, changes, expected=None):
             decision = _timeout_cap_decision(decision, worker_key, audit,
                                              'WORKER_ROLE_TIMEOUT_RETRY_POLICY_INVALID',
                                              'WORKER_ROLE_TIMEOUT_RETRY_LIMIT')
+        if action == 'START_RETRY':
+            # #2188 design section 3: the Owner policy above, then the recorded
+            # start failure, then the per-Task cap of earlier ALLOWED retries.
+            if not _start_retry_valid(current, changes, expected,
+                                      old_developer, new_developer,
+                                      d6_unchanged=d6_unchanged):
+                decision = PolicyDecision(worker_key, False,
+                                          'WORKER_START_RETRY_PRECONDITION',
+                                          decision.policy_sha256)
+            prior = sum(1 for item in audit if type(item) is dict and
+                        item.get('action') == 'START_RETRY' and
+                        item.get('decision') == 'ALLOWED')
+            if prior >= MAX_START_RETRIES_PER_TASK:
+                decision = PolicyDecision(worker_key, False, 'WORKER_START_RETRY_LIMIT',
+                                          decision.policy_sha256)
         if action == 'COMMITTED_RESULT_CARRY':
             prior = sum(1 for item in audit if type(item) is dict and
                         item.get('action') == action and

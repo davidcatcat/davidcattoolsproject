@@ -33,6 +33,26 @@ TASK_ID = 'a' * 32
 FIXED_TAIL = 'Diagnose only; do not edit files.'
 
 
+def _codex_quota_first(claude_runner, codex_prompts=None):
+    """A runner whose first launch is a Codex attempt reporting a real quota failure.
+
+    PR #2222: Claude Debug runs only as the fallback of this run's Codex
+    Debug, so the Claude runner is reached through that fallback. The Codex
+    prompt is kept in ``codex_prompts`` when given.
+    """
+    launches = []
+
+    def runner(**kwargs):
+        launches.append(True)
+        if len(launches) == 1:
+            if codex_prompts is not None:
+                codex_prompts.append(kwargs['prompt'])
+            return subprocess.CompletedProcess([], 1, stdout=b'',
+                                               stderr=b"You've hit your usage limit.\n")
+        return claude_runner(**kwargs)
+    return runner
+
+
 def _git(root, *args):
     result = subprocess.run(
         ['git', '-C', str(root), '-c', 'user.name=t', '-c', 'user.email=t@e',
@@ -109,11 +129,19 @@ class _CardsCase(unittest.TestCase):
         self.addCleanup(reader.stop)
         self.addCleanup(ensure.stop)
 
-    def _run(self, root, route, runner, *, create=None, store=None):
+    def _run(self, root, route, runner, *, create=None, store=None, codex_prompts=None):
+        """Run one Debug. Route 'claude' is the authorized fallback (PR #2222):
+        the Codex attempt of the same run reports a real quota failure first."""
         registration = SimpleNamespace(result_sha='a' * 40, root=str(root),
                                        common_dir=str(root / '.git'))
         store = store or _Store()
         create = create or (lambda **_kwargs: str(root))
+        if route == 'claude':
+            runner = _codex_quota_first(runner, codex_prompts)
+            debug = high_debug.run_high_debug_with_fallback
+            route = 'codex'
+        else:
+            debug = high_debug.run_high_debug
         resolve = (lambda role: {'role': role, 'source': 'roles', 'account': 'acct',
                                  'config_dir': '/safe/claude', 'provider': 'claude'})
         with patch.object(high_debug.worker_dispatch, 'evaluate',
@@ -123,7 +151,7 @@ class _CardsCase(unittest.TestCase):
                           return_value=SimpleNamespace(head='a' * 40)), \
              redirect_stdout(StringIO()):
             try:
-                high_debug.run_high_debug(
+                debug(
                     store=store, task_id=TASK_ID, executor_task='executor', pr_number=17,
                     family='family', failed_corrections=2, runner=runner,
                     create_d6=create, repo_root=str(root),
@@ -200,10 +228,14 @@ class PromptAndEntryTests(_CardsCase):
 
         code, codex_store = self._run(root, 'codex', codex)
         self.assertIsNone(code)
-        code, claude_store = self._run(root, 'claude', claude)
+        fallback_codex_prompts = []
+        code, claude_store = self._run(root, 'claude', claude,
+                                       codex_prompts=fallback_codex_prompts)
         self.assertEqual(code, 'HIGH_DEBUG_RUN_FAILED')
 
         self.assertEqual(prompts['codex'], prompts['claude'])
+        # The fallback run's own Codex attempt got that same prompt too.
+        self.assertEqual(fallback_codex_prompts, [prompts['codex']])
         prompt = prompts['codex']
         self.assertTrue(prompt.startswith(expected))
         self.assertIn('not evidence', expected)
@@ -214,8 +246,17 @@ class PromptAndEntryTests(_CardsCase):
         self.assertNotIn('REQUIRED_SKILL_BEGIN', fixed)
         self.assertEqual(codex_store.entries[0]['status'], 'RCA_CONFIRMED')
         self.assertEqual(codex_store.entries[0]['rules_sha256'], digest)
-        self.assertEqual(claude_store.entries[0]['status'], 'RUN_FAILED')
-        self.assertEqual(claude_store.entries[0]['rules_sha256'], digest)
+        # The fallback run records the Codex quota failure, then the Claude run.
+        self.assertEqual(len(claude_store.entries), 2)
+        codex_entry, claude_entry = claude_store.entries
+        self.assertEqual((codex_entry['status'], codex_entry['report']),
+                         ('RUN_FAILED', 'HIGH_DEBUG_QUOTA_EXHAUSTED'))
+        self.assertEqual(codex_entry['model_requested'], high_debug._CODEX_MODEL)
+        self.assertEqual(codex_entry['rules_sha256'], digest)
+        self.assertEqual(claude_entry['status'], 'RUN_FAILED')
+        self.assertEqual(claude_entry['model_requested'], high_debug._CLAUDE_MODEL)
+        self.assertEqual(claude_entry['rules_sha256'], digest)
+        self.assertEqual(high_debug._CLAUDE_GRANTS, set())
 
 
 class RefusalBeforeD6Tests(_CardsCase):

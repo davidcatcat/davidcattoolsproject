@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 from datetime import datetime, timezone
 import functools
 
@@ -119,7 +120,7 @@ def _record_body(entry, task_id, refusal_code=None, account=None):
     return '\n'.join(lines)
 
 
-def _post_github_record(pr_number, body, repo_root):
+def _post_github_record(pr_number, body, repo_root, issue_only=False):
     """Post one screened metadata comment with the trusted gh environment."""
     gh = shutil.which('gh', path=task_completion._GH_PATH)
     if gh is None:
@@ -141,6 +142,9 @@ def _post_github_record(pr_number, body, repo_root):
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, shell=False,
             check=False, timeout=30)
 
+    if issue_only:
+        # #1943 WP-5: a no-PR Debug writes only on a verified Issue, never on a PR.
+        return _is_plain_issue(pr_number) and comment('issue').returncode == 0
     # --pr may name an Issue, which `gh pr comment` rejects with a specific
     # message. Retry on the Issue API only for that confirmed case: any other
     # failure may mean GitHub accepted a write whose response was lost, and a
@@ -188,7 +192,7 @@ def _write_unposted(entry, pr_number, task_id, reason, body=None):
         pass
 
 
-def _post_record(entry, pr_number, repo_root, task_id, refusal_code=None, account=None):
+def _post_record(entry, pr_number, repo_root, task_id, refusal_code=None, account=None, issue_only=False):
     """Return whether a comment was posted; never affect the diagnostic result."""
     try:
         body = _record_body(entry, task_id, refusal_code, account=account)
@@ -196,7 +200,7 @@ def _post_record(entry, pr_number, repo_root, task_id, refusal_code=None, accoun
             _write_unposted(entry, pr_number, task_id, 'SCREEN_REJECTED')
             return False
         try:
-            posted = _post_github_record(pr_number, body, repo_root)
+            posted = _post_github_record(pr_number, body, repo_root, issue_only=issue_only)
         except Exception:
             posted = False
         if posted:
@@ -1130,7 +1134,7 @@ def _claude_usage(raw_usage):
 def _failed_entry(*, family, failed_corrections, early_reason, head, d6, code,
                   report=None,
                   observed, effort, usage, recorded_at, model_requested='gpt-6.1-sol',
-                  rules_sha256=None):
+                  rules_sha256=None, no_pr=None):
     """The high_debug entry recording one attempt that did not finish.
 
     ``rules_sha256`` (the digest of the rule prefix sent) is recorded when given.
@@ -1144,6 +1148,8 @@ def _failed_entry(*, family, failed_corrections, early_reason, head, d6, code,
              'report': stored_report, 'usage': usage, 'recorded_at': recorded_at}
     if rules_sha256 is not None:
         entry['rules_sha256'] = rules_sha256
+    if no_pr is True:
+        entry['no_pr'] = True
     return entry
 
 
@@ -1423,11 +1429,149 @@ def _reserve_debug(store, task_id, entries, reservation):
         release()
 
 
-def run_high_debug(*, store, task_id, executor_task, pr_number, family,
+def _target_ok(pr_number, issue_number, family, failed_corrections):
+    """#1943 WP-5: exactly one of a PR and an Issue; an Issue only for family no-pr and --early."""
+    if (pr_number is None) == (issue_number is None):
+        return False
+    number = issue_number if pr_number is None else pr_number
+    if type(number) is not int or not 1 <= number <= 9999999:
+        return False
+    if issue_number is not None:
+        return family == 'no-pr' and failed_corrections is None
+    return family != 'no-pr'
+
+
+def _no_pr_repo_root():
+    """#1943 WP-5: the trusted canonical repository root for a no-PR Debug, else refuse."""
+    try:
+        config = task_completion._trust_config()
+        trust.verify_repository(config)
+        return config.canonical_root
+    except Exception:
+        _refuse('HIGH_DEBUG_D6_UNAVAILABLE')
+
+
+def _task_holds_d6(task, executor_task):
+    """#1943 WP-5: True when the Task's developer record or its result callback names the D6."""
+    developer = task.get('developer') if type(task.get('developer')) is dict else {}
+    callback = developer.get('direct_result_callback')
+    holders = [developer, callback if type(callback) is dict else {}]
+    return any(item.get('executor_task_id') == executor_task for item in holders)
+
+
+def _journal_holds_d6(store, task_id, executor_task):
+    """#1943 WP-5 F1: the newest D6 binding-journal entry must name this Task; else fail closed."""
+    try:
+        return store.d6_journal_holder(executor_task) == task_id
+    except Exception:
+        return False
+
+
+def _is_plain_issue(number):
+    """#1943 WP-5: True only when GitHub reads the number as an Issue that is not a PR."""
+    try:
+        issue = task_completion._github_get(f'issues/{number}')
+    except Exception:
+        return False
+    return type(issue) is dict and issue.get('number') == number and 'pull_request' not in issue
+
+
+# #1502 WP-B, Codex v995 audit of #1630 and PR #2222 v91 (CWE-862): a caller
+# never picks Claude Debug directly. It runs only after this run's Codex Debug
+# was refused with a DEBUG_FALLBACK_CODES code (quota exhausted or login
+# failed). run_high_debug itself enforces this, for every caller.
+CLAUDE_ROUTE_REFUSED = 'HIGH_DEBUG_CLAUDE_ROUTE_REFUSED'
+_CLAUDE_ROUTE_REFUSED_DETAIL = 'claude_debug_requires=codex_quota_exhausted_or_login_failed'
+
+
+class _ClaudeFallbackGrant:
+    """Proof that this run's Codex Debug of one Task hit a fallback code.
+
+    Only run_high_debug_with_fallback issues one, right after it caught that
+    refusal from run_high_debug(route='codex') and confirmed (PR #2222 v92)
+    that the Codex attempt itself reported it. It is bound to the Task, used
+    at most once, and valid only while it is in the issued set, so an object
+    built any other way is not a grant.
+    """
+    __slots__ = ('task_id', 'codex_code')
+
+    def __init__(self, task_id, codex_code):
+        self.task_id = task_id
+        self.codex_code = codex_code
+
+
+_CLAUDE_GRANTS = set()
+_CLAUDE_GRANTS_LOCK = threading.Lock()
+
+
+def _issue_claude_grant(task_id, codex_code):
+    """Record this run's Codex fallback condition; None when there is none."""
+    if type(task_id) is not str or codex_code not in DEBUG_FALLBACK_CODES:
+        return None
+    grant = _ClaudeFallbackGrant(task_id, codex_code)
+    with _CLAUDE_GRANTS_LOCK:
+        _CLAUDE_GRANTS.add(grant)
+    return grant
+
+
+def _revoke_claude_grant(grant):
+    with _CLAUDE_GRANTS_LOCK:
+        _CLAUDE_GRANTS.discard(grant)
+
+
+def _consume_claude_grant(grant, task_id):
+    """True once for an issued grant of task_id with a fallback code; it is then spent."""
+    if type(grant) is not _ClaudeFallbackGrant:
+        return False
+    with _CLAUDE_GRANTS_LOCK:
+        if grant not in _CLAUDE_GRANTS:
+            return False
+        _CLAUDE_GRANTS.discard(grant)
+    return (type(task_id) is str and grant.task_id == task_id and
+            grant.codex_code in DEBUG_FALLBACK_CODES)
+
+
+class _CodexAttempt:
+    """What this run's Codex Debug attempt itself reported (PR #2222 v92, CWE-862).
+
+    run_high_debug_with_fallback makes a fresh one per call and passes it to
+    run_high_debug(route='codex'). Only run_high_debug sets ``code``, and only
+    right after the Codex runner actually ran and its own result was
+    classified as a DEBUG_FALLBACK_CODES failure. A matching refusal code
+    raised anywhere else (the Task read, dispatch, D6, store or a caller)
+    leaves ``code`` unset, so it can never authorize Claude Debug.
+    """
+    __slots__ = ('task_id', 'code')
+
+    def __init__(self, task_id):
+        self.task_id = task_id
+        self.code = None
+
+
+# The refusal detail when a fallback code did not come from this run's Codex attempt.
+_CODEX_ATTEMPT_UNCONFIRMED_DETAIL = (_CLAUDE_ROUTE_REFUSED_DETAIL +
+                                     ' codex_attempt=UNCONFIRMED')
+
+
+def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_number=None, family,
                    failed_corrections=None, early_reason=None, evidence=None,
                    runner=None, create_d6=None, repo_root=None,
                    read_registration=None, sessions_dir=None,
-                   route='codex'):
+                   route='codex', claude_fallback=None, codex_attempt=None):
+    # PR #2222 v91 (CWE-862): the Claude route needs this run's recorded Codex
+    # quota or login failure (a grant from run_high_debug_with_fallback). The
+    # refusal comes before any Task read, D6, entry or provider call.
+    if route == 'claude':
+        if not _consume_claude_grant(claude_fallback, task_id):
+            _refuse(CLAUDE_ROUTE_REFUSED, _CLAUDE_ROUTE_REFUSED_DETAIL)
+    elif claude_fallback is not None:
+        _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
+    # PR #2222 v92: an attempt record is only for the Codex route, belongs to
+    # this Task and starts empty; only the Codex attempt below fills it in.
+    if codex_attempt is not None and (
+            route != 'codex' or type(codex_attempt) is not _CodexAttempt or
+            codex_attempt.task_id != task_id or codex_attempt.code is not None):
+        _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
     task = store.get(task_id)
     if type(task) is not dict or task.get('task_id') != task_id:
         _refuse('HIGH_DEBUG_TASK_INVALID')
@@ -1435,7 +1579,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
             type(task_id) is not str or _SCREEN_TASK_ID.fullmatch(task_id) is None or
             type(executor_task) is not str or
             re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', executor_task) is None or
-            type(pr_number) is not int or not 1 <= pr_number <= 9999999 or
+            not _target_ok(pr_number, issue_number, family, failed_corrections) or
             type(family) is not str or re.fullmatch(r'[a-z0-9._-]{1,64}', family) is None):
         _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
     if ((type(failed_corrections) is int and failed_corrections >= 2 and early_reason is None) or
@@ -1455,7 +1599,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     _require_screen_cleared(task_id, family)
     # #1887: the review repair gate finds a confirmed RCA by the repair claim
     # family, so a Debug for a PR that has repair claims must name one of them.
-    claims = task.get('review_repair_claims', [])
+    claims = task.get('review_repair_claims', []) if pr_number is not None else []
     families = sorted({claim.get('family', f"pr-{claim.get('pr')}")
                        for claim in (claims if type(claims) is list else [])
                        if type(claim) is dict and claim.get('pr') == pr_number and
@@ -1522,7 +1666,18 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     debug_model = _admit_debug_model(worker_key, debug_model)
     completion = task.get('completion')
     ev = completion.get('evidence') if type(completion) is dict else None
-    if type(ev) is not dict or completion.get('executor_task_id') != executor_task or type(ev.get('common_dir')) is not str:
+    # #1943 WP-5: an Issue target must be a verified Issue, never a pull request.
+    if issue_number is not None and not _is_plain_issue(issue_number):
+        _refuse('HIGH_DEBUG_ISSUE_INVALID')
+    no_pr_d6 = issue_number is not None and completion is None
+    # #1943 WP-5: with no completion, the Task itself must name the D6 it debugs,
+    # and (F1, #2210 c6914242781) be the newest binding-journal holder of that D6.
+    if no_pr_d6 and not (_task_holds_d6(task, executor_task) and _journal_holds_d6(store, task_id, executor_task)):
+        _refuse('HIGH_DEBUG_D6_NOT_BOUND')
+    if no_pr_d6:
+        repo_root = _no_pr_repo_root()
+        ev = {'common_dir': os.path.join(repo_root, '.git')}
+    elif type(ev) is not dict or completion.get('executor_task_id') != executor_task or type(ev.get('common_dir')) is not str:
         _refuse('HIGH_DEBUG_D6_UNAVAILABLE')
     try:
         reader = read_registration or task_completion.read_d6_registration
@@ -1532,12 +1687,16 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         snap = task_completion.collect_git_snapshot(registration.root)
     except Exception:
         _refuse('HIGH_DEBUG_D6_UNAVAILABLE')
+    if no_pr_d6:
+        head = snap.head if isinstance(snap.head, str) and _HEX40.fullmatch(snap.head) else None
+        if head is None:
+            _refuse('HIGH_DEBUG_D6_UNAVAILABLE')
     if not isinstance(head, str) or _HEX40.fullmatch(head) is None or snap.head != head:
         _refuse('HIGH_DEBUG_HEAD_MISMATCH')
     # #1502 WP-D D13: no AI Debug while a dispute on this PR head is OPEN. The
     # refusal records no entry, so it uses no Debug.
     from .review_repair import dispute_open_on
-    if dispute_open_on(task, pr_number, head):
+    if pr_number is not None and dispute_open_on(task, pr_number, head):
         _refuse('DEBUG_DISPUTE_OPEN')
     entries = task.get('high_debug', [])
     if type(entries) is not list or len(entries) >= 8: _refuse('HIGH_DEBUG_LIMIT')
@@ -1555,6 +1714,9 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     else:
         _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
 
+    target_number = issue_number if issue_number is not None else pr_number
+    no_pr = True if issue_number is not None else None
+    target_line = f'Issue: {issue_number} (no PR)' if issue_number is not None else 'PR: ' + str(pr_number)
     model_requested = debug_model
     # O7: reserved before any D6 create or provider call; a crash leaves it RESERVED.
     try:
@@ -1565,7 +1727,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         family=family, failed_corrections=failed_corrections, early_reason=early_reason,
         head=head, d6=d6, code='HIGH_DEBUG_RESERVED', observed='UNKNOWN', effort='UNKNOWN',
         usage='UNKNOWN', recorded_at=reserved_at, model_requested=model_requested,
-        rules_sha256=rules_sha256)
+        rules_sha256=rules_sha256, no_pr=no_pr)
     reservation['status'] = 'RESERVED'
     index = _reserve_debug(store, task_id, entries, reservation)
 
@@ -1580,13 +1742,13 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
                 early_reason=early_reason, head=head, d6=d6, code=code, report=report,
                 observed=observed, effort=effort, usage=usage,
                 recorded_at=recorded_at, model_requested=model_requested,
-                rules_sha256=rules_sha256)
+                rules_sha256=rules_sha256, no_pr=no_pr)
         try:
             store.finalize_high_debug(task_id, index, entry)
         except Exception:
             detail = (detail + ' ' if detail else '') + 'reservation=UNFINALIZED'
-        if post and not _post_record(entry, pr_number, repo_root, task_id, code,
-                                     account=account):
+        if post and not _post_record(entry, target_number, repo_root, task_id, code,
+                                     account=account, issue_only=no_pr is True):
             detail = (detail + ' ' if detail else '') + 'github_record=UNPOSTED'
         if screen_hits is not None:
             detail = _screen_detail(
@@ -1612,7 +1774,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
             failed('HIGH_DEBUG_D6_CREATE_FAILED', post=False)
         _refuse('HIGH_DEBUG_D6_CREATE_FAILED', 'reservation=RESERVED')
     reason = f'failed corrections: {failed_corrections}' if failed_corrections is not None else f'early reason: {early_reason}'
-    prompt = rules_prefix + (f'Task: {task_id}\nPR: {pr_number}\nFamily: {family}\n{reason}\nExamined SHA: {head}\n'
+    prompt = rules_prefix + (f'Task: {task_id}\n{target_line}\nFamily: {family}\n{reason}\nExamined SHA: {head}\n'
               f'Evidence:\n{evidence_text}\n\nRequired report sections, each exactly as its own line:\n'
               + '\n'.join('## ' + section for section in REPORT_SECTIONS) + '\n'
               'The Outcome/cost section must start with exactly one status word alone on its own line: '
@@ -1634,7 +1796,13 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         result = actual_runner(prompt=prompt, cwd=diagnosis_root or d6, output_path=output_path)
         if route == 'codex':
             if result.returncode != 0:
-                raise _AttemptFailed(_codex_failure_code(result.stdout, result.stderr))
+                attempt_code = _codex_failure_code(result.stdout, result.stderr)
+                # PR #2222 v92: the only place a fallback condition is
+                # recorded: the Codex runner ran and its own output says
+                # quota exhausted or login failed.
+                if codex_attempt is not None and attempt_code in DEBUG_FALLBACK_CODES:
+                    codex_attempt.code = attempt_code
+                raise _AttemptFailed(attempt_code)
             events_raw = result.stdout
             if len(events_raw) > 1024 * 1024 or len(result.stderr) > 65536:
                 raise _AttemptFailed('HIGH_DEBUG_RUN_FAILED')
@@ -1717,8 +1885,10 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
        'effort_observed':effort,'status':status,'report_sha256':hashlib.sha256(report.encode()).hexdigest(),
        'report':report,'usage':usage,'recorded_at':store._completion_now(),
        'rules_sha256':rules_sha256}
+    if no_pr:
+        entry['no_pr'] = True
     store.finalize_high_debug(task_id, index, entry)
-    posted = _post_record(entry, pr_number, repo_root, task_id, account=account)
+    posted = _post_record(entry, target_number, repo_root, task_id, account=account, issue_only=no_pr is True)
     payload=entry['report_sha256'].encode()
     event_id=hashlib.sha256(('HIGH_DEBUG\0'+task_id+'\0'+head+'\0'+entry['report_sha256']).encode()).hexdigest()[:32]
     result=store.record_completion_event(task_id,event_id=event_id,run_id=task['run_id'],
@@ -1737,18 +1907,48 @@ _CLAUDE_DEBUG_UNAVAILABLE = DEBUG_FALLBACK_CODES | {
 def run_high_debug_with_fallback(*, route='codex', **kwargs):
     """Run AI Debug; switch from Codex to Claude only on DEBUG_FALLBACK_CODES.
 
+    An explicit Claude route is refused with CLAUDE_ROUTE_REFUSED before any
+    Task read, D6, entry or provider call: Claude Debug runs only as the
+    fallback of a Codex Debug in this same run that reported quota exhausted
+    or login failure. That condition is passed to run_high_debug as a one-use
+    grant, which run_high_debug requires for the Claude route.
+
+    PR #2222 v92 (CWE-862): the error code alone proves nothing. The grant
+    needs the attempt record that run_high_debug fills in only after its
+    Codex runner actually ran and reported that same code. A fallback code
+    raised before or outside that attempt (for example by the Task read)
+    refuses with CLAUDE_ROUTE_REFUSED and starts no Claude Debug.
+
     Every other refusal stops as before and nothing is resent. When neither
     route can run, refuse with HIGH_DEBUG_WAITING, a reason code (AUTH first,
     then QUOTA, else ROUTE_UNAVAILABLE), the time and a resume condition.
     """
+    if route == 'claude':
+        _refuse(CLAUDE_ROUTE_REFUSED, _CLAUDE_ROUTE_REFUSED_DETAIL)
+    if 'claude_fallback' in kwargs or 'codex_attempt' in kwargs:
+        # Only this function issues a grant or an attempt record; a caller
+        # never supplies one.
+        _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
+    attempt = _CodexAttempt(kwargs.get('task_id')) if route == 'codex' else None
+    extra = {'codex_attempt': attempt} if attempt is not None else {}
     try:
-        return run_high_debug(route=route, **kwargs)
+        return run_high_debug(route=route, **extra, **kwargs)
     except LLMToolError as error:
         first = getattr(error, 'high_debug_code', None)
         if route != 'codex' or first not in DEBUG_FALLBACK_CODES:
             raise
+    if attempt.code is None or attempt.code != first:
+        # The fallback code did not come from this run's Codex attempt.
+        _refuse(CLAUDE_ROUTE_REFUSED, _CODEX_ATTEMPT_UNCONFIRMED_DETAIL)
+    # Reached only when this run's Codex attempt itself reported a fallback code.
+    grant = _issue_claude_grant(kwargs.get('task_id'), attempt.code)
+    if grant is None:
+        _refuse(CLAUDE_ROUTE_REFUSED, _CODEX_ATTEMPT_UNCONFIRMED_DETAIL)
     try:
-        return run_high_debug(route='claude', **kwargs)
+        try:
+            return run_high_debug(route='claude', claude_fallback=grant, **kwargs)
+        finally:
+            _revoke_claude_grant(grant)
     except LLMToolError as error:
         second = getattr(error, 'high_debug_code', None)
         if second not in _CLAUDE_DEBUG_UNAVAILABLE:

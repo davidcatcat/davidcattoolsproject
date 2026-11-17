@@ -944,6 +944,46 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "ENV_BOOTSTRAP_REJECTED")
         self.assertEqual(lifecycle._read_registry_record(record_path), before)
 
+    def test_record_result_writes_allowance_and_accepts_schema2_marker(self):
+        root, record_path = self._registered_result_fixture("record-result-allowance")
+        head = self._commit_file(root, "result\n", "developer result")
+        output = io.StringIO()
+        write_paths = ["tools/llmtool/pyproject.toml", "tools/llmtool/Makefile"]
+        def complete_bootstrap(bootstrap_root, bootstrap_task_id):
+            current = lifecycle._read_registry_record(record_path)
+            self.assertEqual(current["head_sha"], head)
+            current["env2_pass_marker"] = {
+                "schema_version": 2, "result": "PASS",
+                "task_id": "record-result-allowance",
+                "root_realpath": str(root),
+                "submitted_head_sha": head, "current_head_sha": head,
+                "tooling_sha": self.base,
+                "environment_fingerprint": _actual_cache_fingerprint(),
+                "report_sha256": "0" * 64,
+                "environment_mode": "CARRIED",
+                "carried_from_head_sha": self.base,
+                "allowed_bootstrap_paths": ["tools/llmtool/pyproject.toml"],
+            }
+            lifecycle._replace_record(record_path, current)
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(lifecycle, "_bootstrap", side_effect=complete_bootstrap) as bootstrap, \
+                contextlib.redirect_stdout(output):
+            recorded = lifecycle.record_result(
+                task_id="record-result-allowance", canonical_root=self.source,
+                root=root, workspace_root=self.tasks, write_paths=write_paths)
+        bootstrap.assert_called_once_with(root, "record-result-allowance")
+        after = lifecycle._read_registry_record(record_path)
+        self.assertEqual(recorded, head)
+        self.assertIn("env2_source_allowance", after)
+        allowance = after["env2_source_allowance"]
+        self.assertEqual(allowance["schema_version"], 1)
+        self.assertEqual(allowance["head_sha"], head)
+        self.assertEqual(allowance["base_sha"], self.base)
+        self.assertEqual(allowance["paths"], [
+            "tools/llmtool/Makefile",
+            "tools/llmtool/pyproject.toml",
+        ])
+
     def test_record_result_refuses_approved_tooling_without_registry_change(self):
         root, record_path = self._registered_result_fixture("record-result-approved")
         before = lifecycle._read_registry_record(record_path)
