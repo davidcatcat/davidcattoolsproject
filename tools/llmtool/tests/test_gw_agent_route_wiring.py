@@ -121,9 +121,18 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             data_class='SYNTHETIC', egress_basis='Synthetic test context.',
             acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
             read_path=['src.py'], write_path=['src.py'])
-        route_config = {'allowed_data_classes': ['synthetic', 'public_repo'], 'profile': {
-            'data_class_map': {'SYNTHETIC': 'synthetic', 'PUBLIC_REPO': 'public_repo'}, 'context_cap_tokens': 32768,
-            'max_output_tokens': 8192}}
+        route_config = {
+            'allowed_data_classes': ['synthetic', 'public_repo'],
+            'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
+                        'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                        'max_tool_result_bytes': 262144,
+                        'max_sent_bytes': 16777216},
+            'profile': {
+                'data_class_map': {'SYNTHETIC': 'synthetic', 'PUBLIC_REPO': 'public_repo'},
+                'context_cap_tokens': 32768,
+                'max_output_tokens': 8192,
+            },
+        }
         with patch.object(task_completion, 'validate_task_binding'), \
              patch.object(task_submission_cli, '_delegate_d6_binding',
                           return_value=(registration, snapshot)), \
@@ -202,6 +211,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                          {'SYNTHETIC': 'synthetic', 'PUBLIC_REPO': 'public_repo'})
         self.assertEqual(config['profile']['timeout_seconds'], 1800)
         self.assertEqual(config['profile']['timeout_seconds'], config['default_timeout'])
+        self.assertEqual(config['budgets']['max_turns'], 512)
         self.assertEqual(config['authorization_ref'],
             'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6760670167')
         with tempfile.TemporaryDirectory() as temp:
@@ -495,6 +505,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, 'load_route_config',
                           return_value={'routes': {'gw-agent': {
                               'allowed_data_classes': ['synthetic', 'public_repo'],
+                              'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
+                                          'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                                          'max_tool_result_bytes': 262144,
+                                          'max_sent_bytes': 16777216},
                               'profile': {'adapter': 'openai-chat-tools',
                                   'base_url': 'https://api.openai.com/v1',
                                   'model': 'gw-agent-default',
@@ -563,6 +577,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             read_path=['src.py'], write_path=['src.py'])
         route_config = {
             'allowed_data_classes': ['synthetic', 'public_repo'],
+            'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
+                        'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                        'max_tool_result_bytes': 262144,
+                        'max_sent_bytes': 16777216},
             'profile': {'adapter': 'openai-chat-tools', 'model': 'gw-agent-default',
                         'context_cap_tokens': 32768, 'max_output_tokens': 8192,
                         'allowed_data_classes': ['synthetic', 'public_repo']},
@@ -758,6 +776,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, 'load_route_config',
                           return_value={'routes': {'gw-agent': {
                               'allowed_data_classes': ['synthetic', 'public_repo'],
+                              'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
+                                          'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                                          'max_tool_result_bytes': 262144,
+                                          'max_sent_bytes': 16777216},
                               'profile': {'adapter': 'openai-chat-tools',
                                   'base_url': 'https://api.openai.com/v1',
                                   'model': 'gw-agent-default',

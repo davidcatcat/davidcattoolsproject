@@ -283,6 +283,70 @@ class GwAgentRouteTests(unittest.TestCase):
             GwAgentRoute(dict(self.route.config, profile=profile_without_auth_env))
         self.assertEqual(caught.exception.code, 'GW_AGENT_CONFIG_INVALID')
 
+    def test_route_config_validates_gw_agent_budgets(self):
+        route_config = {
+            'schema_version': 1,
+            'routes': {
+                'agy': {'executable': 'agy', 'default_model': 'agy-model',
+                        'allowed_models': ['agy-model'],
+                        'default_effort': 'low', 'denied_dirs': ['.gemini'],
+                        'state_dirs': {'policy': 'private-temp-only'},
+                        'default_timeout': 600, 'max_timeout': 600},
+                'gw-agent': {
+                    'package_path': str(Path(self.temp.name) / 'gateway'),
+                    'default_model': 'fake-model', 'allowed_models': ['fake-model'],
+                    'default_effort': 'low',
+                    'profile_name': 'fake',
+                    'profile': {'model': 'fake-model', 'auth_env': None},
+                    'authorization_ref': 'pm-task-ref',
+                    'allowed_data_classes': ['synthetic'],
+                    'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
+                                'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                                'max_tool_result_bytes': 262144,
+                                'max_sent_bytes': 16777216},
+                    'default_timeout': 600, 'max_timeout': 600,
+                },
+            },
+        }
+        path = Path(self.temp.name) / 'developer-routes.json'
+        path.write_text(json.dumps(route_config))
+        self.assertEqual(
+            load_route_config(path)['routes']['gw-agent']['budgets']['max_turns'], 512)
+
+        # Multiplier keys also accepted
+        multiplier_budgets = {
+            'max_turns': 512, 'max_input_tokens_multiplier': 8,
+            'max_output_tokens_multiplier': 4, 'max_wall_seconds': 600,
+            'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216}
+        route_config['routes']['gw-agent']['budgets'] = multiplier_budgets
+        path.write_text(json.dumps(route_config))
+        self.assertEqual(
+            load_route_config(path)['routes']['gw-agent']['budgets']['max_input_tokens_multiplier'], 8)
+
+        # Missing or invalid budgets fails closed with ROUTE_CONFIG_INVALID
+        invalid_cases = (
+            None,
+            'not-a-dict',
+            {},
+            {'max_turns': 0, 'max_input_tokens': 262144, 'max_output_tokens': 65536,
+             'max_wall_seconds': 600, 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
+            {'max_turns': 1001, 'max_input_tokens': 262144, 'max_output_tokens': 65536,
+             'max_wall_seconds': 600, 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
+            {'max_turns': True, 'max_input_tokens': 262144, 'max_output_tokens': 65536,
+             'max_wall_seconds': 600, 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
+            {'max_turns': 512, 'max_input_tokens': 0, 'max_output_tokens': 65536,
+             'max_wall_seconds': 600, 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
+        )
+        for invalid in invalid_cases:
+            if invalid is None:
+                route_config['routes']['gw-agent'].pop('budgets', None)
+            else:
+                route_config['routes']['gw-agent']['budgets'] = invalid
+            path.write_text(json.dumps(route_config))
+            with self.subTest(budgets=invalid), self.assertRaises(RouteError) as caught:
+                load_route_config(path)
+            self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
+
     def test_invalid_package_paths_raise_route_error(self):
         package_file = Path(self.temp.name) / 'package-file'
         package_file.write_text('not a directory')
