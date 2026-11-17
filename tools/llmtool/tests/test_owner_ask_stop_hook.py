@@ -273,6 +273,61 @@ class StopHookTests(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         self.assertEqual(self._last_outcome(), "HOOK_ERROR")
 
+    def test_enforce_blocks_on_a_failed_later_page(self):
+        first = _filler(99) + [_comment(101)]
+        failure = mock.Mock(returncode=1, stdout=b"", stderr=b"")
+        payload = _payload(hook.CHAT_ASK + " " + _url(10, 101), self.transcript)
+        with mock.patch.dict(os.environ, {hook.MODE_ENV: "enforce"}, clear=False), \
+                mock.patch.object(hook.subprocess, "run",
+                                  side_effect=[_gh_result(first), failure]):
+            response = hook.handle(payload, now=NOW, log_path=self.log)
+        self.assertEqual(response.get("decision"), "block")
+        self.assertIn("verification was unavailable or incomplete",
+                      response.get("reason", ""))
+        self.assertEqual(self._outcomes(), ["UNGATED_BLOCKED"])
+
+    def test_enforce_blocks_on_an_unreadable_later_page(self):
+        first = _filler(99) + [_comment(101)]
+        garbage = mock.Mock(returncode=0, stdout=b"not json", stderr=b"")
+        payload = _payload(hook.CHAT_ASK + " " + _url(10, 101), self.transcript)
+        with mock.patch.dict(os.environ, {hook.MODE_ENV: "enforce"}, clear=False), \
+                mock.patch.object(hook.subprocess, "run",
+                                  side_effect=[_gh_result(first), garbage]):
+            response = hook.handle(payload, now=NOW, log_path=self.log)
+        self.assertEqual(response.get("decision"), "block")
+        self.assertEqual(self._outcomes(), ["UNGATED_BLOCKED"])
+
+    def test_enforce_blocks_when_there_are_too_many_pages(self):
+        first = _filler(99) + [_comment(101)]
+        second = _filler(100, start=2000)
+        payload = _payload(hook.CHAT_ASK + " " + _url(10, 101), self.transcript)
+        with mock.patch.dict(os.environ, {hook.MODE_ENV: "enforce"}, clear=False), \
+                mock.patch.object(hook, "FETCH_MAX_PAGES", 2), \
+                mock.patch.object(hook.subprocess, "run",
+                                  side_effect=[_gh_result(first), _gh_result(second)]):
+            response = hook.handle(payload, now=NOW, log_path=self.log)
+        self.assertEqual(response.get("decision"), "block")
+        self.assertEqual(self._outcomes(), ["UNGATED_BLOCKED"])
+
+    def test_malformed_entry_on_the_first_page_blocks_enforce(self):
+        comments = [_comment(101), {"id": "102", "body": "x"}]
+        payload = _payload(hook.CHAT_ASK + " " + _url(10, 101), self.transcript)
+        with mock.patch.dict(os.environ, {hook.MODE_ENV: "enforce"}, clear=False):
+            response = hook.handle(payload, fetch=_fetch(comments), now=NOW,
+                                   log_path=self.log)
+        self.assertEqual(response.get("decision"), "block")
+        self.assertEqual(self._outcomes(), ["UNGATED_BLOCKED"])
+
+    def test_malformed_entry_on_a_later_page_fails_closed(self):
+        first = _filler(99) + [_comment(101)]
+        second = [_comment(202), {"id": True, "body": "x"}]
+        payload = _payload(hook.CHAT_ASK + " " + _url(10, 101), self.transcript)
+        with mock.patch.object(
+                hook.subprocess, "run",
+                side_effect=[_gh_result(first), _gh_result(second)]):
+            self.assertEqual(hook.handle(payload, now=NOW, log_path=self.log), {})
+        self.assertEqual(self._outcomes(), ["HOOK_ERROR"])
+
     def test_created_after_the_turn_started(self):
         comments = [_comment(101, created="2026-11-17T10:30:00Z")]
         self.assertEqual(self._run(comments=comments), {})
@@ -342,14 +397,34 @@ class StopHookTests(unittest.TestCase):
         self.assertEqual(hook.handle(payload, fetch=fetch, now=NOW, log_path=self.log), {})
         self.assertEqual(self._last_outcome(), "HOOK_ERROR")
 
-    def test_enforce_does_not_block_on_a_fetch_error(self):
+    def test_enforce_blocks_once_on_a_fetch_error_then_stops(self):
         def fetch(_url):
             raise hook.HookError("FETCH_ERROR")
         payload = _payload(hook.CHAT_ASK + " " + _url(10, 101), self.transcript)
         with mock.patch.dict(os.environ, {hook.MODE_ENV: "enforce"}, clear=False):
+            first = hook.handle(payload, fetch=fetch, now=NOW, log_path=self.log)
+            second = hook.handle(payload, fetch=fetch, now=NOW, log_path=self.log)
+        self.assertEqual(first.get("decision"), "block")
+        self.assertIn("verification was unavailable or incomplete",
+                      first.get("reason", ""))
+        self.assertEqual(second, {})
+        self.assertEqual(self._outcomes(), ["UNGATED_BLOCKED", "HOOK_ERROR"])
+        text = self.log.read_text(encoding="utf-8")
+        records = [json.loads(line) for line in text.splitlines()]
+        for record in records:
+            self.assertEqual(set(record), {"time", "session", "issue", "outcome",
+                                           "reply_sha256"})
+        self.assertNotIn("please decide", text)
+
+    def test_enforce_fetch_error_does_not_block_when_stop_hook_active(self):
+        def fetch(_url):
+            raise hook.HookError("FETCH_ERROR")
+        payload = _payload(hook.CHAT_ASK + " " + _url(10, 101), self.transcript,
+                           stop_hook_active=True)
+        with mock.patch.dict(os.environ, {hook.MODE_ENV: "enforce"}, clear=False):
             self.assertEqual(
                 hook.handle(payload, fetch=fetch, now=NOW, log_path=self.log), {})
-        self.assertEqual(self._last_outcome(), "HOOK_ERROR")
+        self.assertEqual(self._outcomes(), ["HOOK_ERROR"])
 
     def test_enforce_does_not_block_when_order_is_unknown(self):
         self._write_transcript(self.transcript, first=None)
@@ -397,6 +472,23 @@ class StopHookTests(unittest.TestCase):
             self.assertEqual(hook.main(), 0)
         response = json.loads(stdout.getvalue())
         self.assertEqual(response["decision"], "block")
+        self.assertEqual(self._outcomes(), ["UNGATED_BLOCKED"])
+
+    def test_main_enforce_fetch_error_emits_one_block_response(self):
+        payload = _payload(hook.CHAT_ASK + " " + _url(10, 101), self.transcript)
+        stdout = io.StringIO()
+        with mock.patch.dict(os.environ, {
+                hook.MODE_ENV: "enforce", hook.LOG_ENV: str(self.log)}, clear=False), \
+                mock.patch.object(hook, "_default_fetch",
+                                  side_effect=hook.HookError("FETCH_ERROR")), \
+                mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), \
+                mock.patch("sys.stdout", stdout):
+            self.assertEqual(hook.main(), 0)
+        self.assertEqual(len(stdout.getvalue().splitlines()), 1)
+        response = json.loads(stdout.getvalue())
+        self.assertEqual(response["decision"], "block")
+        self.assertIn("verification was unavailable or incomplete",
+                      response["reason"])
         self.assertEqual(self._outcomes(), ["UNGATED_BLOCKED"])
 
 

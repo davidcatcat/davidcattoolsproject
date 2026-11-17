@@ -6,16 +6,24 @@ the marker constants and parsers in ``scripts/pm_owner_marker.py`` and
 ``scripts/owner_ask_audit.py``.
 
 Observe mode is the default and never blocks. Enforce mode is an explicit
-switch (``LLMTOOL_OWNER_ASK_GATE_MODE=enforce``). Every non-PASS stop appends
-exactly one JSON line to the state log. The log holds time, session, Issue or
-NONE, outcome code and the SHA-256 of the reply; it never holds reply text,
-comment bodies or tokens. A PASS writes no log line.
+switch (``LLMTOOL_OWNER_ASK_GATE_MODE=enforce``). In enforce mode a HOOK_ERROR
+outcome -- a failed, incomplete, over-limit or malformed fetch, or any other
+unverifiable reply -- blocks once with a reason saying verification was
+unavailable or incomplete. When ``stop_hook_active`` is true, or an earlier
+fire already blocked the same reply, the turn may stop and HOOK_ERROR is
+logged instead. Observe mode never blocks on HOOK_ERROR. Every non-PASS stop
+appends exactly one JSON line to the state log. The log holds time, session,
+Issue or NONE, outcome code and the SHA-256 of the reply; it never holds reply
+text, comment bodies or tokens. A PASS writes no log line.
 
 The default fetcher performs read-only GitHub API reads: every comment page of
 the cited Issue, oldest first. Only a short page (fewer than ``FETCH_PAGE_SIZE``
 comments) proves the list is complete; a failed or malformed page, or more pages
 than ``FETCH_MAX_PAGES``, fails closed as HOOK_ERROR and never yields PASS.
-Tests inject a fake fetcher and never use the network.
+One shared validator rejects any comment entry that is not an object with a
+positive integer id (not bool), a parseable ``issue_url`` and ``created_at``,
+and a string body; a bad entry fails closed as HOOK_ERROR rather than being
+silently discarded. Tests inject a fake fetcher and never use the network.
 """
 
 from __future__ import annotations
@@ -72,6 +80,13 @@ BLOCK_REASON = (
     "exhausted -> D3 REPLAN/DROP) or post an ask with pm_owner_marker.py ask and "
     "restate the request with its URL."
 )
+VERIFY_BLOCK_REASON = (
+    "owner_ask_gate: this reply asks the Owner for a decision, but verification "
+    "was unavailable or incomplete, so the cited owner-ask marker could not be "
+    "confirmed. Act under your own PM authority (CI FAIL -> repair; caps "
+    "exhausted -> D3 REPLAN/DROP) or post an ask with pm_owner_marker.py ask and "
+    "restate the request with its URL."
+)
 
 _OPTION_LINE = re.compile(r"^\s*[A-Za-z][.)]\s+\S", re.MULTILINE)
 _OWNER = re.compile(r"(?<![A-Za-z0-9_])Owner(?![A-Za-z0-9_])", re.IGNORECASE)
@@ -125,6 +140,20 @@ def _parse_ref(url):
     return parts[3] + "/" + parts[4], int(parts[6]), int(match.group(1))
 
 
+def _valid_comment(item):
+    """True only for one complete comment entry every consumer can rely on."""
+    if type(item) is not dict:
+        return False
+    comment_id = item.get("id")
+    if isinstance(comment_id, bool) or type(comment_id) is not int or comment_id <= 0:
+        return False
+    if owner_ask_audit._issue_number(item.get("issue_url")) <= 0:
+        return False
+    if owner_ask_audit._seconds(item.get("created_at")) is None:
+        return False
+    return type(item.get("body")) is str
+
+
 def _fetch_page(repo, issue, page):
     """One read-only GitHub API read of one Issue comment page."""
     try:
@@ -142,7 +171,7 @@ def _fetch_page(repo, issue, page):
         comments = json.loads(result.stdout)
     except (UnicodeDecodeError, ValueError) as exc:
         raise HookError("FETCH_ERROR") from exc
-    if type(comments) is not list:
+    if type(comments) is not list or not all(_valid_comment(item) for item in comments):
         raise HookError("FETCH_ERROR")
     return comments
 
@@ -248,7 +277,7 @@ def _verify(payload, fetch, now):
     except (HookError, ValueError):
         return "NO_COMMENT_URL", None
     comments = fetch(refs[0])
-    if type(comments) is not list:
+    if type(comments) is not list or not all(_valid_comment(item) for item in comments):
         return "HOOK_ERROR", issue
     cited = next((item for item in comments
                   if type(item) is dict and item.get("id") == comment_id), None)
@@ -338,11 +367,24 @@ def handle(payload, fetch=None, now=None, log_path=None):
         if not detect(message):
             _append_log(log_path, payload, None, "NO_ASK", sha, now)
             return {}
-        outcome, issue = _verify(
-            payload, fetch or _default_fetch, now if now is not None else int(time.time()))
+        try:
+            outcome, issue = _verify(
+                payload, fetch or _default_fetch,
+                now if now is not None else int(time.time()))
+        except HookError:
+            outcome, issue = "HOOK_ERROR", None
         if outcome == "PASS":
             return {}
-        if outcome in ("HOOK_ERROR", "UNKNOWN", "ORDER_UNKNOWN"):
+        if outcome == "HOOK_ERROR":
+            if _mode() != "enforce":
+                _append_log(log_path, payload, issue, "HOOK_ERROR", sha, now)
+                return {}
+            if payload.get("stop_hook_active") is True or _already_blocked(log_path, sha):
+                _append_log(log_path, payload, issue, "HOOK_ERROR", sha, now)
+                return {}
+            _append_log(log_path, payload, issue, "UNGATED_BLOCKED", sha, now)
+            return {"decision": "block", "reason": VERIFY_BLOCK_REASON}
+        if outcome in ("UNKNOWN", "ORDER_UNKNOWN"):
             _append_log(log_path, payload, issue, outcome, sha, now)
             return {}
         if payload.get("stop_hook_active") is True or _already_blocked(log_path, sha):
