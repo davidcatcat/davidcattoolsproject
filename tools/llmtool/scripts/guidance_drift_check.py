@@ -206,6 +206,8 @@ DEVELOPER_ROUTE = TimeoutPair(Obj(
         "max_diff_bytes": Int(1024, 512 * 1024),
         # #2281: same rule as developer_routes.base max_prompt_bytes_ok (>= 1, no hard ceiling).
         "max_prompt_bytes": Int(1),
+        "max_source_file_bytes": Int(1),
+        "max_source_total_bytes": Int(1),
     },
 ))
 # Review/AI Debug role model registry (#1502 WP-E). The route loader checks

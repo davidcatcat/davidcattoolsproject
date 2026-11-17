@@ -34,13 +34,19 @@ AGENT = 'llmtool-direct-developer'
 MAX_WALL_CLOCK_SECONDS = 3600
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 MAX_STDERR_BYTES = 64 * 1024
-MAX_PROMPT_BYTES = 64 * 1024
+# #2281: default bound from developer-routes.json (resolved_max_prompt_bytes).
+DEFAULT_MAX_PROMPT_BYTES = 64 * 1024
+MAX_PROMPT_BYTES = DEFAULT_MAX_PROMPT_BYTES
 MAX_OUTPUT_TOKENS = 32768
 DEFAULT_AGENT_STEPS = 1000
 MIN_AGENT_STEPS = 3
 MAX_AGENT_STEPS = 1000
-MAX_SOURCE_FILE_BYTES = 1024 * 1024
-MAX_SOURCE_TOTAL_BYTES = 2 * 1024 * 1024
+# #2281: default bounds from developer-routes.json (resolved_max_source_file_bytes
+# and resolved_max_source_total_bytes).
+DEFAULT_MAX_SOURCE_FILE_BYTES = 1024 * 1024
+MAX_SOURCE_FILE_BYTES = DEFAULT_MAX_SOURCE_FILE_BYTES
+DEFAULT_MAX_SOURCE_TOTAL_BYTES = 2 * 1024 * 1024
+MAX_SOURCE_TOTAL_BYTES = DEFAULT_MAX_SOURCE_TOTAL_BYTES
 MAX_VERSION_OUTPUT_BYTES = 4096
 VERSION_TIMEOUT_SECONDS = 5
 _SESSION = re.compile(r'ses_[A-Za-z0-9]{1,100}\Z')
@@ -158,6 +164,33 @@ def resolved_timeout(requested=None):
     if type(value) is not int or not 1 <= value <= MAX_WALL_CLOCK_SECONDS:
         _reject('OPENCODE_BUDGET_INVALID')
     return value
+
+
+def resolved_max_prompt_bytes(config=None):
+    """Return the opencode max_prompt_bytes bound from developer-routes.json (#2281)."""
+    from .developer_routes import RouteError, resolve_route_max_prompt_bytes
+    try:
+        return resolve_route_max_prompt_bytes('opencode', config=config)
+    except RouteError as exc:
+        raise DirectOpenCodeError(exc.code) from None
+
+
+def resolved_max_source_file_bytes(config=None):
+    """Return the opencode max_source_file_bytes bound from developer-routes.json (#2281)."""
+    from .developer_routes import RouteError, resolve_route_max_source_file_bytes
+    try:
+        return resolve_route_max_source_file_bytes('opencode', config=config)
+    except RouteError as exc:
+        raise DirectOpenCodeError(exc.code) from None
+
+
+def resolved_max_source_total_bytes(config=None):
+    """Return the opencode max_source_total_bytes bound from developer-routes.json (#2281)."""
+    from .developer_routes import RouteError, resolve_route_max_source_total_bytes
+    try:
+        return resolve_route_max_source_total_bytes('opencode', config=config)
+    except RouteError as exc:
+        raise DirectOpenCodeError(exc.code) from None
 
 
 def is_free_model(model):
@@ -412,8 +445,10 @@ def _valid_paths(root, read_paths, write_paths):
             _reject('OPENCODE_SCOPE_INVALID')
 
 
-def _read_scoped_file(root, name):
+def _read_scoped_file(root, name, *, max_file_bytes=None):
     """Read one bounded regular file through no-follow directory descriptors."""
+    if max_file_bytes is None:
+        max_file_bytes = resolved_max_source_file_bytes()
     parts = name.split('/')
     directory_flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | os.O_NOFOLLOW
     root_fd = os.open(root, directory_flags)
@@ -434,15 +469,15 @@ def _read_scoped_file(root, name):
             if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or
                     before.st_size < 0):
                 _reject('OPENCODE_SOURCE_INVALID')
-            if before.st_size > MAX_SOURCE_FILE_BYTES:
+            if before.st_size > max_file_bytes:
                 _reject('OPENCODE_SOURCE_TOO_LARGE')
             raw = bytearray()
             while True:
-                chunk = os.read(fd, min(65536, MAX_SOURCE_FILE_BYTES + 1 - len(raw)))
+                chunk = os.read(fd, min(65536, max(1, max_file_bytes + 1 - len(raw))))
                 if not chunk:
                     break
                 raw.extend(chunk)
-                if len(raw) > MAX_SOURCE_FILE_BYTES:
+                if len(raw) > max_file_bytes:
                     _reject('OPENCODE_SOURCE_TOO_LARGE')
             after = os.fstat(fd)
             identity = lambda info: (info.st_dev, info.st_ino, info.st_mode,
@@ -468,13 +503,17 @@ def _read_scoped_file(root, name):
         os.close(root_fd)
 
 
-def _screen_sources(root, read_paths):
+def _screen_sources(root, read_paths, *, max_file_bytes=None, max_total_bytes=None):
     """Screen and bind every source file before launching any OpenCode process."""
+    if max_file_bytes is None:
+        max_file_bytes = resolved_max_source_file_bytes()
+    if max_total_bytes is None:
+        max_total_bytes = resolved_max_source_total_bytes()
     entries = []
     total = 0
     for name in read_paths:
         try:
-            captured = _read_scoped_file(root, name)
+            captured = _read_scoped_file(root, name, max_file_bytes=max_file_bytes)
         except DirectOpenCodeError:
             raise
         except OSError:
@@ -484,7 +523,7 @@ def _screen_sources(root, read_paths):
             continue
         entry, size = captured
         total += size
-        if total > MAX_SOURCE_TOTAL_BYTES:
+        if total > max_total_bytes:
             _reject('OPENCODE_SOURCE_TOO_LARGE')
         entries.append(entry)
     encoded = json.dumps(entries, ensure_ascii=True, sort_keys=True,
@@ -544,7 +583,7 @@ def configuration(*, read_paths, write_paths, model=MODEL,
     }
 
 
-def _screen_prompt(prompt):
+def _screen_prompt(prompt, max_prompt_bytes=None):
     if type(prompt) is not str or not prompt.strip():
         _reject('OPENCODE_PROMPT_INVALID')
     if _emitted_sensitive(prompt):
@@ -553,7 +592,9 @@ def _screen_prompt(prompt):
         raw = prompt.encode('utf-8')
     except UnicodeError:
         _reject('OPENCODE_PROMPT_INVALID')
-    if len(raw) > MAX_PROMPT_BYTES:
+    if max_prompt_bytes is None:
+        max_prompt_bytes = resolved_max_prompt_bytes()
+    if len(raw) > max_prompt_bytes:
         _reject('OPENCODE_PROMPT_TOO_LARGE')
     return raw
 
@@ -827,9 +868,13 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
     if not root.is_dir():
         _reject('OPENCODE_WORKTREE_INVALID')
     _valid_paths(root, read_paths, write_paths)
-    payload = _screen_prompt(prompt)
+    max_prompt_bytes = resolved_max_prompt_bytes()
+    max_source_file_bytes = resolved_max_source_file_bytes()
+    max_source_total_bytes = resolved_max_source_total_bytes()
+    payload = _screen_prompt(prompt, max_prompt_bytes)
     source_bytes, source_file_count, source_manifest_sha256, source_manifest = \
-        _screen_sources(root, read_paths)
+        _screen_sources(root, read_paths, max_file_bytes=max_source_file_bytes,
+                        max_total_bytes=max_source_total_bytes)
     if not callable(prelaunch_validate):
         _reject('OPENCODE_D6_BINDING_CHANGED')
     if delivered_callback is not None and not callable(delivered_callback):
@@ -841,7 +886,9 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
     if not executable or not os.path.isabs(executable):
         _reject('OPENCODE_RUNTIME_UNAVAILABLE')
     version = _version(executable)
-    _, _, current_manifest_sha256, current_manifest = _screen_sources(root, read_paths)
+    _, _, current_manifest_sha256, current_manifest = _screen_sources(
+        root, read_paths, max_file_bytes=max_source_file_bytes,
+        max_total_bytes=max_source_total_bytes)
     if (current_manifest_sha256 != source_manifest_sha256 or
             current_manifest != source_manifest):
         _reject('OPENCODE_SOURCE_CHANGED')
