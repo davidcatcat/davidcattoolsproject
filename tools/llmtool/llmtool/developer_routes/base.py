@@ -42,12 +42,27 @@ HARD_MAX_DIFF_BYTES = 512 * 1024
 # 32 of each per Developer record, so a route may lower the cap but not raise it.
 DEFAULT_MAX_TASK_PATHS = 32
 HARD_MAX_TASK_PATHS = 32
-ROUTE_LIMIT_KEYS = TIMEOUT_KEYS | {'max_diff_bytes', 'max_task_paths'}
+DEFAULT_CLAUDE_MAX_PROMPT_BYTES = 65536
+DEFAULT_AGY_MAX_PROMPT_BYTES = 512 * 1024
+DEFAULT_ROUTE_MAX_PROMPT_BYTES = {
+    'claude': DEFAULT_CLAUDE_MAX_PROMPT_BYTES,
+    'agy': DEFAULT_AGY_MAX_PROMPT_BYTES,
+}
+ROUTE_LIMIT_KEYS = TIMEOUT_KEYS | {'max_diff_bytes', 'max_task_paths', 'max_prompt_bytes'}
 
 
 def max_diff_bytes_ok(value: Any) -> bool:
     """Return True only for an int (not bool) with MIN_MAX_DIFF_BYTES <= value <= HARD_MAX_DIFF_BYTES."""
     return type(value) is int and MIN_MAX_DIFF_BYTES <= value <= HARD_MAX_DIFF_BYTES
+
+
+def max_prompt_bytes_ok(value: Any) -> bool:
+    """Return True only for an int (not bool) >= 1.
+
+    No upper bound is enforced here; the configured value is bounded only by
+    available memory and provider limits.
+    """
+    return type(value) is int and value >= 1
 
 
 def max_task_paths_ok(value: Any) -> bool:
@@ -382,6 +397,53 @@ def resolve_route_max_task_paths(route: Any, *, config: Mapping[str, Any] | None
     if not max_task_paths_ok(entry['max_task_paths']):
         raise RouteError('ROUTE_CONFIG_INVALID')
     return entry['max_task_paths']
+
+
+def resolve_route_max_prompt_bytes(route: Any, *,
+                                   config: Mapping[str, Any] | None = None) -> int:
+    """Return the effective max prompt bytes for route (#2281).
+
+    route is a registered route name or a DeveloperRoute; config is a
+    load_route_config() result (None loads the repository file). A route
+    without max_prompt_bytes returns today's default for that route
+    (65536 for claude, 524288 for agy). An invalid value, unknown str route
+    or bad config raises RouteError('ROUTE_CONFIG_INVALID').
+    """
+    if isinstance(route, DeveloperRoute):
+        name = getattr(route, 'name', None)
+        if type(name) is not str:
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        key, registered_only = name.lower().replace('_', '-'), False
+        adapter_config = getattr(route, 'config', None)
+    elif type(route) is str:
+        key, registered_only = route, True
+        adapter_config = None
+    else:
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    if config is None and isinstance(adapter_config, Mapping) and 'max_prompt_bytes' in adapter_config:
+        val = adapter_config['max_prompt_bytes']
+        if not max_prompt_bytes_ok(val):
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        return val
+    if config is None:
+        from . import load_route_config
+        config = load_route_config()
+    routes = config.get('routes') if isinstance(config, Mapping) else None
+    if not isinstance(routes, Mapping):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    entry = routes.get(key)
+    if entry is None:
+        if registered_only:
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        return DEFAULT_ROUTE_MAX_PROMPT_BYTES.get(key, DEFAULT_CLAUDE_MAX_PROMPT_BYTES)
+    if not isinstance(entry, Mapping):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    if 'max_prompt_bytes' not in entry:
+        return DEFAULT_ROUTE_MAX_PROMPT_BYTES.get(key, DEFAULT_CLAUDE_MAX_PROMPT_BYTES)
+    val = entry['max_prompt_bytes']
+    if not max_prompt_bytes_ok(val):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    return val
 
 
 def _default_runner(argv, cwd, env, timeout):

@@ -12,7 +12,8 @@ from unittest.mock import ANY, Mock, patch
 
 from llmtool import (review_dispatch, skill_ledger, skill_manifest, task_completion,
                      task_submission_cli, worker_dispatch)
-from llmtool.developer_routes import RouteError, resolve_route_max_diff_bytes
+from llmtool.developer_routes import (RouteError, resolve_route_max_diff_bytes,
+                                     resolve_route_max_prompt_bytes)
 from llmtool.developer_routes.agy import owner_assignment_gate
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore
@@ -1257,7 +1258,7 @@ class AgyRouteWiringTests(unittest.TestCase):
             self.assertEqual(status, 0)
             return prompts[0]
 
-        limit = task_submission_cli._AGY_PROMPT_MAX_BYTES
+        limit = min(64 * 1024 - 1, resolve_route_max_prompt_bytes('agy'))
         self.assertEqual(limit, 64 * 1024 - 1)
         room = limit - len(run(0).encode('utf-8'))
         self.assertGreater(room, 0)

@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import uuid
 
-from .base import DeveloperRoute, RouteError, usage_reported
+from .base import DeveloperRoute, RouteError, resolve_route_max_prompt_bytes, usage_reported
 from .. import github_identity
 
 _MODEL = re.compile(r'claude-[a-z0-9][a-z0-9.-]{0,120}\Z')
@@ -99,7 +99,8 @@ class ClaudeRoute(DeveloperRoute):
             prompt_size = len(prompt.encode('utf-8')) if type(prompt) is str else None
         except UnicodeEncodeError:
             prompt_size = None
-        if prompt_size is None or prompt_size > MAX_PROMPT_BYTES:
+        max_prompt_bytes = resolve_route_max_prompt_bytes(self)
+        if prompt_size is None or prompt_size > max_prompt_bytes:
             raise RouteError('CLAUDE_REQUEST_INVALID')
         if type(self.config.get('executable')) is not str:
             raise RouteError('CLAUDE_CONFIG_INVALID')
