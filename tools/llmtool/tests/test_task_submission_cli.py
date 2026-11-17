@@ -2289,25 +2289,32 @@ class TaskSubmissionCLITests(unittest.TestCase):
     def test_opencode_developer_profile_steps_default_configured_and_invalid(self):
         with patch.dict(os.environ, {'HOME': str(self.home)}):
             self._write_opencode_developer_model('opencode/other-model-free')
+            # #289 Owner decision: the production default is 1000 agent steps.
             self.assertEqual(submission_cli._opencode_developer_profile(),
-                             ('opencode/other-model-free', 12))
-            self._write_opencode_developer_model('opencode/other-model-free', steps=24)
-            self.assertEqual(submission_cli._opencode_developer_profile(),
-                             ('opencode/other-model-free', 24))
-            self._write_opencode_developer_model('opencode/other-model-free', steps=51)
-            with self.assertRaisesRegex(LLMToolError,
-                                        'steps must be an integer from 3 to 50'):
-                submission_cli._opencode_developer_profile()
+                             ('opencode/other-model-free', 1000))
+            for steps in (3, 24, 1000):
+                with self.subTest(steps=steps):
+                    self._write_opencode_developer_model('opencode/other-model-free',
+                                                         steps=steps)
+                    self.assertEqual(submission_cli._opencode_developer_profile(),
+                                     ('opencode/other-model-free', steps))
+            for steps in (1001, 2):
+                with self.subTest(steps=steps):
+                    self._write_opencode_developer_model('opencode/other-model-free',
+                                                         steps=steps)
+                    with self.assertRaisesRegex(LLMToolError,
+                                                'steps must be an integer from 3 to 1000'):
+                        submission_cli._opencode_developer_profile()
 
     def test_opencode_developer_role_model_and_effort_override_profile(self):
-        self._write_opencode_developer_model('opencode/profile-model-free#high')
+        self._write_opencode_developer_model('opencode/profile-model-free#high', steps=24)
         role = {'model': 'opencode/role-model-free', 'effort': 'low',
                 'account': None}
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch.object(submission_cli.role_config, 'resolve_role',
                              return_value=role) as resolve:
             self.assertEqual(submission_cli._opencode_developer_profile(),
-                             ('opencode/role-model-free#low', 12))
+                             ('opencode/role-model-free#low', 24))
         resolve.assert_called_once_with('opencode-developer')
 
     def test_opencode_developer_role_account_is_typed_refusal_before_claim(self):
