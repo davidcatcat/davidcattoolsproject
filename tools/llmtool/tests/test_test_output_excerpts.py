@@ -812,6 +812,16 @@ class TestOutputExcerptsTests(unittest.TestCase):
                     feedback._reject_credentials('\u5317' + value + '\u4eac')
                 feedback._reject_credentials('prefix_' + value)
 
+    def test_feedback_keyword_screen_detects_kelvin_sign_left_boundary(self):
+        # #986 F1: the ASCII-only left boundary must not treat U+212A KELVIN SIGN,
+        # which case-folds to ASCII k, as an identifier character before a keyword.
+        from llmtool import feedback
+
+        # synthetic-fixture: screen-tool test
+        assigned = 'tok' + 'en=' + 'private-value'
+        with self.assertRaises(LLMToolError):
+            feedback._reject_credentials('\u212A' + assigned)
+
     def test_task_submission_cloud_key_screen_detects_cjk_neighbors_and_allows_longer_ascii_identifier(self):
         from llmtool import task_submission_cli
         from llmtool.test_output_excerpts import _CLOUD_KEY
