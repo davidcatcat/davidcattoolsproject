@@ -64,6 +64,11 @@ def _gh_result(payload):
                      stderr=b"")
 
 
+def _undecodable_result():
+    """A page whose JSON nesting makes decoding raise RecursionError."""
+    return mock.Mock(returncode=0, stdout=b"[" * 5000, stderr=b"")
+
+
 def _filler(count, start=1000):
     """Earlier unrelated comments, used to fill a full API page."""
     return [_comment(start + index, created="2026-11-17T08:00:00Z",
@@ -261,6 +266,13 @@ class StopHookTests(unittest.TestCase):
             self.assertEqual(hook.handle(payload, now=NOW, log_path=self.log), {})
         self.assertEqual(self._last_outcome(), "HOOK_ERROR")
 
+    def test_undecodable_deep_page_is_hook_error_in_observe(self):
+        payload = _payload(hook.CHAT_ASK + " " + _url(10, 101), self.transcript)
+        with mock.patch.object(hook.subprocess, "run",
+                               return_value=_undecodable_result()):
+            self.assertEqual(hook.handle(payload, now=NOW, log_path=self.log), {})
+        self.assertEqual(self._outcomes(), ["HOOK_ERROR"])
+
     def test_too_many_pages_fail_closed(self):
         first = _filler(99) + [_comment(101)]
         second = _filler(100, start=2000)
@@ -296,6 +308,19 @@ class StopHookTests(unittest.TestCase):
             response = hook.handle(payload, now=NOW, log_path=self.log)
         self.assertEqual(response.get("decision"), "block")
         self.assertEqual(self._outcomes(), ["UNGATED_BLOCKED"])
+
+    def test_enforce_blocks_once_on_an_undecodable_deep_page(self):
+        payload = _payload(hook.CHAT_ASK + " " + _url(10, 101), self.transcript)
+        with mock.patch.dict(os.environ, {hook.MODE_ENV: "enforce"}, clear=False), \
+                mock.patch.object(hook.subprocess, "run",
+                                  return_value=_undecodable_result()):
+            first = hook.handle(payload, now=NOW, log_path=self.log)
+            second = hook.handle(payload, now=NOW, log_path=self.log)
+        self.assertEqual(first.get("decision"), "block")
+        self.assertIn("verification was unavailable or incomplete",
+                      first.get("reason", ""))
+        self.assertEqual(second, {})
+        self.assertEqual(self._outcomes(), ["UNGATED_BLOCKED", "HOOK_ERROR"])
 
     def test_enforce_blocks_when_there_are_too_many_pages(self):
         first = _filler(99) + [_comment(101)]

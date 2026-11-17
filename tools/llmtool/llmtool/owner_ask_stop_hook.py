@@ -169,7 +169,7 @@ def _fetch_page(repo, issue, page):
         raise HookError("FETCH_ERROR")
     try:
         comments = json.loads(result.stdout)
-    except (UnicodeDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise HookError("FETCH_ERROR") from exc
     if type(comments) is not list or not all(_valid_comment(item) for item in comments):
         raise HookError("FETCH_ERROR")
