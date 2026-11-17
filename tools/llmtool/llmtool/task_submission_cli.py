@@ -29,7 +29,9 @@ from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
 from .task_store import (TaskStore, TaskStoreConflict, new_id, _json_bytes,
                          _DIRECT_EXECUTION_FIELDS, _NO_CHANGES_MAX_TURNS,
-                         _NO_CHANGES_REASON_MAX_CHARS, valid_provider_evidence)
+                         _NO_CHANGES_REASON_MAX_CHARS, valid_provider_evidence,
+                         CLAUDE_FAILURE_EXIT_CODE_RANGE, valid_claude_failure_evidence,
+                         valid_claude_failure_evidence_record)
 from . import active_pm_inbox
 from . import remote_test
 from . import task_completion
@@ -5759,6 +5761,37 @@ def _claude_no_changes_diagnosis(raw, sent_texts):
         return {'reason': 'UNKNOWN', 'write_attempted': 'UNKNOWN', 'num_turns': 'UNKNOWN'}
 
 
+def _claude_failure_evidence(route, exc, result):
+    """#2275: structured evidence of one Claude run, or None.
+
+    Only for a run that ended CLAUDE_NO_CHANGES (the route returned a result)
+    or failed after launch (run_route attached valid execution facts, so the
+    process ran). The value is the route's parsed CLI fields (ClaudeRoute
+    cli_fields: subtype enum, is_error, num_turns, duration_ms) plus the
+    process exit code. A field the run did not report is absent; no provider,
+    stdout or stderr text is ever kept. Nothing observed, or any doubt, gives
+    None.
+    """
+    try:
+        if result is not None:
+            if exc.code != 'CLAUDE_NO_CHANGES':
+                return None
+            exit_code = getattr(result, 'exit_code', None)
+        else:
+            # The same fact check _route_failure_execution uses.
+            if _route_failure_execution(exc, None) is None:
+                return None
+            exit_code = exc.execution_facts['process_exit_code']
+        fields = getattr(route, 'cli_fields', None)
+        evidence = dict(fields) if type(fields) is dict else {}
+        low, high = CLAUDE_FAILURE_EXIT_CODE_RANGE
+        if type(exit_code) is int and low <= exit_code <= high:
+            evidence['process_exit_code'] = exit_code
+        return evidence if valid_claude_failure_evidence(evidence) else None
+    except Exception:
+        return None
+
+
 def _claude_committed_carry(task, store, registration, snapshot, developer, completion,
                             result, write_paths, test_policy):
     """#1148/#1279: return (developer, completion) that carry the D6's committed head.
@@ -6108,6 +6141,13 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
             # v93: a reason that repeats the sent prompt or context is UNKNOWN.
             developer['no_changes_diagnosis'] = _claude_no_changes_diagnosis(
                 parsed_cli_result, _claude_sent_texts(prompt, prompt_packet))
+        if not owner_gate_denied:
+            # #2275: structured run evidence; kept only when the store accepts it,
+            # so it can never block persisting this failure.
+            failure_evidence = _claude_failure_evidence(route, exc, result)
+            if (failure_evidence is not None and valid_claude_failure_evidence_record(
+                    dict(developer, claude_failure_evidence=failure_evidence))):
+                developer['claude_failure_evidence'] = failure_evidence
         if owner_gate_denied:
             developer['blocked_reason'] = 'OWNER_DISPATCH_DENIED'
         elif exc.blocked_reason is not None:
