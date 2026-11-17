@@ -36,7 +36,8 @@ ADAPTER_NAMES = {'claude': 'claude', 'agy': 'agy', 'gw-agent': 'gw_agent'}
 ROLE = 'ROLE_TIMEOUT_RETRY'
 CODEX = 'TIMEOUT_CONTINUATION'
 UNRELATED_NAMES = ('DISPATCH', 'RETRY', 'REASSIGN', 'RECOVERY', 'REPAIR',
-                   'REVIEWER_HANDOFF', 'REVIEWER_RETRY', 'COMMITTED_RESULT_CARRY')
+                   'REVIEWER_HANDOFF', 'REVIEWER_RETRY', 'COMMITTED_RESULT_CARRY',
+                   'START_RETRY')
 BINDING_FIELDS = ('assignment_id', 'source_sha', 'contract_digest')
 PAIR_FIELDS = ('action', 'worker_key') + BINDING_FIELDS
 UNREAD_FIELDS = ('reason_code', 'policy_sha256', 'at')
