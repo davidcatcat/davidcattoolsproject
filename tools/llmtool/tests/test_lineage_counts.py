@@ -143,6 +143,66 @@ class ChainWalkTests(unittest.TestCase):
                     store, task, base_family='pr-17'), unknown)
 
 
+class ContinuesSuccessorNameTests(unittest.TestCase):
+    """#2188 section 6: CONTINUES_PREDECESSOR_HAS_SUCCESSOR names S only when S is empty."""
+
+    def refusal(self, successor, *, store=None):
+        store = store or DictStore({'task_id': tid(1)}, successor)
+        with self.assertRaises(LLMToolError) as caught:
+            lineage_counts.check_continues(store, tid(3), tid(1))
+        error = caught.exception
+        self.assertEqual(error.continues_code, 'CONTINUES_PREDECESSOR_HAS_SUCCESSOR')
+        self.assertEqual(str(error), 'CONTINUES_PREDECESSOR_HAS_SUCCESSOR')
+        return error
+
+    @staticmethod
+    def successor(**fields):
+        record = {'task_id': tid(2), 'continues': tid(1), 'developer': None,
+                  'completion': None, 'review_repair_claims': [],
+                  'review_dispatch_claim': []}
+        record.update(fields)
+        return record
+
+    def test_an_empty_successor_is_named(self):
+        self.assertEqual(self.refusal(self.successor()).continues_successor, tid(2))
+        # Absent fields are empty too.
+        bare = {'task_id': tid(2), 'continues': tid(1)}
+        self.assertEqual(self.refusal(bare).continues_successor, tid(2))
+
+    def test_a_successor_with_any_work_is_not_named(self):
+        cases = {
+            'developer': {'developer': {'state': 'BLOCKED', 'provider_profile': 'claude'}},
+            'completion': {'completion': {'state': 'WAITING_EXECUTOR',
+                                          'executor_task_id': 'executor-1'}},
+            'repair claim': {'review_repair_claims': [claim('pr-17', OLD_HEAD)]},
+            'review claim': {'review_dispatch_claim': [{'pr': 17, 'head_sha': HEAD,
+                                                        'version': 1, 'state': 'DISPATCHED'}]},
+            'lineage': {'lineage': {'lineage_id': tid(9), 'kind': 'root', 'parent': None,
+                                    'replaces': [], 'state': 'OPEN', 'reason': None,
+                                    'base_sha': MAIN, 'recorded_at': AT}},
+            # Malformed values are never read as empty (fail closed).
+            'malformed developer': {'developer': {}},
+            'malformed claims': {'review_repair_claims': 'not a list'},
+        }
+        for name, fields in cases.items():
+            with self.subTest(case=name):
+                error = self.refusal(self.successor(**fields))
+                self.assertFalse(hasattr(error, 'continues_successor'))
+
+    def test_a_successor_whose_id_does_not_match_is_not_named(self):
+        store = DictStore({'task_id': tid(1)})
+        store.records[tid(2)] = self.successor(task_id=tid(4))
+        error = self.refusal(None, store=store)
+        self.assertFalse(hasattr(error, 'continues_successor'))
+
+    def test_other_refusals_name_no_successor(self):
+        store = DictStore({'task_id': tid(1)}, self.successor())
+        with self.assertRaises(LLMToolError) as caught:
+            lineage_counts.check_continues(store, tid(1), tid(1))
+        self.assertEqual(caught.exception.continues_code, 'CONTINUES_SELF')
+        self.assertFalse(hasattr(caught.exception, 'continues_successor'))
+
+
 class ChainCountTests(unittest.TestCase):
     def test_counts_sum_over_two_and_three_tasks_any_pr(self):
         first = {'task_id': tid(1), 'review_repair_claims': [
@@ -408,6 +468,17 @@ class RecordPmContinuesTests(RecordPmCase):
         first = self.task()
         self.record_pm(continues=first)
         self.refused('CONTINUES_PREDECESSOR_HAS_SUCCESSOR', first)
+
+    def test_successor_left_before_its_first_delegate_is_named(self):
+        # #2188 section 6: record-pm created S; no delegate has written to it yet.
+        first = self.task()
+        successor = self.record_pm(continues=first)['task_id']
+        with self.assertRaises(LLMToolError) as caught:
+            self.record_pm(continues=first)
+        self.assertEqual(caught.exception.continues_code,
+                         'CONTINUES_PREDECESSOR_HAS_SUCCESSOR')
+        self.assertEqual(str(caught.exception), 'CONTINUES_PREDECESSOR_HAS_SUCCESSOR')
+        self.assertEqual(getattr(caught.exception, 'continues_successor', None), successor)
 
     def test_split_child_or_replan_predecessor_is_refused(self):
         root = self.task()

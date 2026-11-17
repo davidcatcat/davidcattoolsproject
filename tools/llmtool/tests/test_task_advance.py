@@ -57,6 +57,24 @@ def base_record(**changes):
     return record
 
 
+def start_failed_repair_record(**changes):
+    """A repair Task whose Claude delegate stopped before its process (#2188 checks 1-5)."""
+    record = {
+        'task_id': '3' * 32, 'state': 'PM_RESPONDED',
+        'developer': {
+            'state': 'BLOCKED', 'provider_profile': 'claude',
+            'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+            'error_code': 'CLAUDE_CONFIG_INVALID', 'artifact': None,
+            'artifact_sha256': None, 'usage': None, 'execution': None,
+        },
+        'completion': {'executor_task_id': 'executor-1', 'state': 'WAITING_EXECUTOR',
+                       'evidence': {'result_head': None}},
+        'completion_events': [], 'review_repair_claims': [],
+    }
+    record.update(changes)
+    return record
+
+
 def d6(clean=True, recorded=HEAD):
     return {'root': '/repo/task', 'task_id': 'executor-1', 'result_head': HEAD,
             'recorded_result_head': recorded, 'registered_result_head': recorded,
@@ -711,6 +729,150 @@ class TaskAdvanceTests(unittest.TestCase):
                 }
                 self.assertEqual(task_advance.decide(
                     base_record(review_dispatch_claim=[review_claim]), d6(), PR, related), action)
+
+    def test_start_failed_repair_record_is_derived_only_when_checks_one_to_five_pass(self):
+        # #2188 section 7 item 3: record checks 1-5 only; the live D6 is not read.
+        self.assertEqual(task_advance.derive_repair_state(start_failed_repair_record()),
+                         'START_FAILED')
+        # The top-level state may still read PM_PENDING; the developer field decides.
+        self.assertEqual(task_advance.derive_repair_state(
+            start_failed_repair_record(state='PM_PENDING')), 'START_FAILED')
+        confirmed = {'native_session_id': None, 'process_exit_code': None,
+                     'stdout_sha256': None, 'cleanup_status': 'CONFIRMED'}
+        record = start_failed_repair_record()
+        record['developer']['execution'] = confirmed
+        self.assertEqual(task_advance.derive_repair_state(record), 'START_FAILED')
+        for code in ('CLAUDE_PROFILE_INVALID', 'CLAUDE_ENV_INVALID', 'CLAUDE_REQUEST_INVALID'):
+            with self.subTest(code=code):
+                record = start_failed_repair_record()
+                record['developer']['error_code'] = code
+                self.assertEqual(task_advance.derive_repair_state(record), 'START_FAILED')
+
+        def developer(**fields):
+            record = start_failed_repair_record()
+            record['developer'].update(fields)
+            return record
+
+        misses = {
+            'check 1 non-Claude route': developer(provider_profile='codex'),
+            'check 1 other session semantics': developer(
+                backend_session_semantics='NO_NATIVE_SESSION_ID_EXPOSED'),
+            'check 2 code after a run': developer(error_code='CLAUDE_RESULT_UNKNOWN'),
+            'check 2 owner denial': developer(error_code='OWNER_DISPATCH_DENIED'),
+            'check 2 no code': developer(error_code=None),
+            'check 3 artifact': developer(artifact='diff text'),
+            'check 3 progress': developer(progress=[]),
+            'check 3 changed files': developer(changed_files=['module.py']),
+            'check 4 native session': developer(execution=dict(
+                confirmed, native_session_id='native-session-1')),
+            'check 4 cleanup not confirmed': developer(execution=dict(
+                confirmed, cleanup_status='UNCONFIRMED')),
+            'check 5 completion moved on': start_failed_repair_record(completion={
+                'executor_task_id': 'executor-1', 'state': 'WAITING_REVIEW',
+                'evidence': {'result_head': None}}),
+            'check 5 result head': start_failed_repair_record(completion={
+                'executor_task_id': 'executor-1', 'state': 'WAITING_EXECUTOR',
+                'evidence': {'result_head': HEAD}}),
+            'check 5 completion event': start_failed_repair_record(
+                completion_events=[{'source': 'REVIEWER'}]),
+            'check 5 repair claim': start_failed_repair_record(
+                review_repair_claims=[{'head_sha': HEAD}]),
+        }
+        for name, record in misses.items():
+            with self.subTest(case=name):
+                self.assertEqual(task_advance.derive_repair_state(record), 'UNKNOWN')
+        # CLAUDE_NO_CHANGES keeps its BLOCKED state and its REPAIR_RETRY action.
+        self.assertEqual(task_advance.derive_repair_state(
+            developer(error_code='CLAUDE_NO_CHANGES')), 'BLOCKED')
+        # A non-BLOCKED developer is never a start failure.
+        self.assertEqual(task_advance.derive_repair_state(
+            developer(state='DEVELOPER_PENDING')), 'PENDING')
+
+    def test_start_failed_repair_gives_developer_start_failed_and_never_a_repair(self):
+        review_claim = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}
+        start_failed = {'head_sha': HEAD, 'state': 'DISPATCHED',
+                        'repair_task_id': '3' * 32, 'repair_state': 'START_FAILED'}
+        related = {'events': [{'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                               'outcome': 'REVIEW_FAIL', 'findings_count': 1}],
+                   'repair_claims': [start_failed]}
+        self.assertEqual(task_advance.decide(
+            base_record(review_dispatch_claim=[review_claim]), d6(), PR, related),
+            'DEVELOPER_START_FAILED')
+        # The EC2 and CI failure path reads the same claim.
+        self.assertEqual(task_advance._remote_fail_action(related, HEAD),
+                         'DEVELOPER_START_FAILED')
+        self.assertEqual(task_advance._start_failed_repair(related, HEAD),
+                         {'repair_task_id': '3' * 32})
+        # A claim that is not DISPATCHED, or is at another head, is not this step.
+        for claim in (dict(start_failed, state='FAILED'), dict(start_failed, head_sha='b' * 40)):
+            with self.subTest(claim=claim):
+                other = dict(related, repair_claims=[claim])
+                self.assertNotEqual(task_advance._remote_fail_action(other, HEAD),
+                                    'DEVELOPER_START_FAILED')
+                self.assertIsNone(task_advance._start_failed_repair(other, HEAD))
+
+    def test_ci_failure_with_start_failed_repair_stops_without_a_repair(self):
+        related = {'events': [], 'repair_claims': [{
+            'head_sha': HEAD, 'state': 'DISPATCHED', 'repair_task_id': '3' * 32,
+            'repair_state': 'START_FAILED'}]}
+        routed = task_advance._route_ci_failure(
+            store=None, record=base_record(), task_id='1' * 32, executor_task='executor-1',
+            number=17, d6=d6(), related=related,
+            run={'name': 'check (Linux 3.14)', 'id': 5, 'conclusion': 'failure'},
+            fail_code='LINUX_CI_FAILED',
+            github_get=lambda _path: self.fail('no GitHub read is needed'),
+            repair_review_call=lambda **_kwargs: self.fail('no repair may start'))
+        self.assertEqual(routed, ('DEVELOPER_START_FAILED', ['DEVELOPER_START_FAILED'],
+                                  {'repair_task_id': '3' * 32}))
+
+    def test_advance_stops_for_the_pm_on_a_start_failed_repair(self):
+        class Store:
+            record = base_record(
+                review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD, 'version': 1,
+                                        'state': 'DISPATCHED'}],
+                review_repair_claims=[{'head_sha': HEAD, 'state': 'DISPATCHED',
+                                       'repair_task_id': '3' * 32}])
+            repair = start_failed_repair_record()
+
+            def __init__(self):
+                self.writes = 0
+
+            def get(self, task_id):
+                return self.repair if task_id == '3' * 32 else self.record
+
+            def compare_and_update(self, *_args, **_kwargs):
+                self.writes += 1
+
+        store = Store()
+        repair_before = json.loads(json.dumps(store.repair))
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=[{
+                 'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_FAIL', 'findings_count': 1}]):
+            result = task_advance.advance(
+                task_id=store.record['task_id'], store=store, pr_number=17,
+                github_get=lambda _path: [],
+                repair_review_call=lambda **_kwargs: self.fail('no automatic retry'),
+                dispatch_review_call=lambda **_kwargs: self.fail('no review may start'))
+        self.assertEqual(result['step'], 'DEVELOPER_START_FAILED')
+        self.assertEqual(result['next'], 'DEVELOPER_START_FAILED')
+        self.assertEqual(result['codes'], ['DEVELOPER_START_FAILED'])
+        self.assertEqual(result['result'], {'repair_task_id': '3' * 32})
+        self.assertEqual(store.writes, 0)
+        self.assertEqual(store.repair, repair_before)
+
+        calls = []
+
+        def one_advance(**kwargs):
+            calls.append(kwargs)
+            return result
+
+        driven = task_drive.drive(task_id=store.record['task_id'], max_steps=5,
+                                  advance_call=one_advance,
+                                  sleep=lambda _seconds: self.fail('drive must not poll'))
+        self.assertEqual(driven['step'], 'DEVELOPER_START_FAILED')
+        self.assertEqual(len(calls), 1)
 
     def test_missing_repair_task_record_is_developer_attention_with_specific_code(self):
         class Store:

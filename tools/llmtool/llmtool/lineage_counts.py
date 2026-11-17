@@ -51,10 +51,34 @@ def _hex40(value):
     return type(value) is str and _HEX40.fullmatch(value) is not None
 
 
-def _refuse(code):
+def _refuse(code, successor=None):
     error = LLMToolError(code)
     error.continues_code = code
+    if successor is not None:
+        error.continues_successor = successor
     raise error from None
+
+
+# #2188 section 6: fields that a successor left by a delegate refused before its
+# first write still has empty. 'claims' covers both claim lists.
+_EMPTY_SUCCESSOR_FIELDS = ('developer', 'completion', 'lineage',
+                           'review_repair_claims', 'review_dispatch_claim')
+
+
+def _empty_successor(record, task_id):
+    """task_id when record is an empty successor, else None (fail closed).
+
+    Empty: a 32-hex task_id equal to the scanned ID, and no developer,
+    completion, claims or lineage (each absent, None or an empty list). Such a
+    Task counts nothing; the PM re-delegates it instead of forking the chain.
+    """
+    if not _hex32(task_id) or record.get('task_id') != task_id:
+        return None
+    for field in _EMPTY_SUCCESSOR_FIELDS:
+        value = record.get(field)
+        if value is not None and not (type(value) is list and not value):
+            return None
+    return task_id
 
 
 def chain_records(store, task):
@@ -279,6 +303,8 @@ def check_continues(store, task_id, predecessor):
     Refused: a malformed or unknown Task, the Task itself, a predecessor that is
     a split child or REPLAN of another lineage, a predecessor that already has a
     successor, a cycle and a chain over MAX_CHAIN Tasks. Any read doubt refuses.
+    A CONTINUES_PREDECESSOR_HAS_SUCCESSOR refusal sets continues_successor to
+    the successor's ID only when that successor is empty (#2188 section 6).
     """
     if not _hex32(predecessor):
         _refuse('CONTINUES_TASK_INVALID')
@@ -311,7 +337,10 @@ def check_continues(store, task_id, predecessor):
         if type(other) is not dict:
             _refuse('CONTINUES_STORE_UNAVAILABLE')
         if other.get('continues') == predecessor:
-            _refuse('CONTINUES_PREDECESSOR_HAS_SUCCESSOR')
+            # #2188 section 6: an empty successor is named so the PM can
+            # re-delegate it; any other successor is not named.
+            _refuse('CONTINUES_PREDECESSOR_HAS_SUCCESSOR',
+                    successor=_empty_successor(other, other_id))
     # The new Task plus the predecessor's chain: no cycle, at most MAX_CHAIN Tasks.
     seen, current = {task_id, predecessor}, record
     length = 2
