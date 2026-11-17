@@ -322,7 +322,8 @@ def _current_d6_head(task, executor_task, current_head):
     return registration.result_sha
 
 
-def _failed_event(task, *, executor_task, pr_number, github_get):
+def _failed_event(task, *, executor_task, pr_number, github_get, body_holder=None,
+                  body_out=None):
     claims = task.get('review_dispatch_claim')
     claims = [claims] if type(claims) is dict else claims
     if type(claims) is not list:
@@ -354,6 +355,9 @@ def _failed_event(task, *, executor_task, pr_number, github_get):
     for comment in comments:
         if type(comment) is not dict:
             _refuse('REVIEW_RESULT_COMMENTS_INVALID')
+        if review_result.is_verdict_too_long(
+                comment, head=claim['head_sha'], version=claim['version']):
+            _refuse('REVIEW_VERDICT_TOO_LONG')
         verdict = review_result._comment_verdict(
             comment, head=claim['head_sha'], version=claim['version'], task=task)
         if verdict is not None:
@@ -377,6 +381,14 @@ def _failed_event(task, *, executor_task, pr_number, github_get):
                          separators=(',', ':')).encode('utf-8')
     if len(encoded) > 8192:
         _refuse('REPAIR_PACKET_INVALID')
+    target = body_holder if body_holder is not None else body_out
+    if target is not None:
+        if isinstance(target, list):
+            target.append(body)
+        elif isinstance(target, dict):
+            target['body'] = body
+        elif callable(target):
+            target(body)
     return packet, event
 
 
@@ -505,7 +517,7 @@ def _policy():
         _refuse('REPAIR_POLICY_INVALID')
 
 
-def _review_gate(task, attempts, packet, family, policy, counts=None):
+def _review_gate(task, attempts, packet, family, policy, counts=None, *, body=None):
     """#1502 WP-D (O2, D1, D3): admit one review repair from the valid FAILs per HEAD.
 
     Each earlier review repair claim stands for a valid FAIL on its HEAD and the
@@ -523,7 +535,7 @@ def _review_gate(task, attempts, packet, family, policy, counts=None):
     Without counts the Task's own attempts are used.
     """
     from . import repair_policy
-    text = packet['reviewer_text_excerpt_untrusted_data']
+    text = body if body is not None else packet['reviewer_text_excerpt_untrusted_data']
     if review_result.blocking_findings(text) == []:
         _refuse('REPAIR_NO_BLOCKING_FINDING')
     # #1502 WP-D D13: a FAIL whose every blocking finding an arbiter withdrew
@@ -676,12 +688,14 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     if profile == 'claude' and shutil.which(profile) is None:
         _refuse('RUNTIME_NOT_ON_PATH')
     ci_identity_sha = None
+    body_holder = []
     if ci_failure is not None:
         packet, ci_identity_sha = _ci_failure(task, executor_task=executor_task,
                                               pr_number=pr_number, ci_failure=ci_failure)
     elif remote_test_receipt is None:
         packet, _event = _failed_event(task, executor_task=executor_task,
-                                       pr_number=pr_number, github_get=github_get)
+                                       pr_number=pr_number, github_get=github_get,
+                                       body_holder=body_holder)
     else:
         packet = _remote_test_failure(task, executor_task=executor_task,
                                       pr_number=pr_number, receipt=remote_test_receipt)
@@ -823,7 +837,9 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                                                include_successors=True)
         rca_entry = None
         if not test_failure:
-            rca_entry = _review_gate(task, attempts, packet, family, _policy(), counts=counts)
+            body = body_holder[0] if body_holder else None
+            rca_entry = _review_gate(task, attempts, packet, family, _policy(), counts=counts,
+                                     body=body)
             if rca_entry is not None:
                 packet = dict(packet,
                               high_debug_report_untrusted_data=rca_entry['report'][:6000],
