@@ -2,6 +2,12 @@
 
 Status: design only. No code, no tests and no policy change in this PR.
 
+Implementation status (2026-11-17): PR 1a merged as #2178 (pure role-timeout
+classifier and attempt count); the monotone attempt-count amendment to this
+note merged as #2184; PR 1b merged as #2185 (REPLAN: monotone timeout
+attempt count). PR 2 (the role-timeout retry step in task advance) is not on
+main; its AGY Tasks failed EC2 before a PR existed and are parked (https://github.com/davidcatcat/davidcattoolsproject/issues/1019#issuecomment-6912676372). The design text below is unchanged.
+
 Source commit: cb9633ce820e20930fbf09e728186e862f165c7a.
 
 Read for this design: `tools/llmtool/llmtool/task_drive.py`,
