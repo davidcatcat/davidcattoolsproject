@@ -29,7 +29,11 @@ from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
 from .task_store import (TaskStore, TaskStoreConflict, new_id, _json_bytes,
                          _DIRECT_EXECUTION_FIELDS, _NO_CHANGES_MAX_TURNS,
-                         _NO_CHANGES_REASON_MAX_CHARS, valid_provider_evidence)
+                         _NO_CHANGES_REASON_MAX_CHARS, valid_provider_evidence,
+                         CLAUDE_RESULT_SUBTYPES, FAILURE_EVIDENCE_EXIT_CODE_RANGE,
+                         FAILURE_EVIDENCE_MAX_DURATION_MS,
+                         FAILURE_EVIDENCE_MESSAGE_MAX_CHARS,
+                         FAILURE_EVIDENCE_OTHER_SUBTYPE, valid_failure_evidence)
 from . import active_pm_inbox
 from . import remote_test
 from . import task_completion
@@ -5673,23 +5677,66 @@ def _claude_sent_texts(prompt, prompt_packet):
 
 
 class _SentTextIndex:
-    """v93: normalized prompt/context text and all its _NO_CHANGES_ECHO_RUN-character runs."""
+    """v93: normalized prompt/context text and all its ``run``-character runs.
 
-    def __init__(self, sent_texts):
+    ``run`` defaults to _NO_CHANGES_ECHO_RUN; #2275 failure evidence uses
+    _FAILURE_EVIDENCE_ECHO_RUN."""
+
+    def __init__(self, sent_texts, run=_NO_CHANGES_ECHO_RUN):
         if (type(sent_texts) is not tuple or not sent_texts or
                 any(type(text) is not str for text in sent_texts)):
             raise ValueError('sent text is unavailable')
+        if type(run) is not int or run < 1:
+            raise ValueError('echo run is invalid')
+        self.run = run
         self.texts = tuple(_echo_normalize(text) for text in sent_texts)
-        self.runs = {text[i:i + _NO_CHANGES_ECHO_RUN] for text in self.texts
-                     for i in range(len(text) - _NO_CHANGES_ECHO_RUN + 1)}
+        self.runs = {text[i:i + run] for text in self.texts
+                     for i in range(len(text) - run + 1)}
 
     def echoes(self, candidate):
-        """True if the whole candidate, or any 20+ character run of it, was sent."""
+        """True if the whole candidate, or any ``run``+ character run of it, was sent."""
         value = _echo_normalize(candidate)
         if not value or any(value in text for text in self.texts):
             return True
-        return any(value[i:i + _NO_CHANGES_ECHO_RUN] in self.runs
-                   for i in range(len(value) - _NO_CHANGES_ECHO_RUN + 1))
+        return any(value[i:i + self.run] in self.runs
+                   for i in range(len(value) - self.run + 1))
+
+
+def _screened_last_line(text, sent_texts, *, max_chars, run):
+    """Last non-empty line of text, screened, cut to max_chars; else None.
+
+    Shared by the #1824 reason and the #2275 failure message. Any C0/C1 control
+    character other than CR or LF, a screen hit or other non-printable text gives
+    None. Control characters are refused before the text is split or stripped;
+    provider text is never reworded to pass the screen. A line that repeats the
+    sent prompt or context (whole, or any ``run``+ character run after
+    whitespace/case normalization) gives None; missing sent text also gives None
+    (fail closed)."""
+    if type(text) is not str:
+        return None
+    if any((ord(char) < 0x20 and char not in '\r\n') or 0x7f <= ord(char) <= 0x9f
+           for char in text):
+        return None
+    lines = [line.strip() for line in
+             text.replace('\r\n', '\n').replace('\r', '\n').split('\n') if line.strip()]
+    if not lines:
+        return None
+    line = lines[-1]
+    reason = line[:max_chars].rstrip()
+    for value in (line, reason):
+        if not value or not value.isprintable():
+            return None
+        try:
+            _screen_text(value, 4 * 1024 * 1024)
+        except LLMToolError:
+            return None
+    try:
+        index = _SentTextIndex(sent_texts, run)
+        if index.echoes(line) or index.echoes(reason):
+            return None
+    except Exception:
+        return None
+    return reason
 
 
 def _claude_no_changes_reason(text, sent_texts):
@@ -5701,31 +5748,62 @@ def _claude_no_changes_reason(text, sent_texts):
     v93: a line that repeats the prompt or context sent to Claude (whole, or any
     20+ character run after whitespace/case normalization) gives UNKNOWN; missing
     sent text also gives UNKNOWN (fail closed)."""
-    if type(text) is not str:
-        return 'UNKNOWN'
-    if any((ord(char) < 0x20 and char not in '\r\n') or 0x7f <= ord(char) <= 0x9f
-           for char in text):
-        return 'UNKNOWN'
-    lines = [line.strip() for line in
-             text.replace('\r\n', '\n').replace('\r', '\n').split('\n') if line.strip()]
-    if not lines:
-        return 'UNKNOWN'
-    line = lines[-1]
-    reason = line[:_NO_CHANGES_REASON_MAX_CHARS].rstrip()
-    for value in (line, reason):
-        if not value or not value.isprintable():
-            return 'UNKNOWN'
-        try:
-            _screen_text(value, 4 * 1024 * 1024)
-        except LLMToolError:
-            return 'UNKNOWN'
+    reason = _screened_last_line(text, sent_texts, max_chars=_NO_CHANGES_REASON_MAX_CHARS,
+                                 run=_NO_CHANGES_ECHO_RUN)
+    return 'UNKNOWN' if reason is None else reason
+
+
+# #2275: a failure message that shares this many normalized characters with sent text is dropped.
+_FAILURE_EVIDENCE_ECHO_RUN = 12
+
+
+def _evidence_int(value, low, high):
+    return value if type(value) is int and low <= value <= high else 'UNKNOWN'
+
+
+def _claude_failure_evidence(raw, sent_texts, exit_code):
+    """#2275: non-secret evidence of a BLOCKED Claude CLI run; None on any doubt.
+
+    Built only from this run's parsed CLI result object and the process exit
+    code. subtype is a fixed Claude CLI result subtype or the literal OTHER,
+    never provider text. message is the screened last line of the result text,
+    or None when it fails the sensitive screen or shares any
+    _FAILURE_EVIDENCE_ECHO_RUN normalized characters (or the whole message)
+    with the prompt or context sent to Claude."""
     try:
-        index = _SentTextIndex(sent_texts)
-        if index.echoes(line) or index.echoes(reason):
-            return 'UNKNOWN'
+        if type(raw) is not dict:
+            return None
+        subtype = raw.get('subtype')
+        is_error = raw.get('is_error')
+        low, high = FAILURE_EVIDENCE_EXIT_CODE_RANGE
+        evidence = {
+            'subtype': (subtype if type(subtype) is str and subtype in CLAUDE_RESULT_SUBTYPES
+                        else FAILURE_EVIDENCE_OTHER_SUBTYPE),
+            'is_error': is_error if type(is_error) is bool else 'UNKNOWN',
+            'num_turns': _evidence_int(raw.get('num_turns'), 0, _NO_CHANGES_MAX_TURNS),
+            'duration_ms': _evidence_int(raw.get('duration_ms'), 0,
+                                         FAILURE_EVIDENCE_MAX_DURATION_MS),
+            'exit_code': _evidence_int(exit_code, low, high),
+            'message': _screened_last_line(
+                raw.get('result'), sent_texts, max_chars=FAILURE_EVIDENCE_MESSAGE_MAX_CHARS,
+                run=_FAILURE_EVIDENCE_ECHO_RUN),
+        }
+        if not valid_failure_evidence(evidence):
+            # Fail closed: drop the message, never reword it.
+            evidence['message'] = None
+            if not valid_failure_evidence(evidence):
+                return None
+        return evidence
     except Exception:
-        return 'UNKNOWN'
-    return reason
+        return None
+
+
+def _claude_failure_exit_code(result, exc):
+    """The process exit code of a BLOCKED Claude run, or None when not observed."""
+    if result is not None:
+        return getattr(result, 'exit_code', None)
+    facts = getattr(exc, 'execution_facts', None)
+    return facts.get('process_exit_code') if type(facts) is dict else None
 
 
 def _claude_no_changes_diagnosis(raw, sent_texts):
@@ -6108,6 +6186,15 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
             # v93: a reason that repeats the sent prompt or context is UNKNOWN.
             developer['no_changes_diagnosis'] = _claude_no_changes_diagnosis(
                 parsed_cli_result, _claude_sent_texts(prompt, prompt_packet))
+        if (not owner_gate_denied and type(parsed_cli_result) is dict and
+                re.fullmatch(r'CLAUDE_[A-Z0-9_]{1,57}', error_code) is not None):
+            # #2275: non-secret evidence only from this run's parsed CLI result;
+            # the message is screened and dropped on any echo of the sent text.
+            failure_evidence = _claude_failure_evidence(
+                parsed_cli_result, _claude_sent_texts(prompt, prompt_packet),
+                _claude_failure_exit_code(result, exc))
+            if failure_evidence is not None:
+                developer['failure_evidence'] = failure_evidence
         if owner_gate_denied:
             developer['blocked_reason'] = 'OWNER_DISPATCH_DENIED'
         elif exc.blocked_reason is not None:

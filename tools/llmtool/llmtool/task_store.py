@@ -370,7 +370,70 @@ _DEVELOPER_NO_CHANGES_FIELDS = frozenset(('no_changes_diagnosis',))
 _NO_CHANGES_DIAGNOSIS_FIELDS = frozenset(('reason', 'write_attempted', 'num_turns'))
 _NO_CHANGES_REASON_MAX_CHARS = 200
 _NO_CHANGES_MAX_TURNS = 1_000_000
-_DEVELOPER_OPTIONAL_FIELDS = _DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS
+# #2275: a Claude CLI run that ended BLOCKED with a parsed CLI result may keep
+# non-secret failure evidence. Optional on every developer shape; legacy records
+# omit it. subtype is only a fixed Claude CLI result subtype or the literal
+# OTHER; message is None or a short text that passed the sensitive screen.
+_DEVELOPER_FAILURE_EVIDENCE_FIELDS = frozenset(('failure_evidence',))
+FAILURE_EVIDENCE_FIELDS = frozenset((
+    'subtype', 'is_error', 'num_turns', 'duration_ms', 'exit_code', 'message'))
+CLAUDE_RESULT_SUBTYPES = frozenset((
+    'success', 'error_max_turns', 'error_during_execution', 'error_max_budget_usd',
+    'error_max_structured_output_retries'))
+FAILURE_EVIDENCE_OTHER_SUBTYPE = 'OTHER'
+FAILURE_EVIDENCE_MESSAGE_MAX_CHARS = 200
+FAILURE_EVIDENCE_MAX_DURATION_MS = 86_400_000
+FAILURE_EVIDENCE_EXIT_CODE_RANGE = (-255, 255)
+_DEVELOPER_OPTIONAL_FIELDS = (_DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS |
+                              _DEVELOPER_FAILURE_EVIDENCE_FIELDS)
+
+
+def _bounded_int_or_unknown(value, low, high):
+    if type(value) is str:
+        return value == 'UNKNOWN'
+    return type(value) is int and low <= value <= high
+
+
+def valid_failure_evidence_message(message):
+    """#2275: None, or a short, stripped, printable text that passes the screen."""
+    if message is None:
+        return True
+    return (type(message) is str and bool(message) and message == message.strip() and
+            len(message) <= FAILURE_EVIDENCE_MESSAGE_MAX_CHARS and
+            all(char.isprintable() for char in message) and
+            not any(unicodedata.category(char) == 'Cf' for char in message) and
+            not _emitted_sensitive(message))
+
+
+def valid_failure_evidence(evidence):
+    """#2275: strict shape of a failure_evidence value; enums, ints, screened text."""
+    if type(evidence) is not dict or set(evidence) != FAILURE_EVIDENCE_FIELDS:
+        return False
+    subtype = evidence['subtype']
+    if (type(subtype) is not str or
+            (subtype not in CLAUDE_RESULT_SUBTYPES and
+             subtype != FAILURE_EVIDENCE_OTHER_SUBTYPE)):
+        return False
+    is_error = evidence['is_error']
+    if type(is_error) is not bool and not (type(is_error) is str and is_error == 'UNKNOWN'):
+        return False
+    low, high = FAILURE_EVIDENCE_EXIT_CODE_RANGE
+    return (_bounded_int_or_unknown(evidence['num_turns'], 0, _NO_CHANGES_MAX_TURNS) and
+            _bounded_int_or_unknown(evidence['duration_ms'], 0,
+                                    FAILURE_EVIDENCE_MAX_DURATION_MS) and
+            _bounded_int_or_unknown(evidence['exit_code'], low, high) and
+            valid_failure_evidence_message(evidence['message']))
+
+
+def _valid_developer_failure_evidence(developer):
+    """#2275: failure_evidence only on a BLOCKED Claude CLI developer with a CLAUDE_ code."""
+    error_code = developer.get('error_code')
+    return (developer.get('provider_profile') == 'claude' and
+            developer.get('backend_session_semantics') == 'CLI_REPORTED_SESSION_ID' and
+            developer.get('state') == 'BLOCKED' and
+            type(error_code) is str and
+            re.fullmatch(r'CLAUDE_[A-Z0-9_]{1,57}', error_code) is not None and
+            valid_failure_evidence(developer.get('failure_evidence')))
 
 
 def _valid_no_changes_diagnosis(developer):
@@ -2674,6 +2737,9 @@ def _validate(record, *, strict=True):
                 _fail()
             if ('no_changes_diagnosis' in developer and
                     not _valid_no_changes_diagnosis(developer)):
+                _fail()
+            if ('failure_evidence' in developer and
+                    not _valid_developer_failure_evidence(developer)):
                 _fail()
             if ('data_class' in developer and
                     (developer.get('provider_profile') != 'gw-agent' or
