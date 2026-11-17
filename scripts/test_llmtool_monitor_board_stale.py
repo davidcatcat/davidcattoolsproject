@@ -86,7 +86,6 @@ def _paint(monitor, view, colors=None, screen=None):
     with patch.object(mon, "summary", return_value="status"), \
             patch.object(mon, "stuck_lines", return_value=[]), \
             patch.object(mon, "waiting_task_lines", return_value=[]), \
-            patch.object(mon, "pm_progress", return_value=("PM 進度：未確認", "")), \
             patch.object(mon.time, "time", return_value=float(NOW)):
         mon._paint_screen(screen or _Screen(), monitor, view, 0, False, colors or {},
                           lambda row, text, attr=0, x=0: drawn.__setitem__(row, (text, attr)))

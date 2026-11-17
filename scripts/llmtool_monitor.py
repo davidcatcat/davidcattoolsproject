@@ -117,7 +117,7 @@ IGNORED = frozenset({"grep", "egrep", "fgrep", "pgrep", "ps"})
 PYTHON_VALUE_OPTIONS = frozenset({"-X", "-W", "-Q"})
 # Roles whose process groups are not expanded (GUI apps with many helpers).
 NO_EXPAND = frozenset({"Claude Desktop", "Antigravity App (AGY)"})
-DISK_REFRESH_SECONDS = 60.0
+DISK_REFRESH_SECONDS = 5.0   # #2311: a live reading, at the office rebuild cadence (one statfs call)
 DISK_WARNING_PERCENT = 95
 DISK_ATTENTION_PERCENT = 95
 RULE_ALERT_FILE = os.path.join(os.path.expanduser("~"), ".local/state/llmtool/rule-file-alerts.json")
@@ -1065,9 +1065,11 @@ class Monitor:
         self.disk_usage: tuple[int, int] | None = None  # used percent, available bytes
         self.disk_due = 0.0
         self.incidents: list[tuple[str, str]] = []
+        self.routes: list | None = None   # route_rows() of the last office rebuild; None: unknown
 
     def refresh_disk_usage(self, now: float | None = None) -> None:
-        """Read the home volume at most once per minute; failure is silent."""
+        """Read the home volume at most every DISK_REFRESH_SECONDS; a failed read
+        clears the value, so an old reading is never shown as current."""
         now = time.monotonic() if now is None else now
         if now < self.disk_due:
             return
@@ -1220,6 +1222,7 @@ class Monitor:
                     new.append((stamp, "?", f"office view unavailable: {message}"))
                 # A fresh baseline after the error, so recovery is not logged as changes.
                 self.office, self.office_state, self.office_error = [], {}, message
+                self.routes = None
             else:
                 state, changes = office_events(self.office_state, office)
                 new += [(stamp, kind, text) for kind, text in changes]
@@ -1253,6 +1256,11 @@ class Monitor:
                     self.incidents = main_incident_lines()
                 except Exception:
                     pass
+                try:
+                    self.routes = monitor_routes(office, result.processes, self.pm_board,
+                                                 self.github, time.time())
+                except Exception:   # never a stale route list: the member rows show instead
+                    self.routes = None
         if self.short_lived and now - self.last_summary >= self.summary_every:
             new += self._flush_short_lived(stamp)
             self.last_summary = now
@@ -2060,6 +2068,90 @@ def owner_pending(comments, pulls, earlier=()) -> list[OwnerPending]:
                    if closed.get(number, 0.0) <= item.when), key=lambda item: item.when)
 
 
+# #2311: a target=Owner record with an information status (the D4 NOTICE, a PM
+# spec-error notice) is listed apart from the ★ asks, so it never reads as an
+# ask. The newest one per thread is kept; nothing settles it.
+NOTICES_SHOWN = 3   # at most this many notice lines; the rest are counted
+
+
+@dataclass(frozen=True)
+class OwnerNotice:
+    when: float
+    reference: str   # "#310"
+    status: str
+    summary: str
+
+
+def owner_notices(comments) -> list[OwnerNotice]:
+    """Notices addressed to the Owner (pure), newest per thread, oldest first."""
+    found: dict[str, OwnerNotice] = {}
+    for comment in comments if type(comments) is list else []:
+        if type(comment) is not dict or not _trusted_github_comment(comment):
+            continue
+        number, body = _issue_number(comment.get("issue_url")), comment.get("body")
+        when = _github_time(comment.get("created_at"))
+        if not number or type(body) is not str or not when:
+            continue
+        for line in body.splitlines()[:MAX_MARKERS]:
+            if MARKER.fullmatch(line) is None:   # leading, column-zero marker lines only
+                break
+            fields = {}
+            for key, value in OWNER_FIELD.findall(line):
+                fields.setdefault(key, value.rstrip("-").casefold() if key in ("actor", "target")
+                                  else value.rstrip("-").upper())
+            status = fields.get("status", "")
+            if (fields.get("target") == "owner" and fields.get("actor") != "owner"
+                    and status in OWNER_INFORMATION_STATUSES):
+                held = found.get(number)
+                if held is None or held.when <= when:
+                    found[number] = OwnerNotice(when, f"#{number}", status, _headline(body))
+                break
+    return sorted(found.values(), key=lambda item: item.when)
+
+
+# Sub-agent PM leases (pm-continuation.md, Sub-agent PMs): a trusted `subpm-lease`
+# comment with wp, holder, pm and status fields. Only HELD leases are lanes.
+LEASE_LINE = re.compile(r"(?i)\bsubpm-lease\b")
+LEASE_FIELD = re.compile(r"(?i)\b(wp|holder|pm|status)\s*[=:]\s*`?([A-Za-z0-9_.:#/-]{1,64})")
+LEASE_LINES = 12   # lines of a comment looked at for the lease fields
+
+
+@dataclass(frozen=True)
+class SubPmLease:
+    when: float
+    issue: str
+    wp: str
+    holder: str
+
+
+def subpm_leases(comments) -> list[SubPmLease]:
+    """HELD sub-agent PM leases (pure): the newest record per issue and WP wins."""
+    latest: dict[tuple[str, str], tuple[float, str, SubPmLease]] = {}
+    for comment in comments if type(comments) is list else []:
+        if type(comment) is not dict or not _trusted_github_comment(comment):
+            continue
+        number, body = _issue_number(comment.get("issue_url")), comment.get("body")
+        when = _github_time(comment.get("created_at"))
+        if not number or type(body) is not str or not when:
+            continue
+        lines = body.splitlines()[:LEASE_LINES]
+        if not any(LEASE_LINE.search(line) for line in lines):
+            continue
+        fields: dict[str, str] = {}
+        for line in lines:
+            for key, value in LEASE_FIELD.findall(line):
+                fields.setdefault(key.casefold(), value.rstrip(".:"))
+        wp, holder = fields.get("wp", ""), fields.get("holder", "")
+        if not holder or any(SECRETISH.search(value) for value in (wp, holder)):
+            continue
+        key = (number, wp or holder)
+        if key not in latest or latest[key][0] <= when:
+            latest[key] = (when, fields.get("status", "").upper(),
+                           SubPmLease(when, number, wp, holder))
+    return sorted((lease for _, status, lease in latest.values() if status == "HELD"),
+                  key=lambda lease: lease.when)
+
+
 def branch_prs(pulls, repo: str | None = None) -> dict[str, tuple[int, str]]:
     """{head branch: (PR number, MERGED/CLOSED/OPEN)} from a pulls listing; the
     newest PR wins when a branch was reused. With repo, PRs from forks (whose
@@ -2148,6 +2240,8 @@ class GitHubSource:
         self._full_read_at: float | None = None
         self._comment_updated: float | None = None
         self.pending: list[OwnerPending] = []
+        self.notices: list[OwnerNotice] = []   # #2311: Owner notices, shown apart from asks
+        self.leases: list[SubPmLease] = []     # #2311: HELD sub-agent PM leases
         self.scope = ""   # what the ★ list could see, said next to it
         self.branch_prs: dict[str, tuple[int, str]] = {}   # head branch -> (PR, MERGED/CLOSED/OPEN)
         self.verdicts: dict | None = None   # review_verdicts(); None until GitHub was read
@@ -2462,6 +2556,7 @@ class GitHubSource:
                      + (f"（只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則）" if more else "")
                      + "；監控開著時，更早還沒回覆的也會留著")
             self.events, self.pending, self.branch_prs, self.scope = events, pending, prs, scope
+            self.notices, self.leases = owner_notices(unique), subpm_leases(unique)
             self.comments_cut = more
             self.board_pulls = work_pulls
             self.board_page_count = board_page_count
@@ -4611,7 +4706,6 @@ def review_verdicts(comments) -> dict:
 
 PM_BOARD = os.path.expanduser("~/.local/state/llmtool/pm-board.json")
 PM_BOARD_STALE = 1800
-PM_PROGRESS_STALE = 1800
 PM_BOARD_LIMIT = 64 * 1024
 PM_BOARD_REF = re.compile(r"(?:PR )?#[0-9]{1,7}")
 
@@ -8594,6 +8688,203 @@ DISPATCH_PROBLEMS = {
 }
 
 
+def dispatch_reasons(raw: bytes | None) -> dict:
+    """{worker key: the one-line reason the dispatch file gives}, screened like
+    any headline; {} unless the llmtool gate would accept the whole file."""
+    if worker_dispatch(raw)[1]:
+        return {}
+    try:
+        workers = json.loads(raw.decode("utf-8"))["workers"]
+        return {key: _label(item["reason"], 80) for key, item in workers.items()}
+    except (ValueError, UnicodeDecodeError, RecursionError, KeyError, TypeError, AttributeError):
+        return {}
+
+
+# ---------------------------------------------------------------- routes (#2311)
+# One row per Developer route, always in this order, each decided by the same
+# rule (route_rows). A record names a route by one of its words.
+ROUTES = (   # (row name, worker-dispatch.json key, words that name the route in a record)
+    ("Claude", "claude-developer", ("claude",)),
+    ("AGY", "agy", ("agy", "antigravity")),
+    ("OpenCode", "opencode-developer", ("opencode",)),
+    ("home LLM", "gw-agent", ("gw-agent", "company-gw", "openai-compatible", "home llm")),
+    ("Codex", "codex-developer", ("codex",)),
+)
+ROUTE_WINDOW = 24 * 3600   # an older Task record decides nothing
+ROUTE_BUDGET = 4 << 20     # bytes of new or changed Task files read per office rebuild
+ROUTE_WAITING_PM, ROUTE_ONLY_OWNER, ROUTE_FREE, LEASE_HELD = "等 PM", "僅指定", "可派工", "持有"
+ROUTE_STYLES = {WORKING: "+", ROUTE_WAITING_PM: "!", UNCHECKED: "!"}   # anything else: plain
+ROUTE_BOARD_WORDS = {"missing": "PM 白板檔不存在", "unreadable": "PM 白板檔無法讀取",
+                     "malformed": "PM 白板檔格式錯誤", "undated": "PM 白板檔沒有有效更新時間"}
+# The dispatch-switch rows of office_rows; the route rows say the same, so the
+# office view leaves them out when it shows routes.
+SWITCH_ROW_NAMES = frozenset(name for name, _, _ in WORKER_ROSTER + DEBUG_ROSTER)
+_route_parsed: dict = {}
+
+
+def route_of(text) -> str:
+    """The route a record's provider, profile or row name names, else ""."""
+    if type(text) is not str:
+        return ""
+    folded = text.casefold()
+    return next((name for name, _, words in ROUTES if any(word in folded for word in words)), "")
+
+
+def _switch_row(row: OfficeRow) -> bool:
+    return row.kind == "worker" and row.name in SWITCH_ROW_NAMES
+
+
+def _route_of_row(row: OfficeRow) -> str:
+    return "Codex" if row.key.startswith("codex:") else route_of(row.name)
+
+
+@dataclass(frozen=True)
+class RouteTask:
+    route: str
+    task: str        # the first 8 characters of the Task id
+    running: bool    # the Developer run is under way (DEVELOPER_DISPATCHING)
+    words: str       # its result in plain words
+    when: float
+    issue: str
+    moved: bool      # the PM moved the result on: a PR or an EC2 run is recorded
+
+
+@dataclass(frozen=True)
+class RouteRow:
+    name: str
+    state: str
+    detail: str
+    next: str = ""
+    age: float | None = None
+
+
+def _route_task_entry(record) -> RouteTask | None:
+    """The bounded fields of one Developer Task (ids, route, states, codes and
+    times); its request is only matched for a leading issue number."""
+    if type(record) is not dict:
+        return None
+    task, developer, lineage = record.get("task_id"), record.get("developer"), record.get("lineage")
+    if (type(task) is not str or not re.fullmatch(r"[0-9a-f]{32}", task)
+            or type(developer) is not dict or record.get("abandonment") is not None
+            or (type(lineage) is dict and lineage.get("state") in WAITING_END_STATES)):
+        return None
+    route = next((found for found in (route_of(value) for value in (
+        developer.get("provider_type"), stored_worker_id(developer.get("provider_profile")))
+        if type(value) is str and PROFILE.fullmatch(value)) if found), "")
+    state, code = developer.get("state"), developer.get("error_code")
+    when = (_remote_test_time(record.get("updated_at"))
+            or _remote_test_time(developer.get("created_at")))
+    if not route or type(state) is not str or not CODE_TEXT.fullmatch(state) or when <= 0:
+        return None
+    code = code if type(code) is str and CODE_TEXT.fullmatch(code) else None
+    request = record.get("request")
+    found = CODEX_WORK_ISSUE.match(request) if type(request) is str else None
+    tested = any(type(record.get(name)) is list and record[name]
+                 for name in ("remote_test_receipts", "remote_test_outcomes"))
+    return RouteTask(route, task[:8], state == "DEVELOPER_DISPATCHING",
+                     DEVELOPER_RESULTS.get(code) or DEVELOPER_RESULTS.get(state) or code or state,
+                     when, found.group(1) if found else "", tested or _task_pr(record) is not None)
+
+
+def route_tasks(root: str | None = None) -> tuple[list[RouteTask], str]:
+    """Developer Tasks from the local Task store, bounded and unchanged-cached."""
+    root = LLMTOOL_TASKS if root is None else root
+    return _bounded_task_entries(root, _route_parsed, ROUTE_BUDGET, _route_task_entry)
+
+
+def _route_task_text(entry: RouteTask) -> str:
+    return f"task {entry.task}" + (f" · #{entry.issue}" if entry.issue else "")
+
+
+def _route_next(board, route: str, now: float) -> str:
+    """The first queued PM board row whose next step (else its text) names the route."""
+    status = getattr(board, "status", "missing")
+    if status not in ("ok", "stale"):
+        return f"未確認（{ROUTE_BOARD_WORDS.get(status, status)}）"
+    found = next((item for item in board.queue
+                  if (route_of(item.next) or route_of(item.what)) == route), None)
+    text = f"{found.ref} {found.what}" if found else "無"   # read_pm_board screened both
+    text = text if len(text) <= 40 else text[:40] + "…"
+    if status == "stale":
+        text += f"（白板 {int((board.age or 0) // 60)} 分鐘沒更新）"
+    return text
+
+
+def route_rows(office, switches: dict, problem: str, reasons: dict, tasks, board, leases,
+               now: float, *, llmtool_running: bool, task_problem: str = "") -> list[RouteRow]:
+    """One row per route, then one per HELD sub-PM lease no route row names.
+
+    The rule, the same for every route; the first that applies sets the state:
+    1. 工作中: its newest Task is being dispatched while an llmtool process runs,
+       or a live session or process of the route is bound to a Task or PR;
+    2. 未確認: its newest Task says it is being dispatched, but no llmtool runs;
+    3. 等 PM: its newest Task has a Developer result and no PR or EC2 run yet;
+    4. otherwise the dispatch switch: 暫停中, 僅指定, 未確認 (no valid switch) or 可派工.
+    A switch that is not ALLOWED is always named with its reason, and the
+    sub-PM holding the lease on the Task's issue is named when one is recorded."""
+    leases, used, out = list(leases or []), set(), []
+    for name, key, _ in ROUTES:
+        newest = max((entry for entry in tasks or [] if entry.route == name
+                      and now - entry.when <= ROUTE_WINDOW),
+                     key=lambda entry: entry.when, default=None)
+        live = sorted((row for row in office or [] if row.state == WORKING and row.task
+                       and row.role != "pm" and not _switch_row(row)
+                       and _route_of_row(row) == name),
+                      key=lambda row: row.age if row.age is not None else 1e12)
+        state, parts, age, issue = "", [], None, ""
+        if newest is not None and newest.running and llmtool_running:
+            state, age, issue = WORKING, now - newest.when, newest.issue
+            parts.append(_route_task_text(newest))
+        elif live:
+            state, age = WORKING, live[0].age
+            parts.append(live[0].task + (f"（另有 {len(live) - 1} 件）" if len(live) > 1 else ""))
+        elif newest is not None and newest.running:
+            state, age, issue = UNCHECKED, now - newest.when, newest.issue
+            parts.append(f"{_route_task_text(newest)} 記錄派工中，但沒有 llmtool 程序在跑")
+        elif newest is not None and not newest.moved:
+            state, age, issue = ROUTE_WAITING_PM, now - newest.when, newest.issue
+            parts.append(f"{_route_task_text(newest)} 結果：{newest.words}，PM 還沒推進")
+        switch = None if problem else switches.get(key)
+        if switch is None:
+            note = DISPATCH_PROBLEMS[problem] if problem else "派工檔沒有這條路線"
+        elif switch[0] == "ALLOWED":
+            note = ""
+        else:
+            word = "暫停派工" if switch[0] == "PAUSED" else "僅 Owner 指定時派工"
+            note = f"{switch[1]} {switch[2]} {word}" + (f"：{reasons[key]}" if reasons.get(key) else "")
+        if not state:
+            state = (UNCHECKED if switch is None else PAUSED if switch[0] == "PAUSED"
+                     else ROUTE_ONLY_OWNER if switch[0] == "OWNER_ASSIGNMENT_ONLY" else ROUTE_FREE)
+            if state == ROUTE_FREE:
+                parts.append("沒有工作" + (f"（{task_problem}）" if task_problem else ""))
+        if note:
+            parts.append(note)
+        lease = next((lease for lease in reversed(leases) if issue and lease.issue == issue), None)
+        if lease is not None:
+            used.add(id(lease))
+            parts.append(f"sub-PM {lease.holder}")
+        out.append(RouteRow(name, state, "；".join(parts), _route_next(board, name, now),
+                            None if age is None else max(0.0, age)))
+    out += [RouteRow("sub-PM", LEASE_HELD, f"{lease.holder}：WP {lease.wp or '?'}（#{lease.issue}）",
+                     "", max(0.0, now - lease.when))
+            for lease in leases if id(lease) not in used]
+    return out
+
+
+def monitor_routes(office, processes, board, github, now: float, *, canonical: str | None = None,
+                   dispatch: str | None = None, root: str | None = None) -> list[RouteRow]:
+    """route_rows from the live records: the dispatch file as the gate reads it,
+    the local Task store, the PM board and the last good GitHub read."""
+    raw, _ = load_dispatch(canonical or canonical_root(), dispatch)
+    switches, problem = worker_dispatch(raw)
+    tasks, task_problem = route_tasks(root)
+    fresh = github is not None and github.successful_read and not github.read_failed
+    return route_rows(office, switches, problem, dispatch_reasons(raw), tasks, board,
+                      getattr(github, "leases", []) if fresh else [], now,
+                      llmtool_running=any(p.role.startswith("llmtool") for p in processes),
+                      task_problem=task_problem)
+
+
 def track_one_shot(state: dict, processes: list[Process], now: float,
                    sessions: str | None = None):
     """Remember short `claude -p` runs started by Codex after they exit.
@@ -9357,46 +9648,6 @@ def _ago(age: float | None) -> str:
     return f"{int(age // 3600)} 小時前"
 
 
-def pm_progress_line(work: WorkBoard, dispatch, now: float) -> tuple[str, str]:
-    entry, problem = dispatch if dispatch is not None else (None, "")
-    if dispatch is None or problem:
-        age_text, age = "?", None
-    elif entry is None:
-        age_text, age = "沒有紀錄", None
-    else:
-        age = max(0.0, now - entry.created)
-        age_text = _ago(age)
-
-    queue_count = len(work.queue) if work.board_known else None
-    queue_text = "?" if queue_count is None else str(queue_count)
-    if queue_count is not None and work.board_status == "stale":
-        queue_text += "（可能過時）"
-
-    if not work.github_known or work.github_status:
-        merges_text = "?"
-    else:
-        merges_text = str(len(work.done))
-        if "今天完成可能不完整" in work.note:
-            merges_text += "+"
-
-    style = "!" if (queue_count is not None and queue_count > 0
-                    and work.board_status == "ok"
-                    and age is not None and age > PM_PROGRESS_STALE) else ""
-    return f"PM 進度：上次派工 {age_text} · 排隊 {queue_text} · 今天合併 {merges_text}", style
-
-
-def pm_progress(mon, now: float) -> tuple[str, str]:
-    try:
-        work = work_board(mon.github, mon.pm_board, now)
-    except Exception:
-        return "PM 進度：未確認", ""
-    try:
-        dispatch = pm_last_dispatch(now)
-    except Exception:
-        dispatch = None
-    return pm_progress_line(work, dispatch, now)
-
-
 LIVE_SECTION = "即時（讀得到 session 紀錄）"
 STATUS_SECTION = "只看得到狀態（依派工紀錄和程序推算）"
 
@@ -9405,7 +9656,8 @@ BANDS = ("?", "+", "!", "dim")   # row colours top to bottom: red, green, yellow
 GRAY = BANDS.index("dim")
 
 
-def _tree(rows: list[OfficeRow], fold: bool = False) -> list[tuple[str, OfficeRow]]:
+def _tree(rows: list[OfficeRow], fold: bool = False,
+          only_alerts: bool = False) -> list[tuple[str, OfficeRow]]:
     """(prefix, row) in display order: each agent followed by what it started.
     Each section is ordered by colour band (red, green, yellow, gray; see BANDS),
     stable within a band, and a group is ranked by its most urgent member so a
@@ -9414,7 +9666,11 @@ def _tree(rows: list[OfficeRow], fold: bool = False) -> list[tuple[str, OfficeRo
     (Owner 2026-10-28: green and yellow stay on screen, key a unfolds). A
     shared line (kind shared) is not ranked or folded: it goes right after the
     last shown row it is about (PR #614 review: never between the runner rows),
-    or last of all when they are all folded away (W47)."""
+    or last of all when they are all folded away (W47).
+    With only_alerts (#2311, the office view beside the route rows), a row is
+    shown only when it or something it started needs attention (yellow); all
+    others, and a shared line whose rows are all hidden, become one count at
+    the end, and a section with nothing shown has no heading."""
     keys = {row.key for row in rows if row.key}
     children: dict[str, list[OfficeRow]] = {}
     for row in rows:
@@ -9434,33 +9690,52 @@ def _tree(rows: list[OfficeRow], fold: bool = False) -> list[tuple[str, OfficeRo
     def size(row: OfficeRow, depth: int) -> int:
         return 1 + sum(size(child, depth + 1) for child in below(row, depth))
 
+    def alerting(row: OfficeRow, depth: int) -> bool:
+        return (_row_style(row.state) == "!"
+                or any(alerting(child, depth + 1) for child in below(row, depth)))
+
     def walk(row: OfficeRow, depth: int, out: list) -> int:
-        """Appends the row and its group to out; returns how many gray rows were
+        """Appends the row and its group to out; returns how many rows were
         folded away instead (every gray member when fold is on)."""
-        if fold and band(row, depth) == GRAY:
+        if (only_alerts and not alerting(row, depth)) or (fold and band(row, depth) == GRAY):
             return size(row, depth)
         out.append(("  " * (depth - 1) + "└ " if depth else "", row))
         return sum(walk(child, depth + 1, out) for child in ordered(below(row, depth), depth + 1))
 
+    folded_away = 0
+
     def section(items: list[OfficeRow], shared: tuple | list = ()) -> list[tuple[str, OfficeRow]]:
+        nonlocal folded_away
         out: list[tuple[str, OfficeRow]] = []
         hidden = sum(walk(row, 0, out) for row in ordered(items, 0))
         for line in shared:   # after the last shown row it is about, whatever its band
-            out.insert(max([i + 1 for i, (_, row) in enumerate(out) if row.name.startswith(line.group)],
-                           default=len(out)), ("", line))
-        if hidden:
+            about = [i + 1 for i, (_, row) in enumerate(out) if row.name.startswith(line.group)]
+            if only_alerts and not about:
+                hidden += 1
+                continue
+            out.insert(max(about, default=len(out)), ("", line))
+        if only_alerts:
+            folded_away += hidden
+        elif hidden:
             out.append(("", OfficeRow(f"… 灰色 {hidden} 項", "", "（已摺疊，按 a 展開）", None, 10 ** 6)))
         return out
 
     out: list[tuple[str, OfficeRow]] = []
     agents = [row for row in rows if row.group not in keys and row.kind not in ("worker", "shared")]
     if any(row.kind not in ("worker", "shared") or row.group in keys for row in rows):
-        out.append(("—", OfficeRow(LIVE_SECTION, "", "", None, 0)))
-        out += section(agents)
+        shown = section(agents)
+        if shown or not only_alerts:
+            out.append(("—", OfficeRow(LIVE_SECTION, "", "", None, 0)))
+            out += shown
     workers = [row for row in rows if row.kind == "worker" and row.group not in keys]
     if workers:
-        out.append(("—", OfficeRow(STATUS_SECTION, "", "", None, 0)))
-        out += section(workers, [row for row in rows if row.kind == "shared"])
+        shown = section(workers, [row for row in rows if row.kind == "shared"])
+        if shown or not only_alerts:
+            out.append(("—", OfficeRow(STATUS_SECTION, "", "", None, 0)))
+            out += shown
+    if folded_away:
+        out.append(("", OfficeRow(f"… 另有 {folded_away} 項不用你處理", "",
+                                  "（已摺疊，按 a 展開）", None, 10 ** 6)))
     return out
 
 
@@ -9684,6 +9959,14 @@ def owner_waiting(github) -> int | None:
     return count
 
 
+def owner_notice_list(github) -> list[OwnerNotice]:
+    """Owner notices from trusted GitHub reads; [] before the first good read."""
+    if github is None or GITHUB_IDENTITY_STATUS or not getattr(github, "successful_read", False):
+        return []
+    notices = getattr(github, "notices", None)
+    return list(notices) if type(notices) is list else []
+
+
 def stuck_lines(mon, now) -> list[str]:
     try:
         github = mon.github
@@ -9728,6 +10011,23 @@ def office_top(github, quota, now, stuck=None, progress=None, install=None,
     return out
 
 
+def route_view(routes: list[RouteRow], width: int | None = None) -> list[tuple[str, str]]:
+    """The route block: a section line, then each route row as name, state,
+    detail, its age and its next item; a long row continues under its detail."""
+    out = [("── 路線 ──", "section")]
+    cols = max((_width(route.name) for route in routes), default=0) + 2
+    for route in routes:
+        head = f"{_pad(route.name, cols)}{_pad(route.state, 8)}"
+        when = _short_ago(route.age)
+        body = (route.detail + (f"（{when}）" if when else "")
+                + (f"；下一件：{route.next}" if route.next else ""))
+        pieces = _wrap(body, max(10, width - _width(head))) if width else [body]
+        style = ROUTE_STYLES.get(route.state, "")
+        out.append(((head + pieces[0]).rstrip(), style))
+        out += [(" " * _width(head) + piece, style) for piece in pieces[1:]]
+    return out
+
+
 def office_view(rows: list[OfficeRow], error: str | None = None,
                 width: int | None = None, expand: bool = False,
                 pending: list[OwnerPending] | None = None,
@@ -9735,22 +10035,35 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
                 waiting: int | None = None,
                 top: list[tuple[str, str]] | None = None,
                 parts: dict[int, list[tuple[str, bool]]] | None = None,
-                entries: list[dict[str, typing.Any]] | None = None) -> list[tuple[str, str]]:
+                entries: list[dict[str, typing.Any]] | None = None,
+                routes: list[RouteRow] | None = None,
+                notices: list[OwnerNotice] | None = None) -> list[tuple[str, str]]:
     """[(line, style)]: style is "title", "!", "+", "dim", "section" or "".
     parts, if given, gets {line index: [(text, highlighted)]} for each runner
     row line holding a CI reference (the TUI draws those bright white).
     With a screen width, each detail is cut so the time column stays visible.
     Rows are ordered red, green, yellow, gray in each section; without expand
     the gray rows are folded into one count per section (key a in the TUI).
-    pending: GitHub requests waiting for the Owner, shown first."""
+    pending: GitHub requests waiting for the Owner, shown first.
+    notices: Owner notices, listed apart from the requests and never starred.
+    routes: route_rows(); when given, the title counts the routes waiting for
+    the PM, the routes come before the members, and the dispatch-switch rows
+    they replace are left out of the member list."""
     working = sum(row.state == WORKING for row in rows)
     waiting_text = "?" if waiting is None else str(waiting)
     working_text = "?" if error else str(working)
-    out = [(f"辦公室 · 工作中 {working_text} · 等你 {waiting_text}", "title")]
+    waiting_pm = ("" if routes is None else
+                  f" · 等 PM {sum(route.state == ROUTE_WAITING_PM for route in routes)}")
+    out = [(f"辦公室 · 工作中 {working_text}{waiting_pm} · 等你 {waiting_text}", "title")]
     now = time.time() if now is None else now
-    for text, style in top or []:
-        out += [(('  ' if i else '') + piece, style) for i, piece in
+
+    def add(text: str, style: str) -> None:
+        nonlocal out
+        out += [(("  " if i else "") + piece, style) for i, piece in
                 enumerate(_wrap(text, max(10, width - 2)) if width else [text])]
+
+    for text, style in top or []:
+        add(text, style)
     pending = list(pending or [])
     texts = [f"★ 等你決定：GitHub {item.reference}（{_short_ago(max(0.0, now - item.when))}）"
              + ("（UNGATED_OWNER_ASK：未經提問閘門）" if getattr(item, "ungated", False) else "")
@@ -9759,8 +10072,24 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
     if len(pending) > OWNER_SHOWN:
         texts.append(f"★ …另有 {len(pending) - OWNER_SHOWN} 筆較早的等你決定")
     for text in texts:
-        out += [(("  " if i else "") + piece, "!") for i, piece in
-                enumerate(_wrap(text, max(10, width - 2)) if width else [text])]
+        add(text, "!")
+    notices = list(notices or [])
+    if notices:
+        out.append(("── 通知（只給你看，不用回覆）──", "section"))
+        for item in notices[-NOTICES_SHOWN:]:
+            add(f"ℹ GitHub {item.reference}（{_short_ago(max(0.0, now - item.when))}）"
+                + (f" — {item.summary}" if item.summary else ""), "")
+        if len(notices) > NOTICES_SHOWN:
+            add(f"ℹ …另有 {len(notices) - NOTICES_SHOWN} 則較早的通知", "dim")
+    if routes is not None:
+        out += route_view(routes, width)
+        kept = []
+        for row in rows:   # the routes say what these rows said; their alerts stay
+            if not _switch_row(row):
+                kept.append(row)
+            elif row.alert or row.state in ALERT_STATES:
+                add(f"⚠ {_shown(row)}：{row.alert or row.detail}", "!")
+        rows = kept
     if error:
         return out + [(f"⚠ 辦公室資料讀取失敗（{error}），目前無法判斷誰在做什麼。", "!")]
     if not rows:
@@ -9795,14 +10124,17 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
     alerts = _review_alerts(rows)
     alerts += [f"{_shown(row)}：{row.alert}" for row in rows if row.alert]
     # In full (wrapped, not cut): the session name at the end is how a PM
-    # finds the window that needs an answer.
-    alerts += [f"{_shown(row)}（{row.state}，{_short_ago(row.age)}）{row.detail}"
-               for row in rows if row.state in ALERT_STATES and not row.alert]
+    # finds the window that needs an answer. Beside the routes, the member list
+    # itself shows exactly these rows, so they are not said twice.
+    if routes is None:
+        alerts += [f"{_shown(row)}（{row.state}，{_short_ago(row.age)}）{row.detail}"
+                   for row in rows if row.state in ALERT_STATES and not row.alert]
     for text in [f"⚠ {text}" for text in alerts] + notes:
         out += [(("  " if i else "") + piece, "!") for i, piece in
                 enumerate(_wrap(text, width - 2) if width else [text])]
-    tree = _tree(rows, fold=not expand)
-    name_cols = max(_width(prefix + _shown(row)) for prefix, row in tree if prefix != "—") + 2
+    tree = _tree(rows, fold=not expand, only_alerts=routes is not None and not expand)
+    name_cols = max([_width(prefix + _shown(row)) for prefix, row in tree if prefix != "—"],
+                    default=0) + 2
     # The detail column is as wide as the longest detail, up to DETAIL_MAX and
     # what the screen leaves, so the time stays near its text on a wide screen.
     longest = max([_width(_row_detail(row)) for _, row in tree if _row_detail(row)] or [0])
@@ -9868,6 +10200,8 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
                 if any(lit):
                     text = out[index][0]
                     parts[index] = _split_lit(text, [False] * shift + lit + [False] * len(text))
+    if routes is not None:
+        return out   # nothing in the legend is for the Owner to act on
     legend.append("工作中 = 最近有動作，不代表模型正在產生內容")
     if scope:
         legend.append(scope)
@@ -9880,9 +10214,12 @@ def office_lines(rows: list[OfficeRow], error: str | None = None,
                  width: int | None = None, expand: bool = False,
                  pending: list[OwnerPending] | None = None, scope: str = "", *,
                  waiting: int | None = None,
-                 top: list[tuple[str, str]] | None = None) -> list[str]:
+                 top: list[tuple[str, str]] | None = None,
+                 routes: list[RouteRow] | None = None,
+                 notices: list[OwnerNotice] | None = None) -> list[str]:
     return [line for line, _ in office_view(rows, error, width, expand, pending,
-                                             scope=scope, waiting=waiting, top=top)]
+                                             scope=scope, waiting=waiting, top=top,
+                                             routes=routes, notices=notices)]
 
 
 def office_events(old: dict, rows: list[OfficeRow]) -> tuple[dict, list[tuple[str, str]]]:
@@ -9940,9 +10277,10 @@ def run_once(github: "GitHubSource | None" = None) -> int:
                                  top=office_top(github, mon.quota, time.time(),
                                                 stuck=stuck_lines(mon, time.time()),
                                                 waiting=waiting_task_lines(mon, time.time()),
-                                                progress=pm_progress(mon, time.time()),
                                                 install=rule_alert_lines() + install_lines(github),
-                                                incidents=mon.incidents))))
+                                                incidents=mon.incidents),
+                                 routes=getattr(mon, "routes", None),
+                                 notices=owner_notice_list(github))))
     print("\n".join(line for line, _ in board_view(
         work_board(github, mon.pm_board, time.time(), ec2=mon.ec2_heads,
                    reviewing=pr_reviewing(mon.office), office=mon.office,
@@ -10157,9 +10495,10 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
                             top=office_top(mon.github, mon.quota, time.time(),
                                            stuck=stuck_lines(mon, time.time()),
                                            waiting=waiting_task_lines(mon, time.time()),
-                                           progress=pm_progress(mon, time.time()),
                                            install=rule_alert_lines() + install_lines(mon.github),
-                                           incidents=mon.incidents))
+                                           incidents=mon.incidents),
+                            routes=getattr(mon, "routes", None),
+                            notices=owner_notice_list(mon.github))
         offset = max(0, min(offset, len(lines) - body))
         styles = {"title": colors.get("title", 0) | curses.A_BOLD, "!": colors.get("!", 0),
                   "+": colors.get("+", 0), "dim": curses.A_DIM, "section": curses.A_BOLD}
@@ -10176,8 +10515,9 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
                 if lit:
                     put(3 + row, text, ref | curses.A_BOLD, x)
                 x += _width(text)
+        folded_word = "灰色" if getattr(mon, "routes", None) is None else "其他"
         hint = ("Tab/1-6: log·tasks·processes·Activity·辦公室·白板  ↑↓ PgUp/PgDn: scroll  "
-                f"a: {'摺疊' if expanded else '展開'}灰色  q: quit")
+                f"a: {'摺疊' if expanded else '展開'}{folded_word}  q: quit")
     elif view == "board":
         lines = board_view(work_board(mon.github, mon.pm_board, time.time(),
                                       ec2=mon.ec2_heads,

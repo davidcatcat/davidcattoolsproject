@@ -1145,13 +1145,7 @@ class ActivityViewTests(unittest.TestCase):
             entry, problem = mon.pm_last_dispatch(NOW, tasks)
             self.assertEqual(entry.created, NOW - 700)   # an older file is not read
             self.assertEqual(problem, "")
-            work = mon.WorkBoard(owner=[], running=[], queue=[object()], blocked=[], done=[],
-                                 github_known=True, board_known=True, github_status="",
-                                 board_status="ok", board_age=0, skipped=0)
-            line, style = mon.pm_progress_line(
-                work, (entry, problem), NOW)
-            self.assertIn("上次派工 11 分鐘前", line)
-            self.assertEqual(style, "")
+            self.assertIn("PM 上次派工：11 分鐘前", mon.pm_dispatch_line(entry, problem, NOW))
 
     def test_pm_last_dispatch_window_boundaries_and_no_dispatch(self):
         with tempfile.TemporaryDirectory() as tasks:
@@ -1196,37 +1190,9 @@ class ActivityViewTests(unittest.TestCase):
             try:
                 entry, problem = mon.pm_last_dispatch(NOW, tasks)
                 self.assertEqual(problem, "本機 Task 紀錄讀取失敗")
-                work = mon.WorkBoard(owner=[], running=[], queue=[], blocked=[], done=[],
-                                     github_known=True, board_known=True, github_status="",
-                                     board_status="ok", board_age=0, skipped=0)
-                line, _ = mon.pm_progress_line(work, (entry, problem), NOW)
-                self.assertIn("上次派工 ?", line)
+                self.assertIn("PM 上次派工：未確認", mon.pm_dispatch_line(entry, problem, NOW))
             finally:
                 os.chmod(tasks, 0o700)
-
-    def test_pm_progress_uncertain_merges_and_fresh_queue_style(self):
-        from types import SimpleNamespace
-        github = SimpleNamespace(board_pulls=[], successful_read=True, pending=[],
-                                 read_failed=True, window=43200, verdicts={}, ci_heads=None)
-        work = mon.work_board(github, mon.PmBoard(status="ok", age=0, running=[], queue=[],
-                                                 blocked=[]), NOW)
-        text, style = mon.pm_progress_line(
-            work, (mon.DispatchRecord(NOW - 60, "", ""), ""), NOW)
-        self.assertIn("今天合併 ?", text)
-        self.assertNotIn("今天合併 0", text)
-        self.assertEqual(style, "")
-
-        dispatch = (mon.DispatchRecord(NOW - 3600, "", ""), "")
-        stale = mon.WorkBoard(owner=[], running=[], queue=[object()], blocked=[], done=[],
-                              github_known=True, board_known=True, github_status="",
-                              board_status="stale", board_age=0, skipped=0)
-        text, style = mon.pm_progress_line(stale, dispatch, NOW)
-        self.assertIn("（可能過時）", text)
-        self.assertEqual(style, "")
-        fresh = mon.WorkBoard(owner=[], running=[], queue=[object()], blocked=[], done=[],
-                              github_known=True, board_known=True, github_status="",
-                              board_status="ok", board_age=0, skipped=0)
-        self.assertEqual(mon.pm_progress_line(fresh, dispatch, NOW)[1], "!")
 
     def test_pm_dispatch_entry_rejects_wrong_types(self):
         self.assertIsNone(mon._dispatch_entry(None))
@@ -8366,16 +8332,34 @@ class DiskUsageTests(unittest.TestCase):
         self.assertEqual(mon.disk_status(monitor.disk_usage), "")
         self.assertEqual(mon.disk_alert(monitor.disk_usage), "")
 
-    def test_statvfs_is_limited_to_once_per_60_seconds(self):
+    def test_statvfs_is_read_again_at_the_office_cadence(self):
+        # #2311: the disk value is a live reading, read again every office rebuild.
+        self.assertEqual(mon.DISK_REFRESH_SECONDS, mon.OFFICE_EVERY)
         monitor = mon.Monitor()
         with patch.object(mon.os, "statvfs", return_value=self.statvfs_for(50)) as statvfs, \
                 patch.object(mon.os.path, "expanduser", return_value="/home/test"), \
                 patch.object(mon.sys, "platform", "linux"):
             monitor.refresh_disk_usage(now=0)
-            monitor.refresh_disk_usage(now=59.9)
+            monitor.refresh_disk_usage(now=mon.DISK_REFRESH_SECONDS - 0.1)
             statvfs.assert_called_once_with("/home/test")
-            monitor.refresh_disk_usage(now=60)
+            statvfs.return_value = self.statvfs_for(91)
+            monitor.refresh_disk_usage(now=mon.DISK_REFRESH_SECONDS)
         self.assertEqual(statvfs.call_count, 2)
+        self.assertEqual(monitor.disk_usage[0], 91)   # the newer reading replaces the old one
+
+    def test_failed_disk_read_clears_the_old_value(self):
+        monitor = mon.Monitor()
+        with patch.object(mon.os, "statvfs", return_value=self.statvfs_for(50)), \
+                patch.object(mon.os.path, "expanduser", return_value="/home/test"), \
+                patch.object(mon.sys, "platform", "linux"):
+            monitor.refresh_disk_usage(now=0)
+        self.assertEqual(monitor.disk_usage[0], 50)
+        with patch.object(mon.os, "statvfs", side_effect=OSError("unavailable")), \
+                patch.object(mon.os.path, "expanduser", return_value="/home/test"), \
+                patch.object(mon.sys, "platform", "linux"):
+            monitor.refresh_disk_usage(now=mon.DISK_REFRESH_SECONDS)
+        self.assertIsNone(monitor.disk_usage)
+        self.assertEqual(mon.disk_status(monitor.disk_usage), "")
 
 
 class WorkBoardTests(unittest.TestCase):
@@ -8427,63 +8411,14 @@ class WorkBoardTests(unittest.TestCase):
         values.update(fields)
         return SimpleNamespace(**values)
 
-    @staticmethod
-    def _progress_work(*, queue=None, done=None, board_known=True, github_known=True,
-                       board_status="ok", note="", github_status=""):
-        return mon.WorkBoard(owner=[], running=[], queue=[] if queue is None else queue,
-                             blocked=[], done=[] if done is None else done,
-                             github_known=github_known, board_known=board_known,
-                             github_status=github_status, board_status=board_status, board_age=0,
-                             skipped=0, note=note)
-
-    def test_pm_progress_line_text_and_staleness(self):
-        entry = mon.DispatchRecord(NOW - 60, "codex-cli", "965")
-        work = self._progress_work(queue=[object()], done=[object()])
-        self.assertEqual(mon.pm_progress_line(work, (entry, ""), NOW),
-                         ("PM 進度：上次派工 1 分鐘前 · 排隊 1 · 今天合併 1", ""))
-        self.assertEqual(mon.pm_progress_line(work, None, NOW),
-                         ("PM 進度：上次派工 ? · 排隊 1 · 今天合併 1", ""))
-        self.assertEqual(mon.pm_progress_line(work, (entry, "capped"), NOW),
-                         ("PM 進度：上次派工 ? · 排隊 1 · 今天合併 1", ""))
-        self.assertEqual(mon.pm_progress_line(work, (None, ""), NOW),
-                         ("PM 進度：上次派工 沒有紀錄 · 排隊 1 · 今天合併 1", ""))
-        unknown_queue = self._progress_work(queue=[object()], board_known=False)
-        self.assertEqual(mon.pm_progress_line(unknown_queue, (entry, ""), NOW),
-                         ("PM 進度：上次派工 1 分鐘前 · 排隊 ? · 今天合併 0", ""))
-        stale = self._progress_work(queue=[object()], board_status="stale")
-        self.assertEqual(mon.pm_progress_line(stale, (entry, ""), NOW),
-                         ("PM 進度：上次派工 1 分鐘前 · 排隊 1（可能過時） · 今天合併 0", ""))
-        unknown_github = self._progress_work(queue=[], github_known=False)
-        self.assertEqual(mon.pm_progress_line(unknown_github, (entry, ""), NOW),
-                         ("PM 進度：上次派工 1 分鐘前 · 排隊 0 · 今天合併 ?", ""))
-        incomplete = self._progress_work(queue=[], note="今天完成可能不完整")
-        self.assertEqual(mon.pm_progress_line(incomplete, (entry, ""), NOW),
-                         ("PM 進度：上次派工 1 分鐘前 · 排隊 0 · 今天合併 0+", ""))
-        identity_warning = self._progress_work(
-            queue=[], done=[object()], github_status="GitHub 身分設定讀取失敗，信任已停用")
-        self.assertEqual(mon.pm_progress_line(identity_warning, (entry, ""), NOW),
-                         ("PM 進度：上次派工 1 分鐘前 · 排隊 0 · 今天合併 ?", ""))
-        self.assertEqual(len(identity_warning.done), 1)
-
-        queued = self._progress_work(queue=[object()])
-        empty_queue = self._progress_work()
-        self.assertEqual(mon.pm_progress_line(queued, (mon.DispatchRecord(NOW - 1800, "", ""), ""), NOW)[1], "")
-        self.assertEqual(mon.pm_progress_line(queued, (mon.DispatchRecord(NOW - 1801, "", ""), ""), NOW)[1], "!")
-        self.assertEqual(mon.pm_progress_line(empty_queue, (mon.DispatchRecord(NOW - 1801, "", ""), ""), NOW)[1], "")
-        self.assertEqual(mon.pm_progress_line(queued, None, NOW)[1], "")
-        self.assertEqual(mon.pm_progress_line(unknown_queue, (mon.DispatchRecord(NOW - 1801, "", ""), ""), NOW)[1], "")
-        future = (mon.DispatchRecord(NOW + 60, "", ""), "")
-        self.assertEqual(mon.pm_progress_line(queued, future, NOW),
-                         ("PM 進度：上次派工 剛剛 · 排隊 1 · 今天合併 0", ""))
-
-    def test_pm_progress_handles_read_failures_and_unknown_merges(self):
-        from types import SimpleNamespace
-        monitor = SimpleNamespace(github=None, pm_board=mon.PmBoard("ok", 0, [], [], []))
-        with patch.object(mon, "pm_last_dispatch", side_effect=OSError("unavailable")):
-            text, style = mon.pm_progress(monitor, NOW)
-        self.assertEqual((text, style), ("PM 進度：上次派工 ? · 排隊 0 · 今天合併 ?", ""))
-        with patch.object(mon, "work_board", side_effect=OSError("unavailable")):
-            self.assertEqual(mon.pm_progress(monitor, NOW), ("PM 進度：未確認", ""))
+    def test_office_screen_has_no_board_queue_count(self):
+        # #2311: the PM progress line (board queue count, shown as "?" when the
+        # board was not read) left the office screen; each route row names its
+        # next board item instead.
+        self.assertFalse(hasattr(mon, "pm_progress"))
+        self.assertFalse(hasattr(mon, "pm_progress_line"))
+        source = Path(mon.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("progress=pm_progress", source)
 
     def test_office_top_places_progress_between_health_and_quota(self):
         from types import SimpleNamespace
@@ -10326,6 +10261,8 @@ class StuckAlertTests(unittest.TestCase):
                 self.stale = False
                 self.behind = True
                 self.incidents = []
+                self.routes = [mon.RouteRow("Codex", mon.ROUTE_WAITING_PM,
+                                            "task 96596596 結果：成功回應，PM 還沒推進", "無", 60.0)]
             def poll(self): pass
 
         class Screen:
@@ -10334,6 +10271,7 @@ class StuckAlertTests(unittest.TestCase):
             def move(self, y, x): pass
             def refresh(self): pass
 
+        github.notices = [mon.OwnerNotice(self.NOW - 60, "#2311", "NOTICE", "spec error notice")]
         details = {"wp-1": ("ACTIVE", "agent", self.NOW, self.NOW, "feature")}
         with patch.object(mon, "Monitor", FakeMonitor), \
                 patch.object(mon, "ClaudeAgents"), \
@@ -10351,15 +10289,21 @@ class StuckAlertTests(unittest.TestCase):
                               lambda row, text, attr=0: drawn.__setitem__(row, text))
         self.assertIn("macOS 超過 45 分鐘", rendered)
         self.assertIn("修復已到上限：D6 wp-1（至少 2 輪）", rendered)
-        self.assertIn("PM 進度：上次派工 12 分鐘前 · 排隊 0", rendered)
-        self.assertIn("辦公室 · 工作中 0 · 等你 1", rendered)
+        self.assertNotIn("PM 進度", rendered)
+        self.assertIn("辦公室 · 工作中 0 · 等 PM 1 · 等你 1", rendered)
         self.assertIn(mon.BEHIND_WARNING, rendered)
+        self.assertIn("── 路線 ──", rendered)
+        self.assertIn("task 96596596 結果：成功回應，PM 還沒推進", rendered)
+        notice = next(line for line in rendered.splitlines() if "#2311" in line)
+        self.assertTrue(notice.startswith("ℹ "), notice)
+        self.assertNotIn("★", notice)
+        self.assertNotIn("等你決定", notice)
         self.assertTrue(any("macOS 超過 45 分鐘" in line for line in drawn.values()))
         self.assertTrue(any("修復已到上限：D6 wp-1（至少 2 輪）" in line for line in drawn.values()))
-        self.assertTrue(any("PM 進度：上次派工 12 分鐘前 · 排隊 0" in line
+        self.assertFalse(any("PM 進度" in line for line in drawn.values()))
+        self.assertTrue(any("辦公室 · 工作中 0 · 等 PM 1 · 等你 1" in line
                             for line in drawn.values()))
-        self.assertTrue(any("辦公室 · 工作中 0 · 等你 1" in line
-                            for line in drawn.values()))
+        self.assertTrue(any("ℹ GitHub #2311" in line for line in drawn.values()))
         self.assertIn(mon.BEHIND_WARNING, drawn[2])
         monitor.behind = False
         drawn.clear()
@@ -11104,3 +11048,291 @@ class MainAiGhConfigTests(unittest.TestCase):
                     mon.main(['--help'])
                 self.assertNotIn('GH_TOKEN', os.environ)
                 self.assertNotIn('GITHUB_TOKEN', os.environ)
+
+
+ROUTE_NAMES = ["Claude", "AGY", "OpenCode", "home LLM", "Codex"]
+ROUTE_KEYS = {"Claude": "claude-developer", "AGY": "agy", "OpenCode": "opencode-developer",
+              "home LLM": "gw-agent", "Codex": "codex-developer"}
+ROUTE_PROVIDERS = {"Claude": "claude-cli", "AGY": "agy-cli", "OpenCode": "opencode-cli",
+                   "home LLM": "gw-agent-cli", "Codex": "codex-cli"}
+
+
+class RouteRowTests(unittest.TestCase):
+    """#2311: one row per route, every route decided by the same rule."""
+
+    ALLOWED = {key: ("ALLOWED", "Owner", "11-10") for key in ROUTE_KEYS.values()}
+    BOARD = mon.PmBoard("ok", 0, [], [], [])
+
+    @staticmethod
+    def task(route, *, running=False, moved=False, issue="2311", when=NOW - 120, words="成功回應"):
+        return mon.RouteTask(route, "a1b2c3d4", running, words, when, issue, moved)
+
+    def rows(self, *, office=(), switches=None, problem="", reasons=None, tasks=(), board=None,
+             leases=(), llmtool_running=True, task_problem=""):
+        return mon.route_rows(list(office), self.ALLOWED if switches is None else switches, problem,
+                              reasons or {}, list(tasks), self.BOARD if board is None else board,
+                              list(leases), NOW, llmtool_running=llmtool_running,
+                              task_problem=task_problem)
+
+    def by_name(self, rows):
+        return {row.name: row for row in rows}
+
+    def test_one_row_per_route_in_fixed_order(self):
+        rows = self.rows()
+        self.assertEqual([row.name for row in rows], ROUTE_NAMES)
+        for row in rows:
+            self.assertEqual((row.state, row.detail, row.next), (mon.ROUTE_FREE, "沒有工作", "無"))
+
+    def test_every_route_follows_the_same_rule(self):
+        # The same records give the same state on every route: no special cases.
+        cases = (
+            (dict(running=True), True, mon.WORKING),
+            (dict(running=True), False, mon.UNCHECKED),
+            (dict(), True, mon.ROUTE_WAITING_PM),
+            (dict(moved=True), True, mon.ROUTE_FREE),
+            (dict(when=NOW - mon.ROUTE_WINDOW - 1), True, mon.ROUTE_FREE),
+        )
+        for fields, running, expected in cases:
+            for name in ROUTE_NAMES:
+                with self.subTest(route=name, fields=fields, llmtool=running):
+                    rows = self.by_name(self.rows(tasks=[self.task(name, **fields)],
+                                                  llmtool_running=running))
+                    self.assertEqual(rows[name].state, expected)
+                    others = [row.state for key, row in rows.items() if key != name]
+                    self.assertEqual(set(others), {mon.ROUTE_FREE})
+
+    def test_developer_result_waiting_for_the_pm_is_shown_and_counted(self):
+        rows = self.rows(tasks=[self.task("OpenCode")])
+        row = self.by_name(rows)["OpenCode"]
+        self.assertEqual(row.state, mon.ROUTE_WAITING_PM)
+        self.assertIn("task a1b2c3d4 · #2311 結果：成功回應，PM 還沒推進", row.detail)
+        self.assertEqual(row.age, 120)
+        view = mon.office_view([], routes=rows, waiting=0, now=NOW)
+        self.assertEqual(view[0], ("辦公室 · 工作中 0 · 等 PM 1 · 等你 0", "title"))
+        line = next(line for line, _ in view if line.startswith("OpenCode"))
+        self.assertIn("等 PM", line)
+        self.assertEqual(dict(view)[line], "!")
+
+    def test_only_the_newest_task_of_a_route_decides(self):
+        rows = self.by_name(self.rows(tasks=[self.task("Codex", when=NOW - 60, moved=True),
+                                             self.task("Codex", when=NOW - 600)]))
+        self.assertEqual(rows["Codex"].state, mon.ROUTE_FREE)
+
+    def test_paused_route_names_who_when_and_why(self):
+        switches = dict(self.ALLOWED, agy=("PAUSED", "Owner", "11-15"),
+                        **{"codex-developer": ("OWNER_ASSIGNMENT_ONLY", "Owner", "11-12")})
+        rows = self.by_name(self.rows(switches=switches,
+                                      reasons={"agy": "quota resets on Friday",
+                                               "codex-developer": "only for assigned Tasks"}))
+        self.assertEqual(rows["AGY"].state, mon.PAUSED)
+        self.assertEqual(rows["AGY"].detail, "Owner 11-15 暫停派工：quota resets on Friday")
+        self.assertEqual(rows["Codex"].state, mon.ROUTE_ONLY_OWNER)
+        self.assertEqual(rows["Codex"].detail, "Owner 11-12 僅 Owner 指定時派工：only for assigned Tasks")
+
+    def test_work_on_a_paused_route_still_shows_and_keeps_the_reason(self):
+        switches = dict(self.ALLOWED, agy=("PAUSED", "PM", "11-18"))
+        rows = self.by_name(self.rows(switches=switches, reasons={"agy": "tool outage"},
+                                      tasks=[self.task("AGY")]))
+        self.assertEqual(rows["AGY"].state, mon.ROUTE_WAITING_PM)
+        self.assertIn("PM 11-18 暫停派工：tool outage", rows["AGY"].detail)
+
+    def test_unreadable_dispatch_file_makes_every_route_unknown(self):
+        rows = self.rows(switches={}, problem="rejected")
+        self.assertEqual({row.state for row in rows}, {mon.UNCHECKED})
+        self.assertTrue(all(row.detail == mon.DISPATCH_PROBLEMS["rejected"] for row in rows))
+        missing = self.by_name(self.rows(switches={k: v for k, v in self.ALLOWED.items()
+                                                    if k != "gw-agent"}))
+        self.assertEqual(missing["home LLM"].state, mon.UNCHECKED)
+        self.assertEqual(missing["home LLM"].detail, "派工檔沒有這條路線")
+
+    def test_live_bound_rows_count_and_pm_or_switch_rows_do_not(self):
+        office = [
+            mon.OfficeRow("codex reviewer", mon.WORKING, "審", 30, 10, key="codex:x",
+                          role="reviewer", task="PR #5 @abcdef0"),
+            mon.OfficeRow("claude PM", mon.WORKING, "pm", 5, 10, role="pm", task="task main"),
+            mon.OfficeRow("claude", mon.WORKING, "chat", 5, 10),   # not bound to any work
+            mon.OfficeRow("agy", mon.WORKING, "switch", 5, 60, kind="worker", task="task x"),
+        ]
+        rows = self.by_name(self.rows(office=office))
+        self.assertEqual(rows["Codex"].state, mon.WORKING)
+        self.assertEqual(rows["Codex"].detail, "PR #5 @abcdef0")
+        self.assertEqual(rows["Codex"].age, 30)
+        self.assertEqual(rows["Claude"].state, mon.ROUTE_FREE)
+        self.assertEqual(rows["AGY"].state, mon.ROUTE_FREE)
+
+    def test_sub_pm_is_named_on_its_route_and_other_leases_get_lanes(self):
+        leases = [mon.SubPmLease(NOW - 300, "2311", "WP-1", "claude-subpm-a"),
+                  mon.SubPmLease(NOW - 600, "2400", "WP-9", "codex-subpm-b")]
+        rows = self.rows(tasks=[self.task("Claude", running=True)], leases=leases)
+        named = self.by_name(rows)
+        self.assertEqual(named["Claude"].state, mon.WORKING)
+        self.assertIn("sub-PM claude-subpm-a", named["Claude"].detail)
+        lanes = [row for row in rows if row.name == "sub-PM"]
+        self.assertEqual([(row.state, row.detail) for row in lanes],
+                         [(mon.LEASE_HELD, "codex-subpm-b：WP WP-9（#2400）")])
+        self.assertEqual(lanes[0].age, 600)
+
+    def test_next_item_comes_from_the_board_queue(self):
+        board = mon.PmBoard("ok", 0, [], [
+            mon.PmBoardItem("#2320", "monitor follow-up", "Codex"),
+            mon.PmBoardItem("#2321", "OpenCode docs pass", "dispatch"),
+            mon.PmBoardItem("#2322", "second Codex item", "Codex")], [])
+        rows = self.by_name(self.rows(board=board))
+        self.assertEqual(rows["Codex"].next, "#2320 monitor follow-up")
+        self.assertEqual(rows["OpenCode"].next, "#2321 OpenCode docs pass")
+        self.assertEqual(rows["AGY"].next, "無")
+        stale = self.by_name(self.rows(board=mon.PmBoard("stale", 1900, [], [], [])))
+        self.assertEqual(stale["AGY"].next, "無（白板 31 分鐘沒更新）")
+        missing = self.by_name(self.rows(board=mon.PmBoard("missing", None, [], [], [])))
+        self.assertEqual(missing["AGY"].next, "未確認（PM 白板檔不存在）")
+
+    def test_task_read_shortfall_is_said_on_free_routes(self):
+        rows = self.rows(task_problem=mon.REMOTE_TEST_CAPPED)
+        self.assertTrue(all(row.detail == f"沒有工作（{mon.REMOTE_TEST_CAPPED}）" for row in rows))
+
+
+class RouteTaskRecordTests(unittest.TestCase):
+    STAMP = datetime.fromtimestamp(NOW - 60, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def record(self, **developer):
+        fields = {"provider_type": "opencode-cli", "state": "DEVELOPER_RESPONDED"}
+        fields.update(developer)
+        return {"task_id": "c" * 32, "updated_at": self.STAMP, "developer": fields,
+                "request": "#2311 make the monitor match the process"}
+
+    def test_entry_reads_route_state_issue_and_progress(self):
+        entry = mon._route_task_entry(self.record())
+        self.assertEqual(entry, mon.RouteTask("OpenCode", "c" * 8, False, "成功回應", NOW - 60,
+                                              "2311", False))
+        self.assertTrue(mon._route_task_entry(self.record(state="DEVELOPER_DISPATCHING")).running)
+        for route, provider in ROUTE_PROVIDERS.items():
+            with self.subTest(provider=provider):
+                self.assertEqual(mon._route_task_entry(self.record(provider_type=provider)).route, route)
+
+    def test_pr_or_ec2_run_means_the_pm_moved_on(self):
+        moved = dict(self.record(), pr=2330)
+        self.assertTrue(mon._route_task_entry(moved).moved)
+        tested = dict(self.record(), remote_test_receipts=[{"result": "PASS"}])
+        self.assertTrue(mon._route_task_entry(tested).moved)
+
+    def test_ended_unknown_or_malformed_records_decide_nothing(self):
+        for record in (dict(self.record(), lineage={"state": "DROPPED"}),
+                       dict(self.record(), abandonment={"reason": "x"}),
+                       self.record(provider_type="unknown-cli"),
+                       self.record(state="bad state"),
+                       dict(self.record(), task_id="short"),
+                       dict(self.record(), updated_at=None),
+                       None):
+            with self.subTest(record=record):
+                self.assertIsNone(mon._route_task_entry(record))
+
+    def test_route_tasks_read_the_task_store_bounded(self):
+        with tempfile.TemporaryDirectory() as tasks:
+            Path(tasks, "a.json").write_text(json.dumps(self.record()), encoding="utf-8")
+            entries, problem = mon.route_tasks(tasks)
+        self.assertEqual([entry.route for entry in entries], ["OpenCode"])
+        self.assertEqual(problem, "")
+
+
+class RouteOfficeViewTests(unittest.TestCase):
+    """#2311: beside the routes the office view shows only what needs attention."""
+
+    def switch_rows(self):
+        return [mon.OfficeRow(name, mon.IDLE, "可派工", None, order, kind="worker",
+                              evidence="派工檔", authority="Owner")
+                for name, _, order in mon.WORKER_ROSTER + mon.DEBUG_ROSTER]
+
+    def members(self):
+        return [
+            mon.OfficeRow("claude PM", mon.WORKING, "sweep", 5, 10, key="pm", role="pm"),
+            mon.OfficeRow("claude subagent", mon.WORKING, "reading", 5, 10, group="pm",
+                          kind="subagent"),
+            mon.OfficeRow("codex reviewer", mon.WORKING, "審 PR #5", 30, 20, key="codex:r",
+                          role="reviewer", task="PR #5 @abcdef0"),
+            mon.OfficeRow("claude developer", mon.STALLED, "no reply", 1200, 30,
+                          role="developer", task="task d6-a"),
+            mon.OfficeRow("mac ci runner", mon.IDLE, "idle", 60, 90, kind="worker"),
+            mon.OfficeRow("EC2 遠端測試", mon.IDLE, "最近一次：PASS", 60, 80, kind="worker"),
+        ]
+
+    def test_switch_rows_leave_the_member_list_and_their_alerts_stay(self):
+        rows = self.switch_rows()
+        rows[0] = replace(rows[0], state=mon.STOPPED, alert="本 repo 上次失敗")
+        routes = mon.route_rows([], {}, "missing", {}, [], RouteRowTests.BOARD, [], NOW,
+                                llmtool_running=False)
+        lines = [line for line, _ in mon.office_view(rows, routes=routes, expand=True, now=NOW)]
+        names = {name for name, _, _ in mon.WORKER_ROSTER + mon.DEBUG_ROSTER}
+        self.assertFalse(any(line.split("  ")[0] in names for line in lines))
+        self.assertIn("⚠ opencode developer：本 repo 上次失敗", lines)
+        self.assertIn("── 路線 ──", lines)
+        self.assertEqual(sum(line.split()[0] in ROUTE_NAMES + ["home"] for line in lines
+                             if line and not line.startswith(("⚠", "──", "辦公室"))), 5)
+
+    def test_route_view_has_fewer_lines_than_the_old_screen(self):
+        rows = self.switch_rows() + self.members()
+        top = [("等你決定：0 件（只看最近 12 小時留言）", "")]
+        progress = ("PM 進度：上次派工 ? · 排隊 ? · 今天合併 ?", "")   # the line #2311 removed
+        before = mon.office_view(rows, top=top + [progress], width=120, now=NOW)
+        routes = mon.route_rows(rows, RouteRowTests.ALLOWED, "", {}, [], RouteRowTests.BOARD, [],
+                                NOW, llmtool_running=False)
+        after = mon.office_view(rows, top=top, routes=routes, width=120, now=NOW)
+        self.assertLess(len(after), len(before))
+        texts = [line for line, _ in after]
+        # Shown: the alert row; folded: everything that needs nobody.
+        self.assertTrue(any(line.startswith("claude developer") for line in texts))
+        self.assertFalse(any(line.startswith(("claude PM", "mac ci runner", "EC2")) for line in texts))
+        self.assertIn("… 另有 5 項不用你處理", "\n".join(texts))
+        self.assertFalse(any("工作中 = 最近有動作" in line for line in texts))
+        # Key a still lists every member.
+        expanded = [line for line, _ in mon.office_view(rows, top=top, routes=routes, width=120,
+                                                         expand=True, now=NOW)]
+        for name in ("claude PM", "mac ci runner", "EC2 遠端測試"):
+            self.assertTrue(any(line.lstrip("└ ").startswith(name) for line in expanded), name)
+
+    def test_without_routes_the_view_is_unchanged(self):
+        rows = self.switch_rows() + self.members()
+        self.assertEqual(mon.office_view(rows, now=NOW), mon.office_view(rows, now=NOW, notices=[]))
+        self.assertTrue(any(text.startswith("… 灰色") for text, _ in mon.office_view(rows, now=NOW)))
+
+    def test_route_view_wraps_under_the_detail(self):
+        routes = [mon.RouteRow("Codex", mon.PAUSED, "Owner 11-15 暫停派工：" + "x" * 80, "無", None)]
+        lines = mon.route_view(routes, 40)
+        self.assertEqual(lines[0], ("── 路線 ──", "section"))
+        head = mon._width(f"{mon._pad('Codex', 7)}{mon._pad(mon.PAUSED, 8)}")
+        self.assertTrue(lines[1][0].startswith("Codex"))
+        self.assertTrue(all(line.startswith(" " * head) for line, _ in lines[2:]))
+        self.assertTrue(all(mon._width(line) <= 40 for line, _ in lines))
+
+
+class MonitorRoutesTests(unittest.TestCase):
+    def test_monitor_routes_reads_the_dispatch_file_and_task_store(self):
+        workers = {key: {"dispatch": "ALLOWED", "decided_by": "Owner", "decided_at": "2026-11-10",
+                         "reason": "open", "evidence": POLICY_EVIDENCE}
+                   for key in mon.DISPATCH_WORKERS}
+        workers["agy"] = dict(workers["agy"], dispatch="PAUSED", reason="waiting for a fix")
+        workers["gw-agent"] = {"dispatch": "ALLOWED", "decided_by": "Owner",
+                               "decided_at": "2026-11-10", "reason": "standing",
+                               "evidence": "https://github.com/davidcatcat/davidcattoolsproject/"
+                                           "issues/120#issuecomment-6760670167"}
+        from types import SimpleNamespace
+        github = SimpleNamespace(successful_read=True, read_failed=False,
+                                 leases=[mon.SubPmLease(NOW, "77", "WP-1", "claude-subpm-a")])
+        with tempfile.TemporaryDirectory() as root:
+            dispatch = Path(root, "worker-dispatch.json")
+            dispatch.write_text(json.dumps({"schema_version": 1, "workers": workers}),
+                                encoding="utf-8")
+            tasks = Path(root, "tasks")
+            tasks.mkdir()
+            rows = mon.monitor_routes([], [], RouteRowTests.BOARD, github, NOW, canonical=root,
+                                      dispatch=str(dispatch), root=str(tasks))
+        named = {row.name: row for row in rows}
+        self.assertEqual([row.name for row in rows], ROUTE_NAMES + ["sub-PM"])
+        self.assertEqual(named["AGY"].state, mon.PAUSED)
+        self.assertEqual(named["AGY"].detail, "Owner 11-10 暫停派工：waiting for a fix")
+        self.assertEqual(named["Codex"].state, mon.ROUTE_FREE)
+        failed = SimpleNamespace(successful_read=True, read_failed=True, leases=github.leases)
+        with tempfile.TemporaryDirectory() as root:
+            rows = mon.monitor_routes([], [], RouteRowTests.BOARD, failed, NOW, canonical=root,
+                                      dispatch=str(Path(root, "absent.json")), root=root)
+        self.assertEqual([row.name for row in rows], ROUTE_NAMES)   # no lane from a failed read
+        self.assertEqual({row.state for row in rows}, {mon.UNCHECKED})
