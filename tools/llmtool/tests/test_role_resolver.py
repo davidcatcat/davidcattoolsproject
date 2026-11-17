@@ -448,9 +448,9 @@ class RolesCommandTests(AccountBase):
         self.assertEqual(status, 0)
         rows = {line.split('\t')[0]: line.split('\t') for line in lines}
         self.assertEqual(sorted(rows), sorted(role_config.KNOWN_ROLES))
-        self.assertTrue(all(len(row) == 6 for row in rows.values()))
+        self.assertTrue(all(len(row) == 7 for row in rows.values()))
         self.assertEqual(rows['claude-reviewer'],
-                         ['claude-reviewer', 'claude', 'work', REVIEWER_MODEL, 'high', 'roles'])
+                         ['claude-reviewer', 'claude', 'work', REVIEWER_MODEL, 'high', 'roles', 'roles'])
         # #1502 WP-E: an unconfigured review/debug role shows its registry model.
         roles = load_route_config()['roles']
         for role in ('codex-reviewer', 'codex-debug', 'claude-debug'):
@@ -459,7 +459,7 @@ class RolesCommandTests(AccountBase):
         agy = load_route_config()['routes']['agy']
         self.assertEqual(rows['agy-developer'],
                          ['agy-developer', 'agy', '-', agy['default_model'],
-                          agy['default_effort'], 'repo_default'])
+                          agy['default_effort'], 'repo_default', 'repo_default'])
         self.assertNotIn(str(self.account_dir), '\n'.join(lines))
         self.assertNotIn(str(self.home), '\n'.join(lines))
 

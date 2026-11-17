@@ -1,7 +1,7 @@
 """`llmtool roles`: read-only view of every resolved role (#1502 WP-E).
 
-Each line is tab-separated: role, provider, account name, model, effort and
-source layer. It never prints a config_dir path, a credential or any other
+Each line is tab-separated: role, provider, account name, model, effort, source
+layer and model source. It never prints a config_dir path, a credential or any other
 account data, and it never writes configuration.
 """
 
@@ -50,7 +50,7 @@ def role_lines(environ=None, home=None):
         lines.append('\t'.join((
             name, _cell(provider), _cell(resolved.get('account')),
             _cell(resolved.get('model')), _cell(resolved.get('effort')),
-            _cell(resolved.get('source')))))
+            _cell(resolved.get('source')), _cell(resolved.get('model_source')))))
     return lines, failed
 
 
