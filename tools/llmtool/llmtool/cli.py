@@ -779,6 +779,18 @@ def main(argv=None):
                     type(detail) is str and len(detail) <= 128 and
                     re.fullmatch(r'[A-Za-z0-9_,= .:-]+', detail)):
                 line += ' (' + detail + ')'
+            # #1817: the fallback HIGH_DEBUG_WAITING detail is over the 128-char
+            # cap; surface the reason/waiting_since pair compactly for it only.
+            elif (getattr(args, 'action', None) == 'high-debug' and
+                    refusal_code == 'HIGH_DEBUG_WAITING' and
+                    type(detail) is str and len(detail) > 128):
+                tokens = detail.split()
+                reason = next((t[7:] for t in tokens if t.startswith('reason=')), None)
+                since = next((t[14:] for t in tokens if t.startswith('waiting_since=')), None)
+                if (reason and since and
+                        re.fullmatch(r'[A-Za-z0-9_,= .:-]+', reason) and
+                        re.fullmatch(r'[A-Za-z0-9_,= .:-]+', since)):
+                    line += ' (reason=' + reason + ' waiting_since=' + since + ')'
             print(line, file=sys.stderr)
         elif (getattr(args, 'command', None) == 'task' and
                 getattr(args, 'action', None) == 'record-pm' and
