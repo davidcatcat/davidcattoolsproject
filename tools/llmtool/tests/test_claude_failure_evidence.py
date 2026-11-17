@@ -3,6 +3,13 @@
 Fake CLI output only. No test string is credential-shaped: the sensitive-screen
 cases inject a screen that flags a plain synthetic marker and still check the
 real refusal behaviour (Owner #763 A, point 2).
+
+The delegate runs against the Claude wiring fixture's store, which keeps a
+partial Task record: a strict task_store._validate of that record fails on the
+top-level shape (task_store.py:2207-2213) whatever the developer holds. So the
+developer outcome the real delegate wrote is put onto a real TaskStore Claude
+CLI record, which the real store checks on every write and read, and that
+record is what the store checks below.
 """
 
 import contextlib
@@ -14,6 +21,7 @@ from unittest import mock
 
 from llmtool import task_store
 from llmtool import task_submission_cli
+from llmtool import worker_dispatch
 from llmtool.developer_routes.base import RouteError, RouteResult
 from llmtool.developer_routes.claude import ClaudeRoute, cli_result_fields
 from llmtool.errors import LLMToolError
@@ -22,6 +30,11 @@ try:
     import test_claude_route_wiring
 except ImportError:
     from tests import test_claude_route_wiring
+
+try:
+    import test_task_store
+except ImportError:
+    from tests import test_task_store
 
 try:
     import review_trust_fixture
@@ -46,6 +59,10 @@ SESSION = '4f9c2a1e-8b7d-4c3e-9a2f-1d0e5b6c7a88'
 MARKER = 'SYNTHETIC-SCREEN-MARKER-2275'
 EVIDENCE_KEYS = {'subtype', 'is_error', 'num_turns', 'duration_ms',
                  'process_exit_code', 'result_head'}
+# Developer keys the delegate's BLOCKED outcome sets (run_task_claude_delegate).
+OUTCOME_KEYS = ('state', 'provider_type', 'model', 'error_code', 'artifact',
+                'artifact_sha256', 'execution', 'usage', 'no_changes_diagnosis',
+                'cli_failure_evidence', 'blocked_reason', 'progress')
 
 
 def _cli_json(drop=(), **overrides):
@@ -130,9 +147,44 @@ class ClaudeFailureEvidenceTests(unittest.TestCase):
         self.assertEqual(status, 1)
         return store, args.task_id
 
-    def _evidence(self, store, task_id, error_code, exit_code):
+    def _real_store_case(self):
+        """One real TaskStore (test_task_store fixture) for this test, cleaned up after it."""
+        case = getattr(self, '_store_case', None)
+        if case is None:
+            case = test_task_store.TaskStoreTests(
+                methodName='test_claude_cli_accepts_blocked_isolation_record')
+            case.setUp()
+            self.addCleanup(case.doCleanups)
+            self._store_case = case
+        return case
+
+    def _real_record(self, produced):
+        """The delegate's BLOCKED developer outcome, written to a real Claude CLI record.
+
+        The real TaskStore validates the write and the read, as for the
+        delegate's own store.update; the record is then checked again strictly."""
+        case = self._real_store_case()
+        store = case.store
+        task_id = case._claude_cli_task()['task_id']
+        pending = store.get(task_id)['developer']
+        dispatching = dict(pending, state='DEVELOPER_DISPATCHING',
+                           provider_type='claude-cli', model=produced['model'],
+                           execution=None)
+        blocked = dict(dispatching, **{key: produced[key] for key in OUTCOME_KEYS
+                                       if key in produced})
+        with mock.patch.object(worker_dispatch, 'authorize_task_store_change',
+                               return_value=None):
+            for developer in (dispatching, blocked):
+                current = store.get(task_id)
+                store.compare_and_update(
+                    task_id, expected={'record_sha256': current['record_sha256']},
+                    developer=developer)
         record = store.get(task_id)
-        developer = record['developer']
+        task_store._validate(record)
+        return record
+
+    def _evidence(self, store, task_id, error_code, exit_code):
+        developer = store.get(task_id)['developer']
         self.assertEqual(developer['state'], 'BLOCKED')
         self.assertEqual(developer['error_code'], error_code)
         self.assertEqual(developer['execution']['status'], 'BLOCKED')
@@ -140,8 +192,9 @@ class ClaudeFailureEvidenceTests(unittest.TestCase):
         evidence = developer['cli_failure_evidence']
         self.assertEqual(set(evidence), EVIDENCE_KEYS)
         self.assertEqual(evidence['process_exit_code'], exit_code)
-        # The stored record is the store's own write; it passes _validate as is.
-        task_store._validate(record)
+        # The real store accepts the evidence the delegate wrote, unchanged.
+        record = self._real_record(developer)
+        self.assertEqual(record['developer']['cli_failure_evidence'], evidence)
         return record, evidence
 
     # -- each failure path ------------------------------------------------
@@ -274,6 +327,7 @@ class ClaudeFailureEvidenceTests(unittest.TestCase):
                 record, evidence = self._evidence(store, task_id, 'CLAUDE_STATUS_FAILED', 1)
                 self.assertIsNone(evidence['result_head'])
                 self.assertEqual(evidence['num_turns'], 6)
+                self.assertNotIn(MARKER, json.dumps(store.get(task_id), default=str))
                 self.assertNotIn(MARKER, json.dumps(record))
 
     def test_prompt_echo_and_control_text_drop_head(self):
