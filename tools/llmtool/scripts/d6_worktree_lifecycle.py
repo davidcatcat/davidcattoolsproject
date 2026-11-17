@@ -58,6 +58,33 @@ LEASE_SECONDS = 24 * 60 * 60
 LEASE_TIME_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
 LEASE_RELEASED_STATE = "LEASE_RELEASED"
 LEASE_RELEASE_STATES = frozenset(("ACTIVE", "REPAIR"))
+BOOTSTRAP_SOURCES = frozenset((
+    "tools/llmtool/Makefile",
+    "tools/llmtool/.gitignore",
+    "tools/llmtool/scripts/worktree_env.py",
+    "tools/llmtool/worktree-env.lock",
+    "tools/llmtool/pyproject.toml",
+    "tools/llmtool/setup.py",
+    "tools/llmtool/setup.cfg",
+    "tools/llmtool/MANIFEST.in",
+    "tools/llmtool/scripts/d6_worktree_env.py",
+))
+ENV2_PASS_MARKER_SCHEMA1_KEYS = frozenset({
+    "schema_version",
+    "result",
+    "task_id",
+    "root_realpath",
+    "submitted_head_sha",
+    "current_head_sha",
+    "tooling_sha",
+    "environment_fingerprint",
+    "report_sha256",
+})
+ENV2_PASS_MARKER_SCHEMA2_KEYS = ENV2_PASS_MARKER_SCHEMA1_KEYS | frozenset({
+    "environment_mode",
+    "carried_from_head_sha",
+    "allowed_bootstrap_paths",
+})
 
 
 class LifecycleError(Exception):
@@ -901,7 +928,8 @@ def _validate_record_result_report_path(root):
             _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
 
 
-def record_result(*, task_id, canonical_root, root=None, workspace_root=None):
+def record_result(*, task_id, canonical_root, root=None, workspace_root=None,
+                  write_paths=None):
     """Advance a registered D6 result HEAD after commit, without changing Git."""
     trust = _load_trust()
     workspace_root = Path(trust["tasks_root"] if workspace_root is None else workspace_root)
@@ -996,9 +1024,30 @@ def record_result(*, task_id, canonical_root, root=None, workspace_root=None):
         if _task_git(root, "merge-base", "--is-ancestor", old_head, head,
                      check=False).returncode:
             _stop("D6_RECORD_RESULT_NON_DESCENDANT")
+        if write_paths is not None and (
+                type(write_paths) not in (list, tuple) or
+                any(type(p) is not str for p in write_paths)):
+            _stop("D6_TASK_INPUT_INVALID")
         previous_record = dict(record)
         updated = dict(record)
         updated["head_sha"] = head
+        intersection = sorted(set(write_paths) & BOOTSTRAP_SOURCES) if write_paths else []
+        if intersection:
+            base_sha = record.get("base_sha")
+            if type(base_sha) is not str or not SHA40_RE.fullmatch(base_sha):
+                _stop("D6_RECORD_RESULT_REGISTRY_INVALID")
+            updated["env2_source_allowance"] = {
+                "schema_version": 1,
+                "head_sha": head,
+                "base_sha": base_sha,
+                "paths": intersection,
+                "write_paths_sha256": hashlib.sha256(
+                    json.dumps(list(write_paths), sort_keys=True, ensure_ascii=True,
+                               separators=(",", ":")).encode("ascii")
+                ).hexdigest(),
+            }
+        else:
+            updated.pop("env2_source_allowance", None)
         _replace_record(record_path, updated)
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         try:
@@ -1023,6 +1072,26 @@ def record_result(*, task_id, canonical_root, root=None, workspace_root=None):
                     not isinstance(current.get("env2_pass_marker"), dict) or
                     current["env2_pass_marker"].get("current_head_sha") != head):
                 _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
+            marker = current["env2_pass_marker"]
+            marker_keys = set(marker.keys())
+            is_schema_1 = (marker_keys == ENV2_PASS_MARKER_SCHEMA1_KEYS and
+                           type(marker.get("schema_version")) is int and
+                           marker.get("schema_version") == 1)
+            is_schema_2 = (marker_keys == ENV2_PASS_MARKER_SCHEMA2_KEYS and
+                           type(marker.get("schema_version")) is int and
+                           marker.get("schema_version") == 2)
+            if not (is_schema_1 or is_schema_2):
+                _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
+            if is_schema_2:
+                allowance = current.get("env2_source_allowance")
+                if (type(allowance) is not dict or
+                        allowance.get("schema_version") != 1 or
+                        allowance.get("head_sha") != head or
+                        allowance.get("base_sha") != current.get("base_sha") or
+                        type(allowance.get("paths")) is not list or
+                        type(marker.get("allowed_bootstrap_paths")) is not list or
+                        not set(marker["allowed_bootstrap_paths"]).issubset(set(allowance["paths"]))):
+                    _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
             current["last_verified_at"] = _now()
             if "lease_expires_at" in current:
                 # Recording a result is writer activity: the lease runs again
