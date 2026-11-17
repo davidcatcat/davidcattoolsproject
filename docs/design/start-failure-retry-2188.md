@@ -1,5 +1,7 @@
 # #2188 Start-failure retry: design
 
+**Status (2026-11-17):** Implemented. PR 1 (#2243, gate/store/predicate), PR 2 (#2253, retry-start command and repair-packet persistence) and PR 3 (#2272, advance DEVELOPER_START_FAILED step and empty-successor diagnostic) are merged. The rest of this note is the original design, kept as history.
+
 Status: design only (#1502 WP-F unblock). v2 repairs codex-reviewer v1 FAIL (F1 dispatch gate, F2 repair packet,
 F3 PR disposition). Source read: `90b03dde`. Read: `task_submission_cli.py`, `task_store.py`, `task_advance.py`,
 `review_repair.py`, `lineage_counts.py`, `worker_dispatch.py`, `developer_routes/claude.py`. Not read:
