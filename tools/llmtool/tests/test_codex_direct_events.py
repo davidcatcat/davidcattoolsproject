@@ -134,6 +134,24 @@ class CodexDirectEventsTests(unittest.TestCase):
             'tool_calls': 3,
         })
 
+    def test_duplicate_json_key_in_thread_started_is_rejected(self):
+        # json.dumps cannot emit a duplicate key, so the thread.started line
+        # is built by hand; the following agent_message event stays valid.
+        started = '{"type": "thread.started", "thread_id": "%s", ' \
+                  '"thread_id": "%s"}' % (THREAD_ID, THREAD_ID)
+        message = json.dumps({
+            'type': 'item.completed',
+            'item': {'type': 'agent_message', 'text': json.dumps(FINAL)},
+        })
+        raw = (started + '\n' + message).encode('utf-8')
+
+        self.assertIsNone(direct._thread_from_events(raw))
+
+        with self.assertRaises(direct.DirectCodexError) as caught:
+            direct._result_from_events(raw)
+
+        self.assertEqual(caught.exception.direct_codex_code, 'CODEX_EVENT_INVALID')
+
 
 if __name__ == '__main__':
     unittest.main()

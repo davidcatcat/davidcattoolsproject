@@ -66,6 +66,14 @@ Each ask carries one structured record with these fields:
 The weekly audit runs `python3 tools/llmtool/scripts/owner_ask_audit.py --since ISO --until ISO` (#1943 WP-1d). It is read-only and reports the week's asks, gated and ungated asks, the count per row and the `R-OTHER` ratio. It also reports Owner wait time per ask (from the ask to the next PM-relayed ANSWERED record on the same Issue: answered, unanswered, total and mean) (#1985). A Reviewer from another family than the PM's checks `R-OTHER` asks and at least 20% of the others.
 The monitor flag `UNGATED_OWNER_ASK` is live since #1983 and flags a `waiting_owner` ask from PM or Integrator posted after the ask gate without a valid `owner-ask` record line, with the weekly audit as the second check.
 
+**Owner-ask entry points** ([#1943 c6906342320](https://github.com/davidcatcat/davidcattoolsproject/issues/1943#issuecomment-6906342320)):
+- Entry 1: a waiting_owner ask posted with pm_owner_marker.py ask is enforced; the script refuses an incomplete record before any GitHub call.
+- Entry 2: a waiting_owner marker posted by hand with gh issue or pr comment is audit-only; the monitor UNGATED_OWNER_ASK flag and the weekly audit catch it afterwards; there is no hook, because the shell-text hook was dropped ([#1943 c6926749428](https://github.com/davidcatcat/davidcattoolsproject/issues/1943#issuecomment-6926749428)); no hard interception.
+- Entry 3: llmtool-written target=Owner markers (D4 NOTICE, ANSWERED relays) are notices or relays, not asks, and the audit counts them as non-asks.
+- Entry 4: PM chat asks with no marker are not interceptable; the PM posts the waiting marker with pm_owner_marker.py before asking in chat, and owner_ask_audit.py --chat-transcripts DIR cross-checks local chat transcripts, reporting an unavailable source as UNKNOWN, never zero; no hard interception.
+- Entry 5: Claude Web or other chat relays are not interceptable and count as UNKNOWN unless a relay record exists; no hard interception.
+- Entry 6: monitor Owner-decision rows are display only, derived from entries 1 and 2.
+
 ## Standing PM cleanup (Owner O2, #1943)
 
 The PM may do this routine cleanup without asking, and records each action:

@@ -298,6 +298,17 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertEqual(caught.exception.direct_codex_code,
                          'CODEX_FINAL_JSON_INVALID')
 
+    def test_jsonl_readers_reject_malformed_first_lines(self):
+        thread_line = json.dumps({'type': 'thread.started', 'thread_id': self.THREAD})
+        invalid_utf8 = b'\xff\xfe\n' + thread_line.encode('utf-8')
+        json_list = b'["type", "thread.started"]\n' + thread_line.encode('utf-8')
+        for raw in (invalid_utf8, json_list):
+            self.assertIsNone(direct._thread_from_events(raw))
+            with self.assertRaises(direct.DirectCodexError) as caught:
+                direct._result_from_events(raw)
+            self.assertEqual(caught.exception.direct_codex_code,
+                             'CODEX_EVENT_INVALID')
+
     def test_fenced_final_json_and_object_test_items_are_normalized(self):
         final = dict(self.final, tests=[{'test_one.py': 'passed', 'test_two.py': 'not run'}])
         raw = json.dumps({'type': 'thread.started', 'thread_id': self.THREAD}) + '\n'
