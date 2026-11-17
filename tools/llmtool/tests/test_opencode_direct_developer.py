@@ -143,7 +143,7 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
             {'action': 'edit', 'resource': 'source.py', 'effect': 'allow'},
         ])
         self.assertEqual(value['mcp'], {'servers': {}})
-        self.assertEqual(value['agents'][AGENT]['steps'], 12)
+        self.assertEqual(value['agents'][AGENT]['steps'], 1000)
         self.assertEqual(value['agents'][AGENT]['permissions'], value['permissions'])
         self.assertEqual(value['policies'][-1], {
             'action': 'integration.use', 'resource': 'opencode#*', 'effect': 'allow'})
@@ -154,7 +154,9 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
     def test_configured_agent_steps_are_bounded(self):
         value = configuration(read_paths=['source.py'], write_paths=['source.py'], steps=23)
         self.assertEqual(value['agents'][AGENT]['steps'], 23)
-        for steps in (2, 51, True, 12.0, '12'):
+        value = configuration(read_paths=['source.py'], write_paths=['source.py'], steps=1000)
+        self.assertEqual(value['agents'][AGENT]['steps'], 1000)
+        for steps in (2, 1001, True, 12.0, '12'):
             with self.subTest(steps=steps), self.assertRaises(DirectOpenCodeError) as caught:
                 configuration(read_paths=['source.py'], write_paths=['source.py'],
                               steps=steps)
@@ -162,7 +164,7 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
                              'OPENCODE_STEPS_INVALID')
 
     def test_no_final_text_after_step_limit_has_distinct_error(self):
-        raw = '\n'.join([self.event('step_finish', part={}) for _ in range(12)]).encode()
+        raw = '\n'.join([self.event('step_finish', part={}) for _ in range(1000)]).encode()
         with self.assertRaises(DirectOpenCodeError) as caught:
             parse_json_events(raw)
         self.assertEqual(caught.exception.direct_opencode_code,
@@ -201,7 +203,7 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertEqual(summary['edit_tool_uses'], 2)
         self.assertEqual(summary['edited_file_count'], 2)
         self.assertEqual(summary['step_finishes'], 3)
-        self.assertEqual(summary['step_limit'], 12)
+        self.assertEqual(summary['step_limit'], 1000)
 
     def test_summarize_events_reports_other_and_integer_only(self):
         marker = 'marker-0123456789'
@@ -227,7 +229,7 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         summary = summarize_events(raw)
         self.assertEqual(summary['event_counts'], {'step_start': 1})
         self.assertEqual(summary['step_finishes'], 0)
-        self.assertEqual(summary['step_limit'], 12)
+        self.assertEqual(summary['step_limit'], 1000)
 
     def test_output_cap_is_16_mib_and_parser_accepts_output_over_1_mib(self):
         self.assertEqual(MAX_OUTPUT_BYTES, 16 * 1024 * 1024)
