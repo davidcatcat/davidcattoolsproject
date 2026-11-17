@@ -11,9 +11,11 @@ exactly one JSON line to the state log. The log holds time, session, Issue or
 NONE, outcome code and the SHA-256 of the reply; it never holds reply text,
 comment bodies or tokens. A PASS writes no log line.
 
-The default fetcher performs one read-only GitHub API read: the cited Issue's
-comment page. That one response provides the cited comment and any later
-settling comment. Tests inject a fake fetcher and never use the network.
+The default fetcher performs read-only GitHub API reads: every comment page of
+the cited Issue, oldest first. Only a short page (fewer than ``FETCH_PAGE_SIZE``
+comments) proves the list is complete; a failed or malformed page, or more pages
+than ``FETCH_MAX_PAGES``, fails closed as HOOK_ERROR and never yields PASS.
+Tests inject a fake fetcher and never use the network.
 """
 
 from __future__ import annotations
@@ -62,6 +64,8 @@ CHAT_ASK = owner_ask_audit.CHAT_ASK
 MODE_ENV = "LLMTOOL_OWNER_ASK_GATE_MODE"
 LOG_ENV = "LLMTOOL_OWNER_ASK_GATE_LOG"
 FETCH_TIMEOUT = 30
+FETCH_PAGE_SIZE = 100
+FETCH_MAX_PAGES = 50
 BLOCK_REASON = (
     "owner_ask_gate: this reply asks the Owner for a decision but cites no valid "
     "owner-ask marker. Act under your own PM authority (CI FAIL -> repair; caps "
@@ -121,12 +125,13 @@ def _parse_ref(url):
     return parts[3] + "/" + parts[4], int(parts[6]), int(match.group(1))
 
 
-def _default_fetch(url):
-    """One read-only GitHub API read for the cited Issue's comment page."""
-    repo, issue, _ = _parse_ref(url)
+def _fetch_page(repo, issue, page):
+    """One read-only GitHub API read of one Issue comment page."""
     try:
         result = subprocess.run(
-            ["gh", "api", f"repos/{repo}/issues/{issue}/comments?per_page=100"],
+            ["gh", "api",
+             f"repos/{repo}/issues/{issue}/comments"
+             f"?per_page={FETCH_PAGE_SIZE}&page={page}"],
             stdin=subprocess.DEVNULL, capture_output=True, timeout=FETCH_TIMEOUT,
             check=False, shell=False)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -140,6 +145,22 @@ def _default_fetch(url):
     if type(comments) is not list:
         raise HookError("FETCH_ERROR")
     return comments
+
+
+def _default_fetch(url):
+    """All read-only comment pages of the cited Issue, oldest first.
+
+    A short page proves the end of the list. Anything short of that proof fails
+    closed, so the settlement check always sees every comment.
+    """
+    repo, issue, _ = _parse_ref(url)
+    comments = []
+    for page in range(1, FETCH_MAX_PAGES + 1):
+        batch = _fetch_page(repo, issue, page)
+        comments.extend(batch)
+        if len(batch) < FETCH_PAGE_SIZE:
+            return comments
+    raise HookError("FETCH_INCOMPLETE")
 
 
 def _is_tool_result(entry):

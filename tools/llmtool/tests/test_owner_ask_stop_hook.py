@@ -59,6 +59,18 @@ def _fetch(comments):
     return fetch
 
 
+def _gh_result(payload):
+    return mock.Mock(returncode=0, stdout=json.dumps(payload).encode("utf-8"),
+                     stderr=b"")
+
+
+def _filler(count, start=1000):
+    """Earlier unrelated comments, used to fill a full API page."""
+    return [_comment(start + index, created="2026-11-17T08:00:00Z",
+                     body="Progress note")
+            for index in range(count)]
+
+
 class StopHookTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -195,6 +207,71 @@ class StopHookTests(unittest.TestCase):
                   "status=NOTICE -->\nInfo"))
         self.assertEqual(self._run(comments=[_comment(101), later]), {})
         self.assertFalse(self.log.exists())
+
+    # -- comment pagination --------------------------------------------
+
+    def test_answer_beyond_the_first_page_blocks_pass(self):
+        later = _comment(202, created="2026-11-17T09:30:00Z",
+                         body=hook.MARKER_ANSWER + "\nOwner words")
+        first = _filler(99) + [_comment(101)]
+        payload = _payload(hook.CHAT_ASK + " " + _url(10, 101), self.transcript)
+        with mock.patch.object(
+                hook.subprocess, "run",
+                side_effect=[_gh_result(first), _gh_result([later])]) as run:
+            self.assertEqual(hook.handle(payload, now=NOW, log_path=self.log), {})
+        self.assertEqual(run.call_count, 2)
+        self.assertIn("page=1", run.call_args_list[0].args[0][2])
+        self.assertIn("page=2", run.call_args_list[1].args[0][2])
+        self.assertEqual(self._last_outcome(), "MARKER_ANSWER")
+
+    def test_full_page_is_not_treated_as_the_end(self):
+        first = _filler(100)
+        with mock.patch.object(
+                hook.subprocess, "run",
+                side_effect=[_gh_result(first), _gh_result([])]) as run:
+            self.assertEqual(hook._default_fetch(_url(10, 101)), first)
+        self.assertEqual(run.call_count, 2)
+        self.assertIn("page=2", run.call_args_list[1].args[0][2])
+
+    def test_default_fetcher_single_short_page_passes(self):
+        payload = _payload(hook.CHAT_ASK + " " + _url(10, 101), self.transcript)
+        with mock.patch.object(
+                hook.subprocess, "run",
+                side_effect=[_gh_result([_comment(101)])]) as run:
+            self.assertEqual(hook.handle(payload, now=NOW, log_path=self.log), {})
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("per_page=100", run.call_args_list[0].args[0][2])
+        self.assertFalse(self.log.exists())
+
+    def test_failed_later_page_never_gives_pass(self):
+        first = _filler(99) + [_comment(101)]
+        failure = mock.Mock(returncode=1, stdout=b"", stderr=b"")
+        payload = _payload(hook.CHAT_ASK + " " + _url(10, 101), self.transcript)
+        with mock.patch.object(hook.subprocess, "run",
+                               side_effect=[_gh_result(first), failure]):
+            self.assertEqual(hook.handle(payload, now=NOW, log_path=self.log), {})
+        self.assertEqual(self._last_outcome(), "HOOK_ERROR")
+
+    def test_unreadable_later_page_never_gives_pass(self):
+        first = _filler(99) + [_comment(101)]
+        garbage = mock.Mock(returncode=0, stdout=b"not json", stderr=b"")
+        payload = _payload(hook.CHAT_ASK + " " + _url(10, 101), self.transcript)
+        with mock.patch.object(hook.subprocess, "run",
+                               side_effect=[_gh_result(first), garbage]):
+            self.assertEqual(hook.handle(payload, now=NOW, log_path=self.log), {})
+        self.assertEqual(self._last_outcome(), "HOOK_ERROR")
+
+    def test_too_many_pages_fail_closed(self):
+        first = _filler(99) + [_comment(101)]
+        second = _filler(100, start=2000)
+        payload = _payload(hook.CHAT_ASK + " " + _url(10, 101), self.transcript)
+        with mock.patch.object(hook, "FETCH_MAX_PAGES", 2), \
+                mock.patch.object(
+                    hook.subprocess, "run",
+                    side_effect=[_gh_result(first), _gh_result(second)]) as run:
+            self.assertEqual(hook.handle(payload, now=NOW, log_path=self.log), {})
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(self._last_outcome(), "HOOK_ERROR")
 
     def test_created_after_the_turn_started(self):
         comments = [_comment(101, created="2026-11-17T10:30:00Z")]
