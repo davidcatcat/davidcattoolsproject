@@ -777,7 +777,7 @@ def main(argv=None):
             detail = getattr(exc, 'high_debug_detail', None)
             if (getattr(args, 'action', None) == 'high-debug' and
                     type(detail) is str and len(detail) <= 128 and
-                    re.fullmatch(r'[A-Za-z0-9_,= ]+', detail)):
+                    re.fullmatch(r'[A-Za-z0-9_,= .:-]+', detail)):
                 line += ' (' + detail + ')'
             print(line, file=sys.stderr)
         else:
