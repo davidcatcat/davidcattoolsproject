@@ -1,6 +1,8 @@
 """#1893 follow-up: a raw U+2028 inside a Codex JSONL event does not split it (High Debug)."""
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from llmtool import high_debug
 
@@ -17,6 +19,22 @@ class HighDebugJsonlSplitTests(unittest.TestCase):
                 self.assertEqual(high_debug._thread_id_from_events(raw), '0123456789abcdef')
                 self.assertEqual(high_debug._usage_from_events(raw),
                                  {'input': 5, 'cached': 1, 'output': 2, 'reasoning': 0})
+
+    def test_raw_separators_keep_rollout_session_model_and_effort(self):
+        for sep in ('\u2028', '\u2029', '\u0085'):
+            with self.subTest(sep=hex(ord(sep))):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    rollout = root / '2026' / '10' / '27' / 'rollout-test-thread-1234567890.jsonl'
+                    rollout.parent.mkdir(parents=True)
+                    record = {'type': 'session_meta',
+                              'payload': {'model': 'gpt-test',
+                                          'reasoning_effort': 'high',
+                                          'note': 'a' + sep + 'b'}}
+                    rollout.write_text(json.dumps(record, ensure_ascii=False) + '\n',
+                                       encoding='utf-8')
+                    self.assertEqual(high_debug._session_observed('thread-1234567890', root),
+                                     ('gpt-test', 'high'))
 
 
 if __name__ == '__main__':
