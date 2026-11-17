@@ -51,7 +51,7 @@ class AllowedModelsConfigTests(unittest.TestCase):
         config = load_route_config()
         self.assertEqual(config['routes']['agy']['allowed_models'],
                          ['gemini-3.8-flash-medium'])
-        self.assertEqual(config['routes']['claude']['allowed_models'], ['claude-opus-5-5'])
+        self.assertEqual(config['routes']['claude']['allowed_models'], ['claude-opus-5-5', 'claude-fable-5-2'])
         # #1502 WP-E: gw-agent lists today's actual served default model.
         self.assertEqual(config['routes']['gw-agent']['allowed_models'], ['gw'])
         self.assertEqual(config['routes']['gw-agent']['default_model'], 'gw')
