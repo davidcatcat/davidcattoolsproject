@@ -17,10 +17,11 @@ REVERT_INCIDENT_INVALID = 'REVERT_INCIDENT_INVALID'
 REVERT_INCIDENT_NOT_OPEN = 'REVERT_INCIDENT_NOT_OPEN'
 REVERT_NOT_CONFIRMED = 'REVERT_NOT_CONFIRMED'
 REVERT_CONFIRMATION_STALE = 'REVERT_CONFIRMATION_STALE'
-REVERT_CLASS_NOT_CODE = 'REVERT_CLASS_NOT_CODE'
+REVERT_CLASSIFICATION_NOT_CODE = 'REVERT_CLASSIFICATION_NOT_CODE'
+REVERT_CLASSIFICATION_UNKNOWN = 'REVERT_CLASSIFICATION_UNKNOWN'
 REVERT_SCOPE_TOO_LARGE = 'REVERT_SCOPE_TOO_LARGE'
-REVERT_DEPENDENCY_UNKNOWN = 'REVERT_DEPENDENCY_UNKNOWN'
-# The dependency refusal code is owned by main_incident.dependency_check.
+# The dependency refusal codes are owned by main_incident.
+REVERT_DEPENDENCY_UNKNOWN = mi.DEPENDENCY_UNKNOWN
 REVERT_DEPENDENT_LATER_MERGE = mi.REVERT_DEPENDENT
 
 
@@ -60,8 +61,11 @@ def admit(record, dependency):
     3. no confirmation is REVERT_NOT_CONFIRMED;
     4. a confirmation that is not a dict, has a non-int (including bool)
        observation index, does not name the last observation, or is not bound
-       to that observation's digest is REVERT_CONFIRMATION_STALE;
-    5. a last observation that is not CODE is REVERT_CLASS_NOT_CODE;
+       to that observation's digest is REVERT_CONFIRMATION_STALE; a last
+       observation that cannot be digested is REVERT_INCIDENT_INVALID;
+    5. a last observation that is ENV or FLAKY is
+       REVERT_CLASSIFICATION_NOT_CODE and any other class but CODE is
+       REVERT_CLASSIFICATION_UNKNOWN;
     6. a malformed scope is REVERT_INCIDENT_INVALID and more than
        MAX_SCOPE_PRS PRs is REVERT_SCOPE_TOO_LARGE;
     7. a missing or unknown dependency result is REVERT_DEPENDENCY_UNKNOWN,
@@ -77,12 +81,19 @@ def admit(record, dependency):
         return _refuse(REVERT_NOT_CONFIRMED)
     confirmation, last = confirmations[-1], observations[-1]
     index = confirmation.get('observation_index') if isinstance(confirmation, dict) else None
+    try:
+        digest = store.observation_digest(last)
+    except (TypeError, ValueError, RecursionError):
+        return _refuse(REVERT_INCIDENT_INVALID)
     if (not isinstance(confirmation, dict) or type(index) is not int or
             index != len(observations) - 1 or
-            confirmation.get('evidence_sha256') != store.observation_digest(last)):
+            confirmation.get('evidence_sha256') != digest):
         return _refuse(REVERT_CONFIRMATION_STALE)
-    if last.get('class') != mi.CODE:
-        return _refuse(REVERT_CLASS_NOT_CODE)
+    cls = last.get('class')
+    if cls != mi.CODE:
+        if cls in (mi.ENV, mi.FLAKY):
+            return _refuse(REVERT_CLASSIFICATION_NOT_CODE)
+        return _refuse(REVERT_CLASSIFICATION_UNKNOWN)
     scope = confirmation.get('scope')
     if not _valid_scope(scope):
         return _refuse(REVERT_INCIDENT_INVALID)
