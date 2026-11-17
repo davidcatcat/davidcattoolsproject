@@ -2,6 +2,8 @@
 
 Proposal only; not a review or acceptance. Source: `main` at `9416bdd02439e09d94d3c5d78f5ce407c7593edd`. Claims about today cite `path:line` at that SHA; anything not read is marked UNVERIFIED. The change is not implemented yet (#2094) and needs a PM/Owner routing call under the CI-process rules (#1485).
 
+**Status (2026-11-17):** Outcome: the Owner chose option A ([Owner comment](https://github.com/davidcatcat/davidcattoolsproject/issues/2094#issuecomment-6891904041)). It is implemented on `main`: PR #2108 makes a top-level required-check `timed_out` at the exact head count as one CI failure, while `cancelled` and `startup_failure` stay environment waits; PR #2143 added the `WORKFLOW.md` note. The "not implemented yet" wording above and the sections below are the original proposal, kept for history.
+
 ## 1. Today (current)
 
 - `tools/llmtool/llmtool/task_advance.py:778`: `_CI_ENV_CONCLUSIONS = ('cancelled', 'timed_out', 'startup_failure')`.
