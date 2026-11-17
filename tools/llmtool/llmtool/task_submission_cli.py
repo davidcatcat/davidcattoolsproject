@@ -5761,20 +5761,28 @@ def _claude_no_changes_diagnosis(raw, sent_texts):
         return {'reason': 'UNKNOWN', 'write_attempted': 'UNKNOWN', 'num_turns': 'UNKNOWN'}
 
 
+# The delegate's own refusals after run_route returned a result; each keeps the
+# result's BLOCKED execution facts and (#2275) its structured run evidence.
+_CLAUDE_POST_RESULT_ERRORS = (
+    'CLAUDE_NO_CHANGES', 'CLAUDE_WRITE_SCOPE_VIOLATION',
+    'CLAUDE_OUTPUT_TOO_LARGE', 'CLAUDE_D6_BINDING_CHANGED')
+
+
 def _claude_failure_evidence(route, exc, result):
     """#2275: structured evidence of one Claude run, or None.
 
-    Only for a run that ended CLAUDE_NO_CHANGES (the route returned a result)
-    or failed after launch (run_route attached valid execution facts, so the
-    process ran). The value is the route's parsed CLI fields (ClaudeRoute
-    cli_fields: subtype enum, is_error, num_turns, duration_ms) plus the
-    process exit code. A field the run did not report is absent; no provider,
-    stdout or stderr text is ever kept. Nothing observed, or any doubt, gives
-    None.
+    Only for a run that failed after launch: either the route returned a
+    result and the delegate then refused it (_CLAUDE_POST_RESULT_ERRORS,
+    which also persist the result's BLOCKED execution facts), or run_route
+    attached valid execution facts (so the process ran). The value is the
+    route's parsed CLI fields (ClaudeRoute cli_fields: subtype enum, is_error,
+    num_turns, duration_ms) plus the process exit code. A field the run did
+    not report is absent; no provider, stdout or stderr text is ever kept.
+    Nothing observed, or any doubt, gives None.
     """
     try:
         if result is not None:
-            if exc.code != 'CLAUDE_NO_CHANGES':
+            if exc.code not in _CLAUDE_POST_RESULT_ERRORS:
                 return None
             exit_code = getattr(result, 'exit_code', None)
         else:
@@ -6116,9 +6124,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
         error_code = ('CLAUDE_DISPATCH_DENIED' if owner_gate_denied else exc.code)
         developer.update(state='BLOCKED', provider_type='claude-cli', model=model,
                          error_code=error_code, artifact=None, artifact_sha256=None)
-        if (result is not None and exc.code in (
-                'CLAUDE_NO_CHANGES', 'CLAUDE_WRITE_SCOPE_VIOLATION',
-                'CLAUDE_OUTPUT_TOO_LARGE', 'CLAUDE_D6_BINDING_CHANGED')):
+        if result is not None and exc.code in _CLAUDE_POST_RESULT_ERRORS:
             usage = _normalize_agy_usage(result.usage)
             developer.update(execution=_with_provider_evidence({
                 'status': 'BLOCKED', 'native_session_id': result.session_id,

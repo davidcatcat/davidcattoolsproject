@@ -74,13 +74,13 @@ def _cli(**fields):
                        if value is not _DROP}).encode('utf-8')
 
 
-def _process(code, stdout=b'', stderr=b'', *, write=None, error=None):
+def _process(code, stdout=b'', stderr=b'', *, write=None, error=None, content='after\n'):
     """The fake Claude CLI process run_route starts (argv, cwd, env, timeout)."""
     def run(_argv, cwd, _env, _timeout):
         if error is not None:
             raise error
         if write is not None:
-            (Path(cwd) / write).write_text('after\n')
+            (Path(cwd) / write).write_text(content)
         return code, stdout, stderr
     run.last_cleanup_status = 'CONFIRMED'
     return run
@@ -181,9 +181,14 @@ class ClaudeFailureEvidenceTests(unittest.TestCase):
         store.create(task)
         return store
 
-    def _run(self, process, *, mutate=None):
-        """Run the real delegate once; return (status, store, printed text)."""
+    def _run(self, process, *, mutate=None, route_config=None, registry_after=None):
+        """Run the real delegate once; return (status, store, printed text).
+
+        route_config adds keys to the Claude route configuration;
+        registry_after(registration) gives the D6 registry entry the delegate
+        reads back after the route result (default: unchanged)."""
         base, registration, snapshot = self._d6()
+        after = registration if registry_after is None else registry_after(registration)
         store = self._store(base, _MutatingStore)
         store.mutate = mutate
         args = SimpleNamespace(
@@ -203,7 +208,8 @@ class ClaudeFailureEvidenceTests(unittest.TestCase):
             patch.object(cli, 'shutil', _Shutil()),
             patch.object(cli, '_delegate_d6_binding', return_value=(registration, snapshot)),
             patch.object(cli, 'load_route_config',
-                         return_value={'routes': {'claude': {'denied_dirs': []}}}),
+                         return_value={'routes': {'claude': {'denied_dirs': [],
+                                                             **(route_config or {})}}}),
             patch.object(cli, '_claude_developer_profile',
                          return_value=(_MODEL, 'low', '/fake/claude-config')),
             patch.object(cli, 'for_platform', return_value=_Boundary()),
@@ -216,7 +222,7 @@ class ClaudeFailureEvidenceTests(unittest.TestCase):
             patch.object(cli, 'run_task_direct_result_event', return_value=0),
             patch.object(task_completion, 'bind_executor_task',
                          return_value=(registration, snapshot)),
-            patch.object(task_completion, 'read_d6_registration', return_value=registration),
+            patch.object(task_completion, 'read_d6_registration', return_value=after),
             patch.object(claude_module.github_identity, 'ai_github_env',
                          side_effect=lambda env, _home: env),
         )
@@ -229,8 +235,8 @@ class ClaudeFailureEvidenceTests(unittest.TestCase):
                                                   route_runner=route_runner)
         return status, store, printed.getvalue()
 
-    def _assert_failure(self, process, code, expected, *, prose_free=True):
-        status, store, printed = self._run(process)
+    def _assert_failure(self, process, code, expected, *, prose_free=True, **run_options):
+        status, store, printed = self._run(process, **run_options)
         self.assertEqual(status, 1)
         record = store.get(_TASK_ID)
         developer = record['developer']
@@ -348,6 +354,31 @@ class ClaudeFailureEvidenceTests(unittest.TestCase):
              'duration_ms': 4321, 'process_exit_code': 0})
         # The #1824 diagnosis is unchanged and separate.
         self.assertIn('no_changes_diagnosis', developer)
+
+    def test_output_too_large_after_a_route_result_keeps_evidence(self):
+        # The run succeeds and edits only src.py; the delegate then refuses the
+        # diff against the configured route cap (the minimum, 1024 bytes).
+        _store, developer = self._assert_failure(
+            _process(0, _cli(num_turns=7, duration_ms=2468), write='src.py',
+                     content='a line of plain text\n' * 100),
+            'CLAUDE_OUTPUT_TOO_LARGE',
+            {'subtype': 'SUCCESS', 'is_error': False, 'num_turns': 7,
+             'duration_ms': 2468, 'process_exit_code': 0},
+            route_config={'max_diff_bytes': 1024})
+        self.assertNotIn('no_changes_diagnosis', developer)
+
+    def test_d6_binding_changed_after_a_route_result_keeps_evidence(self):
+        # The run succeeds; the D6 registry entry read back after it differs.
+        def moved(registration):
+            return SimpleNamespace(**dict(vars(registration),
+                                          session_ref='session-ref-moved'))
+        _store, developer = self._assert_failure(
+            _process(0, _cli(num_turns=5, duration_ms=1357), write='src.py'),
+            'CLAUDE_D6_BINDING_CHANGED',
+            {'subtype': 'SUCCESS', 'is_error': False, 'num_turns': 5,
+             'duration_ms': 1357, 'process_exit_code': 0},
+            registry_after=moved)
+        self.assertNotIn('no_changes_diagnosis', developer)
 
     def test_failure_before_a_process_result_keeps_none(self):
         status, store, _printed = self._run(_process(0, error=TimeoutError()))
