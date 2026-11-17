@@ -56,8 +56,6 @@ from .developer_routes.gw_agent import (_GATEWAY_DATA_CLASS, _normalize_gw_agent
                                         cleanup_audit_copies)
 from .developer_routes.agy import _CONVERSATION as AGY_CONVERSATION
 from . import gw_agent_callsite, gw_agent_wiring
-AGY_MAX_PROMPT_BYTES = resolve_route_max_prompt_bytes('agy')
-CLAUDE_MAX_PROMPT_BYTES = resolve_route_max_prompt_bytes('claude')
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
 from .test_data_rule import TEST_DATA_RULE
 from .test_output_excerpts import _CLOUD_KEY, _emitted_sensitive
@@ -72,9 +70,6 @@ TEXT_DEVELOPER_CONTEXT_SEPARATOR = (
 
 REQUEST_LIMIT = 64 * 1024
 RESPONSE_LIMIT = 64 * 1024
-# A prompt carrying skill text must stay strictly under 64 KiB.
-_CLAUDE_PROMPT_MAX_BYTES = min(64 * 1024 - 1, CLAUDE_MAX_PROMPT_BYTES)
-_AGY_PROMPT_MAX_BYTES = min(64 * 1024 - 1, AGY_MAX_PROMPT_BYTES)
 _PROFILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}')
 # No production Reviewer dispatcher is installed. A future Host runtime may
 # bind this internal seam only after a separate authority/runtime grant.

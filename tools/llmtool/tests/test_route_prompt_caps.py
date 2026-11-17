@@ -2,7 +2,10 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -173,6 +176,113 @@ class RoutePromptCapsTests(unittest.TestCase):
                     any("max_prompt_bytes must be an integer >= 1" in err for err in errors),
                     errors,
                 )
+
+    def test_fresh_process_startup_with_agy_only_route_file(self):
+        base_config = load_route_config()
+        agy_only_config = {
+            "schema_version": 1,
+            "routes": {"agy": base_config["routes"]["agy"]},
+        }
+        if "roles" in base_config:
+            agy_only_config["roles"] = base_config["roles"]
+        agy_path = self.root / "agy_only_routes.json"
+        agy_path.write_text(json.dumps(agy_only_config), encoding="utf-8")
+
+        tools_llmtool = str(Path(__file__).resolve().parents[1])
+        code = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            f"tools_llmtool = {tools_llmtool!r}\n"
+            "if tools_llmtool not in sys.path:\n"
+            "    sys.path.insert(0, tools_llmtool)\n"
+            "from llmtool import developer_routes\n"
+            "orig_load = developer_routes.load_route_config\n"
+            f"substitute_path = Path({str(agy_path)!r})\n"
+            "developer_routes.load_route_config = lambda path=None: orig_load(substitute_path if path is None else path)\n"
+            "assert 'llmtool.cli' not in sys.modules\n"
+            "assert 'llmtool.task_submission_cli' not in sys.modules\n"
+            "from llmtool import cli, task_submission_cli\n"
+            "try:\n"
+            "    exit_code = cli.main(['--help'])\n"
+            "except SystemExit as exc:\n"
+            "    exit_code = exc.code\n"
+            "if exit_code != 0:\n"
+            "    sys.exit(exit_code)\n"
+            "loaded = developer_routes.load_route_config()\n"
+            "assert 'agy' in loaded['routes']\n"
+            "assert 'claude' not in loaded['routes']\n"
+            "assert developer_routes.resolve_route_max_prompt_bytes('agy') == 524288\n"
+            "try:\n"
+            "    developer_routes.resolve_route_max_prompt_bytes('claude')\n"
+            "    sys.exit(201)\n"
+            "except developer_routes.RouteError as exc:\n"
+            "    if exc.code != 'ROUTE_CONFIG_INVALID':\n"
+            "        sys.exit(202)\n"
+            "sys.exit(0)\n"
+        )
+        env = dict(os.environ, PYTHONPATH=tools_llmtool)
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(proc.returncode, 0, f"Process failed: {proc.stderr}\n{proc.stdout}")
+        self.assertIn("llmtool", proc.stdout)
+
+    def test_fresh_process_startup_with_malformed_route_file(self):
+        malformed_path = self.root / "malformed_routes.json"
+        malformed_path.write_text("{ malformed json", encoding="utf-8")
+
+        tools_llmtool = str(Path(__file__).resolve().parents[1])
+        code = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            f"tools_llmtool = {tools_llmtool!r}\n"
+            "if tools_llmtool not in sys.path:\n"
+            "    sys.path.insert(0, tools_llmtool)\n"
+            "from llmtool import developer_routes\n"
+            "orig_load = developer_routes.load_route_config\n"
+            f"substitute_path = Path({str(malformed_path)!r})\n"
+            "developer_routes.load_route_config = lambda path=None: orig_load(substitute_path if path is None else path)\n"
+            "assert 'llmtool.cli' not in sys.modules\n"
+            "assert 'llmtool.task_submission_cli' not in sys.modules\n"
+            "from llmtool import cli, task_submission_cli\n"
+            "try:\n"
+            "    exit_code = cli.main(['--help'])\n"
+            "except SystemExit as exc:\n"
+            "    exit_code = exc.code\n"
+            "if exit_code != 0:\n"
+            "    sys.exit(exit_code)\n"
+            "try:\n"
+            "    developer_routes.load_route_config()\n"
+            "    sys.exit(101)\n"
+            "except developer_routes.RouteError as exc:\n"
+            "    if exc.code != 'ROUTE_CONFIG_INVALID':\n"
+            "        sys.exit(102)\n"
+            "try:\n"
+            "    developer_routes.resolve_route_max_prompt_bytes('agy')\n"
+            "    sys.exit(103)\n"
+            "except developer_routes.RouteError as exc:\n"
+            "    if exc.code != 'ROUTE_CONFIG_INVALID':\n"
+            "        sys.exit(104)\n"
+            "try:\n"
+            "    developer_routes.resolve_route_max_prompt_bytes('claude')\n"
+            "    sys.exit(105)\n"
+            "except developer_routes.RouteError as exc:\n"
+            "    if exc.code != 'ROUTE_CONFIG_INVALID':\n"
+            "        sys.exit(106)\n"
+            "sys.exit(0)\n"
+        )
+        env = dict(os.environ, PYTHONPATH=tools_llmtool)
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(proc.returncode, 0, f"Process failed: {proc.stderr}\n{proc.stdout}")
+        self.assertIn("llmtool", proc.stdout)
 
 
 if __name__ == "__main__":
