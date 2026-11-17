@@ -15,6 +15,42 @@ _MODEL = re.compile(r'claude-[a-z0-9][a-z0-9.-]{0,120}\Z')
 _EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 _QUOTA = re.compile(r'quota|rate.?limit|usage limit|overloaded|spend.?limit', re.IGNORECASE)
 MAX_PROMPT_BYTES = 65536
+# #2275: Claude CLI result subtypes kept as structured run evidence. Any other
+# subtype string is OTHER; the CLI string itself is never kept.
+CLI_SUBTYPES = {
+    'success': 'SUCCESS',
+    'error_max_turns': 'ERROR_MAX_TURNS',
+    'error_during_execution': 'ERROR_DURING_EXECUTION',
+    'error_max_budget_usd': 'ERROR_MAX_BUDGET_USD',
+    'error_max_structured_output_retries': 'ERROR_MAX_STRUCTURED_OUTPUT_RETRIES',
+}
+CLI_SUBTYPE_OTHER = 'OTHER'
+CLI_MAX_TURNS = 1_000_000
+CLI_MAX_DURATION_MS = 86_400_000
+
+
+def cli_run_fields(obj):
+    """#2275: structured fields of one parsed Claude CLI result object.
+
+    Returns a dict with only the keys the object reports with a valid type:
+    subtype (a CLI_SUBTYPES value, or OTHER for any other string), is_error
+    (bool), num_turns and duration_ms (bounded non-negative ints; bool is not
+    an int). A missing or ill-typed field is absent, never invented. Anything
+    that is not a CLI object of type "result" gives {}. No text is kept.
+    """
+    if type(obj) is not dict or obj.get('type') != 'result':
+        return {}
+    fields = {}
+    subtype = obj.get('subtype')
+    if type(subtype) is str:
+        fields['subtype'] = CLI_SUBTYPES.get(subtype, CLI_SUBTYPE_OTHER)
+    if type(obj.get('is_error')) is bool:
+        fields['is_error'] = obj['is_error']
+    for key, limit in (('num_turns', CLI_MAX_TURNS), ('duration_ms', CLI_MAX_DURATION_MS)):
+        value = obj.get(key)
+        if type(value) is int and 0 <= value <= limit:
+            fields[key] = value
+    return fields
 
 
 def _unique_pairs(pairs):
@@ -57,6 +93,9 @@ def _is_quota_fallback(parsed):
 class ClaudeRoute(DeveloperRoute):
     name = 'claude'
     worker_key = 'claude-developer'
+    # #2275: cli_run_fields() of this route's last parsed stdout; None until
+    # parse_output runs, {} when stdout held no CLI result object.
+    cli_fields = None
 
     @property
     def family(self):
@@ -112,6 +151,7 @@ class ClaudeRoute(DeveloperRoute):
 
     def parse_output(self, stdout, stderr, log_text):
         self._model_usage = None
+        self.cli_fields = {}
         try:
             obj = json.loads(stdout.decode('utf-8'), object_pairs_hook=_unique_pairs,
                              parse_constant=_reject_constant)
@@ -122,6 +162,9 @@ class ClaudeRoute(DeveloperRoute):
             if _QUOTA.search(stderr.decode('utf-8', 'replace')):
                 return _quota_fallback()
             raise RouteError('CLAUDE_OUTPUT_INVALID') from None
+        # #2275: kept before validation, so a result object that is refused
+        # (CLAUDE_OUTPUT_INVALID) still gives its well-typed fields.
+        self.cli_fields = cli_run_fields(obj)
         if (type(obj) is not dict or obj.get('type') != 'result' or
                 type(obj.get('is_error')) is not bool or type(obj.get('subtype')) is not str or
                 not _is_canonical_uuid(obj.get('session_id'))):

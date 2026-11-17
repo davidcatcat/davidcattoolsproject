@@ -29,7 +29,9 @@ from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
 from .task_store import (TaskStore, TaskStoreConflict, new_id, _json_bytes,
                          _DIRECT_EXECUTION_FIELDS, _NO_CHANGES_MAX_TURNS,
-                         _NO_CHANGES_REASON_MAX_CHARS, valid_provider_evidence)
+                         _NO_CHANGES_REASON_MAX_CHARS, valid_provider_evidence,
+                         CLAUDE_FAILURE_EXIT_CODE_RANGE, valid_claude_failure_evidence,
+                         valid_claude_failure_evidence_record)
 from . import active_pm_inbox
 from . import remote_test
 from . import task_completion
@@ -5759,6 +5761,62 @@ def _claude_no_changes_diagnosis(raw, sent_texts):
         return {'reason': 'UNKNOWN', 'write_attempted': 'UNKNOWN', 'num_turns': 'UNKNOWN'}
 
 
+def _claude_post_result_execution(result):
+    """#2275: (execution, usage) of a returned Claude route result, BLOCKED.
+
+    Every failure after run_route returned a result keeps these facts,
+    whatever the error code (the delegate's own refusals and the generic
+    handler alike); a failure before any result never gets them."""
+    usage = _normalize_agy_usage(result.usage)
+    return _with_provider_evidence({
+        'status': 'BLOCKED', 'native_session_id': result.session_id,
+        'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
+        'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
+        'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
+        'source_bytes': None, 'source_file_count': None,
+        'source_manifest_sha256': None},
+        getattr(result, 'provider_evidence', None), 'claude'), usage
+
+
+def _claude_attach_failure_evidence(developer, route, exc, result):
+    """#2275: add claude_failure_evidence to developer only when the store accepts it,
+    so the evidence can never block persisting the failure."""
+    evidence = _claude_failure_evidence(route, exc, result)
+    if (evidence is not None and valid_claude_failure_evidence_record(
+            dict(developer, claude_failure_evidence=evidence))):
+        developer['claude_failure_evidence'] = evidence
+
+
+def _claude_failure_evidence(route, exc, result):
+    """#2275: structured evidence of one Claude run, or None.
+
+    Only for a run that failed after launch: either the route returned a
+    result and the delegate then failed (any error, which also persists the
+    result's BLOCKED execution facts), or, with no result, run_route attached
+    valid execution facts to its RouteError (so the process ran). The value
+    is the route's parsed CLI fields (ClaudeRoute cli_fields: subtype enum,
+    is_error, num_turns, duration_ms) plus the process exit code. A field the
+    run did not report is absent; no provider, stdout or stderr text is ever
+    kept. Nothing observed, or any doubt, gives None.
+    """
+    try:
+        if result is not None:
+            exit_code = getattr(result, 'exit_code', None)
+        else:
+            # The same fact check _route_failure_execution uses.
+            if _route_failure_execution(exc, None) is None:
+                return None
+            exit_code = exc.execution_facts['process_exit_code']
+        fields = getattr(route, 'cli_fields', None)
+        evidence = dict(fields) if type(fields) is dict else {}
+        low, high = CLAUDE_FAILURE_EXIT_CODE_RANGE
+        if type(exit_code) is int and low <= exit_code <= high:
+            evidence['process_exit_code'] = exit_code
+        return evidence if valid_claude_failure_evidence(evidence) else None
+    except Exception:
+        return None
+
+
 def _claude_committed_carry(task, store, registration, snapshot, developer, completion,
                             result, write_paths, test_policy):
     """#1148/#1279: return (developer, completion) that carry the D6's committed head.
@@ -5992,6 +6050,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
                                'write; nothing was written') from None
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
     owner_gate_denied = False
+    # Bound before the try: every failure handler asks whether a result returned.
+    result = None
     try:
         developer.update(state='DEVELOPER_DISPATCHING', provider_type='claude-cli', model=model)
         store.update(task['task_id'], developer=developer)
@@ -6031,7 +6091,6 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
                             if hasattr(proof, 'get') else None}
                 return proof
         execute = run_route if route_runner is None else route_runner
-        result = None
         result = execute(route, {
             'root': registration.root, 'model': model, 'effort': effort,
             'expected_branch': registration.branch, 'expected_head': snapshot.head,
@@ -6083,19 +6142,11 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
         error_code = ('CLAUDE_DISPATCH_DENIED' if owner_gate_denied else exc.code)
         developer.update(state='BLOCKED', provider_type='claude-cli', model=model,
                          error_code=error_code, artifact=None, artifact_sha256=None)
-        if (result is not None and exc.code in (
-                'CLAUDE_NO_CHANGES', 'CLAUDE_WRITE_SCOPE_VIOLATION',
-                'CLAUDE_OUTPUT_TOO_LARGE', 'CLAUDE_D6_BINDING_CHANGED')):
-            usage = _normalize_agy_usage(result.usage)
-            developer.update(execution=_with_provider_evidence({
-                'status': 'BLOCKED', 'native_session_id': result.session_id,
-                'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
-                'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
-                'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
-                'source_bytes': None, 'source_file_count': None,
-                'source_manifest_sha256': None},
-                getattr(result, 'provider_evidence', None), 'claude'), usage=usage)
-        elif result is None and not owner_gate_denied:
+        if result is not None:
+            # #2275: a returned route result decides, not the error code.
+            execution, usage = _claude_post_result_execution(result)
+            developer.update(execution=execution, usage=usage)
+        elif not owner_gate_denied:
             execution = _route_failure_execution(
                 exc, _condition_execution(getattr(exc, 'provider_evidence', None),
                                           'claude', 'BLOCKED'))
@@ -6108,6 +6159,9 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
             # v93: a reason that repeats the sent prompt or context is UNKNOWN.
             developer['no_changes_diagnosis'] = _claude_no_changes_diagnosis(
                 parsed_cli_result, _claude_sent_texts(prompt, prompt_packet))
+        if not owner_gate_denied:
+            # #2275: structured run evidence; kept only when the store accepts it.
+            _claude_attach_failure_evidence(developer, route, exc, result)
         if owner_gate_denied:
             developer['blocked_reason'] = 'OWNER_DISPATCH_DENIED'
         elif exc.blocked_reason is not None:
@@ -6117,10 +6171,22 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
         store.update(task['task_id'], developer=developer)
         _print(_task_view(store.get(task['task_id'])))
         return 1
-    except Exception:
+    except Exception as exc:
         developer.update(state='BLOCKED', provider_type='claude-cli', model=model,
                          error_code='CLAUDE_RESULT_UNKNOWN', artifact=None,
                          artifact_sha256=None)
+        if result is not None:
+            # #2275: a failure after run_route returned a result (registry read,
+            # Git snapshot, worktree diff, UTF-8 decoding, ...) keeps the
+            # result's BLOCKED execution facts and its structured run evidence.
+            # Before any result nothing is invented.
+            try:
+                execution, usage = _claude_post_result_execution(result)
+            except Exception:
+                execution = usage = None
+            developer.update(execution=execution, usage=usage)
+            if execution is not None and not owner_gate_denied:
+                _claude_attach_failure_evidence(developer, route, exc, result)
         store.update(task['task_id'], developer=developer)
         _print(_task_view(store.get(task['task_id'])))
         return 1
