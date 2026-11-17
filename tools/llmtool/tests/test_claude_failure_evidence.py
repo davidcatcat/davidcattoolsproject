@@ -367,6 +367,51 @@ class ClaudeFailureEvidenceTests(unittest.TestCase):
                 self.assertIsNone(evidence['result_head'])
                 self.assertEqual(evidence['subtype'], 'error_during_execution')
 
+    def test_short_prompt_fragment_in_extra_text_drops_head(self):
+        # Codex security v91: "use Git, publish" (16 normalized characters) is
+        # from the delegate's own sent instructions. No 20-character run of
+        # this text was sent, so only the 12-character window catches it.
+        text = 'Quokka step tried to use Git, publish halted at gate seven.'
+        stdout = _cli_json(subtype='error_during_execution', is_error=True,
+                           num_turns=2, result=text)
+        store, task_id = self._run(_failing_runner(stdout, 1, _status_failed))
+        record, evidence = self._evidence(store, task_id, 'CLAUDE_STATUS_FAILED', 1)
+        self.assertIsNone(evidence['result_head'])
+        self.assertEqual(evidence['subtype'], 'error_during_execution')
+        self.assertEqual(evidence['num_turns'], 2)
+        self.assertNotIn('halted at gate seven', json.dumps(store.get(task_id), default=str))
+        self.assertNotIn('halted at gate seven', json.dumps(record))
+
+    def test_result_head_echo_window(self):
+        head = task_submission_cli._claude_result_head
+        sent = ('Please keep the amber quokka lattice stable.', 'goal')
+        cases = {
+            # A 12-character fragment inside extra text; case and whitespace folded.
+            'fragment_in_extra_text': ('Run halted; AMBER   quokka seen at gate nine.', None),
+            # A 16-character fragment: below the 20-character v93 run.
+            'fragment_16': ('Wombat said the amber quokka twice.', None),
+            'exact_echo': ('Please keep the amber quokka lattice stable.', None),
+            'contained_echo': ('the amber quokka lattice', None),
+            # Unrelated provider error text is kept.
+            'unrelated': ('Provider stopped: wombat ledger 4410 timed out.',
+                          'Provider stopped: wombat ledger 4410 timed out.'),
+            # Only 11 characters ("mber quokka") are shared, below the window,
+            # so the head is kept.
+            'eleven_shared': ('Saw umber quokkas.', 'Saw umber quokkas.'),
+        }
+        for name, (text, expected) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(head(text, sent), expected)
+
+    def test_no_changes_reason_echo_run_unchanged(self):
+        # The v93 no-changes reason keeps its own 20-character run (no other
+        # behaviour change); only the result head uses the 12-character window.
+        index = task_submission_cli._SentTextIndex(
+            ('Please keep the amber quokka lattice stable.',))
+        self.assertEqual(index.run, 20)
+        self.assertFalse(index.echoes('Wombat said the amber quokka twice.'))
+        self.assertTrue(index.echoes('Wombat: keep the amber quokka lattice now.'))
+
     def test_pre_launch_refusal_stores_no_evidence(self):
         # A refusal without execution facts never ran the process.
         store, task_id = self._run(None, runner_error=RouteError('CLAUDE_STATUS_FAILED'))

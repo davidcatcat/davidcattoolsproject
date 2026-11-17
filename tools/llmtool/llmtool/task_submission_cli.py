@@ -5647,6 +5647,9 @@ class _DiagnosedClaudeRoute(ClaudeRoute):
 
 # v93: a reason that repeats this many normalized characters of sent text is refused.
 _NO_CHANGES_ECHO_RUN = 20
+# #2275 (Codex security v91): a CLI failure result head that repeats this many
+# normalized characters of sent text is dropped (fail closed).
+_RESULT_HEAD_ECHO_RUN = 12
 
 
 def _echo_normalize(text):
@@ -5674,23 +5677,32 @@ def _claude_sent_texts(prompt, prompt_packet):
 
 
 class _SentTextIndex:
-    """v93: normalized prompt/context text and all its _NO_CHANGES_ECHO_RUN-character runs."""
+    """v93: normalized prompt/context text and all its ``run``-character runs.
 
-    def __init__(self, sent_texts):
+    ``run`` defaults to _NO_CHANGES_ECHO_RUN (v93); the #2275 result head uses
+    the shorter _RESULT_HEAD_ECHO_RUN."""
+
+    def __init__(self, sent_texts, run=_NO_CHANGES_ECHO_RUN):
         if (type(sent_texts) is not tuple or not sent_texts or
                 any(type(text) is not str for text in sent_texts)):
             raise ValueError('sent text is unavailable')
+        if type(run) is not int or run < 1:
+            raise ValueError('echo run length is invalid')
+        self.run = run
         self.texts = tuple(_echo_normalize(text) for text in sent_texts)
-        self.runs = {text[i:i + _NO_CHANGES_ECHO_RUN] for text in self.texts
-                     for i in range(len(text) - _NO_CHANGES_ECHO_RUN + 1)}
+        self.runs = {text[i:i + run] for text in self.texts
+                     for i in range(len(text) - run + 1)}
 
     def echoes(self, candidate):
-        """True if the whole candidate, or any 20+ character run of it, was sent."""
+        """True if the whole candidate, or any ``run``+ character run of it, was sent.
+
+        Any longer shared run contains a shared ``run``-character run, so
+        checking every window of exactly ``run`` characters covers them all."""
         value = _echo_normalize(candidate)
         if not value or any(value in text for text in self.texts):
             return True
-        return any(value[i:i + _NO_CHANGES_ECHO_RUN] in self.runs
-                   for i in range(len(value) - _NO_CHANGES_ECHO_RUN + 1))
+        return any(value[i:i + self.run] in self.runs
+                   for i in range(len(value) - self.run + 1))
 
 
 def _claude_no_changes_reason(text, sent_texts):
@@ -5765,8 +5777,11 @@ def _claude_result_head(text, sent_texts):
 
     The whole text and the cut head must both pass _screen_text, so a
     sensitive hit anywhere in the text drops the head. Whitespace runs become
-    one space. A head that repeats the sent prompt or context (the v93 echo
-    rule), missing sent text or any error gives None. Provider text is never
+    one space. Fail closed (Codex security v91): a head that is contained in
+    the sent prompt or context, or that shares any window of
+    _RESULT_HEAD_ECHO_RUN (12) or more normalized characters with it, gives
+    None, so a short prompt fragment inside extra provider text is never kept.
+    Missing sent text or any error also gives None. Provider text is never
     reworded to pass the screen."""
     if type(text) is not str:
         return None
@@ -5776,7 +5791,7 @@ def _claude_result_head(text, sent_texts):
         if not head or not head.isprintable():
             return None
         _screen_text(head, 4 * 1024)
-        if _SentTextIndex(sent_texts).echoes(head):
+        if _SentTextIndex(sent_texts, _RESULT_HEAD_ECHO_RUN).echoes(head):
             return None
     except Exception:
         return None
