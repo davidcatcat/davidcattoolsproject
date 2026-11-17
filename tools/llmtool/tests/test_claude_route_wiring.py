@@ -15,7 +15,8 @@ from llmtool import skill_ledger
 from llmtool import skill_manifest
 from llmtool import task_advance
 from llmtool import worker_dispatch
-from llmtool.developer_routes import RouteError, resolve_route_max_diff_bytes
+from llmtool.developer_routes import (RouteError, resolve_route_max_diff_bytes,
+                                     resolve_route_max_prompt_bytes)
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore
 
@@ -574,7 +575,7 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                     args, store=store, route_runner=runner), 0)
             return prompts[0]
 
-        limit = task_submission_cli._CLAUDE_PROMPT_MAX_BYTES
+        limit = min(64 * 1024 - 1, resolve_route_max_prompt_bytes('claude'))
         self.assertLess(limit, 64 * 1024)
         room = limit - len(run(0).encode('utf-8'))
         self.assertGreater(room, 0)

@@ -10,7 +10,8 @@
       "state_dirs": {"policy": "private-temp-only"},
       "default_timeout": 1800,
       "max_timeout": 3600,
-      "max_diff_bytes": 262144
+      "max_diff_bytes": 262144,
+      "max_prompt_bytes": 524288
     },
     "claude": {
       "executable": "claude",
@@ -21,7 +22,8 @@
       "state_dirs": {"policy": "private-temp-only"},
       "default_timeout": 1800,
       "max_timeout": 3600,
-      "max_diff_bytes": 262144
+      "max_diff_bytes": 262144,
+      "max_prompt_bytes": 65536
     },
     "gw-agent": {
       "package_path": "~/.local/lib/api-agent-gateway",

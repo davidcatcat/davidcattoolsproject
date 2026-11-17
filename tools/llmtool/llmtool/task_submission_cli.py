@@ -50,16 +50,13 @@ from . import trust
 from .developer_routes import (AgyRoute, ClaudeRoute, GwAgentRoute, RouteError, capture_snapshot,
                                UnsupportedBoundary, check_route_model, for_platform,
                                load_route_config, resolve_route_max_diff_bytes,
+                               resolve_route_max_prompt_bytes,
                                resolve_route_timeout, run_route)
 from .developer_routes.base import _git_status_paths
 from .developer_routes.gw_agent import (_GATEWAY_DATA_CLASS, _normalize_gw_agent_usage,
                                         cleanup_audit_copies)
-from .developer_routes.agy import (
-    MAX_PROMPT_BYTES as AGY_MAX_PROMPT_BYTES,
-    _CONVERSATION as AGY_CONVERSATION,
-)
+from .developer_routes.agy import _CONVERSATION as AGY_CONVERSATION
 from . import gw_agent_callsite, gw_agent_wiring
-from .developer_routes.claude import MAX_PROMPT_BYTES as CLAUDE_MAX_PROMPT_BYTES
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
 from .test_data_rule import TEST_DATA_RULE
 from .test_output_excerpts import _CLOUD_KEY, _emitted_sensitive
@@ -74,9 +71,6 @@ TEXT_DEVELOPER_CONTEXT_SEPARATOR = (
 
 REQUEST_LIMIT = 64 * 1024
 RESPONSE_LIMIT = 64 * 1024
-# A prompt carrying skill text must stay strictly under 64 KiB.
-_CLAUDE_PROMPT_MAX_BYTES = min(64 * 1024 - 1, CLAUDE_MAX_PROMPT_BYTES)
-_AGY_PROMPT_MAX_BYTES = min(64 * 1024 - 1, AGY_MAX_PROMPT_BYTES)
 _PROFILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}')
 # No production Reviewer dispatcher is installed. A future Host runtime may
 # bind this internal seam only after a separate authority/runtime grant.
@@ -5434,12 +5428,13 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     task_json = '\nTASK_JSON=' + json.dumps(prompt_packet, ensure_ascii=True, sort_keys=True,
                                             separators=(',', ':'))
     prompt = instructions + task_json
-    _screen_text(prompt, AGY_MAX_PROMPT_BYTES)
-    if len(prompt.encode('utf-8')) > AGY_MAX_PROMPT_BYTES:
+    agy_max_prompt_bytes = resolve_route_max_prompt_bytes('agy', config=config)
+    _screen_text(prompt, agy_max_prompt_bytes)
+    if len(prompt.encode('utf-8')) > agy_max_prompt_bytes:
         raise LLMToolError('request or response exceeds the supported size')
     card_prefix, card_prefix_sha256 = _developer_card_prefix(task, registration, 'agy')
     prompt = instructions + card_prefix + task_json
-    if len(prompt.encode('utf-8')) > _AGY_PROMPT_MAX_BYTES:
+    if len(prompt.encode('utf-8')) > min(64 * 1024 - 1, agy_max_prompt_bytes):
         raise LLMToolError('AGY_SKILL_PROMPT_TOO_LARGE')
     provider_input_bytes = len(prompt.encode('utf-8'))
     test_policy = _remote_receipt_test_policy(task, read_paths=read_paths)
@@ -5987,12 +5982,13 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
     if packet_text is not None and packet_text not in task_json:
         raise LLMToolError('REPAIR_PACKET_ENCODING_MISMATCH')
     prompt = instructions + task_json
-    _screen_text(prompt, CLAUDE_MAX_PROMPT_BYTES)
-    if len(prompt.encode('utf-8')) > CLAUDE_MAX_PROMPT_BYTES:
+    claude_max_prompt_bytes = resolve_route_max_prompt_bytes('claude', config=config)
+    _screen_text(prompt, claude_max_prompt_bytes)
+    if len(prompt.encode('utf-8')) > claude_max_prompt_bytes:
         raise LLMToolError('request or response exceeds the supported size')
     card_prefix, card_prefix_sha256 = _developer_card_prefix(task, registration, 'claude')
     prompt = instructions + card_prefix + task_json
-    if len(prompt.encode('utf-8')) > _CLAUDE_PROMPT_MAX_BYTES:
+    if len(prompt.encode('utf-8')) > min(64 * 1024 - 1, claude_max_prompt_bytes):
         raise LLMToolError('CLAUDE_SKILL_PROMPT_TOO_LARGE')
     provider_input_bytes = len(prompt.encode('utf-8'))
     test_policy = _remote_receipt_test_policy(task, read_paths=read_paths)

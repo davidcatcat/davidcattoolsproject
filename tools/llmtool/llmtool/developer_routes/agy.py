@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import re
 
-from .base import DeveloperRoute, RouteError
+from .base import DeveloperRoute, RouteError, resolve_route_max_prompt_bytes
 from .. import github_identity
 
 _MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z')
@@ -62,7 +62,8 @@ class AgyRoute(DeveloperRoute):
         value = super().validate_request(request)
         prompt = value.get('prompt')
         log_path = value.get('log_path')
-        if (type(prompt) is not str or len(prompt.encode('utf-8')) > MAX_PROMPT_BYTES or
+        max_prompt_bytes = resolve_route_max_prompt_bytes(self)
+        if (type(prompt) is not str or len(prompt.encode('utf-8')) > max_prompt_bytes or
                 type(log_path) is not str or not log_path or os.path.isabs(log_path) or
                 '\\' in log_path or any(part in ('', '.', '..') for part in log_path.split('/')) or
                 any(ord(char) < 32 or ord(char) == 127 for char in log_path)):
