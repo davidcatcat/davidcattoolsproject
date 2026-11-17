@@ -29,7 +29,11 @@ from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
 from .task_store import (TaskStore, TaskStoreConflict, new_id, _json_bytes,
                          _DIRECT_EXECUTION_FIELDS, _NO_CHANGES_MAX_TURNS,
-                         _NO_CHANGES_REASON_MAX_CHARS, valid_provider_evidence)
+                         _NO_CHANGES_REASON_MAX_CHARS, valid_provider_evidence,
+                         CLI_RESULT_EXIT_CODE_MAX, CLI_RESULT_EXIT_CODE_MIN,
+                         CLI_RESULT_HEAD_MAX_CHARS, CLI_RESULT_MAX_DURATION_MS,
+                         CLI_RESULT_MAX_TURNS, CLI_RESULT_SUBTYPE,
+                         _valid_cli_result_evidence, valid_cli_result_head)
 from . import active_pm_inbox
 from . import remote_test
 from . import task_completion
@@ -5764,6 +5768,81 @@ def _claude_no_changes_diagnosis(raw, sent_texts):
         return {'reason': 'UNKNOWN', 'write_attempted': 'UNKNOWN', 'num_turns': 'UNKNOWN'}
 
 
+def _claude_result_head(text, sent_texts):
+    """#2275: a short one-line head of the CLI result text, else None.
+
+    Any C0/C1 control character other than TAB, CR or LF gives None; it is
+    refused before the text is normalized. Whitespace runs become one space
+    and the head is the first CLI_RESULT_HEAD_MAX_CHARS characters. The whole
+    normalized text and the head both pass the existing _screen_text; any
+    screen failure drops the head (never reworded to pass). A head that
+    repeats the prompt or context sent to Claude (v93 rule) is dropped too;
+    missing sent text drops it (fail closed)."""
+    try:
+        if type(text) is not str:
+            return None
+        if any((ord(char) < 0x20 and char not in '\t\r\n') or 0x7f <= ord(char) <= 0x9f
+               for char in text):
+            return None
+        line = ' '.join(text.split())
+        head = line[:CLI_RESULT_HEAD_MAX_CHARS].rstrip()
+        if not head:
+            return None
+        for value in (line, head):
+            try:
+                _screen_text(value, 4 * 1024 * 1024)
+            except LLMToolError:
+                return None
+        if _SentTextIndex(sent_texts).echoes(head):
+            return None
+        return head if valid_cli_result_head(head) else None
+    except Exception:
+        return None
+
+
+def _claude_cli_result_evidence(developer, route, exc, result, sent_texts):
+    """#2275: bounded CLI evidence for a post-spawn Claude failure or CLAUDE_NO_CHANGES.
+
+    Only a run that reached the CLI qualifies: a returned RouteResult, or a
+    RouteError carrying run_route's post-run execution_facts. The values are
+    the parsed CLI subtype, is_error, num_turns and duration_ms (typed and
+    bounded, else None), the process exit code and a screened result head.
+    No stderr, prompt, credential or file content is read. Returns None when
+    nothing is known or the store would refuse the value."""
+    try:
+        if result is not None:
+            exit_code = result.exit_code
+        else:
+            facts = getattr(exc, 'execution_facts', None)
+            if type(facts) is not dict:
+                return None
+            exit_code = facts.get('process_exit_code')
+        fields = getattr(route, 'cli_result', None)
+        if type(fields) is not dict:
+            fields = {}
+
+        def bounded(value, low, high):
+            return value if type(value) is int and low <= value <= high else None
+
+        subtype = fields.get('subtype')
+        is_error = fields.get('is_error')
+        evidence = {
+            'subtype': (subtype if type(subtype) is str and
+                        CLI_RESULT_SUBTYPE.fullmatch(subtype) is not None else None),
+            'is_error': is_error if type(is_error) is bool else None,
+            'num_turns': bounded(fields.get('num_turns'), 0, CLI_RESULT_MAX_TURNS),
+            'duration_ms': bounded(fields.get('duration_ms'), 0, CLI_RESULT_MAX_DURATION_MS),
+            'process_exit_code': bounded(exit_code, CLI_RESULT_EXIT_CODE_MIN,
+                                         CLI_RESULT_EXIT_CODE_MAX),
+            'result_head': _claude_result_head(fields.get('result'), sent_texts),
+        }
+        if not _valid_cli_result_evidence(dict(developer, cli_result_evidence=evidence)):
+            return None
+        return evidence
+    except Exception:
+        return None
+
+
 def _claude_committed_carry(task, store, registration, snapshot, developer, completion,
                             result, write_paths, test_policy):
     """#1148/#1279: return (developer, completion) that carry the D6's committed head.
@@ -6112,6 +6191,12 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
             # v93: a reason that repeats the sent prompt or context is UNKNOWN.
             developer['no_changes_diagnosis'] = _claude_no_changes_diagnosis(
                 parsed_cli_result, _claude_sent_texts(prompt, prompt_packet))
+        if not owner_gate_denied:
+            # #2275: bounded, screened CLI evidence; only for a run that reached the CLI.
+            cli_evidence = _claude_cli_result_evidence(
+                developer, route, exc, result, _claude_sent_texts(prompt, prompt_packet))
+            if cli_evidence is not None:
+                developer['cli_result_evidence'] = cli_evidence
         if owner_gate_denied:
             developer['blocked_reason'] = 'OWNER_DISPATCH_DENIED'
         elif exc.blocked_reason is not None:

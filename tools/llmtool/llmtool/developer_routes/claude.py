@@ -45,6 +45,26 @@ def _quota_fallback():
             'raw': {}}
 
 
+def cli_result_fields(obj):
+    """#2275: typed fields of one parsed CLI JSON object for failure evidence.
+
+    Only subtype, is_error, num_turns, duration_ms and the result text are
+    read; a value that is absent or of the wrong type is None (bool is never
+    an int). Bounds and screening are the caller's: the result text is
+    returned unscreened and must pass the screen before any storage. Anything
+    but a JSON object gives None."""
+    if type(obj) is not dict:
+        return None
+
+    def typed(key, kind):
+        value = obj.get(key)
+        return value if type(value) is kind else None
+
+    return {'subtype': typed('subtype', str), 'is_error': typed('is_error', bool),
+            'num_turns': typed('num_turns', int), 'duration_ms': typed('duration_ms', int),
+            'result': typed('result', str)}
+
+
 def _is_quota_fallback(parsed):
     """Only the exact quota-fallback shape. A parsed CLI result always has a
     canonical session_id and a non-empty raw object, so it never matches."""
@@ -57,6 +77,9 @@ def _is_quota_fallback(parsed):
 class ClaudeRoute(DeveloperRoute):
     name = 'claude'
     worker_key = 'claude-developer'
+    # #2275: cli_result_fields of this run's parsed stdout object, else None.
+    # Reset on every parse; set even when the object then fails validation.
+    cli_result = None
 
     @property
     def family(self):
@@ -111,6 +134,7 @@ class ClaudeRoute(DeveloperRoute):
 
     def parse_output(self, stdout, stderr, log_text):
         self._model_usage = None
+        self.cli_result = None
         try:
             obj = json.loads(stdout.decode('utf-8'), object_pairs_hook=_unique_pairs,
                              parse_constant=_reject_constant)
@@ -121,6 +145,7 @@ class ClaudeRoute(DeveloperRoute):
             if _QUOTA.search(stderr.decode('utf-8', 'replace')):
                 return _quota_fallback()
             raise RouteError('CLAUDE_OUTPUT_INVALID') from None
+        self.cli_result = cli_result_fields(obj)
         if (type(obj) is not dict or obj.get('type') != 'result' or
                 type(obj.get('is_error')) is not bool or type(obj.get('subtype')) is not str or
                 not _is_canonical_uuid(obj.get('session_id'))):

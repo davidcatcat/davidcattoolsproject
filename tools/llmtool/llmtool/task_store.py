@@ -370,7 +370,58 @@ _DEVELOPER_NO_CHANGES_FIELDS = frozenset(('no_changes_diagnosis',))
 _NO_CHANGES_DIAGNOSIS_FIELDS = frozenset(('reason', 'write_attempted', 'num_turns'))
 _NO_CHANGES_REASON_MAX_CHARS = 200
 _NO_CHANGES_MAX_TURNS = 1_000_000
-_DEVELOPER_OPTIONAL_FIELDS = _DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS
+# #2275: a Claude CLI run that failed after spawn or ended CLAUDE_NO_CHANGES may
+# keep bounded, non-secret CLI evidence. Optional on every developer shape;
+# legacy records and successful runs omit it. Each value is nullable.
+_DEVELOPER_CLI_EVIDENCE_FIELDS = frozenset(('cli_result_evidence',))
+_CLI_RESULT_EVIDENCE_FIELDS = frozenset((
+    'subtype', 'is_error', 'num_turns', 'duration_ms', 'process_exit_code', 'result_head'))
+CLI_RESULT_SUBTYPE = re.compile(r'[a-z][a-z0-9_]{0,63}')
+CLI_RESULT_HEAD_MAX_CHARS = 200
+CLI_RESULT_MAX_TURNS = _NO_CHANGES_MAX_TURNS
+CLI_RESULT_MAX_DURATION_MS = 86_400_000
+CLI_RESULT_EXIT_CODE_MIN = -255
+CLI_RESULT_EXIT_CODE_MAX = 255
+_DEVELOPER_OPTIONAL_FIELDS = (_DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS |
+                              _DEVELOPER_CLI_EVIDENCE_FIELDS)
+
+
+def valid_cli_result_head(head):
+    """#2275: a stored CLI result head: short, one trimmed printable line, not sensitive."""
+    return (type(head) is str and bool(head) and head == head.strip() and
+            len(head) <= CLI_RESULT_HEAD_MAX_CHARS and
+            all(char.isprintable() for char in head) and
+            not any(unicodedata.category(char) == 'Cf' for char in head) and
+            not _emitted_sensitive(head))
+
+
+def _valid_cli_result_evidence(developer):
+    """#2275: strict shape of developer.cli_result_evidence (Claude CLI, BLOCKED run)."""
+    evidence = developer.get('cli_result_evidence')
+    error_code = developer.get('error_code')
+    if (developer.get('provider_profile') != 'claude' or
+            developer.get('backend_session_semantics') != 'CLI_REPORTED_SESSION_ID' or
+            developer.get('state') != 'BLOCKED' or
+            type(error_code) is not str or not error_code.startswith('CLAUDE_') or
+            error_code == 'CLAUDE_DISPATCH_DENIED' or
+            type(evidence) is not dict or set(evidence) != _CLI_RESULT_EVIDENCE_FIELDS or
+            all(value is None for value in evidence.values())):
+        return False
+    subtype = evidence['subtype']
+    if subtype is not None and (type(subtype) is not str or
+                                CLI_RESULT_SUBTYPE.fullmatch(subtype) is None):
+        return False
+    if evidence['is_error'] is not None and type(evidence['is_error']) is not bool:
+        return False
+    for key, low, high in (('num_turns', 0, CLI_RESULT_MAX_TURNS),
+                           ('duration_ms', 0, CLI_RESULT_MAX_DURATION_MS),
+                           ('process_exit_code', CLI_RESULT_EXIT_CODE_MIN,
+                            CLI_RESULT_EXIT_CODE_MAX)):
+        value = evidence[key]
+        if value is not None and (type(value) is not int or not low <= value <= high):
+            return False
+    head = evidence['result_head']
+    return head is None or valid_cli_result_head(head)
 
 
 def _valid_no_changes_diagnosis(developer):
@@ -2674,6 +2725,10 @@ def _validate(record, *, strict=True):
                 _fail()
             if ('no_changes_diagnosis' in developer and
                     not _valid_no_changes_diagnosis(developer)):
+                _fail()
+            # #2275: the optional Claude cli_result_evidence, checked strictly.
+            if ('cli_result_evidence' in developer and
+                    not _valid_cli_result_evidence(developer)):
                 _fail()
             if ('data_class' in developer and
                     (developer.get('provider_profile') != 'gw-agent' or
