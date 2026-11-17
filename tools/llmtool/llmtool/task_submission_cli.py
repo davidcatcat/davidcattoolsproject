@@ -7210,18 +7210,12 @@ _POST_RUN_NO_WORK_GW_AGENT_REFUSALS = frozenset((
     # Raised during credential resolution before workspace write.
     # gw_agent.py:469, 473; task_submission_cli.py:6506.
     ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_CREDENTIAL_MISSING'),
-    # Raised during session validation or reading session binding before workspace write.
-    # gw_agent.py:278, 280, 283, 363, 395, 1055, 1057, 1062, 1071, 1074, 1077, 1081, 1085, 1089, 1093, 1099; task_submission_cli.py:6506.
-    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_SESSION_UNAVAILABLE'),
     # Raised during session home creation/lock acquisition before workspace write.
     # gw_agent.py:757, 761, 767, 771, 780, 898, 903, 928, 937, 947; task_submission_cli.py:6506.
     ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_SESSION_HOME_UNSAFE'),
     # Raised when session home lock is already acquired before workspace write.
     # gw_agent.py:895, 936; task_submission_cli.py:6506.
     ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_SESSION_LOCKED'),
-    # Raised during session binding creation before workspace write.
-    # gw_agent.py:989, 995, 997, 1000, 1010, 1022, 1024, 1031, 1046; task_submission_cli.py:6506.
-    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_SESSION_BINDING_FAILED'),
     # Raised during task request validation before workspace write.
     # gw_agent.py:291; task_submission_cli.py:6506.
     ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_INVALID'),

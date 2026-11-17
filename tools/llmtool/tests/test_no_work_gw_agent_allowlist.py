@@ -35,10 +35,8 @@ class TestNoWorkGwAgentAllowlist(unittest.TestCase):
             ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_PROFILE_INVALID'),
             ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_REQUEST_INVALID'),
             ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_CREDENTIAL_MISSING'),
-            ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_SESSION_UNAVAILABLE'),
             ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_SESSION_HOME_UNSAFE'),
             ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_SESSION_LOCKED'),
-            ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_SESSION_BINDING_FAILED'),
             ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_INVALID'),
             ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_UNKNOWN_FIELDS'),
             ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_SCHEMA_VERSION_INVALID'),
@@ -61,10 +59,8 @@ class TestNoWorkGwAgentAllowlist(unittest.TestCase):
             'DEVELOPER_GW_AGENT_PROFILE_INVALID',
             'DEVELOPER_GW_AGENT_REQUEST_INVALID',
             'DEVELOPER_GW_AGENT_CREDENTIAL_MISSING',
-            'DEVELOPER_GW_AGENT_SESSION_UNAVAILABLE',
             'DEVELOPER_GW_AGENT_SESSION_HOME_UNSAFE',
             'DEVELOPER_GW_AGENT_SESSION_LOCKED',
-            'DEVELOPER_GW_AGENT_SESSION_BINDING_FAILED',
             'DEVELOPER_GW_AGENT_TASK_INVALID',
             'DEVELOPER_GW_AGENT_TASK_UNKNOWN_FIELDS',
             'DEVELOPER_GW_AGENT_TASK_SCHEMA_VERSION_INVALID',
@@ -83,6 +79,16 @@ class TestNoWorkGwAgentAllowlist(unittest.TestCase):
             with self.subTest(code=code):
                 dev = _synthetic_dev(code)
                 self.assertTrue(_launched_run_did_no_work(dev, lambda sha, write_paths=None: True))
+
+    def test_post_result_session_codes_count(self):
+        codes = [
+            'DEVELOPER_GW_AGENT_SESSION_UNAVAILABLE',
+            'DEVELOPER_GW_AGENT_SESSION_BINDING_FAILED',
+        ]
+        for code in codes:
+            with self.subTest(code=code):
+                dev = _synthetic_dev(code)
+                self.assertFalse(_launched_run_did_no_work(dev, lambda sha, write_paths=None: True))
 
     def test_gw_agent_unknown_cleanup_counts(self):
         dev = _synthetic_dev(execution={'cleanup_status': 'UNKNOWN'})
