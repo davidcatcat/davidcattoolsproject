@@ -29,7 +29,8 @@ from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
 from .task_store import (TaskStore, TaskStoreConflict, new_id, _json_bytes,
                          _DIRECT_EXECUTION_FIELDS, _NO_CHANGES_MAX_TURNS,
-                         _NO_CHANGES_REASON_MAX_CHARS, valid_provider_evidence)
+                         _NO_CHANGES_REASON_MAX_CHARS, valid_provider_evidence,
+                         _CLI_FAILURE_RESULT_HEAD_MAX_CHARS, _valid_cli_failure_evidence)
 from . import active_pm_inbox
 from . import remote_test
 from . import task_completion
@@ -5764,6 +5765,56 @@ def _claude_no_changes_diagnosis(raw, sent_texts):
         return {'reason': 'UNKNOWN', 'write_attempted': 'UNKNOWN', 'num_turns': 'UNKNOWN'}
 
 
+def _claude_result_head(text, sent_texts):
+    """#2275: a short head of the CLI result text, or None.
+
+    The whole text and the cut head must both pass _screen_text, so a
+    sensitive hit anywhere in the text drops the head. Whitespace runs become
+    one space. A head that repeats the sent prompt or context (the v93 echo
+    rule), missing sent text or any error gives None. Provider text is never
+    reworded to pass the screen."""
+    if type(text) is not str:
+        return None
+    try:
+        _screen_text(text, 4 * 1024 * 1024)
+        head = ' '.join(text.split())[:_CLI_FAILURE_RESULT_HEAD_MAX_CHARS].rstrip()
+        if not head or not head.isprintable():
+            return None
+        _screen_text(head, 4 * 1024)
+        if _SentTextIndex(sent_texts).echoes(head):
+            return None
+    except Exception:
+        return None
+    return head
+
+
+def _claude_cli_failure_evidence(developer, fields, sent_texts):
+    """#2275: bounded, non-secret evidence of a failed or no-change Claude CLI run.
+
+    ``fields`` is the route's cli_result_fields of this run's parsed output
+    (None when stdout was not JSON). The exit code is the stored execution's.
+    No credential, prompt or file content is kept: only typed values and a
+    screened result head. Returns None unless TaskStore would accept it, so
+    the evidence can never block the BLOCKED record write."""
+    try:
+        execution = developer.get('execution')
+        if type(execution) is not dict:
+            return None
+        if type(fields) is not dict:
+            fields = {}
+        evidence = {
+            'subtype': fields.get('subtype'), 'is_error': fields.get('is_error'),
+            'num_turns': fields.get('num_turns'), 'duration_ms': fields.get('duration_ms'),
+            'process_exit_code': execution.get('process_exit_code'),
+            'result_head': _claude_result_head(fields.get('result'), sent_texts),
+        }
+        if _valid_cli_failure_evidence(dict(developer, cli_failure_evidence=evidence)):
+            return evidence
+    except Exception:
+        return None
+    return None
+
+
 def _claude_committed_carry(task, store, registration, snapshot, developer, completion,
                             result, write_paths, test_policy):
     """#1148/#1279: return (developer, completion) that carry the D6's committed head.
@@ -6112,6 +6163,14 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
             # v93: a reason that repeats the sent prompt or context is UNKNOWN.
             developer['no_changes_diagnosis'] = _claude_no_changes_diagnosis(
                 parsed_cli_result, _claude_sent_texts(prompt, prompt_packet))
+        if not owner_gate_denied and (
+                result is not None or type(getattr(exc, 'execution_facts', None)) is dict):
+            # #2275: only after the process ran; never on a pre-launch refusal.
+            evidence = _claude_cli_failure_evidence(
+                developer, getattr(route, 'parsed_cli_fields', None),
+                _claude_sent_texts(prompt, prompt_packet))
+            if evidence is not None:
+                developer['cli_failure_evidence'] = evidence
         if owner_gate_denied:
             developer['blocked_reason'] = 'OWNER_DISPATCH_DENIED'
         elif exc.blocked_reason is not None:

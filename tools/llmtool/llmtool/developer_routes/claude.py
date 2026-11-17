@@ -15,6 +15,36 @@ _MODEL = re.compile(r'claude-[a-z0-9][a-z0-9.-]{0,120}\Z')
 _EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 _QUOTA = re.compile(r'quota|rate.?limit|usage limit|overloaded|spend.?limit', re.IGNORECASE)
 MAX_PROMPT_BYTES = 65536
+# #2275: bounds of the typed CLI result fields a failed run may keep.
+_SUBTYPE = re.compile(r'[a-z][a-z0-9_]{0,63}\Z')
+MAX_CLI_TURNS = 1_000_000
+MAX_CLI_DURATION_MS = 86_400_000
+
+
+def cli_result_fields(obj):
+    """#2275: typed CLI result fields of a parsed JSON object, else None.
+
+    Returns {subtype, is_error, num_turns, duration_ms, result}. A field of
+    the wrong type or out of bounds is None. ``result`` is the raw result
+    text; the caller must screen it before keeping any of it.
+    """
+    if type(obj) is not dict:
+        return None
+    subtype = obj.get('subtype')
+    is_error = obj.get('is_error')
+    turns = obj.get('num_turns')
+    duration = obj.get('duration_ms')
+    result = obj.get('result')
+    return {
+        'subtype': (subtype if type(subtype) is str and _SUBTYPE.match(subtype)
+                    else None),
+        'is_error': is_error if type(is_error) is bool else None,
+        'num_turns': (turns if type(turns) is int and 0 <= turns <= MAX_CLI_TURNS
+                      else None),
+        'duration_ms': (duration if type(duration) is int and
+                        0 <= duration <= MAX_CLI_DURATION_MS else None),
+        'result': result if type(result) is str else None,
+    }
 
 
 def _unique_pairs(pairs):
@@ -57,6 +87,9 @@ def _is_quota_fallback(parsed):
 class ClaudeRoute(DeveloperRoute):
     name = 'claude'
     worker_key = 'claude-developer'
+    # #2275: cli_result_fields of the last parsed JSON object, even when the
+    # output is then refused; None when stdout was not JSON.
+    parsed_cli_fields = None
 
     @property
     def family(self):
@@ -111,9 +144,11 @@ class ClaudeRoute(DeveloperRoute):
 
     def parse_output(self, stdout, stderr, log_text):
         self._model_usage = None
+        self.parsed_cli_fields = None
         try:
             obj = json.loads(stdout.decode('utf-8'), object_pairs_hook=_unique_pairs,
                              parse_constant=_reject_constant)
+            self.parsed_cli_fields = cli_result_fields(obj)
         except (UnicodeError, ValueError, TypeError, RecursionError):
             # A quota stderr with non-JSON stdout gives the fixed quota-fallback
             # result; validate_status maps it to CLAUDE_QUOTA_EXHAUSTED (#2158).

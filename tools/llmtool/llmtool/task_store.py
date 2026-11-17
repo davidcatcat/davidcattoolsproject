@@ -370,7 +370,65 @@ _DEVELOPER_NO_CHANGES_FIELDS = frozenset(('no_changes_diagnosis',))
 _NO_CHANGES_DIAGNOSIS_FIELDS = frozenset(('reason', 'write_attempted', 'num_turns'))
 _NO_CHANGES_REASON_MAX_CHARS = 200
 _NO_CHANGES_MAX_TURNS = 1_000_000
-_DEVELOPER_OPTIONAL_FIELDS = _DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS
+# #2275: a Claude CLI run that failed after its process ran, or ended
+# CLAUDE_NO_CHANGES, may keep bounded, non-secret CLI evidence. Optional on
+# every developer shape; legacy records omit it.
+_DEVELOPER_CLI_FAILURE_FIELDS = frozenset(('cli_failure_evidence',))
+_CLI_FAILURE_EVIDENCE_FIELDS = frozenset((
+    'subtype', 'is_error', 'num_turns', 'duration_ms', 'process_exit_code', 'result_head'))
+_CLI_FAILURE_RESULT_HEAD_MAX_CHARS = 200
+_CLI_FAILURE_MAX_DURATION_MS = 86_400_000
+_CLI_FAILURE_SUBTYPE = re.compile(r'[a-z][a-z0-9_]{0,63}')
+_CLI_FAILURE_ERROR_CODE = re.compile(r'CLAUDE_[A-Z0-9_]{1,57}')
+_DEVELOPER_OPTIONAL_FIELDS = (_DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS |
+                              _DEVELOPER_CLI_FAILURE_FIELDS)
+
+
+def _valid_cli_failure_evidence(developer):
+    """#2275: strict shape of developer.cli_failure_evidence (Claude CLI, BLOCKED run).
+
+    Every value is typed and bounded; result_head is short, printable and
+    passes the sensitive screen. process_exit_code must equal the stored
+    execution's exit code."""
+    evidence = developer.get('cli_failure_evidence')
+    execution = developer.get('execution')
+    error_code = developer.get('error_code')
+    if (developer.get('provider_profile') != 'claude' or
+            developer.get('backend_session_semantics') != 'CLI_REPORTED_SESSION_ID' or
+            developer.get('state') != 'BLOCKED' or
+            type(error_code) is not str or
+            _CLI_FAILURE_ERROR_CODE.fullmatch(error_code) is None or
+            error_code == 'CLAUDE_DISPATCH_DENIED' or
+            type(execution) is not dict or execution.get('status') != 'BLOCKED' or
+            type(evidence) is not dict or set(evidence) != _CLI_FAILURE_EVIDENCE_FIELDS):
+        return False
+    subtype = evidence['subtype']
+    if subtype is not None and (type(subtype) is not str or
+                                _CLI_FAILURE_SUBTYPE.fullmatch(subtype) is None):
+        return False
+    if evidence['is_error'] is not None and type(evidence['is_error']) is not bool:
+        return False
+    turns = evidence['num_turns']
+    if turns is not None and (type(turns) is not int or
+                              not 0 <= turns <= _NO_CHANGES_MAX_TURNS):
+        return False
+    duration = evidence['duration_ms']
+    if duration is not None and (type(duration) is not int or
+                                 not 0 <= duration <= _CLI_FAILURE_MAX_DURATION_MS):
+        return False
+    exit_code = evidence['process_exit_code']
+    if exit_code is not None and (type(exit_code) is not int or
+                                  not -127 <= exit_code <= 255):
+        return False
+    stored_exit = execution.get('process_exit_code')
+    if type(stored_exit) is not type(exit_code) or stored_exit != exit_code:
+        return False
+    head = evidence['result_head']
+    return head is None or (
+        type(head) is str and bool(head) and head == head.strip() and
+        len(head) <= _CLI_FAILURE_RESULT_HEAD_MAX_CHARS and head.isprintable() and
+        not any(unicodedata.category(char) == 'Cf' for char in head) and
+        not _emitted_sensitive(head))
 
 
 def _valid_no_changes_diagnosis(developer):
@@ -2666,14 +2724,18 @@ def _validate(record, *, strict=True):
         if developer is not None:
             # #1815: the shapes carry the optional run timeout; legacy records omit it.
             # The validated --data-class a gw-agent delegate stored is an optional
-            # key on every shape; legacy records omit it. So is the #1824
-            # Claude no_changes_diagnosis, checked strictly below.
+            # key on every shape; legacy records omit it. So are the #1824
+            # Claude no_changes_diagnosis and the #2275 Claude
+            # cli_failure_evidence, checked strictly below.
             if (type(developer) is not dict or
                     frozenset(developer) - _DEVELOPER_OPTIONAL_FIELDS
                     not in _DEVELOPER_RECORD_SHAPES):
                 _fail()
             if ('no_changes_diagnosis' in developer and
                     not _valid_no_changes_diagnosis(developer)):
+                _fail()
+            if ('cli_failure_evidence' in developer and
+                    not _valid_cli_failure_evidence(developer)):
                 _fail()
             if ('data_class' in developer and
                     (developer.get('provider_profile') != 'gw-agent' or
