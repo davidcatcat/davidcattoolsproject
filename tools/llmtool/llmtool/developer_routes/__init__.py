@@ -137,7 +137,7 @@ def _role_models(roles):
     return normalized
 
 
-def _gw_agent_budgets_ok(budgets):
+def _gw_agent_budgets_ok(budgets, profile=None):
     """Return True when budgets has valid gw-agent budget keys and ranges (#2281 L9)."""
     if type(budgets) is not dict:
         return False
@@ -172,6 +172,12 @@ def _gw_agent_budgets_ok(budgets):
         val = budgets['max_input_tokens_multiplier']
         if type(val) is not int or type(val) is bool or val < 1:
             return False
+        context_cap = profile.get('context_cap_tokens') if type(profile) is dict else None
+        if type(context_cap) is not int or type(context_cap) is bool or context_cap < 1:
+            return False
+        resolved_input = val * context_cap
+        if not 1 <= resolved_input <= 50_000_000:
+            return False
     if 'max_output_tokens' in budgets:
         val = budgets['max_output_tokens']
         if type(val) is not int or type(val) is bool or not 1 <= val <= 5_000_000:
@@ -179,6 +185,12 @@ def _gw_agent_budgets_ok(budgets):
     if 'max_output_tokens_multiplier' in budgets:
         val = budgets['max_output_tokens_multiplier']
         if type(val) is not int or type(val) is bool or val < 1:
+            return False
+        output_cap = profile.get('max_output_tokens') if type(profile) is dict else None
+        if type(output_cap) is not int or type(output_cap) is bool or output_cap < 1:
+            return False
+        resolved_output = val * output_cap
+        if not 1 <= resolved_output <= 5_000_000:
             return False
     return True
 
@@ -373,7 +385,7 @@ def load_route_config(path=None):
                 not gw['authorization_ref'].strip() or
                 not _allowed_models_ok(gw.get('allowed_models'), gw['default_model'],
                                        _generic_model_ok) or
-                not _gw_agent_budgets_ok(gw.get('budgets')) or
+                not _gw_agent_budgets_ok(gw.get('budgets'), gw.get('profile')) or
                 gw['profile'].get('model') not in gw['allowed_models']):
             raise RouteError('ROUTE_CONFIG_INVALID')
         normalized['gw-agent'] = dict(gw)

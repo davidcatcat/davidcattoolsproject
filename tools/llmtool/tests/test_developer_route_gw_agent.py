@@ -297,7 +297,8 @@ class GwAgentRouteTests(unittest.TestCase):
                     'default_model': 'fake-model', 'allowed_models': ['fake-model'],
                     'default_effort': 'low',
                     'profile_name': 'fake',
-                    'profile': {'model': 'fake-model', 'auth_env': None},
+                    'profile': {'model': 'fake-model', 'auth_env': None,
+                                'context_cap_tokens': 32768, 'max_output_tokens': 16384},
                     'authorization_ref': 'pm-task-ref',
                     'allowed_data_classes': ['synthetic'],
                     'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
@@ -322,6 +323,32 @@ class GwAgentRouteTests(unittest.TestCase):
         path.write_text(json.dumps(route_config))
         self.assertEqual(
             load_route_config(path)['routes']['gw-agent']['budgets']['max_input_tokens_multiplier'], 8)
+
+        # Multipliers exceeding token ceilings are refused (#2281 L9 repair 2)
+        exceeding_input_multiplier = dict(multiplier_budgets, max_input_tokens_multiplier=2000)
+        route_config['routes']['gw-agent']['budgets'] = exceeding_input_multiplier
+        path.write_text(json.dumps(route_config))
+        with self.assertRaises(RouteError) as caught:
+            load_route_config(path)
+        self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
+
+        exceeding_output_multiplier = dict(multiplier_budgets, max_output_tokens_multiplier=400)
+        route_config['routes']['gw-agent']['budgets'] = exceeding_output_multiplier
+        path.write_text(json.dumps(route_config))
+        with self.assertRaises(RouteError) as caught:
+            load_route_config(path)
+        self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
+
+        # Multipliers without profile token caps are refused
+        route_config['routes']['gw-agent']['profile'] = {'model': 'fake-model', 'auth_env': None}
+        route_config['routes']['gw-agent']['budgets'] = multiplier_budgets
+        path.write_text(json.dumps(route_config))
+        with self.assertRaises(RouteError) as caught:
+            load_route_config(path)
+        self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
+        route_config['routes']['gw-agent']['profile'] = {
+            'model': 'fake-model', 'auth_env': None,
+            'context_cap_tokens': 32768, 'max_output_tokens': 16384}
 
         # Missing or invalid budgets fails closed with ROUTE_CONFIG_INVALID
         invalid_cases = (

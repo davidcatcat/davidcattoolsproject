@@ -6233,9 +6233,16 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         max_wall_seconds = route_budgets.get('max_wall_seconds')
         max_tool_result_bytes = route_budgets.get('max_tool_result_bytes')
         max_sent_bytes = route_budgets.get('max_sent_bytes')
-        for v in (max_turns, max_input_tokens_budget, max_output_tokens_budget,
-                  max_wall_seconds, max_tool_result_bytes, max_sent_bytes):
-            if type(v) is not int or type(v) is bool or v < 1:
+        budget_bounds = (
+            (max_turns, 1, 1000),
+            (max_input_tokens_budget, 1, 50_000_000),
+            (max_output_tokens_budget, 1, 5_000_000),
+            (max_wall_seconds, 1, 86400),
+            (max_tool_result_bytes, 256, 1048576),
+            (max_sent_bytes, 1024, 512 * 1024 * 1024),
+        )
+        for val, low, high in budget_bounds:
+            if type(val) is not int or type(val) is bool or not low <= val <= high:
                 raise ValueError
         if (company_provider.get('type') != 'openai-compatible' or
                 type(model) is not str or not model or type(base_url) is not str or
