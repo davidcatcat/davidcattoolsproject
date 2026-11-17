@@ -26,6 +26,18 @@ from llmtool.task_submission_cli import (  # noqa: E402
 # #2006: task repair adds one bounded item and record-pm allows 16, so keep one free.
 REPAIR_ROOM_MAX_ACCEPTANCE = 15
 
+# #1502 WP-G subtraction (c6957703194): a spec must not carry the answer text, so
+# any spec with an 'edits' field is refused, whatever its value.
+EDITS_FORBIDDEN_CODE = "EDITS_FORBIDDEN"
+EDITS_FORBIDDEN_MESSAGE = (
+    "spec field 'edits' is not allowed (#1502 WP-G): a spec must not carry the answer text"
+)
+
+
+def has_edits_field(spec: dict[str, Any]) -> bool:
+    """True when the spec carries an 'edits' key, even if its value is null or empty."""
+    return "edits" in spec
+
 
 def check_ascii(spec: dict[str, Any]) -> list[str]:
     """#2099: gw-agent copies non-ASCII text unreliably; fixed labels of fields that have any."""
@@ -33,8 +45,6 @@ def check_ascii(spec: dict[str, Any]) -> list[str]:
         return []
     fields = [("goal", spec.get("goal"))]
     fields += [(f"acceptance[{i}]", item) for i, item in enumerate(spec.get("acceptance") or [])]
-    edits = spec.get("edits") if isinstance(spec.get("edits"), list) else []
-    fields += [(f"edits[{i}]", json.dumps(edit, ensure_ascii=False)) for i, edit in enumerate(edits)]
     return [f"{label}_non_ascii" for label, value in fields
             if isinstance(value, str) and not value.isascii()]
 
@@ -82,18 +92,13 @@ def check_open_bracket_ends(spec: dict[str, Any]) -> list[str]:
     """#2124: gw-agent closes a bracket that a spec line leaves open; fixed labels only.
 
     It checks each JSON string literal in acceptance items, quoted old and new
-    lines alike, and each line of edits new text. It works line by line, so a
-    line inside a triple-quoted string can be refused; that fails closed.
-    Unquoted acceptance prose is not checked.
+    lines alike. It works line by line, so a line inside a triple-quoted string
+    can be refused; that fails closed. Unquoted acceptance prose is not checked.
     """
     if spec.get("provider") != "gw-agent":
         return []
     fields = [(f"acceptance[{i}]", item) for i, item in enumerate(spec.get("acceptance") or [])]
     texts = [(label, _quoted_lines(item)) for label, item in fields if isinstance(item, str)]
-    edits = spec.get("edits") if isinstance(spec.get("edits"), list) else []
-    pairs = [(i, edit) for i, edit in enumerate(edits) if isinstance(edit, dict)]
-    news = [(f"edits[{i}]", edit.get("new")) for i, edit in pairs]
-    texts += [(label, new.split("\n")) for label, new in news if isinstance(new, str)]
     found = [label for label, lines in texts if any(map(_ends_inside_open_bracket, lines))]
     return [label + "_open_bracket_line_end" for label in found]
 
@@ -142,75 +147,9 @@ def check(spec: dict[str, Any]) -> list[str]:
 
 
 # #1570: a home LLM that must find an anchor in a long file reads it in large
-# chunks and can exhaust its context (Task 1e61753d), so long files need a line hint.
+# chunks and can exhaust its context (Task 1e61753d), so a gw-agent spec that
+# writes a long file is refused. The 'edits' line hints are gone with #1502 WP-G.
 LARGE_FILE_LINES = 2000
-LINE_HINT_WINDOW = 20
-
-
-def check_edits(spec: dict[str, Any], repo: str | Path | None = None) -> tuple[str, int] | None:
-    """Validate optional spec field 'edits' under the given repo directory.
-
-    Returns None if valid or if 'edits' is not present.
-    On failure returns (code, index) where code is one of:
-      - EDIT_COUNT_OVER_CAP
-      - EDIT_PATH_OUT_OF_SCOPE
-      - EDIT_NEW_TEXT_INVALID
-      - EDIT_ANCHOR_MISSING
-      - EDIT_ANCHOR_NOT_UNIQUE
-    """
-    if "edits" not in spec or spec["edits"] is None:
-        return None
-
-    edits = spec["edits"]
-    if not isinstance(edits, list):
-        return None
-
-    if len(edits) > 6:
-        return ("EDIT_COUNT_OVER_CAP", 6)
-
-    write_list = spec.get("write")
-    write_paths = set(write_list) if isinstance(write_list, list) else set()
-    repo_dir = Path.cwd() if repo is None else Path(repo)
-
-    for index, edit in enumerate(edits):
-        if not isinstance(edit, dict):
-            return ("EDIT_PATH_OUT_OF_SCOPE", index)
-
-        path = edit.get("path")
-        if not isinstance(path, str) or path not in write_paths:
-            return ("EDIT_PATH_OUT_OF_SCOPE", index)
-
-        new_text = edit.get("new")
-        old_text = edit.get("old")
-
-        if not isinstance(new_text, str) or len(new_text) == 0 or new_text == old_text:
-            return ("EDIT_NEW_TEXT_INVALID", index)
-
-        if not isinstance(old_text, str) or len(old_text) == 0:
-            return ("EDIT_ANCHOR_MISSING", index)
-
-        target_file = repo_dir / path
-        if not target_file.is_file():
-            return ("EDIT_ANCHOR_MISSING", index)
-
-        try:
-            content = target_file.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            return ("EDIT_ANCHOR_MISSING", index)
-
-        count = content.count(old_text)
-        if count == 0:
-            return ("EDIT_ANCHOR_MISSING", index)
-        if count > 1:
-            return ("EDIT_ANCHOR_NOT_UNIQUE", index)
-        if content.count("\n") >= LARGE_FILE_LINES:
-            line = edit.get("line")
-            if type(line) is not int or line < 1:
-                return ("EDIT_LINE_HINT_MISSING", index)
-            if abs(content[:content.index(old_text)].count("\n") + 1 - line) > LINE_HINT_WINDOW:
-                return ("EDIT_LINE_HINT_WRONG", index)
-
-    return None
 
 
 # WP-120L (#120): the home LLM ladder runs from T1 to T6 (T6: Owner decision A, #763).
@@ -427,6 +366,11 @@ def main(argv: list[str] | None = None) -> int:
         print("SPEC_PREFLIGHT_INVALID")
         return 2
 
+    if has_edits_field(spec):
+        print(f"SPEC_PREFLIGHT_INVALID:{EDITS_FORBIDDEN_CODE}")
+        print(EDITS_FORBIDDEN_MESSAGE, file=sys.stderr)
+        return 2
+
     failures = check(spec) + check_ascii(spec) + check_open_bracket_ends(spec)
     if failures:
         print("SPEC_PREFLIGHT_FAIL:" + ",".join(failures))
@@ -435,16 +379,7 @@ def main(argv: list[str] | None = None) -> int:
     if len(spec["acceptance"]) > REPAIR_ROOM_MAX_ACCEPTANCE:
         print("SPEC_PREFLIGHT_WARN:ACCEPTANCE_NO_REPAIR_ROOM", file=sys.stderr)
 
-    if "edits" in spec and spec["edits"] is not None:
-        if not isinstance(spec["edits"], list):
-            print("SPEC_PREFLIGHT_INVALID")
-            return 2
-        edit_failure = check_edits(spec, repo=repo_dir)
-        if edit_failure is not None:
-            code, index = edit_failure
-            print(f"SPEC_PREFLIGHT_INVALID:{code}:{index}")
-            return 2
-    elif spec.get("provider") == "gw-agent":
+    if spec.get("provider") == "gw-agent":
         for path in spec.get("write") or []:
             target = repo_dir / path if isinstance(path, str) else None
             if (target is not None and target.is_file() and
