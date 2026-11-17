@@ -2680,6 +2680,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                                        claim.get('head_sha') == result_sha and
                                        claim.get('reviewer_task') == reviewer_task_id and
                                        claim.get('version') == version and
+                                       review_result.review_kind(claim) == 'formal' and
                                        claim.get('state') == 'COMPLETED' and
                                        type(claim.get('review_result')) is dict and
                                        claim['review_result'].get('task_id') == task_id and
