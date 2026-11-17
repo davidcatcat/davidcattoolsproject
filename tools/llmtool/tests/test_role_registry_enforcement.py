@@ -1,10 +1,12 @@
 """#1502 WP-E invariant R1: one shared registry check for review/debug models.
 
 No code path may launch codex-reviewer, claude-reviewer, codex-debug or
-claude-debug with a model outside that role's allowed_models, whatever the
+claude-debug with a model outside that role's model family, whatever the
 CLI, environment or user config says, with any provider prefix or case.
-Consumer launch tests live next to each consumer; this module covers the
-shared check and the resolver. Nothing here opens a network connection.
+Owner #2302 P2: any model of the role's own family is admitted; the role's
+allowed_models is not a membership list. Consumer launch tests live next to
+each consumer; this module covers the shared check and the resolver. Nothing
+here opens a network connection.
 """
 
 import copy
@@ -35,6 +37,11 @@ def cross_family(config, role):
     return listed(config, other)
 
 
+def same_family(role):
+    """A same-family model that is not the role's listed model (Owner #2302 P2)."""
+    return 'gpt-example-b' if role in CODEX_ROLES else 'claude-fable-5-2'
+
+
 class SharedCheckTests(unittest.TestCase):
     def setUp(self):
         self.config = load_route_config()
@@ -56,10 +63,20 @@ class SharedCheckTests(unittest.TestCase):
                 # None loads the repository developer-routes.json.
                 self.assertEqual(check_registry_role_model(None, role, model), model)
 
-    def test_unlisted_and_cross_family_models_are_refused(self):
+    def test_unlisted_same_family_models_are_admitted(self):
+        # Owner #2302 P2: family and format decide, not allowed_models.
         for role in sorted(REGISTRY_ROLES):
             family = 'gpt-' if role in CODEX_ROLES else 'claude-'
-            for refused in (family + 'unlisted-model', cross_family(self.config, role)):
+            for model in (family + 'unlisted-model', same_family(role),
+                          listed(self.config, role) + '-mini'):
+                with self.subTest(role=role, model=model):
+                    self.assertEqual(check_registry_role_model(self.config, role, model),
+                                     model)
+
+    def test_cross_family_and_other_family_models_are_refused(self):
+        for role in sorted(REGISTRY_ROLES):
+            for refused in (cross_family(self.config, role), 'gemini-4-hydrogen-medium',
+                            'opencode/example-model-b-free', 'example-model-b'):
                 with self.subTest(role=role, model=refused):
                     self.assert_refused(self.config, role, refused)
 
@@ -67,8 +84,7 @@ class SharedCheckTests(unittest.TestCase):
         for role in sorted(REGISTRY_ROLES):
             model = listed(self.config, role)
             for refused in ('openai/' + model, 'anthropic/' + model, 'vendor/' + model,
-                            model.upper(), model.title(), ' ' + model, model + '\n',
-                            model + '-mini'):
+                            model.upper(), model.title(), ' ' + model, model + '\n'):
                 with self.subTest(role=role, model=refused):
                     self.assert_refused(self.config, role, refused)
 
@@ -87,16 +103,30 @@ class SharedCheckTests(unittest.TestCase):
     def test_absent_or_invalid_registry_refuses_every_model(self):
         model = listed(self.config, 'claude-reviewer')
         route_only = {key: value for key, value in self.config.items() if key != 'roles'}
-        extra = copy.deepcopy(self.config)
-        extra['roles']['claude-reviewer']['allowed_models'].append('claude-extra-model')
         wrong_family = copy.deepcopy(self.config)
         wrong_family['roles']['claude-reviewer']['allowed_models'] = [
             cross_family(self.config, 'claude-reviewer')]
+        wrong_default = copy.deepcopy(self.config)
+        wrong_default['roles']['claude-reviewer']['default_model'] = cross_family(
+            self.config, 'claude-reviewer')
         missing_role = copy.deepcopy(self.config)
         del missing_role['roles']['claude-debug']
-        for config in (route_only, extra, wrong_family, missing_role, {}, [], 'not-a-config'):
+        for config in (route_only, wrong_family, wrong_default, missing_role,
+                       {}, [], 'not-a-config'):
             with self.subTest(config=config):
                 self.assert_refused(config, 'claude-reviewer', model)
+
+    def test_registry_with_more_family_models_or_a_default_model_is_valid(self):
+        # Owner #2302 P2: these registries are valid and admit any family model.
+        extra = copy.deepcopy(self.config)
+        extra['roles']['claude-reviewer']['allowed_models'].append('claude-extra-model')
+        default_only = copy.deepcopy(self.config)
+        default_only['roles']['claude-reviewer'] = {'default_model': 'claude-extra-model'}
+        for config in (extra, default_only):
+            for model in (listed(self.config, 'claude-reviewer'), 'claude-fable-5-2'):
+                with self.subTest(config=config['roles']['claude-reviewer'], model=model):
+                    self.assertEqual(
+                        check_registry_role_model(config, 'claude-reviewer', model), model)
 
     def test_route_only_fixtures_still_load(self):
         # Compatibility: route-only fixtures load; only admission needs roles.
@@ -142,11 +172,27 @@ class ResolverEnforcementTests(unittest.TestCase):
                 self.assertEqual(resolved['model_source'], 'repo_default')
                 self.assertEqual(resolved['source'], 'builtin')
 
-    def test_unlisted_and_cross_family_models_are_refused_at_every_layer(self):
+    def test_same_family_models_are_admitted_at_every_layer(self):
+        # Owner #2302 P2: e.g. claude-fable-5-2 for a Claude role via user config.
         for role in sorted(REGISTRY_ROLES):
             env_name = 'LLMTOOL_ROLE_' + role.upper().replace('-', '_') + '_MODEL'
-            for model in ('gpt-unlisted-model' if role in CODEX_ROLES else
-                          'claude-unlisted-model', cross_family(self.config, role)):
+            model = same_family(role)
+            for layer in ('roles', 'env', 'cli'):
+                with self.subTest(role=role, model=model, layer=layer):
+                    self.save({'roles': {role: {'model': model}}} if layer == 'roles'
+                              else {})
+                    resolved = self.resolve(
+                        role,
+                        environ={env_name: model} if layer == 'env' else {},
+                        cli={'model': model} if layer == 'cli' else None)
+                    self.assertEqual((resolved['model'], resolved['model_source']),
+                                     (model, layer))
+
+    def test_cross_family_and_malformed_models_are_refused_at_every_layer(self):
+        for role in sorted(REGISTRY_ROLES):
+            env_name = 'LLMTOOL_ROLE_' + role.upper().replace('-', '_') + '_MODEL'
+            for model in (cross_family(self.config, role), 'gemini-4-hydrogen-medium',
+                          'vendor/' + same_family(role)):
                 for layer in ('roles', 'env', 'cli'):
                     with self.subTest(role=role, model=model, layer=layer):
                         self.save({'roles': {role: {'model': model}}} if layer == 'roles'
@@ -245,13 +291,15 @@ class ConsumerAdmissionTests(unittest.TestCase):
         )
         self.bg_error = bg.DispatchError
 
-    def test_each_consumer_admits_only_the_listed_model(self):
+    def test_each_consumer_admits_only_models_of_the_role_family(self):
         for consumer, role, admit, code in self.rows:
             model = listed(self.config, role)
             family = 'gpt-' if role in CODEX_ROLES else 'claude-'
-            with self.subTest(consumer=consumer, role=role, model=model):
-                self.assertEqual(admit(model), model)
-            for refused in (family + 'unlisted-model', cross_family(self.config, role),
+            # Owner #2302 P2: unlisted same-family models are admitted too.
+            for admitted in (model, family + 'unlisted-model', same_family(role)):
+                with self.subTest(consumer=consumer, role=role, model=admitted):
+                    self.assertEqual(admit(admitted), admitted)
+            for refused in (cross_family(self.config, role), 'gemini-4-hydrogen-medium',
                             'openai/' + model, model.upper(), None):
                 with self.subTest(consumer=consumer, role=role, model=refused):
                     with self.assertRaises((LLMToolError, self.bg_error)) as caught:

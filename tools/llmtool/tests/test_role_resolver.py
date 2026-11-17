@@ -20,8 +20,11 @@ from llmtool.owner_override import _MARKER
 REPOSITORY = 'example-owner/example-repo'
 REF = 'https://github.com/' + REPOSITORY + '/issues/12#issuecomment-345'
 ISSUE_URL = 'https://api.github.com/repos/' + REPOSITORY + '/issues/12'
-ROUTE = {'default_model': 'model-default', 'default_effort': 'medium',
-         'allowed_models': ['model-default', 'model-user', 'model-env', 'model-cli']}
+# An agy route fixture. Owner #2302 P2: agy accepts any Gemini-family model,
+# so the precedence layers use Gemini names; 'model-extra' is of no provider
+# family and is refused unless a verified owner override admits it.
+ROUTE = {'default_model': 'gemini-default', 'default_effort': 'medium',
+         'allowed_models': ['gemini-default']}
 # The claude-reviewer model listed in developer-routes.json (#1502 WP-E).
 REVIEWER_MODEL = 'claude-sonnet-5-5'
 
@@ -74,7 +77,7 @@ class PrecedenceTests(ResolverBase):
         resolved = self.resolve('agy-developer', route_config=ROUTE)
         self.assertEqual((resolved['model'], resolved['effort'], resolved['source'],
                           resolved['model_source']),
-                         ('model-default', 'medium', 'repo_default', 'repo_default'))
+                         ('gemini-default', 'medium', 'repo_default', 'repo_default'))
         self.assertEqual(resolved['effort_source'], 'repo_default')
 
     def test_repo_default_comes_from_developer_routes_json(self):
@@ -86,35 +89,35 @@ class PrecedenceTests(ResolverBase):
                 self.assertEqual(resolved['effort'], routes[route]['default_effort'])
 
     def test_user_config_wins_over_repo_default(self):
-        self.save({'roles': {'agy-developer': {'model': 'model-user', 'effort': 'low'}}})
+        self.save({'roles': {'agy-developer': {'model': 'gemini-user', 'effort': 'low'}}})
         resolved = self.resolve('agy-developer', route_config=ROUTE)
         self.assertEqual((resolved['model'], resolved['effort'], resolved['source'],
                           resolved['model_source']),
-                         ('model-user', 'low', 'roles', 'roles'))
+                         ('gemini-user', 'low', 'roles', 'roles'))
         self.assertEqual(resolved['effort_source'], 'roles')
 
     def test_env_wins_over_user_config_with_either_prefix_spelling(self):
-        self.save({'roles': {'agy-developer': {'model': 'model-user'}}})
+        self.save({'roles': {'agy-developer': {'model': 'gemini-user'}}})
         for prefix in ('LLMTOOL_ROLE_AGY-DEVELOPER_', 'LLMTOOL_ROLE_AGY_DEVELOPER_'):
             with self.subTest(prefix=prefix):
-                self.env = {prefix + 'MODEL': 'model-env'}
+                self.env = {prefix + 'MODEL': 'gemini-env'}
                 resolved = self.resolve('agy-developer', route_config=ROUTE)
                 self.assertEqual((resolved['model'], resolved['source'],
-                                  resolved['model_source']), ('model-env', 'env', 'env'))
+                                  resolved['model_source']), ('gemini-env', 'env', 'env'))
 
     def test_conflicting_env_spellings_are_refused(self):
-        self.env = {'LLMTOOL_ROLE_AGY-DEVELOPER_MODEL': 'model-env',
-                    'LLMTOOL_ROLE_AGY_DEVELOPER_MODEL': 'model-user'}
+        self.env = {'LLMTOOL_ROLE_AGY-DEVELOPER_MODEL': 'gemini-env',
+                    'LLMTOOL_ROLE_AGY_DEVELOPER_MODEL': 'gemini-user'}
         with self.assertRaises(LLMToolError) as caught:
             self.resolve('agy-developer', route_config=ROUTE)
         self.assertEqual(caught.exception.role_config_code, 'ROLE_CONFIG_OVERRIDE_INVALID')
 
     def test_cli_wins_over_env(self):
-        self.save({'roles': {'agy-developer': {'model': 'model-user'}}})
-        self.env = {'LLMTOOL_ROLE_AGY_DEVELOPER_MODEL': 'model-env'}
-        resolved = self.resolve('agy-developer', cli={'model': 'model-cli'}, route_config=ROUTE)
+        self.save({'roles': {'agy-developer': {'model': 'gemini-user'}}})
+        self.env = {'LLMTOOL_ROLE_AGY_DEVELOPER_MODEL': 'gemini-env'}
+        resolved = self.resolve('agy-developer', cli={'model': 'gemini-cli'}, route_config=ROUTE)
         self.assertEqual((resolved['model'], resolved['source'], resolved['model_source']),
-                         ('model-cli', 'cli', 'cli'))
+                         ('gemini-cli', 'cli', 'cli'))
 
     def test_non_developer_roles_keep_their_previous_shape(self):
         self.assertEqual(self.resolve('coder'), {
@@ -123,7 +126,7 @@ class PrecedenceTests(ResolverBase):
 
 
 class AllowedModelTests(ResolverBase):
-    def test_model_outside_allowed_models_is_refused_at_every_layer(self):
+    def test_wrong_family_model_is_refused_at_every_layer(self):
         cases = (
             ({'roles': {'agy-developer': {'model': 'model-extra'}}}, {}, None),
             ({}, {'LLMTOOL_ROLE_AGY_DEVELOPER_MODEL': 'model-extra'}, None),
@@ -138,19 +141,67 @@ class AllowedModelTests(ResolverBase):
                 self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
                 self.assertIsNone(caught.exception.owner_override_code)
 
-    def test_real_route_refuses_a_model_it_does_not_list(self):
-        self.save({'roles': {'claude-developer': {'model': 'claude-not-listed-0'}}})
-        with self.assertRaises(LLMToolError) as caught:
-            self.resolve('claude-developer')
-        self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
+    def test_real_routes_accept_a_same_family_model_from_user_config(self):
+        # Owner #2302 P2: no allowed_models entry and no owner override needed.
+        for role, model in (('agy-developer', 'gemini-4-hydrogen-medium'),
+                            ('claude-developer', 'claude-fable-5-2')):
+            with self.subTest(role=role, model=model):
+                self.save({'roles': {role: {'model': model}}})
+                resolved = self.resolve(role)
+                self.assertEqual((resolved['model'], resolved['model_source'],
+                                  resolved['source']), (model, 'roles', 'roles'))
+                self.assertNotIn('owner_override', resolved)
+
+    def test_real_routes_accept_a_same_family_model_from_env_and_cli(self):
+        for role, model in (('agy-developer', 'gemini-4-hydrogen-medium'),
+                            ('claude-developer', 'claude-fable-5-2')):
+            env_name = 'LLMTOOL_ROLE_' + role.upper().replace('-', '_') + '_MODEL'
+            with self.subTest(role=role, layer='env'):
+                self.env = {env_name: model}
+                self.assertEqual(self.resolve(role)['model'], model)
+            with self.subTest(role=role, layer='cli'):
+                self.env = {}
+                self.assertEqual(self.resolve(role, cli={'model': model})['model'], model)
+
+    def test_real_routes_refuse_a_wrong_family_or_malformed_model(self):
+        cases = (
+            ('agy-developer', 'claude-fable-5-2'),
+            ('agy-developer', 'gpt-6.1-sol'),
+            ('agy-developer', 'GEMINI-4-HYDROGEN-MEDIUM'),
+            ('agy-developer', 'google/gemini-4-hydrogen-medium'),
+            ('claude-developer', 'gemini-4-hydrogen-medium'),
+            ('claude-developer', 'claude-gpt-6'),
+            ('claude-developer', 'anthropic/claude-fable-5-2'),
+            ('claude-developer', 'Claude-fable-5-2'),
+        )
+        for role, model in cases:
+            with self.subTest(role=role, model=model):
+                self.save({'roles': {role: {'model': model}}})
+                with self.assertRaises(LLMToolError) as caught:
+                    self.resolve(role)
+                self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
+                self.assertIsNone(caught.exception.owner_override_code)
 
     def test_allowed_model_never_reads_the_override_ref(self):
         fetch = mock.Mock(side_effect=AssertionError('must not read'))
-        resolved = self.resolve('agy-developer', route_config=ROUTE,
-                                owner_override={'model': 'model-default', 'ref': REF},
-                                repository=REPOSITORY, fetch_comment=fetch)
+        for model in ('gemini-default', 'gemini-4-hydrogen-medium'):
+            with self.subTest(model=model):
+                resolved = self.resolve('agy-developer', route_config=ROUTE,
+                                        cli={'model': model},
+                                        owner_override={'model': model, 'ref': REF},
+                                        repository=REPOSITORY, fetch_comment=fetch)
+                self.assertEqual(resolved['model'], model)
+                self.assertNotIn('owner_override', resolved)
         fetch.assert_not_called()
-        self.assertNotIn('owner_override', resolved)
+
+    def test_route_without_allowed_models_still_resolves(self):
+        route = {key: value for key, value in ROUTE.items() if key != 'allowed_models'}
+        self.save({'roles': {'agy-developer': {'model': 'gemini-4-hydrogen-medium'}}})
+        resolved = self.resolve('agy-developer', route_config=route)
+        self.assertEqual(resolved['model'], 'gemini-4-hydrogen-medium')
+        with self.assertRaises(LLMToolError) as caught:
+            self.resolve('agy-developer', route_config=dict(route, allowed_models='x'))
+        self.assertEqual(caught.exception.role_config_code, 'ROUTE_CONFIG_INVALID')
 
     def test_verified_owner_override_naming_route_and_model_is_accepted(self):
         self.save({'roles': {'agy-developer': {'model': 'model-extra'}}})
@@ -292,22 +343,32 @@ class DispatchPathTests(ResolverBase):
         self.assertEqual(model, route['default_model'])
         self.assertEqual(calls, ['agy-developer'])
 
-    def test_agy_dispatch_refuses_a_model_outside_allowed_models(self):
+    def test_agy_dispatch_refuses_a_wrong_family_model(self):
         self.isolated_resolver()
-        self.save({'roles': {'agy-developer': {'model': 'model-extra'}}})
-        with self.assertRaises(LLMToolError) as caught:
-            task_submission_cli._agy_developer_profile(dict(self.routes()['agy']))
-        self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
+        for model in ('model-extra', 'claude-fable-5-2'):
+            with self.subTest(model=model):
+                self.save({'roles': {'agy-developer': {'model': model}}})
+                with self.assertRaises(LLMToolError) as caught:
+                    task_submission_cli._agy_developer_profile(dict(self.routes()['agy']))
+                self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
 
-    def test_claude_dispatch_refuses_a_model_outside_allowed_models(self):
+    def test_agy_dispatch_accepts_a_same_family_model_from_user_config(self):
+        # Owner #2302 P2: gemini-4-hydrogen-medium is not in allowed_models.
         calls = self.isolated_resolver()
-        self.save({'roles': {'claude-developer': {'model': 'claude-not-listed-0'}}})
+        self.save({'roles': {'agy-developer': {'model': 'gemini-4-hydrogen-medium'}}})
+        model, _effort = task_submission_cli._agy_developer_profile(dict(self.routes()['agy']))
+        self.assertEqual(model, 'gemini-4-hydrogen-medium')
+        self.assertEqual(calls, ['agy-developer'])
+
+    def test_claude_dispatch_refuses_a_wrong_family_model(self):
+        calls = self.isolated_resolver()
+        self.save({'roles': {'claude-developer': {'model': 'gemini-4-hydrogen-medium'}}})
         with self.assertRaises(LLMToolError) as caught:
             task_submission_cli._claude_developer_profile(dict(self.routes()['claude']))
         self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
         self.assertEqual(calls, ['claude-developer'])
 
-    def test_dispatch_checks_again_when_a_resolver_returns_an_unlisted_model(self):
+    def test_dispatch_checks_again_when_a_resolver_returns_a_wrong_family_model(self):
         role = {'model': 'model-extra', 'effort': None, 'account': None}
         with mock.patch.object(role_config, 'resolve_role', return_value=role):
             with self.assertRaises(LLMToolError) as caught:
@@ -315,7 +376,7 @@ class DispatchPathTests(ResolverBase):
         self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
 
     def test_dispatch_check_accepts_only_a_matching_verified_override(self):
-        route = dict(ROUTE, allowed_models=['model-default'])
+        route = dict(ROUTE)
         verified = {'route': 'agy', 'model': 'model-extra', 'ref': REF, 'comment_id': 345}
         self.assertIsNone(task_submission_cli._require_developer_model(
             'agy-developer', 'agy', route, 'model-extra', {'owner_override': verified}))

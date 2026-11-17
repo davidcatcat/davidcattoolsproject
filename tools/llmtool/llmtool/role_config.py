@@ -16,7 +16,8 @@ _ENV_FIELDS = {
     "EFFORT": "effort",
 }
 # #1502 WP-E: Developer role ids bound to a developer-routes.json route. The
-# route supplies the repo-default model and effort and its allowed_models.
+# route supplies the repo-default model and effort; Owner #2302 P2: the route
+# accepts any model of its own provider family (see check_role_model).
 ROUTE_ROLES = {
     "agy-developer": "agy",
     "claude-developer": "claude",
@@ -50,7 +51,7 @@ def _fail(message="role configuration: invalid configuration", code="ROLE_CONFIG
 
 
 def _fail_model(detail=None):
-    """Refuse a Developer model outside its route's allowed_models."""
+    """Refuse a Developer model its route does not accept (wrong family or format)."""
     message = "role model is not allowed for its route: " + ROLE_MODEL_NOT_ALLOWED
     if detail is not None:
         message += " (" + detail + ")"
@@ -231,12 +232,14 @@ def _fail_registry_model():
 
 
 def _registry_default(role, role_registry):
-    """Return (config, the registry's listed model for role); refuse when absent.
+    """Return (config, the registry's default model for role); refuse when absent.
 
-    #2027: if role_registry is None, RouteError from load_route_config() fails
-    with ROUTE_CONFIG_UNAVAILABLE; an absent roles entry keeps ROLE_MODEL_NOT_ALLOWED.
+    Owner #2302 P2: the default is the entry's default_model, else its first
+    allowed_models item. #2027: if role_registry is None, RouteError from
+    load_route_config() fails with ROUTE_CONFIG_UNAVAILABLE; an absent roles
+    entry keeps ROLE_MODEL_NOT_ALLOWED.
     """
-    from .developer_routes import RouteError, load_route_config
+    from .developer_routes import RouteError, load_route_config, registry_default_model
     if role_registry is None:
         try:
             config = load_route_config()
@@ -245,16 +248,21 @@ def _registry_default(role, role_registry):
     else:
         config = role_registry
     try:
-        models = config["roles"][role]["allowed_models"]
+        entry = config["roles"][role]
     except (KeyError, TypeError):
         _fail_registry_model()
-    if type(models) is not list or not models or type(models[0]) is not str:
+    model = registry_default_model(entry)
+    if model is None:
         _fail_registry_model()
-    return config, models[0]
+    return config, model
 
 
 def _route_entry(route, route_config):
-    """Return one developer-routes.json entry, loaded when not supplied."""
+    """Return one developer-routes.json entry, loaded when not supplied.
+
+    Owner #2302 P2: allowed_models is optional here; when present it must be
+    a list (check_route_model decides whether it is consulted).
+    """
     if route_config is None:
         from .developer_routes import RouteError, load_route_config
         try:
@@ -264,7 +272,8 @@ def _route_entry(route, route_config):
     if (type(route_config) is not dict or
             type(route_config.get("default_model")) is not str or
             type(route_config.get("default_effort")) is not str or
-            type(route_config.get("allowed_models")) is not list):
+            ("allowed_models" in route_config and
+             type(route_config["allowed_models"]) is not list)):
         _fail("developer route configuration is invalid", "ROUTE_CONFIG_INVALID")
     return route_config
 
@@ -282,11 +291,15 @@ def check_role_model(route, route_config, model, *, owner_override=None,
                      repository=None, fetch_comment=None):
     """Return None for an allowed model, else the verified owner override.
 
-    A model outside the route's allowed_models is refused with
-    ROLE_MODEL_NOT_ALLOWED unless owner_override ({"model", "ref"}) names the
-    same model and owner_override.py verifies that its ref names this route and
-    model. fetch_comment(comment_id) is the injected GitHub reader; without it
-    the ref is unreadable and the override is refused.
+    Owner #2302 P2: a model of the route's own provider family in a valid
+    format is accepted with no owner_override (the override is optional, never
+    required, and is not read). allowed_models is not consulted for agy,
+    claude or opencode; gw-agent keeps its allowed_models gate (see
+    developer_routes.check_route_model). A model the route check refuses is
+    refused with ROLE_MODEL_NOT_ALLOWED unless owner_override ({"model",
+    "ref"}) names the same model and owner_override.py verifies that its ref
+    names this route and model. fetch_comment(comment_id) is the injected
+    GitHub reader; without it the ref is unreadable and the override is refused.
     """
     from .developer_routes import RouteError, check_route_model
     from .owner_override import OwnerOverrideError, validate_owner_override
@@ -322,11 +335,13 @@ def resolve_role(role, cli=None, environ=None, *, home=None, route_config=None,
     Precedence: CLI > env > user config (the role or its legacy alias) >
     repo default. Developer roles (ROUTE_ROLES) take their repo default model
     and effort from developer-routes.json (route_config overrides the loaded
-    entry) and their model must be in allowed_models; see check_role_model.
+    entry) and their model must be one the route accepts (Owner #2302 P2: any
+    model of the route's own provider family); see check_role_model.
     Review/debug roles (and the legacy 'reviewer' alias) take their default
     model from the developer-routes.json roles registry (role_registry
     overrides the loaded config) and the resolved model must pass
-    check_registry_model; the registry default never changes 'source'.
+    check_registry_model (any model of the role's family); the registry
+    default never changes 'source'.
     """
     if not _name(role):
         _fail("role name is invalid", "ROLE_CONFIG_ROLE_INVALID")
@@ -397,7 +412,7 @@ def resolve_role(role, cli=None, environ=None, *, home=None, route_config=None,
     review_role = registry_role(role)
     if review_role is not None:
         # #1502 WP-E R1: after precedence, the review/debug model must pass the
-        # shared registry check. An unset model takes the registry's listed
+        # shared registry check. An unset model takes the registry's default
         # model. No owner_override applies to these roles.
         if owner_override is not None:
             _fail_registry_model()
