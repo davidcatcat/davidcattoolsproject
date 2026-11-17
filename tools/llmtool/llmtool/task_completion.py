@@ -8,8 +8,13 @@ invalid dispatch intents; ``REVIEW_RECEIPT_INVALID``,
 ``REVIEW_RECEIPT_BINDING_MISMATCH``, and ``REVIEW_RECEIPT_DIGEST_MISMATCH``
 cover invalid or mismatched handoff/return receipts; ``REVIEW_REPAIR_BINDING_INVALID``,
 ``REVIEW_REPAIR_BINDING_MISMATCH``, and ``REVIEW_REPAIR_DIGEST_MISMATCH`` cover
-invalid or mismatched deterministic repair-intent envelopes. JSON-bound values
-are restricted to finite JSON scalars and containers no deeper than 64 levels.
+invalid or mismatched deterministic repair-intent envelopes. Formal completion
+refusal codes: ``FORMAL_REVIEW_MISSING`` covers a missing or unadmitted formal
+review at the head, including when the only completed claim at the head is
+security-kind or unkinded at version 91 or above (where an unverified Codex PASS
+stays advisory); ``FORMAL_REVIEW_NOT_ACCEPTED`` covers an unaccepted disposition.
+JSON-bound values are restricted to finite JSON scalars and containers no deeper
+than 64 levels.
 """
 
 from __future__ import annotations
@@ -2709,7 +2714,12 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                 except (LLMToolError, KeyError, TypeError, ValueError, IndexError):
                     accepted_codex = False
             if not accepted_codex:
-                continue  # Unbound or otherwise unverified Codex PASS stays advisory.
+                # Unbound or otherwise unverified Codex PASS stays advisory.
+                # When the only completed claim at the head is security-kind or
+                # unkinded at version 91 or above, no formal claim matches, so
+                # formal review remains unadmitted and completion refuses
+                # FORMAL_REVIEW_MISSING.
+                continue
         # Anything else that claims to be a verdict for this HEAD is a
         # disposition; only the exact standard Claude PASS form accepts.
         if (standard and marker.group(1) == 'Claude' and marker.group(2) == 'PASS' and

@@ -3158,27 +3158,27 @@ class TaskCompletionTests(unittest.TestCase):
         # 3. Security-kind claim at v91 never satisfies formal completion
         sec_v91 = evaluate(version=91, claim_kind='security')
         self.assertEqual(sec_v91['evidence']['formal_review_state'], 'UNVERIFIED')
-        self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', sec_v91['missing_gates'])
+        self.assertIn('FORMAL_REVIEW_MISSING', sec_v91['missing_gates'])
 
         # 4. Security-kind claim at v1 never satisfies formal completion
         sec_v1 = evaluate(version=1, claim_kind='security')
         self.assertEqual(sec_v1['evidence']['formal_review_state'], 'UNVERIFIED')
-        self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', sec_v1['missing_gates'])
+        self.assertIn('FORMAL_REVIEW_MISSING', sec_v1['missing_gates'])
 
         # 5. Legacy unkinded claim at version >= 91 fails closed
         legacy_v91 = evaluate(version=91, claim_kind='omitted')
         self.assertEqual(legacy_v91['evidence']['formal_review_state'], 'UNVERIFIED')
-        self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', legacy_v91['missing_gates'])
+        self.assertIn('FORMAL_REVIEW_MISSING', legacy_v91['missing_gates'])
 
         # 6. Legacy unkinded claim at version 92 fails closed
         legacy_v92 = evaluate(version=92, claim_kind='omitted')
         self.assertEqual(legacy_v92['evidence']['formal_review_state'], 'UNVERIFIED')
-        self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', legacy_v92['missing_gates'])
+        self.assertIn('FORMAL_REVIEW_MISSING', legacy_v92['missing_gates'])
 
         # 7. Invalid review_kind fails closed
         invalid_res = evaluate(version=1, claim_kind='invalid')
         self.assertEqual(invalid_res['evidence']['formal_review_state'], 'UNVERIFIED')
-        self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', invalid_res['missing_gates'])
+        self.assertIn('FORMAL_REVIEW_MISSING', invalid_res['missing_gates'])
 
         # 8. Both formal (v1) and security (v91) claims present:
         # Formal completion with formal reviewer accepts
@@ -3211,7 +3211,7 @@ class TaskCompletionTests(unittest.TestCase):
         # Security reviewer with security claim never satisfies formal completion
         multi_sec = evaluate(version=91, reviewer_task='reviewer-sec', claims=multi_claims)
         self.assertEqual(multi_sec['evidence']['formal_review_state'], 'UNVERIFIED')
-        self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', multi_sec['missing_gates'])
+        self.assertIn('FORMAL_REVIEW_MISSING', multi_sec['missing_gates'])
 
     def test_canonical_verdict_body_normalizes_only_line_endings_and_body_end(self):
         canonical = task_completion._canonical_verdict_body
