@@ -4006,6 +4006,197 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(saved['developer']['usage'], usage)
         self.assertNotIn('rejected_output_capture', saved['developer'])
 
+    # #1817 PR-2, C4c regression (codex-reviewer v2 F1, v3 F1). The executor
+    # D6 head bumps a synthetic pyproject version. ENV-2 bootstrap stays
+    # mocked (setUp); its marker and report are written here in the design
+    # section 3.5 shapes. The OpenCode launch is a stub that stops the run, so
+    # reaching it proves the post-bootstrap marker refresh accepted the D6.
+
+    _CARRIED_BUMPED = 'tools/llmtool/pyproject.toml'
+
+    class _StopAfterRefresh(Exception):
+        pass
+
+    def _carried_git(self, *args):
+        proc = subprocess.run(
+            ['/usr/bin/git', '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false',
+             *args], cwd=self.executor_root, capture_output=True, check=False)
+        if proc.returncode != 0:
+            raise AssertionError('fixture git %s exited %d: %s' % (
+                args[0], proc.returncode,
+                proc.stderr.decode('utf-8', 'replace').strip()[-400:]))
+        return proc.stdout.decode('utf-8').strip()
+
+    def _bump_executor_bootstrap_source(self):
+        """Commit the required bootstrap sources, then one version bump."""
+        tools = self.executor_root / 'tools' / 'llmtool'
+        (tools / 'scripts').mkdir(parents=True, exist_ok=True)
+        (tools / 'Makefile').write_text('env-bootstrap:\n\t@true\n', encoding='utf-8')
+        (tools / 'scripts' / 'worktree_env.py').write_text(
+            '# synthetic worktree helper\n', encoding='utf-8')
+        (tools / 'worktree-env.lock').write_text('# synthetic lock\n', encoding='utf-8')
+        (tools / 'pyproject.toml').write_text(
+            '[project]\nname = "fixture"\nversion = "0.0.1"\n', encoding='utf-8')
+        self._carried_git('add', 'tools/llmtool/Makefile',
+                          'tools/llmtool/scripts/worktree_env.py',
+                          'tools/llmtool/worktree-env.lock', self._CARRIED_BUMPED)
+        self._carried_git('commit', '-m', 'synthetic tooling sources')
+        self.carried_tooling_sha = self._carried_git('rev-parse', 'HEAD')
+        (tools / 'pyproject.toml').write_text(
+            '[project]\nname = "fixture"\nversion = "0.0.2"\n', encoding='utf-8')
+        self._carried_git('add', self._CARRIED_BUMPED)
+        self._carried_git('commit', '-m', 'bump synthetic pyproject version')
+        self.carried_head_sha = self._carried_git('rev-parse', 'HEAD')
+
+    def _write_executor_env2(self, *, carried):
+        """Bind executor-task-1 to the bumped head with a carried or built marker."""
+        head, tooling = self.carried_head_sha, self.carried_tooling_sha
+        fingerprint = 'cpython3.13-darwin-arm64-012345abcdef'
+        report = {'schema_version': 1, 'result': 'PASS', 'status': 'env_reused',
+                  'task_id': 'executor-task-1', 'root_realpath': str(self.executor_root),
+                  'head_sha': head, 'tooling_sha': tooling,
+                  'cache_fingerprint': fingerprint}
+        if carried:
+            root_stat = self.executor_root.stat()
+            report.update(
+                schema_version=2, status='env_carried', operations='NONE',
+                carried_from_head_sha=tooling,
+                allowed_bootstrap_paths=[self._CARRIED_BUMPED],
+                venv_identity={
+                    'schema_version': 1, 'path': 'tools/llmtool/.venv',
+                    'device': root_stat.st_dev, 'inode': root_stat.st_ino,
+                    'uid': os.getuid(), 'pyvenv_cfg_sha256': '1' * 64,
+                    'interpreter_realpath': '/usr/bin/python3',
+                    'interpreter_stat': {'device': root_stat.st_dev,
+                                         'inode': root_stat.st_ino,
+                                         'size': 1024, 'mtime_ns': 1000},
+                    'site_packages_sha256': '2' * 64})
+        report_bytes = (json.dumps(report, sort_keys=True, separators=(',', ':')) +
+                        '\n').encode('utf-8')
+        report_path = self.executor_root / 'tools' / 'llmtool' / '.d6-bootstrap-report.json'
+        report_path.write_bytes(report_bytes)
+        report_path.chmod(0o600)
+        marker = {'schema_version': 1, 'result': 'PASS', 'task_id': 'executor-task-1',
+                  'root_realpath': str(self.executor_root),
+                  'submitted_head_sha': head, 'current_head_sha': head,
+                  'tooling_sha': tooling, 'environment_fingerprint': fingerprint,
+                  'report_sha256': hashlib.sha256(report_bytes).hexdigest()}
+        if carried:
+            marker.update(schema_version=2, environment_mode='CARRIED',
+                          carried_from_head_sha=tooling,
+                          allowed_bootstrap_paths=[self._CARRIED_BUMPED])
+        path = self._executor_record_path()
+        record = json.loads(path.read_text(encoding='utf-8'))
+        record.update(base_sha=tooling, head_sha=head, env2_pass_marker=marker)
+        path.write_text(json.dumps(record), encoding='utf-8')
+        path.chmod(0o600)
+
+    def _carried_dispatch(self, write_paths):
+        """Run the real OpenCode dispatch up to the launch stub."""
+        task = self._pm_task_with_opencode_assignment()
+        store = TaskStore(self.home / '.local' / 'state' / 'llmtool' / 'tasks')
+        args = self._opencode_delegate_args(task, read_path=list(write_paths),
+                                            write_path=list(write_paths))
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch.object(submission_cli, '_refresh_d6_binding_after_bootstrap',
+                             wraps=submission_cli._refresh_d6_binding_after_bootstrap) as refresh, \
+                patch.object(submission_cli.task_completion, 'validate_env2_pass_marker',
+                             wraps=submission_cli.task_completion.validate_env2_pass_marker) as c4, \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      side_effect=self._StopAfterRefresh) as launch, \
+                redirect_stdout(io.StringIO()):
+            code = run_task_opencode_delegate(args, store=store)
+        return code, store.get(task['task_id']), launch, refresh, c4
+
+    def _assert_reached_launch(self, run, write_paths):
+        code, saved, launch, refresh, c4 = run
+        self.assertEqual(code, 1)
+        self.assertEqual(launch.call_count, 1)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(saved['developer']['error_code'], 'OPENCODE_ADAPTER_UNKNOWN')
+        self.assertEqual(refresh.call_count, 1)
+        self.assertEqual(refresh.call_args.kwargs['write_paths'], sorted(write_paths))
+        self.assertIn(sorted(write_paths),
+                      [call.kwargs.get('write_paths') for call in c4.call_args_list])
+
+    def test_opencode_dispatch_accepts_carried_marker_with_task_write_paths_1817(self):
+        self._bump_executor_bootstrap_source()
+        self._write_executor_env2(carried=True)
+        write_paths = ['sample.py', self._CARRIED_BUMPED]
+        run = self._carried_dispatch(write_paths)
+        self._assert_reached_launch(run, write_paths)
+        # The write paths the Developer gets are the ones C4 checked.
+        self.assertEqual(run[1]['developer']['write_paths'], sorted(write_paths))
+
+    def test_opencode_dispatch_refuses_carried_marker_without_bootstrap_write_path_1817(self):
+        self._bump_executor_bootstrap_source()
+        self._write_executor_env2(carried=True)
+        code, saved, launch, refresh, _ = self._carried_dispatch(['sample.py'])
+        # OpenCode dispatch boundary: the existing refresh error contract.
+        self.assertEqual(code, 1)
+        launch.assert_not_called()
+        self.assertEqual(refresh.call_args.kwargs['write_paths'], ['sample.py'])
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertEqual(saved['developer']['error_code'], 'OPENCODE_ENV2_MARKER_INVALID')
+        # C4 consumer boundary: the same D6, head and write paths.
+        registration, snapshot = submission_cli.task_completion.bind_executor_task(
+            'executor-task-1', expected_common_dir=self.executor_common_dir,
+            root=str(self.executor_root))
+        with self.assertRaises(LLMToolError) as raised:
+            submission_cli.task_completion.validate_env2_pass_marker(
+                registration, expected_root=str(self.executor_root),
+                current_head=snapshot.head, write_paths=['sample.py'])
+        self.assertEqual(raised.exception.completion_code, 'D6_ENV2_PASS_MARKER_MISMATCH')
+
+    # A built (schema-1) marker on the same head behaves as today whether or
+    # not the write paths name the bootstrap source. One dispatch per test.
+
+    def test_opencode_dispatch_schema1_marker_without_bootstrap_write_path_1817(self):
+        self._bump_executor_bootstrap_source()
+        self._write_executor_env2(carried=False)
+        write_paths = ['sample.py']
+        self._assert_reached_launch(self._carried_dispatch(write_paths), write_paths)
+
+    def test_opencode_dispatch_schema1_marker_with_bootstrap_write_path_1817(self):
+        self._bump_executor_bootstrap_source()
+        self._write_executor_env2(carried=False)
+        write_paths = ['sample.py', self._CARRIED_BUMPED]
+        self._assert_reached_launch(self._carried_dispatch(write_paths), write_paths)
+
+    def test_refresh_d6_binding_after_bootstrap_carried_marker_1817(self):
+        self._bump_executor_bootstrap_source()
+
+        def refresh(registration, snapshot, **write_paths):
+            return submission_cli._refresh_d6_binding_after_bootstrap(
+                registration, snapshot, error_type=DirectOpenCodeError,
+                binding_error_code='OPENCODE_D6_BINDING_CHANGED',
+                marker_error_code='OPENCODE_ENV2_MARKER_INVALID', **write_paths)
+
+        def binding():
+            return submission_cli.task_completion.bind_executor_task(
+                'executor-task-1', expected_common_dir=self.executor_common_dir,
+                root=str(self.executor_root))
+
+        self._write_executor_env2(carried=True)
+        registration, snapshot = binding()
+        self.assertEqual(
+            refresh(registration, snapshot, write_paths=[self._CARRIED_BUMPED]),
+            registration)
+        for write_paths in ({}, {'write_paths': None}, {'write_paths': ['sample.py']}):
+            with self.subTest(write_paths=write_paths):
+                with self.assertRaises(DirectOpenCodeError) as raised:
+                    refresh(registration, snapshot, **write_paths)
+                self.assertEqual(raised.exception.direct_opencode_code,
+                                 'OPENCODE_ENV2_MARKER_INVALID')
+
+        # A built (schema-1) marker is accepted as today, with or without them.
+        self._write_executor_env2(carried=False)
+        registration, snapshot = binding()
+        for write_paths in ({}, {'write_paths': None}, {'write_paths': ['sample.py']}):
+            with self.subTest(schema=1, write_paths=write_paths):
+                self.assertEqual(refresh(registration, snapshot, **write_paths),
+                                 registration)
+
 
 class DeveloperOutputShapeMatrixTests(unittest.TestCase):
     """#290 / #315 P2-2: the local verdict for common model output shapes,

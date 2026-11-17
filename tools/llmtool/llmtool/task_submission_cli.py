@@ -3811,7 +3811,8 @@ def _validate_codex_call_binding(store, task, developer, completion,
 
 
 def _refresh_d6_binding_after_bootstrap(registration, snapshot, *, error_type,
-                                       binding_error_code, marker_error_code):
+                                       binding_error_code, marker_error_code,
+                                       write_paths=None):
     """Accept only ENV-2's refreshed PASS marker for the same D6 source."""
     try:
         refreshed, current_snapshot = task_completion.bind_executor_task(
@@ -3821,7 +3822,8 @@ def _refresh_d6_binding_after_bootstrap(registration, snapshot, *, error_type,
         raise error_type(binding_error_code) from None
     try:
         task_completion.validate_env2_pass_marker(
-            refreshed, expected_root=registration.root, current_head=snapshot.head)
+            refreshed, expected_root=registration.root, current_head=snapshot.head,
+            write_paths=write_paths)
     except Exception:
         raise error_type(marker_error_code) from None
     if (dataclasses.replace(refreshed, env2_pass_marker=registration.env2_pass_marker) !=
@@ -5022,7 +5024,8 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         registration = _refresh_d6_binding_after_bootstrap(
             registration, snapshot, error_type=opencode_direct_developer.DirectOpenCodeError,
             binding_error_code='OPENCODE_D6_BINDING_CHANGED',
-            marker_error_code='OPENCODE_ENV2_MARKER_INVALID')
+            marker_error_code='OPENCODE_ENV2_MARKER_INVALID',
+            write_paths=write_paths)
 
         def record_opencode_launch(pid, started_at, pgid):
             nonlocal expected_developer
