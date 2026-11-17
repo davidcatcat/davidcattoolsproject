@@ -11,9 +11,30 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from llmtool.errors import LLMToolError
 from llmtool import task_completion
+
+
+class _ValidationProbe:
+    """Read-only record of which validation stages ran before a refusal.
+
+    The spies wrap the real ``_git`` and ``_is_ancestor`` helpers and change
+    nothing; they only let a negative test prove where it was refused.
+    """
+
+    def __init__(self, git_mock, ancestor_mock):
+        self.git_calls = [tuple(call.args[1]) for call in git_mock.call_args_list]
+        self.ancestor_calls = [tuple(call.args[1:]) for call in ancestor_mock.call_args_list]
+
+    @property
+    def diff_calls(self):
+        return [args for args in self.git_calls if args[0] == 'diff']
+
+    @property
+    def ls_tree_paths(self):
+        return [args[-1] for args in self.git_calls if args[0] == 'ls-tree']
 
 
 class Env2MarkerValidationTests(unittest.TestCase):
@@ -247,15 +268,76 @@ class Env2MarkerValidationTests(unittest.TestCase):
             write_paths=write_paths)
         self.assertEqual(validated, marker)
 
+    def _carried_report(self, **overrides):
+        report = {
+            "schema_version": 2,
+            "result": "PASS",
+            "status": "env_carried",
+            "operations": "NONE",
+            "task_id": self.task_id,
+            "root_realpath": str(self.worktree),
+            "head_sha": self.head_sha,
+            "tooling_sha": self.base_sha,
+            "cache_fingerprint": self.fingerprint,
+            "carried_from_head_sha": self.base_sha,
+            "allowed_bootstrap_paths": ["tools/llmtool/pyproject.toml"],
+            "venv_identity": self._build_valid_venv_identity(),
+        }
+        report.update(overrides)
+        return report
+
+    def _carried_marker(self, report_sha256, **overrides):
+        marker = {
+            "schema_version": 2,
+            "result": "PASS",
+            "task_id": self.task_id,
+            "root_realpath": str(self.worktree),
+            "submitted_head_sha": self.head_sha,
+            "current_head_sha": self.head_sha,
+            "tooling_sha": self.base_sha,
+            "environment_fingerprint": self.fingerprint,
+            "report_sha256": report_sha256,
+            "environment_mode": "CARRIED",
+            "carried_from_head_sha": self.base_sha,
+            "allowed_bootstrap_paths": ["tools/llmtool/pyproject.toml"],
+        }
+        marker.update(overrides)
+        return marker
+
+    def _commit_side_of_base(self):
+        """Commit a non-bootstrap file on main: a child of base, not an ancestor of head."""
+        (self.root / "side-note.txt").write_text("side commit\n", encoding="utf-8")
+        subprocess.run(["/usr/bin/git", "add", "side-note.txt"], cwd=self.root, check=True)
+        subprocess.run(["/usr/bin/git", "commit", "-m", "side commit"],
+                       cwd=self.root, check=True, capture_output=True)
+        return subprocess.check_output(
+            ["/usr/bin/git", "rev-parse", "HEAD"], cwd=self.root, text=True).strip()
+
     def _assert_validation_refusal(self, marker, code, *, write_paths=None,
-                                   approved_tooling_sha=None, current_head=None):
-        reg = self._create_registration(marker, approved_tooling_sha=approved_tooling_sha)
+                                   approved_tooling_sha=None, current_head=None,
+                                   registration_head=None, source_sha=None):
+        reg = self._create_registration(marker, head_sha=registration_head,
+                                        source_sha=source_sha,
+                                        approved_tooling_sha=approved_tooling_sha)
         head = current_head or self.head_sha
-        with self.assertRaises(LLMToolError) as raised:
-            task_completion.validate_env2_pass_marker(
-                reg, expected_root=str(self.worktree), current_head=head,
-                write_paths=write_paths)
+        with mock.patch.object(task_completion, '_git',
+                               wraps=task_completion._git) as git_spy, \
+                mock.patch.object(task_completion, '_is_ancestor',
+                                  wraps=task_completion._is_ancestor) as ancestor_spy:
+            with self.assertRaises(LLMToolError) as raised:
+                task_completion.validate_env2_pass_marker(
+                    reg, expected_root=str(self.worktree), current_head=head,
+                    write_paths=write_paths)
         self.assertEqual(raised.exception.completion_code, code)
+        return _ValidationProbe(git_spy, ancestor_spy)
+
+    def _assert_validation_accepted(self, marker, *, write_paths=None):
+        reg = self._create_registration(marker)
+        self.assertEqual(
+            task_completion.validate_env2_pass_marker(
+                reg, expected_root=str(self.worktree), current_head=self.head_sha,
+                write_paths=write_paths),
+            marker)
 
     def test_refusal_extra_or_missing_keys(self):
         # 10 keys: 9 schema-1 keys + 1 extra key -> INVALID
@@ -303,7 +385,22 @@ class Env2MarkerValidationTests(unittest.TestCase):
         self._assert_validation_refusal(marker_missing_v2, "D6_ENV2_PASS_MARKER_INVALID")
 
     def test_refusal_version_shape_mismatch(self):
+        # Each marker is bound to a real, matching report, so the version
+        # term is the only one that refuses it: the same marker with the
+        # version that fits its key set is accepted.
+        write_paths = ["tools/llmtool/pyproject.toml"]
+
         # 9 keys with schema_version == 2 -> MISMATCH
+        built_report = {
+            "schema_version": 1,
+            "result": "PASS",
+            "status": "env_created",
+            "task_id": self.task_id,
+            "root_realpath": str(self.worktree),
+            "head_sha": self.head_sha,
+            "tooling_sha": self.base_sha,
+            "cache_fingerprint": self.fingerprint,
+        }
         marker_9_v2 = {
             "schema_version": 2,
             "result": "PASS",
@@ -313,26 +410,23 @@ class Env2MarkerValidationTests(unittest.TestCase):
             "current_head_sha": self.head_sha,
             "tooling_sha": self.base_sha,
             "environment_fingerprint": self.fingerprint,
-            "report_sha256": "5" * 64,
+            "report_sha256": self._write_report(built_report),
         }
-        self._assert_validation_refusal(marker_9_v2, "D6_ENV2_PASS_MARKER_MISMATCH")
+        probe = self._assert_validation_refusal(
+            marker_9_v2, "D6_ENV2_PASS_MARKER_MISMATCH", write_paths=write_paths)
+        self.assertEqual(probe.git_calls, [])
+        self._assert_validation_accepted(dict(marker_9_v2, schema_version=1),
+                                         write_paths=write_paths)
 
         # 12 keys with schema_version == 1 -> MISMATCH
-        marker_12_v1 = {
-            "schema_version": 1,
-            "result": "PASS",
-            "task_id": self.task_id,
-            "root_realpath": str(self.worktree),
-            "submitted_head_sha": self.head_sha,
-            "current_head_sha": self.head_sha,
-            "tooling_sha": self.base_sha,
-            "environment_fingerprint": self.fingerprint,
-            "report_sha256": "5" * 64,
-            "environment_mode": "CARRIED",
-            "carried_from_head_sha": self.base_sha,
-            "allowed_bootstrap_paths": ["tools/llmtool/pyproject.toml"],
-        }
-        self._assert_validation_refusal(marker_12_v1, "D6_ENV2_PASS_MARKER_MISMATCH")
+        marker_12_v1 = self._carried_marker(
+            self._write_report(self._carried_report()), schema_version=1)
+        probe = self._assert_validation_refusal(
+            marker_12_v1, "D6_ENV2_PASS_MARKER_MISMATCH", write_paths=write_paths)
+        self.assertEqual(probe.ancestor_calls, [])
+        self.assertEqual(probe.git_calls, [])
+        self._assert_validation_accepted(dict(marker_12_v1, schema_version=2),
+                                         write_paths=write_paths)
 
     def test_refusal_carried_marker_with_write_paths_omitted_or_none(self):
         report = {
@@ -472,53 +566,62 @@ class Env2MarkerValidationTests(unittest.TestCase):
             "carried_from_head_sha": self.head_sha,
             "allowed_bootstrap_paths": ["tools/llmtool/pyproject.toml"],
         }
-        self._assert_validation_refusal(
+        probe = self._assert_validation_refusal(
             marker, "D6_ENV2_PASS_MARKER_MISMATCH",
             write_paths=["tools/llmtool/pyproject.toml"])
+        # Refused by the equality term, before any ancestry query.
+        self.assertEqual(probe.ancestor_calls, [])
 
-        # Case 2: carried_from_head_sha not an ancestor
-        fake_sha = "6" * 40
-        report["carried_from_head_sha"] = fake_sha
-        marker["carried_from_head_sha"] = fake_sha
-        marker["report_sha256"] = self._write_report(report)
-        self._assert_validation_refusal(
+        # Case 2: carried_from_head_sha is a real commit (a child of
+        # tooling/source) that is not an ancestor of the head. Git answers
+        # the ancestry query normally, so the ancestry check itself refuses.
+        side_sha = self._commit_side_of_base()
+        report = self._carried_report(carried_from_head_sha=side_sha)
+        marker = self._carried_marker(self._write_report(report),
+                                      carried_from_head_sha=side_sha)
+        probe = self._assert_validation_refusal(
             marker, "D6_ENV2_PASS_MARKER_MISMATCH",
             write_paths=["tools/llmtool/pyproject.toml"])
+        self.assertIn((self.base_sha, side_sha), probe.ancestor_calls)
+        self.assertIn((side_sha, self.head_sha), probe.ancestor_calls)
+        self.assertEqual(probe.diff_calls, [])
+
+        # Case 3: the registration source is not an ancestor of
+        # carried_from_head_sha (carried_from is a strict ancestor of the
+        # head, so only the source-ancestry term refuses).
+        report = self._carried_report(tooling_sha=side_sha)
+        marker = self._carried_marker(self._write_report(report), tooling_sha=side_sha)
+        probe = self._assert_validation_refusal(
+            marker, "D6_ENV2_PASS_MARKER_MISMATCH",
+            write_paths=["tools/llmtool/pyproject.toml"], source_sha=side_sha)
+        self.assertIn((side_sha, self.base_sha), probe.ancestor_calls)
+        self.assertEqual(probe.diff_calls, [])
 
     def test_refusal_approved_tooling_present(self):
-        report = {
-            "schema_version": 2,
-            "result": "PASS",
-            "status": "env_carried",
-            "operations": "NONE",
-            "task_id": self.task_id,
-            "root_realpath": str(self.worktree),
-            "head_sha": self.head_sha,
-            "tooling_sha": self.base_sha,
-            "cache_fingerprint": self.fingerprint,
-            "carried_from_head_sha": self.base_sha,
-            "allowed_bootstrap_paths": ["tools/llmtool/pyproject.toml"],
-            "venv_identity": self._build_valid_venv_identity(),
-        }
-        report_sha256 = self._write_report(report)
-        marker = {
-            "schema_version": 2,
-            "result": "PASS",
-            "task_id": self.task_id,
-            "root_realpath": str(self.worktree),
-            "submitted_head_sha": self.head_sha,
-            "current_head_sha": self.head_sha,
-            "tooling_sha": self.base_sha,
-            "environment_fingerprint": self.fingerprint,
-            "report_sha256": report_sha256,
-            "environment_mode": "CARRIED",
-            "carried_from_head_sha": self.base_sha,
-            "allowed_bootstrap_paths": ["tools/llmtool/pyproject.toml"],
-        }
-        self._assert_validation_refusal(
-            marker, "D6_ENV2_PASS_MARKER_MISMATCH",
-            write_paths=["tools/llmtool/pyproject.toml"],
+        # The marker and report are bound to the approved tooling SHA, so
+        # the common marker binding (tooling_sha == approved or source)
+        # passes and the carried approved-tooling check is reached.
+        write_paths = ["tools/llmtool/pyproject.toml"]
+        report = self._carried_report(tooling_sha=self.head_sha)
+        marker = self._carried_marker(self._write_report(report),
+                                      tooling_sha=self.head_sha)
+
+        # Case 1: approved tooling on an ordinary record (source = base).
+        probe = self._assert_validation_refusal(
+            marker, "D6_ENV2_PASS_MARKER_MISMATCH", write_paths=write_paths,
             approved_tooling_sha=self.head_sha)
+        # Refused by the carried binding check, before any ancestry query.
+        self.assertEqual(probe.ancestor_calls, [])
+        self.assertEqual(probe.git_calls, [])
+
+        # Case 2: the record source equals the approved tooling SHA, so
+        # tooling_sha == source_sha holds and only the
+        # "env2_approved_tooling_sha is None" term refuses.
+        probe = self._assert_validation_refusal(
+            marker, "D6_ENV2_PASS_MARKER_MISMATCH", write_paths=write_paths,
+            approved_tooling_sha=self.head_sha, source_sha=self.head_sha)
+        self.assertEqual(probe.ancestor_calls, [])
+        self.assertEqual(probe.git_calls, [])
 
     def test_refusal_path_outside_bootstrap_sources_or_write_paths(self):
         # Outside BOOTSTRAP_SOURCES
@@ -551,17 +654,23 @@ class Env2MarkerValidationTests(unittest.TestCase):
             "carried_from_head_sha": self.base_sha,
             "allowed_bootstrap_paths": ["outside/path.py"],
         }
-        self._assert_validation_refusal(
+        probe = self._assert_validation_refusal(
             marker, "D6_ENV2_PASS_MARKER_MISMATCH",
             write_paths=["outside/path.py"])
+        # The path is inside write_paths, so only the BOOTSTRAP_SOURCES
+        # term refuses; it does so before the tooling-to-head diff runs.
+        self.assertTrue(probe.ancestor_calls)
+        self.assertEqual(probe.diff_calls, [])
 
         # In BOOTSTRAP_SOURCES, but outside write_paths
         report["allowed_bootstrap_paths"] = ["tools/llmtool/pyproject.toml"]
         marker["allowed_bootstrap_paths"] = ["tools/llmtool/pyproject.toml"]
         marker["report_sha256"] = self._write_report(report)
-        self._assert_validation_refusal(
+        probe = self._assert_validation_refusal(
             marker, "D6_ENV2_PASS_MARKER_MISMATCH",
             write_paths=["src/other.py"])
+        self.assertTrue(probe.ancestor_calls)
+        self.assertEqual(probe.diff_calls, [])
 
     def test_refusal_unsorted_or_duplicate_paths(self):
         report = {
@@ -594,9 +703,12 @@ class Env2MarkerValidationTests(unittest.TestCase):
             "carried_from_head_sha": self.base_sha,
             "allowed_bootstrap_paths": ["tools/llmtool/pyproject.toml", "tools/llmtool/Makefile"],
         }
-        self._assert_validation_refusal(
+        probe = self._assert_validation_refusal(
             marker_unsorted, "D6_ENV2_PASS_MARKER_MISMATCH",
             write_paths=["tools/llmtool/Makefile", "tools/llmtool/pyproject.toml"])
+        # Refused by the sorted/unique term, before the diff runs.
+        self.assertTrue(probe.ancestor_calls)
+        self.assertEqual(probe.diff_calls, [])
 
         # Duplicate
         report["allowed_bootstrap_paths"] = [
@@ -607,9 +719,11 @@ class Env2MarkerValidationTests(unittest.TestCase):
                           allowed_bootstrap_paths=["tools/llmtool/pyproject.toml",
                                                    "tools/llmtool/pyproject.toml"],
                           report_sha256=self._write_report(report))
-        self._assert_validation_refusal(
+        probe = self._assert_validation_refusal(
             marker_dup, "D6_ENV2_PASS_MARKER_MISMATCH",
             write_paths=["tools/llmtool/pyproject.toml"])
+        self.assertTrue(probe.ancestor_calls)
+        self.assertEqual(probe.diff_calls, [])
 
     def test_refusal_paths_differ_from_actual_diff(self):
         # Only pyproject.toml changed between base_sha and head_sha,
@@ -688,9 +802,15 @@ class Env2MarkerValidationTests(unittest.TestCase):
             "carried_from_head_sha": self.base_sha,
             "allowed_bootstrap_paths": allowed,
         }
-        self._assert_validation_refusal(
+        # The registration records del_head as its result head, so the
+        # common head binding passes and the required-source check is reached.
+        probe = self._assert_validation_refusal(
             marker, "D6_ENV2_PASS_MARKER_MISMATCH",
-            write_paths=allowed, current_head=del_head)
+            write_paths=allowed, current_head=del_head, registration_head=del_head)
+        # The marker paths equal the real tooling-to-head diff, so the diff
+        # check passed; the refusal comes from the missing Makefile lookup.
+        self.assertEqual(len(probe.diff_calls), 1)
+        self.assertEqual(probe.ls_tree_paths[-1], "tools/llmtool/Makefile")
 
     def test_refusal_report_wrong_status_or_operations_or_carried_fields(self):
         base_report = {
