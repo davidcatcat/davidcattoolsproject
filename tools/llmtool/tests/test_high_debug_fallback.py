@@ -307,7 +307,7 @@ class FallbackTests(unittest.TestCase):
         return output.getvalue()
 
     def test_cli_prints_allowlisted_high_debug_detail_with_hyphen_period_or_colon(self):
-        for detail in ('pr-17', 'v1.2', '2026-11-12T00:00:00Z'):
+        for detail in ('expected=pr-17', 'v1.2', '2026-11-12T00:00:00Z'):
             with self.subTest(detail=detail):
                 self.assertEqual(
                     self._cli_refusal_line('high-debug', detail),
