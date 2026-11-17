@@ -73,14 +73,18 @@ Owner decision [#1230 D1=A](https://github.com/davidcatcat/davidcattoolsproject/
 | --- | --- | --- |
 | 1. Channel module `telegram_channel.py`: status text, notification events, screened delivery over an injected transport | Nothing | PR #1170; offline, not wired |
 | 2. Per-chat cursor and dedupe `telegram_cursor.py` | Nothing | PR #1165; offline, not wired |
-| 3. Real Bot API transport, token file, pairing and allowlist | Owner enables new data egress and holds the token | Not started |
+| 3. Real Bot API network call (egress), token file, pairing and allowlist | Owner enables new data egress and holds the token | Not started |
 | 4. Foreground run command | Owner decides run mode | Not started |
 | 5. Remote approve and reject | A11b.3 `REMOTE_OWNER` issuer, Security review and an Owner grant | Not started |
 | 6. Design note [docs/design/telegram-pm-inbox-1160.md](../../docs/design/telegram-pm-inbox-1160.md) | Nothing | PR #2093 merged |
 | 7. Owner instruction inbox store `owner_instruction_inbox.py` | Nothing | PR #2116 merged; offline, not wired |
 | 8. Update gates and `/do`, `/inbox`, `/revoke`, `/help` `telegram_instruction.py` | Nothing | PR #2120 merged; fake transport only, not wired |
 | 9. PM CLI `llmtool owner-inbox` | Nothing | PR #2127 merged; local only |
-| 10. Real Bot API transport, token and allowlist files, pairing, foreground run command, go-live | Owner (credentials, new data egress) and an independent security review before go-live | Not started |
+| 10. Real Bot API network call (egress), token and allowlist files, pairing, foreground run command, go-live | Owner (credentials, new data egress) and an independent security review before go-live | Not started |
+| 11. Deferred inbox items (peek of EXPIRED items, prune-history, COMPACTED resend) | Nothing | PR #2134 merged |
+| 12. Pure Bot API transport adapter telegram_bot_api.py (injected HTTP call and chat resolver; no token, URL or network library) | Nothing | PR #2146 merged; not wired |
+| 13. Design deferred list and the /do COMPACTED reply test | Nothing | PR #2151 merged |
+| 14. Wiring telegram_link.run_once (adapter + poll_once + notifications) | Nothing | PR #2250 merged; no run command, token or network call |
 
 The cursor follows the same private state-file rules as the WP5 GitHubSync poll ledger (#1144); a shared helper can follow once both merge.
 

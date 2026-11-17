@@ -114,7 +114,7 @@ class CLITests(unittest.TestCase):
 
         expected_freshness = {
             'delegate', 'review-dispatch', 'high-debug', 'repair', 'remote-test', 'drive',
-            'claude-bind',
+            'claude-bind', 'retry-start',
         }
         self.assertEqual(
             {action for action, (_function_name, fresh) in TASK_ACTIONS.items() if fresh},

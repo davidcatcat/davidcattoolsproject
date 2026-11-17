@@ -61,6 +61,14 @@ Not every change needs every gate. The pinned Task Contract/milestone declares w
 are required. A confirmed finding is fixed via normal implementation with a permanent
 regression test where appropriate, then the affected gate is re-run.
 
+## Main CI failure (#1706)
+
+See [#1706](https://github.com/davidcatcat/davidcattoolsproject/issues/1706). `llmtool ci main-incident scan [--pm-session]` reads main commits and CI runs from GitHub with reads only (it writes nothing to GitHub), classifies the failure (ENV, FLAKY, CODE or UNKNOWN) and records or updates the incident in a local store; the PM session that runs the first scan owns the incident.
+
+`llmtool ci main-incident show --incident ID` prints one incident record as JSON. `llmtool ci main-incident confirm --incident ID --scope <comma-separated PR numbers> --reason <text>` records the owning PM's revert-scope confirmation, bound to the newest observation, and never reverts anything.
+
+No revert command exists yet (#1706 R4-R7 are not built), so a confirmed incident is advice only. Handle a red main with the [debug-ci skill](../../.claude/skills/debug-ci/SKILL.md).
+
 ## References
 
 - [Repository guidance](../../AGENTS.md)

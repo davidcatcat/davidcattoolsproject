@@ -6804,6 +6804,233 @@ class CompletionAttributedPathsStoreTests(unittest.TestCase):
         self.assertNotIn(scratch, result['changed_paths'])
 
 
+def _fixture_git(cwd, *args):
+    """Run one fixture Git command; on failure, report Git's own message.
+
+    Hooks and commit signing are off so host Git settings cannot change the
+    fixture. The output is returned undecoded by newline rules.
+    """
+    proc = subprocess.run(
+        ['/usr/bin/git', '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false',
+         *args], cwd=cwd, capture_output=True, check=False)
+    if proc.returncode != 0:
+        raise AssertionError('fixture git %s exited %d: %s' % (
+            args[0], proc.returncode,
+            proc.stderr.decode('utf-8', 'replace').strip()[-400:]))
+    return proc.stdout.decode('utf-8')
+
+
+class CarriedMarkerResultCollectionTests(unittest.TestCase):
+    """#1817 PR-2 (C4a, C4b): result collection with a carried ENV-2 marker.
+
+    The D6 head bumps the version in a synthetic pyproject.toml. setUp builds
+    that history once; the refusal case of each test reuses the same fixture
+    with the bootstrap source left out of the write paths. No ENV-2 bootstrap
+    runs: the marker and report are written in the design section 3.5 shapes.
+    """
+
+    BUMPED = 'tools/llmtool/pyproject.toml'
+
+    def setUp(self):
+        review_trust_fixture.install_for_case(self)
+        self.rules_patch = patch('llmtool.review_dispatch._review_rules',
+                                 return_value=(RULES_PREFIX, RULES_SHA256))
+        self.rules_patch.start()
+        self.addCleanup(self.rules_patch.stop)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name).resolve()
+        worker_policy_fixture.install(self)
+
+        self.root = self.base / 'executor'
+        self.root.mkdir(mode=0o700)
+        self.common = str(self.root / '.git')
+        _fixture_git(self.root, 'init', '-b', 'feat/executor')
+        _fixture_git(self.root, 'config', 'user.name', 'Executor')
+        _fixture_git(self.root, 'config', 'user.email', 'executor@example.invalid')
+
+        tools = self.root / 'tools' / 'llmtool'
+        scripts = tools / 'scripts'
+        scripts.mkdir(parents=True)
+        (tools / 'Makefile').write_text('env-bootstrap:\n\t@true\n', encoding='utf-8')
+        (tools / '.gitignore').write_text('/.d6-bootstrap-report.json\n', encoding='utf-8')
+        (scripts / 'worktree_env.py').write_text('# synthetic worktree helper\n',
+                                                 encoding='utf-8')
+        (tools / 'worktree-env.lock').write_text('# synthetic lock\n', encoding='utf-8')
+        (tools / 'pyproject.toml').write_text(
+            '[project]\nname = "fixture"\nversion = "0.0.1"\n', encoding='utf-8')
+        (scripts / 'd6_worktree_env.py').write_text('# synthetic d6 helper\n',
+                                                    encoding='utf-8')
+        (self.root / 'README.md').write_text('Repository fixture.\n', encoding='utf-8')
+        _fixture_git(self.root, 'add', 'tools', 'README.md')
+        _fixture_git(self.root, 'commit', '-m', 'tooling source')
+        self.source_sha = _fixture_git(self.root, 'rev-parse', 'HEAD').strip()
+
+        # The one bootstrap-source change: a synthetic version bump.
+        (tools / 'pyproject.toml').write_text(
+            '[project]\nname = "fixture"\nversion = "0.0.2"\n', encoding='utf-8')
+        _fixture_git(self.root, 'add', self.BUMPED)
+        _fixture_git(self.root, 'commit', '-m', 'bump synthetic pyproject version')
+        self.result_sha = _fixture_git(self.root, 'rev-parse', 'HEAD').strip()
+        self.artifact = _fixture_git(self.root, 'diff', '--binary', '--no-ext-diff',
+                                     '--no-textconv', '--no-renames',
+                                     self.source_sha, self.result_sha, '--')
+
+        (Path(self.common) / 'llmtool-worktrees').mkdir(mode=0o700)
+        self.task_id = 'carried-result-task'
+        self.fingerprint = 'cpython3.13-darwin-arm64-012345abcdef'
+        self.task_binding = {'task_id': '1' * 32, 'run_id': '2' * 32,
+                             'contract_digest': '3' * 64}
+        self._write_carried_registration()
+
+    def test_bootstrap_sources_constant_equals_helper_set(self):
+        self.assertEqual(task_completion.BOOTSTRAP_SOURCES, d6_worktree_lifecycle.BOOTSTRAP_SOURCES)
+
+    def _write_carried_registration(self):
+        result_sha = self.result_sha
+        self.root.chmod(0o700)
+        stat_info = self.root.stat()
+        venv_id = {
+            'schema_version': 1,
+            'path': 'tools/llmtool/.venv',
+            'device': stat_info.st_dev,
+            'inode': stat_info.st_ino,
+            'uid': os.getuid(),
+            'pyvenv_cfg_sha256': '1' * 64,
+            'interpreter_realpath': '/usr/bin/python3',
+            'interpreter_stat': {
+                'device': stat_info.st_dev,
+                'inode': stat_info.st_ino,
+                'size': 1024,
+                'mtime_ns': 1000,
+            },
+            'site_packages_sha256': '2' * 64,
+        }
+        report = {
+            'schema_version': 2,
+            'result': 'PASS',
+            'status': 'env_carried',
+            'operations': 'NONE',
+            'task_id': self.task_id,
+            'root_realpath': str(self.root),
+            'head_sha': result_sha,
+            'tooling_sha': self.source_sha,
+            'cache_fingerprint': self.fingerprint,
+            'carried_from_head_sha': self.source_sha,
+            'allowed_bootstrap_paths': ['tools/llmtool/pyproject.toml'],
+            'venv_identity': venv_id,
+        }
+        report_path = self.root / 'tools' / 'llmtool' / '.d6-bootstrap-report.json'
+        raw = (json.dumps(report, sort_keys=True, separators=(',', ':')) + '\n').encode('utf-8')
+        report_path.write_bytes(raw)
+        report_path.chmod(0o600)
+        report_sha256 = hashlib.sha256(raw).hexdigest()
+
+        marker = {
+            'schema_version': 2,
+            'result': 'PASS',
+            'task_id': self.task_id,
+            'root_realpath': str(self.root),
+            'submitted_head_sha': result_sha,
+            'current_head_sha': result_sha,
+            'tooling_sha': self.source_sha,
+            'environment_fingerprint': self.fingerprint,
+            'report_sha256': report_sha256,
+            'environment_mode': 'CARRIED',
+            'carried_from_head_sha': self.source_sha,
+            'allowed_bootstrap_paths': ['tools/llmtool/pyproject.toml'],
+        }
+
+        reg_dict = {
+            'schema_version': 1,
+            'task_id': self.task_id,
+            'trusted_agent_id': 'executor-agent',
+            'session_ref': 'Executor D6 session',
+            'root_realpath': str(self.root),
+            'physical_identity': {
+                'device': stat_info.st_dev,
+                'inode': stat_info.st_ino,
+                'uid': stat_info.st_uid,
+                'mode': oct(stat.S_IMODE(stat_info.st_mode)),
+            },
+            'git_common_dir': self.common,
+            'branch': 'feat/executor',
+            'base_sha': self.source_sha,
+            'head_sha': result_sha,
+            'state': 'ACTIVE',
+            'lock_state': 'LOCKED',
+            'env2_pass_marker': marker,
+        }
+        reg_path = Path(self.common) / 'llmtool-worktrees' / f'{self.task_id}.json'
+        reg_path.write_text(json.dumps(reg_dict), encoding='utf-8')
+        reg_path.chmod(0o600)
+
+    def _collect_executor(self, write_paths):
+        return task_completion.collect_executor_result(
+            task_id=self.task_id, expected_common_dir=self.common,
+            expected_root=str(self.root), expected_branch='feat/executor',
+            source_sha=self.source_sha, task_binding=self.task_binding,
+            expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+            expected_native_session_id=None, write_paths=write_paths,
+            artifact=self.artifact,
+            artifact_sha256=hashlib.sha256(self.artifact.encode('utf-8')).hexdigest())
+
+    def _collect_claude(self, write_paths):
+        return task_completion.collect_claude_result(
+            task_id=self.task_id, expected_common_dir=self.common,
+            expected_root=str(self.root), expected_branch='feat/executor',
+            source_sha=self.source_sha, task_binding=self.task_binding,
+            expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+            expected_native_session_id=None, write_paths=write_paths,
+            claude_result={'executor_task_id': self.task_id, 'head_sha': self.result_sha})
+
+    def _collect_worktree(self, paths, artifact):
+        # An OpenCode run on the carried D6 head leaves an uncommitted diff.
+        return task_completion.collect_executor_worktree_result(
+            task_id=self.task_id, expected_common_dir=self.common,
+            expected_root=str(self.root), expected_branch='feat/executor',
+            source_sha=self.result_sha, expected_result_head=self.result_sha,
+            task_binding=self.task_binding, expected_agent='executor-agent',
+            expected_session_ref='Executor D6 session', expected_native_session_id=None,
+            write_paths=paths, read_paths=paths, artifact=artifact,
+            artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest())
+
+    def test_collect_executor_result_with_carried_marker(self):
+        result = self._collect_executor([self.BUMPED])
+        self.assertEqual(result['result_head'], self.result_sha)
+        self.assertEqual(result['changed_paths'], [self.BUMPED])
+        self.assertEqual(result['developer_changed_paths'], [self.BUMPED])
+
+        # Same fixture, bootstrap source not in the write paths: C4 refuses first.
+        with self.assertRaises(LLMToolError) as raised:
+            self._collect_executor(['README.md'])
+        self.assertEqual(raised.exception.completion_code, 'D6_ENV2_PASS_MARKER_MISMATCH')
+
+    def test_collect_claude_result_with_carried_marker(self):
+        result = self._collect_claude([self.BUMPED])
+        self.assertEqual(result['result_head'], self.result_sha)
+        self.assertEqual(result['changed_paths'], [self.BUMPED])
+
+        with self.assertRaises(LLMToolError) as raised:
+            self._collect_claude(['README.md'])
+        self.assertEqual(raised.exception.completion_code, 'D6_ENV2_PASS_MARKER_MISMATCH')
+
+    def test_collect_executor_worktree_result_with_carried_marker(self):
+        (self.root / 'README.md').write_text('Repository fixture, edited.\n', encoding='utf-8')
+        artifact = _fixture_git(self.root, 'diff', '--binary', '--no-ext-diff',
+                                '--no-textconv', '--no-renames', self.result_sha, '--')
+        self.assertIn('README.md', artifact)
+        result = self._collect_worktree(['README.md', self.BUMPED], artifact)
+        self.assertEqual(result['source_sha'], self.result_sha)
+        self.assertEqual(result['result_mode'], 'UNCOMMITTED_WORKTREE')
+        self.assertEqual(result['changed_paths'], ['README.md'])
+
+        # The uncommitted diff stays in scope, so the refusal comes from C4.
+        with self.assertRaises(LLMToolError) as raised:
+            self._collect_worktree(['README.md'], artifact)
+        self.assertEqual(raised.exception.completion_code, 'D6_ENV2_PASS_MARKER_MISMATCH')
+
+
 class CompletionTestTimeoutTests(unittest.TestCase):
     def test_registered_test_timeout_is_600_seconds(self):
         # #1703: test_task_completion alone needs ~310 s on the Mac.
