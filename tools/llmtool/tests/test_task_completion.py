@@ -6682,7 +6682,33 @@ class CompletionAttributedPathsStoreTests(unittest.TestCase):
         self.assertNotIn(scratch, result['changed_paths'])
 
 
+def _fixture_git(cwd, *args):
+    """Run one fixture Git command; on failure, report Git's own message.
+
+    Hooks and commit signing are off so host Git settings cannot change the
+    fixture. The output is returned undecoded by newline rules.
+    """
+    proc = subprocess.run(
+        ['/usr/bin/git', '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false',
+         *args], cwd=cwd, capture_output=True, check=False)
+    if proc.returncode != 0:
+        raise AssertionError('fixture git %s exited %d: %s' % (
+            args[0], proc.returncode,
+            proc.stderr.decode('utf-8', 'replace').strip()[-400:]))
+    return proc.stdout.decode('utf-8')
+
+
 class CarriedMarkerResultCollectionTests(unittest.TestCase):
+    """#1817 PR-2 (C4a, C4b): result collection with a carried ENV-2 marker.
+
+    The D6 head bumps the version in a synthetic pyproject.toml. setUp builds
+    that history once; the refusal case of each test reuses the same fixture
+    with the bootstrap source left out of the write paths. No ENV-2 bootstrap
+    runs: the marker and report are written in the design section 3.5 shapes.
+    """
+
+    BUMPED = 'tools/llmtool/pyproject.toml'
+
     def setUp(self):
         review_trust_fixture.install_for_case(self)
         self.rules_patch = patch('llmtool.review_dispatch._review_rules',
@@ -6697,52 +6723,49 @@ class CarriedMarkerResultCollectionTests(unittest.TestCase):
         self.root = self.base / 'executor'
         self.root.mkdir(mode=0o700)
         self.common = str(self.root / '.git')
-
-        subprocess.run(['/usr/bin/git', 'init', '-b', 'feat/executor'], cwd=self.root,
-                       check=True, capture_output=True)
-        subprocess.run(['/usr/bin/git', 'config', 'user.name', 'Executor'],
-                       cwd=self.root, check=True)
-        subprocess.run(['/usr/bin/git', 'config', 'user.email', 'executor@example.invalid'],
-                       cwd=self.root, check=True)
+        _fixture_git(self.root, 'init', '-b', 'feat/executor')
+        _fixture_git(self.root, 'config', 'user.name', 'Executor')
+        _fixture_git(self.root, 'config', 'user.email', 'executor@example.invalid')
 
         tools = self.root / 'tools' / 'llmtool'
         scripts = tools / 'scripts'
         scripts.mkdir(parents=True)
         (tools / 'Makefile').write_text('env-bootstrap:\n\t@true\n', encoding='utf-8')
         (tools / '.gitignore').write_text('/.d6-bootstrap-report.json\n', encoding='utf-8')
-        (scripts / 'worktree_env.py').write_text('# worktree helper\n', encoding='utf-8')
-        (tools / 'worktree-env.lock').write_text('# lock file\n', encoding='utf-8')
-        (tools / 'pyproject.toml').write_text('[build-system]\nrequires = []\n', encoding='utf-8')
-        (scripts / 'd6_worktree_env.py').write_text('# d6 helper\n', encoding='utf-8')
+        (scripts / 'worktree_env.py').write_text('# synthetic worktree helper\n',
+                                                 encoding='utf-8')
+        (tools / 'worktree-env.lock').write_text('# synthetic lock\n', encoding='utf-8')
+        (tools / 'pyproject.toml').write_text(
+            '[project]\nname = "fixture"\nversion = "0.0.1"\n', encoding='utf-8')
+        (scripts / 'd6_worktree_env.py').write_text('# synthetic d6 helper\n',
+                                                    encoding='utf-8')
         (self.root / 'README.md').write_text('Repository fixture.\n', encoding='utf-8')
+        _fixture_git(self.root, 'add', 'tools', 'README.md')
+        _fixture_git(self.root, 'commit', '-m', 'tooling source')
+        self.source_sha = _fixture_git(self.root, 'rev-parse', 'HEAD').strip()
 
-        subprocess.run(['/usr/bin/git', 'add', 'tools', 'README.md'], cwd=self.root, check=True)
-        subprocess.run(['/usr/bin/git', 'commit', '-m', 'source commit'],
-                       cwd=self.root, check=True, capture_output=True)
-        self.source_sha = subprocess.check_output(
-            ['/usr/bin/git', 'rev-parse', 'HEAD'], cwd=self.root, text=True).strip()
+        # The one bootstrap-source change: a synthetic version bump.
+        (tools / 'pyproject.toml').write_text(
+            '[project]\nname = "fixture"\nversion = "0.0.2"\n', encoding='utf-8')
+        _fixture_git(self.root, 'add', self.BUMPED)
+        _fixture_git(self.root, 'commit', '-m', 'bump synthetic pyproject version')
+        self.result_sha = _fixture_git(self.root, 'rev-parse', 'HEAD').strip()
+        self.artifact = _fixture_git(self.root, 'diff', '--binary', '--no-ext-diff',
+                                     '--no-textconv', '--no-renames',
+                                     self.source_sha, self.result_sha, '--')
 
         (Path(self.common) / 'llmtool-worktrees').mkdir(mode=0o700)
         self.task_id = 'carried-result-task'
         self.fingerprint = 'cpython3.13-darwin-arm64-012345abcdef'
+        self.task_binding = {'task_id': '1' * 32, 'run_id': '2' * 32,
+                             'contract_digest': '3' * 64}
+        self._write_carried_registration()
 
     def test_bootstrap_sources_constant_equals_helper_set(self):
         self.assertEqual(task_completion.BOOTSTRAP_SOURCES, d6_worktree_lifecycle.BOOTSTRAP_SOURCES)
 
-    def _setup_carried_fixture(self, *, path_in_write_paths=True):
-        pyproject = self.root / 'tools' / 'llmtool' / 'pyproject.toml'
-        pyproject.write_text('[build-system]\n# version bump\nrequires = []\n', encoding='utf-8')
-        subprocess.run(['/usr/bin/git', 'add', 'tools/llmtool/pyproject.toml'],
-                       cwd=self.root, check=True)
-        subprocess.run(['/usr/bin/git', 'commit', '-m', 'bump pyproject version'],
-                       cwd=self.root, check=True, capture_output=True)
-        result_sha = subprocess.check_output(
-            ['/usr/bin/git', 'rev-parse', 'HEAD'], cwd=self.root, text=True).strip()
-
-        artifact = subprocess.check_output(
-            ['/usr/bin/git', 'diff', '--binary', self.source_sha, result_sha],
-            cwd=self.root, text=True)
-
+    def _write_carried_registration(self):
+        result_sha = self.result_sha
         self.root.chmod(0o700)
         stat_info = self.root.stat()
         venv_id = {
@@ -6820,87 +6843,69 @@ class CarriedMarkerResultCollectionTests(unittest.TestCase):
         reg_path.write_text(json.dumps(reg_dict), encoding='utf-8')
         reg_path.chmod(0o600)
 
-        write_paths = (['tools/llmtool/pyproject.toml'] if path_in_write_paths
-                       else ['src/other.py'])
-        return result_sha, artifact, write_paths
-
-    def test_collect_executor_result_with_carried_marker(self):
-        result_sha, artifact, write_paths = self._setup_carried_fixture(path_in_write_paths=True)
-        task_binding = {'task_id': '1' * 32, 'run_id': '2' * 32, 'contract_digest': '3' * 64}
-        result = task_completion.collect_executor_result(
+    def _collect_executor(self, write_paths):
+        return task_completion.collect_executor_result(
             task_id=self.task_id, expected_common_dir=self.common,
             expected_root=str(self.root), expected_branch='feat/executor',
-            source_sha=self.source_sha, task_binding=task_binding,
+            source_sha=self.source_sha, task_binding=self.task_binding,
             expected_agent='executor-agent', expected_session_ref='Executor D6 session',
             expected_native_session_id=None, write_paths=write_paths,
-            artifact=artifact, artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
-        self.assertEqual(result['result_head'], result_sha)
-        self.assertEqual(result['changed_paths'], ['tools/llmtool/pyproject.toml'])
+            artifact=self.artifact,
+            artifact_sha256=hashlib.sha256(self.artifact.encode('utf-8')).hexdigest())
 
-        _, _, excluded_write_paths = self._setup_carried_fixture(path_in_write_paths=False)
+    def _collect_claude(self, write_paths):
+        return task_completion.collect_claude_result(
+            task_id=self.task_id, expected_common_dir=self.common,
+            expected_root=str(self.root), expected_branch='feat/executor',
+            source_sha=self.source_sha, task_binding=self.task_binding,
+            expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+            expected_native_session_id=None, write_paths=write_paths,
+            claude_result={'executor_task_id': self.task_id, 'head_sha': self.result_sha})
+
+    def _collect_worktree(self, paths, artifact):
+        # An OpenCode run on the carried D6 head leaves an uncommitted diff.
+        return task_completion.collect_executor_worktree_result(
+            task_id=self.task_id, expected_common_dir=self.common,
+            expected_root=str(self.root), expected_branch='feat/executor',
+            source_sha=self.result_sha, expected_result_head=self.result_sha,
+            task_binding=self.task_binding, expected_agent='executor-agent',
+            expected_session_ref='Executor D6 session', expected_native_session_id=None,
+            write_paths=paths, read_paths=paths, artifact=artifact,
+            artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest())
+
+    def test_collect_executor_result_with_carried_marker(self):
+        result = self._collect_executor([self.BUMPED])
+        self.assertEqual(result['result_head'], self.result_sha)
+        self.assertEqual(result['changed_paths'], [self.BUMPED])
+        self.assertEqual(result['developer_changed_paths'], [self.BUMPED])
+
+        # Same fixture, bootstrap source not in the write paths: C4 refuses first.
         with self.assertRaises(LLMToolError) as raised:
-            task_completion.collect_executor_result(
-                task_id=self.task_id, expected_common_dir=self.common,
-                expected_root=str(self.root), expected_branch='feat/executor',
-                source_sha=self.source_sha, task_binding=task_binding,
-                expected_agent='executor-agent', expected_session_ref='Executor D6 session',
-                expected_native_session_id=None, write_paths=excluded_write_paths,
-                artifact=artifact, artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+            self._collect_executor(['README.md'])
         self.assertEqual(raised.exception.completion_code, 'D6_ENV2_PASS_MARKER_MISMATCH')
 
     def test_collect_claude_result_with_carried_marker(self):
-        result_sha, artifact, write_paths = self._setup_carried_fixture(path_in_write_paths=True)
-        task_binding = {'task_id': '1' * 32, 'run_id': '2' * 32, 'contract_digest': '3' * 64}
-        claude_res = {'executor_task_id': self.task_id, 'head_sha': result_sha}
-        result = task_completion.collect_claude_result(
-            task_id=self.task_id, expected_common_dir=self.common,
-            expected_root=str(self.root), expected_branch='feat/executor',
-            source_sha=self.source_sha, task_binding=task_binding,
-            expected_agent='executor-agent', expected_session_ref='Executor D6 session',
-            expected_native_session_id=None, write_paths=write_paths,
-            claude_result=claude_res)
-        self.assertEqual(result['result_head'], result_sha)
-        self.assertEqual(result['changed_paths'], ['tools/llmtool/pyproject.toml'])
+        result = self._collect_claude([self.BUMPED])
+        self.assertEqual(result['result_head'], self.result_sha)
+        self.assertEqual(result['changed_paths'], [self.BUMPED])
 
-        result_sha_excluded, _, excluded_write_paths = self._setup_carried_fixture(path_in_write_paths=False)
-        claude_res_excluded = {'executor_task_id': self.task_id, 'head_sha': result_sha_excluded}
         with self.assertRaises(LLMToolError) as raised:
-            task_completion.collect_claude_result(
-                task_id=self.task_id, expected_common_dir=self.common,
-                expected_root=str(self.root), expected_branch='feat/executor',
-                source_sha=self.source_sha, task_binding=task_binding,
-                expected_agent='executor-agent', expected_session_ref='Executor D6 session',
-                expected_native_session_id=None, write_paths=excluded_write_paths,
-                claude_result=claude_res_excluded)
+            self._collect_claude(['README.md'])
         self.assertEqual(raised.exception.completion_code, 'D6_ENV2_PASS_MARKER_MISMATCH')
 
     def test_collect_executor_worktree_result_with_carried_marker(self):
-        result_sha, artifact, write_paths = self._setup_carried_fixture(path_in_write_paths=True)
-        task_binding = {'task_id': '1' * 32, 'run_id': '2' * 32, 'contract_digest': '3' * 64}
-        worktree_artifact = ''
-        result = task_completion.collect_executor_worktree_result(
-            task_id=self.task_id, expected_common_dir=self.common,
-            expected_root=str(self.root), expected_branch='feat/executor',
-            source_sha=result_sha, expected_result_head=result_sha,
-            task_binding=task_binding, expected_agent='executor-agent',
-            expected_session_ref='Executor D6 session', expected_native_session_id=None,
-            write_paths=write_paths, read_paths=['tools/llmtool/pyproject.toml'],
-            artifact=worktree_artifact,
-            artifact_sha256=hashlib.sha256(b'').hexdigest())
-        self.assertEqual(result['source_sha'], result_sha)
+        (self.root / 'README.md').write_text('Repository fixture, edited.\n', encoding='utf-8')
+        artifact = _fixture_git(self.root, 'diff', '--binary', '--no-ext-diff',
+                                '--no-textconv', '--no-renames', self.result_sha, '--')
+        self.assertIn('README.md', artifact)
+        result = self._collect_worktree(['README.md', self.BUMPED], artifact)
+        self.assertEqual(result['source_sha'], self.result_sha)
         self.assertEqual(result['result_mode'], 'UNCOMMITTED_WORKTREE')
+        self.assertEqual(result['changed_paths'], ['README.md'])
 
-        result_sha_excluded, _, excluded_write_paths = self._setup_carried_fixture(path_in_write_paths=False)
+        # The uncommitted diff stays in scope, so the refusal comes from C4.
         with self.assertRaises(LLMToolError) as raised:
-            task_completion.collect_executor_worktree_result(
-                task_id=self.task_id, expected_common_dir=self.common,
-                expected_root=str(self.root), expected_branch='feat/executor',
-                source_sha=result_sha_excluded, expected_result_head=result_sha_excluded,
-                task_binding=task_binding, expected_agent='executor-agent',
-                expected_session_ref='Executor D6 session', expected_native_session_id=None,
-                write_paths=excluded_write_paths, read_paths=['tools/llmtool/pyproject.toml'],
-                artifact=worktree_artifact,
-                artifact_sha256=hashlib.sha256(b'').hexdigest())
+            self._collect_worktree(['README.md'], artifact)
         self.assertEqual(raised.exception.completion_code, 'D6_ENV2_PASS_MARKER_MISMATCH')
 
 
