@@ -1074,11 +1074,15 @@ def record_result(*, task_id, canonical_root, root=None, workspace_root=None,
                 _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
             marker = current["env2_pass_marker"]
             marker_keys = set(marker.keys())
+            is_schema_1 = (marker_keys == ENV2_PASS_MARKER_SCHEMA1_KEYS and
+                           type(marker.get("schema_version")) is int and
+                           marker.get("schema_version") == 1)
             is_schema_2 = (marker_keys == ENV2_PASS_MARKER_SCHEMA2_KEYS and
+                           type(marker.get("schema_version")) is int and
                            marker.get("schema_version") == 2)
-            if marker.get("schema_version") == 2 or marker_keys == ENV2_PASS_MARKER_SCHEMA2_KEYS:
-                if not is_schema_2:
-                    _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
+            if not (is_schema_1 or is_schema_2):
+                _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
+            if is_schema_2:
                 allowance = current.get("env2_source_allowance")
                 if (type(allowance) is not dict or
                         allowance.get("schema_version") != 1 or

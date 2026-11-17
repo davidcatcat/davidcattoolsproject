@@ -604,6 +604,137 @@ class BootstrapSourceAllowanceTests(unittest.TestCase):
                 write_paths=["tools/llmtool/pyproject.toml"])
         self.assertEqual(raised.exception.code, "D6_RECORD_RESULT_ENV2_MARKER_INVALID")
 
+        # Case 3: 9-key marker but with schema_version == 3
+        def complete_v3_with_9_keys(_root, _task_id):
+            current = lifecycle._read_registry_record(record_path)
+            current["env2_pass_marker"] = {
+                "schema_version": 3,
+                "result": "PASS",
+                "task_id": "c3-mismatch-test",
+                "root_realpath": str(root),
+                "submitted_head_sha": head,
+                "current_head_sha": head,
+                "tooling_sha": self.base,
+                "environment_fingerprint": _actual_cache_fingerprint(),
+                "report_sha256": "f" * 64,
+            }
+            lifecycle._replace_record(record_path, current)
+
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(lifecycle, "_bootstrap", side_effect=complete_v3_with_9_keys), \
+                self.assertRaises(lifecycle.LifecycleError) as raised:
+            lifecycle.record_result(
+                task_id="c3-mismatch-test", canonical_root=self.source,
+                root=root, workspace_root=self.tasks,
+                write_paths=["tools/llmtool/pyproject.toml"])
+        self.assertEqual(raised.exception.code, "D6_RECORD_RESULT_ENV2_MARKER_INVALID")
+
+        # Case 4: mixed keys (schema-1 keys plus partial schema-2 key, 10 keys)
+        def complete_mixed_keys(_root, _task_id):
+            current = lifecycle._read_registry_record(record_path)
+            current["env2_pass_marker"] = {
+                "schema_version": 1,
+                "result": "PASS",
+                "task_id": "c3-mismatch-test",
+                "root_realpath": str(root),
+                "submitted_head_sha": head,
+                "current_head_sha": head,
+                "tooling_sha": self.base,
+                "environment_fingerprint": _actual_cache_fingerprint(),
+                "report_sha256": "f" * 64,
+                "environment_mode": "CARRIED",
+            }
+            lifecycle._replace_record(record_path, current)
+
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(lifecycle, "_bootstrap", side_effect=complete_mixed_keys), \
+                self.assertRaises(lifecycle.LifecycleError) as raised:
+            lifecycle.record_result(
+                task_id="c3-mismatch-test", canonical_root=self.source,
+                root=root, workspace_root=self.tasks,
+                write_paths=["tools/llmtool/pyproject.toml"])
+        self.assertEqual(raised.exception.code, "D6_RECORD_RESULT_ENV2_MARKER_INVALID")
+
+        # Case 5: missing keys (schema-1 keys missing report_sha256, 8 keys)
+        def complete_missing_keys(_root, _task_id):
+            current = lifecycle._read_registry_record(record_path)
+            current["env2_pass_marker"] = {
+                "schema_version": 1,
+                "result": "PASS",
+                "task_id": "c3-mismatch-test",
+                "root_realpath": str(root),
+                "submitted_head_sha": head,
+                "current_head_sha": head,
+                "tooling_sha": self.base,
+                "environment_fingerprint": _actual_cache_fingerprint(),
+            }
+            lifecycle._replace_record(record_path, current)
+
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(lifecycle, "_bootstrap", side_effect=complete_missing_keys), \
+                self.assertRaises(lifecycle.LifecycleError) as raised:
+            lifecycle.record_result(
+                task_id="c3-mismatch-test", canonical_root=self.source,
+                root=root, workspace_root=self.tasks,
+                write_paths=["tools/llmtool/pyproject.toml"])
+        self.assertEqual(raised.exception.code, "D6_RECORD_RESULT_ENV2_MARKER_INVALID")
+
+        # Case 6: missing keys from schema-2 (missing carried_from_head_sha, 11 keys)
+        def complete_missing_schema2_keys(_root, _task_id):
+            current = lifecycle._read_registry_record(record_path)
+            current["env2_pass_marker"] = {
+                "schema_version": 2,
+                "result": "PASS",
+                "task_id": "c3-mismatch-test",
+                "root_realpath": str(root),
+                "submitted_head_sha": head,
+                "current_head_sha": head,
+                "tooling_sha": self.base,
+                "environment_fingerprint": _actual_cache_fingerprint(),
+                "report_sha256": "f" * 64,
+                "environment_mode": "CARRIED",
+                "allowed_bootstrap_paths": ["tools/llmtool/pyproject.toml"],
+            }
+            lifecycle._replace_record(record_path, current)
+
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(lifecycle, "_bootstrap", side_effect=complete_missing_schema2_keys), \
+                self.assertRaises(lifecycle.LifecycleError) as raised:
+            lifecycle.record_result(
+                task_id="c3-mismatch-test", canonical_root=self.source,
+                root=root, workspace_root=self.tasks,
+                write_paths=["tools/llmtool/pyproject.toml"])
+        self.assertEqual(raised.exception.code, "D6_RECORD_RESULT_ENV2_MARKER_INVALID")
+
+        # Case 7: mixed keys with unexpected extra field (13 keys)
+        def complete_mixed_extra_keys(_root, _task_id):
+            current = lifecycle._read_registry_record(record_path)
+            current["env2_pass_marker"] = {
+                "schema_version": 2,
+                "result": "PASS",
+                "task_id": "c3-mismatch-test",
+                "root_realpath": str(root),
+                "submitted_head_sha": head,
+                "current_head_sha": head,
+                "tooling_sha": self.base,
+                "environment_fingerprint": _actual_cache_fingerprint(),
+                "report_sha256": "f" * 64,
+                "environment_mode": "CARRIED",
+                "carried_from_head_sha": self.base,
+                "allowed_bootstrap_paths": ["tools/llmtool/pyproject.toml"],
+                "unexpected_field": "disallowed",
+            }
+            lifecycle._replace_record(record_path, current)
+
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(lifecycle, "_bootstrap", side_effect=complete_mixed_extra_keys), \
+                self.assertRaises(lifecycle.LifecycleError) as raised:
+            lifecycle.record_result(
+                task_id="c3-mismatch-test", canonical_root=self.source,
+                root=root, workspace_root=self.tasks,
+                write_paths=["tools/llmtool/pyproject.toml"])
+        self.assertEqual(raised.exception.code, "D6_RECORD_RESULT_ENV2_MARKER_INVALID")
+
     def test_record_result_refuses_invalid_write_paths(self):
         root, _record_path = self._registered_result_fixture("bad-write-paths-test")
         self._commit_file(root, "tools/llmtool/result-fixture.txt", "c\n", "msg")
