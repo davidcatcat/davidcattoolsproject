@@ -518,7 +518,7 @@ class Env2MarkerValidationTests(unittest.TestCase):
         self._assert_validation_refusal(
             marker, "D6_ENV2_PASS_MARKER_MISMATCH",
             write_paths=["tools/llmtool/pyproject.toml"],
-            approved_tooling_sha=self.base_sha)
+            approved_tooling_sha=self.head_sha)
 
     def test_refusal_path_outside_bootstrap_sources_or_write_paths(self):
         # Outside BOOTSTRAP_SOURCES

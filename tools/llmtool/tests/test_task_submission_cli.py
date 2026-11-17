@@ -5664,10 +5664,12 @@ class OpenCodeRefreshD6BindingCarriedTests(unittest.TestCase):
 
             args_excluded = make_args(['src/other.py'])
             args_excluded.task_id = task2['task_id']
-            with self.assertRaises(DirectOpenCodeError) as caught:
-                submission_cli.run_task_opencode_delegate(
-                    args_excluded, store=self.store, d6_binding=(registration, snapshot))
-            self.assertEqual(caught.exception.direct_opencode_code, 'OPENCODE_ENV2_MARKER_INVALID')
+            code = submission_cli.run_task_opencode_delegate(
+                args_excluded, store=self.store, d6_binding=(registration, snapshot))
+            self.assertEqual(code, 1)
+            saved2 = self.store.get(task2['task_id'])
+            self.assertEqual(saved2['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+            self.assertEqual(saved2['developer']['error_code'], 'OPENCODE_ENV2_MARKER_INVALID')
 
             with self.assertRaises(LLMToolError) as c4_caught:
                 task_completion.validate_env2_pass_marker(

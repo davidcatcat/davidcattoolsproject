@@ -6743,6 +6743,7 @@ class CarriedMarkerResultCollectionTests(unittest.TestCase):
             ['/usr/bin/git', 'diff', '--binary', self.source_sha, result_sha],
             cwd=self.root, text=True)
 
+        self.root.chmod(0o700)
         stat_info = self.root.stat()
         venv_id = {
             'schema_version': 1,
@@ -6850,7 +6851,7 @@ class CarriedMarkerResultCollectionTests(unittest.TestCase):
     def test_collect_claude_result_with_carried_marker(self):
         result_sha, artifact, write_paths = self._setup_carried_fixture(path_in_write_paths=True)
         task_binding = {'task_id': '1' * 32, 'run_id': '2' * 32, 'contract_digest': '3' * 64}
-        claude_res = {'executor_task_id': self.task_id}
+        claude_res = {'executor_task_id': self.task_id, 'head_sha': result_sha}
         result = task_completion.collect_claude_result(
             task_id=self.task_id, expected_common_dir=self.common,
             expected_root=str(self.root), expected_branch='feat/executor',
@@ -6861,7 +6862,8 @@ class CarriedMarkerResultCollectionTests(unittest.TestCase):
         self.assertEqual(result['result_head'], result_sha)
         self.assertEqual(result['changed_paths'], ['tools/llmtool/pyproject.toml'])
 
-        _, _, excluded_write_paths = self._setup_carried_fixture(path_in_write_paths=False)
+        result_sha_excluded, _, excluded_write_paths = self._setup_carried_fixture(path_in_write_paths=False)
+        claude_res_excluded = {'executor_task_id': self.task_id, 'head_sha': result_sha_excluded}
         with self.assertRaises(LLMToolError) as raised:
             task_completion.collect_claude_result(
                 task_id=self.task_id, expected_common_dir=self.common,
@@ -6869,7 +6871,7 @@ class CarriedMarkerResultCollectionTests(unittest.TestCase):
                 source_sha=self.source_sha, task_binding=task_binding,
                 expected_agent='executor-agent', expected_session_ref='Executor D6 session',
                 expected_native_session_id=None, write_paths=excluded_write_paths,
-                claude_result=claude_res)
+                claude_result=claude_res_excluded)
         self.assertEqual(raised.exception.completion_code, 'D6_ENV2_PASS_MARKER_MISMATCH')
 
     def test_collect_executor_worktree_result_with_carried_marker(self):
@@ -6888,12 +6890,12 @@ class CarriedMarkerResultCollectionTests(unittest.TestCase):
         self.assertEqual(result['source_sha'], result_sha)
         self.assertEqual(result['result_mode'], 'UNCOMMITTED_WORKTREE')
 
-        _, _, excluded_write_paths = self._setup_carried_fixture(path_in_write_paths=False)
+        result_sha_excluded, _, excluded_write_paths = self._setup_carried_fixture(path_in_write_paths=False)
         with self.assertRaises(LLMToolError) as raised:
             task_completion.collect_executor_worktree_result(
                 task_id=self.task_id, expected_common_dir=self.common,
                 expected_root=str(self.root), expected_branch='feat/executor',
-                source_sha=result_sha, expected_result_head=result_sha,
+                source_sha=result_sha_excluded, expected_result_head=result_sha_excluded,
                 task_binding=task_binding, expected_agent='executor-agent',
                 expected_session_ref='Executor D6 session', expected_native_session_id=None,
                 write_paths=excluded_write_paths, read_paths=['tools/llmtool/pyproject.toml'],
