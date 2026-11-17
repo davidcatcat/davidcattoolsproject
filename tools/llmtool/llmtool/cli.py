@@ -780,6 +780,16 @@ def main(argv=None):
                     re.fullmatch(r'[A-Za-z0-9_,= .:-]+', detail)):
                 line += ' (' + detail + ')'
             print(line, file=sys.stderr)
+        elif (getattr(args, 'command', None) == 'task' and
+                getattr(args, 'action', None) == 'record-pm' and
+                getattr(exc, 'continues_code', None) == 'CONTINUES_PREDECESSOR_HAS_SUCCESSOR'):
+            # #2188 section 6: name the successor only when check_continues set
+            # it (an empty successor the PM re-delegates); the code stays stable.
+            line = 'llmtool: CONTINUES_PREDECESSOR_HAS_SUCCESSOR'
+            successor = getattr(exc, 'continues_successor', None)
+            if type(successor) is str and re.fullmatch(r'[0-9a-f]{32}', successor):
+                line += ' successor=' + successor
+            print(line, file=sys.stderr)
         else:
             print("llmtool: " + str(exc), file=sys.stderr)
         return 1

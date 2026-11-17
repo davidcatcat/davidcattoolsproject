@@ -19,7 +19,7 @@ from argparse import Namespace
 from . import active_pm_inbox, github_events, remote_test, review_dispatch, review_repair
 from . import github_identity, review_result, sensitive_paths, task_completion
 from . import lineage_counts, mac_full_suite, repair_policy, review_transcript
-from . import task_submission_cli
+from . import start_failure, task_submission_cli
 from .ai_github_exec import AiIdentityError, verified_ai_env
 from .errors import LLMToolError
 from .task_store import TaskStore, _json_bytes, external_action_refusal
@@ -1040,6 +1040,9 @@ def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, rela
     action = _remote_fail_action(related, head)
     if action in ('WAITING_REPAIR', 'REPAIR_OUTCOME_UNKNOWN'):
         return action, [action], None
+    if action == 'DEVELOPER_START_FAILED':
+        # #2188: the PM decides; no automatic retry and no new repair claim.
+        return action, [action], _start_failed_repair(related, head)
     if action == 'DEVELOPER_ATTENTION':
         return action, ['REPAIR_TASK_RECORD_UNAVAILABLE'], None
     if action == 'PUBLISH':
@@ -2320,6 +2323,8 @@ def _remote_fail_action(related, result_head):
                            if type(item) is dict and item.get('head_sha') == result_head), None)
     if current_repair is not None and current_repair.get('state') == 'DISPATCHED':
         state = current_repair.get('repair_state')
+        if state == 'START_FAILED':
+            return 'DEVELOPER_START_FAILED'
         if state in ('UNAVAILABLE', 'BLOCKED', 'OUTPUT_REJECTED'):
             return 'REPAIR_RETRY'
         if state in ('RUNNING', 'PENDING'):
@@ -2333,8 +2338,33 @@ def _remote_fail_action(related, result_head):
     return 'REPAIR_REVIEW'
 
 
+def _start_failed_repair(related, head):
+    """Name the repair Task of the DISPATCHED start-failed claim at head, or None.
+
+    #2188 step DEVELOPER_START_FAILED: the PM runs `task retry-start` on this
+    Task or chooses another route. Nothing here retries or writes.
+    """
+    repairs = related.get('repair_claims', []) if type(related) is dict else []
+    if type(repairs) is not list:
+        return None
+    current = next((item for item in reversed(repairs)
+                    if type(item) is dict and item.get('head_sha') == head), None)
+    if (type(current) is not dict or current.get('state') != 'DISPATCHED' or
+            current.get('repair_state') != 'START_FAILED'):
+        return None
+    repair_task = current.get('repair_task_id')
+    if type(repair_task) is not str or re.fullmatch(r'[0-9a-f]{32}', repair_task) is None:
+        return None
+    return {'repair_task_id': repair_task}
+
+
 def derive_repair_state(repair_record):
-    """Normalize a repair Task record into the state used by the advance loop."""
+    """Normalize a repair Task record into the state used by the advance loop.
+
+    START_FAILED (#2188 section 2 checks 1-5, record only): the Claude delegate
+    stopped before its provider process started. The PM decides whether to run
+    `task retry-start`; advance never retries it and never spends a repair on it.
+    """
     if type(repair_record) is not dict:
         return 'UNKNOWN'
     developer = repair_record.get('developer')
@@ -2343,6 +2373,8 @@ def derive_repair_state(repair_record):
     # top-level state, which may still read PM_PENDING.
     if state == 'BLOCKED' and developer.get('error_code') == 'CLAUDE_NO_CHANGES':
         return 'BLOCKED'
+    if state == 'BLOCKED' and start_failure.record_checks(repair_record).start_failure:
+        return 'START_FAILED'
     if state == 'DEVELOPER_PENDING' or repair_record.get('state') == 'PM_PENDING':
         return 'PENDING'
     if state == 'DEVELOPER_DISPATCHING':
@@ -2450,6 +2482,9 @@ def decide(record, d6, pr, related):
             repairs = (related.get('repair_claims', []) if type(related) is dict else [])
             current_repair = next((item for item in reversed(repairs)
                                    if type(item) is dict and item.get('head_sha') == result_head), None)
+            if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
+                    current_repair.get('repair_state') == 'START_FAILED'):
+                return 'DEVELOPER_START_FAILED'
             if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
                     current_repair.get('repair_state') in (
                         'UNAVAILABLE', 'BLOCKED', 'OUTPUT_REJECTED')):
@@ -3673,6 +3708,12 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             codes.append('DEVELOPER_ATTENTION')
     elif step in ('REPAIR_OUTCOME_UNKNOWN', 'REPAIR_RESULT_NOT_PUBLISHED'):
         codes.append(step)
+    elif step == 'DEVELOPER_START_FAILED':
+        # #2188 section 7 item 3: stop for the PM. No automatic retry, no new
+        # repair claim; the PM decides on `task retry-start`.
+        codes.append(step)
+        result = _start_failed_repair(
+            related, d6.get('result_head') if type(d6) is dict else None)
     elif step == 'NEEDS_ATTENTION':
         remote_status, _, _ = _remote_test_status(record, d6)
         if remote_status == 'NOT_EXECUTED':
