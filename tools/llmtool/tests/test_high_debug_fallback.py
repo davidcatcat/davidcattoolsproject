@@ -343,6 +343,27 @@ class FallbackTests(unittest.TestCase):
                          'llmtool: high-debug refused: HIGH_DEBUG_WAITING '
                          '(reason=QUOTA waiting_since=2026-11-17T06:00:00Z)\n')
 
+    def test_cli_omits_high_debug_waiting_detail_when_since_fails_allowlist_or_reason_missing(self):
+        details = ('reason=QUOTA codex=HIGH_DEBUG_QUOTA_EXHAUSTED claude=HIGH_DEBUG_QUOTA_EXHAUSTED waiting_since=2026/11/17T06:00:00Z resume_condition=a_debug_route_can_run',
+                   'codex=HIGH_DEBUG_QUOTA_EXHAUSTED claude=HIGH_DEBUG_QUOTA_EXHAUSTED waiting_since=2026-11-17T06:00:00Z resume_condition=a_debug_route_can_run_now_or_later')
+        for detail in details:
+            self.assertGreater(len(detail), 128)
+            error = LLMToolError('safe refusal')
+            error.high_debug_code = 'HIGH_DEBUG_WAITING'
+            error.review_repair_code = 'REVIEW_REPAIR_REFUSED'
+            error.high_debug_detail = detail
+            args = SimpleNamespace(command='task', action='high-debug')
+            output = StringIO()
+            with patch.object(cli, 'parser_for_cli',
+                              return_value=SimpleNamespace(parse_args=lambda _argv: args)), \
+                 patch('llmtool.source_freshness.require_fresh_source'), \
+                 patch.object(cli.task_submission_cli, 'run_task_high_debug', side_effect=error), \
+                 patch.object(cli.task_submission_cli, 'run_task_repair', side_effect=error), \
+                 redirect_stderr(output):
+                self.assertEqual(cli.main([]), 1)
+            self.assertEqual(output.getvalue(),
+                             'llmtool: high-debug refused: HIGH_DEBUG_WAITING\n')
+
 
 class CliWiringTests(unittest.TestCase):
     def test_task_high_debug_goes_through_the_fallback(self):
