@@ -4,6 +4,8 @@ Proposal only; not a review or acceptance. Source: main at a863ace18f68216a69d9d
 
 **Status (2026-11-17):** Implemented for both routes. PR #2144 added the OpenCode allow-list `_POST_RUN_NO_WORK_REFUSALS` with four codes (OPENCODE_PROVIDER_FAILED, OPENCODE_RATE_LIMITED, OPENCODE_FREE_LIMIT, OPENCODE_OUTPUT_TRUNCATED). PR #2269 added the gw-agent allow-list `_POST_RUN_NO_WORK_GW_AGENT_REFUSALS` of exact (gw-agent, DEVELOPER_UNAVAILABLE, code) entries for refusals raised before the provider call; codes that can be raised after the call (such as DEVELOPER_GW_AGENT_SESSION_UNAVAILABLE and DEVELOPER_GW_AGENT_SESSION_BINDING_FAILED) still count. The sections below are the original proposal, kept for history.
 
+A Claude run that ends with CLAUDE_STATUS_FAILED still counts toward the repair cap, so Issue #2098 stays open for that case, and keeping the Claude failure kind and a short screened message as failure evidence is tracked in #2275.
+
 ## 1. Today
 
 - **OpenCode attempted failures**:
