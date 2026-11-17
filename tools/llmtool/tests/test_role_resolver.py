@@ -463,6 +463,37 @@ class RolesCommandTests(AccountBase):
         self.assertNotIn(str(self.account_dir), '\n'.join(lines))
         self.assertNotIn(str(self.home), '\n'.join(lines))
 
+    def test_agy_developer_model_source_is_roles_env_or_repo_default(self):
+        # Owner #2302 r3: the user-config model and the one-shot env override
+        # take effect; with neither set the route's repo default applies.
+        with self.subTest(source='roles'):
+            self.save({'roles': {'agy-developer': {'model': 'gemini-3.8-flash-medium'}}})
+            self.env = {}
+            status, lines = self.run_roles()
+            self.assertEqual(status, 0)
+            rows = {line.split('\t')[0]: line.split('\t') for line in lines}
+            self.assertEqual(rows['agy-developer'],
+                             ['agy-developer', 'agy', '-', 'gemini-3.8-flash-medium',
+                              'medium', 'roles', 'roles'])
+        with self.subTest(source='env'):
+            self.save({})
+            self.env = {'LLMTOOL_ROLE_AGY_DEVELOPER_MODEL': 'gemini-3.8-flash-medium'}
+            status, lines = self.run_roles()
+            self.assertEqual(status, 0)
+            rows = {line.split('\t')[0]: line.split('\t') for line in lines}
+            self.assertEqual(rows['agy-developer'],
+                             ['agy-developer', 'agy', '-', 'gemini-3.8-flash-medium',
+                              'medium', 'env', 'env'])
+        with self.subTest(source='repo_default'):
+            self.save({})
+            self.env = {}
+            status, lines = self.run_roles()
+            self.assertEqual(status, 0)
+            rows = {line.split('\t')[0]: line.split('\t') for line in lines}
+            self.assertEqual(rows['agy-developer'],
+                             ['agy-developer', 'agy', '-', 'gemini-3.8-flash-medium',
+                              'medium', 'repo_default', 'repo_default'])
+
     def test_lists_extra_configured_roles_and_reports_refusals(self):
         self.save({'roles': {'pm-codex-binding': {'model': 'm1'},
                              'agy-developer': {'model': 'model-extra'}}})
