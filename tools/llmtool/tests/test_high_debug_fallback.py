@@ -2,9 +2,12 @@
 
 import unittest
 import unittest.mock
+from contextlib import redirect_stderr
+from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from llmtool import cli
 from llmtool import high_debug
 from llmtool import task_submission_cli
 from llmtool.errors import LLMToolError
@@ -284,6 +287,38 @@ class FallbackTests(unittest.TestCase):
                 self.assertRegex(detail, r'waiting_since=\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ ')
                 self.assertTrue(detail.endswith('resume_condition=a_debug_route_can_run'))
                 self.assertEqual(calls, ['codex', 'claude'])
+
+
+    def _cli_refusal_line(self, action, detail):
+        error = LLMToolError('safe refusal')
+        error.high_debug_code = 'HIGH_DEBUG_REPORT_INVALID'
+        error.review_repair_code = 'REVIEW_REPAIR_REFUSED'
+        if detail is not None:
+            error.high_debug_detail = detail
+        args = SimpleNamespace(command='task', action=action)
+        output = StringIO()
+        with patch.object(cli, 'parser_for_cli',
+                          return_value=SimpleNamespace(parse_args=lambda _argv: args)), \
+             patch('llmtool.source_freshness.require_fresh_source'), \
+             patch.object(cli.task_submission_cli, 'run_task_high_debug', side_effect=error), \
+             patch.object(cli.task_submission_cli, 'run_task_repair', side_effect=error), \
+             redirect_stderr(output):
+            self.assertEqual(cli.main([]), 1)
+        return output.getvalue()
+
+    def test_cli_prints_allowlisted_high_debug_detail_with_hyphen_period_or_colon(self):
+        for detail in ('expected=pr-17', 'v1.2', '2026-11-12T00:00:00Z'):
+            with self.subTest(detail=detail):
+                self.assertEqual(
+                    self._cli_refusal_line('high-debug', detail),
+                    'llmtool: high-debug refused: HIGH_DEBUG_REPORT_INVALID '
+                    + '(' + detail + ')\n')
+
+    def test_cli_omits_high_debug_detail_with_newline_slash_quote_or_129_chars(self):
+        for detail in ('pr-17\nv1.2', 'pr-17/v1.2', 'pr-17"v1.2', 'a' * 129):
+            with self.subTest(detail=detail[:8] + ('...' if len(detail) > 11 else '')):
+                self.assertEqual(self._cli_refusal_line('high-debug', detail),
+                                 'llmtool: high-debug refused: HIGH_DEBUG_REPORT_INVALID\n')
 
 
 class CliWiringTests(unittest.TestCase):
