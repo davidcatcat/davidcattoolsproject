@@ -350,6 +350,11 @@ class RuleFileSchemaTests(unittest.TestCase):
     def test_valid_rule_files_pass(self):
         self.assertEqual(guidance_drift_check.check_rule_files(self.repo), [])
 
+    def test_max_prompt_bytes_accepted(self):
+        routes = fixture_routes()
+        routes["routes"]["fixture"]["max_prompt_bytes"] = 65536
+        self.assertEqual(self.findings_after("developer-routes.json", routes), [])
+
     def test_unknown_top_level_key_fails_for_each_rule_file(self):
         for name, value in self.valid.items():
             with self.subTest(name=name):
@@ -379,6 +384,12 @@ class RuleFileSchemaTests(unittest.TestCase):
                 **routes["routes"]["fixture"], "allowed_models": "gpt-6-luna"}}}, "must be a list"),
             ("developer-routes.json", {**routes, "routes": {"fixture": {
                 **routes["routes"]["fixture"], "allowed_models": []}}}, "at least 1"),
+            ("developer-routes.json", {**routes, "routes": {"fixture": {
+                **routes["routes"]["fixture"], "max_prompt_bytes": 0}}}, "must be an integer >= 1"),
+            ("developer-routes.json", {**routes, "routes": {"fixture": {
+                **routes["routes"]["fixture"], "max_prompt_bytes": True}}}, "must be an integer >= 1"),
+            ("developer-routes.json", {**routes, "routes": {"fixture": {
+                **routes["routes"]["fixture"], "max_prompt_bytes": "65536"}}}, "must be an integer >= 1"),
             ("developer-routes.json", {**routes, "routes": {}}, "at least 1"),
             ("sensitive-paths.json", {**self.valid["sensitive-paths.json"], "exact": "x"}, "must be a list"),
             ("sensitive-paths.json", {**self.valid["sensitive-paths.json"], "exact": [1]}, "non-empty string"),
