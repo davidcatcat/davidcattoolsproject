@@ -1,6 +1,9 @@
 # #2190 Repair-count lineage: design
 
-Status: design only (Owner A, #1502 WP-D). No code or test is changed by this Task. Source read:
+Status: design only (Owner A, #1502 WP-D). Repair 2 (PR #2299, head b97fae36) fixes codex-reviewer
+v2 F1 [Medium]: the root-scoped run gate records an atomic reservation before launch under the
+exclusive root lock, with release or settle on every exit path, so concurrent delegates on one root
+cannot both pass. No code or test is changed by this Task. Source read:
 `62186a801c811940cdcc53f4e81a8d58cc643100`. Read: `docs/design/start-failure-retry-2188.md`,
 `lineage_counts.py`, `repair_policy.py`, `review_repair.py`, `task_advance.py`, `task_store.py`,
 `task_submission_cli.py`, `policy.json`, `tests/test_lineage_counts.py`.
@@ -145,6 +148,12 @@ These are actual behaviours, recorded rather than treated as a spec mismatch:
     existing developer (`task_submission_cli.py:7959`-`:7965`); `retry-start` gets past that only
     for the Claude route through its `expected_failed_developer` hook (`:8390`-`:8392`). A
     route-agnostic rerun therefore needs its own authorized dispatch action, not a bypass.
+11. **Run gate race without pre-launch root reservations.** Today's `_delegate_chain_gate` takes
+    chain locks while doing `claim()`, and `_repair_run_stamp` counts existing runs on the D6 or
+    chain (`:7789`-`:7834`, `:7493`-`:7513`). In a root lineage spanning multiple Tasks, D6s,
+    inherited replans or sibling repairs, counting runs only when completed records are appended at
+    run end leaves a race: two concurrent delegates on different Tasks of the same root can both
+    evaluate the gate before either run finishes, both pass the cap check, and both launch.
 
 ## 4. Design
 
@@ -178,10 +187,28 @@ Add a pure `lineage_ledger.py` (new module) and a write-once store link:
 
 ### 4.2 One ledger per root, derived from records
 
-Add an append-only `developer_runs` list to each Task (bounded; each entry records
-`assignment_id, task_id, d6_task_id, route, source_sha, state, error_code, no_work_proof,
-counted, recorded_at`). The current `developer` slot stays the latest run for compatibility; a
-legacy Task with no `developer_runs` contributes its single `developer` once.
+Add an append-only `developer_runs` list to each Task (bounded, at most 16 entries per Task; each
+entry records `assignment_id, task_id, d6_task_id, route, source_sha, state, error_code,
+no_work_proof, counted, recorded_at, reserved_at, settled_at`). The current `developer` slot stays
+the latest run for compatibility; a legacy Task with no `developer_runs` contributes its single
+`developer` once.
+
+To prevent concurrent delegates on one root from both passing the cap check before either run ends
+(codex-reviewer v2 F1), run entries follow an atomic two-phase lifecycle:
+1. **Pre-launch reservation:** recorded under the exclusive root lock before dispatch proceeds
+   (`state='RESERVED'`, `counted=True`, `reserved_at` set).
+2. **Terminal settlement or release:** on every exit path after launch:
+   - **Settle:** on run completion, the reservation is updated to its terminal state (`COMPLETED`,
+     `DEVELOPER_FAILED`, `BLOCKED`, etc.), recording `settled_at`, `error_code`, and `no_work_proof`.
+     If `no_work_proof` is valid and proves no work on its own D6, `counted` becomes `False`;
+     otherwise `counted` stays `True`.
+   - **Release:** if launch aborts before execution (pre-launch refusal, exception, CAS conflict,
+     route launch failure), the exit path releases the reservation (`state='RELEASED'`,
+     `counted=False`), preventing leaked in-flight reservations.
+   - **Stale reservation handling:** an active reservation carries a bounded lease (`reserved_at`,
+     matching the task execution timeout). A reservation that remains `RESERVED` past the lease
+     without settlement or release is in doubt and returns `UNKNOWN` for `runs`, substituting the
+     limit (`repair_policy.py:67`-`:69`) until reconciled.
 
 `lineage_ledger.counts(records, root)` sums, exactly once over every Task with that root:
 
@@ -189,9 +216,10 @@ legacy Task with no `developer_runs` contributes its single `developer` once.
   family included), on any PR and in any family;
 - `test_fails`: every `-ec2` claim plus every legacy EC2 claim (`comment_id is None` in the base
   family; `review_repair.py:499`-`:509`), on any PR and in any family;
-- `runs`: every `developer_runs` entry for the root, on every D6 and every route, with `counted`
-  true. A `no_work_proof` that is valid and says "unchanged at the run's own D6" sets
-  `counted=false`; anything absent, malformed or `UNKNOWN` counts.
+- `runs`: every active reservation (`state == 'RESERVED'`) and every settled `developer_runs`
+  entry for the root, on every D6 and every route, with `counted` true. An unexpired reservation
+  counts as `counted=True`. A `no_work_proof` that is valid and says "unchanged at the run's own
+  D6" sets `counted=false`; anything absent, malformed or `UNKNOWN` counts.
 - `review_heads`: one entry per failed HEAD, as `lineage_counts.py:230`-`:241` does now. This is
   reported for evidence; D1 and the review-FAIL escalation keep the scope in §4.4.
 
@@ -203,24 +231,66 @@ generated repair Tasks reached only through a claim edge. The existing `chain_re
 uses `lineage_ledger` only when it can build the whole root, otherwise it refuses
 `DELEGATE_REPAIR_COUNT_UNAVAILABLE` / `REPAIR_COUNT_UNAVAILABLE`.
 
-### 4.3 The no-work proof is evaluated once and recorded
+### 4.3 Atomic pre-launch reservation, exit paths, and evaluated-once no-work proof
 
-At the end of a launched run, on that run's own D6, evaluate the existing proof
-(`_launched_run_did_no_work`, `task_submission_cli.py:7274`-`:7327`, with the lazy probe
-`:7518`-`:7542`) and persist it in the same append that records the run:
+#### 4.3.1 Atomic reservation before launch
+
+Under the exclusive root lock (`root_of(records, task_id)`), the run gate
+(`_check_delegate_repair_cap` / `_delegate_chain_gate` wired to `lineage_ledger`):
+
+1. Re-reads the root's lineage records fresh under the lock.
+2. Evaluates `counts = lineage_ledger.counts(records, root)`.
+3. Compares `counts['runs']` (active reservations + settled counted runs) against the cap: refuses
+   `DELEGATE_REPAIR_LIMIT_REACHED` if `>= 1 + repair_max` (review) or `>= test_fail_max` (EC2
+   repairs), or `DELEGATE_REPAIR_COUNT_UNAVAILABLE` if `UNKNOWN`.
+4. Writes an atomic reservation entry (`assignment_id, task_id, d6_task_id, route, source_sha,
+   state='RESERVED', counted=True, reserved_at=timestamp`) to the Task's `developer_runs` list in
+   the store before releasing the lock.
+5. Releases the root lock and hands off to the route launcher.
+
+Because the reservation is committed to the store under the root lock before launch proceeds,
+concurrent `task delegate` invocations on any Task of the same root lineage serialize on the root
+lock: the first reserves the run slot, and the second re-reads the records under the lock, observes
+the active reservation in `counts['runs']`, and is refused when the cap is reached. Concurrent
+delegates on one root cannot both pass.
+
+#### 4.3.2 Exit paths: settle, release, and stale reservation handling
+
+The caller wraps dispatch and execution in a `try...finally` block guaranteeing that every exit path
+transitions the reservation:
+
+1. **Settle on run completion:** at the end of a launched run, on that run's own D6, evaluate the
+   existing proof (`_launched_run_did_no_work`, `task_submission_cli.py:7274`-`:7327`, with the lazy
+   probe `:7518`-`:7542`) and persist it in the reservation's terminal settlement:
 
 ```
 no_work_proof = {source_sha, d6_task_id, d6_head, tree_clean, write_paths_untouched,
                  checked_at, evidence_sha256}
 ```
 
-`evidence_sha256` covers the proof without itself. The store accepts the proof only in the append
-that adds the matching run, and never changes or removes it. Gate counting reads the stored proof;
-it never re-runs `d6_unchanged` against the current tree. Therefore:
+   Under the root lock, update the reservation entry: set terminal `state` (`COMPLETED`,
+   `DEVELOPER_FAILED`, `BLOCKED`, etc.), `error_code`, `settled_at`, and `no_work_proof`. If and
+   only if `no_work_proof` is valid and proves no work on its own D6, set `counted=False`; otherwise
+   `counted=True`.
+   `evidence_sha256` covers the proof without itself. The store accepts the proof only in the settle
+   transition that completes the matching run, and never changes or removes it. Gate counting reads
+   the stored proof; it never re-runs `d6_unchanged` against the current tree. Therefore:
+   - a D6 that later moves, is reused, or is replaced neither resets nor inflates the count;
+   - a run on another D6 is judged by its own recorded proof, not by the counting D6;
+   - a forged or missing proof cannot be read as "no work": doubt counts.
 
-- a D6 that later moves, is reused, or is replaced neither resets nor inflates the count;
-- a run on another D6 is judged by its own recorded proof, not by the counting D6;
-- a forged or missing proof cannot be read as "no work": doubt counts.
+2. **Release on pre-launch abort:** if dispatch or launch fails before process execution (e.g.
+   pre-launch validation failure, exception during setup, route launch refusal, CAS conflict), the
+   exit path releases the reservation under the root lock: marking `state='RELEASED'`,
+   `counted=False`, and recording `settled_at`. An aborted launch does not leak an in-flight
+   reservation.
+
+3. **Stale reservation / crash recovery:** reservations carry a bounded lease/timeout (`reserved_at`,
+   e.g. matching task/developer execution timeout). If a process crashes without settling or
+   releasing, any reservation that remains in `RESERVED` beyond the lease is considered in doubt:
+   `lineage_ledger.counts` returns `UNKNOWN` for `runs`, which substitutes the limit
+   (`repair_policy.py:67`-`:69`) and refuses further dispatches until explicit PM intervention or
+   recovery clears the stale reservation. Doubt never permits bypass.
 
 For records written before this field, the first gate running on that run's own D6 evaluates the
 proof once and writes a `run_proofs` entry keyed by `assignment_id` and the developer
@@ -232,8 +302,10 @@ proof once and writes a `run_proofs` entry keyed by `assignment_id` and the deve
 The delegate gates call the same ledger and then `_check_repair_limits`; the claim gate applies
 the same policy numbers:
 
-- review runs: refuse at `>= 1 + repair_max` (`task_submission_cli.py:7606`);
-- EC2/CI repair runs: refuse at `>= test_fail_max` (`:7599`);
+- review runs: refuse at `>= 1 + repair_max` (`task_submission_cli.py:7606`), summing active
+  reservations and counted settled runs across the root;
+- EC2/CI repair runs: refuse at `>= test_fail_max` (`:7599`), summing active reservations and
+  counted settled runs across the root;
 - review claims: `repair_max` repairs (the existing escalation at a new valid FAIL is unchanged,
   `review_repair.py:556`-`:588`);
 - test claims: refuse at `>= test_fail_max` (`repair_policy.py:139`-`:142`);
@@ -275,10 +347,12 @@ Add `task retry-run TASK` (or extend `retry-start` with a distinct mode) that:
    `no_work_proof` on the run's own D6; `CLAUDE_STATUS_FAILED` is accepted only through this proof,
    never by widening #2188;
 2. refuses if there is an artifact, a claim, a PR, a merge attempt, or a D6 head/path mismatch;
-3. appends a new run (new assignment, same Task, same `lineage_inherits` root, same D6 scope) and
-   does **not** create a Task, a `continues` link, a REPLAN, or a claim;
-4. counts the failed run as `counted=false` and the new run normally. If the retry also does no
-   work, it is again `counted=false`; a per-Task retry bound (2, matching #2188) sends the third
+3. appends a new run reservation (new assignment, same Task, same `lineage_inherits` root, same D6
+   scope) under the root lock and does **not** create a Task, a `continues` link, a REPLAN, or a
+   claim;
+4. counts the failed run as `counted=false` and the new run reservation normally (`counted=True` while
+   active, settling at run completion). If the retry finishes with a valid `no_work_proof`, its
+   settlement records `counted=false`; a per-Task retry bound (2, matching #2188) sends the third
    failure to the PM.
 5. uses the normal dispatch authorization, not a bypass: `pm_caller.check_caller` (`:8344`-
    `:8347`), the Owner policy `worker_dispatch.evaluate` (`:8360`-`:8362`), a fresh quota check
@@ -303,25 +377,34 @@ credential-shaped strings; route/probe outcomes are injected; no production chec
 
 1. **Pure ledger and link model (not wired).**
    - Files: new `tools/llmtool/llmtool/lineage_ledger.py`; `task_store.py` (new optional
-     `lineage_inherits`, `developer_runs`, `run_proofs` fields, write-once validation).
+     `lineage_inherits`, `developer_runs`, `run_proofs` fields, reservation states `RESERVED`,
+     `RELEASED`, and terminal states, write-once and transition validation).
    - Tests: new `tests/test_lineage_ledger.py`: root walk with `continues`, with
      `lineage_inherits`, with a legacy claim edge, and mixed; a generated repair Task with no
      `continues` joins its claim's root; two sibling repair Tasks share one root and are not a
      fork; conflicting roots, a cycle, a fork on `continues`, a malformed link and a root over the
-     member bound -> `UNKNOWN`; every family/PR is counted; legacy records fall back to one run; a
-     no-work proof counts zero and an invalid proof counts one; caps are unchanged; a second Task
-     in the root is not double-counted.
-2. **Record runs and no-work proofs; wire the run gates.**
-   - Files: `task_submission_cli.py` (`_check_delegate_repair_cap` reads the delegated Task's root
-     from `lineage_ledger` instead of only `completion_d6_task_ids`, so a run on another D6 is
-     still in the count; `_repair_run_stamp`, `_check_chain_repair_count`, `_delegate_chain_gate`,
-     run-end append); `task_store.py`.
-   - Tests: new `tests/test_lineage_run_gate.py`: a run on D6 A counts once on D6 B; a recorded
-     no-work proof stays zero after the D6 moves; a later counted run makes exactly one more; a
-     missing/invalid/`UNKNOWN` proof counts; two Tasks joined only by `lineage_inherits` take one
-     root lock (not two chain keys); a generated repair Task on D6 B still counts the root's run
-     on D6 A; the existing root-lock refusals still return
-     `DELEGATE_REPAIR_COUNT_UNAVAILABLE`; a same-D6 run is still counted as before.
+     member bound -> `UNKNOWN`; every family/PR is counted; legacy records fall back to one run; an
+     active reservation (`RESERVED`) counts towards `runs`; a released reservation (`RELEASED`)
+     counts zero; a no-work proof counts zero and an invalid proof counts one; stale reservation
+     beyond timeout -> `UNKNOWN`; caps are unchanged; a second Task in the root is not double-counted.
+2. **Record runs, atomic reservations, and no-work proofs; wire the run gates.**
+   - Files: `task_submission_cli.py` (`_check_delegate_repair_cap` and `_delegate_chain_gate` wired
+     to `lineage_ledger` root lock; pre-launch atomic reservation written under the root lock; exit
+     paths wrapped in `try...finally` to guarantee settle on run end or release on pre-launch abort;
+     `_repair_run_stamp`, `_check_chain_repair_count`, run-end settle append); `task_store.py`.
+   - Tests: new `tests/test_lineage_run_gate.py`:
+     - Concurrency: two concurrent delegates on one root serialize on the root lock; the first
+       reserves the final available run slot; the second is refused with
+       `DELEGATE_REPAIR_LIMIT_REACHED`; concurrent delegates on one root cannot both pass.
+     - Pre-launch abort: an exception or refusal before launch releases the reservation under the
+       root lock; a subsequent delegate can use the released slot.
+     - Terminal settlement: a completed run settles the reservation, evaluating `no_work_proof` on
+       its own D6; a recorded no-work proof stays zero after the D6 moves; a later run with work
+       makes exactly one more; a missing/invalid/`UNKNOWN` proof counts.
+     - A run on D6 A counts once on D6 B; two Tasks joined only by `lineage_inherits` take one root
+       lock (not two chain keys); a generated repair Task on D6 B still counts the root's run on
+       D6 A; stale reservation returns `UNKNOWN`; root-lock refusals return
+       `DELEGATE_REPAIR_COUNT_UNAVAILABLE`; a same-D6 run is still counted as before.
 3. **Wire the claim gates and advance.**
    - Files: `review_repair.py` (`repair_review` cap count from `lineage_ledger`; the admission
      lock is the root key from `root_of`, and membership and counts are re-read and re-validated
@@ -386,8 +469,10 @@ The following are existing behaviour and must stay green with unchanged assertio
 - `:1614` `test_auto_has_no_effect_on_a_test_failure_repair`
 
 The new tests must also prove: no cap loosening (a run or claim at the old limit still refuses),
-`UNKNOWN` refuses, a D6 change cannot change a recorded proof, and a REPLAN/new ROOT without a
-link cannot inherit.
+`UNKNOWN` refuses, a D6 change cannot change a recorded proof, a REPLAN/new ROOT without a link
+cannot inherit, concurrent delegates on one root serialize on the root lock so two cannot both pass
+the run cap before either completes, pre-launch abort releases the reservation, and run completion
+settles the reservation with evaluated no-work proof.
 
 ## 7. Docs and CI
 
