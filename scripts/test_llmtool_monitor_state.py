@@ -707,6 +707,61 @@ class TestMainIncidentMonitor(unittest.TestCase):
             top_rows = mon.office_top(fake_github, [], 2000.0)
             self.assertTrue(any("incident store is unreadable" in t and "INCIDENT_RECORD_INVALID" in t for t, s in top_rows))
 
+    def test_refused_store_security_f1_no_path_leak(self):
+        """Security v91 F1 (CWE-209): exception text holding a file path is never shown."""
+        fake_github = self._make_fake_github()
+        sensitive_path = "/var/log/llmtool/private_records/incident.json"
+
+        # Case 1: Arbitrary exception with path in message
+        exc_with_path = RuntimeError(f"failed reading {sensitive_path}: IO error")
+        with unittest.mock.patch.object(mon.main_incident_store, "find_open", side_effect=exc_with_path):
+            lines = mon.main_incident_lines()
+            self.assertEqual(len(lines), 1)
+            text, style = lines[0]
+            self.assertEqual(style, "!")
+            self.assertEqual(text, "main incident store is unreadable (INCIDENT_RECORD_UNAVAILABLE)")
+            self.assertNotIn(sensitive_path, text)
+            self.assertNotIn("private_records", text)
+            self.assertNotIn("IO error", text)
+
+            top_rows = mon.office_top(fake_github, [], 2000.0)
+            self.assertTrue(any("main incident store is unreadable (INCIDENT_RECORD_UNAVAILABLE)" in t for t, _ in top_rows))
+            self.assertFalse(any(sensitive_path in t for t, _ in top_rows))
+
+        # Case 2: Exception whose incident_code is path-shaped or unvalidated
+        class FakeExcWithBadCode(Exception):
+            incident_code = sensitive_path
+
+        with unittest.mock.patch.object(mon.main_incident_store, "find_open", side_effect=FakeExcWithBadCode()):
+            lines = mon.main_incident_lines()
+            self.assertEqual(len(lines), 1)
+            text, style = lines[0]
+            self.assertEqual(style, "!")
+            self.assertEqual(text, "main incident store is unreadable (INCIDENT_RECORD_UNAVAILABLE)")
+            self.assertNotIn(sensitive_path, text)
+
+    def test_import_source_security_f2(self):
+        """Security v91 F2: main_incident_store resolves from this repository's tools/llmtool package."""
+        self.assertIsNotNone(mon.main_incident_store)
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(mon.__file__)))
+        expected_store_path = os.path.realpath(
+            os.path.join(repo_root, "tools", "llmtool", "llmtool", "main_incident_store.py")
+        )
+        actual_store_path = os.path.realpath(mon.main_incident_store.__file__)
+        self.assertEqual(actual_store_path, expected_store_path)
+
+        # Ensure _resolve_main_incident_store purges foreign installed package and resolves from repo
+        fake_foreign_store = unittest.mock.Mock()
+        fake_foreign_store.__file__ = "/opt/homebrew/lib/python3.11/site-packages/llmtool/main_incident_store.py"
+        fake_foreign_pkg = unittest.mock.Mock()
+        fake_foreign_pkg.__file__ = "/opt/homebrew/lib/python3.11/site-packages/llmtool/__init__.py"
+
+        with unittest.mock.patch.dict(sys.modules, {"llmtool": fake_foreign_pkg, "llmtool.main_incident_store": fake_foreign_store}):
+            resolved = mon._resolve_main_incident_store()
+            self.assertIsNotNone(resolved)
+            self.assertEqual(os.path.realpath(resolved.__file__), expected_store_path)
+            self.assertNotEqual(resolved, fake_foreign_store)
+
 
 if __name__ == "__main__":
     unittest.main()

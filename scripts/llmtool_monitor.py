@@ -70,16 +70,41 @@ import threading
 import time
 import typing
 
-try:
-    from llmtool import main_incident_store
-except ImportError:
-    _LLMTOOL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "llmtool")
-    if _LLMTOOL_DIR not in sys.path and os.path.isdir(_LLMTOOL_DIR):
-        sys.path.insert(0, _LLMTOOL_DIR)
+def _resolve_main_incident_store():
+    """Resolve main_incident_store from this repository's tools/llmtool package (Security v91 F2).
+
+    Never resolves from a same-named installed package outside this checkout.
+    """
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    llmtool_dir = os.path.join(repo_root, "tools", "llmtool")
+    store_file = os.path.join(llmtool_dir, "llmtool", "main_incident_store.py")
+    if not os.path.isfile(store_file):
+        return None
+
+    if llmtool_dir in sys.path:
+        sys.path.remove(llmtool_dir)
+    sys.path.insert(0, llmtool_dir)
+
+    expected_dir = os.path.realpath(os.path.join(llmtool_dir, "llmtool"))
+    pkg = sys.modules.get("llmtool")
+    if pkg is not None:
+        pkg_file = getattr(pkg, "__file__", "") or ""
+        if not os.path.realpath(pkg_file).startswith(expected_dir):
+            for name in list(sys.modules):
+                if name == "llmtool" or name.startswith("llmtool."):
+                    sys.modules.pop(name, None)
+
     try:
-        from llmtool import main_incident_store
-    except ImportError:
-        main_incident_store = None
+        from llmtool import main_incident_store as store
+        actual_file = getattr(store, "__file__", "") or ""
+        if os.path.realpath(actual_file) == os.path.realpath(store_file):
+            return store
+    except Exception:
+        pass
+    return None
+
+
+main_incident_store = _resolve_main_incident_store()
 
 # Intentionally exclude every raw process command line from rendered output.
 PS_COLUMNS = "pid=,ppid=,pgid=,etime=,stat=,command="   # what LINE / ps_rows() parse
@@ -4468,27 +4493,41 @@ def main_health_line(health, error, now) -> tuple[str, str]:
     return text, "!" if failed else ""
 
 
+VALID_INCIDENT_CODES = frozenset({
+    "INCIDENT_RECORD_INVALID",
+    "INCIDENT_RECORD_UNAVAILABLE",
+    "INCIDENT_RECORD_EXISTS",
+    "INCIDENT_RECORD_CONFLICT",
+    "INCIDENT_RECORD_IMMUTABLE",
+    "INCIDENT_RECORD_BUSY",
+    "INCIDENT_RECORD_FULL",
+    "INCIDENT_OUTCOME_INVALID",
+    "INCIDENT_CLOSED",
+    "INCIDENT_RECEIPT_FIELDS_INVALID",
+    "INCIDENT_RECEIPT_INCONSISTENT",
+})
+GENERIC_INCIDENT_CODE = "INCIDENT_RECORD_UNAVAILABLE"
+
+
 def main_incident_lines(store=None, root=None) -> list[tuple[str, str]]:
     """Return alert rows for open main incidents, next to main-health (#1706 R7).
 
     Never writes, never calls GitHub, and never creates the store directory.
     When find_open() refuses, returns one alert row with the refusal code and no traceback.
+    Security v91 F1 (CWE-209): shows only a validated incident refusal code,
+    else GENERIC_INCIDENT_CODE; never text taken from str(exc).
     """
-    target_store = store if store is not None else main_incident_store
+    target_store = store if store is not None else (main_incident_store or _resolve_main_incident_store())
     if target_store is None or not hasattr(target_store, "find_open"):
-        return [("main incident store is unreadable (INCIDENT_RECORD_UNAVAILABLE)", "!")]
+        return [(f"main incident store is unreadable ({GENERIC_INCIDENT_CODE})", "!")]
     try:
         records = target_store.find_open(root=root) if root is not None else target_store.find_open()
     except Exception as exc:
         code = getattr(exc, "incident_code", None)
         if not code:
             code = getattr(exc, "code", None)
-        if not code:
-            parts = str(exc).split(":")
-            if parts and parts[0].strip():
-                code = parts[0].strip()
-        if not code:
-            code = type(exc).__name__
+        if not isinstance(code, str) or code not in VALID_INCIDENT_CODES:
+            code = GENERIC_INCIDENT_CODE
         return [(f"main incident store is unreadable ({code})", "!")]
 
     if not records:
@@ -9903,7 +9942,7 @@ def run_once(github: "GitHubSource | None" = None) -> int:
                                                 waiting=waiting_task_lines(mon, time.time()),
                                                 progress=pm_progress(mon, time.time()),
                                                 install=rule_alert_lines() + install_lines(github),
-                                                incidents=mon.incidents)))))
+                                                incidents=mon.incidents))))
     print("\n".join(line for line, _ in board_view(
         work_board(github, mon.pm_board, time.time(), ec2=mon.ec2_heads,
                    reviewing=pr_reviewing(mon.office), office=mon.office,
