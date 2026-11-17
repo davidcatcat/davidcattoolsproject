@@ -120,9 +120,24 @@ class AdmitTests(unittest.TestCase):
             dict(self.confirmation(record), evidence_sha256='0' * 64))
         self.assertCode(tr.REVERT_CONFIRMATION_STALE, record, {'code': mi.NO_DEPENDENT})
 
-    def test_non_code_observation_is_refused(self):
-        self.assertCode(tr.REVERT_CLASS_NOT_CODE, self.confirmed(cls=mi.ENV),
-                        {'code': mi.NO_DEPENDENT})
+    def test_env_and_flaky_observations_are_not_code(self):
+        for cls in (mi.ENV, mi.FLAKY):
+            self.assertCode(tr.REVERT_CLASSIFICATION_NOT_CODE, self.confirmed(cls=cls),
+                            {'code': mi.NO_DEPENDENT})
+
+    def test_other_class_values_are_unknown(self):
+        for cls in (mi.UNKNOWN, 'SOMETHING_ELSE', None):
+            self.assertCode(tr.REVERT_CLASSIFICATION_UNKNOWN, self.confirmed(cls=cls),
+                            {'code': mi.NO_DEPENDENT})
+
+    def test_dependency_unknown_code_is_shared_with_main_incident(self):
+        self.assertIs(tr.REVERT_DEPENDENCY_UNKNOWN, mi.DEPENDENCY_UNKNOWN)
+
+    def test_undigestable_last_observation_is_invalid(self):
+        for value in (float('nan'), {1, 2}):
+            record = self.confirmed()
+            record['observations'][-1] = dict(record['observations'][-1], extra=value)
+            self.assertCode(tr.REVERT_INCIDENT_INVALID, record, {'code': mi.NO_DEPENDENT})
 
     def test_more_than_five_prs_is_refused(self):
         record = self.confirmed(scope=(12, 13, 14, 15, 16, 17))
