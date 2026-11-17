@@ -1,7 +1,7 @@
 # #2190 Repair-count lineage: design
 
 Status: design only (Owner A, #1502 WP-D). No code or test is changed by this Task. Source read:
-`db169c88397adbb02471b15acc0f5f7eb1377d5e`. Read: `docs/design/start-failure-retry-2188.md`,
+`62186a801c811940cdcc53f4e81a8d58cc643100`. Read: `docs/design/start-failure-retry-2188.md`,
 `lineage_counts.py`, `repair_policy.py`, `review_repair.py`, `task_advance.py`, `task_store.py`,
 `task_submission_cli.py`, `policy.json`, `tests/test_lineage_counts.py`.
 
@@ -133,6 +133,18 @@ These are actual behaviours, recorded rather than treated as a spec mismatch:
    it can be raised after a spawn (`docs/design/start-failure-retry-2188.md:56`). `retry-start`
    therefore refuses it through `start_failure.record_checks` (`task_submission_cli.py:8350`-`:8352`)
    and again through `start_failure.classify` under the CAS (`:8303`), even when the run did no work.
+8. **A generated repair Task has no chain link.** `_record_repair_task` creates it through
+   `record-pm` without `continues` (`review_repair.py:269`-`:295`). Its only association is the
+   owning Task's `review_repair_claims[].repair_task_id` (`:861`-`:866`), so today it is a
+   different chain from the Task that spent the claim.
+9. **The claim gate locks a chain key, not a root.** Admission locks
+   `lineage_counts.chain_key` (`review_repair.py:814`-`:837`), which follows only `continues`
+   (`lineage_counts.py:150`-`:164`). Two Tasks joined only by `lineage_inherits` would take
+   different locks while spending the same count.
+10. **An in-place rerun needs a new dispatch authorization.** The text-codex route refuses any
+    existing developer (`task_submission_cli.py:7959`-`:7965`); `retry-start` gets past that only
+    for the Claude route through its `expected_failed_developer` hook (`:8390`-`:8392`). A
+    route-agnostic rerun therefore needs its own authorized dispatch action, not a bypass.
 
 ## 4. Design
 
@@ -140,18 +152,28 @@ These are actual behaviours, recorded rather than treated as a spec mismatch:
 
 Add a pure `lineage_ledger.py` (new module) and a write-once store link:
 
-- `root_of(records, task_id)` walks `continues` and a new `lineage_inherits` link to the oldest
-  Task, returning one root ID. A cycle, fork, malformed link or more than `MAX_CHAIN` Tasks returns
-  `None`; the caller then uses `UNKNOWN`.
+- `root_of(records, task_id)` returns one root ID by walking every parent edge of a Task:
+  `continues` (one predecessor), `lineage_inherits.root_task_id` (zero or one) and, for a legacy
+  generated repair Task, every `review_repair_claims[].repair_task_id` on another Task that names
+  it. All edges of one Task must lead to the same root. A cycle, a self link, a Task named by two
+  different roots, a conflicting `lineage_inherits`, a root with more than
+  `MAX_DELEGATE_MEMBERS` (32) Tasks, or a read doubt returns `None`; the caller then uses
+  `UNKNOWN`. Several inherited children of one root (for example two repair Tasks of one Task) are
+  siblings, not a fork: only `continues` keeps the one-successor rule (`lineage_counts.py:107`-
+  `:151`, `:300`-`:343`).
 - `lineage_inherits` is a write-once top-level Task field, e.g.
-  `{root_task_id, kind: 'REPLAN'|'ROOT', recorded_at, pm_session_id}`. It is created only by
-  `task record-pm`, under the same continues lock as `check_continues`
-  (`task_submission_cli.py:8502`-`:8510`), and joins the contract digest as `continues` does
-  (contract-digest tests at `tests/test_lineage_counts.py:604`-`:634`). It is distinct from
-  `continues` because `check_continues` must keep refusing a REPLAN/child predecessor
-  (`lineage_counts.py:325`-`:327`).
-- A REPLAN or new ROOT that inherits counts must carry this link. Without it, it is a new
-  independent lineage and inherits nothing. `admit_replan` and its one-REPLAN rule are unchanged
+  `{root_task_id, kind: 'REPLAN'|'ROOT'|'REPAIR', recorded_at, pm_session_id}`. `task record-pm`
+  writes it under the same continues lock as `check_continues` (`task_submission_cli.py:8502`-
+  `:8510`), and it joins the contract digest as `continues` does (contract-digest tests at
+  `tests/test_lineage_counts.py:604`-`:634`). A generated repair Task is created by
+  `review_repair._record_repair_task` through `record-pm` without `continues`
+  (`review_repair.py:269`-`:295`); that call passes `root_task_id` and kind `REPAIR`, so the new
+  Task joins the root at its creation site. The claim already stores `repair_task_id`
+  (`review_repair.py:861`-`:866`); for legacy repair Tasks with no `lineage_inherits`, that claim
+  edge is the parent link and no record is rewritten.
+- A REPLAN, new ROOT or generated REPAIR Task that inherits counts must carry this link (or, for a
+  legacy repair Task, be named by the claim). Without it, a REPLAN/new ROOT is a new independent
+  lineage and inherits nothing. `admit_replan` and its one-REPLAN rule are unchanged
   (`repair_policy.py:162`-`:171`).
 
 ### 4.2 One ledger per root, derived from records
@@ -173,8 +195,10 @@ legacy Task with no `developer_runs` contributes its single `developer` once.
 - `review_heads`: one entry per failed HEAD, as `lineage_counts.py:230`-`:241` does now. This is
   reported for evidence; D1 and the review-FAIL escalation keep the scope in §4.4.
 
-A Task that appears twice is counted once. A fork or a read doubt returns `UNKNOWN` for every
-value, never `0` (`repair_policy.py:16`). The existing `chain_review_repairs` and
+A Task that appears twice is counted once. A conflicting root (the `continues`,
+`lineage_inherits` and claim edges of one Task imply different roots), a cycle or a read doubt
+returns `UNKNOWN` for every value, never `0` (`repair_policy.py:16`). The root's members include
+generated repair Tasks reached only through a claim edge. The existing `chain_review_repairs` and
 `lineage_counts` chain path remain the fallback for records without the new fields; the new gate
 uses `lineage_ledger` only when it can build the whole root, otherwise it refuses
 `DELEGATE_REPAIR_COUNT_UNAVAILABLE` / `REPAIR_COUNT_UNAVAILABLE`.
@@ -200,7 +224,7 @@ it never re-runs `d6_unchanged` against the current tree. Therefore:
 
 For records written before this field, the first gate running on that run's own D6 evaluates the
 proof once and writes a `run_proofs` entry keyed by `assignment_id` and the developer
-`record_sha256`, under the chain lock. If no gate has run on the run's own D6, the run counts
+`record_sha256`, under the root lock (§4.1). If no gate has run on the run's own D6, the run counts
 (doubt). Once written a proof is not recomputed.
 
 ### 4.4 Caps and UNKNOWN
@@ -256,6 +280,16 @@ Add `task retry-run TASK` (or extend `retry-start` with a distinct mode) that:
 4. counts the failed run as `counted=false` and the new run normally. If the retry also does no
    work, it is again `counted=false`; a per-Task retry bound (2, matching #2188) sends the third
    failure to the PM.
+5. uses the normal dispatch authorization, not a bypass: `pm_caller.check_caller` (`:8344`-
+   `:8347`), the Owner policy `worker_dispatch.evaluate` (`:8360`-`:8362`), a fresh quota check
+   (`:8363`-`:8368`), `_check_delegate_repair_cap` (`:8388`) and `_with_quota_observation`
+   (`:8389`). The route launcher receives the `expected_failed_developer` hook that `retry-start`
+   already passes (`:8390`-`:8392`), so it accepts exactly the failed run and still refuses any
+   other existing developer. This needs a distinct dispatch action (e.g. `RUN_RETRY`) in
+   `worker_dispatch.authorize_dispatch` and its `dispatch_audit` (`:8090`-`:8096` shows the
+   `'DISPATCH'` action), because the text-codex route otherwise refuses any existing developer
+   (`:7959`-`:7965`). #2188 `start_failure` is not used; the recorded no-work proof is the only
+   admission.
 
 This reruns in place without resetting or bypassing any count, and the root lineage still sees
 every earlier counted run and claim. A REPLAN with no recorded `lineage_inherits` cannot prove
@@ -271,37 +305,62 @@ credential-shaped strings; route/probe outcomes are injected; no production chec
    - Files: new `tools/llmtool/llmtool/lineage_ledger.py`; `task_store.py` (new optional
      `lineage_inherits`, `developer_runs`, `run_proofs` fields, write-once validation).
    - Tests: new `tests/test_lineage_ledger.py`: root walk with `continues`, with
-     `lineage_inherits`, mixed; cycle/fork/malformed/over-limit -> `UNKNOWN`; every family/PR is
-     counted; legacy records fall back to one run; a no-work proof counts zero and an invalid proof
-     counts one; caps are unchanged; a second Task in the root is not double-counted.
+     `lineage_inherits`, with a legacy claim edge, and mixed; a generated repair Task with no
+     `continues` joins its claim's root; two sibling repair Tasks share one root and are not a
+     fork; conflicting roots, a cycle, a fork on `continues`, a malformed link and a root over the
+     member bound -> `UNKNOWN`; every family/PR is counted; legacy records fall back to one run; a
+     no-work proof counts zero and an invalid proof counts one; caps are unchanged; a second Task
+     in the root is not double-counted.
 2. **Record runs and no-work proofs; wire the run gates.**
-   - Files: `task_submission_cli.py` (`_repair_run_stamp`, `_check_delegate_repair_cap`,
-     `_check_chain_repair_count`, `_delegate_chain_gate`, run-end append); `task_store.py`.
+   - Files: `task_submission_cli.py` (`_check_delegate_repair_cap` reads the delegated Task's root
+     from `lineage_ledger` instead of only `completion_d6_task_ids`, so a run on another D6 is
+     still in the count; `_repair_run_stamp`, `_check_chain_repair_count`, `_delegate_chain_gate`,
+     run-end append); `task_store.py`.
    - Tests: new `tests/test_lineage_run_gate.py`: a run on D6 A counts once on D6 B; a recorded
      no-work proof stays zero after the D6 moves; a later counted run makes exactly one more; a
-     missing/invalid/`UNKNOWN` proof counts; the existing locks still refuse
+     missing/invalid/`UNKNOWN` proof counts; two Tasks joined only by `lineage_inherits` take one
+     root lock (not two chain keys); a generated repair Task on D6 B still counts the root's run
+     on D6 A; the existing root-lock refusals still return
      `DELEGATE_REPAIR_COUNT_UNAVAILABLE`; a same-D6 run is still counted as before.
 3. **Wire the claim gates and advance.**
-   - Files: `review_repair.py` (`repair_review` cap count from `lineage_ledger`; `_review_gate`
-     keeps its D1/head path; `_auto_replay_claim`); `lineage_counts.py` (the local mode stays as the
-     D1/legacy helper and is not used for a cap); `task_advance.py` (new
-     `_lineage_test_fail_count` used by `_test_family_used_up`; `_test_fail_count` stays as the
-     compatibility helper); `task_store.py` (family stays a label for the cap; per-family guard
-     unchanged).
+   - Files: `review_repair.py` (`repair_review` cap count from `lineage_ledger`; the admission
+     lock is the root key from `root_of`, and membership and counts are re-read and re-validated
+     inside that lock before the claim CAS; `_review_gate` keeps its D1/head path;
+     `_auto_replay_claim` takes the same root key); `lineage_counts.py` (the local mode stays as the
+     D1/legacy helper and is not used for a cap; `acquire_chain_lock`/`acquire_chain_locks` take
+     root keys); `task_advance.py` (new `_lineage_test_fail_count` used by
+     `_test_family_used_up`; `_test_fail_count` stays as the compatibility helper); `task_store.py`
+     (family stays a label for the cap; per-family guard unchanged).
+     The current gate locks `lineage_counts.chain_key` (`review_repair.py:814`-`:837`), which
+     follows only `continues` (`lineage_counts.py:150`-`:164`); two Tasks sharing an inherited root
+     would take different locks and could both spend the same count. Every member of a root takes
+     that root's one key, and a changed root or membership is `UNKNOWN`.
    - Tests: new `tests/test_lineage_claim_gate.py`: two review claims in different families/PRs
      reach the same root cap; a legacy EC2 claim counts on both; two test claims in different
      families/PRs reach the same root test cap; `UNKNOWN` refuses; the store's per-family 3 cap
-     still refuses; no claim is written on refusal. The existing D1 tests stay unchanged and green.
+     still refuses; no claim is written on refusal. A concurrency case has two Tasks in separate
+     `continues` chains joined only by an inherited root, with one repair already spent: two
+     concurrent admissions take the same root lock, exactly one succeeds, and the total stays
+     `repair_max`. A root key that changes under the lock refuses before any count or write. The
+     existing D1 tests stay unchanged and green.
 4. **Inheritance and the REPLAN rerun.**
    - Files: `task_submission_cli.py` (`record-pm` writes `lineage_inherits`; `retry-run` parser and
-     command; `run_task_retry_start` if extended); `lineage_counts.py` (`check_continues` stays
-     unchanged; diagnostics may name the link); `task_advance.py` (a no-work route failure returns
-     `DEVELOPER_START_FAILED`/PM step, not an automatic retry).
+     command; `run_task_retry_start` if extended; the retry dispatch authorization);
+     `review_repair.py` (`_record_repair_task` passes the root and kind `REPAIR` into `record-pm`);
+     `worker_dispatch.py` (a distinct `RUN_RETRY` action in `authorize_dispatch` and the
+     `dispatch_audit`); route launchers that accept `expected_failed_developer`;
+     `lineage_counts.py` (`check_continues` stays unchanged; diagnostics may name the link);
+     `task_advance.py` (a no-work route failure returns `DEVELOPER_START_FAILED`/PM step, not an
+     automatic retry).
    - Tests: new `tests/test_lineage_inherits.py`: a REPLAN with the link inherits the root count;
-     a new ROOT with the link inherits; one without it does not; the one-REPLAN rule still refuses
-     a second REPLAN; `CLAUDE_STATUS_FAILED` without a no-work proof is refused; with one, the
-     same Task is rerun in place and its counts do not reset; a retry that does work adds exactly
-     one run.
+     a new ROOT with the link inherits; one without it does not; a generated repair Task is
+     recorded with `lineage_inherits` kind `REPAIR` and, after moving to another D6, still adds to
+     the root's run count; the one-REPLAN rule still refuses a second REPLAN;
+     `CLAUDE_STATUS_FAILED` without a no-work proof is refused; with one, the same Task is rerun in
+     place and its counts do not reset; a retry that does work adds exactly one run. Dispatch
+     authorization cases: the retry is refused when the Owner policy or fresh quota refuses, when
+     the existing developer is not the failed run, and when the retry action is not authorized; an
+     allowed retry records the `RUN_RETRY` audit entry before the run.
 
 ## 6. Tests that must keep passing
 
@@ -340,6 +399,9 @@ check is `check (docs)`. It has not been run here; the PM runs it before review.
 
 - The `--family` argparse line is outside this Task's read paths; its exact line is UNKNOWN.
   `review_repair.py`'s validation and use of `family` are cited above.
+- `worker_dispatch.py` is outside this Task's read paths, so its accepted action set and audit
+  shape are UNKNOWN. `RUN_RETRY` is a proposed action name; the cited `'DISPATCH'` use is from
+  `task_submission_cli.py:8090`-`:8096`.
 - No test was run in the D6. No existing assertion is expected to change: the cap becomes
   lineage-wide, while the D1/review-FAIL path and the single-Task helper keep their current scope.
 
