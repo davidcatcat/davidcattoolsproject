@@ -6682,6 +6682,226 @@ class CompletionAttributedPathsStoreTests(unittest.TestCase):
         self.assertNotIn(scratch, result['changed_paths'])
 
 
+class CarriedMarkerResultCollectionTests(unittest.TestCase):
+    def setUp(self):
+        review_trust_fixture.install_for_case(self)
+        self.rules_patch = patch('llmtool.review_dispatch._review_rules',
+                                 return_value=(RULES_PREFIX, RULES_SHA256))
+        self.rules_patch.start()
+        self.addCleanup(self.rules_patch.stop)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name).resolve()
+        worker_policy_fixture.install(self)
+
+        self.root = self.base / 'executor'
+        self.root.mkdir(mode=0o700)
+        self.common = str(self.root / '.git')
+
+        subprocess.run(['/usr/bin/git', 'init', '-b', 'feat/executor'], cwd=self.root,
+                       check=True, capture_output=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.name', 'Executor'],
+                       cwd=self.root, check=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.email', 'executor@example.invalid'],
+                       cwd=self.root, check=True)
+
+        tools = self.root / 'tools' / 'llmtool'
+        scripts = tools / 'scripts'
+        scripts.mkdir(parents=True)
+        (tools / 'Makefile').write_text('env-bootstrap:\n\t@true\n', encoding='utf-8')
+        (tools / '.gitignore').write_text('/.d6-bootstrap-report.json\n', encoding='utf-8')
+        (scripts / 'worktree_env.py').write_text('# worktree helper\n', encoding='utf-8')
+        (tools / 'worktree-env.lock').write_text('# lock file\n', encoding='utf-8')
+        (tools / 'pyproject.toml').write_text('[build-system]\nrequires = []\n', encoding='utf-8')
+        (scripts / 'd6_worktree_env.py').write_text('# d6 helper\n', encoding='utf-8')
+        (self.root / 'README.md').write_text('Repository fixture.\n', encoding='utf-8')
+
+        subprocess.run(['/usr/bin/git', 'add', 'tools', 'README.md'], cwd=self.root, check=True)
+        subprocess.run(['/usr/bin/git', 'commit', '-m', 'source commit'],
+                       cwd=self.root, check=True, capture_output=True)
+        self.source_sha = subprocess.check_output(
+            ['/usr/bin/git', 'rev-parse', 'HEAD'], cwd=self.root, text=True).strip()
+
+        (Path(self.common) / 'llmtool-worktrees').mkdir(mode=0o700)
+        self.task_id = 'carried-result-task'
+        self.fingerprint = 'cpython3.13-darwin-arm64-012345abcdef'
+
+    def test_bootstrap_sources_constant_equals_helper_set(self):
+        self.assertEqual(task_completion.BOOTSTRAP_SOURCES, d6_worktree_lifecycle.BOOTSTRAP_SOURCES)
+
+    def _setup_carried_fixture(self, *, path_in_write_paths=True):
+        pyproject = self.root / 'tools' / 'llmtool' / 'pyproject.toml'
+        pyproject.write_text('[build-system]\n# version bump\nrequires = []\n', encoding='utf-8')
+        subprocess.run(['/usr/bin/git', 'add', 'tools/llmtool/pyproject.toml'],
+                       cwd=self.root, check=True)
+        subprocess.run(['/usr/bin/git', 'commit', '-m', 'bump pyproject version'],
+                       cwd=self.root, check=True, capture_output=True)
+        result_sha = subprocess.check_output(
+            ['/usr/bin/git', 'rev-parse', 'HEAD'], cwd=self.root, text=True).strip()
+
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', self.source_sha, result_sha],
+            cwd=self.root, text=True)
+
+        stat_info = self.root.stat()
+        venv_id = {
+            'schema_version': 1,
+            'path': 'tools/llmtool/.venv',
+            'device': stat_info.st_dev,
+            'inode': stat_info.st_ino,
+            'uid': os.getuid(),
+            'pyvenv_cfg_sha256': '1' * 64,
+            'interpreter_realpath': '/usr/bin/python3',
+            'interpreter_stat': {
+                'device': stat_info.st_dev,
+                'inode': stat_info.st_ino,
+                'size': 1024,
+                'mtime_ns': 1000,
+            },
+            'site_packages_sha256': '2' * 64,
+        }
+        report = {
+            'schema_version': 2,
+            'result': 'PASS',
+            'status': 'env_carried',
+            'operations': 'NONE',
+            'task_id': self.task_id,
+            'root_realpath': str(self.root),
+            'head_sha': result_sha,
+            'tooling_sha': self.source_sha,
+            'cache_fingerprint': self.fingerprint,
+            'carried_from_head_sha': self.source_sha,
+            'allowed_bootstrap_paths': ['tools/llmtool/pyproject.toml'],
+            'venv_identity': venv_id,
+        }
+        report_path = self.root / 'tools' / 'llmtool' / '.d6-bootstrap-report.json'
+        raw = (json.dumps(report, sort_keys=True, separators=(',', ':')) + '\n').encode('utf-8')
+        report_path.write_bytes(raw)
+        report_path.chmod(0o600)
+        report_sha256 = hashlib.sha256(raw).hexdigest()
+
+        marker = {
+            'schema_version': 2,
+            'result': 'PASS',
+            'task_id': self.task_id,
+            'root_realpath': str(self.root),
+            'submitted_head_sha': result_sha,
+            'current_head_sha': result_sha,
+            'tooling_sha': self.source_sha,
+            'environment_fingerprint': self.fingerprint,
+            'report_sha256': report_sha256,
+            'environment_mode': 'CARRIED',
+            'carried_from_head_sha': self.source_sha,
+            'allowed_bootstrap_paths': ['tools/llmtool/pyproject.toml'],
+        }
+
+        reg_dict = {
+            'schema_version': 1,
+            'task_id': self.task_id,
+            'trusted_agent_id': 'executor-agent',
+            'session_ref': 'Executor D6 session',
+            'root_realpath': str(self.root),
+            'physical_identity': {
+                'device': stat_info.st_dev,
+                'inode': stat_info.st_ino,
+                'uid': stat_info.st_uid,
+                'mode': oct(stat.S_IMODE(stat_info.st_mode)),
+            },
+            'git_common_dir': self.common,
+            'branch': 'feat/executor',
+            'base_sha': self.source_sha,
+            'head_sha': result_sha,
+            'state': 'ACTIVE',
+            'lock_state': 'LOCKED',
+            'env2_pass_marker': marker,
+        }
+        reg_path = Path(self.common) / 'llmtool-worktrees' / f'{self.task_id}.json'
+        reg_path.write_text(json.dumps(reg_dict), encoding='utf-8')
+        reg_path.chmod(0o600)
+
+        write_paths = (['tools/llmtool/pyproject.toml'] if path_in_write_paths
+                       else ['src/other.py'])
+        return result_sha, artifact, write_paths
+
+    def test_collect_executor_result_with_carried_marker(self):
+        result_sha, artifact, write_paths = self._setup_carried_fixture(path_in_write_paths=True)
+        task_binding = {'task_id': '1' * 32, 'run_id': '2' * 32, 'contract_digest': '3' * 64}
+        result = task_completion.collect_executor_result(
+            task_id=self.task_id, expected_common_dir=self.common,
+            expected_root=str(self.root), expected_branch='feat/executor',
+            source_sha=self.source_sha, task_binding=task_binding,
+            expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+            expected_native_session_id=None, write_paths=write_paths,
+            artifact=artifact, artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+        self.assertEqual(result['result_head'], result_sha)
+        self.assertEqual(result['changed_paths'], ['tools/llmtool/pyproject.toml'])
+
+        _, _, excluded_write_paths = self._setup_carried_fixture(path_in_write_paths=False)
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion.collect_executor_result(
+                task_id=self.task_id, expected_common_dir=self.common,
+                expected_root=str(self.root), expected_branch='feat/executor',
+                source_sha=self.source_sha, task_binding=task_binding,
+                expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+                expected_native_session_id=None, write_paths=excluded_write_paths,
+                artifact=artifact, artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+        self.assertEqual(raised.exception.completion_code, 'D6_ENV2_PASS_MARKER_MISMATCH')
+
+    def test_collect_claude_result_with_carried_marker(self):
+        result_sha, artifact, write_paths = self._setup_carried_fixture(path_in_write_paths=True)
+        task_binding = {'task_id': '1' * 32, 'run_id': '2' * 32, 'contract_digest': '3' * 64}
+        claude_res = {'executor_task_id': self.task_id}
+        result = task_completion.collect_claude_result(
+            task_id=self.task_id, expected_common_dir=self.common,
+            expected_root=str(self.root), expected_branch='feat/executor',
+            source_sha=self.source_sha, task_binding=task_binding,
+            expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+            expected_native_session_id=None, write_paths=write_paths,
+            claude_result=claude_res)
+        self.assertEqual(result['result_head'], result_sha)
+        self.assertEqual(result['changed_paths'], ['tools/llmtool/pyproject.toml'])
+
+        _, _, excluded_write_paths = self._setup_carried_fixture(path_in_write_paths=False)
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion.collect_claude_result(
+                task_id=self.task_id, expected_common_dir=self.common,
+                expected_root=str(self.root), expected_branch='feat/executor',
+                source_sha=self.source_sha, task_binding=task_binding,
+                expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+                expected_native_session_id=None, write_paths=excluded_write_paths,
+                claude_result=claude_res)
+        self.assertEqual(raised.exception.completion_code, 'D6_ENV2_PASS_MARKER_MISMATCH')
+
+    def test_collect_executor_worktree_result_with_carried_marker(self):
+        result_sha, artifact, write_paths = self._setup_carried_fixture(path_in_write_paths=True)
+        task_binding = {'task_id': '1' * 32, 'run_id': '2' * 32, 'contract_digest': '3' * 64}
+        worktree_artifact = ''
+        result = task_completion.collect_executor_worktree_result(
+            task_id=self.task_id, expected_common_dir=self.common,
+            expected_root=str(self.root), expected_branch='feat/executor',
+            source_sha=result_sha, expected_result_head=result_sha,
+            task_binding=task_binding, expected_agent='executor-agent',
+            expected_session_ref='Executor D6 session', expected_native_session_id=None,
+            write_paths=write_paths, read_paths=['tools/llmtool/pyproject.toml'],
+            artifact=worktree_artifact,
+            artifact_sha256=hashlib.sha256(b'').hexdigest())
+        self.assertEqual(result['source_sha'], result_sha)
+        self.assertEqual(result['result_mode'], 'UNCOMMITTED_WORKTREE')
+
+        _, _, excluded_write_paths = self._setup_carried_fixture(path_in_write_paths=False)
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion.collect_executor_worktree_result(
+                task_id=self.task_id, expected_common_dir=self.common,
+                expected_root=str(self.root), expected_branch='feat/executor',
+                source_sha=result_sha, expected_result_head=result_sha,
+                task_binding=task_binding, expected_agent='executor-agent',
+                expected_session_ref='Executor D6 session', expected_native_session_id=None,
+                write_paths=excluded_write_paths, read_paths=['tools/llmtool/pyproject.toml'],
+                artifact=worktree_artifact,
+                artifact_sha256=hashlib.sha256(b'').hexdigest())
+        self.assertEqual(raised.exception.completion_code, 'D6_ENV2_PASS_MARKER_MISMATCH')
+
+
 class CompletionTestTimeoutTests(unittest.TestCase):
     def test_registered_test_timeout_is_600_seconds(self):
         # #1703: test_task_completion alone needs ~310 s on the Mac.

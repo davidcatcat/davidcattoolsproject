@@ -94,6 +94,41 @@ _GITHUB_API_PATH = re.compile(
     r'&since=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z|'
     r'(?!compare/)[A-Za-z0-9_./?=&-]{1,256})\Z')
 
+BOOTSTRAP_SOURCES = frozenset((
+    'tools/llmtool/Makefile',
+    'tools/llmtool/.gitignore',
+    'tools/llmtool/scripts/worktree_env.py',
+    'tools/llmtool/worktree-env.lock',
+    'tools/llmtool/pyproject.toml',
+    'tools/llmtool/setup.py',
+    'tools/llmtool/setup.cfg',
+    'tools/llmtool/MANIFEST.in',
+    'tools/llmtool/scripts/d6_worktree_env.py',
+))
+REQUIRED_BOOTSTRAP_SOURCES = frozenset((
+    'tools/llmtool/Makefile',
+    'tools/llmtool/.gitignore',
+    'tools/llmtool/scripts/worktree_env.py',
+    'tools/llmtool/worktree-env.lock',
+    'tools/llmtool/pyproject.toml',
+))
+ENV2_PASS_MARKER_SCHEMA1_KEYS = frozenset({
+    'schema_version',
+    'result',
+    'task_id',
+    'root_realpath',
+    'submitted_head_sha',
+    'current_head_sha',
+    'tooling_sha',
+    'environment_fingerprint',
+    'report_sha256',
+})
+ENV2_PASS_MARKER_SCHEMA2_KEYS = ENV2_PASS_MARKER_SCHEMA1_KEYS | frozenset({
+    'environment_mode',
+    'carried_from_head_sha',
+    'allowed_bootstrap_paths',
+})
+
 
 def _stop(code):
     error = LLMToolError('Executor completion evidence is unavailable; details omitted')
@@ -737,22 +772,25 @@ def read_d6_registration(task_id, common_dir, *, allowed_states=('ACTIVE',)):
                           value.get('env2_pass_marker'), approved_tooling_sha)
 
 
-def validate_env2_pass_marker(registration, *, expected_root, current_head):
+def validate_env2_pass_marker(registration, *, expected_root, current_head, write_paths=None):
     """Require the owner-only registry marker and report for this exact D6 HEAD."""
     marker = registration.env2_pass_marker
     if marker is None:
         _stop('D6_ENV2_PASS_MARKER_MISSING')
-    required = {
-        'schema_version', 'result', 'task_id', 'root_realpath',
-        'submitted_head_sha', 'current_head_sha', 'environment_fingerprint',
-        'tooling_sha', 'report_sha256',
-    }
     fingerprint_re = re.compile(
         r'[a-z][a-z0-9]*\d+\.\d+-[a-z0-9][a-z0-9._-]{0,31}-'
         r'[a-z0-9][a-z0-9._-]{0,31}-[0-9a-f]{12}\Z')
-    if type(marker) is not dict or set(marker) != required:
+    if type(marker) is not dict:
         _stop('D6_ENV2_PASS_MARKER_INVALID')
-    if (type(marker['schema_version']) is not int or marker['schema_version'] != 1 or
+    marker_keys = set(marker)
+    if marker_keys == ENV2_PASS_MARKER_SCHEMA1_KEYS:
+        expected_version = 1
+    elif marker_keys == ENV2_PASS_MARKER_SCHEMA2_KEYS:
+        expected_version = 2
+    else:
+        _stop('D6_ENV2_PASS_MARKER_INVALID')
+    if (type(marker['schema_version']) is not int or
+            marker['schema_version'] != expected_version or
             marker['result'] != 'PASS' or marker['task_id'] != registration.task_id or
             marker['root_realpath'] != expected_root or expected_root != registration.root or
             type(current_head) is not str or _HEX40.fullmatch(current_head) is None or
@@ -820,6 +858,94 @@ def validate_env2_pass_marker(registration, *, expected_root, current_head):
             report.get('tooling_sha') != marker['tooling_sha'] or
             report.get('cache_fingerprint') != marker['environment_fingerprint']):
         _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+
+    if expected_version == 1:
+        return marker
+
+    if (marker.get('environment_mode') != 'CARRIED' or
+            type(write_paths) is not list or
+            any(type(p) is not str for p in write_paths)):
+        _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+    if type(report.get('schema_version')) is not int or report.get('schema_version') != 2:
+        _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+    if (registration.env2_approved_tooling_sha is not None or
+            marker['tooling_sha'] != registration.source_sha):
+        _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+
+    carried_from = marker.get('carried_from_head_sha')
+    if (type(carried_from) is not str or _HEX40.fullmatch(carried_from) is None or
+            carried_from == current_head):
+        _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+    try:
+        is_source_ancestor = (registration.source_sha == carried_from or
+                              _is_ancestor(expected_root, registration.source_sha, carried_from))
+        is_carried_ancestor = _is_ancestor(expected_root, carried_from, current_head)
+    except LLMToolError:
+        _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+    if not is_source_ancestor or not is_carried_ancestor:
+        _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+
+    allowed = marker.get('allowed_bootstrap_paths')
+    if (type(allowed) is not list or not allowed or
+            any(type(p) is not str for p in allowed) or
+            allowed != sorted(set(allowed)) or
+            not set(allowed).issubset(BOOTSTRAP_SOURCES) or
+            not set(allowed).issubset(set(write_paths))):
+        _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+
+    try:
+        diff_raw = _git(expected_root, ('diff', '--name-only', '-z', '--no-ext-diff',
+                                        '--no-textconv', '--no-renames', marker['tooling_sha'],
+                                        current_head, '--', *sorted(BOOTSTRAP_SOURCES)),
+                        limit=1024 * 1024)
+        diff_paths = sorted(set(p for p in diff_raw.decode('utf-8', 'strict').split('\x00') if p))
+    except (LLMToolError, UnicodeError):
+        _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+    if allowed != diff_paths:
+        _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+
+    try:
+        for req_path in sorted(REQUIRED_BOOTSTRAP_SOURCES):
+            if _tree_entry(expected_root, current_head, req_path) is None:
+                _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+    except LLMToolError:
+        _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+
+    if (report.get('status') != 'env_carried' or
+            report.get('operations') != 'NONE' or
+            report.get('carried_from_head_sha') != carried_from or
+            report.get('allowed_bootstrap_paths') != allowed):
+        _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+
+    venv_identity = report.get('venv_identity')
+    expected_venv_keys = {
+        'schema_version', 'path', 'device', 'inode', 'uid',
+        'pyvenv_cfg_sha256', 'interpreter_realpath', 'interpreter_stat',
+        'site_packages_sha256',
+    }
+    if type(venv_identity) is not dict or set(venv_identity) != expected_venv_keys:
+        _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+    if (type(venv_identity['schema_version']) is not int or
+            venv_identity['schema_version'] != 1 or
+            venv_identity['path'] != 'tools/llmtool/.venv' or
+            type(venv_identity['device']) is not int or isinstance(venv_identity['device'], bool) or
+            type(venv_identity['inode']) is not int or isinstance(venv_identity['inode'], bool) or
+            type(venv_identity['uid']) is not int or isinstance(venv_identity['uid'], bool) or
+            type(venv_identity['pyvenv_cfg_sha256']) is not str or
+            _HEX64.fullmatch(venv_identity['pyvenv_cfg_sha256']) is None or
+            type(venv_identity['interpreter_realpath']) is not str or
+            not venv_identity['interpreter_realpath'] or
+            type(venv_identity['site_packages_sha256']) is not str or
+            _HEX64.fullmatch(venv_identity['site_packages_sha256']) is None):
+        _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+
+    stat_obj = venv_identity['interpreter_stat']
+    expected_stat_keys = {'device', 'inode', 'size', 'mtime_ns'}
+    if (type(stat_obj) is not dict or set(stat_obj) != expected_stat_keys or
+            any(type(stat_obj[k]) is not int or isinstance(stat_obj[k], bool)
+                for k in expected_stat_keys)):
+        _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+
     return marker
 
 
@@ -1353,7 +1479,7 @@ def _collect_registered_result_diff(*, task_id, expected_common_dir, expected_ro
             snapshot.head != registration.result_sha or not snapshot.clean):
         _stop('RESULT_HEAD_MISMATCH')
     validate_env2_pass_marker(registration, expected_root=expected_root,
-                              current_head=snapshot.head)
+                              current_head=snapshot.head, write_paths=write_paths)
     try:
         _git(registration.root, ('merge-base', '--is-ancestor', registration.source_sha, source_sha),
              limit=4096)
@@ -1633,7 +1759,7 @@ def collect_executor_worktree_result(*, task_id, expected_common_dir, expected_r
             live['branch'] != registration.branch or live['source_sha'] != result_head):
         _stop('D6_TASK_BINDING_MISMATCH')
     validate_env2_pass_marker(registration, expected_root=expected_root,
-                              current_head=live['source_sha'])
+                              current_head=live['source_sha'], write_paths=write_paths)
     try:
         _git(registration.root, ('merge-base', '--is-ancestor',
                                  registration.source_sha, source_sha), limit=4096)
