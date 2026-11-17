@@ -27,11 +27,13 @@ class CodexDirectJsonlSplitTests(unittest.TestCase):
                          'self_review': 'diff checked', 'blocked_reason': None}
                 events = [{'type': 'thread.started', 'thread_id': thread_id},
                           {'type': 'item.completed',
-                           'item': {'type': 'agent_message', 'text': json.dumps(final)}},
+                           'item': {'type': 'agent_message',
+                                    'text': json.dumps(final, ensure_ascii=False)}},
                           {'type': 'turn.completed',
                            'usage': {'input_tokens': prompt_tokens,
                                      'output_tokens': completion_tokens}}]
                 raw = '\n'.join(json.dumps(e, ensure_ascii=False) for e in events).encode('utf-8')
+                self.assertIn(sep.encode('utf-8'), raw)
                 result_thread_id, result, usage = codex_direct_developer._result_from_events(raw)
                 self.assertEqual(result_thread_id, thread_id)
                 self.assertEqual(result['summary'], summary)
