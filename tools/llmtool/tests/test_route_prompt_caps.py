@@ -153,7 +153,7 @@ class RoutePromptCapsTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "AGY_REQUEST_INVALID")
 
     def test_drift_check_schema_accepts_max_prompt_bytes(self):
-        schema = guidance_drift_check.ROUTE_ENTRY
+        schema = guidance_drift_check.DEVELOPER_ROUTE
         valid_entry = {
             "executable": "claude",
             "default_model": "claude-opus-5-5",
