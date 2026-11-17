@@ -1,5 +1,7 @@
 # Recording results that change D6 bootstrap sources (#1817)
 
+**Status (2026-11-18):** Partly implemented. PR-1 (#2242, lifecycle binding) and PR-2 (#2254, completion marker validation) are merged. PR-3 (ENV-2 acceptance, CARRY and venv identity) is not started. The rest of this note is the original design, kept as written.
+
 Status: design only, revision 3. Revision 2 fixed codex-reviewer v1 findings F1 (marker consumers) and
 F2 (CARRY must verify the live environment). Revision 3 fixes codex-reviewer v2 findings F1 (the
 consumer `task_submission_cli._refresh_d6_binding_after_bootstrap` was missing) and F2 (carried
