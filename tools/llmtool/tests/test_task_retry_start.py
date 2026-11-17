@@ -369,6 +369,38 @@ class TaskRetryStartTests(unittest.TestCase):
                 parser.parse_args(['task', 'retry-start', 'a' * 32,
                                    '--executor-task', D6, option, WRITE])
 
+    def test_cli_requires_fresh_source_then_dispatches_to_handler(self):
+        from llmtool.cli import main
+        calls = []
+        with patch('llmtool.source_freshness.require_fresh_source',
+                   side_effect=lambda: calls.append('fresh') or 'OK'), \
+                patch.object(cli, 'run_task_retry_start',
+                             side_effect=lambda args: calls.append(args) or 0):
+            rc = main(['task', 'retry-start', 'a' * 32,
+                       '--executor-task', D6, '--pm-session', PM_SESSION])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], 'fresh')
+        self.assertEqual((calls[1].action, calls[1].task_id, calls[1].executor_task),
+                         ('retry-start', 'a' * 32, D6))
+
+    def test_cli_stale_source_refusal_runs_no_handler(self):
+        from llmtool.cli import main
+        called = []
+
+        def stale():
+            raise LLMToolError('SOURCE_STALE: synthetic stale-source refusal for this test')
+
+        with patch('llmtool.source_freshness.require_fresh_source', side_effect=stale), \
+                patch.object(cli, 'run_task_retry_start',
+                             side_effect=lambda args: called.append(args) or 0), \
+                patch('sys.stderr', new_callable=io.StringIO), \
+                redirect_stdout(io.StringIO()):
+            rc = main(['task', 'retry-start', 'a' * 32,
+                       '--executor-task', D6, '--pm-session', PM_SESSION])
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(called, [])
+
     # -- first CAS persists the repair packet -----------------------------
 
     def test_first_cas_persists_canonical_repair_packet_inside_task_json(self):
