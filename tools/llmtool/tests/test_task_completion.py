@@ -3091,6 +3091,128 @@ class TaskCompletionTests(unittest.TestCase):
                                   review_text=mismatched_contract_body)
                          ['evidence']['formal_review_state'], 'UNVERIFIED')
 
+    def test_codex_formal_pass_matches_only_formal_claims_and_fails_closed(self):
+        result_sha, _ = self._make_result()
+        pr = {'state': 'open', 'merged': False, 'head': {'sha': result_sha},
+              'base': {'repo': {'full_name': 'davidcatcat/davidcattoolsproject'}},
+              'user': {'login': 'author-user'}}
+        checks = {'total_count': 1, 'check_runs': [
+            {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
+             'status': 'completed', 'conclusion': 'success'}]}
+
+        case_number = [0]
+
+        def evaluate(*, version=1, claim_kind='omitted', reviewer_task='reviewer-task',
+                     claims=None):
+            case_number[0] += 1
+            reviewer_root = self.base / ('reviewer-kind-' + str(case_number[0]))
+            reviewer_branch = 'review/kind-' + str(case_number[0])
+            self._git('worktree', 'add', '-b', reviewer_branch,
+                      str(reviewer_root), result_sha)
+            self._write_registration(reviewer_task, 'codex-reviewer',
+                'native-reviewer-session', reviewer_root, reviewer_branch,
+                result_sha, result_sha, native_session_id='native-reviewer-session',
+                github_login='reviewer-user', state='REVIEW_PENDING')
+            comment_body = (
+                '<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->\n'
+                f'Verdict: PASS | Version: v{version} | HEAD: {result_sha}\n'
+                'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
+                self._review_binding(head=result_sha))
+            comment = {'id': 44 + case_number[0], 'user': {'login': 'reviewer-user'},
+                       'body': comment_body, 'created_at': '2026-10-21T10:00:00Z',
+                       'updated_at': '2026-10-21T10:00:00Z'}
+            if claims is None:
+                claim = {
+                    'pr': 10, 'head_sha': result_sha, 'reviewer_task': reviewer_task,
+                    'version': version, 'state': 'COMPLETED',
+                    'review_result': {'task_id': '1' * 32, 'run_id': '2' * 32,
+                        'contract_digest': '3' * 64, 'head': result_sha,
+                        'verdict': 'PASS', 'review_text': comment_body}
+                }
+                if claim_kind != 'omitted':
+                    claim['review_kind'] = claim_kind
+                claims = [claim]
+            task = {'task_id': '1' * 32, 'run_id': '2' * 32,
+                    'task_binding': {'contract_digest': '3' * 64},
+                    'developer': {'provider_profile': 'claude'},
+                    'review_dispatch_claim': claims}
+            api = self._github_response_sequence(result_sha, pr, [], checks,
+                                                 comments=[comment])
+            with patch('llmtool.task_store.TaskStore') as task_store:
+                task_store.return_value.get.return_value = task
+                with patch('llmtool.task_completion._github_get', side_effect=api):
+                    return task_completion.collect_github_evidence(
+                        **self._github_kwargs(result_sha, reviewer_task_id=reviewer_task,
+                                              task_record=task))
+
+        # 1. Explicit formal claim matches and accepts
+        formal_res = evaluate(version=1, claim_kind='formal')
+        self.assertEqual(formal_res['evidence']['formal_review_state'], 'ACCEPTED')
+        self.assertEqual(formal_res['missing_gates'], [])
+
+        # 2. Legacy unkinded claim below version 91 treated as formal and accepts
+        legacy_res = evaluate(version=1, claim_kind='omitted')
+        self.assertEqual(legacy_res['evidence']['formal_review_state'], 'ACCEPTED')
+        self.assertEqual(legacy_res['missing_gates'], [])
+
+        # 3. Security-kind claim at v91 never satisfies formal completion
+        sec_v91 = evaluate(version=91, claim_kind='security')
+        self.assertEqual(sec_v91['evidence']['formal_review_state'], 'UNVERIFIED')
+        self.assertIn('FORMAL_REVIEW_MISSING', sec_v91['missing_gates'])
+
+        # 4. Security-kind claim at v1 never satisfies formal completion
+        sec_v1 = evaluate(version=1, claim_kind='security')
+        self.assertEqual(sec_v1['evidence']['formal_review_state'], 'UNVERIFIED')
+        self.assertIn('FORMAL_REVIEW_MISSING', sec_v1['missing_gates'])
+
+        # 5. Legacy unkinded claim at version >= 91 fails closed
+        legacy_v91 = evaluate(version=91, claim_kind='omitted')
+        self.assertEqual(legacy_v91['evidence']['formal_review_state'], 'UNVERIFIED')
+        self.assertIn('FORMAL_REVIEW_MISSING', legacy_v91['missing_gates'])
+
+        # 6. Legacy unkinded claim at version 92 fails closed
+        legacy_v92 = evaluate(version=92, claim_kind='omitted')
+        self.assertEqual(legacy_v92['evidence']['formal_review_state'], 'UNVERIFIED')
+        self.assertIn('FORMAL_REVIEW_MISSING', legacy_v92['missing_gates'])
+
+        # 7. Invalid review_kind fails closed
+        invalid_res = evaluate(version=1, claim_kind='invalid')
+        self.assertEqual(invalid_res['evidence']['formal_review_state'], 'UNVERIFIED')
+        self.assertIn('FORMAL_REVIEW_MISSING', invalid_res['missing_gates'])
+
+        # 8. Both formal (v1) and security (v91) claims present:
+        # Formal completion with formal reviewer accepts
+        formal_body = (
+            '<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->\n'
+            f'Verdict: PASS | Version: v1 | HEAD: {result_sha}\n'
+            'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
+            self._review_binding(head=result_sha))
+        sec_body = (
+            '<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->\n'
+            f'Verdict: PASS | Version: v91 | HEAD: {result_sha}\n'
+            'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
+            self._review_binding(head=result_sha))
+        multi_claims = [
+            {'pr': 10, 'head_sha': result_sha, 'reviewer_task': 'reviewer-formal',
+             'version': 1, 'state': 'COMPLETED', 'review_kind': 'formal',
+             'review_result': {'task_id': '1' * 32, 'run_id': '2' * 32,
+                 'contract_digest': '3' * 64, 'head': result_sha,
+                 'verdict': 'PASS', 'review_text': formal_body}},
+            {'pr': 10, 'head_sha': result_sha, 'reviewer_task': 'reviewer-sec',
+             'version': 91, 'state': 'COMPLETED', 'review_kind': 'security',
+             'review_result': {'task_id': '1' * 32, 'run_id': '2' * 32,
+                 'contract_digest': '3' * 64, 'head': result_sha,
+                 'verdict': 'PASS', 'review_text': sec_body}},
+        ]
+        multi_formal = evaluate(version=1, reviewer_task='reviewer-formal', claims=multi_claims)
+        self.assertEqual(multi_formal['evidence']['formal_review_state'], 'ACCEPTED')
+        self.assertEqual(multi_formal['missing_gates'], [])
+
+        # Security reviewer with security claim never satisfies formal completion
+        multi_sec = evaluate(version=91, reviewer_task='reviewer-sec', claims=multi_claims)
+        self.assertEqual(multi_sec['evidence']['formal_review_state'], 'UNVERIFIED')
+        self.assertIn('FORMAL_REVIEW_MISSING', multi_sec['missing_gates'])
+
     def test_canonical_verdict_body_normalizes_only_line_endings_and_body_end(self):
         canonical = task_completion._canonical_verdict_body
         self.assertEqual(canonical('a\r\nb\rc\n'), 'a\nb\nc')

@@ -573,3 +573,223 @@ class PriorityFindingTests(unittest.TestCase):
 
     def test_no_finding_line_counts_zero(self):
         self.assertEqual(self._findings('no findings\n'), 0)
+
+
+class ReviewKindTests(unittest.TestCase):
+    def test_review_kind_helper(self):
+        # Explicit review_kind values
+        self.assertEqual(review_result.review_kind({'review_kind': 'formal'}), 'formal')
+        self.assertEqual(review_result.review_kind({'review_kind': 'security'}), 'security')
+        self.assertEqual(review_result.review_kind({'review_kind': 'formal', 'version': 95}), 'formal')
+        self.assertEqual(review_result.review_kind({'review_kind': 'security', 'version': 1}), 'security')
+        # Invalid review_kind values return None
+        self.assertIsNone(review_result.review_kind({'review_kind': 'invalid'}))
+        self.assertIsNone(review_result.review_kind({'review_kind': 123}))
+        self.assertIsNone(review_result.review_kind({'review_kind': None}))
+        # Unkinded version ranges
+        self.assertEqual(review_result.review_kind({'version': 1}), 'formal')
+        self.assertEqual(review_result.review_kind({'version': 90}), 'formal')
+        # Legacy unkinded claim at version >= 91 fails closed
+        self.assertIsNone(review_result.review_kind({'version': 91}))
+        self.assertIsNone(review_result.review_kind({'version': 100}))
+        # Non-dict inputs return None
+        self.assertIsNone(review_result.review_kind(None))
+        self.assertIsNone(review_result.review_kind('formal'))
+        self.assertIsNone(review_result.review_kind([1, 2]))
+
+    def test_claim_lookup_by_kind_and_hand_built_security_never_returned_for_formal(self):
+        formal_claim = {
+            'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD, 'version': 1,
+            'state': 'CLAIMED', 'reviewer_task': REVIEWER,
+            'native_session_id': None, 'account_mode': 'DEFAULT_SECOND_ACCOUNT',
+            'review_kind': 'formal',
+            'claimed_at': '2026-10-27T00:00:00Z', 'updated_at': '2026-10-27T00:00:00Z',
+        }
+        security_claim = {
+            'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD, 'version': 91,
+            'state': 'CLAIMED', 'reviewer_task': 'reviewer-sec',
+            'native_session_id': None, 'account_mode': 'CODEX_CLI',
+            'review_kind': 'security',
+            'claimed_at': '2026-10-27T00:00:00Z', 'updated_at': '2026-10-27T00:00:00Z',
+        }
+        legacy_unkinded_v91 = {
+            'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD, 'version': 92,
+            'state': 'CLAIMED', 'reviewer_task': 'reviewer-old',
+            'native_session_id': None, 'account_mode': 'CODEX_CLI',
+            'claimed_at': '2026-10-27T00:00:00Z', 'updated_at': '2026-10-27T00:00:00Z',
+        }
+        task = {
+            'task_id': TASK, 'run_id': RUN,
+            'task_binding': {'contract_digest': CONTRACT},
+            'review_dispatch_claim': [formal_claim, security_claim, legacy_unkinded_v91],
+        }
+
+        # Formal lookup finds formal claim
+        claim, head = review_result._claim_for(
+            task, executor_task=EXECUTOR, pr_number=PR, version=1, kind='formal')
+        self.assertEqual(claim, formal_claim)
+        self.assertEqual(head, HEAD)
+
+        # Formal lookup for security version 91 refuses: hand-built security claim never returned for formal
+        with self.assertRaises(LLMToolError) as caught:
+            review_result._claim_for(
+                task, executor_task=EXECUTOR, pr_number=PR, version=91, kind='formal')
+        self.assertEqual(caught.exception.review_dispatch_code, 'REVIEW_RESULT_CLAIM_MISSING')
+
+        # Security lookup finds security claim
+        claim, head = review_result._claim_for(
+            task, executor_task=EXECUTOR, pr_number=PR, version=91, kind='security')
+        self.assertEqual(claim, security_claim)
+        self.assertEqual(head, HEAD)
+
+        # Security lookup for formal version 1 refuses
+        with self.assertRaises(LLMToolError) as caught:
+            review_result._claim_for(
+                task, executor_task=EXECUTOR, pr_number=PR, version=1, kind='security')
+        self.assertEqual(caught.exception.review_dispatch_code, 'REVIEW_RESULT_CLAIM_MISSING')
+
+        # Legacy unkinded claim at v91+ fails closed for both kinds
+        for kind in ('formal', 'security'):
+            with self.subTest(kind=kind), self.assertRaises(LLMToolError) as caught:
+                review_result._claim_for(
+                    task, executor_task=EXECUTOR, pr_number=PR, version=92, kind=kind)
+            self.assertEqual(caught.exception.review_dispatch_code, 'REVIEW_RESULT_CLAIM_MISSING')
+
+    def test_record_review_result_kind_argument_validation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = _store(temp_dir)
+            with self.assertRaises(LLMToolError) as caught:
+                review_result.record_review_result(
+                    store=store, task_id=TASK, executor_task=EXECUTOR, pr_number=PR,
+                    version=1, kind='invalid', github_get=lambda p: [])
+            self.assertEqual(caught.exception.review_dispatch_code,
+                             'REVIEW_KIND_UNSUPPORTED')
+
+    def test_record_review_result_refuses_non_formal_kind_before_any_read_or_write(self):
+        # #2199 PR 1 (security v91 F1, CWE-841): record_review_result has no
+        # security writer path. Even with a hand-built COMPLETED security PASS
+        # claim present, every kind but 'formal' is refused with one stable
+        # code before the store or GitHub is read and before any event.
+        security_claim = {
+            'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD, 'version': 91,
+            'state': 'COMPLETED', 'reviewer_task': 'reviewer-sec',
+            'native_session_id': 'review-session', 'account_mode': 'CODEX_CLI',
+            'review_kind': 'security',
+            'claimed_at': '2026-10-27T00:00:00Z', 'updated_at': '2026-10-27T00:00:00Z',
+            'review_result': {
+                'task_id': TASK, 'run_id': RUN, 'contract_digest': CONTRACT,
+                'head': HEAD, 'verdict': 'PASS',
+                'review_text': _comment(version=91)['body']},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = _store(temp_dir)
+            before = store.get(TASK)
+            calls = []
+
+            class SpyStore:
+                def get(self, task_id):
+                    calls.append('get')
+                    record = store.get(task_id)
+                    record['review_dispatch_claim'] = (
+                        list(record['review_dispatch_claim']) + [security_claim])
+                    return record
+
+                def record_completion_event(self, *args, **kwargs):
+                    calls.append('record_completion_event')
+                    return store.record_completion_event(*args, **kwargs)
+
+                def compare_and_update(self, *args, **kwargs):
+                    calls.append('compare_and_update')
+                    return store.compare_and_update(*args, **kwargs)
+
+            def github_get(path):
+                calls.append('github_get')
+                return []
+
+            for kind in ('security', 'invalid', '', 'FORMAL', None, 1):
+                with self.subTest(kind=kind):
+                    calls.clear()
+                    with self.assertRaises(LLMToolError) as caught:
+                        review_result.record_review_result(
+                            store=SpyStore(), task_id=TASK, executor_task=EXECUTOR,
+                            pr_number=PR, version=91, kind=kind,
+                            reviewer_session_done=True, github_get=github_get,
+                            inline_io={'file_lister': lambda *_: calls.append('inline'),
+                                       'comment_lister': lambda *_: calls.append('inline'),
+                                       'poster': lambda *_: calls.append('inline')})
+                    self.assertEqual(caught.exception.review_dispatch_code,
+                                     'REVIEW_KIND_UNSUPPORTED')
+                    self.assertEqual(calls, [])
+                    after = store.get(TASK)
+                    self.assertEqual(after, before)
+                    self.assertEqual(after.get('completion_events', []), [])
+
+    def test_record_review_result_replay_legacy_claim_and_event_succeeds_without_rewriting_record(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # A legacy record: a Codex claim written CLAIMED, then COMPLETED with
+            # its stored verdict, all before review_kind existed. TaskStore only
+            # accepts the COMPLETED claim through the CLAIMED -> COMPLETED step.
+            store = _store(temp_dir, claim_state='CLAIMED', account_mode='CODEX_CLI')
+            task = store.get(TASK)
+            digest = task['task_binding']['contract_digest']
+            claimed = task['review_dispatch_claim'][0]
+            self.assertNotIn('review_kind', claimed)
+
+            body = _comment(actor='Codex')['body'].replace(CONTRACT, digest)
+            legacy_claim = dict(claimed, state='COMPLETED', native_session_id='review-session')
+            legacy_claim['review_result'] = {
+                'task_id': TASK, 'run_id': RUN, 'contract_digest': digest,
+                'head': HEAD, 'verdict': 'PASS', 'review_text': body,
+            }
+            identity = {'task': TASK, 'run': RUN, 'head': HEAD,
+                        'version': 1, 'outcome': 'REVIEW_PASS', 'comment_id': 0}
+            event_id = hashlib.sha256(json.dumps(
+                identity, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()[:32]
+            payload = {'outcome': 'REVIEW_PASS', 'head': HEAD, 'version': 1,
+                       'comment_id': 0, 'findings_count': 0}
+            payload_sha256 = hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
+
+            seeded = store.record_completion_event(
+                TASK, event_id=event_id, run_id=RUN,
+                session_id='review-' + event_id, source='REVIEWER', source_sha=HEAD,
+                sequence=0, payload_sha256=payload_sha256)
+            self.assertTrue(seeded['created'])
+            self.assertNotIn('review_kind', seeded['event'])
+
+            store.compare_and_update(
+                TASK, expected={'record_sha256': store.get(TASK)['record_sha256']},
+                review_dispatch_claim=[legacy_claim])
+
+            seeded_task = store.get(TASK)
+            self.assertEqual(seeded_task['review_dispatch_claim'][0]['state'], 'COMPLETED')
+            self.assertNotIn('review_kind', seeded_task['review_dispatch_claim'][0])
+            self.assertNotIn('review_kind', seeded_task['completion_events'][0])
+            seeded_claims = seeded_task['review_dispatch_claim']
+            seeded_events = seeded_task['completion_events']
+
+            # A Codex verdict counts only for a cross-family (Claude) Developer.
+            family_store = FamilyStore(store, 'claude')
+            res = review_result.record_review_result(
+                store=family_store, task_id=TASK, executor_task=EXECUTOR, pr_number=PR,
+                version=1, kind='formal')
+            self.assertFalse(res['created'])
+            self.assertEqual(res['state'], 'REVIEW_PASS')
+            self.assertEqual(res['event_id'], event_id)
+
+            after_task = store.get(TASK)
+            self.assertNotIn('review_kind', after_task['review_dispatch_claim'][0])
+            self.assertNotIn('review_kind', after_task['completion_events'][0])
+            self.assertEqual(len(after_task['completion_events']), 1)
+            self.assertEqual(after_task['review_dispatch_claim'], seeded_claims)
+            self.assertEqual(after_task['completion_events'], seeded_events)
+
+            # PR 1 has no security writer: the kind is refused and nothing changes.
+            with self.assertRaises(LLMToolError) as caught:
+                review_result.record_review_result(
+                    store=family_store, task_id=TASK, executor_task=EXECUTOR, pr_number=PR,
+                    version=1, kind='security')
+            self.assertEqual(caught.exception.review_dispatch_code,
+                             'REVIEW_KIND_UNSUPPORTED')
+            self.assertEqual(store.get(TASK)['completion_events'], seeded_events)
+            self.assertEqual(store.get(TASK)['review_dispatch_claim'], seeded_claims)
