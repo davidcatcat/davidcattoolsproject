@@ -712,7 +712,10 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     # #1816: after the Owner policy, before any claim, Task or D6 write.
     if worker_availability.fresh_quota_fail(store, worker):
         _refuse(worker_availability.REFUSAL_CODE)
-    base_family = f'pr-{pr_number}' if family is None else family
+    if family is None:
+        base_family = f'task-{task_id}' if pr_number is None else f'pr-{pr_number}'
+    else:
+        base_family = family
     if (type(base_family) is not str or
             re.fullmatch(r'[a-z0-9._-]{1,64}', base_family) is None or
             base_family.endswith(EC2_FAMILY_SUFFIX)):
@@ -835,6 +838,36 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                 _refuse('REVIEW_REPAIR_PM_REQUIRED')
         counts = lineage_counts.lineage_counts(store, task, base_family=base_family,
                                                include_successors=True)
+        if type(counts.get('chain')) is list and len(counts['chain']) == 1:
+            claims = task.get('review_repair_claims', [])
+            if type(claims) is not list or any(type(item) is not dict for item in claims):
+                counts = lineage_counts._unknown()
+            else:
+                review, tests, heads, heads_known = 0, 0, {}, True
+                for claim in claims:
+                    cfamily = _claim_family(claim)
+                    legacy = ec2_claim_kind(claim) == 'LEGACY'
+                    if type(cfamily) is not str:
+                        counts = lineage_counts._unknown()
+                        break
+                    is_review = not cfamily.endswith(EC2_FAMILY_SUFFIX)
+                    is_test = cfamily.endswith(EC2_FAMILY_SUFFIX) or legacy
+                    if is_review:
+                        review += 1
+                        head = claim.get('head_sha')
+                        if type(head) is str:
+                            heads[head] = 'FAIL'
+                        else:
+                            heads_known = False
+                    if is_test:
+                        tests += 1
+                else:
+                    counts = {
+                        'chain': counts['chain'],
+                        'review_repairs': review,
+                        'review_heads': heads if heads_known else lineage_counts.UNKNOWN,
+                        'test_fails': tests,
+                    }
         rca_entry = None
         if not test_failure:
             body = body_holder[0] if body_holder else None
