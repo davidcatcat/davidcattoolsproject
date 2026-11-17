@@ -53,7 +53,10 @@
       "default_effort": "high",
       "default_timeout": 1800,
       "max_timeout": 3600,
-      "max_diff_bytes": 262144
+      "max_diff_bytes": 262144,
+      "max_prompt_bytes": 65536,
+      "max_source_file_bytes": 1048576,
+      "max_source_total_bytes": 2097152
     }
   },
   "roles": {

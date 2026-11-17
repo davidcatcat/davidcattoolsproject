@@ -44,11 +44,24 @@ DEFAULT_MAX_TASK_PATHS = 32
 HARD_MAX_TASK_PATHS = 32
 DEFAULT_CLAUDE_MAX_PROMPT_BYTES = 65536
 DEFAULT_AGY_MAX_PROMPT_BYTES = 512 * 1024
+DEFAULT_OPENCODE_MAX_PROMPT_BYTES = 65536
 DEFAULT_ROUTE_MAX_PROMPT_BYTES = {
     'claude': DEFAULT_CLAUDE_MAX_PROMPT_BYTES,
     'agy': DEFAULT_AGY_MAX_PROMPT_BYTES,
+    'opencode': DEFAULT_OPENCODE_MAX_PROMPT_BYTES,
 }
-ROUTE_LIMIT_KEYS = TIMEOUT_KEYS | {'max_diff_bytes', 'max_task_paths', 'max_prompt_bytes'}
+DEFAULT_OPENCODE_MAX_SOURCE_FILE_BYTES = 1024 * 1024
+DEFAULT_ROUTE_MAX_SOURCE_FILE_BYTES = {
+    'opencode': DEFAULT_OPENCODE_MAX_SOURCE_FILE_BYTES,
+}
+DEFAULT_OPENCODE_MAX_SOURCE_TOTAL_BYTES = 2 * 1024 * 1024
+DEFAULT_ROUTE_MAX_SOURCE_TOTAL_BYTES = {
+    'opencode': DEFAULT_OPENCODE_MAX_SOURCE_TOTAL_BYTES,
+}
+ROUTE_LIMIT_KEYS = TIMEOUT_KEYS | {
+    'max_diff_bytes', 'max_task_paths', 'max_prompt_bytes',
+    'max_source_file_bytes', 'max_source_total_bytes',
+}
 
 
 def max_diff_bytes_ok(value: Any) -> bool:
@@ -57,6 +70,24 @@ def max_diff_bytes_ok(value: Any) -> bool:
 
 
 def max_prompt_bytes_ok(value: Any) -> bool:
+    """Return True only for an int (not bool) >= 1.
+
+    No upper bound is enforced here; the configured value is bounded only by
+    available memory and provider limits.
+    """
+    return type(value) is int and value >= 1
+
+
+def max_source_file_bytes_ok(value: Any) -> bool:
+    """Return True only for an int (not bool) >= 1.
+
+    No upper bound is enforced here; the configured value is bounded only by
+    available memory and provider limits.
+    """
+    return type(value) is int and value >= 1
+
+
+def max_source_total_bytes_ok(value: Any) -> bool:
     """Return True only for an int (not bool) >= 1.
 
     No upper bound is enforced here; the configured value is bounded only by
@@ -406,7 +437,7 @@ def resolve_route_max_prompt_bytes(route: Any, *,
     route is a registered route name or a DeveloperRoute; config is a
     load_route_config() result (None loads the repository file). A route
     without max_prompt_bytes returns today's default for that route
-    (65536 for claude, 524288 for agy). An invalid value, unknown str route
+    (65536 for claude and opencode, 524288 for agy). An invalid value, unknown str route
     or bad config raises RouteError('ROUTE_CONFIG_INVALID').
     """
     if isinstance(route, DeveloperRoute):
@@ -442,6 +473,100 @@ def resolve_route_max_prompt_bytes(route: Any, *,
         return DEFAULT_ROUTE_MAX_PROMPT_BYTES.get(key, DEFAULT_CLAUDE_MAX_PROMPT_BYTES)
     val = entry['max_prompt_bytes']
     if not max_prompt_bytes_ok(val):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    return val
+
+
+def resolve_route_max_source_file_bytes(route: Any, *,
+                                        config: Mapping[str, Any] | None = None) -> int:
+    """Return the effective max source file bytes for route (#2281).
+
+    route is a registered route name or a DeveloperRoute; config is a
+    load_route_config() result (None loads the repository file). A route
+    without max_source_file_bytes returns today's default for that route
+    (1048576 for opencode). An invalid value, unknown str route or bad config
+    raises RouteError('ROUTE_CONFIG_INVALID').
+    """
+    if isinstance(route, DeveloperRoute):
+        name = getattr(route, 'name', None)
+        if type(name) is not str:
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        key, registered_only = name.lower().replace('_', '-'), False
+        adapter_config = getattr(route, 'config', None)
+    elif type(route) is str:
+        key, registered_only = route, True
+        adapter_config = None
+    else:
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    if config is None and isinstance(adapter_config, Mapping) and 'max_source_file_bytes' in adapter_config:
+        val = adapter_config['max_source_file_bytes']
+        if not max_source_file_bytes_ok(val):
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        return val
+    if config is None:
+        from . import load_route_config
+        config = load_route_config()
+    routes = config.get('routes') if isinstance(config, Mapping) else None
+    if not isinstance(routes, Mapping):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    entry = routes.get(key)
+    if entry is None:
+        if registered_only:
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        return DEFAULT_ROUTE_MAX_SOURCE_FILE_BYTES.get(key, DEFAULT_OPENCODE_MAX_SOURCE_FILE_BYTES)
+    if not isinstance(entry, Mapping):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    if 'max_source_file_bytes' not in entry:
+        return DEFAULT_ROUTE_MAX_SOURCE_FILE_BYTES.get(key, DEFAULT_OPENCODE_MAX_SOURCE_FILE_BYTES)
+    val = entry['max_source_file_bytes']
+    if not max_source_file_bytes_ok(val):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    return val
+
+
+def resolve_route_max_source_total_bytes(route: Any, *,
+                                         config: Mapping[str, Any] | None = None) -> int:
+    """Return the effective max source total bytes for route (#2281).
+
+    route is a registered route name or a DeveloperRoute; config is a
+    load_route_config() result (None loads the repository file). A route
+    without max_source_total_bytes returns today's default for that route
+    (2097152 for opencode). An invalid value, unknown str route or bad config
+    raises RouteError('ROUTE_CONFIG_INVALID').
+    """
+    if isinstance(route, DeveloperRoute):
+        name = getattr(route, 'name', None)
+        if type(name) is not str:
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        key, registered_only = name.lower().replace('_', '-'), False
+        adapter_config = getattr(route, 'config', None)
+    elif type(route) is str:
+        key, registered_only = route, True
+        adapter_config = None
+    else:
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    if config is None and isinstance(adapter_config, Mapping) and 'max_source_total_bytes' in adapter_config:
+        val = adapter_config['max_source_total_bytes']
+        if not max_source_total_bytes_ok(val):
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        return val
+    if config is None:
+        from . import load_route_config
+        config = load_route_config()
+    routes = config.get('routes') if isinstance(config, Mapping) else None
+    if not isinstance(routes, Mapping):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    entry = routes.get(key)
+    if entry is None:
+        if registered_only:
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        return DEFAULT_ROUTE_MAX_SOURCE_TOTAL_BYTES.get(key, DEFAULT_OPENCODE_MAX_SOURCE_TOTAL_BYTES)
+    if not isinstance(entry, Mapping):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    if 'max_source_total_bytes' not in entry:
+        return DEFAULT_ROUTE_MAX_SOURCE_TOTAL_BYTES.get(key, DEFAULT_OPENCODE_MAX_SOURCE_TOTAL_BYTES)
+    val = entry['max_source_total_bytes']
+    if not max_source_total_bytes_ok(val):
         raise RouteError('ROUTE_CONFIG_INVALID')
     return val
 
