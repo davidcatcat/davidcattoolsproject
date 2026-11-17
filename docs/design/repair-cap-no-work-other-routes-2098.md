@@ -2,7 +2,7 @@
 
 Proposal only; not a review or acceptance. Source: main at a863ace18f68216a69d9db43bdb4a623844918d5. Extends design #2103 (Claude/AGY, PR #2107). Claims cite path:line; anything not read is UNVERIFIED. The change is 待實作（#2098）.
 
-**Status (2026-11-17):** Partly implemented. PR #2144 added the OpenCode allow-list `_POST_RUN_NO_WORK_REFUSALS` with four codes (OPENCODE_PROVIDER_FAILED, OPENCODE_RATE_LIMITED, OPENCODE_FREE_LIMIT, OPENCODE_OUTPUT_TRUNCATED). The gw-agent route is not covered yet, so #2098 stays open. The sections below are the original proposal, kept for history.
+**Status (2026-11-17):** Implemented for both routes. PR #2144 added the OpenCode allow-list `_POST_RUN_NO_WORK_REFUSALS` with four codes (OPENCODE_PROVIDER_FAILED, OPENCODE_RATE_LIMITED, OPENCODE_FREE_LIMIT, OPENCODE_OUTPUT_TRUNCATED). PR #2269 added the gw-agent allow-list `_POST_RUN_NO_WORK_GW_AGENT_REFUSALS` of exact (gw-agent, DEVELOPER_UNAVAILABLE, code) entries for refusals raised before the provider call; codes that can be raised after the call (such as DEVELOPER_GW_AGENT_SESSION_UNAVAILABLE and DEVELOPER_GW_AGENT_SESSION_BINDING_FAILED) still count. The sections below are the original proposal, kept for history.
 
 ## 1. Today
 
