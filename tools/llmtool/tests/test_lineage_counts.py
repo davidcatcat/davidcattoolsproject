@@ -480,6 +480,50 @@ class RecordPmContinuesTests(RecordPmCase):
         self.assertEqual(str(caught.exception), 'CONTINUES_PREDECESSOR_HAS_SUCCESSOR')
         self.assertEqual(getattr(caught.exception, 'continues_successor', None), successor)
 
+    def cli_record_pm(self, continues):
+        """Run `llmtool task record-pm --stdin-json --continues P` through cli.main.
+
+        Only the store and the stdin JSON are injected; parsing, the real
+        run_task_record_pm, check_continues and the printed refusal are real.
+        Returns (exit code, stderr).
+        """
+        from llmtool import cli as main_cli
+        real = cli.run_task_record_pm
+
+        def record_pm(args):
+            return real(args, store=self.store, input_stream=io.StringIO(json.dumps({
+                'request': 'Continue the earlier bounded Task.', 'response': RESPONSE})))
+        stderr = io.StringIO()
+        with patch.object(cli, 'run_task_record_pm', side_effect=record_pm), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            code = main_cli.main(['task', 'record-pm', '--stdin-json',
+                                  '--continues', continues])
+        return code, stderr.getvalue()
+
+    def test_cli_refusal_names_an_empty_successor(self):
+        # #2188 section 6 (PR #2271 F1): the line the PM sees names S and keeps the code.
+        first = self.task()
+        successor = self.record_pm(continues=first)['task_id']
+        before = self.store.task_ids()
+        code, stderr = self.cli_record_pm(first)
+        self.assertEqual(code, 1)
+        self.assertEqual(stderr, 'llmtool: CONTINUES_PREDECESSOR_HAS_SUCCESSOR successor='
+                         + successor + '\n')
+        self.assertEqual(self.store.task_ids(), before)
+
+    def test_cli_refusal_does_not_name_a_successor_with_work(self):
+        first = self.task()
+        successor = self.record_pm(continues=first)['task_id']
+        record_lineage(self.store, successor, {
+            'lineage_id': successor, 'kind': 'root', 'parent': None, 'replaces': [],
+            'state': 'OPEN', 'reason': None, 'base_sha': MAIN, 'recorded_at': AT})
+        before = self.store.task_ids()
+        code, stderr = self.cli_record_pm(first)
+        self.assertEqual(code, 1)
+        self.assertEqual(stderr, 'llmtool: CONTINUES_PREDECESSOR_HAS_SUCCESSOR\n')
+        self.assertNotIn(successor, stderr)
+        self.assertEqual(self.store.task_ids(), before)
+
     def test_split_child_or_replan_predecessor_is_refused(self):
         root = self.task()
         for kind, replaces in (('child', ()), ('replan', (tid(77),))):
