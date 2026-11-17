@@ -7195,6 +7195,69 @@ _POST_RUN_NO_WORK_REFUSALS = frozenset((
 ))
 
 
+# gw-agent zero-work refusals allow-list (#2098).
+# Codes shown by code to be raised before workspace write by the gw-agent route.
+_POST_RUN_NO_WORK_GW_AGENT_REFUSALS = frozenset((
+    # Raised during config validation / file preparation before workspace write.
+    # gw_agent.py:180, 191, 203, 219, 221, 234, 243, 358; task_submission_cli.py:6406, 6506.
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_CONFIG_INVALID'),
+    # Raised during profile validation before workspace write.
+    # gw_agent.py:269; task_submission_cli.py:6506.
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_PROFILE_INVALID'),
+    # Raised during file preparation before workspace write.
+    # gw_agent.py:412; task_submission_cli.py:6506.
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_REQUEST_INVALID'),
+    # Raised during credential resolution before workspace write.
+    # gw_agent.py:469, 473; task_submission_cli.py:6506.
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_CREDENTIAL_MISSING'),
+    # Raised during session home creation/lock acquisition before workspace write.
+    # gw_agent.py:757, 761, 767, 771, 780, 898, 903, 928, 937, 947; task_submission_cli.py:6506.
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_SESSION_HOME_UNSAFE'),
+    # Raised when session home lock is already acquired before workspace write.
+    # gw_agent.py:895, 936; task_submission_cli.py:6506.
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_SESSION_LOCKED'),
+    # Raised during task request validation before workspace write.
+    # gw_agent.py:291; task_submission_cli.py:6506.
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_INVALID'),
+    # Raised during task request validation before workspace write.
+    # gw_agent.py:296; task_submission_cli.py:6506.
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_UNKNOWN_FIELDS'),
+    # Raised during task request validation before workspace write.
+    # gw_agent.py:301; task_submission_cli.py:6506.
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_SCHEMA_VERSION_INVALID'),
+    # Raised during task request validation before workspace write.
+    # gw_agent.py:304; task_submission_cli.py:6506.
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_TASK_ID_INVALID'),
+    # Raised during task request validation before workspace write.
+    # gw_agent.py:308; task_submission_cli.py:6506.
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_SOURCE_SHA_INVALID'),
+    # Raised during task request validation before workspace write.
+    # gw_agent.py:311; task_submission_cli.py:6506.
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_GOAL_INVALID'),
+    # Raised during task request validation before workspace write.
+    # gw_agent.py:322; task_submission_cli.py:6506.
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_PATHS_INVALID'),
+    # Raised during task request validation before workspace write.
+    # gw_agent.py:325; task_submission_cli.py:6506.
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_EGRESS_BASIS_INVALID'),
+    # Raised during task request validation or file preparation before workspace write.
+    # gw_agent.py:327, 332, 400; task_submission_cli.py:6506.
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_DATA_CLASS_INVALID'),
+    # Raised during task request validation before workspace write.
+    # gw_agent.py:335, 341; task_submission_cli.py:6506.
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_BUDGETS_INVALID'),
+    # Raised during dispatch authorization failure before workspace write.
+    # task_submission_cli.py:6408.
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_DISPATCH_FAILED'),
+    # Raised during dispatch denial before workspace write.
+    # task_submission_cli.py:6394, 6404, 6506.
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_DISPATCH_DENIED'),
+    # Raised during dispatch denial before workspace write.
+    # task_submission_cli.py:6394, 6404.
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_DISPATCH_DENIED'),
+))
+
+
 def _paths_overlap(status_paths, write_paths):
     """Return True if any status path overlaps any write path.
 
@@ -7235,6 +7298,9 @@ def _launched_run_did_no_work(developer, d6_unchanged=None):
                               error_code) is not None) or
                  (developer.get('provider_profile'), state, error_code) in
                  _POST_RUN_NO_WORK_REFUSALS)
+    elif state == 'DEVELOPER_UNAVAILABLE':
+        ended = ((developer.get('provider_profile'), state, error_code) in
+                 _POST_RUN_NO_WORK_GW_AGENT_REFUSALS)
     else:
         ended = False
     if not ended:
