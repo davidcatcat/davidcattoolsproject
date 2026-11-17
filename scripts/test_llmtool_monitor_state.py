@@ -637,8 +637,12 @@ class TestMainIncidentMonitor(unittest.TestCase):
                 generated_at="2026-11-17T12:00:00Z",
                 data_age=None,
             )
-            top_texts = [item["text"] for item in state["top"]]
-            self.assertTrue(any(text in t for t in top_texts))
+            redacted_incident_row = {
+                "text": "main incident [已遮蔽]: CODE, 2 candidate PR rows",
+                "style": "!",
+            }
+            self.assertIn(redacted_incident_row, state["top"])
+            self.assertFalse(any("mi-1111111111111111111111111111111111111111" in item["text"] for item in state["top"]))
 
     def test_open_plus_resolved(self):
         """Open plus resolved or superseded incidents only show the UNKNOWN_OPEN incident row."""

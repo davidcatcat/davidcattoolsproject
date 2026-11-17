@@ -76,7 +76,7 @@ def _monitor(**extra):
     fields = dict(version="test", polls=0, disk_usage=None, error=None, processes=[],
                   lingering=[], github=None, tasks=[], stale=False, behind=False,
                   office=[], office_error=None, quota=[], pm_board_stamp=None, ec2_heads=None,
-                  pm_board=mon.PmBoard("missing", None, [], [], []))
+                  pm_board=mon.PmBoard("missing", None, [], [], []), incidents=[])
     fields.update(extra)
     return SimpleNamespace(**fields)
 

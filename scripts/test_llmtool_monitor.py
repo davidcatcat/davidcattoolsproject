@@ -10325,6 +10325,7 @@ class StuckAlertTests(unittest.TestCase):
                 self.github, self.polls = github, 0
                 self.stale = False
                 self.behind = True
+                self.incidents = []
             def poll(self): pass
 
         class Screen:
