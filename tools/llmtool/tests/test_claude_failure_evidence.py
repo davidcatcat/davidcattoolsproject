@@ -4,7 +4,9 @@ Every case drives the real path: a fake Claude CLI process output goes through
 the real run_route and ClaudeRoute parser in a real temporary Git D6, then the
 real run_task_claude_delegate failure handling, then a real TaskStore in a
 temporary store directory, and the record is read back (and printed by
-``task show``). No record is built by hand for the store.
+``task show``). No record is built by hand for the store. A post-result
+failure (registry read, Git snapshot, worktree diff, decoding) is injected
+only after the real run_route has returned its result.
 
 Test data rule (Owner #763 A): no test here holds a password-, API-key-,
 token- or other credential-shaped string, and no screen function is touched.
@@ -120,13 +122,25 @@ class _Shutil:
         return '/fake/bin/claude'
 
 
+class _InjectedFailure(Exception):
+    """A plain failure the test injects; it is no RouteError."""
+
+
 class _MutatingStore(TaskStore):
-    """A real TaskStore; mutate (if set) rewrites the BLOCKED developer write."""
+    """A real TaskStore; mutate (if set) rewrites the BLOCKED developer write.
+
+    refuse_responded (if set) makes the first DEVELOPER_RESPONDED write fail
+    before it reaches the store."""
 
     mutate = None
+    refuse_responded = False
 
     def update(self, task_id, **changes):
         developer = changes.get('developer')
+        if (self.refuse_responded and type(developer) is dict and
+                developer.get('state') == 'DEVELOPER_RESPONDED'):
+            self.refuse_responded = False
+            raise _InjectedFailure('injected store refusal')
         if (self.mutate is not None and type(developer) is dict and
                 developer.get('state') == 'BLOCKED'):
             changes['developer'] = self.mutate(dict(developer))
@@ -181,16 +195,23 @@ class ClaudeFailureEvidenceTests(unittest.TestCase):
         store.create(task)
         return store
 
-    def _run(self, process, *, mutate=None, route_config=None, registry_after=None):
+    def _run(self, process, *, mutate=None, route_config=None, registry_after=None,
+             after_result=(), runner_failure=None, refuse_responded=False):
         """Run the real delegate once; return (status, store, printed text).
 
         route_config adds keys to the Claude route configuration;
         registry_after(registration) gives the D6 registry entry the delegate
-        reads back after the route result (default: unchanged)."""
+        reads back after the route result (default: unchanged).
+        after_result holds patches entered only once run_route has returned
+        its result, so the run itself stays real. runner_failure makes the
+        route runner raise a plain failure instead of returning a result:
+        'BEFORE_LAUNCH' (no process runs) or 'AFTER_PROCESS' (the real
+        run_route ran the process, but no result reaches the delegate)."""
         base, registration, snapshot = self._d6()
         after = registration if registry_after is None else registry_after(registration)
         store = self._store(base, _MutatingStore)
         store.mutate = mutate
+        store.refuse_responded = refuse_responded
         args = SimpleNamespace(
             task_id=_TASK_ID, owner_ref=_OWNER_REF, mode='direct', context_stdin=False,
             selection_source='PM', acceptance=list(_ACCEPTANCE),
@@ -198,9 +219,18 @@ class ClaudeFailureEvidenceTests(unittest.TestCase):
             egress_basis='Approved non-sensitive Task context.', repair_packet=None,
             executor_task=_EXECUTOR_ID)
 
+        stack = contextlib.ExitStack()
+
         def route_runner(route, request, **kwargs):
             # The real run_route, with the fake CLI process as its runner.
-            return run_route(route, request, runner=process, **kwargs)
+            if runner_failure == 'BEFORE_LAUNCH':
+                raise _InjectedFailure('runner failed before launch')
+            result = run_route(route, request, runner=process, **kwargs)
+            if runner_failure == 'AFTER_PROCESS':
+                raise _InjectedFailure('runner failed before returning')
+            for item in after_result:
+                stack.enter_context(item)
+            return result
 
         cli = task_submission_cli
         patches = (
@@ -227,7 +257,7 @@ class ClaudeFailureEvidenceTests(unittest.TestCase):
                          side_effect=lambda env, _home: env),
         )
         printed = io.StringIO()
-        with contextlib.ExitStack() as stack:
+        with stack:
             for item in patches:
                 stack.enter_context(item)
             stack.enter_context(contextlib.redirect_stdout(printed))
@@ -379,6 +409,86 @@ class ClaudeFailureEvidenceTests(unittest.TestCase):
              'duration_ms': 1357, 'process_exit_code': 0},
             registry_after=moved)
         self.assertNotIn('no_changes_diagnosis', developer)
+
+    def test_write_scope_violation_after_a_route_result_keeps_evidence(self):
+        # The run succeeds; the worktree diff read after it names a path
+        # outside write_paths.
+        _store, developer = self._assert_failure(
+            _process(0, _cli(num_turns=4, duration_ms=2222), write='src.py'),
+            'CLAUDE_WRITE_SCOPE_VIOLATION',
+            {'subtype': 'SUCCESS', 'is_error': False, 'num_turns': 4,
+             'duration_ms': 2222, 'process_exit_code': 0},
+            after_result=(patch.object(task_completion, '_worktree_diff',
+                                       return_value=(['other.py'], b'+plain line\n')),))
+        self.assertNotIn('no_changes_diagnosis', developer)
+
+    def _assert_generic_post_result_failure(self, after_result):
+        """A non-RouteError failure after run_route returned its result."""
+        _store, developer = self._assert_failure(
+            _process(0, _cli(num_turns=6, duration_ms=1111), write='src.py'),
+            'CLAUDE_RESULT_UNKNOWN',
+            {'subtype': 'SUCCESS', 'is_error': False, 'num_turns': 6,
+             'duration_ms': 1111, 'process_exit_code': 0},
+            after_result=after_result)
+        # The returned result's own execution facts, kept as BLOCKED.
+        execution = developer['execution']
+        self.assertEqual(execution['native_session_id'], _SESSION)
+        self.assertEqual(execution['process_exit_code'], 0)
+        self.assertEqual(execution['cleanup_status'], 'CONFIRMED')
+        self.assertRegex(execution['stdout_sha256'], r'^[0-9a-f]{64}$')
+        self.assertIsNone(developer['artifact'])
+        self.assertNotIn('no_changes_diagnosis', developer)
+        self.assertTrue(task_store_module.valid_claude_failure_evidence_record(developer))
+
+    def test_registry_read_failure_after_a_route_result_keeps_evidence(self):
+        self._assert_generic_post_result_failure((patch.object(
+            task_completion, 'read_d6_registration',
+            side_effect=_InjectedFailure('registry read failed')),))
+
+    def test_git_snapshot_failure_after_a_route_result_keeps_evidence(self):
+        self._assert_generic_post_result_failure((patch.object(
+            task_completion, 'collect_git_snapshot',
+            side_effect=_InjectedFailure('git snapshot failed')),))
+
+    def test_worktree_diff_failure_after_a_route_result_keeps_evidence(self):
+        self._assert_generic_post_result_failure((patch.object(
+            task_completion, '_worktree_diff',
+            side_effect=_InjectedFailure('worktree diff failed')),))
+
+    def test_utf8_decoding_failure_after_a_route_result_keeps_evidence(self):
+        # The diff of an in-scope path is not UTF-8; the delegate's strict
+        # decode fails after the route result.
+        self._assert_generic_post_result_failure((patch.object(
+            task_completion, '_worktree_diff',
+            return_value=(['src.py'], b'+\xff\xfe not utf-8\n')),))
+
+    def test_runner_failure_before_any_result_invents_nothing(self):
+        for when in ('BEFORE_LAUNCH', 'AFTER_PROCESS'):
+            with self.subTest(when=when):
+                status, store, printed = self._run(
+                    _process(0, _cli(), write='src.py'), runner_failure=when)
+                self.assertEqual(status, 1)
+                developer = store.get(_TASK_ID)['developer']
+                self.assertEqual((developer['state'], developer['error_code']),
+                                 ('BLOCKED', 'CLAUDE_RESULT_UNKNOWN'))
+                self.assertIsNone(developer['execution'])
+                self.assertIsNone(developer['usage'])
+                self.assertNotIn(_EVIDENCE, developer)
+                self.assertNotIn(_PROSE, printed)
+
+    def test_result_persistence_rejected_is_unchanged(self):
+        status, store, _printed = self._run(_process(0, _cli(), write='src.py'),
+                                            refuse_responded=True)
+        self.assertEqual(status, 1)
+        developer = store.get(_TASK_ID)['developer']
+        self.assertEqual((developer['state'], developer['error_code']),
+                         ('DEVELOPER_OUTCOME_UNKNOWN', 'CLAUDE_RESULT_PERSISTENCE_REJECTED'))
+        self.assertEqual(developer['execution']['status'], 'UNKNOWN')
+        self.assertEqual(developer['execution']['usage_source'], 'UNKNOWN')
+        self.assertEqual(developer['execution']['native_session_id'], _SESSION)
+        self.assertIsNone(developer['usage'])
+        self.assertIsNone(developer['artifact'])
+        self.assertNotIn(_EVIDENCE, developer)
 
     def test_failure_before_a_process_result_keeps_none(self):
         status, store, _printed = self._run(_process(0, error=TimeoutError()))
