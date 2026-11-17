@@ -36,6 +36,15 @@ class HighDebugJsonlSplitTests(unittest.TestCase):
                     self.assertEqual(high_debug._session_observed('thread-1234567890', root),
                                      ('gpt-test', 'high'))
 
+    def test_malformed_line_is_skipped_and_conflicting_thread_ids_give_none(self):
+        events = ['not valid json',
+                  json.dumps({'type': 'thread.started', 'thread_id': '0123456789abcdef'})]
+        raw = '\n'.join(events).encode('utf-8')
+        self.assertEqual(high_debug._thread_id_from_events(raw), '0123456789abcdef')
+        conflicting = '\n'.join(json.dumps({'type': 'thread.started', 'thread_id': tid})
+                                for tid in ('0123456789abcdef', 'fedcba9876543210'))
+        self.assertIsNone(high_debug._thread_id_from_events(conflicting.encode('utf-8')))
+
 
 if __name__ == '__main__':
     unittest.main()
