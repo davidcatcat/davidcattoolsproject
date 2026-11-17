@@ -14,6 +14,8 @@ _MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z')
 _EFFORT = re.compile(r'(?:minimal|low|medium|high)\Z')
 _CONVERSATION = re.compile(r'[A-Za-z0-9_-]{8,128}\Z')
 MAX_PROMPT_BYTES = 512 * 1024
+# #2302: refusal code for a chosen model this provider cannot run.
+MODEL_UNSUPPORTED = 'MODEL_UNSUPPORTED'
 
 
 def _unique_pairs(pairs):
@@ -40,6 +42,16 @@ class AgyRoute(DeveloperRoute):
                 type(effort) is not str or _EFFORT.fullmatch(effort) is None):
             raise RouteError('AGY_PROFILE_INVALID')
         return model, effort
+
+    def validate_model(self, model):
+        """#2302: return model when AGY can run it, else RouteError MODEL_UNSUPPORTED.
+
+        Only the provider model-name format is checked; there is no fallback
+        to another model.
+        """
+        if type(model) is not str or _MODEL.fullmatch(model) is None:
+            raise RouteError(MODEL_UNSUPPORTED)
+        return model
 
     def build_argv(self, executable, request):
         return [executable, '-p', request['prompt'], '--model', request['model'],

@@ -15,6 +15,8 @@ _MODEL = re.compile(r'claude-[a-z0-9][a-z0-9.-]{0,120}\Z')
 _EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 _QUOTA = re.compile(r'quota|rate.?limit|usage limit|overloaded|spend.?limit', re.IGNORECASE)
 MAX_PROMPT_BYTES = 65536
+# #2302: refusal code for a chosen model this provider cannot run.
+MODEL_UNSUPPORTED = 'MODEL_UNSUPPORTED'
 # #2275: Claude CLI result subtypes kept as structured run evidence. Any other
 # subtype string is OTHER; the CLI string itself is never kept.
 CLI_SUBTYPES = {
@@ -106,6 +108,16 @@ class ClaudeRoute(DeveloperRoute):
                 type(effort) is not str or effort not in _EFFORTS):
             raise RouteError('CLAUDE_PROFILE_INVALID')
         return model, effort
+
+    def validate_model(self, model):
+        """#2302: return model when Claude can run it, else RouteError MODEL_UNSUPPORTED.
+
+        Only a claude-* model name is supported; there is no fallback to
+        another model.
+        """
+        if type(model) is not str or _MODEL.fullmatch(model) is None:
+            raise RouteError(MODEL_UNSUPPORTED)
+        return model
 
     def build_argv(self, executable, request):
         # --tools is variadic, so -- ends it before the user prompt.

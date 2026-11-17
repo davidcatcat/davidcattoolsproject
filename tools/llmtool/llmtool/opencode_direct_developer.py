@@ -27,6 +27,9 @@ from .opencode_worker import _observe_exit_without_reap, _path
 from .providers.cli_lifecycle import CLIProcessLifecycle
 from .test_output_excerpts import _emitted_sensitive
 
+# #2302: the Developer delegate takes its default model from developer-routes.json
+# (route_default_model); MODEL is only the default of the run()/configuration()
+# keyword for direct callers.
 MODEL = 'opencode/deepseek-v4.1-flash-free#high'
 AGENT = 'llmtool-direct-developer'
 # #1815: each run's bound is resolve_route_timeout('opencode', requested) from
@@ -200,6 +203,27 @@ def is_free_model(model):
 def validate_model(model):
     if not is_free_model(model):
         _reject('OPENCODE_MODEL_INVALID')
+    return model
+
+
+def route_default_model(config=None):
+    """Return routes.opencode.default_model from developer-routes.json (#2302).
+
+    config None loads developer-routes.json. The value must be an OpenCode
+    free model; anything else (or an unreadable route file) is refused with
+    OPENCODE_ROUTE_MODEL_INVALID. There is no fallback to MODEL or any other
+    model.
+    """
+    from .developer_routes import RouteError, load_route_config
+    try:
+        loaded = load_route_config() if config is None else config
+    except RouteError:
+        _reject('OPENCODE_ROUTE_MODEL_INVALID')
+    routes = loaded.get('routes') if type(loaded) is dict else None
+    entry = routes.get('opencode') if type(routes) is dict else None
+    model = entry.get('default_model') if type(entry) is dict else None
+    if not is_free_model(model):
+        _reject('OPENCODE_ROUTE_MODEL_INVALID')
     return model
 
 

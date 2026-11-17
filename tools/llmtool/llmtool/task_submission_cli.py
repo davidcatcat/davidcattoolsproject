@@ -934,6 +934,10 @@ def add_task_submission_parsers(actions):
                           help=('Claude, OpenCode, AGY and gw-agent direct runs: wall-clock '
                                 'limit in seconds (default: the route default_timeout; at most '
                                 'the route max_timeout and never above 3600)'))
+    delegate.add_argument('--model', default=None,
+                          help=('AGY, Claude and OpenCode: one-shot Developer model for this '
+                                'Task only; never saved as a default. A repair of the Task '
+                                'keeps the model recorded for it (#2302)'))
     delegate.add_argument('--context-stdin', action='store_true',
                           help='codex text proposals only: read bounded, sensitive-screened context from stdin')
     delegate.add_argument('--pm-session',
@@ -4552,8 +4556,15 @@ def _print_task_without_masking_interrupt(store, task_id):
         pass
 
 
-def _opencode_developer_profile():
-    """Return the optional OpenCode model and validated agent step limit."""
+def _opencode_developer_profile(model_choice=None):
+    """Return the OpenCode model and validated agent step limit.
+
+    #2302: model_choice (a one-shot --model or the model recorded for a
+    started Task) wins and is used as given; otherwise role model > profile
+    model > developer-routes.json routes.opencode.default_model. Every model
+    must be an OpenCode free model; a chosen model that is not is refused with
+    MODEL_UNSUPPORTED and nothing falls back to another model.
+    """
     try:
         yaml_module()
     except LLMToolError:
@@ -4579,19 +4590,33 @@ def _opencode_developer_profile():
     except opencode_direct_developer.DirectOpenCodeError:
         raise LLMToolError('opencode-developer profile steps must be an integer from 3 to 1000') \
             from None
-    model = provider['model']
-    if model is None:
-        model = opencode_direct_developer.MODEL
     try:
-        role = role_config.resolve_role('opencode-developer')
+        # #2302: a chosen model is a one-shot CLI value; resolve_role never saves it.
+        role = (role_config.resolve_role('opencode-developer') if model_choice is None else
+                role_config.resolve_role('opencode-developer', cli={'model': model_choice}))
     except LLMToolError:
         raise LLMToolError('opencode-developer role configuration is invalid') from None
     if role.get('account') is not None:
         error = LLMToolError('opencode-developer role accounts are not supported')
         error.role_config_code = 'OPENCODE_ROLE_ACCOUNT_UNSUPPORTED'
         raise error
-    if role.get('model') is not None:
-        model = role['model']
+    if model_choice is not None:
+        # The chosen (one-shot or Task-recorded) model is used exactly as given:
+        # no role effort rewrite and no fallback; free-only still applies.
+        if not opencode_direct_developer.is_free_model(model_choice):
+            _model_unsupported('opencode-developer',
+                               'an opencode/<name>-free model is required')
+        return model_choice, steps
+    model = role.get('model') or provider['model']
+    if model is None:
+        # #2302: the default comes from developer-routes.json, never a constant.
+        try:
+            model = opencode_direct_developer.route_default_model()
+        except opencode_direct_developer.DirectOpenCodeError:
+            error = LLMToolError('opencode-developer route default model is unavailable '
+                                 'or not an opencode/<name>-free model')
+            error.role_config_code = 'OPENCODE_ROUTE_MODEL_INVALID'
+            raise error from None
     if role.get('effort') is not None:
         model = model.split('#', 1)[0] + '#' + role['effort']
     try:
@@ -4601,22 +4626,76 @@ def _opencode_developer_profile():
                            'opencode/<name>-free model') from None
 
 
-def _resolve_developer_role(role_name, *, owner_override=None, repository=None,
-                            fetch_comment=None):
+# #2302: a chosen Developer model the provider cannot run. No fallback model.
+MODEL_UNSUPPORTED = 'MODEL_UNSUPPORTED'
+# Routes whose delegate accepts a one-shot --model (#2302).
+_MODEL_CHOICE_ROUTES = ('agy', 'claude', 'opencode')
+# Bounded model-name shape checked before any route-specific validation.
+_MODEL_CHOICE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/#-]{0,127}\Z')
+
+
+def _model_unsupported(role_name, detail=None):
+    """Refuse a chosen model with MODEL_UNSUPPORTED; nothing falls back."""
+    message = role_name + ' model is not supported: ' + MODEL_UNSUPPORTED
+    if type(detail) is str and detail:
+        message += ' (' + detail + ')'
+    error = LLMToolError(message)
+    error.role_config_code = MODEL_UNSUPPORTED
+    raise error from None
+
+
+def _delegate_model_choice(args, role_name):
+    """Return this delegate's chosen model, or None to use the configuration (#2302).
+
+    ``args.recorded_model`` is the model recorded for a started Task; only an
+    internal repair or start retry sets it, and it wins. ``args.model`` is the
+    one-shot ``task delegate --model`` value. Neither is ever written to any
+    configuration. A malformed value, or a one-shot model that differs from the
+    recorded one, is refused with MODEL_UNSUPPORTED.
+    """
+    recorded = getattr(args, 'recorded_model', None)
+    chosen = getattr(args, 'model', None)
+    for value in (recorded, chosen):
+        if value is not None and (type(value) is not str or
+                                  _MODEL_CHOICE.fullmatch(value) is None):
+            _model_unsupported(role_name)
+    if recorded is not None:
+        if chosen is not None and chosen != recorded:
+            _model_unsupported(role_name, 'the Task keeps its recorded model')
+        return recorded
+    return chosen
+
+
+def _require_model_choice_route(args):
+    """Refuse a one-shot --model on a route that cannot honour it (#2302)."""
+    if (getattr(args, 'model', None) is not None and
+            getattr(args, 'provider', None) not in _MODEL_CHOICE_ROUTES):
+        _model_unsupported(str(getattr(args, 'provider', None)) + '-developer',
+                           '--model applies only to the AGY, Claude and OpenCode routes')
+
+
+def _resolve_developer_role(role_name, *, model_choice=None, owner_override=None,
+                            repository=None, fetch_comment=None):
     """Resolve a Developer role through the single role_config resolver (#1502 WP-E).
 
     The resolver applies CLI > env > user config > developer-routes.json
     precedence and refuses a model outside allowed_models at resolve time.
     Override arguments are passed only when an owner override is supplied.
+    #2302: model_choice is passed as the one-shot CLI model (never saved);
+    its refusal is MODEL_UNSUPPORTED, with no fallback.
     """
     kwargs = {}
+    if model_choice is not None:
+        kwargs['cli'] = {'model': model_choice}
     if owner_override is not None:
-        kwargs = {'owner_override': owner_override, 'repository': repository,
-                  'fetch_comment': fetch_comment}
+        kwargs.update(owner_override=owner_override, repository=repository,
+                      fetch_comment=fetch_comment)
     try:
         return role_config.resolve_role(role_name, **kwargs)
     except LLMToolError as exc:
         if getattr(exc, 'role_config_code', None) == role_config.ROLE_MODEL_NOT_ALLOWED:
+            if model_choice is not None:
+                _model_unsupported(role_name)
             _refuse_developer_model(role_name, getattr(exc, 'owner_override_code', None))
         raise LLMToolError(role_name + ' role configuration is invalid') from None
 
@@ -4641,8 +4720,11 @@ def _developer_role_value(role, key, route_config):
     return value or route_config.get('default_' + key)
 
 
-def _require_developer_model(role_name, route, route_config, model, role):
-    """Dispatch-time allowed_models check; a verified override must match exactly."""
+def _require_developer_model(role_name, route, route_config, model, role, *, chosen=False):
+    """Dispatch-time allowed_models check; a verified override must match exactly.
+
+    #2302: a chosen model (chosen=True) that fails is MODEL_UNSUPPORTED.
+    """
     try:
         check_route_model({'routes': {route: route_config}}, route, model)
         return
@@ -4652,13 +4734,20 @@ def _require_developer_model(role_name, route, route_config, model, role):
     if (type(verified) is dict and verified.get('route') == route and
             type(model) is str and verified.get('model') == model):
         return
+    if chosen:
+        _model_unsupported(role_name)
     _refuse_developer_model(role_name)
 
 
-def _agy_developer_profile(route_config, *, owner_override=None, repository=None,
-                           fetch_comment=None):
-    """Apply the AGY role model and effort before the route's normal validation."""
-    role = _resolve_developer_role('agy-developer', owner_override=owner_override,
+def _agy_developer_profile(route_config, *, model_choice=None, owner_override=None,
+                           repository=None, fetch_comment=None):
+    """Apply the AGY role model and effort before the route's normal validation.
+
+    #2302: model_choice (one-shot --model or the Task's recorded model) is
+    the model; a model AGY cannot run is refused with MODEL_UNSUPPORTED.
+    """
+    role = _resolve_developer_role('agy-developer', model_choice=model_choice,
+                                   owner_override=owner_override,
                                    repository=repository, fetch_comment=fetch_comment)
     if role.get('account') is not None:
         error = LLMToolError('agy-developer role accounts are not supported')
@@ -4666,6 +4755,11 @@ def _agy_developer_profile(route_config, *, owner_override=None, repository=None
         raise error
     model = _developer_role_value(role, 'model', route_config)
     effort = _developer_role_value(role, 'effort', route_config)
+    if model_choice is not None:
+        try:
+            model = AgyRoute(route_config).validate_model(model_choice)
+        except RouteError:
+            _model_unsupported('agy-developer')
     # The allowlist check runs after the route's own profile validation, so a
     # malformed model or effort keeps its AGY_ROLE_PROFILE_INVALID refusal.
     try:
@@ -4674,28 +4768,42 @@ def _agy_developer_profile(route_config, *, owner_override=None, repository=None
         error = LLMToolError('agy-developer role model or effort is invalid')
         error.role_config_code = 'AGY_ROLE_PROFILE_INVALID'
         raise error from None
-    _require_developer_model('agy-developer', 'agy', route_config, model, role)
+    _require_developer_model('agy-developer', 'agy', route_config, model, role,
+                             chosen=model_choice is not None)
     return model, effort
 
 
-def _claude_developer_profile(route_config, *, owner_override=None, repository=None,
-                              fetch_comment=None):
-    """Apply the configured Claude role model, effort, and config directory."""
-    role = _resolve_developer_role('claude-developer', owner_override=owner_override,
+def _claude_developer_profile(route_config, *, model_choice=None, owner_override=None,
+                              repository=None, fetch_comment=None):
+    """Apply the configured Claude role model, effort, and config directory.
+
+    #2302: model_choice (one-shot --model or the Task's recorded model) is
+    the model; a model Claude cannot run is refused with MODEL_UNSUPPORTED.
+    """
+    role = _resolve_developer_role('claude-developer', model_choice=model_choice,
+                                   owner_override=owner_override,
                                    repository=repository, fetch_comment=fetch_comment)
     if type(role) is not dict:
         raise LLMToolError('claude-developer role configuration is invalid')
     model = _developer_role_value(role, 'model', route_config)
     effort = _developer_role_value(role, 'effort', route_config)
+    if model_choice is not None:
+        try:
+            model = ClaudeRoute(route_config).validate_model(model_choice)
+        except RouteError:
+            _model_unsupported('claude-developer')
     config_dir = role.get('config_dir')
     if type(config_dir) is not str or not os.path.isabs(config_dir):
         raise LLMToolError('claude-developer config_dir is unavailable or invalid')
-    _require_developer_model('claude-developer', 'claude', route_config, model, role)
+    chosen = model_choice is not None
+    _require_developer_model('claude-developer', 'claude', route_config, model, role,
+                             chosen=chosen)
     try:
         model, effort = ClaudeRoute(route_config).validate_profile(model, effort)
     except RouteError:
         raise LLMToolError('claude-developer role model or effort is invalid') from None
-    _require_developer_model('claude-developer', 'claude', route_config, model, role)
+    _require_developer_model('claude-developer', 'claude', route_config, model, role,
+                             chosen=chosen)
     return model, effort, config_dir
 
 
@@ -4936,7 +5044,8 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
     if prompt_size > REQUEST_LIMIT:
         raise LLMToolError('OpenCode task prompt exceeds the supported size')
     _screen_text(prompt, REQUEST_LIMIT)
-    model, steps = _opencode_developer_profile()
+    model, steps = _opencode_developer_profile(
+        _delegate_model_choice(args, 'opencode-developer'))
     # #1502 WP-F: pin main and read the role cards before any Task write or
     # provider call; any pin or card failure refuses here (fail closed).
     card_prefix, card_prefix_sha256 = _developer_card_prefix(task, registration, 'opencode')
@@ -5400,7 +5509,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     _screen_text(task['response'], RESPONSE_LIMIT)
     config = load_route_config()
     route_config = dict(config['routes']['agy'])
-    model, effort = _agy_developer_profile(route_config)
+    model, effort = _agy_developer_profile(
+        route_config, model_choice=_delegate_model_choice(args, 'agy-developer'))
     executable = shutil.which(route_config['executable'])
     if executable is None:
         raise LLMToolError('AGY executable is unavailable')
@@ -5937,7 +6047,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
     if type(route_value) is not dict:
         raise LLMToolError('Claude route configuration is unavailable')
     route_config = dict(route_value)
-    model, effort, config_dir = _claude_developer_profile(route_config)
+    model, effort, config_dir = _claude_developer_profile(
+        route_config, model_choice=_delegate_model_choice(args, 'claude-developer'))
     executable = shutil.which('claude')
     if executable is None:
         raise LLMToolError('Claude executable is unavailable')
@@ -6346,6 +6457,13 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     # gateway profile will actually serve is checked against allowed_models (or
     # a verified owner override). Only that checked model is bound below.
     model, effort = _gw_agent_developer_profile(role_route_config, served_model=model)
+    # #2302: a repair keeps the model recorded for the started Task. The gateway
+    # profile decides the served model, so a different one is refused before any
+    # Task write; there is no fallback.
+    recorded = _delegate_model_choice(args, 'gw-agent-developer')
+    if recorded is not None and recorded != model:
+        _model_unsupported('gw-agent-developer',
+                           'the gateway serves a model other than the Task recorded model')
     route_config['default_model'] = model
     route_config['expected_served_model'] = model
     route_config['profile']['model'] = model
@@ -7941,6 +8059,10 @@ def run_task_delegate(args, *, store=None):
         raise LLMToolError(
             f'WORKER_ID_RETIRED_ALIAS: {retired} is a retired id; use '
             f'{worker_dispatch.RETIRED_WORKER_ALIASES[retired]} (#1502 WP-E)')
+    # #2302: refuse an unsupported or malformed model choice before any Task
+    # read, fork or provider call. The choice is one-shot and never saved.
+    _require_model_choice_route(args)
+    _delegate_model_choice(args, str(getattr(args, 'provider', None)) + '-developer')
     # #1815: refuse a bad --timeout before any Task read, fork or provider call.
     selected_route = getattr(args, 'provider', None)
     if selected_route in TIMEOUT_ROUTES:

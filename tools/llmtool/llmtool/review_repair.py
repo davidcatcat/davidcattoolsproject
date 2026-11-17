@@ -189,7 +189,12 @@ def _worker_key(profile):
 
 def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
                      store=None, **_route_metadata):
-    """Resume the original direct Developer route with a bounded repair request."""
+    """Resume the original direct Developer route with a bounded repair request.
+
+    #2302: the repair runs on the model recorded for the started Task
+    (developer['model']), never on the current configuration; a record with
+    no model is refused with REPAIR_MODEL_UNKNOWN before any delegate call.
+    """
     from . import task_submission_cli
 
     invoke = task_submission_cli.run_task_delegate if delegate is None else delegate
@@ -200,6 +205,9 @@ def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
     if (type(acceptance) is not list or type(read_paths) is not list or
             type(write_paths) is not list):
         _refuse('REPAIR_DEVELOPER_BINDING_INVALID')
+    recorded_model = developer.get('model')
+    if type(recorded_model) is not str or not recorded_model:
+        _refuse('REPAIR_MODEL_UNKNOWN')
     profile = developer.get('provider_profile')
     data_class = developer.get('data_class')
     if profile == 'gw-agent' and data_class not in ('SYNTHETIC', 'PUBLIC_REPO'):
@@ -220,7 +228,7 @@ def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
         read_path=list(read_paths),
         write_path=list(write_paths), acceptance=list(acceptance),
         egress_basis=developer.get('egress_basis'), repair_packet=packet,
-        data_class=data_class,
+        data_class=data_class, recorded_model=recorded_model,
     )
     return invoke(args, store=store)
 
@@ -685,6 +693,10 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
     if profile == 'company-gw':
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
+    # #2302: the repair keeps the started Task's recorded model; without one it
+    # is refused here, before any repair Task, claim or attempt is used.
+    if type(developer.get('model')) is not str or not developer.get('model'):
+        _refuse('REPAIR_MODEL_UNKNOWN')
     if profile == 'claude' and shutil.which(profile) is None:
         _refuse('RUNTIME_NOT_ON_PATH')
     ci_identity_sha = None
