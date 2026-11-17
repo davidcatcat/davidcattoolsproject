@@ -2,6 +2,9 @@
 
 **Proposal only; not a review or acceptance.** Source: `main` at `a2b6f4d891d89f16f3411122e25f307a54538a01`. Code paths are under `tools/llmtool/llmtool/`; claims about today cite `path:line` at that SHA. Anything not read is UNVERIFIED. The entry is 待實作（WP-5）.
 
+**Status (2026-11-17):** WP-5 shipped in reduced form by [PR #2213](https://github.com/davidcatcat/davidcattoolsproject/pull/2213): `task high-debug --issue` posts only to a verified plain Issue; a Task with no completion must hold the D6 named by the newest binding-journal entry, and a missing or unreadable journal fails closed; a `no_pr` entry is refused by the four formal RCA consumers.
+The consultation ledger (the Ledger parts of section 3 and plan item 1) and the design-advice PR were dropped by the Owner scope-down ([#1943 comment 6894302255](https://github.com/davidcatcat/davidcattoolsproject/issues/1943#issuecomment-6894302255) and [#1943 comment 6906309958](https://github.com/davidcatcat/davidcattoolsproject/issues/1943#issuecomment-6906309958)); the sections below are the original proposal, kept for history.
+
 ## 1. Today (現行)
 
 - **CLI.** Required: `task_id`, `--executor-task`, `--pr` (int), `--family`, and `--failed-corrections` or `--early` (`task_submission_cli.py:1021-1030`), passed to `run_high_debug_with_fallback` (`:2417-2423`). Refusals print `high-debug refused: CODE (detail)` (`cli.py:736-746`).
