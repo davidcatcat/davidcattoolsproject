@@ -4967,10 +4967,10 @@ class TaskStoreTests(unittest.TestCase):
         existing_task = self._codex_dispatch_task()
         existing_sec_claim = dict(base_claim, review_kind='security')
         existing_sec_event = {
-            'event_id': 's' * 32, 'task_id': existing_task['task_id'],
+            'event_id': '2' * 32, 'task_id': existing_task['task_id'],
             'run_id': existing_task['run_id'],
             'pm_session_id': existing_task['pm_session_id'],
-            'session_id': 'review-' + 's' * 32, 'source': 'REVIEWER',
+            'session_id': 'review-' + '2' * 32, 'source': 'REVIEWER',
             'source_sha': 'a' * 40, 'sequence': 0, 'payload_sha256': 'f' * 64,
             'review_kind': 'security', 'state': 'PENDING',
             'received_at': '2026-10-27T00:00:00Z', 'consumed_at': None,
@@ -5026,8 +5026,8 @@ class TaskStoreTests(unittest.TestCase):
 
         # Fresh write of review_kind='security' on REVIEWER event is refused
         event_args_sec = dict(
-            event_id='s' * 32, run_id=task['run_id'],
-            session_id='review-' + 's' * 32, source='REVIEWER',
+            event_id='2' * 32, run_id=task['run_id'],
+            session_id='review-' + '2' * 32, source='REVIEWER',
             source_sha='a' * 40, sequence=1, payload_sha256='f' * 64)
         with self.assertRaises(LLMToolError) as sec_fresh:
             self.store.record_completion_event(
