@@ -339,6 +339,282 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(self.store.get(TASK)['review_dispatch_claim'][0]['account'],
                          'claude-account')
 
+    def test_preflight_version_range_checked_per_kind(self):
+        executor = SimpleNamespace(
+            result_sha=HEAD, root='/repo/worktree', common_dir='/repo/.git', branch='task')
+        snapshot = SimpleNamespace(
+            head=HEAD, root='/repo/worktree', common_dir='/repo/.git', branch='task',
+            clean=True)
+        task = {
+            'task_id': TASK, 'run_id': 'c' * 32,
+            'task_binding': {'contract_digest': 'd' * 64},
+            'developer': {'provider_profile': 'codex'},
+            'completion': {'executor_task_id': 'executor-d6',
+                           'evidence': {'common_dir': '/repo/.git'}},
+        }
+        pull = {'number': 42, 'head': {'sha': HEAD}, 'base': {'sha': 'c' * 40}}
+        with patch.object(review_dispatch.task_completion, 'validate_task_binding'), \
+                patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                             return_value=executor), \
+                patch.object(review_dispatch.task_completion, 'collect_git_snapshot',
+                             return_value=snapshot), \
+                patch.object(review_dispatch.task_completion, '_github_get',
+                             return_value=pull), \
+                patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                             return_value=SimpleNamespace(allowed=True)):
+            # Formal kind accepts 1..90
+            for v in (1, 45, 90):
+                with self.subTest(kind='formal', version=v):
+                    res = review_dispatch._preflight(
+                        self.store, TASK, 'executor-d6', 42, v, task=task, kind='formal')
+                    self.assertEqual(res[4], 'claude-reviewer')
+
+            # Formal kind refuses < 1 or > 90
+            for v in (0, -1, 91, 92, 100, 9999, 10000):
+                with self.subTest(kind='formal', invalid_version=v), \
+                        self.assertRaises(LLMToolError) as caught:
+                    review_dispatch._preflight(
+                        self.store, TASK, 'executor-d6', 42, v, task=task, kind='formal')
+                self.assertEqual(caught.exception.review_dispatch_code,
+                                 'REVIEW_VERSION_RANGE_INVALID')
+
+            # Security kind accepts 91..9999
+            for v in (91, 100, 9999):
+                with self.subTest(kind='security', version=v):
+                    res = review_dispatch._preflight(
+                        self.store, TASK, 'executor-d6', 42, v, task=task, kind='security')
+                    self.assertEqual(res[4], 'claude-reviewer')
+
+            # Security kind refuses < 91 or > 9999
+            for v in (0, 1, 90, 10000):
+                with self.subTest(kind='security', invalid_version=v), \
+                        self.assertRaises(LLMToolError) as caught:
+                    review_dispatch._preflight(
+                        self.store, TASK, 'executor-d6', 42, v, task=task, kind='security')
+                self.assertEqual(caught.exception.review_dispatch_code,
+                                 'REVIEW_VERSION_RANGE_INVALID')
+
+            # Unknown kind refuses
+            with self.assertRaises(LLMToolError) as caught:
+                review_dispatch._preflight(
+                    self.store, TASK, 'executor-d6', 42, 1, task=task, kind='other')
+            self.assertEqual(caught.exception.review_dispatch_code,
+                             'REVIEW_VERSION_RANGE_INVALID')
+
+            # Non-int or boolean version refuses REVIEW_PROMPT_BINDING_MISSING
+            for v in (True, False, '1', 1.5, None):
+                with self.subTest(bad_type=v), self.assertRaises(LLMToolError) as caught:
+                    review_dispatch._preflight(
+                        self.store, TASK, 'executor-d6', 42, v, task=task, kind='formal')
+                self.assertEqual(caught.exception.review_dispatch_code,
+                                 'REVIEW_PROMPT_BINDING_MISSING')
+
+    def test_dispatch_review_prior_claim_kind_mismatch_and_legacy_unkinded_fails_closed(self):
+        # 1. Existing claim has review_kind='security', dispatch asks for 'formal'
+        self.store.data['review_dispatch_claim'] = [{
+            'executor_task': 'executor-d6', 'pr': 42, 'head_sha': HEAD,
+            'version': 1, 'state': 'CLAIMED', 'reviewer_task': 'reviewer-sec',
+            'native_session_id': None, 'account_mode': 'ROLES',
+            'review_kind': 'security',
+            'claimed_at': '2026-10-27T00:00:00Z', 'updated_at': '2026-10-27T00:00:00Z',
+        }]
+        with self.assertRaises(LLMToolError) as caught:
+            self.invoke()
+        self.assertEqual(caught.exception.review_dispatch_code,
+                         'REVIEW_DISPATCH_CLAIM_MISMATCH')
+
+        # 2. Existing claim has review_kind='formal', dispatch asks for 'security':
+        # PR 1 has no security writer, so the kind itself is refused and the
+        # stored claim is left exactly as it was.
+        self.store.data['review_dispatch_claim'] = [{
+            'executor_task': 'executor-d6', 'pr': 42, 'head_sha': HEAD,
+            'version': 91, 'state': 'CLAIMED', 'reviewer_task': 'reviewer-f',
+            'native_session_id': None, 'account_mode': 'ROLES',
+            'review_kind': 'formal',
+            'claimed_at': '2026-10-27T00:00:00Z', 'updated_at': '2026-10-27T00:00:00Z',
+        }]
+        before = json.loads(json.dumps(self.store.data['review_dispatch_claim']))
+        gate = SimpleNamespace(allowed=True, reason_code='ALLOWED')
+        with patch.object(review_dispatch, '_preflight',
+                          return_value=(TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer')), \
+                patch.object(review_dispatch.worker_dispatch, 'evaluate', return_value=gate), \
+                self.assertRaises(LLMToolError) as caught:
+            review_dispatch.dispatch_review(
+                store=self.store, task_id=TASK, executor_task='executor-d6',
+                pr_number=42, version=91, kind='security')
+        self.assertEqual(caught.exception.review_dispatch_code,
+                         'REVIEW_KIND_UNSUPPORTED')
+        self.assertEqual(self.store.data['review_dispatch_claim'], before)
+
+        # 3. Existing claim is legacy unkinded at version >= 91: a formal
+        # dispatch fails closed on the unknown prior kind; a security dispatch
+        # is refused on its kind before the claim is even looked at.
+        self.store.data['review_dispatch_claim'] = [{
+            'executor_task': 'executor-d6', 'pr': 42, 'head_sha': HEAD,
+            'version': 91, 'state': 'CLAIMED', 'reviewer_task': 'reviewer-old',
+            'native_session_id': None, 'account_mode': 'CODEX_CLI',
+            'claimed_at': '2026-10-27T00:00:00Z', 'updated_at': '2026-10-27T00:00:00Z',
+        }]
+        for kind, code in (('formal', 'REVIEW_DISPATCH_CLAIM_MISMATCH'),
+                           ('security', 'REVIEW_KIND_UNSUPPORTED')):
+            with self.subTest(kind=kind), \
+                    patch.object(review_dispatch, '_preflight',
+                                 return_value=(TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer')), \
+                    patch.object(review_dispatch.worker_dispatch, 'evaluate', return_value=gate), \
+                    self.assertRaises(LLMToolError) as caught:
+                review_dispatch.dispatch_review(
+                    store=self.store, task_id=TASK, executor_task='executor-d6',
+                    pr_number=42, version=91, kind=kind)
+            self.assertEqual(caught.exception.review_dispatch_code, code)
+            self.assertEqual(self.store.data['review_dispatch_claim'][0]['state'], 'CLAIMED')
+
+    def test_dispatch_review_next_version_arithmetic_is_kind_aware(self):
+        other_head = 'c' * 40
+        # Stored claims on another head: formal v1 and security v91
+        self.store.data['review_dispatch_claim'] = [
+            {
+                'executor_task': 'executor-d6', 'pr': 42, 'head_sha': other_head,
+                'version': 1, 'state': 'COMPLETED', 'reviewer_task': 'reviewer-1',
+                'native_session_id': 'sess-1', 'account_mode': 'ROLES',
+                'review_kind': 'formal',
+                'claimed_at': '2026-10-27T00:00:00Z', 'updated_at': '2026-10-27T00:00:00Z',
+            },
+            {
+                'executor_task': 'executor-d6', 'pr': 42, 'head_sha': other_head,
+                'version': 91, 'state': 'COMPLETED', 'reviewer_task': 'reviewer-91',
+                'native_session_id': 'sess-91', 'account_mode': 'CODEX_CLI',
+                'review_kind': 'security',
+                'claimed_at': '2026-10-27T00:00:00Z', 'updated_at': '2026-10-27T00:00:00Z',
+            },
+        ]
+        gate = SimpleNamespace(allowed=True, reason_code='ALLOWED')
+        # Re-dispatching version 1 for formal: next version is max(formal) + 1 = 2 (not 92!)
+        with patch.object(review_dispatch, '_preflight',
+                          return_value=(TASK, self.executor, HEAD, 'd' * 40, 'claude-reviewer')), \
+                patch.object(review_dispatch.worker_dispatch, 'evaluate', return_value=gate), \
+                self.assertRaises(LLMToolError) as caught:
+            review_dispatch.dispatch_review(
+                store=self.store, task_id=TASK, executor_task='executor-d6',
+                pr_number=42, version=1, kind='formal')
+        self.assertEqual(caught.exception.review_dispatch_code,
+                         'REVIEW_DISPATCH_VERSION_USED')
+        self.assertIn('use version 2.', str(caught.exception))
+
+        # A security dispatch is refused on its kind (PR 1 has no security
+        # writer); the stored claims are untouched.
+        before = json.loads(json.dumps(self.store.data['review_dispatch_claim']))
+        with patch.object(review_dispatch, '_preflight',
+                          return_value=(TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer')), \
+                patch.object(review_dispatch.worker_dispatch, 'evaluate', return_value=gate), \
+                self.assertRaises(LLMToolError) as caught:
+            review_dispatch.dispatch_review(
+                store=self.store, task_id=TASK, executor_task='executor-d6',
+                pr_number=42, version=91, kind='security')
+        self.assertEqual(caught.exception.review_dispatch_code,
+                         'REVIEW_KIND_UNSUPPORTED')
+        self.assertEqual(self.store.data['review_dispatch_claim'], before)
+
+    def test_non_formal_dispatch_is_refused_before_any_read_preflight_claim_d6_or_session(self):
+        # #2199 PR 1 (security v91 F1, CWE-841): dispatch_review has no
+        # security writer path. Every kind but 'formal' is refused with one
+        # stable code before the store is read and before any side effect.
+        self.store.data.update({
+            'developer': {'provider_profile': 'claude'},
+            'run_id': 'c' * 32,
+            'task_binding': {'contract_digest': 'd' * 64},
+        })
+        self.store.path.write_text(json.dumps(self.store.data))
+        before = self.store.path.read_text()
+        calls = []
+
+        class SpyStore:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def __getattr__(self, name):
+                calls.append(name)
+                return getattr(self.inner, name)
+
+        def record(name):
+            return lambda *args, **kwargs: calls.append(name)
+
+        for kind in ('security', 'invalid_kind', '', 'FORMAL', None, 1):
+            with self.subTest(kind=kind):
+                calls.clear()
+                with patch.object(review_dispatch, '_preflight',
+                                  side_effect=record('_preflight')), \
+                        patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                                     side_effect=record('evaluate')), \
+                        patch.object(review_dispatch, '_resolve_github_login',
+                                     side_effect=record('_resolve_github_login')), \
+                        self.assertRaises(LLMToolError) as caught:
+                    review_dispatch.dispatch_review(
+                        store=SpyStore(self.store), task_id=TASK,
+                        executor_task='executor-d6', pr_number=42, version=91,
+                        kind=kind, create_d6=record('create_d6'),
+                        dispatch_session=record('dispatch_session'),
+                        bind_session=record('bind_session'),
+                        prompt_renderer=record('prompt_renderer'),
+                        codex_runner=record('codex_runner'))
+                self.assertEqual(caught.exception.review_dispatch_code,
+                                 'REVIEW_KIND_UNSUPPORTED')
+                self.assertEqual(calls, [])
+                self.assertEqual(self.store.path.read_text(), before)
+                self.assertNotIn('review_dispatch_claim', self.store.get(TASK))
+
+    def test_kind_and_version_range_refusal_happens_before_claim_or_d6_written(self):
+        task_data = {
+            'task_id': TASK,
+            'developer': {'provider_profile': 'claude'},
+            'run_id': 'c' * 32,
+            'task_binding': {'contract_digest': 'd' * 64},
+            'completion': {'executor_task_id': 'executor-d6',
+                           'evidence': {'common_dir': '/repo/.git'}},
+            'record_sha256': 'c' * 64,
+        }
+        self.store.data.update(task_data)
+        self.store.path.write_text(json.dumps(self.store.data))
+        # A formal dispatch outside 1..90 is refused on its range; any other
+        # kind is refused on the kind itself (PR 1 has no security writer).
+        cases = [
+            ('formal', 91, 'REVIEW_VERSION_RANGE_INVALID'),
+            ('formal', 0, 'REVIEW_VERSION_RANGE_INVALID'),
+            ('formal', 92, 'REVIEW_VERSION_RANGE_INVALID'),
+            ('security', 1, 'REVIEW_KIND_UNSUPPORTED'),
+            ('security', 90, 'REVIEW_KIND_UNSUPPORTED'),
+            ('security', 91, 'REVIEW_KIND_UNSUPPORTED'),
+            ('security', 10000, 'REVIEW_KIND_UNSUPPORTED'),
+            ('invalid_kind', 1, 'REVIEW_KIND_UNSUPPORTED'),
+        ]
+        executor = SimpleNamespace(
+            result_sha=HEAD, root='/repo/worktree', common_dir='/repo/.git', branch='task')
+        snapshot = SimpleNamespace(
+            head=HEAD, root='/repo/worktree', common_dir='/repo/.git', branch='task',
+            clean=True)
+        pull = {'number': 42, 'head': {'sha': HEAD}, 'base': {'sha': 'c' * 40}}
+
+        for kind, v, code in cases:
+            with self.subTest(kind=kind, version=v):
+                test_store = DurableFakeStore(self.store.path)
+                created_d6 = []
+                with patch.object(review_dispatch.task_completion, 'validate_task_binding'), \
+                        patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                                     return_value=executor), \
+                        patch.object(review_dispatch.task_completion, 'collect_git_snapshot',
+                                     return_value=snapshot), \
+                        patch.object(review_dispatch.task_completion, '_github_get',
+                                     return_value=pull), \
+                        patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                                     return_value=SimpleNamespace(allowed=True)), \
+                        self.assertRaises(LLMToolError) as caught:
+                    review_dispatch.dispatch_review(
+                        store=test_store, task_id=TASK, executor_task='executor-d6',
+                        pr_number=42, version=v, kind=kind, reviewer='codex-reviewer',
+                        create_d6=lambda **kw: created_d6.append(kw))
+                self.assertEqual(caught.exception.review_dispatch_code, code)
+                self.assertEqual(len(created_d6), 0)
+                self.assertNotIn('review_dispatch_claim', test_store.get(TASK))
+
     def test_legacy_alias_naming_a_codex_account_is_refused_before_any_claim(self):
         # The real resolver on a temporary home: the Owner-style legacy
         # 'reviewer' entry names a Codex account, so dispatch stops at resolve.

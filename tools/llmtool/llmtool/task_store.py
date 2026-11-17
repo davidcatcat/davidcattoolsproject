@@ -953,11 +953,19 @@ def _validate_completion_events(record):
         _fail('COMPLETION_EVENT_INVALID')
     ids, sequences, last_sequence = set(), set(), {}
     for event in events:
-        github_fields = set(event) - _COMPLETION_EVENT_FIELDS if type(event) is dict else set()
+        github_fields = (set(event) & _GITHUB_EVENT_FIELDS) if type(event) is dict else set()
+        is_valid_shape = (
+            set(event) == _COMPLETION_EVENT_FIELDS or
+            (set(event) == _COMPLETION_EVENT_FIELDS | _GITHUB_EVENT_FIELDS and
+             event.get('source') == 'GITHUB') or
+            (set(event) == _COMPLETION_EVENT_FIELDS | frozenset(('review_kind',)) and
+             event.get('source') == 'REVIEWER')
+        ) if type(event) is dict else False
         if (type(event) is not dict or
-                (set(event) != _COMPLETION_EVENT_FIELDS and
-                 not (set(event) == _COMPLETION_EVENT_FIELDS | _GITHUB_EVENT_FIELDS and
-                      event.get('source') == 'GITHUB')) or
+                not is_valid_shape or
+                ('review_kind' in event and
+                 (type(event['review_kind']) is not str or
+                  event['review_kind'] not in ('formal', 'security'))) or
                 not _safe_identifier(event['event_id'], TASK_ID) or
                 event['event_id'] in ids or
                 event['task_id'] != record['task_id'] or
@@ -2266,7 +2274,8 @@ def _validate(record, *, strict=True):
         for item in claims:
             if (type(item) is not dict or
                     set(item) - frozenset(('failure_reason', 'binding_mismatch_keys',
-                                           'rules_sha256', 'bind_failure_reason')) not in (
+                                           'rules_sha256', 'bind_failure_reason',
+                                           'review_kind')) not in (
                         _REVIEW_DISPATCH_CLAIM_FIELDS,
                         _REVIEW_DISPATCH_CLAIM_FIELDS | frozenset(('review_result',)),
                         _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS,
@@ -2285,6 +2294,9 @@ def _validate(record, *, strict=True):
                     ('rules_sha256' in item and
                      (type(item['rules_sha256']) is not str or
                       re.fullmatch(r'[0-9a-f]{64}', item['rules_sha256']) is None)) or
+                    ('review_kind' in item and
+                     (type(item['review_kind']) is not str or
+                      item['review_kind'] not in ('formal', 'security'))) or
                     ('account' in item and
                      (type(item['account']) is not str or
                       _NAME.fullmatch(item['account']) is None)) or
@@ -3887,6 +3899,11 @@ class TaskStore:
             _fail('TASK_FILE_OPS_EVIDENCE_FORBIDDEN')
         if type(record) is dict and 'file_ops_reservation' in record:
             _fail('TASK_FILE_OPS_RESERVATION_FORBIDDEN')
+        if type(record) is dict and 'review_dispatch_claim' in record:
+            claims = record['review_dispatch_claim']
+            claims_list = [claims] if type(claims) is dict else claims if type(claims) is list else []
+            if any(type(c) is dict and c.get('review_kind') == 'security' for c in claims_list):
+                _fail('REVIEW_DISPATCH_CLAIM_INVALID')
         if type(record) is dict and 'start_failures' in record:
             # #2188: appended to an existing Task by its START_RETRY write only.
             _fail('START_RETRY_INVALID')
@@ -4474,7 +4491,7 @@ class TaskStore:
 
     def record_completion_event(self, task_id, *, event_id, run_id, session_id,
                                 source, source_sha, sequence, payload_sha256,
-                                github_metadata=None):
+                                github_metadata=None, review_kind=None):
         """Persist a terminal event before any wake; identical replay is inert.
 
         The caller verifies the terminal source separately. This storage API
@@ -4499,6 +4516,11 @@ class TaskStore:
                     not 1 <= github_metadata['issue_number'] <= 9999999):
                 _fail('COMPLETION_EVENT_INVALID')
             binding.update(github_metadata)
+        if review_kind is not None:
+            if (source != 'REVIEWER' or type(review_kind) is not str or
+                    review_kind != 'formal'):
+                _fail('COMPLETION_EVENT_INVALID')
+            binding['review_kind'] = review_kind
         for _ in range(5):
             current = self.get(task_id)
             if current['schema_version'] != 2 or current['run_id'] != run_id:
@@ -4516,7 +4538,11 @@ class TaskStore:
                         False)
             for existing in events:
                 if existing['event_id'] == event_id:
-                    if any(existing[key] != value for key, value in binding.items()):
+                    if existing.get('source') == 'REVIEWER' or source == 'REVIEWER':
+                        if existing.get('review_kind', 'formal') != binding.get('review_kind', 'formal'):
+                            _fail('COMPLETION_EVENT_CONFLICT')
+                    if any(existing.get(key) != value for key, value in binding.items()
+                           if key != 'review_kind'):
                         _fail('COMPLETION_EVENT_CONFLICT')
                     return self._completion_result(existing, False)
             for existing in events + tombstones:
@@ -5821,7 +5847,8 @@ class TaskStore:
                 if type(old_claims) is list and type(new_claims) is list:
                     if len(new_claims) == len(old_claims) + 1 and new_claims[:-1] == old_claims:
                         allowed_claim_transition = (type(new_claims[-1]) is dict and
-                                                    new_claims[-1].get('state') == 'CLAIMED')
+                                                    new_claims[-1].get('state') == 'CLAIMED' and
+                                                    new_claims[-1].get('review_kind') != 'security')
                     elif len(new_claims) == len(old_claims):
                         changed = [index for index, (before, after) in
                                    enumerate(zip(old_claims, new_claims)) if before != after]
@@ -5831,10 +5858,12 @@ class TaskStore:
                             allowed_claim_transition = (
                                 before.get('state') == 'CLAIMED' and
                                 after.get('state') in ('UNKNOWN', 'DISPATCHED', 'COMPLETED') and
+                                before.get('review_kind') != 'security' and
+                                after.get('review_kind') != 'security' and
                                 all(before.get(key) == after.get(key) for key in (
                                     'executor_task', 'pr', 'head_sha', 'version',
                                     'account_mode', 'account', 'claimed_at',
-                                    'reviewer_task', 'rules_sha256')) and
+                                    'reviewer_task', 'rules_sha256', 'review_kind')) and
                                 (before.get('state') == 'CLAIMED' and
                                  (after.get('state') == 'COMPLETED' or
                                   ('review_result' not in after))) and
@@ -5851,6 +5880,8 @@ class TaskStore:
                                     'binding_mismatch_keys' not in before and
                                     'bind_failure_reason' not in before and
                                     type(before.get('native_session_id')) is str and
+                                    before.get('review_kind') != 'security' and
+                                    after.get('review_kind') != 'security' and
                                     set(after) == set(before) and
                                     all(before.get(key) == after.get(key) for key in before
                                         if key not in ('state', 'updated_at')) and
