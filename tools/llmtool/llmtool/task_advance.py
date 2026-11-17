@@ -1877,14 +1877,15 @@ def label_mac_ci_for_skipped_check(*, task_id, store=None, pr_number=None,
     return {'step': 'WAITING_CI', 'codes': [], 'result': {'pr': number, 'head': head}}
 
 
-def _record_d6_result(*, task_id, canonical_root, root):
+def _record_d6_result(*, task_id, canonical_root, root, write_paths=None):
     lifecycle_path = Path(__file__).resolve().parents[1] / 'scripts' / 'd6_worktree_lifecycle.py'
     spec = importlib.util.spec_from_file_location('_llmtool_d6_worktree_lifecycle', lifecycle_path)
     if spec is None or spec.loader is None:
         raise _PublishRefusal('PUBLISH_RESULT_RECORD_FAILED')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.record_result(task_id=task_id, canonical_root=canonical_root, root=root)
+    return module.record_result(task_id=task_id, canonical_root=canonical_root, root=root,
+                                 write_paths=write_paths)
 
 
 def _publish_task(record, d6, executor_task, *, pre_pr_gate, git_runner=None,
@@ -2000,7 +2001,7 @@ def _publish_task(record, d6, executor_task, *, pre_pr_gate, git_runner=None,
         try:
             record_result_call = _record_d6_result if record_result_call is None else record_result_call
             recorded = record_result_call(task_id=executor_task, canonical_root=canonical_root,
-                                          root=root)
+                                          root=root, write_paths=write_paths)
         except Exception:
             raise _PublishRefusal('PUBLISH_RESULT_RECORD_FAILED') from None
         if recorded not in (None, local_head):
