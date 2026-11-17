@@ -55,8 +55,10 @@ def tearDownModule():
 
 
 SESSION = '4f9c2a1e-8b7d-4c3e-9a2f-1d0e5b6c7a88'
-# Plain synthetic marker; flagged only by the injected screen below.
+# Plain synthetic markers; flagged only by the injected screen below. The
+# subtype marker fits the subtype shape, so only the screen can refuse it.
 MARKER = 'SYNTHETIC-SCREEN-MARKER-2275'
+SUBTYPE_MARKER = 'synthetic_screen_marker_2275'
 EVIDENCE_KEYS = {'subtype', 'is_error', 'num_turns', 'duration_ms',
                  'process_exit_code', 'result_head'}
 # Developer keys the delegate's BLOCKED outcome sets (run_task_claude_delegate).
@@ -118,9 +120,9 @@ def _exit_nonzero(route, parsed):
     raise RouteError('CLAUDE_EXIT_NONZERO')
 
 
-def _flagging(original):
+def _flagging(original, marker=MARKER):
     def screen(text):
-        return (type(text) is str and MARKER in text) or original(text)
+        return (type(text) is str and marker in text) or original(text)
     return screen
 
 
@@ -330,6 +332,26 @@ class ClaudeFailureEvidenceTests(unittest.TestCase):
                 self.assertNotIn(MARKER, json.dumps(store.get(task_id), default=str))
                 self.assertNotIn(MARKER, json.dumps(record))
 
+    def test_screen_hit_drops_subtype_and_is_never_stored(self):
+        # codex-reviewer v1 F1: the subtype is screened like the result head.
+        stdout = _cli_json(subtype=SUBTYPE_MARKER, is_error=True, num_turns=6,
+                           duration_ms=700)
+
+        def setup(stack, cli):
+            stack.enter_context(mock.patch.object(
+                cli, '_emitted_sensitive',
+                _flagging(cli._emitted_sensitive, SUBTYPE_MARKER)))
+        store, task_id = self._run(_failing_runner(stdout, 1, _status_failed),
+                                   setup=setup)
+        record, evidence = self._evidence(store, task_id, 'CLAUDE_STATUS_FAILED', 1)
+        # Only the subtype is dropped; the other typed fields and the head stay.
+        self.assertEqual(evidence, {
+            'subtype': None, 'is_error': True, 'num_turns': 6, 'duration_ms': 700,
+            'process_exit_code': 1,
+            'result_head': 'Provider halted: quokka lattice 7731 stalled at phase nine.'})
+        self.assertNotIn(SUBTYPE_MARKER, json.dumps(store.get(task_id), default=str))
+        self.assertNotIn(SUBTYPE_MARKER, json.dumps(record))
+
     def test_prompt_echo_and_control_text_drop_head(self):
         cases = {
             # Repeats the delegate's own instructions, which are sent text.
@@ -386,6 +408,18 @@ class ClaudeFailureEvidenceTests(unittest.TestCase):
         self.assertIsNone(head(None, sent))
         self.assertIsNone(head('   ', sent))
         self.assertIsNone(head('quokka text', ()))  # sent text unavailable: fail closed
+
+    def test_subtype_helper(self):
+        subtype = task_submission_cli._claude_cli_subtype
+        self.assertEqual(subtype('error_max_turns'), 'error_max_turns')
+        self.assertIsNone(subtype(None))
+        self.assertIsNone(subtype(7))
+        self.assertEqual(subtype(SUBTYPE_MARKER), SUBTYPE_MARKER)
+        with mock.patch.object(task_submission_cli, '_emitted_sensitive',
+                               _flagging(task_submission_cli._emitted_sensitive,
+                                         SUBTYPE_MARKER)):
+            self.assertIsNone(subtype(SUBTYPE_MARKER))
+            self.assertEqual(subtype('error_max_turns'), 'error_max_turns')
 
     # -- TaskStore accepts the field strictly -----------------------------
 
@@ -467,6 +501,20 @@ class ClaudeFailureEvidenceTests(unittest.TestCase):
         with mock.patch.object(task_store, '_emitted_sensitive',
                                _flagging(task_store._emitted_sensitive)):
             self.assertRefused(variant)
+
+    def test_store_screens_subtype(self):
+        # codex-reviewer v1 F1: TaskStore refuses a sensitive subtype value.
+        record = self._stored_failure()
+        developer = record['developer']
+        evidence = dict(developer['cli_failure_evidence'], subtype=SUBTYPE_MARKER)
+        variant = _with_developer(record, dict(developer, cli_failure_evidence=evidence))
+        task_store._validate(variant)
+        with mock.patch.object(task_store, '_emitted_sensitive',
+                               _flagging(task_store._emitted_sensitive, SUBTYPE_MARKER)):
+            self.assertRefused(variant)
+            # A null subtype stays valid under the same screen.
+            task_store._validate(_with_developer(record, dict(
+                developer, cli_failure_evidence=dict(evidence, subtype=None))))
 
 
 if __name__ == '__main__':

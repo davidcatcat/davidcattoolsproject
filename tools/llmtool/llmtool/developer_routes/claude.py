@@ -25,8 +25,9 @@ def cli_result_fields(obj):
     """#2275: typed CLI result fields of a parsed JSON object, else None.
 
     Returns {subtype, is_error, num_turns, duration_ms, result}. A field of
-    the wrong type or out of bounds is None. ``result`` is the raw result
-    text; the caller must screen it before keeping any of it.
+    the wrong type or out of bounds is None. ``subtype`` and ``result`` are
+    provider text (``result`` is the raw result text); the caller must screen
+    each before keeping any of it.
     """
     if type(obj) is not dict:
         return None

@@ -387,9 +387,9 @@ _DEVELOPER_OPTIONAL_FIELDS = (_DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANG
 def _valid_cli_failure_evidence(developer):
     """#2275: strict shape of developer.cli_failure_evidence (Claude CLI, BLOCKED run).
 
-    Every value is typed and bounded; result_head is short, printable and
-    passes the sensitive screen. process_exit_code must equal the stored
-    execution's exit code."""
+    Every value is typed and bounded; subtype and result_head are provider
+    text and both must pass the sensitive screen; result_head is short and
+    printable. process_exit_code must equal the stored execution's exit code."""
     evidence = developer.get('cli_failure_evidence')
     execution = developer.get('execution')
     error_code = developer.get('error_code')
@@ -404,7 +404,8 @@ def _valid_cli_failure_evidence(developer):
         return False
     subtype = evidence['subtype']
     if subtype is not None and (type(subtype) is not str or
-                                _CLI_FAILURE_SUBTYPE.fullmatch(subtype) is None):
+                                _CLI_FAILURE_SUBTYPE.fullmatch(subtype) is None or
+                                _emitted_sensitive(subtype)):
         return False
     if evidence['is_error'] is not None and type(evidence['is_error']) is not bool:
         return False

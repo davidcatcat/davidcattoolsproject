@@ -5783,14 +5783,29 @@ def _claude_result_head(text, sent_texts):
     return head
 
 
+def _claude_cli_subtype(value):
+    """#2275: the CLI result subtype if it passes _screen_text, else None.
+
+    The subtype is provider text: a sensitive hit or any error drops it, so a
+    credential-shaped subtype is never kept. It is never reworded to pass the
+    screen."""
+    if type(value) is not str:
+        return None
+    try:
+        _screen_text(value, 4 * 1024)
+    except Exception:
+        return None
+    return value
+
+
 def _claude_cli_failure_evidence(developer, fields, sent_texts):
     """#2275: bounded, non-secret evidence of a failed or no-change Claude CLI run.
 
     ``fields`` is the route's cli_result_fields of this run's parsed output
     (None when stdout was not JSON). The exit code is the stored execution's.
-    No credential, prompt or file content is kept: only typed values and a
-    screened result head. Returns None unless TaskStore would accept it, so
-    the evidence can never block the BLOCKED record write."""
+    No credential, prompt or file content is kept: only typed values, a
+    screened subtype and a screened result head. Returns None unless TaskStore
+    would accept it, so the evidence can never block the BLOCKED record write."""
     try:
         execution = developer.get('execution')
         if type(execution) is not dict:
@@ -5798,7 +5813,8 @@ def _claude_cli_failure_evidence(developer, fields, sent_texts):
         if type(fields) is not dict:
             fields = {}
         evidence = {
-            'subtype': fields.get('subtype'), 'is_error': fields.get('is_error'),
+            'subtype': _claude_cli_subtype(fields.get('subtype')),
+            'is_error': fields.get('is_error'),
             'num_turns': fields.get('num_turns'), 'duration_ms': fields.get('duration_ms'),
             'process_exit_code': execution.get('process_exit_code'),
             'result_head': _claude_result_head(fields.get('result'), sent_texts),
