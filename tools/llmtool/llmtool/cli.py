@@ -67,6 +67,9 @@ TASK_ACTIONS = {
     'remote-test': ('run_task_remote_test_checked', True),
     'repair': ('run_task_repair', True),
     'replan': ('run_task_replan', False),
+    # #2188 PR 2: re-dispatches a Claude Developer start, so it needs a fresh
+    # source like delegate and repair.
+    'retry-start': ('run_task_retry_start', True),
     'review-dispatch': ('run_task_review_dispatch', True),
     'review-prompt': ('run_task_review_prompt', False),
     'review-result': ('run_task_review_result', False),

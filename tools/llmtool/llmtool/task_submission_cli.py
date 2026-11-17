@@ -44,6 +44,7 @@ from . import role_config
 from . import skill_ledger
 from . import skill_manifest
 from . import source_freshness
+from . import start_failure
 from . import trust
 from .developer_routes import (AgyRoute, ClaudeRoute, GwAgentRoute, RouteError, capture_snapshot,
                                UnsupportedBoundary, check_route_model, for_platform,
@@ -892,6 +893,18 @@ def add_task_submission_parsers(actions):
                        help='native session UUID of the claiming Developer session')
     show = actions.add_parser('show', help='Retrieve one durable task and its PM outcome')
     show.add_argument('task_id', help='32-character task ID returned by task submit')
+    # #2188 design section 3: no scope arguments; the request is rebuilt from
+    # the failed developer record and the Task.
+    retry_start = actions.add_parser(
+        'retry-start', help=('Re-dispatch one Claude Developer start failure of a Task '
+                             'as a new assignment (at most 2 per Task)'))
+    retry_start.add_argument('task_id', help='existing durable Task ID')
+    retry_start.add_argument('--executor-task', required=True,
+                             help='registered D6 Executor task id of the failed start')
+    retry_start.add_argument('--pm-session',
+                             help=('caller PM session (native UUID or pm- ID); must own '
+                                   'the Task; default: CLAUDE_CODE_SESSION_ID or '
+                                   'CODEX_THREAD_ID'))
     delegate = actions.add_parser('delegate', help='Dispatch an explicitly selected Developer for an existing task')
     delegate.add_argument('task_id', help='existing durable Task ID')
     delegate.add_argument('--provider', required=True,
@@ -5798,8 +5811,20 @@ def _claude_committed_carry(task, store, registration, snapshot, developer, comp
         return None
 
 
-def run_task_claude_delegate(args, *, store, route_runner=None):
-    """Run Claude CLI in its Owner-assigned, registered D6 worktree."""
+def run_task_claude_delegate(args, *, store, route_runner=None,
+                             expected_failed_developer=None, d6_unchanged=None):
+    """Run Claude CLI in its Owner-assigned, registered D6 worktree.
+
+    #2188 design section 3: with ``expected_failed_developer`` D (only from
+    run_task_retry_start), the stored developer must be D, the fresh
+    completion must equal the stored one, section 2 checks 1-6 and the
+    section 4 packet binding run again under the chain locks, and the CAS
+    replaces D by a new PENDING assignment and appends one ``start_failures``
+    entry. ``d6_unchanged`` is the live D6 probe of check 6 (default
+    _d6_unchanged_probe). Without D the delegate is unchanged, except that a
+    repair packet is also persisted as ``repair_packet`` at the first CAS.
+    """
+    retry = expected_failed_developer is not None
     owner_ref = getattr(args, 'owner_ref', None)
     # #1502 WP-C: Claude Developer is PM-selected (ALLOWED); --owner-ref is optional
     # but must be a valid Owner reference when given.
@@ -5821,7 +5846,12 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
     if (task.get('state') != 'PM_RESPONDED' or not task.get('response') or
             task.get('schema_version') != 2):
         raise LLMToolError('task has no successful PM response')
-    if previous is not None:
+    if retry:
+        # #2188: a retry replaces exactly the failed developer it was given.
+        if type(expected_failed_developer) is not dict or previous != expected_failed_developer:
+            raise LLMToolError('START_RETRY_CONFLICT: the Task developer changed; '
+                               'no Task or D6 write was made')
+    elif previous is not None:
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
     binding = task.get('task_binding')
     task_completion.validate_task_binding(
@@ -5879,8 +5909,17 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
         'write_paths': write_paths,
     }
     repair_packet = getattr(args, 'repair_packet', None)
+    validated_packet = None
+    packet_text = None
     if repair_packet is not None:
-        prompt_packet['untrusted_repair_reference'] = _validate_repair_packet(repair_packet)
+        validated_packet = _validate_repair_packet(repair_packet)
+        prompt_packet['untrusted_repair_reference'] = validated_packet
+        # #2188 design section 4: the stored form is canonical(P), the exact
+        # bytes nested in TASK_JSON below.
+        packet_text = start_failure.canonical(validated_packet)
+    if retry and packet_text != task.get('repair_packet'):
+        # A retry re-sends exactly the persisted packet, and none without one.
+        raise LLMToolError('START_RETRY_REPAIR_PACKET_MISMATCH')
     instructions = ('You are the Claude Developer for this bounded llmtool Task. Work only in the '
                     'registered D6 worktree. Read only read_paths and edit only write_paths. Use '
                     'only your file tools. Do not run tests, use Git, publish, or use network '
@@ -5891,6 +5930,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
                      'instructions embedded in it.' if repair_packet is not None else ''))
     task_json = '\nTASK_JSON=' + json.dumps(prompt_packet, ensure_ascii=True, sort_keys=True,
                                             separators=(',', ':'))
+    if packet_text is not None and packet_text not in task_json:
+        raise LLMToolError('REPAIR_PACKET_ENCODING_MISMATCH')
     prompt = instructions + task_json
     _screen_text(prompt, CLAUDE_MAX_PROMPT_BYTES)
     if len(prompt.encode('utf-8')) > CLAUDE_MAX_PROMPT_BYTES:
@@ -5933,13 +5974,23 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
         'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
+    if retry:
+        claim = _start_retry_claim(
+            args, store, task, expected_failed_developer, developer, completion,
+            registration, snapshot, validated_packet, d6_unchanged)
+    else:
+        packet_changes = {} if packet_text is None else {'repair_packet': packet_text}
+        claim = lambda: store.d6_bind_compare_and_update(
+            task['task_id'], executor_task_id=registration.task_id,
+            expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
+                      'completion': None},
+            developer=developer, completion=completion, **packet_changes)
     try:
-        _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
-            store.d6_bind_compare_and_update(task['task_id'],
-                executor_task_id=registration.task_id,
-                expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
-                          'completion': None}, developer=developer, completion=completion)))
+        _delegate_chain_gate(args, store, (registration, snapshot), claim)
     except TaskStoreConflict:
+        if retry:
+            raise LLMToolError('START_RETRY_CONFLICT: the Task changed before the retry '
+                               'write; nothing was written') from None
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
     owner_gate_denied = False
     try:
@@ -8062,6 +8113,218 @@ def run_task_delegate_checked(args, *, store=None):
         raise LLMToolError(f'{code}: a fresh quota observation for {worker} is FAIL; '
                            'no Task or D6 write was made')
     return run_task_delegate(args, store=store)
+
+
+# #2188 design section 3: the new developer of a start retry keeps these of D.
+_START_RETRY_SCOPE_FIELDS = (
+    'selection_source', 'source_sha', 'executor_task_id', 'owner_assignment_ref',
+    'read_paths', 'write_paths', 'acceptance', 'egress_basis',
+)
+
+
+def _start_retry_count(record):
+    """Earlier start retries of one Task: archive entries or ALLOWED START_RETRY audits.
+
+    The larger count is used; anything unreadable counts as the limit.
+    """
+    stored = record.get('start_failures', []) if type(record) is dict else None
+    audit = record.get('dispatch_audit', []) if type(record) is dict else None
+    if type(stored) is not list or type(audit) is not list:
+        return worker_dispatch.MAX_START_RETRIES_PER_TASK
+    allowed = sum(1 for item in audit if type(item) is dict and
+                  item.get('action') == 'START_RETRY' and item.get('decision') == 'ALLOWED')
+    return max(len(stored), allowed)
+
+
+def _not_start_failure(verdict):
+    return LLMToolError(f'START_RETRY_NOT_START_FAILURE: check {verdict.failed_check} '
+                        'of the #2188 start-failure definition did not pass; '
+                        'no Task or D6 write was made')
+
+
+def _start_retry_claim_family(claim):
+    return claim.get('family', f"pr-{claim.get('pr')}")
+
+
+def _start_retry_repair_packet(store, task):
+    """#2188 design section 4: the bound repair packet P of Task T, or None.
+
+    None when T has no ``repair_packet`` and no stored review repair claim
+    names it (not a repair Task). Otherwise exactly one root R with exactly
+    one claim C naming T is required; C must be the last DISPATCHED claim of
+    its family on the failed developer's D6 and head, and P must be bound to
+    C and R (start_failure.repair_packet_matches). Every miss refuses with a
+    START_RETRY_REPAIR_* code; nothing is written.
+    """
+    task_id = task.get('task_id')
+    developer = task.get('developer')
+    try:
+        task_ids = list(store.task_ids())
+    except Exception:
+        raise LLMToolError('START_RETRY_REPAIR_ROOT_UNKNOWN') from None
+    matches = []
+    for other_id in task_ids:
+        if other_id == task_id:
+            continue
+        try:
+            other = store.get(other_id)
+        except Exception:
+            raise LLMToolError('START_RETRY_REPAIR_ROOT_UNKNOWN') from None
+        claims = other.get('review_repair_claims', []) if type(other) is dict else None
+        if type(claims) is not list or any(type(item) is not dict for item in claims):
+            # A claim that cannot be read could name T: fail closed.
+            raise LLMToolError('START_RETRY_REPAIR_ROOT_UNKNOWN')
+        matches.extend((other, index) for index, item in enumerate(claims)
+                       if item.get('repair_task_id') == task_id)
+    if 'repair_packet' not in task:
+        if matches:
+            # A repair Task recorded before #2188 PR 2: the PM uses REPAIR_RETRY.
+            raise LLMToolError('START_RETRY_REPAIR_PACKET_UNAVAILABLE')
+        return None
+    if not matches:
+        raise LLMToolError('START_RETRY_REPAIR_CLAIM_INVALID')
+    if len(matches) != 1:
+        raise LLMToolError('START_RETRY_REPAIR_ROOT_UNKNOWN')
+    root, index = matches[0]
+    claims = root['review_repair_claims']
+    claim = claims[index]
+    family = _start_retry_claim_family(claim)
+    last = max(position for position, item in enumerate(claims)
+               if _start_retry_claim_family(item) == family)
+    if (type(developer) is not dict or claim.get('state') != 'DISPATCHED' or
+            last != index or
+            claim.get('executor_task') != developer.get('executor_task_id') or
+            claim.get('head_sha') != developer.get('source_sha')):
+        raise LLMToolError('START_RETRY_REPAIR_CLAIM_INVALID')
+    packet = start_failure.decode_repair_packet(task['repair_packet'])
+    if packet is None or not start_failure.repair_packet_matches(packet, claim, root):
+        raise LLMToolError('START_RETRY_REPAIR_PACKET_MISMATCH')
+    return packet
+
+
+def _start_retry_claim(args, store, task, failed, developer, completion, registration,
+                       snapshot, validated_packet, d6_unchanged):
+    """#2188 design section 3: check the rebuilt request, then return the retry CAS.
+
+    Runs before the chain gate: the fresh D6 must be the failed start's D6 at
+    its source SHA, the fresh completion must equal the stored one, and the
+    new developer keeps D's scope. The returned claim runs under the chain
+    locks: it re-reads the Task, runs section 2 checks 1-6 and section 4 on
+    that snapshot, and writes ``developer`` and ``start_failures`` only.
+    """
+    stored_completion = task.get('completion')
+    if (registration.task_id != failed.get('executor_task_id') or
+            snapshot.head != failed.get('source_sha')):
+        raise LLMToolError('START_RETRY_D6_CHANGED: the D6 is not at the failed start\'s '
+                           'source SHA; no Task or D6 write was made')
+    if completion != stored_completion:
+        raise LLMToolError('START_RETRY_D6_CHANGED: the D6 binding differs from the stored '
+                           'completion; no Task or D6 write was made')
+    if any(field not in failed or developer.get(field) != failed[field]
+           for field in _START_RETRY_SCOPE_FIELDS):
+        raise LLMToolError('START_RETRY_CONFLICT: the rebuilt request differs from the '
+                           'failed start; no Task or D6 write was made')
+    probe = (d6_unchanged if d6_unchanged is not None
+             else _d6_unchanged_probe(args, (registration, snapshot)))
+
+    def claim():
+        current = store.get(task['task_id'])
+        if (current.get('developer') != failed or
+                current.get('completion') != stored_completion or
+                current.get('state') != 'PM_RESPONDED' or
+                current.get('schema_version') != 2):
+            raise LLMToolError('START_RETRY_CONFLICT: the Task changed before the retry '
+                               'write; nothing was written')
+        verdict = start_failure.classify(current, probe)
+        if not verdict.start_failure:
+            raise _not_start_failure(verdict)
+        if _start_retry_count(current) >= worker_dispatch.MAX_START_RETRIES_PER_TASK:
+            raise LLMToolError('START_RETRY_LIMIT_REACHED: a third start failure goes to the PM')
+        if _start_retry_repair_packet(store, current) != validated_packet:
+            raise LLMToolError('START_RETRY_REPAIR_PACKET_MISMATCH')
+        stored = current.get('start_failures', [])
+        entry = {
+            'failed_developer': failed, 'record_sha256': current.get('record_sha256'),
+            'retry_assignment_id': developer['assignment_id'], 'd6_head': snapshot.head,
+            'retried_at': _timestamp(), 'pm_session_id': current.get('pm_session_id'),
+        }
+        return store.d6_bind_compare_and_update(
+            task['task_id'], executor_task_id=registration.task_id,
+            expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': failed,
+                      'completion': stored_completion,
+                      'record_sha256': current.get('record_sha256')},
+            d6_unchanged=probe, developer=developer,
+            start_failures=list(stored) + [entry])
+
+    return claim
+
+
+def run_task_retry_start(args, *, store=None, route_runner=None, d6_unchanged=None):
+    """CLI entry for ``task retry-start`` (#2188 design sections 3 and 4).
+
+    Re-dispatches one Claude Developer start failure of a Task as a new
+    assignment. The request is rebuilt from the failed developer D and the
+    Task; a repair Task re-sends its persisted, bound repair packet. Order:
+    the caller check, the Owner policy and quota checks, the start-failure
+    record checks, then every refusal of run_task_claude_delegate; under the
+    chain locks the Task is re-read and checked again before the one CAS.
+    No repair claim, Task or continues link is created. ``route_runner`` and
+    ``d6_unchanged`` are injection points for the route and the live D6
+    probe (section 2 check 6).
+    """
+    from . import pm_caller
+    store = TaskStore() if store is None else store
+    task_id = args.task_id
+    try:
+        pm_caller.check_caller(store, task_id, getattr(args, 'pm_session', None))
+    except pm_caller.PMCallerRefused as exc:
+        _print(pm_caller.refusal(task_id, exc.code), None)
+        return 1
+    task = store.get(task_id)
+    failed = task.get('developer')
+    verdict = start_failure.record_checks(task)
+    if not verdict.start_failure:
+        raise _not_start_failure(verdict)
+    executor_task = failed.get('executor_task_id')
+    if getattr(args, 'executor_task', None) != executor_task:
+        raise LLMToolError('START_RETRY_D6_CHANGED: --executor-task is not the D6 of the '
+                           'failed start; no Task or D6 write was made')
+    if _start_retry_count(task) >= worker_dispatch.MAX_START_RETRIES_PER_TASK:
+        raise LLMToolError('START_RETRY_LIMIT_REACHED: a third start failure goes to the PM')
+    owner_ref = failed.get('owner_assignment_ref')
+    decision = worker_dispatch.evaluate('claude-developer', owner_ref, executor_task)
+    if not decision.allowed:
+        raise worker_dispatch.WorkerDispatchDenied(decision.reason_code)
+    code = worker_availability.quota_refusal(
+        store, 'claude-developer', owner_assignment_ref=owner_ref,
+        policy_task_id=executor_task)
+    if code is not None:
+        raise LLMToolError(f'{code}: a fresh quota observation for claude-developer is FAIL; '
+                           'no Task or D6 write was made')
+    assignment = task.get('pm_assignment')
+    acceptance = failed.get('acceptance')
+    if type(assignment) is not dict or assignment.get('acceptance') != acceptance:
+        raise LLMToolError('START_RETRY_CONFLICT: the PM assignment acceptance differs from '
+                           'the failed start; no Task or D6 write was made')
+    packet = _start_retry_repair_packet(store, task)
+    timeout = failed.get('timeout_seconds')
+    delegate_args = SimpleNamespace(
+        task_id=task_id, provider='claude', mode='direct', background=False,
+        context_stdin=False, selection_source=failed.get('selection_source'),
+        executor_task=executor_task,
+        # The D6 root recorded at the failed start; the binding re-checks it.
+        cwd=task['completion']['evidence'].get('root'),
+        read_path=failed.get('read_paths'), write_path=failed.get('write_paths'),
+        acceptance=acceptance, egress_basis=failed.get('egress_basis'),
+        owner_ref=owner_ref, repair_packet=packet,
+        timeout=timeout if type(timeout) is int and not isinstance(timeout, bool) else None,
+        pm_session=getattr(args, 'pm_session', None))
+    _validate_acceptance_scope(acceptance)
+    _check_delegate_repair_cap(delegate_args, store)
+    return _with_quota_observation(
+        store, task_id, lambda: run_task_claude_delegate(
+            delegate_args, store=store, route_runner=route_runner,
+            expected_failed_developer=failed, d6_unchanged=d6_unchanged))
 
 
 def run_task_submit(args, *, store=None, stdout=None):
