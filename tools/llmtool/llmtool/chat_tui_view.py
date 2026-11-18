@@ -435,7 +435,7 @@ def copy_to_clipboard(text):
             continue
         try:
             done = subprocess.run(command, input=text.encode("utf-8"), stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL, timeout=3)
+                                  stderr=subprocess.DEVNULL, timeout=3, check=False)
         except (OSError, subprocess.SubprocessError):
             return False
         return done.returncode == 0
