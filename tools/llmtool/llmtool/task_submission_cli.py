@@ -6238,6 +6238,9 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         raise LLMToolError('task has no successful PM response')
     # #2310: a gw-agent developer refused before any model call is restarted on
     # this Task as a START_RETRY; every other stored developer is a duplicate.
+    # #2310 F1: that includes a refusal after the DISPATCHING write persisted
+    # and before the route call (the adapter gate, building the route or its
+    # validate_profile below), as start_failure.gw_agent_record_checks proves.
     restart = None
     if previous is not None:
         if not start_failure.gw_agent_record_checks(task).start_failure:
@@ -8448,8 +8451,8 @@ def _gw_agent_restart_claim(args, store, task, failed, developer, completion, re
     """#2310: check a rebuilt gw-agent request, then return its restart CAS.
 
     ``failed`` passed start_failure.gw_agent_record_checks: it was refused
-    before its DISPATCHING write persisted, so no route or model call was
-    made. The fresh D6 must be the failed start's D6 at its source SHA, the
+    before its DISPATCHING write persisted, or (#2310 F1) after it and before
+    the route call, so no route or model call was made. The fresh D6 must be the failed start's D6 at its source SHA, the
     rebuilt completion must equal the stored one and the new developer keeps
     the failed one's scope. The returned claim runs under the chain locks: it
     re-reads the Task, runs checks 1-6 on that snapshot and replaces the

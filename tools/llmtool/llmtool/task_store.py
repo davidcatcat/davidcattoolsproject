@@ -2106,10 +2106,17 @@ def _archived_start_failure(failed):
         return False
     if failed.get('provider_profile') == 'claude':
         return failed.get('state') == 'BLOCKED'
-    return (failed.get('provider_profile') == 'gw-agent' and
+    if not (failed.get('provider_profile') == 'gw-agent' and
             failed.get('state') == 'DEVELOPER_UNAVAILABLE' and
-            'provider_type' in failed and failed['provider_type'] is None and
-            'model' in failed and failed['model'] is None)
+            'provider_type' in failed and 'model' in failed):
+        return False
+    # Refused before its DISPATCHING write persisted (no route identity), or,
+    # #2310 F1, after it and before the route call (the identity that write
+    # bound). The dispatch gate (start_failure.gw_agent_record_checks) decides
+    # which records may be archived; this keeps only the stored shape.
+    return ((failed['provider_type'] is None and failed['model'] is None) or
+            (failed['provider_type'] == 'gw-agent-cli' and
+             type(failed['model']) is str and bool(failed['model'])))
 
 
 def _validate_start_failures(record):

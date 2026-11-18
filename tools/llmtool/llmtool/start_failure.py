@@ -10,7 +10,9 @@ match.
 
 #2310 adds the gw-agent pre-model failure (gw_agent_record_checks) and the
 route dispatchers restart_record_checks and classify_restart; the Claude
-checks (record_checks, classify) are unchanged.
+checks (record_checks, classify) are unchanged. #2310 F1 extends the gw-agent
+checks to a failure after the DISPATCHING write persisted but before the
+route was called, proven by the dispatch audit or the code.
 """
 
 from __future__ import annotations
@@ -149,6 +151,66 @@ _GW_AGENT_ABSENT_RESULT_FIELDS = _ABSENT_RESULT_FIELDS + (
     'audit_sha256', 'audit_copy_path_sha256',
 )
 
+# #2310 F1: the route identity the gw-agent DISPATCHING write binds
+# (worker_dispatch._PROVIDER_TYPES['gw-agent']).
+_GW_AGENT_PROVIDER_TYPE = 'gw-agent-cli'
+
+# #2310 F1: the codes run_task_gw_agent_delegate writes after its DISPATCHING
+# write persisted and before it calls the route, when building GwAgentRoute or
+# its validate_profile raises (the RouteError and Exception handlers right
+# after authorize_dispatch), or authorize_dispatch raises something that is
+# not a refusal (the same Exception handler). Nothing the route raises after
+# the gateway starts has either code: GwAgentRoute raises
+# GW_AGENT_CONFIG_INVALID only while it is built (gw_agent.py:181-244) or
+# writes its input files (gw_agent.py:359), and its post-launch codes are
+# GW_AGENT_<status> (gw_agent.py:553, statuses at :45), GW_AGENT_OUTPUT_INVALID,
+# GW_AGENT_MODEL_UNVERIFIED and GW_AGENT_TASK_ID_MISMATCH[_<gateway code>],
+# each stored with the DEVELOPER_ prefix. Both codes are also listed as
+# pre-launch in task_submission_cli._POST_RUN_NO_WORK_GW_AGENT_REFUSALS.
+GW_AGENT_PRE_ROUTE_CODES = frozenset((
+    'DEVELOPER_GW_AGENT_CONFIG_INVALID', 'DEVELOPER_DISPATCH_FAILED',
+))
+
+
+def _gw_agent_dispatch_audit(audit, assignment_id):
+    """#2310 F1: the DISPATCH audit of one gw-agent assignment.
+
+    Returns ``(transitions, adapter_allowed, refused_codes)`` or None. An
+    entry without an assignment counts as this one. ``transitions`` counts
+    ALLOWED DISPATCH entries without an ``authorization_id``: the store gate's
+    entry for the PENDING to DISPATCHING write. ``adapter_allowed`` counts
+    ALLOWED DISPATCH entries with one: worker_dispatch.authorize_dispatch
+    saves that entry before it returns, and the delegate calls the route only
+    after it returned. ``refused_codes`` holds ``DEVELOPER_<reason_code>`` of
+    every BLOCKED DISPATCH entry, as the delegate stores a refusal. None when
+    the audit is unreadable, or when an ALLOWED entry of any other action but
+    START_RETRY names the assignment (fail closed).
+    """
+    if type(audit) is not list:
+        return None
+    transitions = adapter_allowed = 0
+    refused_codes = set()
+    for entry in audit:
+        if type(entry) is not dict:
+            return None
+        if entry.get('assignment_id') not in (None, assignment_id):
+            continue
+        action, decision = entry.get('action'), entry.get('decision')
+        if action == 'START_RETRY':
+            continue
+        if decision == 'BLOCKED':
+            reason = entry.get('reason_code')
+            if action == 'DISPATCH' and type(reason) is str:
+                refused_codes.add(('DEVELOPER_' + reason)[:64])
+            continue
+        if action != 'DISPATCH' or decision != 'ALLOWED':
+            return None
+        if 'authorization_id' in entry:
+            adapter_allowed += 1
+        else:
+            transitions += 1
+    return transitions, adapter_allowed, frozenset(refused_codes)
+
 
 def gw_agent_record_checks(record):
     """#2310: checks 1-5 for a gw-agent developer refused before any model call.
@@ -157,11 +219,21 @@ def gw_agent_record_checks(record):
     runs the route only after its DISPATCHING write has persisted, and that
     write is the one that records ``provider_type`` and ``model``. The store
     never lets those identity fields go back to None (worker_dispatch REASSIGN
-    needs a PENDING developer). A DEVELOPER_UNAVAILABLE record that still has
-    both as None therefore never reached the route or the provider: its
-    failure was persisted from the DISPATCHING write's own refusal (the Owner
-    gate or a rejected write). Any other gw-agent record is refused, so a run
-    that reached the provider (any model call) is never a start failure.
+    needs a PENDING developer). Two records are admitted:
+
+    - Unbound: both identity fields still None. The failure was persisted
+      from the DISPATCHING write's own refusal (the Owner gate or a rejected
+      write), so the route never ran. No ALLOWED DISPATCH entry exists.
+    - Bound (#2310 F1): the DISPATCHING write persisted (``gw-agent-cli`` and
+      a model), with exactly its one ALLOWED transition entry, and a failure
+      proven to come before the route call: either the adapter gate refused
+      (its BLOCKED DISPATCH entry gives the stored code, and no adapter
+      authorization was saved for the assignment), or the code is in
+      GW_AGENT_PRE_ROUTE_CODES, with at most the one adapter authorization
+      the delegate makes before it builds the route.
+
+    Any other gw-agent record is refused, so a run that reached the provider
+    (any model call) is never a start failure.
     """
     if type(record) is not dict:
         return _not(1)
@@ -172,31 +244,40 @@ def gw_agent_record_checks(record):
             developer.get('backend_session_semantics') == 'CLI_REPORTED_SESSION_ID' and
             developer.get('state') == 'DEVELOPER_UNAVAILABLE'):
         return _not(1)
-    # Check 2: the DISPATCHING write never persisted, so no route identity, and
-    # the code is one the gw-agent delegate writes (DEVELOPER_*).
+    # Check 2: a code the gw-agent delegate writes (DEVELOPER_*), and either no
+    # route identity (the DISPATCHING write never persisted), or the bound
+    # identity with a failure that is shown to be before the route call.
     code = developer.get('error_code')
-    if not ('provider_type' in developer and developer['provider_type'] is None and
-            'model' in developer and developer['model'] is None and
-            type(code) is str and code.startswith('DEVELOPER_')):
+    assignment_id = developer.get('assignment_id')
+    audit = _gw_agent_dispatch_audit(record.get('dispatch_audit', []), assignment_id)
+    unbound = ('provider_type' in developer and developer['provider_type'] is None and
+               'model' in developer and developer['model'] is None)
+    bound = (developer.get('provider_type') == _GW_AGENT_PROVIDER_TYPE and
+             type(developer.get('model')) is str and bool(developer['model']))
+    pre_route = type(code) is str and code in GW_AGENT_PRE_ROUTE_CODES
+    adapter_refused = (type(code) is str and audit is not None and code in audit[2])
+    if not (type(code) is str and code.startswith('DEVELOPER_') and
+            (unbound or (bound and (pre_route or adapter_refused)))):
         return _not(2)
     # Check 3: no result, progress, diagnosis or gateway audit.
     if not _no_result(developer, _GW_AGENT_ABSENT_RESULT_FIELDS):
         return _not(3)
-    # Check 4: no execution at all, and no audit entry other than a refusal
-    # (or the START_RETRY that created this assignment) was allowed for this
-    # assignment. An entry without an assignment counts as this one.
-    assignment_id = developer.get('assignment_id')
-    audit = record.get('dispatch_audit', [])
+    # Check 4: no execution at all, and only the dispatch audit that check 2's
+    # case allows for this assignment: refusals and the START_RETRY that
+    # created it always; unbound, no ALLOWED DISPATCH entry; bound, the one
+    # ALLOWED transition, plus one adapter authorization only for a
+    # GW_AGENT_PRE_ROUTE_CODES failure. An entry without an assignment counts
+    # as this one.
     if ('execution' not in developer or developer['execution'] is not None or
-            type(assignment_id) is not str or type(audit) is not list):
+            type(assignment_id) is not str or audit is None):
         return _not(4)
-    for entry in audit:
-        if type(entry) is not dict:
+    transitions, adapter_allowed, _refused = audit
+    if unbound:
+        if transitions or adapter_allowed:
             return _not(4)
-        if (entry.get('assignment_id') in (None, assignment_id) and
-                entry.get('decision') != 'BLOCKED' and
-                entry.get('action') != 'START_RETRY'):
-            return _not(4)
+    elif not (transitions == 1 and
+              (adapter_allowed == 0 or (adapter_allowed == 1 and pre_route))):
+        return _not(4)
     # Check 5: as for Claude.
     if not _still_waiting(record):
         return _not(5)
