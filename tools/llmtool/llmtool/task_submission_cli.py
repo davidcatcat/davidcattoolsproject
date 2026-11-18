@@ -4563,14 +4563,17 @@ def _opencode_developer_profile():
             'run llmtool with its virtualenv (tools/llmtool/.venv/bin/python)') from None
     try:
         profile = resolve_profile_config('opencode-developer', require_configured=False)
+        provider = (selected_provider(profile) if profile is not None else
+                    {'model': None, 'provider_options': {}})
     except LLMToolError as exc:
         if str(exc) == 'requested provider profile is not defined':
-            profile = None
+            provider = {'model': None, 'provider_options': {}}
         else:
             raise LLMToolError('opencode-developer profile is invalid in the llmtool '
                                'user config (~/.config/llmtool/config.yaml)') from None
-    provider = (selected_provider(profile) if profile is not None else
-                {'model': None, 'provider_options': {}})
+    except Exception:
+        raise LLMToolError('opencode-developer profile is invalid in the llmtool '
+                           'user config (~/.config/llmtool/config.yaml)') from None
     options = provider.get('provider_options', {})
     if type(options) is not dict:
         raise LLMToolError('opencode-developer profile provider_options must be a mapping')
@@ -4580,7 +4583,7 @@ def _opencode_developer_profile():
     except opencode_direct_developer.DirectOpenCodeError:
         raise LLMToolError('opencode-developer profile steps must be an integer from 3 to 1000') \
             from None
-    model = provider['model']
+    model = provider.get('model')
     if model is None:
         model = opencode_direct_developer.MODEL
     try:

@@ -71,6 +71,23 @@ MALFORMED_MODELS = (
 )
 
 
+def _make_mock_profile(model, steps=None):
+    provider_entry = {
+        'name': 'opencode-developer',
+        'type': 'opencode-cli',
+        'model': model,
+    }
+    if steps is not None:
+        provider_entry['provider_options'] = {'steps': steps}
+    return {
+        'name': 'opencode-developer',
+        'active_provider': 'opencode-cli',
+        'providers': {
+            'opencode-cli': provider_entry,
+        },
+    }
+
+
 class OpenCodePaidModel289Tests(unittest.TestCase):
     def setUp(self):
         self.config = load_route_config()
@@ -142,12 +159,7 @@ class OpenCodePaidModel289Tests(unittest.TestCase):
                 self.assertIn(('integration.use', f'{expected_provider}#*', 'allow'), policy_actions)
 
     def test_profile_resolution_admits_paid_model_end_to_end(self):
-        mock_profile = {
-            'name': 'opencode-developer',
-            'type': 'opencode-cli',
-            'model': 'opencode-go/deepseek-v4.1-flash#high',
-            'provider_options': {'steps': 500},
-        }
+        mock_profile = _make_mock_profile('opencode-go/deepseek-v4.1-flash#high', steps=500)
         with patch('llmtool.task_submission_cli.resolve_profile_config', return_value=mock_profile), \
                 patch('llmtool.role_config.resolve_role', return_value={}):
             model, steps = task_submission_cli._opencode_developer_profile()
@@ -155,12 +167,7 @@ class OpenCodePaidModel289Tests(unittest.TestCase):
             self.assertEqual(steps, 500)
 
     def test_profile_resolution_admits_another_provider_model(self):
-        mock_profile = {
-            'name': 'opencode-developer',
-            'type': 'opencode-cli',
-            'model': 'anthropic/claude-3-5-sonnet#medium',
-            'provider_options': {'steps': 200},
-        }
+        mock_profile = _make_mock_profile('anthropic/claude-3-5-sonnet#medium', steps=200)
         with patch('llmtool.task_submission_cli.resolve_profile_config', return_value=mock_profile), \
                 patch('llmtool.role_config.resolve_role', return_value={}):
             model, steps = task_submission_cli._opencode_developer_profile()
@@ -168,31 +175,38 @@ class OpenCodePaidModel289Tests(unittest.TestCase):
             self.assertEqual(steps, 200)
 
     def test_profile_resolution_admits_free_model(self):
-        mock_profile = {
-            'name': 'opencode-developer',
-            'type': 'opencode-cli',
-            'model': 'opencode/deepseek-v4.1-flash-free#high',
-        }
+        mock_profile = _make_mock_profile('opencode/deepseek-v4.1-flash-free#high')
         with patch('llmtool.task_submission_cli.resolve_profile_config', return_value=mock_profile), \
                 patch('llmtool.role_config.resolve_role', return_value={}):
             model, steps = task_submission_cli._opencode_developer_profile()
             self.assertEqual(model, 'opencode/deepseek-v4.1-flash-free#high')
             self.assertEqual(steps, opencode_direct_developer.DEFAULT_AGENT_STEPS)
 
+    def test_profile_resolution_when_profile_is_none(self):
+        with patch('llmtool.task_submission_cli.resolve_profile_config', return_value=None), \
+                patch('llmtool.role_config.resolve_role', return_value={}):
+            model, steps = task_submission_cli._opencode_developer_profile()
+            self.assertEqual(model, opencode_direct_developer.MODEL)
+            self.assertEqual(steps, opencode_direct_developer.DEFAULT_AGENT_STEPS)
+
     def test_profile_resolution_refuses_malformed_model_with_stable_code(self):
         for bad_model in ('opencode/a/b', 'bare-model', '', None, 'opencode/m#HIGH'):
             with self.subTest(model=bad_model):
-                mock_profile = {
-                    'name': 'opencode-developer',
-                    'type': 'opencode-cli',
-                    'model': bad_model,
-                }
+                mock_profile = _make_mock_profile(bad_model)
                 with patch('llmtool.task_submission_cli.resolve_profile_config', return_value=mock_profile), \
                         patch('llmtool.role_config.resolve_role', return_value={}):
                     with self.assertRaises(LLMToolError) as caught:
                         task_submission_cli._opencode_developer_profile()
                     self.assertEqual(getattr(caught.exception, 'direct_opencode_code', None),
                                      'OPENCODE_MODEL_INVALID')
+
+    def test_profile_resolution_refuses_missing_active_provider(self):
+        broken = {'name': 'opencode-developer', 'model': 'opencode/example'}
+        with patch('llmtool.task_submission_cli.resolve_profile_config', return_value=broken), \
+                patch('llmtool.role_config.resolve_role', return_value={}):
+            with self.assertRaises(LLMToolError) as caught:
+                task_submission_cli._opencode_developer_profile()
+            self.assertIn('opencode-developer profile is invalid', str(caught.exception))
 
 
 if __name__ == '__main__':
