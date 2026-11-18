@@ -1,6 +1,6 @@
 # #2098 design: proving a failed Developer run did no work
 
-Proposal only; not a review or acceptance. Source: main at 9416bdd02439e09d94d3c5d78f5ce407c7593edd. Claims cite path:line at that SHA; anything not read is UNVERIFIED. The change is 待實作（#2098）.
+Proposal only; not a review or acceptance. Source: main at 9416bdd02439e09d94d3c5d78f5ce407c7593edd. Claims cite path:line at that SHA; anything not read is UNVERIFIED. The change is 已實作（#2098）; merged in PR #2107 with follow-up tests in PR #2144.
 
 **Status (2026-11-17):** PR #2107 implemented this note's recommendation: post-run Developer route refusals carry and persist execution evidence. PR #2144 added the follow-up tests. The sections below are the original proposal, kept for history.
 
