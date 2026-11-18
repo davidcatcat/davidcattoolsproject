@@ -2193,6 +2193,7 @@ def run_task_advance(args, *, store=None, **adapters):
     if result.get('step') == 'CLOSED':
         from . import gw_agent_sessions
         gw_agent_sessions.sweep_quietly(TaskStore() if store is None else store)
+    _attach_advance_no_change_reply(result, store, args.task_id)
     _print(result)
     return _advance_exit_code(result)
 
@@ -5824,6 +5825,46 @@ def _claude_attach_no_change_reply(developer, raw):
                 _valid_reported_text(reported['summary'], CLAUDE_REPLY_MAX_REPORTED_BYTES) and
                 _reported_size(reported) <= CLAUDE_REPLY_MAX_REPORTED_BYTES):
             developer['reported'] = reported
+    except Exception:
+        pass
+
+
+def _advance_no_change_reply(record):
+    """#2324: the bounded, screened stored reply of a CLAUDE_NO_CHANGES record, else None.
+
+    Only a Task whose own Developer is BLOCKED with CLAUDE_NO_CHANGES and keeps
+    developer.reported.summary gives a reply. The stored text is screened and
+    bounded again before output; text that fails gives the fixed
+    CLAUDE_REPLY_WITHHELD text, never a reworded reply."""
+    developer = record.get('developer') if type(record) is dict else None
+    if (type(developer) is not dict or developer.get('state') != 'BLOCKED' or
+            developer.get('error_code') != 'CLAUDE_NO_CHANGES'):
+        return None
+    reported = developer.get('reported')
+    summary = reported.get('summary') if type(reported) is dict else None
+    if type(summary) is not str or not summary.strip():
+        return None
+    try:
+        _screen_text(summary, CLAUDE_REPLY_MAX_REPORTED_BYTES)
+        if (not _valid_reported_text(summary, CLAUDE_REPLY_MAX_REPORTED_BYTES) or
+                _reported_size({'summary': summary}) > CLAUDE_REPLY_MAX_REPORTED_BYTES):
+            summary = CLAUDE_REPLY_WITHHELD
+    except LLMToolError:
+        summary = CLAUDE_REPLY_WITHHELD
+    return _developer_reported_packet({'summary': summary})
+
+
+def _attach_advance_no_change_reply(result, store, task_id):
+    """#2324: add developer_reported to a DEVELOPER_ATTENTION advance result.
+
+    Output only: the step, codes, result and exit code are unchanged, and any
+    read or screen failure leaves the advance result as it was."""
+    try:
+        if type(result) is not dict or result.get('step') != 'DEVELOPER_ATTENTION':
+            return
+        packet = _advance_no_change_reply(store.get(task_id))
+        if packet is not None:
+            result['developer_reported'] = packet
     except Exception:
         pass
 

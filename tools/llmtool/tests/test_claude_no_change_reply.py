@@ -2,6 +2,7 @@
 
 The reply is stored as developer.reported.summary (Developer-reported, unverified),
 screened for credentials and bounded to the TaskStore reported-object limit.
+`task advance` output for such a record carries it as developer_reported (F1).
 Test data rule (Owner #763 A): no credential-shaped strings here; the screen
 refusal tests inject the screen function and still check the real behaviour.
 """
@@ -164,6 +165,136 @@ class ClaudeNoChangeRecordTests(unittest.TestCase):
         self.assertEqual(source.count('_claude_attach_no_change_reply('), 1)
         self.assertLess(attach, source.index("store.update(task['task_id'], developer=developer)\n"
                                              "        _print(_task_view"))
+
+
+TASK_ID = 'f' * 32
+
+
+class _Store:
+    """Read-only stand-in for TaskStore: run_task_advance only reads the record."""
+
+    def __init__(self, record=None, error=None):
+        self.record, self.error = record, error
+
+    def get(self, task_id):
+        if self.error is not None:
+            raise self.error
+        return json.loads(json.dumps(self.record))
+
+
+def _attention_result(**changes):
+    result = {'task_id': TASK_ID, 'step': 'DEVELOPER_ATTENTION', 'result': None,
+              'next': 'DEVELOPER_ATTENTION', 'codes': ['DEVELOPER_ATTENTION'], 'acked': []}
+    result.update(changes)
+    return result
+
+
+def _record(reported=None, **developer_changes):
+    developer = _blocked_developer()
+    developer.update(developer_changes)
+    if reported is not None:
+        developer['reported'] = reported
+    return {'task_id': TASK_ID, 'schema_version': 2, 'developer': developer}
+
+
+class ClaudeNoChangeAdvanceOutputTests(unittest.TestCase):
+    """#2324 F1: task advance output carries the stored reply for a no-change record."""
+
+    def _advance(self, store, advance_result):
+        from argparse import Namespace
+        import contextlib
+        import io
+        from llmtool import pm_caller
+        from llmtool import task_advance
+        out = io.StringIO()
+        with patch.object(pm_caller, 'check_caller', return_value=None), \
+                patch.object(task_advance, 'advance',
+                             return_value=json.loads(json.dumps(advance_result))) as advance, \
+                contextlib.redirect_stdout(out):
+            code = cli.run_task_advance(Namespace(task_id=TASK_ID, pm_session=None),
+                                        store=store)
+        advance.assert_called_once()
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        return code, json.loads(lines[0])
+
+    def test_no_change_record_decides_developer_attention(self):
+        from llmtool import task_advance
+        for record in (_record({'summary': SPEC_REPLY}), _record()):
+            with self.subTest(reported='reported' in record['developer']):
+                self.assertEqual(task_advance.decide(
+                    record, None, None, {'events': [], 'repair_claims': []}),
+                    'DEVELOPER_ATTENTION')
+
+    def test_reply_is_in_advance_output_and_gates_are_unchanged(self):
+        expected = _attention_result()
+        code, output = self._advance(_Store(_record({'summary': SPEC_REPLY})), expected)
+        self.assertEqual(output.pop('developer_reported'),
+                         {'label': 'Developer-reported, unverified', 'summary': SPEC_REPLY})
+        self.assertEqual(output, expected)
+        self.assertEqual(code, cli._advance_exit_code(expected))
+        self.assertEqual(code, 1)
+
+    def test_no_reply_leaves_advance_output_unchanged(self):
+        expected = _attention_result()
+        code, output = self._advance(_Store(_record()), expected)
+        self.assertEqual(output, expected)
+        self.assertNotIn('developer_reported', output)
+        self.assertEqual(code, 1)
+
+    def test_a_silent_no_op_and_a_reply_are_told_apart(self):
+        _, silent = self._advance(_Store(_record()), _attention_result())
+        _, replied = self._advance(_Store(_record({'summary': SPEC_REPLY})),
+                                   _attention_result())
+        self.assertNotEqual(silent, replied)
+        self.assertIn('SPEC_MISMATCH', replied['developer_reported']['summary'])
+
+    def test_stored_reply_is_screened_again_before_output(self):
+        with patch.object(cli, '_emitted_sensitive', return_value=True):
+            _, output = self._advance(_Store(_record({'summary': SPEC_REPLY})),
+                                      _attention_result())
+        self.assertEqual(output['developer_reported']['summary'], cli.CLAUDE_REPLY_WITHHELD)
+        self.assertNotIn('SPEC_MISMATCH', json.dumps(output))
+
+    def test_oversized_or_control_stored_reply_is_withheld(self):
+        for summary in ('x' * (cli.CLAUDE_REPLY_MAX_REPORTED_BYTES + 1), 'answer\x07 done'):
+            with self.subTest(size=len(summary)):
+                _, output = self._advance(_Store(_record({'summary': summary})),
+                                          _attention_result())
+                self.assertEqual(output['developer_reported']['summary'],
+                                 cli.CLAUDE_REPLY_WITHHELD)
+
+    def test_only_a_no_change_record_at_developer_attention_gets_the_reply(self):
+        cases = (
+            ('other step', _record({'summary': SPEC_REPLY}),
+             _attention_result(step='PUBLISH', next='PUBLISH', codes=['PUBLISH_FAILED'])),
+            ('other error code', _record({'summary': SPEC_REPLY}, error_code='CLAUDE_TIMEOUT'),
+             _attention_result()),
+            ('other state', _record({'summary': SPEC_REPLY}, state='DEVELOPER_RESPONDED'),
+             _attention_result()),
+        )
+        for name, record, expected in cases:
+            with self.subTest(case=name):
+                code, output = self._advance(_Store(record), expected)
+                self.assertEqual(output, expected)
+                self.assertEqual(code, cli._advance_exit_code(expected))
+
+    def test_record_read_failure_leaves_advance_output_unchanged(self):
+        expected = _attention_result()
+
+        class _FailingAfterFirstRead(_Store):
+            calls = 0
+
+            def get(self, task_id):
+                type(self).calls += 1
+                if type(self).calls > 1:
+                    raise RuntimeError('record unavailable')
+                return super().get(task_id)
+
+        code, output = self._advance(
+            _FailingAfterFirstRead(_record({'summary': SPEC_REPLY})), expected)
+        self.assertEqual(output, expected)
+        self.assertEqual(code, 1)
 
 
 if __name__ == '__main__':
