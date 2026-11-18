@@ -102,6 +102,14 @@ class OwnerOverrideTest(unittest.TestCase):
                             route='agy', fetch=fetch)
         self.assertEqual(fetch.calls, [])
 
+    def test_malformed_model_is_refused_before_the_ref_is_read(self):
+        override = valid_override()
+        override['model'] = 'GEMINI-UPPER'
+        fetch = FakeFetch(make_comment(MARKER + '\n' + OVERRIDE_LINE))
+        self.assert_refused('ROLE_MODEL_NOT_ALLOWED', override=override,
+                            route='agy', fetch=fetch)
+        self.assertEqual(fetch.calls, [])
+
     def test_bad_repository_argument_is_invalid(self):
         self.assert_refused('OWNER_OVERRIDE_INVALID', repository='example-owner')
 

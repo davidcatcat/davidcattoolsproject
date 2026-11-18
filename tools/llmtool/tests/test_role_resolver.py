@@ -287,7 +287,7 @@ class AllowedModelTests(ResolverBase):
                          owner_override={'model': 'has space', 'ref': REF},
                          repository=REPOSITORY, fetch_comment=fetch)
         self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
-        self.assertIsNone(caught.exception.owner_override_code)
+        self.assertIsNone(getattr(caught.exception, 'owner_override_code', None))
         fetch.assert_not_called()
 
 
@@ -405,6 +405,14 @@ class DispatchPathTests(ResolverBase):
         self.assertEqual(model, 'gemini-4-hydrogen-medium')
         self.assertEqual(calls, ['agy-developer'])
 
+    def test_claude_dispatch_accepts_a_same_family_model_from_user_config(self):
+        # Owner #2302 P2: claude-fable-5-2 is not in allowed_models.
+        calls = self.isolated_resolver()
+        self.save({'roles': {'claude-developer': {'model': 'claude-fable-5-2'}}})
+        model, _effort = task_submission_cli._claude_developer_profile(dict(self.routes()['claude']))
+        self.assertEqual(model, 'claude-fable-5-2')
+        self.assertEqual(calls, ['claude-developer'])
+
     def test_claude_dispatch_refuses_a_wrong_family_model(self):
         calls = self.isolated_resolver()
         self.save({'roles': {'claude-developer': {'model': 'gemini-4-hydrogen-medium'}}})
@@ -448,7 +456,7 @@ class DispatchPathTests(ResolverBase):
                 owner_override={'model': 'claude-fable-5-2', 'ref': REF},
                 repository=REPOSITORY, fetch_comment=fetch)
         self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
-        self.assertIsNone(caught.exception.owner_override_code)
+        self.assertIsNone(getattr(caught.exception, 'owner_override_code', None))
         fetch.assert_not_called()
 
     def test_gw_agent_profile_uses_the_resolver(self):

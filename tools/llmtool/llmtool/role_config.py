@@ -49,6 +49,7 @@ _VERIFIED_OVERRIDE_KEYS = frozenset({"route", "model", "ref", "comment_id"})
 def _fail(message="role configuration: invalid configuration", code="ROLE_CONFIG_INVALID"):
     error = LLMToolError(message)
     error.role_config_code = code
+    error.owner_override_code = None
     raise error from None
 
 

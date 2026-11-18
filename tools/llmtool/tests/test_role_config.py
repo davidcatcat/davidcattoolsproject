@@ -88,6 +88,21 @@ class RoleConfigTests(unittest.TestCase):
                 self.assertEqual((resolved["model"], resolved["model_source"]),
                                  (model, source))
 
+    def test_developer_same_family_model_is_accepted_from_user_config(self):
+        # Owner #2302 P2: user config admits any same-family model for developer roles.
+        self.save({
+            "roles": {
+                "agy-developer": {"model": "gemini-4-hydrogen-medium"},
+                "claude-developer": {"model": "claude-fable-5-2"},
+            }
+        })
+        resolved_agy = resolve_role("agy-developer", environ={}, home=self.home)
+        self.assertEqual((resolved_agy["model"], resolved_agy["model_source"]),
+                         ("gemini-4-hydrogen-medium", "roles"))
+        resolved_claude = resolve_role("claude-developer", environ={}, home=self.home)
+        self.assertEqual((resolved_claude["model"], resolved_claude["model_source"]),
+                         ("claude-fable-5-2", "roles"))
+
     def test_reviewer_model_outside_its_family_is_refused_at_every_layer(self):
         # #1502 WP-E R1: the resolver applies the shared check after precedence.
         self.save(self.account_config())
