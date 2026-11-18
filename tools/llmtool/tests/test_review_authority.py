@@ -30,7 +30,10 @@ LOAD_TOLERANT_TIMEOUT_SECONDS=15
 _ROLES=load_route_config()['roles']
 REVIEW_MODEL=_ROLES['claude-reviewer']['allowed_models'][0]
 CROSS_FAMILY_MODEL=_ROLES['codex-reviewer']['allowed_models'][0]
-UNLISTED_MODEL='claude-unlisted-model'
+# Owner #2302 P2: any Claude-family model is admitted, so the refused model
+# here is of another family (neither Claude nor Codex).
+UNLISTED_MODEL='gemini-unlisted-model'
+SAME_FAMILY_MODEL='claude-fable-5-2'
 FAKE_SCRIPT='''#!INTERPRETER -IB
 import json,sys
 v=json.loads(sys.stdin.read().split('\\n\\nUSER:\\n',1)[1])
@@ -815,6 +818,7 @@ class RegistryModelTests(unittest.TestCase):
         h=Harness();self.addCleanup(h.close)
         self.assertEqual(h.issuer.policy(h.policy.digest).model,REVIEW_MODEL)
         self.assertEqual(a.admit_reviewer_model(REVIEW_MODEL),REVIEW_MODEL)
+        self.assertEqual(a.admit_reviewer_model(SAME_FAMILY_MODEL),SAME_FAMILY_MODEL)
         for model in (UNLISTED_MODEL,CROSS_FAMILY_MODEL,'anthropic/'+REVIEW_MODEL,
                       REVIEW_MODEL.upper(),None):
             with self.subTest(model=model),self.assertRaises(LLMToolError) as caught:
