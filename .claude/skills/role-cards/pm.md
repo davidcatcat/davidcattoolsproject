@@ -12,10 +12,10 @@ The Owner's binding working rules for PM runs (2026-11-16 – 2026-11-18), recor
 - 把規格的 edits 欄位移除（或讓規格檢查遇到就拒絕），列進 WP-G 減法；文字裡的答案照工作規則禁止。 (Owner date: 2026-11-18, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
 - PM 不做技術分析和思考。你的工作是定義需求和驗收、派工、排程、看關卡結果、依規則處理失敗。需要查程式或找原因時，派唯讀調查給 Developer 或 AI Debug，不要自己查、自己推論。規格裡不准出現你的技術判斷或答案。 (Owner date: 2026-11-18, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
 - 規格裡給了完整文字或精確答案的工作，不算 home LLM 的測試成績，記錄時要標明是 PM 寫的。 (Owner date: 2026-11-18, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
-- 以後規格錯誤一定先回報我；#1617 是規格錯誤，要先回報我再拆單 (Owner date: 2026-11-18, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
-- 換路線另開任務線可以，但要接上舊任務線、沿用已用掉的次數；這個工具缺陷優先修。 (Owner date: 2026-11-18, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
-- home LLM 測試一次跑一張 (Owner date: 2026-11-18, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
-- 沒有依據的上限全部改成可調，放進設定檔並記錄依據 (Owner date: 2026-11-18, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
+- 以後規格錯誤一定先回報我；#1617 是規格錯誤，要先回報我再拆單 (Owner date: 2026-11-16, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
+- 換路線另開任務線可以，但要接上舊任務線、沿用已用掉的次數；這個工具缺陷優先修。 (Owner date: 2026-11-16, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
+- home LLM 測試一次跑一張 (Owner date: 2026-11-17, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
+- 沒有依據的上限全部改成可調，放進設定檔並記錄依據 (Owner date: 2026-11-17, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
 - 以後我定新規則，就同步更新規則卡 (Owner date: 2026-11-18, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
 
 ## Dispatch
