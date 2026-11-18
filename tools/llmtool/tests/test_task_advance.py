@@ -1901,6 +1901,44 @@ class TaskAdvanceCiFailRepairTests(unittest.TestCase):
             'conclusion': 'failure', 'excerpt': CI_EXCERPT})
         self.assertIn('check-runs/1', calls)
 
+    def test_docs_only_failure_before_review_calls_repair_with_ci_failure(self):
+        docs_run = check_run(2, name='check (docs)', conclusion='failure')
+        reply = ({'total_count': 1, 'check_runs': [docs_run]},
+                 [{'filename': 'docs/guide.md'}])
+        result, dispatched, calls, repaired, gh_calls = advance_with_ci_repair(reply)
+        self.assertEqual((result['step'], result['codes']), ('CI_FAILED', []))
+        self.assertEqual(dispatched, [])
+        self.assertEqual(gh_calls, [])
+        self.assertEqual(len(repaired), 1)
+        call_args = repaired[0]
+        self.assertEqual((call_args['task_id'], call_args['executor_task'],
+                          call_args['pr_number'], call_args['retry_claim_id']),
+                         ('1' * 32, 'executor-1', 17, None))
+        self.assertNotIn('remote_test_receipt', call_args)
+        self.assertEqual(call_args['ci_failure'], {
+            'head': HEAD, 'check_name': 'check (docs)', 'check_run_id': 2,
+            'conclusion': 'failure', 'excerpt': CI_EXCERPT})
+        self.assertIn('check-runs/2', calls)
+
+    def test_gateway_and_ai_loop_failures_before_review_call_repair(self):
+        cases = (
+            ('gateway tests (Linux 3.14)', [{'filename': 'tools/api-agent-gateway/app.py'}]),
+            ('ai-loop helper tests (Python 3.14)', [{'filename': 'tools/ai-loop/loop.py'}]),
+        )
+        for check_name, files in cases:
+            with self.subTest(check=check_name):
+                failed_run = check_run(3, name=check_name, conclusion='failure')
+                other_runs = [check_run(1, name='check (Linux 3.14)')] if 'gateway' in check_name else []
+                reply = ({'total_count': 1 + len(other_runs),
+                          'check_runs': [failed_run] + other_runs}, files)
+                result, dispatched, calls, repaired, gh_calls = advance_with_ci_repair(reply)
+                self.assertEqual((result['step'], result['codes']), ('CI_FAILED', []))
+                self.assertEqual(dispatched, [])
+                self.assertEqual(gh_calls, [])
+                self.assertEqual(len(repaired), 1)
+                self.assertEqual(repaired[0]['ci_failure']['check_name'], check_name)
+                self.assertEqual(repaired[0]['ci_failure']['check_run_id'], 3)
+
     def test_mac_failure_after_pass_calls_repair_with_ci_failure(self):
         result, calls, repaired = self.mac_after_pass('failure')
         self.assertEqual((result['step'], result['codes'], result['result']),
@@ -1942,6 +1980,18 @@ class TaskAdvanceCiFailRepairTests(unittest.TestCase):
                 self.assertEqual(repaired, [])
                 self.assertFalse(any('rerun' in path or 'rerequest' in path
                                      for path in calls))
+            with self.subTest(conclusion=conclusion, check='docs'):
+                docs_run = check_run(2, name='check (docs)', conclusion=conclusion)
+                reply = ({'total_count': 1, 'check_runs': [docs_run]},
+                         [{'filename': 'docs/guide.md'}])
+                result, dispatched, calls, repaired, gh_calls = advance_with_ci_repair(reply)
+                self.assertEqual((result['step'], result['codes']),
+                                 ('WAITING_ENV', ['CI_ENV_' + conclusion.upper()]))
+                self.assertEqual(result['result'], {
+                    'check': 'check (docs)', 'check_run_id': 2, 'head': HEAD})
+                self.assertEqual((repaired, dispatched, gh_calls), ([], [], []))
+                self.assertFalse(any('rerun' in path or 'rerequest' in path
+                                     for path in calls))
 
     def test_neutral_keeps_ci_failed(self):
         result, dispatched, calls, repaired, _ = self.linux('neutral')
@@ -1953,6 +2003,14 @@ class TaskAdvanceCiFailRepairTests(unittest.TestCase):
         self.assertEqual((result['step'], result['codes']),
                          ('MERGE_REFUSED', ['MERGE_CHECKS_NOT_GREEN']))
         self.assertEqual(repaired, [])
+        docs_run = check_run(2, name='check (docs)', conclusion='neutral')
+        reply = ({'total_count': 1, 'check_runs': [docs_run]},
+                 [{'filename': 'docs/guide.md'}])
+        result, dispatched, calls, repaired, _ = advance_with_ci_repair(reply)
+        self.assertEqual((result['step'], result['codes']),
+                         ('CI_FAILED', ['LINUX_CI_FAILED']))
+        self.assertEqual((repaired, dispatched), ([], []))
+        self.assertNotIn('check-runs/2', calls)
 
 
 class TaskAdvancePublishTests(unittest.TestCase):

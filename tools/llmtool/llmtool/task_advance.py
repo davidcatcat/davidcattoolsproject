@@ -3380,18 +3380,19 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             step = gate_step
             if ci_code is not None:
                 codes.append(ci_code)
-        if (step == 'CI_FAILED' and gate_latest.get('name') == _LINUX_CHECK and
+        failed_name = gate_latest.get('name')
+        if (step == 'CI_FAILED' and failed_name in _LINUX_FLAG_CHECKS and
                 gate_latest.get('conclusion') in ('failure', 'timed_out', *_CI_ENV_CONCLUSIONS)):
-            # #1502 WP-D D11: route the newest exact-head Linux run before review.
-            linux_run = _read_check_run(d6['result_head'], _LINUX_CHECK,
+            # #1502 WP-D D11, #2337: route the newest exact-head required check run before review.
+            check_run = _read_check_run(d6['result_head'], failed_name,
                                         gate_latest.get('id'), get)
-            if linux_run is None:
+            if check_run is None:
                 codes.append('CI_CHECK_RUN_UNAVAILABLE')
             else:
                 routed = _route_ci_failure(
                     store=store, record=record, task_id=task_id,
                     executor_task=executor_task, number=number, d6=d6, related=related,
-                    run=linux_run, fail_code='LINUX_CI_FAILED', github_get=get,
+                    run=check_run, fail_code='LINUX_CI_FAILED', github_get=get,
                     repair_review_call=repair_review_call)
                 if routed is not None:
                     step, codes, result = routed[0], list(routed[1]), routed[2]

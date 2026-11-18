@@ -428,9 +428,14 @@ def _remote_test_failure(task, *, executor_task, pr_number, receipt):
     return packet
 
 
-# #1502 WP-D D11: an exact-head required CI check that ended in conclusion
-# 'failure' is repaired like an EC2 FAIL and shares its count.
-CI_REPAIR_CHECKS = ('check (Linux 3.14)', 'check (macOS 3.13)')
+# #1502 WP-D D11, #2337: exact-head required CI checks a CI repair may answer.
+CI_REPAIR_CHECKS = (
+    'check (Linux 3.14)',
+    'check (docs)',
+    'gateway tests (Linux 3.14)',
+    'ai-loop helper tests (Python 3.14)',
+    'check (macOS 3.13)',
+)
 CI_EXCERPT_MAX_BYTES = 4096
 CI_EXCERPT_MAX_LINES = 40
 CI_PACKET_HEADER = 'CI_CHECK_FAILURE'
