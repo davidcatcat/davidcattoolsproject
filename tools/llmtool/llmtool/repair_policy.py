@@ -19,7 +19,13 @@ POLICY_KEYS = ('repair_max', 'parent_debug_max', 'group_debug_max', 'child_max',
                'waiting_notify_after_hours')
 # #1815 T3: optional limits as key -> (min, max); an absent key keeps its caller default.
 OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
-_MAX_BYTES = 4096
+# #2281 L0a rule 3: the bound is a real technical limit, not arbitrary. The
+# loader reads the file whole and hands it to json.loads, so without a bound a
+# corrupted or runaway policy.json could exhaust memory before any check runs.
+# 16384 bytes keeps that bounded and leaves room for the planned new policy
+# keys; a policy is a small JSON of integer limits. A file above the bound is
+# refused POLICY_INVALID (fail closed, no silent fallback).
+_MAX_BYTES = 16384
 
 
 def _refuse(code):
