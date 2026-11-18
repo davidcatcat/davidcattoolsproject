@@ -44,12 +44,13 @@ class OpenBracketGuardTests(unittest.TestCase):
                 self.assertEqual((code, out), (1, FAIL + "acceptance[1]_open_bracket_line_end"))
                 self.assertNotIn(line, out)
 
-    def test_open_bracket_in_edit_new_text_refuses(self):
+    def test_edits_field_is_refused_before_bracket_check(self):
+        # #1502 WP-G: an 'edits' field is refused whatever its text.
         new = "y = foo" + chr(40) + "\n    1)\n"
         first = dict(path="new_file.py", old="a", new="b\n")
         edits = [first, dict(path="new_file.py", old="c", new=new)]
         code, out = self.run_main(dict(BASE, edits=edits))
-        self.assertEqual((code, out), (1, FAIL + "edits[1]_open_bracket_line_end"))
+        self.assertEqual((code, out), (2, "SPEC_PREFLIGHT_INVALID:EDITS_FORBIDDEN"))
         self.assertNotIn("foo", out)
 
     def test_brackets_in_strings_and_comments_pass(self):
