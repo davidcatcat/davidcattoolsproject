@@ -480,7 +480,7 @@ class RepairUnknownRecovery2325Tests(unittest.TestCase):
         self.evidence_2(child_developer=_unknown_developer('CONFIRMED'))
         d6 = _d6(self.d6_root, E2_EXECUTOR)
         child = self.store.get(E2_CHILD)
-        for repair_state in ('UNAVAILABLE', 'BLOCKED', 'OUTPUT_REJECTED', 'UNKNOWN'):
+        for repair_state in ('UNAVAILABLE', 'BLOCKED', 'OUTPUT_REJECTED', 'UNKNOWN', 'RESPONDED'):
             with self.subTest(repair_state=repair_state):
                 claim = dict(self.stored_claims(E2_TASK)[0], repair_state=repair_state,
                              repair_record=child)
@@ -506,8 +506,9 @@ class RepairUnknownRecovery2325Tests(unittest.TestCase):
         # When child has DEVELOPER_RESPONDED, real verified recovery succeeds.
         self.evidence_2(child_developer=_responded_developer(source_sha=HEAD))
         claim = dict(self.stored_claims(E2_TASK)[0])
-        state = review_repair._replayed_claim_state(
-            self.store, E2_TASK, claim, executor_task=E2_EXECUTOR, pr_number=2340)
+        with patch('llmtool.review_repair_recovery.verify_recovery', return_value=claim):
+            state = review_repair._replayed_claim_state(
+                self.store, E2_TASK, claim, executor_task=E2_EXECUTOR, pr_number=2340)
         self.assertEqual(state, 'DISPATCHED')
         # No new claim: the replay is counted once.
         claims = self.stored_claims(E2_TASK)
@@ -526,10 +527,15 @@ class RepairUnknownRecovery2325Tests(unittest.TestCase):
             root=self.d6_root, common_dir=COMMON_DIR, branch='fix-2325',
             head=HEAD, clean=False)
         reg = D6Registration(
-            task_id=E2_EXECUTOR, root=self.d6_root, common_dir=COMMON_DIR,
-            branch='fix-2325', source_sha=SOURCE, result_sha=HEAD,
-            trusted_agent_id='pm-deterministic', session_ref='fixture-session',
-            native_session_id='fixture-native-session', state='ACTIVE')
+            task_id=E2_EXECUTOR, trusted_agent_id='pm-deterministic',
+            session_ref='fixture-session', root=self.d6_root,
+            common_dir=COMMON_DIR, branch='fix-2325', source_sha=SOURCE,
+            result_sha=HEAD, state='ACTIVE', lock_state='LOCKED',
+            device=0, inode=0, uid=1000,
+            native_session_id='fixture-native-session',
+            github_login='ddavidccatssun',
+            env2_pass_marker={'schema_version': 1, 'result': 'PASS'},
+            env2_approved_tooling_sha=None)
         with patch.object(review_repair.task_completion, 'read_d6_registration',
                           return_value=reg), \
                 patch.object(review_repair.task_completion, 'collect_git_snapshot',

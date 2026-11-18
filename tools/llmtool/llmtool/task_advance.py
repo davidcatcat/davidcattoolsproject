@@ -2408,14 +2408,12 @@ def _repair_claim_action(current_repair, d6, pr=None):
         return 'WAITING_REPAIR'
     if state == 'RECORD_UNAVAILABLE':
         return 'DEVELOPER_ATTENTION'
-    if state == 'RESPONDED':
-        return 'PUBLISH'
     if claim_state == 'UNKNOWN':
         if state == 'UNKNOWN' and _repair_never_delegated(current_repair, d6, pr=pr):
             return 'REPAIR_REVIEW'
-        if state in ('UNAVAILABLE', 'BLOCKED', 'OUTPUT_REJECTED', 'UNKNOWN'):
-            return 'REPAIR_OUTCOME_UNKNOWN'
-        return None
+        return 'REPAIR_OUTCOME_UNKNOWN'
+    if state == 'RESPONDED':
+        return 'PUBLISH'
     if state in ('UNAVAILABLE', 'BLOCKED', 'OUTPUT_REJECTED'):
         return 'REPAIR_RETRY'
     if state == 'UNKNOWN':
