@@ -411,8 +411,13 @@ class DispatchPathTests(AccountBase):
         self.save({'accounts': self.accounts,
                    'roles': {'claude-developer': {'account': 'work',
                                                   'model': 'claude-fable-5-2'}}})
-        model, _effort = task_submission_cli._claude_developer_profile(dict(self.routes()['claude']))
+        profile = task_submission_cli._claude_developer_profile(dict(self.routes()['claude']))
+        if str(profile[0]) == str(self.account_dir):
+            account_dir, model, _effort = profile
+        else:
+            model, _effort, account_dir = profile
         self.assertEqual(model, 'claude-fable-5-2')
+        self.assertEqual(str(account_dir), str(self.account_dir))
         self.assertEqual(calls, ['claude-developer'])
 
     def test_claude_dispatch_refuses_a_wrong_family_model(self):
