@@ -56,9 +56,13 @@ host. No code or configuration was changed.
 
 - `tools/llmtool/llmtool/gw_agent_callsite.py:19-55` opens a session home and a
   lock through `open_locked_home`, and `route_fields` (lines 103-110) supplies
-  `session_home` and `session_id` to the route. Those select the session
-  directory passed to the gateway as `--state-dir` (`gw_agent.py:449`); they do
-  not choose the package.
+  `session_home` and `session_id` to the route. They select persistent session
+  storage, not the package. On a resume, `_prepare_files`
+  (`gw_agent.py:360-396`) reads `meta.json` and `history.json` from that home
+  and stages them into the run's own state directory. `build_argv`
+  (`gw_agent.py:438-450`) passes that directory as `--state-dir` (line 449), a
+  per-run `state` directory inside the route tmpdir (staged at lines 377-392);
+  `session_id` also selects `resume` (line 441).
 - `tools/llmtool/llmtool/gw_agent_sessions.py:308` defines
   `sweep(store, now=None, *, runner=None, package_path=None)`. For an ENDED
   session it runs `end ... --reason task_terminal` with the same module form
