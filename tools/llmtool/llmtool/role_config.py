@@ -42,6 +42,8 @@ KNOWN_ROLES = (
 )
 ROLE_MODEL_NOT_ALLOWED = "ROLE_MODEL_NOT_ALLOWED"
 ROUTE_CONFIG_UNAVAILABLE = "ROUTE_CONFIG_UNAVAILABLE"
+# The exact shape validate_owner_override() returns for an accepted override.
+_VERIFIED_OVERRIDE_KEYS = frozenset({"route", "model", "ref", "comment_id"})
 
 
 def _fail(message="role configuration: invalid configuration", code="ROLE_CONFIG_INVALID"):
@@ -302,7 +304,9 @@ def check_role_model(route, route_config, model, *, owner_override=None,
     gw-agent membership gate when it names the same model and owner_override.py
     verifies that its ref names this route and model. fetch_comment(comment_id)
     is the injected GitHub reader; without it the ref is unreadable and the
-    override is refused.
+    override is refused. A caller may also pass back the accepted mapping
+    validate_owner_override already returned for this route and model; its
+    route/model identity is still checked, so it cannot admit another model.
     """
     from .developer_routes import (
         RouteError, check_route_model, check_route_model_family,
@@ -331,12 +335,21 @@ def check_role_model(route, route_config, model, *, owner_override=None,
     try:
         if type(owner_override) is not dict or owner_override.get("model") != model:
             raise OwnerOverrideError("OWNER_OVERRIDE_MISMATCH")
-        if fetch_comment is None:
-            raise OwnerOverrideError("OWNER_OVERRIDE_REF_UNREADABLE")
-        if repository is None:
-            repository = _default_repository()
-        accepted = validate_owner_override(owner_override, route, repository=repository,
-                                           fetch_comment=fetch_comment)
+        if set(owner_override) == _VERIFIED_OVERRIDE_KEYS:
+            # A caller may reuse the dict validate_owner_override already
+            # returned for this route and model. The family/format gate above
+            # already ran, and this identity check still applies; a raw
+            # {"model", "ref"} override goes through the reader below.
+            if owner_override.get("route") != route:
+                raise OwnerOverrideError("OWNER_OVERRIDE_MISMATCH")
+            accepted = dict(owner_override)
+        else:
+            if fetch_comment is None:
+                raise OwnerOverrideError("OWNER_OVERRIDE_REF_UNREADABLE")
+            if repository is None:
+                repository = _default_repository()
+            accepted = validate_owner_override(owner_override, route, repository=repository,
+                                               fetch_comment=fetch_comment)
     except OwnerOverrideError as exc:
         _fail_model(exc.code)
     if accepted.get("route") != route or accepted.get("model") != model:
