@@ -181,6 +181,33 @@ def _update_claim_state(store, task_id, claim, state):
     _refuse('REPAIR_CLAIM_UNAVAILABLE')
 
 
+def _replayed_claim_state(store, task_id, claim, *, executor_task, pr_number):
+    """#2325: record DISPATCHED for a replayed UNKNOWN claim; return the stored state.
+
+    The replay dispatched the claim's own repair Task, so no new claim and no
+    new count exist. The ordinary claim write is tried first. TaskStore admits
+    UNKNOWN -> DISPATCHED only through its verified claim recovery (#1928,
+    E1-E5 under the Task lock), which is tried next. If both refuse, the claim
+    stays UNKNOWN; the dispatch has already happened, so this is reported, not
+    raised.
+    """
+    try:
+        _update_claim_state(store, task_id, claim, 'DISPATCHED')
+        return 'DISPATCHED'
+    except Exception:
+        pass
+    recover = getattr(store, 'recover_review_repair_claim', None)
+    if callable(recover):
+        try:
+            current = store.get(task_id)
+            recover(task_id, claim['repair_task_id'], executor_task=executor_task,
+                    pr_number=pr_number, expected_sha256=current['record_sha256'])
+            return 'DISPATCHED'
+        except Exception:
+            pass
+    return 'UNKNOWN'
+
+
 def _worker_key(profile):
     return {'company-gw': 'company-gw', 'gw-agent': 'gw-agent',
             'opencode': 'opencode-developer', 'claude': 'claude-developer',
@@ -809,19 +836,26 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                     if adapter is None:
                         adapter = lambda **request: _delegate_repair(
                             **request, delegate=delegate_callable, store=store)
-                    try:
-                        result = adapter(task=repair_record, developer=developer, packet=packet,
-                                         executor_task=executor_task, provider_profile=profile,
-                                         model=developer.get('model'))
-                    except Exception:
-                        _update_claim_state(store, task_id, existing, 'UNKNOWN')
-                        raise
-                    _update_claim_state(store, task_id, existing, 'DISPATCHED')
-                    existing['state'] = 'DISPATCHED'
+                    # #2325: the claim is already UNKNOWN. Rewriting it unchanged is
+                    # refused by the store and would hide the adapter's own refusal,
+                    # so a refused replay leaves the claim as it is.
+                    result = adapter(task=repair_record, developer=developer, packet=packet,
+                                     executor_task=executor_task, provider_profile=profile,
+                                     model=developer.get('model'))
+                    existing['state'] = _replayed_claim_state(
+                        store, task_id, existing, executor_task=executor_task,
+                        pr_number=pr_number)
                     response = {'result': result, 'attempt': existing['attempt'],
                                 'repair_task_id': repair_record['task_id'],
                                 'claim': existing,
                                 'next_action': f"review-dispatch --version {packet_version + 1}"}
+                    if existing['state'] != 'DISPATCHED':
+                        # The repair Task was dispatched; only the claim record lags.
+                        # task advance reads the repair Task's own record either way.
+                        response['next_action'] = (
+                            f"task advance {task_id}" if test_failure else
+                            f"task repair {task_id} --executor-task {executor_task} "
+                            f"--pr {pr_number} --recover-claim {repair_record['task_id']}")
                     if auto_review:
                         try:
                             published_head = _current_d6_head(task, executor_task, current_head)
