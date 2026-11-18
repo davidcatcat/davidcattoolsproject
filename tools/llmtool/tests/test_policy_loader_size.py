@@ -60,7 +60,13 @@ class PolicyLoaderSizeTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), 'POLICY_INVALID')
 
     def test_repository_policy_is_unchanged(self):
-        self.assertEqual(rp.load_policy(), dict(GOOD, timeout_continuation_max=1))
+        # #2281 L0b: rows 2, 15 and 16 are now recorded in policy.json, so the
+        # pinned contents gain exactly those keys at the quoted values.
+        self.assertEqual(rp.load_policy(), dict(GOOD, timeout_continuation_max=1,
+                                                spec_preflight_large_file_lines=2000,
+                                                merge_train_max_members=6,
+                                                merge_train_max_files_per_pr=100,
+                                                revert_max_prs=5))
         self.assertEqual(rp.policy_path().name, 'policy.json')
 
 

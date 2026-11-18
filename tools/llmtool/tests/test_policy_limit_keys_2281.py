@@ -71,10 +71,12 @@ class PolicyLimitKeysTests(unittest.TestCase):
 
     def test_missing_key_keeps_the_caller_default(self):
         # A3: none of the new keys is required, so a policy file without them
-        # loads unchanged and every existing key behaves as before.
+        # loads unchanged and every existing key behaves as before; the loader
+        # injects nothing for an absent key, so the caller keeps its default.
+        # A file with the keys loads them exactly as recorded.
         self.assertEqual(rp.load_policy(self._write(GOOD)), GOOD)
-        self.assertEqual(rp.load_policy(self._write(GOOD)),
-                         rp.load_policy(self._write(dict(GOOD, **VALUES))))
+        self.assertEqual(rp.load_policy(self._write(dict(GOOD, **VALUES))),
+                         dict(GOOD, **VALUES))
 
     def test_existing_keys_and_unknown_keys_are_unchanged(self):
         for value in (True, -1, '1', 1001):

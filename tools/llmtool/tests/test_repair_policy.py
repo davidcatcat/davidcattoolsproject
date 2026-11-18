@@ -23,7 +23,15 @@ class PolicyFileTests(unittest.TestCase):
         return path
 
     def test_repository_policy_has_the_owner_limits(self):
-        self.assertEqual(rp.load_policy(), dict(GOOD, timeout_continuation_max=1))
+        # #2281 L0b: the table limits without a stated basis (row 2, 15, 16)
+        # are now part of the repository policy.json; only the pinned
+        # expectation changes, missing-key defaults are checked in
+        # test_policy_limit_keys_2281.
+        self.assertEqual(rp.load_policy(), dict(GOOD, timeout_continuation_max=1,
+                                                spec_preflight_large_file_lines=2000,
+                                                merge_train_max_members=6,
+                                                merge_train_max_files_per_pr=100,
+                                                revert_max_prs=5))
         self.assertEqual(rp.policy_path().name, 'policy.json')
 
     def test_valid_file_loads(self):
