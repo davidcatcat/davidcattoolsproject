@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from llmtool import (lineage_counts, repair_policy, review_repair, start_failure,
-                     task_advance, task_submission_cli)
+                     task_advance, task_submission_cli, worker_dispatch)
 from llmtool.developer_routes import RouteError
 from llmtool.errors import LLMToolError
 from llmtool.repair_policy import UNKNOWN
@@ -361,23 +361,33 @@ class PrePrClaimStoreTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        worker_policy_fixture.install(self)
+        repository = patch.object(worker_dispatch, 'repository_config',
+            return_value={'slug': 'davidcatcat/davidcattoolsproject',
+                          'dispatch_issue': 289, 'dispatch_evidence_pr': 283})
+        repository.start()
+        self.addCleanup(repository.stop)
+
+    def _task(self, store, task_id=TASK):
+        request = 'Bounded non-sensitive pre-PR repair fixture.'
+        run_id = '1' * 32
+        task = task_submission_cli._record(
+            task_id, run_id, 'pm-' + '1' * 32, 'pm-profile', request,
+            state='PM_RESPONDED', provider_type='openai-compatible',
+            model='pm-model', backend='NO_NATIVE_SESSION_ID_EXPOSED',
+            request_sha=hashlib.sha256(request.encode()).hexdigest())
+        task.update(pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                                      'base_url': None},
+                    response='PM accepted a bounded request.', error_code=None,
+                    pm_assignment={'schema_version': 1, 'route': 'claude', 'risk': 'LOW',
+                                   'goal': 'Add bounded test.',
+                                   'acceptance': ['Fix pre-PR failure.']})
+        store.create(task)
+        return store.get(task_id)
 
     def test_only_a_prepr_ec2_claim_may_have_no_pr(self):
-        from test_active_pm_inbox import ActivePMInboxTests, _RESPONSE
-
-        fixture = ActivePMInboxTests()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
         store = TaskStore(Path(self.temp.name).resolve())
-        with redirect_stdout(StringIO()):
-            task = task_submission_cli.run_task_record_pm(
-                Namespace(stdin_json=True, pm_session_id=fixture.session,
-                          pm_runtime='claude-code', pm_cwd=str(fixture.pm_cwd)),
-                store=store,
-                input_stream=StringIO(json.dumps({
-                    'request': 'Bounded non-sensitive pre-PR repair fixture.',
-                    'response': _RESPONSE})),
-                return_record=True, task_id=TASK)
+        task = self._task(store)
         prepr = dict(_used_claim(PREPR, None, HEADS[0], 1), state='CLAIMED')
         saved = store.compare_and_update(
             TASK, expected={'record_sha256': task['record_sha256']},
@@ -406,24 +416,8 @@ class PrePrClaimStoreTests(unittest.TestCase):
         self.assertEqual(store.get(TASK)['review_repair_claims'], [prepr, after])
 
     def test_real_delegation_persists_prepr_repair_packet_to_task_store(self):
-        from test_active_pm_inbox import ActivePMInboxTests
-
-        fixture = ActivePMInboxTests()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
         store = TaskStore(Path(self.temp.name).resolve())
-        response = json.dumps({'schema_version': 1, 'summary': 'Active PM plan.',
-            'developer_assignment': {'route': 'claude', 'risk': 'LOW',
-                'goal': 'Add bounded test.', 'acceptance': ['Fix pre-PR failure.']}})
-        with redirect_stdout(StringIO()):
-            task = task_submission_cli.run_task_record_pm(
-                Namespace(stdin_json=True, pm_session_id=fixture.session,
-                          pm_runtime='claude-code', pm_cwd=str(fixture.pm_cwd)),
-                store=store,
-                input_stream=StringIO(json.dumps({
-                    'request': 'Bounded non-sensitive pre-PR repair fixture.',
-                    'response': response})),
-                return_record=True, task_id=TASK)
+        self._task(store)
         packet = {
             'task': TASK, 'pr': None, 'executor_task': EXECUTOR,
             'failed_head': HEADS[0], 'version': 0, 'verdict_comment_id': 0,
@@ -432,10 +426,10 @@ class PrePrClaimStoreTests(unittest.TestCase):
         }
         reg = SimpleNamespace(
             task_id=EXECUTOR, trusted_agent_id='claude-developer',
-            session_ref='Session', native_session_id=None, root=str(fixture.pm_cwd),
-            common_dir=str(fixture.pm_cwd), branch='main', source_sha=HEADS[0])
-        snap = SimpleNamespace(head=HEADS[0], root=str(fixture.pm_cwd),
-                               common_dir=str(fixture.pm_cwd), branch='main')
+            session_ref='Session', native_session_id=None, root=self.temp.name,
+            common_dir=self.temp.name, branch='main', source_sha=HEADS[0])
+        snap = SimpleNamespace(head=HEADS[0], root=self.temp.name,
+                               common_dir=self.temp.name, branch='main')
         card = '\nREQUIRED_SKILL_BEGIN path=card\nRules.\nREQUIRED_SKILL_END path=card'
         route = type('Route', (), {'run': lambda *a, **kw: None})()
         def fail_route(*_args, **_kwargs):
