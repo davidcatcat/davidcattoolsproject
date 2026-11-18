@@ -201,10 +201,15 @@ def is_free_model(model):
     return type(model) is str and _FREE_MODEL.match(model) is not None
 
 
+def is_valid_model(model):
+    return (type(model) is str and 1 <= len(model) <= 128 and
+            '://' not in model and '..' not in model and
+            '\n' not in model and '\r' not in model and
+            _OPENCODE_MODEL.match(model) is not None)
+
+
 def validate_model(model):
-    if (type(model) is not str or not model or len(model) > 128 or
-            '://' in model or '..' in model or '\n' in model or '\r' in model or
-            _OPENCODE_MODEL.match(model) is None):
+    if not is_valid_model(model):
         _reject('OPENCODE_MODEL_INVALID')
     return model
 
