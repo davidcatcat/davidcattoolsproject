@@ -119,42 +119,55 @@ Observed instances:
 
 ## 4. Candidate Fixes and Risk Analysis
 
-### Candidate Fix 1: Route `repair_state == 'UNKNOWN'` to `REPAIR_RETRY` in `_remote_fail_action`
+### Candidate Fix 1: Route Confirmed-Clean `repair_state == 'UNKNOWN'` to `REPAIR_RETRY` in `_remote_fail_action`
 - **Description**:
-  In `tools/llmtool/llmtool/task_advance.py` (line 2328), include `'UNKNOWN'` among retriable states:
+  In `tools/llmtool/llmtool/task_advance.py` (line 2328), route `'UNKNOWN'` to `REPAIR_RETRY`, but strictly conditioned on verified process termination, clean execution cleanup status, and released writer ownership:
   ```python
-  if state in ('UNAVAILABLE', 'BLOCKED', 'OUTPUT_REJECTED', 'UNKNOWN'):
+  if state in ('UNAVAILABLE', 'BLOCKED', 'OUTPUT_REJECTED'):
+      return 'REPAIR_RETRY'
+  if state == 'UNKNOWN' and _repair_cleanup_confirmed(current_repair):
       return 'REPAIR_RETRY'
   ```
   When `action == 'REPAIR_RETRY'`, `task advance` re-invokes `repair_review(..., retry_claim_id=repair_claim['repair_task_id'])` (lines 3520–3543).
 - **Risks to Counts**:
-  - *Risk*: An automatic retry of an unknown outcome could loop infinitely if the underlying failure persists (e.g., repeating unhandled route crash or unclassified quota exhaustion).
-  - *Mitigation*: Gated by `_test_family_used_up(record, number, head, store)` (line 3528), so it cannot exceed the policy limit (`test_fail_max`). However, if `repair_review` reuses the claim without incrementing attempt count, it could spin within that attempt unless attempt bounds are enforced.
+  - *Analysis of Existing Guarantees*:
+    - The precheck `_test_family_used_up(record, number, d6['result_head'], store)` at `task_advance.py:3527–3530` specifically applies only when `step == 'REPAIR_REVIEW'`. When `step == 'REPAIR_RETRY'`, this precheck is bypassed.
+    - Furthermore, `_test_family_used_up` (lines 851–864) checks `_live_repair_claim(record, head)` (lines 845–848), which returns `True` for any active claim in `('CLAIMED', 'DISPATCHED', 'UNKNOWN')`, causing `_test_family_used_up` to return `False` (lines 857–858).
+    - Instead, retry limits are enforced under the chain lock in `review_repair.py:836–851` (invoked via `repair_review` at `task_advance.py:3532–3547`). As documented by the inline comment at `task_advance.py:3541–3543` (`# Auto: review_repair applies the chain-wide auto limit under its chain lock; advance never pre-checks it`), `review_repair.py` enforces the attempt limit under its lock, increments the attempt count at line 853, marks the previous claim `FAILED`, and appends a new claim with the incremented attempt at lines 874–881.
+    - If the retry attempt exceeds policy bounds (Owner decision D1 / `repair_policy`), `review_repair` raises `REPAIR_LIMIT_REACHED`, which `task_advance.py` catches at lines 3553–3555 and translates to `step, codes = 'STOPPED', ['TEST_FAIL_LIMIT_REACHED']`.
+    - Thus, existing guarantees ensure that `REPAIR_RETRY` does not reuse an uncounted attempt or spin indefinitely; each retry increments the attempt counter and halts upon reaching the limit.
 - **Risks to Review Gates**:
   - *Risk*: None. The worktree is verified clean before re-dispatch. If the retried Developer run succeeds, HEAD moves and passes through standard remote-test and formal cross-family review before merge.
 - **Risks to Dispatch Gating**:
-  - Must ensure worker dispatch policy in `worker-dispatch.json` is re-evaluated before re-dispatch. If a route was paused due to quota exhaustion, automatic retry must halt cleanly rather than bypassing dispatch policy.
+  - *Execution-Cleanup Guard Requirement*:
+    An unconditional mapping of `repair_state == 'UNKNOWN'` to `REPAIR_RETRY` omits an execution-cleanup guard. In `opencode_direct_developer.py:1077–1088`, exceptions such as `OPENCODE_CLEANUP_UNKNOWN` are raised with `attempted=True`. In `tools/llmtool/llmtool/task_submission_cli.py:5059–5074` (and line 5101), this is persisted as `DEVELOPER_OUTCOME_UNKNOWN` with its `cleanup_status` in `developer.execution`.
+    A clean and unchanged worktree (`d6['dirty'] is False` and `d6['result_head'] == snapshot.head`) establishes only that repository files are unmodified; it does not establish that the previous writer process has actually terminated or that its cleanup completed.
+    If `state == 'UNKNOWN'` were unconditionally retried, `task advance` could launch a new Developer writer while a prior process is still active or in an unconfirmed state, violating the single-writer D6 invariant (Common core rule 2).
+  - *Narrowed Proposal*: Automatic retry must be narrowed strictly to runs with confirmed process termination, verified cleanup (`cleanup_status == 'CLEAN'`), and released writer ownership. Runs with uncertain execution or unconfirmed cleanup must retain a hold (e.g., `DEVELOPER_ATTENTION` or `REPAIR_OUTCOME_UNKNOWN`) to prevent concurrent writer dispatch.
+  - Dispatch authority in `worker-dispatch.json` must be re-evaluated before re-dispatch, stopping cleanly if the route was paused.
 
 ### Candidate Fix 2: Provide an Explicit PM Recovery Command / Parameter for Stuck Repair Claims
 - **Description**:
   Extend `llmtool task repair` (or add a dedicated CLI action such as `llmtool task repair --retry-claim <task_id>`) that admits test-failure repairs (without requiring `--pr` or a formal review FAIL verdict).
-  The command verifies that the registered D6 is clean, marks the prior `DISPATCHED` claim with `state: 'ABANDONED'` or `state: 'FAILED'`, and triggers a fresh repair dispatch.
+  The command verifies that the registered D6 is clean, confirms prior writer termination and cleanup status, marks the prior `DISPATCHED` claim with `state: 'ABANDONED'` or `state: 'FAILED'`, and triggers a fresh repair dispatch.
 - **Risks to Counts**:
   - *Advantage*: Prevents automated retry loops because progress requires explicit PM intervention.
-  - *Risk*: Counting must correctly reflect Owner decision D1 (maximum 2 repairs per test failure family). If an abandoned attempt is uncounted, it could violate the 2-repair ceiling; if counted, the PM must be informed that one repair attempt was spent on the unknown outcome.
+  - *Risk & Mitigation*: Counting must conform to Owner decision D1 (maximum 2 repairs per test failure family). Under `review_repair.py:836–851`, retries increment the attempt count and bound total attempts. The recovery command must ensure that retried attempts are counted against the 2-repair ceiling so that the limit is never bypassed.
 - **Risks to Review Gates**:
   - *Risk*: None. Standard review separation and exact-head CI gates remain intact.
 - **Risks to Dispatch Gating**:
-  - Requires fresh dispatch evaluation against `worker-dispatch.json`, adhering strictly to dispatch rules.
+  - Requires fresh dispatch evaluation against `worker-dispatch.json`. The recovery command must explicitly check that the previous writer process has exited and released writer ownership before launching a new Developer run.
 
-### Candidate Fix 3: Map Clean-Worktree `DEVELOPER_OUTCOME_UNKNOWN` to Actionable Attention in `derive_repair_state` / `_remote_fail_action`
+### Candidate Fix 3: Map Clean-Worktree `DEVELOPER_OUTCOME_UNKNOWN` with Confirmed Cleanup to Actionable Attention in `derive_repair_state` / `_remote_fail_action`
 - **Description**:
   In `tools/llmtool/llmtool/task_advance.py`:
-  - When `derive_repair_state()` observes `DEVELOPER_OUTCOME_UNKNOWN` on a clean, unchanged worktree, return `'DEVELOPER_ATTENTION'` or a distinct actionable state (e.g. `'REPAIR_FAILED'`).
-  - In `_remote_fail_action()`, map this to `'DEVELOPER_ATTENTION'` with code `'REPAIR_OUTCOME_UNKNOWN'`, allowing `task advance` to present an actionable hold for PM decision (such as replan, route switch, or retry) rather than a dead-end `REPAIR_OUTCOME_UNKNOWN` code.
+  - When `derive_repair_state()` observes `DEVELOPER_OUTCOME_UNKNOWN`:
+    - If process termination or cleanup is unconfirmed (`cleanup_status != 'CLEAN'`), retain `'UNKNOWN'` (holding advancement under `REPAIR_OUTCOME_UNKNOWN`).
+    - If process termination and cleanup are confirmed (`cleanup_status == 'CLEAN'`) on a clean, unchanged worktree, return `'DEVELOPER_ATTENTION'` (or a dedicated actionable state).
+  - In `_remote_fail_action()`, map this to `'DEVELOPER_ATTENTION'` with code `'REPAIR_OUTCOME_UNKNOWN'`, allowing `task advance` to present an actionable hold for PM decision (such as replan, route switch, or manual recovery) rather than a dead-end exit `1` loop.
 - **Risks to Counts**:
-  - Low risk: Halts advancement cleanly under PM attention. The PM can choose to replan, drop, or retry, ensuring attempt counts conform to `repair_policy`.
+  - Low risk: Halts advancement cleanly under PM attention. The PM can choose to replan, drop, or retry. Any subsequent repair command routes through `review_repair.py:836–851`, which enforces attempt increments and the 2-repair ceiling (`REPAIR_LIMIT_REACHED`).
 - **Risks to Review Gates**:
   - None. No code is published or reviewed while the task waits for attention.
 - **Risks to Dispatch Gating**:
-  - Aligns with AGENTS.md policy: on quota exhaustion or unknown Developer outcome, bounded task progress is recorded and Writer ownership is released without automatic paid fallback.
+  - Strictly preserves D6 single-writer exclusivity by checking process termination and cleanup status before surfacing an actionable state, preventing concurrent writer dispatch.
