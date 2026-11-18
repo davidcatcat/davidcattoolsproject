@@ -33,14 +33,19 @@ class AsciiGuardTests(unittest.TestCase):
 
     def test_non_ascii_gw_agent_fields_refuse_with_labels_only(self):
         cases = (({"goal": "Create " + WIDE}, "goal_non_ascii"),
-                 ({"acceptance": ["ok", "line " + WIDE]}, "acceptance[1]_non_ascii"),
-                 ({"edits": [{"path": "new_file.py", "old": "a", "new": WIDE}]},
-                  "edits[0]_non_ascii"))
+                 ({"acceptance": ["ok", "line " + WIDE]}, "acceptance[1]_non_ascii"))
         for change, label in cases:
             with self.subTest(label=label):
                 code, out = self.run_main(dict(BASE, **change))
                 self.assertEqual((code, out), (1, "SPEC_PREFLIGHT_FAIL:" + label))
                 self.assertNotIn(WIDE, out)
+
+    def test_non_ascii_edits_field_is_refused_as_edits(self):
+        # #1502 WP-G: an 'edits' field is refused whatever its text.
+        spec = dict(BASE, edits=[{"path": "new_file.py", "old": "a", "new": WIDE}])
+        code, out = self.run_main(spec)
+        self.assertEqual((code, out), (2, "SPEC_PREFLIGHT_INVALID:EDITS_FORBIDDEN"))
+        self.assertNotIn(WIDE, out)
 
     def test_other_routes_keep_non_ascii(self):
         self.assertEqual(spec_preflight.check_ascii(dict(BASE, provider="claude",
