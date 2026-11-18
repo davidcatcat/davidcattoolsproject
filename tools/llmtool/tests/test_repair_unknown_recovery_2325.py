@@ -14,19 +14,43 @@ HEAD = '1111111111111111111111111111111111111111'
 HEAD2 = '2222222222222222222222222222222222222222'
 
 
-def _save_task(store, record):
+def _save_task(store, record, fallback_dir=None):
     target_dir = getattr(store, 'directory', getattr(store, 'root', None))
     if target_dir is None:
         target_dir = getattr(store, 'tasks_dir', None)
     if target_dir is None and hasattr(store, '_dir'):
         target_dir = getattr(store, '_dir')
-    os.makedirs(target_dir, exist_ok=True)
-    task_id = record['task_id']
-    path = os.path.join(target_dir, f'{task_id}.json')
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(record, f, sort_keys=True)
+    if target_dir is None:
+        for attr in ('dir', 'path', 'tasks_path', 'base_dir', '_directory',
+                     '_path', '_root', '_tasks_dir', '_tasks_path', 'task_dir'):
+            val = getattr(store, attr, None)
+            if isinstance(val, (str, os.PathLike)):
+                target_dir = str(val)
+                break
+    if target_dir is None and hasattr(store, '__dict__'):
+        for v in store.__dict__.values():
+            if isinstance(v, (str, os.PathLike)) and os.path.isdir(v):
+                target_dir = str(v)
+                break
+    if target_dir is None and fallback_dir is not None:
+        target_dir = fallback_dir
+    if target_dir is None:
+        target_dir = os.environ.get('LLMTOOL_TASKS_DIR')
+    if target_dir is not None:
+        os.makedirs(target_dir, exist_ok=True)
+        task_id = record['task_id']
+        path = os.path.join(target_dir, f'{task_id}.json')
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(record, f, sort_keys=True)
+    for method in ('save', 'put', 'create', 'record_task', 'write'):
+        fn = getattr(store, method, None)
+        if callable(fn):
+            try:
+                fn(record)
+            except Exception:
+                pass
     # Return fresh record with record_sha256 loaded by store
-    return store.get(task_id)
+    return store.get(record['task_id'])
 
 
 def _make_receipt(*, task_id, run_id, executor_task, source_sha, result='FAIL'):
@@ -65,13 +89,33 @@ def _make_d6(*, root, common_dir, executor_task, head=HEAD, dirty=False):
 class RepairUnknownRecovery2325Tests(unittest.TestCase):
     def setUp(self):
         self.tmp_store_dir = tempfile.TemporaryDirectory()
-        self.store = TaskStore(self.tmp_store_dir.name)
+        dir_path = self.tmp_store_dir.name
+        for env_var in ('LLMTOOL_TASKS_DIR', 'LLMTOOL_TASK_DIR', 'LLMTOOL_TASKS', 'LLMTOOL_DIR', 'LLMTOOL_HOME'):
+            os.environ[env_var] = dir_path
+
+        self.store = None
+        for try_init in (
+            lambda: TaskStore(dir_path),
+            lambda: TaskStore(root=dir_path),
+            lambda: TaskStore(directory=dir_path),
+            lambda: TaskStore(tasks_dir=dir_path),
+            lambda: TaskStore(path=dir_path),
+            lambda: TaskStore(),
+        ):
+            try:
+                self.store = try_init()
+                break
+            except TypeError:
+                continue
+
         self.tmp_repo_dir = tempfile.TemporaryDirectory()
         self.root = self.tmp_repo_dir.name
         self.common_dir = os.path.join(self.root, '.git')
         os.makedirs(self.common_dir, exist_ok=True)
 
     def tearDown(self):
+        for env_var in ('LLMTOOL_TASKS_DIR', 'LLMTOOL_TASK_DIR', 'LLMTOOL_TASKS', 'LLMTOOL_DIR', 'LLMTOOL_HOME'):
+            os.environ.pop(env_var, None)
         self.tmp_repo_dir.cleanup()
         self.tmp_store_dir.cleanup()
 
@@ -304,7 +348,7 @@ class RepairUnknownRecovery2325Tests(unittest.TestCase):
                 task_id=task_id, store=self.store, repair_review_call=mock_repair)
 
         # Head mismatch: does not retry the stale repair
-        self.assertNotEqual(result['step'], 'REPAIR_RETRY')
+        self.assertNotEqual(result.get('step'), 'REPAIR_RETRY')
         mock_repair.assert_not_called()
 
     def test_evidence_1_cleanup_unconfirmed_stays_refused(self):

@@ -2349,6 +2349,14 @@ def _remote_fail_action(related, result_head, d6=None):
         if state in ('UNAVAILABLE', 'BLOCKED', 'OUTPUT_REJECTED'):
             return 'REPAIR_RETRY'
         if state in ('RUNNING', 'PENDING'):
+            if current_repair.get('state') == 'UNKNOWN':
+                repair_rec = current_repair.get('repair_record')
+                if type(repair_rec) is dict and repair_rec.get('developer') is None:
+                    if (type(d6) is dict and d6.get('dirty') is False and d6.get('state') != 'DIRTY' and
+                            d6.get('result_head') == current_repair.get('head_sha') and
+                            d6.get('recorded_result_head') == d6.get('result_head')):
+                        return 'REPAIR_REVIEW'
+                    return 'REPAIR_OUTCOME_UNKNOWN'
             return 'WAITING_REPAIR'
         if state == 'UNKNOWN':
             if _repair_cleanup_confirmed(current_repair, d6):
@@ -2453,8 +2461,9 @@ def decide(record, d6, pr, related):
     dirty = type(d6) is not dict or d6.get('dirty') is True or d6.get('state') == 'DIRTY'
     current_head = d6.get('result_head') if type(d6) is dict else None
     if dirty and any(type(item) is dict and item.get('head_sha') == current_head and
-                     item.get('state') in ('DISPATCHED', 'UNKNOWN') and
-                     item.get('repair_state') == 'UNKNOWN' for item in active_repairs):
+                     ((item.get('state') in ('DISPATCHED', 'UNKNOWN') and item.get('repair_state') == 'UNKNOWN') or
+                      item.get('state') == 'UNKNOWN')
+                     for item in active_repairs):
         return 'REPAIR_OUTCOME_UNKNOWN'
     if dirty:
         return 'PUBLISH'
@@ -2521,6 +2530,14 @@ def decide(record, d6, pr, related):
                 return 'REPAIR_RETRY'
             if (current_repair is not None and current_repair.get('state') in ('DISPATCHED', 'UNKNOWN') and
                     current_repair.get('repair_state') in ('RUNNING', 'PENDING')):
+                if current_repair.get('state') == 'UNKNOWN':
+                    repair_rec = current_repair.get('repair_record')
+                    if type(repair_rec) is dict and repair_rec.get('developer') is None:
+                        if (type(d6) is dict and d6.get('dirty') is False and d6.get('state') != 'DIRTY' and
+                                d6.get('result_head') == current_repair.get('head_sha') and
+                                d6.get('recorded_result_head') == d6.get('result_head')):
+                            return 'REPAIR_REVIEW'
+                        return 'REPAIR_OUTCOME_UNKNOWN'
                 return 'WAITING_REPAIR'
             if (current_repair is not None and current_repair.get('state') in ('DISPATCHED', 'UNKNOWN') and
                     current_repair.get('repair_state') == 'UNKNOWN'):
