@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import errno
 import fcntl
@@ -60,6 +61,29 @@ _HAS_SAFE_PATH_FLAG = sys.version_info >= (3, 11)
 # the gateway the installed package must match (#2310).
 _REPO_GATEWAY_PACKAGE = (Path(__file__).resolve().parents[3] /
                          'api-agent-gateway' / 'api_agent_gateway')
+
+
+@contextmanager
+def _isolated_bytecode_cache():
+    """Ignore any cached bytecode while importing installed gateway code.
+
+    The source digest in `_check_installed_gateway` only covers `.py` files.
+    A stale `__pycache__` entry can still be valid for Python's timestamp check
+    (identical source size and mtime) and shadow the verified sources, so both
+    the launcher and the in-process audit verifier use an unused private cache
+    path and write nothing there (#2318 F1).
+    """
+    previous_prefix = sys.pycache_prefix
+    previous_write = sys.dont_write_bytecode
+    sys.pycache_prefix = str(
+        Path(tempfile.gettempdir()) /
+        ('llmtool-gw-agent-pycache-' + os.urandom(16).hex()))
+    sys.dont_write_bytecode = True
+    try:
+        yield
+    finally:
+        sys.pycache_prefix = previous_prefix
+        sys.dont_write_bytecode = previous_write
 
 
 def _gateway_source_digest(gateway_dir):
@@ -380,7 +404,12 @@ class GwAgentRoute(DeveloperRoute):
             raise
 
     def _check_installed_gateway(self):
-        """Refuse a stale gateway install before staging files or a model call (#2310)."""
+        """Refuse a stale gateway install before staging files or a model call (#2310).
+
+        Cached bytecode is never trusted for this comparison: `build_env` and
+        `_verified_audit_digest` isolate `__pycache__` so only these verified
+        sources can execute (#2318 F1).
+        """
         expected = _gateway_source_digest(_REPO_GATEWAY_PACKAGE)
         installed = _gateway_source_digest(
             Path(self.package_path) / 'api_agent_gateway')
@@ -521,6 +550,9 @@ class GwAgentRoute(DeveloperRoute):
                if key in os.environ}
         env['TMPDIR'] = tmpdir
         env['PYTHONPATH'] = self.package_path
+        # Never read the installed gateway's cached bytecode: only the verified
+        # sources may run (#2318 F1). -B still prevents writing any bytecode.
+        env['PYTHONPYCACHEPREFIX'] = str(Path(tmpdir) / 'pycache')
         if credential is not None:
             env['GW_AGENT_API_KEY'] = credential
         self._credential = None
@@ -592,29 +624,30 @@ class GwAgentRoute(DeveloperRoute):
 
     def _verified_audit_digest(self, path):
         """Load the verifier from the configured gateway package, isolated by name."""
-        package_dir = Path(self.package_path) / 'api_agent_gateway'
-        module_name = '_llmtool_gateway_audit_' + hashlib.sha256(
-            os.fsencode(str(package_dir))).hexdigest()[:16]
-        package_spec = importlib.util.spec_from_file_location(
-            module_name, package_dir / '__init__.py',
-            submodule_search_locations=[str(package_dir)])
-        if package_spec is None or package_spec.loader is None:
-            raise ValueError
-        package = importlib.util.module_from_spec(package_spec)
-        loaded = []
-        try:
-            sys.modules[module_name] = package
-            loaded.append(module_name)
-            package_spec.loader.exec_module(package)
-            audit = importlib.import_module(module_name + '.audit')
-            loaded.append(module_name + '.audit')
-            digest = audit.verify(path)
-            if type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None:
+        with _isolated_bytecode_cache():
+            package_dir = Path(self.package_path) / 'api_agent_gateway'
+            module_name = '_llmtool_gateway_audit_' + hashlib.sha256(
+                os.fsencode(str(package_dir))).hexdigest()[:16]
+            package_spec = importlib.util.spec_from_file_location(
+                module_name, package_dir / '__init__.py',
+                submodule_search_locations=[str(package_dir)])
+            if package_spec is None or package_spec.loader is None:
                 raise ValueError
-            return digest
-        finally:
-            for name in reversed(loaded):
-                sys.modules.pop(name, None)
+            package = importlib.util.module_from_spec(package_spec)
+            loaded = []
+            try:
+                sys.modules[module_name] = package
+                loaded.append(module_name)
+                package_spec.loader.exec_module(package)
+                audit = importlib.import_module(module_name + '.audit')
+                loaded.append(module_name + '.audit')
+                digest = audit.verify(path)
+                if type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None:
+                    raise ValueError
+                return digest
+            finally:
+                for name in reversed(loaded):
+                    sys.modules.pop(name, None)
 
     def verified_model(self, log_text, requested):
         if not isinstance(self._result, dict):

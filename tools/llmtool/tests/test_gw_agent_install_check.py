@@ -1,8 +1,11 @@
-"""Offline tests for the #2310 stale gateway install refusal."""
+"""Offline tests for #2310 stale-install refusal and #2318 F1 cached bytecode."""
 
 import os
 from pathlib import Path
+import py_compile
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -30,6 +33,26 @@ class GwAgentInstallCheckTests(unittest.TestCase):
         os.chmod(package, 0o700)
         os.chmod(package / 'api_agent_gateway', 0o700)
         return package
+
+    def _write_stale_init_bytecode(self, source):
+        """Write a loadable stale __init__ .pyc beside the installed source."""
+        info = source.stat()
+        marker = b'STALE_INSTALL_MARKER = True\n'
+        padding = info.st_size - len(marker) - 1
+        self.assertGreaterEqual(padding, 0)
+        stale_source = Path(self.temp.name) / 'stale_init.py'
+        stale_source.write_bytes(marker + b'#' * padding + b'\n')
+        os.utime(stale_source, (int(info.st_mtime), int(info.st_mtime)))
+        stale_pyc = Path(self.temp.name) / 'stale_init.pyc'
+        py_compile.compile(
+            str(stale_source), cfile=str(stale_pyc), doraise=True,
+            optimize=0,
+            invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP)
+        cache_path = (source.parent / '__pycache__' /
+                      (source.stem + '.' + sys.implementation.cache_tag + '.pyc'))
+        cache_path.parent.mkdir(exist_ok=True)
+        shutil.copyfile(stale_pyc, cache_path)
+        return cache_path
 
     def _route(self, package):
         return GwAgentRoute({
@@ -61,6 +84,37 @@ class GwAgentInstallCheckTests(unittest.TestCase):
             route.prepare_files(tmpdir, self._request())
         for name in ('task.json', 'authorization.json', 'profiles.json'):
             self.assertTrue((Path(tmpdir) / name).is_file())
+
+    def test_repository_identical_sources_with_stale_cached_bytecode_never_run_it(self):
+        package = self._install()
+        cache = self._write_stale_init_bytecode(
+            package / 'api_agent_gateway' / '__init__.py')
+        self.assertTrue(cache.is_file())
+        route = self._route(package)
+        tmpdir = tempfile.mkdtemp(dir=self.temp.name)
+        with mock.patch.object(route, '_load_credential', return_value=None):
+            # Identical sources pass the install check; only the cache is stale.
+            route.prepare_files(tmpdir, self._request())
+            env = route.build_env(tmpdir)
+        self.assertEqual(env['PYTHONPYCACHEPREFIX'],
+                         str(Path(tmpdir) / 'pycache'))
+        query = ('import api_agent_gateway as gateway; '
+                 'print(getattr(gateway, "STALE_INSTALL_MARKER", "CURRENT"))')
+        control_env = dict(os.environ)
+        control_env['PYTHONPATH'] = str(package)
+        control_env.pop('PYTHONPYCACHEPREFIX', None)
+        control_env.pop('PYTHONOPTIMIZE', None)
+        control = subprocess.run([sys.executable, '-B', '-c', query],
+                                 env=control_env, cwd=self.temp.name,
+                                 capture_output=True, text=True, timeout=60)
+        self.assertEqual(control.returncode, 0, control.stderr)
+        # Proves the cached file is loadable bytecode for this interpreter.
+        self.assertEqual(control.stdout.strip(), 'STALE_INSTALL')
+        isolated = subprocess.run([sys.executable, '-B', '-c', query],
+                                  env=env, cwd=self.temp.name,
+                                  capture_output=True, text=True, timeout=60)
+        self.assertEqual(isolated.returncode, 0, isolated.stderr)
+        self.assertEqual(isolated.stdout.strip(), 'CURRENT')
 
     def test_stale_install_is_refused_before_credentials_or_model_call(self):
         package = self._install()
