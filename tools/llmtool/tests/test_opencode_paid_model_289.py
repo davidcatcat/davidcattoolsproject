@@ -216,6 +216,51 @@ class OpenCodePaidModel289Tests(unittest.TestCase):
                 task_submission_cli._opencode_developer_profile()
             self.assertIn('opencode-developer profile is invalid', str(caught.exception))
 
+    def test_profile_model_not_overwritten_by_repo_default_role(self):
+        mock_profile = _make_mock_profile('opencode/paid-model')
+        repo_default_role = {
+            'role': 'opencode-developer',
+            'model': 'opencode/deepseek-v4.1-flash-free',
+            'model_source': 'repo_default',
+            'effort': 'high',
+            'effort_source': 'repo_default',
+        }
+        with patch('llmtool.task_submission_cli.resolve_profile_config', return_value=mock_profile), \
+                patch('llmtool.role_config.resolve_role', return_value=repo_default_role):
+            model, steps = task_submission_cli._opencode_developer_profile()
+            self.assertEqual(model, 'opencode/paid-model')
+            self.assertEqual(steps, opencode_direct_developer.DEFAULT_AGENT_STEPS)
+
+    def test_profile_model_with_variant_not_overwritten_by_repo_default_role(self):
+        mock_profile = _make_mock_profile('opencode-go/deepseek-v4.1-flash#medium')
+        repo_default_role = {
+            'role': 'opencode-developer',
+            'model': 'opencode/deepseek-v4.1-flash-free',
+            'model_source': 'repo_default',
+            'effort': 'high',
+            'effort_source': 'repo_default',
+        }
+        with patch('llmtool.task_submission_cli.resolve_profile_config', return_value=mock_profile), \
+                patch('llmtool.role_config.resolve_role', return_value=repo_default_role):
+            model, steps = task_submission_cli._opencode_developer_profile()
+            self.assertEqual(model, 'opencode-go/deepseek-v4.1-flash#medium')
+            self.assertEqual(steps, opencode_direct_developer.DEFAULT_AGENT_STEPS)
+
+    def test_role_model_explicit_overrides_profile_model(self):
+        mock_profile = _make_mock_profile('opencode/profile-model')
+        explicit_role = {
+            'role': 'opencode-developer',
+            'model': 'opencode/explicit-role-model',
+            'model_source': 'user_config',
+            'effort': 'low',
+            'effort_source': 'user_config',
+        }
+        with patch('llmtool.task_submission_cli.resolve_profile_config', return_value=mock_profile), \
+                patch('llmtool.role_config.resolve_role', return_value=explicit_role):
+            model, steps = task_submission_cli._opencode_developer_profile()
+            self.assertEqual(model, 'opencode/explicit-role-model#low')
+            self.assertEqual(steps, opencode_direct_developer.DEFAULT_AGENT_STEPS)
+
 
 if __name__ == '__main__':
     unittest.main()

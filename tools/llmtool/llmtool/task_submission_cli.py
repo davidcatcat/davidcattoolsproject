@@ -4594,9 +4594,9 @@ def _opencode_developer_profile():
         error = LLMToolError('opencode-developer role accounts are not supported')
         error.role_config_code = 'OPENCODE_ROLE_ACCOUNT_UNSUPPORTED'
         raise error
-    if role.get('model') is not None:
+    if role.get('model') is not None and role.get('model_source') != 'repo_default':
         model = role['model']
-    if role.get('effort') is not None:
+    if role.get('effort') is not None and role.get('effort_source') != 'repo_default':
         model = model.split('#', 1)[0] + '#' + role['effort']
     try:
         return opencode_direct_developer.validate_model(model), steps
