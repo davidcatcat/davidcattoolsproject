@@ -599,6 +599,33 @@ class TaskRetryStartTests(unittest.TestCase):
                             record['completion'])
         self.assertEqual(self.store.get(root_id), root_before)
 
+    def test_prepr_repair_retry_resends_bound_packet(self):
+        root_id = task_store.new_id()
+        packet = {
+            'task': root_id, 'pr': None, 'executor_task': D6, 'failed_head': HEAD,
+            'version': 0, 'verdict_comment_id': 0, 'findings_count': 0,
+            'reviewer_text_excerpt_untrusted_data': '预PR测试失败',
+        }
+        base_sha256 = _sha256(start_failure.canonical(packet))
+        record, _first = self.repair_task(packet)
+        claim = {
+            'executor_task': D6, 'pr': None, 'head_sha': HEAD, 'version': 1,
+            'attempt': 1, 'family': 'prepr-ec2', 'state': 'DISPATCHED',
+            'repair_task_id': record['task_id'], 'comment_id': None,
+            'packet_sha256': base_sha256, 'claimed_at': '2026-11-17T01:00:00Z',
+        }
+        root = root_record([claim])
+        root['task_id'] = root_id
+        root['task_binding'] = dict(root['task_binding'], task_id=root_id)
+        self.store.add(root)
+        root_before = self.store.get(root_id)
+        status, route = self.retry(record['task_id'])
+        self.assertEqual(status, 0)
+        self.assertIn(record['repair_packet'], self.task_json(route.requests[0]))
+        self.assert_retried(self.store.get(record['task_id']), record['developer'],
+                            record['completion'])
+        self.assertEqual(self.store.get(root_id), root_before)
+
     def add_root(self, root_id, claims, high_debug=()):
         root = root_record(claims, high_debug)
         root['task_id'] = root_id

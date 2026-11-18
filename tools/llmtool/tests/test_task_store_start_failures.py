@@ -455,6 +455,17 @@ class StartFailureStoreTests(unittest.TestCase):
         self.assertEqual(saved['repair_packet'], text)
         self.assertEqual(start_failure.decode_repair_packet(saved['repair_packet']), packet)
 
+    def test_prepr_repair_packet_persists_and_decodes(self):
+        packet = dict(repair_packet(reviewer='预PR测试失败：断言不成立。'),
+                      pr=None, version=0, verdict_comment_id=0, findings_count=0)
+        self.assertTrue(start_failure.repair_packet_shape_ok(packet))
+        text = start_failure.canonical(packet)
+        self.assertTrue(text.isascii())
+        task_id = self._failed_task(repair_packet=text)
+        saved = self.store.get(task_id)
+        self.assertEqual(saved['repair_packet'], text)
+        self.assertEqual(start_failure.decode_repair_packet(saved['repair_packet']), packet)
+
     def test_packet_byte_bound(self):
         self.assertEqual(task_store.REPAIR_PACKET_MAX_BYTES, 65536)
         self.assertGreaterEqual(task_store.REPAIR_PACKET_MAX_BYTES,

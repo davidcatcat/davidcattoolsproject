@@ -15,10 +15,12 @@ from argparse import Namespace
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from llmtool import (lineage_counts, repair_policy, review_repair, task_advance,
-                     task_submission_cli)
+from llmtool import (lineage_counts, repair_policy, review_repair, start_failure,
+                     task_advance, task_submission_cli)
+from llmtool.developer_routes import RouteError
 from llmtool.errors import LLMToolError
 from llmtool.repair_policy import UNKNOWN
 from llmtool.task_store import TaskStore
@@ -267,7 +269,7 @@ class PrePrRepairTests(_Base):
             record = self.store.get(TASK)
             self.assertEqual(task_advance._test_fail_count(record, PR, self.store), used - 1)
             result = self.repair(PR, head, family=family)
-            self.assertEqual(result['claim']['family'], f'{family}-ec2')
+            self.assertEqual(result['claim']['family'], f'pr-{PR}-ec2')
             record = self.store.get(TASK)
             self.assertEqual(task_advance._test_fail_count(record, PR, self.store), used)
         record = self.store.get(TASK)
@@ -285,7 +287,7 @@ class PrePrRepairTests(_Base):
             record = self.store.get(TASK)
             self.assertEqual(task_advance._test_fail_count(record, PR, self.store), used - 1)
             result = self.repair(PR, head, family=family)
-            self.assertEqual(result['claim']['family'], f'{family}-ec2')
+            self.assertEqual(result['claim']['family'], f'pr-{PR}-ec2')
             record = self.store.get(TASK)
             self.assertEqual(task_advance._test_fail_count(record, PR, self.store), used)
         record = self.store.get(TASK)
@@ -402,6 +404,66 @@ class PrePrClaimStoreTests(unittest.TestCase):
                 self.assertEqual(caught.exception.task_store_error_code,
                                  'REVIEW_REPAIR_CLAIM_INVALID')
         self.assertEqual(store.get(TASK)['review_repair_claims'], [prepr, after])
+
+    def test_real_delegation_persists_prepr_repair_packet_to_task_store(self):
+        from test_active_pm_inbox import ActivePMInboxTests
+
+        fixture = ActivePMInboxTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        store = TaskStore(Path(self.temp.name).resolve())
+        response = json.dumps({'schema_version': 1, 'summary': 'Active PM plan.',
+            'developer_assignment': {'route': 'claude', 'risk': 'LOW',
+                'goal': 'Add bounded test.', 'acceptance': ['Fix pre-PR failure.']}})
+        with redirect_stdout(StringIO()):
+            task = task_submission_cli.run_task_record_pm(
+                Namespace(stdin_json=True, pm_session_id=fixture.session,
+                          pm_runtime='claude-code', pm_cwd=str(fixture.pm_cwd)),
+                store=store,
+                input_stream=StringIO(json.dumps({
+                    'request': 'Bounded non-sensitive pre-PR repair fixture.',
+                    'response': response})),
+                return_record=True, task_id=TASK)
+        packet = {
+            'task': TASK, 'pr': None, 'executor_task': EXECUTOR,
+            'failed_head': HEADS[0], 'version': 0, 'verdict_comment_id': 0,
+            'findings_count': 0,
+            'reviewer_text_excerpt_untrusted_data': 'EC2 test failed before PR',
+        }
+        reg = SimpleNamespace(
+            task_id=EXECUTOR, trusted_agent_id='claude-developer',
+            session_ref='Session', native_session_id=None, root=str(fixture.pm_cwd),
+            common_dir=str(fixture.pm_cwd), branch='main', source_sha=HEADS[0])
+        snap = SimpleNamespace(head=HEADS[0], root=str(fixture.pm_cwd),
+                               common_dir=str(fixture.pm_cwd), branch='main')
+        card = '\nREQUIRED_SKILL_BEGIN path=card\nRules.\nREQUIRED_SKILL_END path=card'
+        route = type('Route', (), {'run': lambda *a, **kw: None})()
+        def fail_route(*_args, **_kwargs):
+            raise RouteError('CLAUDE_CONFIG_INVALID')
+        route.run = fail_route
+        args = Namespace(
+            task_id=TASK, provider='claude', mode='direct', selection_source='PM',
+            executor_task=EXECUTOR, read_path=['docs/notes.md'], write_path=['docs/notes.md'],
+            acceptance=['Fix pre-PR failure.'], egress_basis='Plain test egress basis.',
+            owner_ref=None, repair_packet=packet, context_stdin=False, timeout=None)
+        with patch.object(task_submission_cli, '_delegate_d6_binding', return_value=(reg, snap)), \
+                patch.object(task_submission_cli, '_developer_card_prefix',
+                             return_value=(card, hashlib.sha256(card.encode()).hexdigest())), \
+                patch.object(task_submission_cli, '_delegate_chain_gate',
+                             side_effect=lambda a, s, b, claim: claim()), \
+                patch.object(task_submission_cli, '_check_delegate_repair_cap', return_value=None), \
+                patch.object(task_submission_cli.worker_availability, 'quota_refusal', return_value=None), \
+                patch.object(task_submission_cli.worker_dispatch, 'evaluate', return_value=ALLOWED), \
+                patch('llmtool.pm_caller.check_caller', return_value=None), \
+                redirect_stdout(StringIO()):
+            rc = task_submission_cli.run_task_claude_delegate(args, store=store, route_runner=route)
+        self.assertEqual(rc, 1)
+        persisted = store.get(TASK)
+        expected_text = start_failure.canonical(packet)
+        self.assertEqual(persisted['repair_packet'], expected_text)
+        self.assertEqual(start_failure.decode_repair_packet(persisted['repair_packet']), packet)
+        self.assertIsNone(packet['pr'])
+        self.assertEqual(persisted['developer']['error_code'], 'CLAUDE_CONFIG_INVALID')
 
 
 if __name__ == '__main__':

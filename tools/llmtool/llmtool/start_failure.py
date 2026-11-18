@@ -71,6 +71,22 @@ HIGH_DEBUG_EXCERPT_MAX_CHARS = 6000
 _CI_EXCERPT_PREFIX = 'CI_CHECK_FAILURE '
 
 
+def _prepr_ec2_repair_packet(value):
+    """#2190: pr None is valid only for a pre-PR EC2 test-failure packet.
+
+    That packet is built from a FAIL receipt before any PR exists: version 0,
+    no verdict comment, no findings, no High Debug report and no CI check.
+    """
+    excerpt = value.get('reviewer_text_excerpt_untrusted_data')
+    return (value.get('pr') is None and set(value) == _PACKET_FIELDS and
+            type(value.get('version')) is int and value['version'] == 0 and
+            type(value.get('verdict_comment_id')) is int and
+            value['verdict_comment_id'] == 0 and
+            type(value.get('findings_count')) is int and value['findings_count'] == 0 and
+            type(excerpt) is str and
+            not excerpt.startswith(_CI_EXCERPT_PREFIX))
+
+
 @dataclass(frozen=True)
 class Verdict:
     """The result of a start-failure check.
@@ -172,7 +188,8 @@ def repair_packet_shape_ok(value):
             set(value) - _PACKET_FIELDS - _PACKET_HIGH_DEBUG_FIELDS or
             type(value.get('task')) is not str or
             type(value.get('executor_task')) is not str or
-            type(value.get('pr')) is not int or
+            (type(value.get('pr')) is not int and
+             not _prepr_ec2_repair_packet(value)) or
             type(value.get('failed_head')) is not str or
             len(value['failed_head']) != 40 or
             type(value.get('version')) is not int or

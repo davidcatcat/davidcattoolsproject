@@ -423,6 +423,26 @@ class RepairPacketBindingTests(unittest.TestCase):
             with self.subTest(args=args):
                 self.assertFalse(start_failure.repair_packet_matches(*args))
 
+    def test_prepr_ec2_packet_binding(self):
+        packet = dict(review_packet(), pr=None, version=0, verdict_comment_id=0,
+                      findings_count=0,
+                      reviewer_text_excerpt_untrusted_data='预PR测试失败：断言不成立。')
+        claim = review_claim(packet, pr=None, comment_id=None, version=1,
+                             family='prepr-ec2')
+        root = {'task_id': ROOT_TASK}
+        self.assertTrue(start_failure.repair_packet_matches(packet, claim, root))
+        # Mismatches
+        self.assertFalse(start_failure.repair_packet_matches(
+            packet, dict(claim, pr=41), root))
+        self.assertFalse(start_failure.repair_packet_matches(
+            dict(packet, pr=41), claim, root))
+        self.assertFalse(start_failure.repair_packet_matches(
+            dict(packet, version=1), claim, root))
+        self.assertFalse(start_failure.repair_packet_matches(
+            dict(packet, verdict_comment_id=1), claim, root))
+        self.assertFalse(start_failure.repair_packet_matches(
+            dict(packet, findings_count=1), claim, root))
+
 
 class RepairPacketEncodingTests(unittest.TestCase):
     def test_shape_rules_equal_the_delegate_validator(self):
@@ -441,6 +461,15 @@ class RepairPacketEncodingTests(unittest.TestCase):
             dict(base, reviewer_text_excerpt_untrusted_data='x' * 2001),
             dict(base, failed_head='c' * 39),
             dict(base, pr=True),
+            dict(base, pr=None, version=0, verdict_comment_id=0, findings_count=0),
+            dict(base, pr=None, version=1, verdict_comment_id=0, findings_count=0),
+            dict(base, pr=None, version=0, verdict_comment_id=1, findings_count=0),
+            dict(base, pr=None, version=0, verdict_comment_id=0, findings_count=1),
+            dict(base, pr=None, version=0, verdict_comment_id=0, findings_count=0,
+                 high_debug_report_untrusted_data=REPORT_TEXT,
+                 high_debug_report_sha256=report_sha),
+            dict(base, pr=None, version=0, verdict_comment_id=0, findings_count=0,
+                 reviewer_text_excerpt_untrusted_data='CI_CHECK_FAILURE check=test run=1 conclusion=failure head=' + HEAD),
             dict(base, extra='plain'),
             {key: value for key, value in base.items() if key != 'findings_count'},
             ['not', 'a', 'packet'],

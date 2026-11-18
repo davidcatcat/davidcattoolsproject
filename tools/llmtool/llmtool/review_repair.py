@@ -719,12 +719,20 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     # the reserved family, so a family key never gives a fresh budget.
     if family == lineage_counts.PREPR_BASE_FAMILY:
         _refuse('REPAIR_FAMILY_INVALID')
+    if family is not None and (type(family) is not str or
+            re.fullmatch(r'[a-z0-9._-]{1,64}', family) is None or
+            family.endswith(EC2_FAMILY_SUFFIX)):
+        _refuse('REPAIR_FAMILY_INVALID')
     if pr_number is None:
         if remote_test_receipt is None or family is not None:
             _refuse('REPAIR_FAMILY_INVALID')
         base_family = lineage_counts.PREPR_BASE_FAMILY
     else:
-        base_family = f'pr-{pr_number}' if family is None else family
+        # Codex security v91 on PR #2348 (CWE-799): bind test-failure repairs to the
+        # canonical PR family when a PR exists regardless of a caller-supplied family,
+        # so switching family keys cannot reset the shared test-failure cap.
+        base_family = (f'pr-{pr_number}' if (family is None or test_failure)
+                       else family)
     if (type(base_family) is not str or
             re.fullmatch(r'[a-z0-9._-]{1,64}', base_family) is None or
             base_family.endswith(EC2_FAMILY_SUFFIX)):
