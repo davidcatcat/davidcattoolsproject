@@ -1,6 +1,6 @@
 # Workflow grant investigation (#2281 / #1502 item 1a)
 
-Status: read-only investigation. No code or test change is made by this note.
+Status: grant piece W1 of the workflow grant work (Issue-bound grant record and verifier, no caller) is merged on main via PR #2349. The later grant pieces are still open. This note itself is read-only: no code or test change is made by this note.
 
 Scope of evidence: only the files named in this Task's `read_paths` were read. Statements below are limited to those files. Checks in files outside that list are marked UNKNOWN and named where relevant.
 
