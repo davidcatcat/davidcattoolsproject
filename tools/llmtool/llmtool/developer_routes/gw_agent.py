@@ -56,6 +56,35 @@ _AUDIT_TOOLS = frozenset({'list_dir', 'read_file', 'grep', 'apply_edit', 'finish
 _TOOL_FAILURE = re.compile(r'[A-Z0-9_]{1,37}\Z')
 _SAFE_PATH_LAUNCHER = "import runpy, sys; del sys.path[0]; runpy.run_module('api_agent_gateway', run_name='__main__', alter_sys=True)"
 _HAS_SAFE_PATH_FLAG = sys.version_info >= (3, 11)
+# The repository copy next to this llmtool checkout is the source of truth for
+# the gateway the installed package must match (#2310).
+_REPO_GATEWAY_PACKAGE = (Path(__file__).resolve().parents[3] /
+                         'api-agent-gateway' / 'api_agent_gateway')
+
+
+def _gateway_source_digest(gateway_dir):
+    """Map the gateway's source .py files to SHA-256 digests, or None.
+
+    Only regular files are accepted, so a symlinked or unreadable source is
+    treated as unverifiable rather than silently trusted.
+    """
+    try:
+        root = Path(gateway_dir)
+        if not root.is_dir():
+            return None
+        digests = {}
+        for path in root.rglob('*.py'):
+            relative = path.relative_to(root)
+            if '__pycache__' in relative.parts:
+                continue
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode):
+                return None
+            digests[relative.as_posix()] = hashlib.sha256(
+                path.read_bytes()).hexdigest()
+        return digests or None
+    except (OSError, ValueError):
+        return None
 
 
 def _normalize_gw_agent_usage(value):
@@ -350,7 +379,16 @@ class GwAgentRoute(DeveloperRoute):
             self._credential_resolved = False
             raise
 
+    def _check_installed_gateway(self):
+        """Refuse a stale gateway install before staging files or a model call (#2310)."""
+        expected = _gateway_source_digest(_REPO_GATEWAY_PACKAGE)
+        installed = _gateway_source_digest(
+            Path(self.package_path) / 'api_agent_gateway')
+        if expected is None or installed is None or expected != installed:
+            raise RouteError('GW_AGENT_INSTALL_STALE')
+
     def _prepare_files(self, tmpdir, request):
+        self._check_installed_gateway()
         root = Path(request['root']).resolve(strict=True)
         private_tmp = Path(tmpdir).resolve(strict=True)
         package_path = Path(self.package_path)
