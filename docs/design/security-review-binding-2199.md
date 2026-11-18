@@ -1,6 +1,8 @@
 # #2199 Security review binding: design
 
-Status: design only (docs). No code changes in this PR.
+Status: design only (docs). No code changes in this PR. As of the PM record
+(2026-11-19): PR 1, #2247 (the design PR for this note, §4), is merged on
+main; PR 2, PR 3 and PR 4 are not merged.
 Source commit read: `0f1014f2` (`main`). Line numbers below are at that commit.
 Repair 1 re-read the four modules at `1639658e`, a docs-only commit on top of
 `0f1014f2`, so the line numbers are unchanged. Repair 2 re-read the cited lines
