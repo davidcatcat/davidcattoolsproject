@@ -196,9 +196,12 @@ def lineage_counts(store, task, *, base_family, include_successors=False):
     successor) counts as before: only its claims in the stored base_family
     (review) and '<base>-ec2' plus legacy EC2 claims in base_family (tests).
     #2190: its test count also adds every PREPR_FAMILY claim (a repair used
-    before the PR existed). With base_family PREPR_BASE_FAMILY (no PR yet) the
-    test count adds every '-ec2' and legacy EC2 claim of the Task, any PR, so
-    no family key gives a fresh budget; a claim family in doubt is UNKNOWN.
+    before the PR existed). With a PR base_family ('pr-<number>'), every EC2
+    and legacy repair of the Task on this PR counts, so switching family keys
+    never resets the shared test-failure cap. With base_family PREPR_BASE_FAMILY
+    (no PR yet) the test count adds every '-ec2' and legacy EC2 claim of the Task,
+    any PR, so no family key gives a fresh budget; a claim family or pr in doubt is
+    UNKNOWN.
 
     include_successors (review_repair under the chain lock, and
     task_advance._test_fail_count so both agree): every Task that
@@ -234,19 +237,24 @@ def lineage_counts(store, task, *, base_family, include_successors=False):
         for claim in claims:
             family = claim.get('family', f"pr-{claim.get('pr')}")
             legacy = ec2_claim_kind(claim) == 'LEGACY'
+            if type(family) is not str:
+                return _unknown()
             if local and prepr:
                 # #2190: no PR yet; every EC2 claim of the Task counts.
-                if type(family) is not str:
-                    return _unknown()
                 is_review = family == base_family
                 is_test = family.endswith(_EC2_SUFFIX) or legacy
             elif local:
+                pr = claim.get('pr')
+                if pr is not None and type(pr) is not int:
+                    return _unknown()
                 is_review = family == base_family
-                is_test = (family == base_family + _EC2_SUFFIX or
-                           (family == base_family and legacy) or
-                           family == PREPR_FAMILY)
-            elif type(family) is not str:
-                return _unknown()
+                is_test = (family == PREPR_FAMILY or
+                           (base_family.startswith('pr-') and
+                            base_family[3:].isdigit() and
+                            (family.endswith(_EC2_SUFFIX) or legacy) and
+                            pr == int(base_family[3:])) or
+                           (family == base_family + _EC2_SUFFIX or
+                            (family == base_family and legacy)))
             else:
                 is_review = not family.endswith(_EC2_SUFFIX)
                 is_test = family.endswith(_EC2_SUFFIX) or legacy

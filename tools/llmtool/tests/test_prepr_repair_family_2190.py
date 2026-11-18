@@ -253,7 +253,44 @@ class PrePrRepairTests(_Base):
         self.assertEqual(lineage_counts.lineage_counts(
             None, alone, base_family=lineage_counts.PREPR_BASE_FAMILY)['test_fails'],
             UNKNOWN)
+        alone_pr = {'task_id': TASK, 'review_repair_claims': [
+            dict(_used_claim(f'pr-{PR}-ec2', PR, HEADS[1], 1), family=7)]}
+        self.assertEqual(lineage_counts.lineage_counts(
+            None, alone_pr, base_family=f'pr-{PR}')['test_fails'],
+            UNKNOWN)
         self.assertEqual(self.dispatched, [])
+
+    def test_switching_family_keys_across_pr_test_failures_still_shares_cap(self):
+        # Switching family keys across PR test failures never resets the shared test-failure cap.
+        families = ('fam-alpha', 'fam-beta', 'fam-gamma')
+        for used, (head, family) in enumerate(zip(HEADS[:self.max], families), 1):
+            record = self.store.get(TASK)
+            self.assertEqual(task_advance._test_fail_count(record, PR, self.store), used - 1)
+            result = self.repair(PR, head, family=family)
+            self.assertEqual(result['claim']['family'], f'{family}-ec2')
+            record = self.store.get(TASK)
+            self.assertEqual(task_advance._test_fail_count(record, PR, self.store), used)
+        record = self.store.get(TASK)
+        self.assertEqual(task_advance._test_fail_count(record, PR, self.store), self.max)
+        self.assertTrue(task_advance._test_family_used_up(
+            record, PR, HEADS[self.max], self.store))
+        self.refused('REPAIR_LIMIT_REACHED', PR, HEADS[self.max], family='fam-delta')
+        self.refused('REPAIR_LIMIT_REACHED', None, HEADS[self.max])
+
+    def test_prepr_fail_then_switching_family_keys_shares_cap(self):
+        # Pre-PR FAIL + PR test failures with distinct family keys share the cap.
+        self.repair(None, HEADS[0])
+        families = ('fam-one', 'fam-two')
+        for used, (head, family) in enumerate(zip(HEADS[1:self.max], families), 2):
+            record = self.store.get(TASK)
+            self.assertEqual(task_advance._test_fail_count(record, PR, self.store), used - 1)
+            result = self.repair(PR, head, family=family)
+            self.assertEqual(result['claim']['family'], f'{family}-ec2')
+            record = self.store.get(TASK)
+            self.assertEqual(task_advance._test_fail_count(record, PR, self.store), used)
+        record = self.store.get(TASK)
+        self.assertEqual(task_advance._test_fail_count(record, PR, self.store), self.max)
+        self.refused('REPAIR_LIMIT_REACHED', PR, HEADS[self.max], family='fam-three')
 
 
 class PrePrAdvanceTests(_Base):

@@ -844,7 +844,9 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                     else None)
             if type(used) is not int or used != 0:
                 _refuse('REVIEW_REPAIR_PM_REQUIRED')
-        counts = lineage_counts.lineage_counts(store, task, base_family=base_family,
+        counts_base = (lineage_counts.repair_base_family(pr_number)
+                       if test_failure else base_family)
+        counts = lineage_counts.lineage_counts(store, task, base_family=counts_base,
                                                include_successors=True)
         rca_entry = None
         if not test_failure:
