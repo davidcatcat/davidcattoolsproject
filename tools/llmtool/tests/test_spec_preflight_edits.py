@@ -1,8 +1,12 @@
+"""#1502 WP-G subtraction (c6957703194): a spec with an 'edits' field is refused.
+
+The old edits support (anchors, edit caps, line hints, check_edits) is removed on
+purpose; these tests prove every 'edits' field gets the fixed refusal label.
+"""
 import contextlib
 import io
 import importlib.util
 import json
-import os
 import sys
 import tempfile
 import unittest
@@ -12,19 +16,20 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "spec_preflight.py"
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-SPEC = importlib.util.spec_from_file_location("spec_preflight", SCRIPT)
+SPEC = importlib.util.spec_from_file_location("spec_preflight_edits", SCRIPT)
 spec_preflight = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(spec_preflight)
-check_edits = spec_preflight.check_edits
+
+REFUSED = "SPEC_PREFLIGHT_INVALID:EDITS_FORBIDDEN\n"
 
 
-class SpecPreflightEditsTests(unittest.TestCase):
+class SpecPreflightEditsRefusedTests(unittest.TestCase):
     def setUp(self):
         self.base_spec = {
-            "request": "Add a bounded edit helper.",
-            "summary": "Check spec edits field locally.",
-            "goal": "Verify edits before dispatch.",
-            "acceptance": ["Edits pass preflight."],
+            "request": "Add a bounded helper.",
+            "summary": "Check the spec locally.",
+            "goal": "Verify the spec before dispatch.",
+            "acceptance": ["The spec passes preflight."],
             "write": ["sample.txt"],
         }
 
@@ -35,191 +40,72 @@ class SpecPreflightEditsTests(unittest.TestCase):
             cmd_args = [str(path)]
             if repo is not None:
                 cmd_args.extend(["--repo", str(repo)])
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
+            output, errors = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
                 status = spec_preflight.main(cmd_args)
-            return status, output.getvalue()
+            return status, output.getvalue(), errors.getvalue()
 
-    def test_valid_edits_pass(self):
+    def test_edits_that_once_passed_are_refused(self):
+        """Edits the removed support accepted (a unique anchor, six at the cap) are refused."""
         with tempfile.TemporaryDirectory() as repo_dir:
-            file_path = Path(repo_dir) / "sample.txt"
-            file_path.write_text("hello universe\n", encoding="utf-8")
-            spec = dict(
-                self.base_spec,
-                edits=[{"path": "sample.txt", "old": "universe", "new": "world"}],
-            )
-            status, output = self.run_main(spec, repo=repo_dir)
-            self.assertEqual(status, 0)
-            self.assertEqual(output, "SPEC_PREFLIGHT_OK\n")
+            (Path(repo_dir) / "sample.txt").write_text(
+                "hello universe\nv0 v1 v2 v3 v4 v5\n", encoding="utf-8")
+            one = [{"path": "sample.txt", "old": "universe", "new": "world"}]
+            six = [{"path": "sample.txt", "old": f"v{i}", "new": f"w{i}"} for i in range(6)]
+            for name, edits in (("one edit", one), ("six edits", six)):
+                with self.subTest(edits=name):
+                    status, output, errors = self.run_main(
+                        dict(self.base_spec, edits=edits), repo=repo_dir)
+                    self.assertEqual((status, output), (2, REFUSED))
+                    self.assertEqual(errors, spec_preflight.EDITS_FORBIDDEN_MESSAGE + "\n")
+                    self.assertNotIn("world", output + errors)
 
-    def test_anchor_twice_fails(self):
-        with tempfile.TemporaryDirectory() as repo_dir:
-            file_path = Path(repo_dir) / "sample.txt"
-            file_path.write_text("repeat word repeat word\n", encoding="utf-8")
-            spec = dict(
-                self.base_spec,
-                edits=[{"path": "sample.txt", "old": "repeat", "new": "unique"}],
-            )
-            status, output = self.run_main(spec, repo=repo_dir)
-            self.assertEqual(status, 2)
-            self.assertEqual(output, "SPEC_PREFLIGHT_INVALID:EDIT_ANCHOR_NOT_UNIQUE:0\n")
-            self.assertNotIn("repeat", output)
-            self.assertNotIn("unique", output)
+    def test_any_edits_value_is_refused_with_fixed_label(self):
+        values = (("empty list", []), ("null", None), ("empty object", {}),
+                  ("string", "replace universe"), ("number", 0),
+                  ("malformed item", [{"path": "other.txt"}]))
+        for name, value in values:
+            with self.subTest(edits=name):
+                status, output, _ = self.run_main(dict(self.base_spec, edits=value))
+                self.assertEqual((status, output), (2, REFUSED))
 
-    def test_anchor_missing_fails(self):
-        with tempfile.TemporaryDirectory() as repo_dir:
-            file_path = Path(repo_dir) / "sample.txt"
-            file_path.write_text("greeting text\n", encoding="utf-8")
-            spec = dict(
-                self.base_spec,
-                edits=[{"path": "sample.txt", "old": "nonexistent target", "new": "replacement"}],
-            )
-            status, output = self.run_main(spec, repo=repo_dir)
-            self.assertEqual(status, 2)
-            self.assertEqual(output, "SPEC_PREFLIGHT_INVALID:EDIT_ANCHOR_MISSING:0\n")
-            self.assertNotIn("nonexistent target", output)
-            self.assertNotIn("replacement", output)
-
-    def test_anchor_missing_when_file_not_found(self):
-        with tempfile.TemporaryDirectory() as repo_dir:
-            spec = dict(
-                self.base_spec,
-                edits=[{"path": "sample.txt", "old": "target", "new": "replacement"}],
-            )
-            status, output = self.run_main(spec, repo=repo_dir)
-            self.assertEqual(status, 2)
-            self.assertEqual(output, "SPEC_PREFLIGHT_INVALID:EDIT_ANCHOR_MISSING:0\n")
-
-    def test_path_not_in_write_list_fails(self):
-        with tempfile.TemporaryDirectory() as repo_dir:
-            file_path = Path(repo_dir) / "other.txt"
-            file_path.write_text("some content\n", encoding="utf-8")
-            spec = dict(
-                self.base_spec,
-                write=["sample.txt"],
-                edits=[{"path": "other.txt", "old": "some", "new": "replacement"}],
-            )
-            status, output = self.run_main(spec, repo=repo_dir)
-            self.assertEqual(status, 2)
-            self.assertEqual(output, "SPEC_PREFLIGHT_INVALID:EDIT_PATH_OUT_OF_SCOPE:0\n")
-            self.assertNotIn("some", output)
-            self.assertNotIn("replacement", output)
-
-    def test_empty_new_text_fails(self):
-        with tempfile.TemporaryDirectory() as repo_dir:
-            file_path = Path(repo_dir) / "sample.txt"
-            file_path.write_text("initial text\n", encoding="utf-8")
-            spec = dict(
-                self.base_spec,
-                edits=[{"path": "sample.txt", "old": "initial", "new": ""}],
-            )
-            status, output = self.run_main(spec, repo=repo_dir)
-            self.assertEqual(status, 2)
-            self.assertEqual(output, "SPEC_PREFLIGHT_INVALID:EDIT_NEW_TEXT_INVALID:0\n")
-
-    def test_identical_new_text_fails(self):
-        with tempfile.TemporaryDirectory() as repo_dir:
-            file_path = Path(repo_dir) / "sample.txt"
-            file_path.write_text("initial text\n", encoding="utf-8")
-            spec = dict(
-                self.base_spec,
-                edits=[{"path": "sample.txt", "old": "initial", "new": "initial"}],
-            )
-            status, output = self.run_main(spec, repo=repo_dir)
-            self.assertEqual(status, 2)
-            self.assertEqual(output, "SPEC_PREFLIGHT_INVALID:EDIT_NEW_TEXT_INVALID:0\n")
-
-    def test_seven_edits_over_cap_fails(self):
-        with tempfile.TemporaryDirectory() as repo_dir:
-            file_path = Path(repo_dir) / "sample.txt"
-            file_path.write_text("item0 item1 item2 item3 item4 item5 item6\n", encoding="utf-8")
-            edits = [
-                {"path": "sample.txt", "old": f"item{i}", "new": f"mod{i}"}
-                for i in range(7)
-            ]
-            spec = dict(self.base_spec, edits=edits)
-            status, output = self.run_main(spec, repo=repo_dir)
-            self.assertEqual(status, 2)
-            self.assertEqual(output, "SPEC_PREFLIGHT_INVALID:EDIT_COUNT_OVER_CAP:6\n")
-            for i in range(7):
-                self.assertNotIn(f"item{i}", output)
-                self.assertNotIn(f"mod{i}", output)
-
-    def test_error_names_correct_edit_index(self):
-        with tempfile.TemporaryDirectory() as repo_dir:
-            file_path = Path(repo_dir) / "sample.txt"
-            file_path.write_text("line one\nline two\n", encoding="utf-8")
-            edits = [
-                {"path": "sample.txt", "old": "line one", "new": "row one"},
-                {"path": "sample.txt", "old": "missing anchor", "new": "row two"},
-            ]
-            spec = dict(self.base_spec, edits=edits)
-            status, output = self.run_main(spec, repo=repo_dir)
-            self.assertEqual(status, 2)
-            self.assertEqual(output, "SPEC_PREFLIGHT_INVALID:EDIT_ANCHOR_MISSING:1\n")
-            self.assertNotIn("missing anchor", output)
-            self.assertNotIn("row two", output)
+    def test_refusal_does_not_echo_edit_text(self):
+        edits = [{"path": "sample.txt", "old": "anchor-text-a", "new": "answer-text-b"}]
+        status, output, errors = self.run_main(dict(self.base_spec, edits=edits))
+        self.assertEqual((status, output), (2, REFUSED))
+        for text in ("anchor-text-a", "answer-text-b", "sample.txt"):
+            self.assertNotIn(text, output + errors)
 
     def test_specs_without_edits_pass_unchanged(self):
-        status, output = self.run_main(self.base_spec)
-        self.assertEqual(status, 0)
-        self.assertEqual(output, "SPEC_PREFLIGHT_OK\n")
+        self.assertEqual(self.run_main(self.base_spec), (0, "SPEC_PREFLIGHT_OK\n", ""))
 
-    def test_six_edits_at_cap_pass(self):
-        with tempfile.TemporaryDirectory() as repo_dir:
-            file_path = Path(repo_dir) / "sample.txt"
-            file_path.write_text("v0 v1 v2 v3 v4 v5\n", encoding="utf-8")
-            edits = [
-                {"path": "sample.txt", "old": f"v{i}", "new": f"w{i}"}
-                for i in range(6)
-            ]
-            spec = dict(self.base_spec, edits=edits)
-            status, output = self.run_main(spec, repo=repo_dir)
-            self.assertEqual(status, 0)
-            self.assertEqual(output, "SPEC_PREFLIGHT_OK\n")
-
-    def test_check_edits_direct_function(self):
-        with tempfile.TemporaryDirectory() as repo_dir:
-            file_path = Path(repo_dir) / "sample.txt"
-            file_path.write_text("content line\n", encoding="utf-8")
-            valid_spec = dict(
-                self.base_spec,
-                edits=[{"path": "sample.txt", "old": "content", "new": "updated"}],
-            )
-            self.assertIsNone(check_edits(valid_spec, repo=repo_dir))
-
-            missing_anchor_spec = dict(
-                self.base_spec,
-                edits=[{"path": "sample.txt", "old": "absent", "new": "updated"}],
-            )
-            self.assertEqual(
-                check_edits(missing_anchor_spec, repo=repo_dir),
-                ("EDIT_ANCHOR_MISSING", 0),
-            )
-
+    def test_edits_support_is_removed(self):
+        self.assertFalse(hasattr(spec_preflight, "check_edits"))
 
     def big_repo(self, directory):
         lines = [f"line {i}" for i in range(1, 2101)]
         (Path(directory) / "sample.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
         return directory
 
-    def test_large_file_edit_needs_line_hint(self):
+    def test_large_file_edit_with_line_hint_is_refused(self):
+        """The removed line hints no longer let an edit through, even on a long file."""
         with tempfile.TemporaryDirectory() as repo_dir:
-            edit = {"path": "sample.txt", "old": "line 1500\n", "new": "line x\n"}
-            spec = dict(self.base_spec, edits=[edit])
-            status, output = self.run_main(spec, repo=self.big_repo(repo_dir))
-            self.assertEqual((status, output), (2, "SPEC_PREFLIGHT_INVALID:EDIT_LINE_HINT_MISSING:0\n"))
-            for line, expected in ((1490, "SPEC_PREFLIGHT_OK\n"), (1400, "SPEC_PREFLIGHT_INVALID:EDIT_LINE_HINT_WRONG:0\n")):
-                spec = dict(self.base_spec, edits=[dict(edit, line=line)])
-                self.assertEqual(self.run_main(spec, repo=repo_dir)[1], expected)
+            edit = {"path": "sample.txt", "old": "line 1500\n", "new": "line x\n", "line": 1490}
+            status, output, _ = self.run_main(
+                dict(self.base_spec, provider="gw-agent", edits=[edit]),
+                repo=self.big_repo(repo_dir))
+            self.assertEqual((status, output), (2, REFUSED))
 
-    def test_gw_agent_spec_writing_large_file_needs_edits(self):
+    def test_gw_agent_spec_writing_large_file_is_refused(self):
+        """#1570: a gw-agent spec that writes a long file is still refused."""
         with tempfile.TemporaryDirectory() as repo_dir:
             spec = dict(self.base_spec, provider="gw-agent")
-            status, output = self.run_main(spec, repo=self.big_repo(repo_dir))
-            self.assertEqual((status, output), (2, "SPEC_PREFLIGHT_INVALID:EDIT_LINE_HINT_MISSING:-1\n"))
+            status, output, _ = self.run_main(spec, repo=self.big_repo(repo_dir))
+            self.assertEqual((status, output),
+                             (2, "SPEC_PREFLIGHT_INVALID:EDIT_LINE_HINT_MISSING:-1\n"))
             (Path(repo_dir) / "sample.txt").write_text("short\n", encoding="utf-8")
-            self.assertEqual(self.run_main(spec, repo=repo_dir), (0, "SPEC_PREFLIGHT_OK\n"))
+            self.assertEqual(self.run_main(spec, repo=repo_dir), (0, "SPEC_PREFLIGHT_OK\n", ""))
+
 
 if __name__ == "__main__":
     unittest.main()
