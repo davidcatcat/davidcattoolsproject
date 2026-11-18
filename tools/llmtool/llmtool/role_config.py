@@ -309,17 +309,18 @@ def check_role_model(route, route_config, model, *, owner_override=None,
     )
     from .owner_override import OwnerOverrideError, validate_owner_override
 
+    # Owner #2302 P2 Repair 2: an override never bypasses the route's own
+    # format/family check. It is mandatory before the route/membership gate, so
+    # only a membership refusal (gw-agent) may be relaxed below.
+    try:
+        check_route_model_family(route, model)
+    except RouteError:
+        _fail_model()
     try:
         check_route_model({"routes": {route: route_config}}, route, model)
         return None
     except RouteError:
         pass
-    # Owner #2302 P2 Repair 2: an override never bypasses the route's own
-    # format/family check. Only a membership refusal (gw-agent) may be relaxed.
-    try:
-        check_route_model_family(route, model)
-    except RouteError:
-        _fail_model()
     if owner_override is None:
         _fail_model()
     try:

@@ -93,6 +93,15 @@ class OwnerOverrideTest(unittest.TestCase):
     def test_bad_route_is_invalid(self):
         self.assert_refused('OWNER_OVERRIDE_INVALID', route='Example_Route')
 
+    def test_wrong_family_model_is_refused_before_the_ref_is_read(self):
+        # Owner #2302 P2 Repair 2: no override bypasses a route family check.
+        override = valid_override()
+        override['model'] = 'claude-opus-5-5'
+        fetch = FakeFetch(make_comment(MARKER + '\n' + OVERRIDE_LINE))
+        self.assert_refused('ROLE_MODEL_NOT_ALLOWED', override=override,
+                            route='agy', fetch=fetch)
+        self.assertEqual(fetch.calls, [])
+
     def test_bad_repository_argument_is_invalid(self):
         self.assert_refused('OWNER_OVERRIDE_INVALID', repository='example-owner')
 

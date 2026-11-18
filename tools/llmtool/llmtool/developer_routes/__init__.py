@@ -123,6 +123,10 @@ _ROUTE_MODEL_CHECKS = {
     'claude': _claude_role_model_ok,
     'opencode': _opencode_model_ok,
 }
+# Owner #2302 P2 Repair 2: a route with no provider family (gw-agent) keeps
+# its allowed_models membership gate, but a malformed identifier is still
+# refused before any owner override is read.
+_GENERIC_ROUTE_CHECKS = {'gw-agent': _generic_model_ok}
 
 
 # #1502 WP-E, Owner #2302 P2: the family check for each review and AI Debug
@@ -334,10 +338,10 @@ def check_route_model_family(route, model):
     Owner #2302 P2 Repair 2: agy, claude and opencode have a mandatory
     format/family check that no owner override may bypass. A model this function
     refuses is refused on every path, before any override is read. gw-agent has
-    no family check, so any model passes here unchanged and keeps its
-    allowed_models membership gate (which an override may relax).
+    no provider family, so only its generic identifier format is checked here;
+    it keeps its allowed_models membership gate (which an override may relax).
     """
-    model_ok = _ROUTE_MODEL_CHECKS.get(route)
+    model_ok = _ROUTE_MODEL_CHECKS.get(route, _GENERIC_ROUTE_CHECKS.get(route))
     if model_ok is not None and not model_ok(model):
         raise RouteError('ROLE_MODEL_NOT_ALLOWED')
     return model

@@ -277,6 +277,19 @@ class AllowedModelTests(ResolverBase):
                 self.assertIsNone(caught.exception.owner_override_code)
                 fetch.assert_not_called()
 
+    def test_malformed_gw_agent_model_never_reads_the_override_ref(self):
+        # Repair 2: gw-agent keeps its membership gate, but a malformed
+        # identifier is refused before any owner override is read.
+        self.save({'roles': {'gw-agent-developer': {'model': 'has space'}}})
+        fetch = mock.Mock(return_value=comment(route='gw-agent', model='has space'))
+        with self.assertRaises(LLMToolError) as caught:
+            self.resolve('gw-agent-developer', route_config=GW_ROUTE,
+                         owner_override={'model': 'has space', 'ref': REF},
+                         repository=REPOSITORY, fetch_comment=fetch)
+        self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
+        self.assertIsNone(caught.exception.owner_override_code)
+        fetch.assert_not_called()
+
 
 class AccountBase(ResolverBase):
     def setUp(self):
