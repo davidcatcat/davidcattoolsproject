@@ -8,5 +8,9 @@
   "test_fail_max": 2,
   "review_fail_max": 3,
   "waiting_notify_after_hours": 24,
-  "timeout_continuation_max": 1
+  "timeout_continuation_max": 1,
+  "spec_preflight_large_file_lines": 2000,
+  "merge_train_max_members": 6,
+  "merge_train_max_files_per_pr": 100,
+  "revert_max_prs": 5
 }

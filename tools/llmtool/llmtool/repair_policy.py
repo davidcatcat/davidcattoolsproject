@@ -18,14 +18,20 @@ POLICY_KEYS = ('repair_max', 'parent_debug_max', 'group_debug_max', 'child_max',
                'replan_max', 'test_fail_max', 'review_fail_max',
                'waiting_notify_after_hours')
 # #1815 T3: optional limits as key -> (min, max); an absent key keeps its caller default.
-OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
+# #2281 L0b: the table limits with no stated basis become configurable (row 2, 15, 16),
+# each at the value recorded in that table; callers are wired in later pieces.
+OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3),
+                          'spec_preflight_large_file_lines': (1, 2000),
+                          'merge_train_max_members': (1, 6),
+                          'merge_train_max_files_per_pr': (1, 100),
+                          'revert_max_prs': (1, 5)}
 # #2281 L0a (design rule 3): the bound is a real technical limit, not an
 # arbitrary cap. policy.json is untrusted input, so load_policy reads at most
 # _MAX_BYTES + 1 bytes in one bounded buffer instead of the whole file. The
 # bound must stay above the largest possible valid policy.json (schema_version,
-# the POLICY_KEYS as small ints and the planned #2281 keys: a few hundred
-# bytes), so it can never refuse a valid policy; 16 KiB keeps the read buffer
-# bounded while leaving room for those keys.
+# the POLICY_KEYS and the optional #1815 and #2281 L0b keys as small ints:
+# a few hundred bytes), so it can never refuse a valid policy; 16 KiB keeps
+# the read buffer bounded while leaving room for those keys.
 _MAX_BYTES = 16 * 1024
 
 
