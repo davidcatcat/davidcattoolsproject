@@ -164,6 +164,35 @@ class PredecessorD6HDAcceptedTests(unittest.TestCase):
         self.assertEqual(claims, [_CURRENT_TASK])
         _assert_released(self, store)
 
+    def test_covering_predecessor_hd_admits_repair_three_through_chain_gate(self):
+        # #2367 A2/A3: three runs in the chain (on two D6s), so the fresh D6's
+        # run is repair #3 under the repository policy. The High Debug taken
+        # before repair #2, on an earlier HEAD of a predecessor D6, covers it.
+        _lock_patches(self)
+        self.assertEqual(_POLICY['repair_max'], 5)
+        store = _chain_store(_PRED_D6_EARLIER, _PRED_D6, _PRED_D6)
+        store.records[_record_id(0x102)]['developer']['created_at'] = '2026-11-04T00:00:02Z'
+        hd_entry = _entry(executor_task=_PRED_D6, examined_sha='b' * 40)
+        store.records[_HIGH_DEBUG_TASK] = _diagnosis([hd_entry], executor_task=_PRED_D6)
+        claims = []
+        args = _args(task_id=_CURRENT_TASK, executor_task=_FRESH_D6)
+        binding = (SimpleNamespace(task_id=_FRESH_D6, root='/d6', source_sha=_HEAD,
+                                  trusted_agent_id='codex-developer'),
+                   SimpleNamespace(head=_HEAD))
+        result = task_submission_cli._delegate_chain_gate(
+            args, store, binding, lambda: claims.append(_CURRENT_TASK) or 'CLAIMED')
+        self.assertEqual(result, 'CLAIMED')
+        self.assertEqual(claims, [_CURRENT_TASK])
+        _assert_released(self, store)
+        # Repair #2 (two runs) still needs the High Debug on the current head.
+        store = _chain_store(_PRED_D6_EARLIER, _PRED_D6)
+        store.records[_HIGH_DEBUG_TASK] = _diagnosis([hd_entry], executor_task=_PRED_D6)
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_HEAD_MOVED'):
+            task_submission_cli._delegate_chain_gate(
+                args, store, binding, lambda: claims.append('unexpected') or 'CLAIMED')
+        self.assertEqual(claims, [_CURRENT_TASK])
+        _assert_released(self, store)
+
     def test_require_bound_high_debug_run_with_predecessors(self):
         diagnosis = _diagnosis([_entry(executor_task=_PRED_D6)], executor_task=_PRED_D6)
         entry = diagnosis['high_debug'][0]

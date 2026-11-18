@@ -128,9 +128,17 @@ class RunBudgetTest(unittest.TestCase):
         self.assertIs(over.dimension(D.PROVIDER_CALLS).status, S.EXCEEDED)
         self.assertIs(over.status, S.EXCEEDED)
 
-    def test_repair_cap_is_two(self):
-        self.assertEqual(b.MAX_REPAIR_ATTEMPTS, 2)
-        self.assertInvalid(budget, max_repair_attempts=3)
+    def test_repair_cap_follows_the_policy(self):
+        # #2367: the bound is policy.json's (repair_max / test_fail_max), not a copy.
+        from llmtool import repair_policy
+        self.assertEqual(b.MAX_REPAIR_ATTEMPTS, repair_policy.repair_attempts_max())
+        self.assertEqual(b.MAX_REPAIR_ATTEMPTS, 5)
+        budget(max_repair_attempts=b.MAX_REPAIR_ATTEMPTS)
+        self.assertInvalid(budget, max_repair_attempts=b.MAX_REPAIR_ATTEMPTS + 1)
+        five = budget(max_repair_attempts=5)
+        self.assertEqual(b.admit_next(five, ledger(repairs=4), P.REPAIR), C.WITHIN_BUDGET)
+        self.assertEqual(b.admit_next(five, ledger(repairs=5), P.REPAIR),
+                         C.REPAIR_LIMIT_REACHED)
         two = ledger([call(1, 1, P.REPAIR)] * 2, repairs=2)
         self.assertEqual(b.admit_next(budget(), two, P.REPAIR), C.REPAIR_LIMIT_REACHED)
         self.assertEqual(b.admit_next(budget(), two, P.REVIEW), C.WITHIN_BUDGET)
@@ -269,7 +277,7 @@ class RunBudgetTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             b.RunBudget(1, 4, 2, 1000, 100)
         bad = dict(schema_version=[0, 2, True, None], max_provider_calls=[0, 65, None, True, -1],
-                   max_repair_attempts=[-1, 3, None, False], wall_clock_ms=[0, b.MAX_WALL_CLOCK_MS + 1, None, True],
+                   max_repair_attempts=[-1, b.MAX_REPAIR_ATTEMPTS + 1, None, False], wall_clock_ms=[0, b.MAX_WALL_CLOCK_MS + 1, None, True],
                    max_input_tokens=[-1, b.MAX_TOKENS + 1, None, False, 1.0],
                    max_output_tokens=[-1, b.MAX_TOKENS + 1, None, True, '1'])
         for name, values in bad.items():

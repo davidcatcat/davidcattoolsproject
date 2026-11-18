@@ -764,9 +764,36 @@ class ReviewRepairChainTests(unittest.TestCase):
         self.assertEqual(self.calls[0]['packet']['high_debug_report_sha256'],
                          self.rca()[0]['report_sha256'])
 
+    def used_on_new_heads(self, count, *, ec2=False):
+        """count claims of one predecessor family, each on its own earlier HEAD."""
+        make = ec2_claim if ec2 else claim
+        family = 'pr-5-ec2' if ec2 else 'pr-5'
+        return [make(family, f'{n:040x}', pr=5, attempt=n) for n in range(1, count + 1)]
+
     def test_repairs_used_up_across_the_chain_escalate(self):
-        used = [claim('pr-5', OLD_HEAD, pr=5), claim('pr-6', OTHER_HEAD, pr=6, attempt=2)]
+        used = self.used_on_new_heads(self.policy['repair_max'])
         self.refused(self.store(used, high_debug=self.rca()), 'REPAIR_SPLIT_REQUIRED')
+        # #2367: two used by a predecessor is no longer the end of the work item.
+        used = [claim('pr-5', OLD_HEAD, pr=5), claim('pr-6', OTHER_HEAD, pr=6, attempt=2)]
+        result = self.dispatch(self.store(used, high_debug=self.rca()))
+        self.assertEqual(result['claim']['attempt'], 1)   # numbered within this Task
+
+    def test_a_continuation_does_not_reset_used_repairs(self):
+        # #2367 A3: a new Task of the same work continues the count. Four
+        # repairs used before: this Task's first repair is repair #5, the last.
+        used = self.used_on_new_heads(self.policy['repair_max'] - 1)
+        store = self.store(used, high_debug=self.rca())
+        counts = lineage_counts.lineage_counts(store, store.get(TASK), base_family=f'pr-{PR}',
+                                               include_successors=True)
+        self.assertEqual(counts['review_repairs'], self.policy['repair_max'] - 1)
+        result = self.dispatch(store)
+        self.assertEqual(result['claim']['attempt'], 1)
+        self.assertEqual(self.calls[0]['packet']['high_debug_report_sha256'],
+                         self.rca()[0]['report_sha256'])
+        # The chain's test repairs carry over the same way.
+        store = self.store(self.used_on_new_heads(self.policy['test_fail_max'], ec2=True))
+        self.calls.clear()
+        self.refused(store, 'REPAIR_LIMIT_REACHED', remote_test_receipt=_receipt())
 
     def test_unknown_chain_counts_as_the_limit(self):
         # The predecessor record is missing: never 0, so no repair starts.
@@ -787,7 +814,8 @@ class ReviewRepairChainTests(unittest.TestCase):
         # F1: this Task's own review repair on PR 5 uses the chain's first repair.
         own = [claim('pr-5', OLD_HEAD, pr=5)]
         self.refused(self.store([], review_repair_claims=own), 'REPAIR_DEBUG_REQUIRED')
-        own_ec2 = [ec2_claim('pr-5-ec2', OLD_HEAD, pr=5)]
+        # One test repair left: this Task's own on PR 5 use the rest.
+        own_ec2 = self.used_on_new_heads(self.policy['test_fail_max'] - 1, ec2=True)
         store = self.store([], review_repair_claims=own_ec2)
         result = self.dispatch(store, remote_test_receipt=_receipt())
         self.assertEqual(result['claim']['family'], f'pr-{PR}-ec2')
@@ -796,7 +824,7 @@ class ReviewRepairChainTests(unittest.TestCase):
         self.refused(store, 'REPAIR_LIMIT_REACHED', remote_test_receipt=_receipt())
 
     def test_test_failures_are_counted_across_the_chain(self):
-        store = self.store([ec2_claim('pr-5-ec2', OLD_HEAD, pr=5)])
+        store = self.store(self.used_on_new_heads(self.policy['test_fail_max'] - 1, ec2=True))
         result = self.dispatch(store, remote_test_receipt=_receipt())
         self.assertEqual(result['claim']['family'], f'pr-{PR}-ec2')
         store.records[TASK]['review_repair_claims'][-1]['state'] = 'FAILED'

@@ -55,11 +55,14 @@ def debug_entry(status='RESERVED'):
 
 
 class LineageDelegateIntegrationTests(unittest.TestCase):
+    # Two review runs per chain, so a third Developer run is over it.
+    POLICY_OVERRIDE = {'repair_max': 1}
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.base = Path(temp.name).resolve()
-        for patcher in (
+        patchers = [
                 patch.dict(os.environ, {'HOME': str(self.base)}),
                 # The temp HOME has no owner trust file; the store's dispatch gate
                 # reads the repository identity through worker_dispatch.
@@ -67,10 +70,12 @@ class LineageDelegateIntegrationTests(unittest.TestCase):
                 patch.object(worker_dispatch, 'repository_config',
                              return_value=dict(REPOSITORY)),
                 patch.object(high_debug.task_store, 'default_root',
-                             return_value=self.base / 'tasks'),
-                # Two review runs per chain, so a third Developer run is over it.
-                patch.object(task_submission_cli.repair_policy, 'load_policy',
-                             return_value=dict(repair_policy.load_policy(), repair_max=1))):
+                             return_value=self.base / 'tasks')]
+        if self.POLICY_OVERRIDE is not None:
+            patchers.append(patch.object(
+                task_submission_cli.repair_policy, 'load_policy',
+                return_value=dict(repair_policy.load_policy(), **self.POLICY_OVERRIDE)))
+        for patcher in patchers:
             patcher.start()
             self.addCleanup(patcher.stop)
         self.store = TaskStore(self.base / 'tasks')
@@ -210,6 +215,29 @@ class LineageDelegateIntegrationTests(unittest.TestCase):
         self.assertEqual(getattr(error, 'high_debug_code', None),
                          'HIGH_DEBUG_DEBUG_PARENT_USED')
         self.assertEqual(self.store.get(b).get('high_debug', []), [])
+
+
+class OwnerPolicyChainTests(LineageDelegateIntegrationTests):
+    """#2367: under the repository policy (5 repairs) the chain is not full at 2 runs."""
+
+    POLICY_OVERRIDE = None
+    test_chain_count_link_and_debug = None
+
+    def test_third_run_of_the_chain_is_repair_two_not_the_limit(self):
+        self.assertEqual(repair_policy.load_policy()['repair_max'], 5)
+        a = self.record_pm()
+        self.assertEqual(self.delegate(a, 'executor-a', SOURCE, 101), 'CLAIMED')
+        self.finish(a, HEAD_A)
+        b = self.record_pm(continues=a)
+        self.assertEqual(self.delegate(b, 'executor-b', HEAD_A, 102), 'CLAIMED')
+        self.finish(b, HEAD_B)
+        c = self.record_pm(continues=b)
+        # A new Task, D6 and PR keep the chain count (2 runs): C is repair #2,
+        # so it needs the AI Debug root cause, not the limit.
+        error = self.refused(lambda: self.delegate(c, 'executor-c', HEAD_B, 103))
+        self.assertEqual(str(error), 'DELEGATE_HIGH_DEBUG_TASK_REQUIRED')
+        self.assert_unclaimed(c)
+        self.assert_released(a)
 
 
 if __name__ == '__main__':

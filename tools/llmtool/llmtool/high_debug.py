@@ -1327,7 +1327,12 @@ def _debug_entry_used(entry):
 
 
 def _admit_debug(task, entries):
-    """O2, D3: one AI Debug per ROOT or REPLAN Task; children share one per lineage."""
+    """O2, D3: one AI Debug per ROOT or REPLAN Task; one per child within the lineage group.
+
+    #2367: policy group_debug_max is shared by the children of a lineage and
+    each child owns parent_debug_max of it; this first check sees the Task's
+    own entries only, the group is counted under the lock (_reserve_debug).
+    """
     from . import repair_policy
     try:
         policy = repair_policy.load_policy()
@@ -1413,8 +1418,12 @@ def _reserve_debug(store, task_id, entries, reservation):
         kind = _debug_kind_and_key(store, current)[0]
         used = (_group_debug_used(store, current, entries) if kind == 'child' else
                 lineage_counts.chain_debug_used(store, current, entries, _debug_entry_used)[0])
+        # #2367: a split child is its own work item; it owns one Debug
+        # (its own entries) within the lineage's shared group limit.
+        own = (sum(1 for entry in entries if _debug_entry_used(entry))
+               if kind == 'child' else used)
         try:
-            code = repair_policy.admit_debug(kind=kind, parent_debug_used=used,
+            code = repair_policy.admit_debug(kind=kind, parent_debug_used=own,
                                              group_debug_used=used, policy=policy)
         except LLMToolError:
             _refuse('HIGH_DEBUG_LINEAGE_INVALID')

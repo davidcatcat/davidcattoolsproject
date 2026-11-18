@@ -10,8 +10,8 @@ from llmtool import repair_policy, worker_dispatch
 from llmtool.errors import LLMToolError
 
 setUpModule, tearDownModule = twd.setUpModule, twd.tearDownModule
-GOOD = {'schema_version': 1, 'repair_max': 2, 'parent_debug_max': 1, 'group_debug_max': 1,
-        'child_max': 3, 'replan_max': 1, 'test_fail_max': 2, 'review_fail_max': 3,
+GOOD = {'schema_version': 1, 'repair_max': 5, 'parent_debug_max': 1, 'group_debug_max': 3,
+        'child_max': 3, 'replan_max': 1, 'test_fail_max': 5, 'review_fail_max': 6,
         'waiting_notify_after_hours': 24}
 
 
