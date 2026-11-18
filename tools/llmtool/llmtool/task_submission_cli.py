@@ -31,7 +31,7 @@ from .task_store import (TaskStore, TaskStoreConflict, new_id, _json_bytes,
                          _DIRECT_EXECUTION_FIELDS, _NO_CHANGES_MAX_TURNS,
                          _NO_CHANGES_REASON_MAX_CHARS, valid_provider_evidence,
                          CLAUDE_FAILURE_EXIT_CODE_RANGE, valid_claude_failure_evidence,
-                         valid_claude_failure_evidence_record)
+                         valid_claude_failure_evidence_record, _valid_reported_text)
 from . import active_pm_inbox
 from . import remote_test
 from . import task_completion
@@ -5761,6 +5761,73 @@ def _claude_no_changes_diagnosis(raw, sent_texts):
         return {'reason': 'UNKNOWN', 'write_attempted': 'UNKNOWN', 'num_turns': 'UNKNOWN'}
 
 
+# #2324: the final reply of a Claude run that ended CLAUDE_NO_CHANGES is kept as
+# developer.reported.summary (Developer-reported, unverified). The bound is the
+# TaskStore limit for the reported object as ASCII JSON.
+CLAUDE_REPLY_MAX_REPORTED_BYTES = 8 * 1024
+# The whole reply is screened before any cut; Claude stdout is at most 1 MiB.
+_CLAUDE_REPLY_SCREEN_LIMIT = 1024 * 1024
+CLAUDE_REPLY_TRUNCATED = ' [truncated]'
+CLAUDE_REPLY_WITHHELD = ('[Developer reply withheld: it did not pass the credential '
+                         'and character screen]')
+
+
+def _reported_size(reported):
+    return len(json.dumps(reported, ensure_ascii=True, sort_keys=True,
+                          separators=(',', ':')).encode('ascii'))
+
+
+def _claude_reply_fits(summary):
+    return _reported_size({'summary': summary}) <= CLAUDE_REPLY_MAX_REPORTED_BYTES
+
+
+def _claude_no_change_reply(raw):
+    """#2324: {'summary': text} from a no-change Claude run's final reply, else None.
+
+    raw is the run's parsed CLI result object. No reply (result absent, not a
+    string, or blank) gives None. The whole reply is screened first, so a cut
+    can never split credential material past the screen; a reply that is too
+    long is then cut at the end, marked ' [truncated]', and screened again. Any
+    screen refusal keeps only the fixed CLAUDE_REPLY_WITHHELD text: the reply is
+    never reworded or reshaped to pass the screen."""
+    text = raw.get('result') if type(raw) is dict else None
+    if type(text) is not str or not text.strip():
+        return None
+    try:
+        _screen_text(text, _CLAUDE_REPLY_SCREEN_LIMIT)
+    except LLMToolError:
+        return {'summary': CLAUDE_REPLY_WITHHELD}
+    summary = text.strip()
+    if not _claude_reply_fits(summary):
+        # The ASCII-JSON size only grows with the prefix length.
+        low, high = 0, len(summary)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if _claude_reply_fits(summary[:middle].rstrip() + CLAUDE_REPLY_TRUNCATED):
+                low = middle
+            else:
+                high = middle - 1
+        summary = summary[:low].rstrip() + CLAUDE_REPLY_TRUNCATED
+    try:
+        _screen_text(summary, CLAUDE_REPLY_MAX_REPORTED_BYTES)
+    except LLMToolError:
+        return {'summary': CLAUDE_REPLY_WITHHELD}
+    return {'summary': summary}
+
+
+def _claude_attach_no_change_reply(developer, raw):
+    """#2324: add developer.reported only when the store will accept it, so the
+    reply can never block persisting the CLAUDE_NO_CHANGES record."""
+    try:
+        reported = _claude_no_change_reply(raw)
+        if (type(reported) is dict and set(reported) == {'summary'} and
+                _valid_reported_text(reported['summary'], CLAUDE_REPLY_MAX_REPORTED_BYTES) and
+                _reported_size(reported) <= CLAUDE_REPLY_MAX_REPORTED_BYTES):
+            developer['reported'] = reported
+    except Exception:
+        pass
+
+
 def _claude_post_result_execution(result):
     """#2275: (execution, usage) of a returned Claude route result, BLOCKED.
 
@@ -6159,6 +6226,9 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
             # v93: a reason that repeats the sent prompt or context is UNKNOWN.
             developer['no_changes_diagnosis'] = _claude_no_changes_diagnosis(
                 parsed_cli_result, _claude_sent_texts(prompt, prompt_packet))
+            # #2324: the Developer's final reply (screened, bounded, unverified), so
+            # a SPEC_MISMATCH answer is not stored like a silent no-op.
+            _claude_attach_no_change_reply(developer, parsed_cli_result)
         if not owner_gate_denied:
             # #2275: structured run evidence; kept only when the store accepts it.
             _claude_attach_failure_evidence(developer, route, exc, result)
