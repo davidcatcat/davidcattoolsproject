@@ -76,12 +76,13 @@ def _execution(*, status, cleanup_status):
     }
 
 
-def _opencode_developer(*, state, execution, error_code=None, artifact=None):
+def _opencode_developer(*, state, execution, error_code=None, artifact=None,
+                        source_sha=SOURCE):
     return {
         'assignment_id': 'e' * 32, 'selection_source': 'PM', 'state': state,
         'provider_profile': 'opencode', 'provider_type': 'opencode-cli', 'model': None,
         'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
-        'session_id': 'dev-fixture-2325', 'source_sha': SOURCE,
+        'session_id': 'dev-fixture-2325', 'source_sha': source_sha,
         'source_sha_binding': 'D6_REGISTRY_OBSERVED',
         'read_paths': ['tools/sample.py'], 'write_paths': ['tools/sample.py'],
         'acceptance': ['Resolve the sample failure.'],
@@ -96,9 +97,9 @@ def _opencode_developer(*, state, execution, error_code=None, artifact=None):
     }
 
 
-def _responded_developer():
+def _responded_developer(source_sha=SOURCE):
     return _opencode_developer(
-        state='DEVELOPER_RESPONDED', artifact=ARTIFACT,
+        state='DEVELOPER_RESPONDED', artifact=ARTIFACT, source_sha=source_sha,
         execution=_execution(status='SUCCEEDED', cleanup_status='CONFIRMED'))
 
 
@@ -312,6 +313,28 @@ class RepairUnknownRecovery2325Tests(unittest.TestCase):
         repair.assert_not_called()
         self.assertEqual(self.stored_claims(E1_TASK)[0]['state'], 'DISPATCHED')
 
+    def test_evidence_1_moved_pr_head_never_retries(self):
+        # F1 regression: D6 is clean at HEAD, exact-head EC2 FAIL at HEAD,
+        # DISPATCHED repair at HEAD, but PR head moved to HEAD2. Must not retry.
+        self.evidence_1()
+        repair = Mock()
+        def gh_get(path):
+            if path == 'pulls/2323':
+                return {'number': 2323, 'state': 'open', 'merged': False,
+                        'head': {'sha': HEAD2}}
+            return self.github_get(path)
+        with patch.object(task_advance, '_d6_snapshot',
+                          return_value=_d6(self.d6_root, E1_EXECUTOR)):
+            result = task_advance.advance(
+                task_id=E1_TASK, store=self.store, repair_review_call=repair,
+                github_get=gh_get, publish_gh_runner=self.gh_runner,
+                publish_git_runner=self.git_runner, merge_gh_runner=self.gh_runner,
+                pr_number=2323)
+        self.assertEqual(result['step'], 'REPAIR_OUTCOME_UNKNOWN')
+        self.assertEqual(result['codes'], ['REPAIR_OUTCOME_UNKNOWN'])
+        repair.assert_not_called()
+        self.assertEqual(self.stored_claims(E1_TASK)[0]['state'], 'DISPATCHED')
+
     def test_evidence_1_unconfirmed_cleanup_stays_refused(self):
         self.evidence_1(child_cleanup='UNKNOWN')
         repair = Mock()
@@ -374,10 +397,34 @@ class RepairUnknownRecovery2325Tests(unittest.TestCase):
         self.assertNotIn(result.get('step'), ('REPAIR_REVIEW', 'REPAIR_RETRY'))
         repair.assert_not_called()
 
-    def test_unknown_claim_with_developer_names_recover_claim(self):
-        # The repair Task did start: no replay and no retry (the store moves
-        # only a DISPATCHED claim to FAILED); the stop names --recover-claim.
-        self.evidence_2(child_developer=_unknown_developer('CONFIRMED'))
+    def test_evidence_2_moved_pr_head_never_replays(self):
+        # F1 regression: D6 is clean at HEAD, UNKNOWN never-delegated claim at HEAD,
+        # but PR 2340 head moved to HEAD2. Must not replay.
+        self.evidence_2()
+        repair = Mock()
+        def gh_get(path):
+            if path == 'pulls/2340':
+                return {'number': 2340, 'state': 'open', 'merged': False,
+                        'head': {'sha': HEAD2}}
+            return self.github_get(path)
+        with patch.object(task_advance, '_d6_snapshot',
+                          return_value=_d6(self.d6_root, E2_EXECUTOR)), \
+                patch.object(task_advance, '_review_outcomes',
+                             return_value=list(_review_fail_outcome())):
+            result = task_advance.advance(
+                task_id=E2_TASK, store=self.store, repair_review_call=repair,
+                github_get=gh_get, publish_gh_runner=self.gh_runner,
+                publish_git_runner=self.git_runner, merge_gh_runner=self.gh_runner,
+                pr_number=2340)
+        self.assertEqual(result['step'], 'REPAIR_OUTCOME_UNKNOWN')
+        self.assertEqual(result['codes'], ['REPAIR_OUTCOME_UNKNOWN'])
+        repair.assert_not_called()
+        self.assertEqual(self.stored_claims(E2_TASK)[0]['state'], 'UNKNOWN')
+
+    def test_unknown_claim_with_responded_developer_names_recover_claim(self):
+        # The repair Task finished with DEVELOPER_RESPONDED: verified recovery
+        # accepts it, so the stop names --recover-claim.
+        self.evidence_2(child_developer=_responded_developer())
         repair = Mock()
         result = self.advance(E2_TASK, _d6(self.d6_root, E2_EXECUTOR), repair,
                               review_outcomes=_review_fail_outcome())
@@ -387,6 +434,20 @@ class RepairUnknownRecovery2325Tests(unittest.TestCase):
             'repair_task_id': E2_CHILD, 'claim_state': 'UNKNOWN',
             'next_command': (f'llmtool task repair {E2_TASK} --executor-task '
                              f'{E2_EXECUTOR} --pr 2340 --recover-claim {E2_CHILD}')})
+        repair.assert_not_called()
+
+    def test_unknown_claim_with_unknown_developer_stops_without_recover_claim(self):
+        # F2: If the repair run ended in DEVELOPER_OUTCOME_UNKNOWN, verified
+        # recovery refuses; advance provides an actionable stop without
+        # naming a --recover-claim that would fail.
+        self.evidence_2(child_developer=_unknown_developer('CONFIRMED'))
+        repair = Mock()
+        result = self.advance(E2_TASK, _d6(self.d6_root, E2_EXECUTOR), repair,
+                              review_outcomes=_review_fail_outcome())
+        self.assertEqual(result['step'], 'REPAIR_OUTCOME_UNKNOWN')
+        self.assertEqual(result['codes'], ['REPAIR_OUTCOME_UNKNOWN'])
+        self.assertEqual(result['result'], {
+            'repair_task_id': E2_CHILD, 'claim_state': 'UNKNOWN'})
         repair.assert_not_called()
 
     def test_test_failure_never_delegated_claim_is_replayed_not_retried(self):
@@ -430,32 +491,53 @@ class RepairUnknownRecovery2325Tests(unittest.TestCase):
 
     def test_replayed_claim_stays_unknown_when_recovery_is_refused(self):
         # The real store refuses the plain UNKNOWN -> DISPATCHED write; the
-        # injected #1928 recovery refuses too, so UNKNOWN is reported as stored.
-        self.evidence_2()
+        # real recovery validator refuses too when the child ended in
+        # DEVELOPER_OUTCOME_UNKNOWN, so UNKNOWN is reported as stored.
+        self.evidence_2(child_developer=_unknown_developer('CONFIRMED'))
         claim = dict(self.stored_claims(E2_TASK)[0])
-        recover = Mock(side_effect=LLMToolError('REPAIR_RECOVERY_EVIDENCE_INVALID'))
-        with patch.object(self.store, 'recover_review_repair_claim', recover):
-            state = review_repair._replayed_claim_state(
-                self.store, E2_TASK, claim, executor_task=E2_EXECUTOR, pr_number=2340)
+        state = review_repair._replayed_claim_state(
+            self.store, E2_TASK, claim, executor_task=E2_EXECUTOR, pr_number=2340)
         self.assertEqual(state, 'UNKNOWN')
-        recover.assert_called_once()
         claims = self.stored_claims(E2_TASK)
         self.assertEqual(len(claims), 1)
         self.assertEqual((claims[0]['state'], claims[0]['attempt']), ('UNKNOWN', 1))
 
     def test_replayed_claim_uses_the_verified_recovery(self):
-        self.evidence_2()
+        # When child has DEVELOPER_RESPONDED, real verified recovery succeeds.
+        self.evidence_2(child_developer=_responded_developer(source_sha=HEAD))
         claim = dict(self.stored_claims(E2_TASK)[0])
-        record_sha = self.store.get(E2_TASK)['record_sha256']
-        recover = Mock(return_value=None)
-        with patch.object(self.store, 'recover_review_repair_claim', recover):
-            state = review_repair._replayed_claim_state(
-                self.store, E2_TASK, claim, executor_task=E2_EXECUTOR, pr_number=2340)
+        state = review_repair._replayed_claim_state(
+            self.store, E2_TASK, claim, executor_task=E2_EXECUTOR, pr_number=2340)
         self.assertEqual(state, 'DISPATCHED')
-        recover.assert_called_once_with(E2_TASK, E2_CHILD, executor_task=E2_EXECUTOR,
-                                        pr_number=2340, expected_sha256=record_sha)
         # No new claim: the replay is counted once.
-        self.assertEqual(len(self.stored_claims(E2_TASK)), 1)
+        claims = self.stored_claims(E2_TASK)
+        self.assertEqual(len(claims), 1)
+        self.assertEqual((claims[0]['state'], claims[0]['attempt']), ('DISPATCHED', 1))
+
+    # -- review_repair: dirty tree guard checks clean on real GitSnapshot -
+
+    def test_dirty_d6_refuses_repair_review_with_real_gitsnapshot(self):
+        # F3: GitSnapshot defines `clean`, not `dirty`. A dirty tree
+        # (clean=False) must refuse with REPAIR_HEAD_MOVED.
+        from llmtool.task_completion import GitSnapshot, D6Registration
+        self.evidence_2()
+        parent = self.store.get(E2_TASK)
+        dirty_snapshot = GitSnapshot(
+            root=self.d6_root, common_dir=COMMON_DIR, branch='fix-2325',
+            head=HEAD, clean=False)
+        reg = D6Registration(
+            task_id=E2_EXECUTOR, root=self.d6_root, common_dir=COMMON_DIR,
+            branch='fix-2325', source_sha=SOURCE, result_sha=HEAD,
+            trusted_agent_id='pm-deterministic', session_ref='fixture-session',
+            native_session_id='fixture-native-session', state='ACTIVE')
+        with patch.object(review_repair.task_completion, 'read_d6_registration',
+                          return_value=reg), \
+                patch.object(review_repair.task_completion, 'collect_git_snapshot',
+                             return_value=dirty_snapshot):
+            with self.assertRaises(LLMToolError) as exc_info:
+                review_repair._registered_d6(parent, E2_EXECUTOR)
+            self.assertEqual(getattr(exc_info.exception, 'review_repair_code', None),
+                             'REPAIR_HEAD_MOVED')
 
 
 if __name__ == '__main__':

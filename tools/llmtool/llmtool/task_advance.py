@@ -2317,21 +2317,31 @@ def _record_cleared_pr(store, task_id, number, head, d6, gh_runner, root):
     return codes
 
 
-def _d6_unchanged_at(current_repair, d6):
-    """#2325: True only when the D6 is clean and its HEAD is the repair claim's head.
+def _d6_unchanged_at(current_repair, d6, pr=None):
+    """#2325: True only when the D6 is clean, its HEAD is the repair claim's head,
+    and any existing PR head matches the claim's head.
 
     Both the observed HEAD and the registered result HEAD must equal the
-    claim's head_sha; any doubt (no D6, dirty tree, moved HEAD) is False.
+    claim's head_sha; any doubt (no D6, dirty tree, moved HEAD, or PR head
+    mismatch) is False.
     """
     if type(current_repair) is not dict or type(d6) is not dict:
         return False
     if d6.get('dirty') is not False or d6.get('state') == 'DIRTY':
         return False
     result_head = d6.get('result_head')
-    return (type(result_head) is str and
+    if not (type(result_head) is str and
             re.fullmatch(r'[0-9a-f]{40}', result_head) is not None and
             result_head == current_repair.get('head_sha') and
-            d6.get('recorded_result_head') == result_head)
+            d6.get('recorded_result_head') == result_head):
+        return False
+    if type(pr) is dict:
+        pr_head = pr.get('head')
+        if type(pr_head) is dict:
+            sha = pr_head.get('sha')
+            if type(sha) is str and sha != current_repair.get('head_sha'):
+                return False
+    return True
 
 
 def _repair_record_of(current_repair):
@@ -2346,14 +2356,14 @@ def _repair_record_of(current_repair):
     return repair_record
 
 
-def _repair_cleanup_confirmed(current_repair, d6):
+def _repair_cleanup_confirmed(current_repair, d6, pr=None):
     """#2325: the unknown repair run ended with confirmed cleanup on an unchanged D6.
 
     A clean, unchanged D6 shows only that no file changed; the Developer
     record's own cleanup_status CONFIRMED shows that its process ended. Both
     are needed before a new writer may start in the same D6.
     """
-    if not _d6_unchanged_at(current_repair, d6):
+    if not _d6_unchanged_at(current_repair, d6, pr=pr):
         return False
     repair_record = _repair_record_of(current_repair)
     developer = repair_record.get('developer') if repair_record is not None else None
@@ -2363,7 +2373,7 @@ def _repair_cleanup_confirmed(current_repair, d6):
             type(execution) is dict and execution.get('cleanup_status') == 'CONFIRMED')
 
 
-def _repair_never_delegated(current_repair, d6):
+def _repair_never_delegated(current_repair, d6, pr=None):
     """#2325 evidence 2: an UNKNOWN claim whose repair Task has no Developer record.
 
     The claim's dispatch failed before the delegate wrote a Developer, so no
@@ -2375,10 +2385,10 @@ def _repair_never_delegated(current_repair, d6):
         return False
     repair_record = _repair_record_of(current_repair)
     return (repair_record is not None and repair_record.get('developer') is None and
-            _d6_unchanged_at(current_repair, d6))
+            _d6_unchanged_at(current_repair, d6, pr=pr))
 
 
-def _repair_claim_action(current_repair, d6):
+def _repair_claim_action(current_repair, d6, pr=None):
     """Return the action for the live repair claim at the D6 head, or None.
 
     None means no live claim decides the step. #2325: only a DISPATCHED claim
@@ -2401,7 +2411,7 @@ def _repair_claim_action(current_repair, d6):
     if state == 'RESPONDED':
         return 'PUBLISH'
     if claim_state == 'UNKNOWN':
-        if state == 'UNKNOWN' and _repair_never_delegated(current_repair, d6):
+        if state == 'UNKNOWN' and _repair_never_delegated(current_repair, d6, pr=pr):
             return 'REPAIR_REVIEW'
         if state in ('UNAVAILABLE', 'BLOCKED', 'OUTPUT_REJECTED', 'UNKNOWN'):
             return 'REPAIR_OUTCOME_UNKNOWN'
@@ -2409,7 +2419,7 @@ def _repair_claim_action(current_repair, d6):
     if state in ('UNAVAILABLE', 'BLOCKED', 'OUTPUT_REJECTED'):
         return 'REPAIR_RETRY'
     if state == 'UNKNOWN':
-        if _repair_cleanup_confirmed(current_repair, d6):
+        if _repair_cleanup_confirmed(current_repair, d6, pr=pr):
             return 'REPAIR_RETRY'
         return 'REPAIR_OUTCOME_UNKNOWN'
     return None
@@ -2423,13 +2433,13 @@ def _current_repair_claim(related, head):
                  if type(item) is dict and item.get('head_sha') == head), None)
 
 
-def _remote_fail_action(related, result_head, d6=None):
+def _remote_fail_action(related, result_head, d6=None, pr=None):
     """Return the repair action for an exact-head EC2 FAIL."""
-    action = _repair_claim_action(_current_repair_claim(related, result_head), d6)
+    action = _repair_claim_action(_current_repair_claim(related, result_head), d6, pr=pr)
     return 'REPAIR_REVIEW' if action is None else action
 
 
-def _unknown_claim_next(task_id, executor_task, related, d6):
+def _unknown_claim_next(task_id, executor_task, related, d6, pr=None):
     """#2325: name the exact next command for an UNKNOWN repair claim, or None.
 
     Only for a review-family claim whose repair Task has a Developer record on
@@ -2440,20 +2450,25 @@ def _unknown_claim_next(task_id, executor_task, related, d6):
     head = d6.get('result_head') if type(d6) is dict else None
     current = _current_repair_claim(related, head)
     if (type(current) is not dict or current.get('state') != 'UNKNOWN' or
-            not _d6_unchanged_at(current, d6)):
+            not _d6_unchanged_at(current, d6, pr=pr)):
         return None
     repair_task = current.get('repair_task_id')
     family = current.get('family', f"pr-{current.get('pr')}")
-    pr = current.get('pr')
+    pr_num = current.get('pr')
     if (type(repair_task) is not str or re.fullmatch(r'[0-9a-f]{32}', repair_task) is None or
-            type(family) is not str or family.endswith(review_repair.EC2_FAMILY_SUFFIX) or
-            type(pr) is not int or pr < 1 or
             type(executor_task) is not str or
             re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', executor_task) is None):
         return None
-    return {'repair_task_id': repair_task, 'claim_state': 'UNKNOWN',
-            'next_command': (f'llmtool task repair {task_id} --executor-task {executor_task} '
-                             f'--pr {pr} --recover-claim {repair_task}')}
+    result = {'repair_task_id': repair_task, 'claim_state': 'UNKNOWN'}
+    repair_record = _repair_record_of(current)
+    developer = repair_record.get('developer') if type(repair_record) is dict else None
+    dev_state = developer.get('state') if type(developer) is dict else None
+    if (type(family) is str and not family.endswith(review_repair.EC2_FAMILY_SUFFIX) and
+            type(pr_num) is int and pr_num >= 1 and
+            dev_state in ('DEVELOPER_RESPONDED', 'DEVELOPER_OUTPUT_REJECTED')):
+        result['next_command'] = (f'llmtool task repair {task_id} --executor-task {executor_task} '
+                                  f'--pr {pr_num} --recover-claim {repair_task}')
+    return result
 
 
 def _replay_refused_next(task_id, executor_task, claim):
@@ -2546,7 +2561,7 @@ def _pre_review_action(record, d6, pr, related, result_head):
     if remote_status == 'NOT_EXECUTED':
         return 'NEEDS_ATTENTION'
     if remote_status == 'FAIL':
-        return _remote_fail_action(related, result_head, d6=d6)
+        return _remote_fail_action(related, result_head, d6=d6, pr=pr)
     if remote_status not in ('PASS', 'ADMISSION_DENIED'):
         return 'RUN_REMOTE_TEST'
     if type(pr) is dict and pr.get('merged') is True:
@@ -2598,7 +2613,7 @@ def decide(record, d6, pr, related):
         if remote_status == 'NOT_EXECUTED':
             return 'NEEDS_ATTENTION'
         if remote_status == 'FAIL':
-            return _remote_fail_action(related, result_head, d6=d6)
+            return _remote_fail_action(related, result_head, d6=d6, pr=pr)
         return 'PUBLISH'
 
     matching = [claim for claim in claims if type(claim) is dict and
@@ -2626,7 +2641,7 @@ def decide(record, d6, pr, related):
         if outcome == 'REVIEW_BLOCKED':
             return 'REVIEWER_ATTENTION'
         if outcome == 'REVIEW_FAIL':
-            action = _repair_claim_action(_current_repair_claim(related, result_head), d6)
+            action = _repair_claim_action(_current_repair_claim(related, result_head), d6, pr=pr)
             if action is not None:
                 return action
             # Only a COMPLETED claim's outcome carries a count. Without a code
@@ -3661,7 +3676,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                 # claim replays that claim's repair Task (no new claim).
                 replay_claim = (_current_repair_claim(related, d6['result_head'])
                                 if step == 'REPAIR_REVIEW' else None)
-                if not _repair_never_delegated(replay_claim, d6):
+                if not _repair_never_delegated(replay_claim, d6, pr=pr):
                     replay_claim = None
                 remote_status, _, failure_receipt = _remote_test_status(record, d6)
                 if (step == 'REPAIR_REVIEW' and remote_status == 'FAIL' and
@@ -3858,7 +3873,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         if step == 'REPAIR_OUTCOME_UNKNOWN':
             # #2325: an UNKNOWN review repair claim names its recovery command;
             # nothing is dispatched or written here.
-            result = _unknown_claim_next(task_id, executor_task, related, d6)
+            result = _unknown_claim_next(task_id, executor_task, related, d6, pr=pr)
     elif step == 'DEVELOPER_START_FAILED':
         # #2188 section 7 item 3: stop for the PM. No automatic retry, no new
         # repair claim; the PM decides on `task retry-start`.

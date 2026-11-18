@@ -338,7 +338,7 @@ def _registered_d6(task, executor_task):
     if (snapshot.head != registration.result_sha or snapshot.root != registration.root or
             snapshot.common_dir != registration.common_dir or
             snapshot.branch != registration.branch or
-            getattr(snapshot, 'dirty', False) is True):
+            getattr(snapshot, 'clean', False) is not True):
         _refuse('REPAIR_HEAD_MOVED')
     return registration, snapshot
 
@@ -852,10 +852,7 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                     if existing['state'] != 'DISPATCHED':
                         # The repair Task was dispatched; only the claim record lags.
                         # task advance reads the repair Task's own record either way.
-                        response['next_action'] = (
-                            f"task advance {task_id}" if test_failure else
-                            f"task repair {task_id} --executor-task {executor_task} "
-                            f"--pr {pr_number} --recover-claim {repair_record['task_id']}")
+                        response['next_action'] = f"task advance {task_id}"
                     if auto_review:
                         try:
                             published_head = _current_d6_head(task, executor_task, current_head)
