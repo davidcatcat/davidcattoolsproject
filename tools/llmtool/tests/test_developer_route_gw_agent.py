@@ -230,8 +230,9 @@ class GwAgentRouteTests(unittest.TestCase):
         route_config = {
             'schema_version': 1,
             'routes': {
-                'agy': {'executable': 'agy', 'default_model': 'agy-model',
-                        'allowed_models': ['agy-model'],
+                # Owner #2302 P2: the AGY route admits Gemini-family models only.
+                'agy': {'executable': 'agy', 'default_model': 'gemini-test',
+                        'allowed_models': ['gemini-test'],
                         'default_effort': 'low', 'denied_dirs': ['.gemini'],
                         'state_dirs': {'policy': 'private-temp-only'},
                         'default_timeout': 600, 'max_timeout': 600},
@@ -287,8 +288,9 @@ class GwAgentRouteTests(unittest.TestCase):
         route_config = {
             'schema_version': 1,
             'routes': {
-                'agy': {'executable': 'agy', 'default_model': 'agy-model',
-                        'allowed_models': ['agy-model'],
+                # Owner #2302 P2: the AGY route admits Gemini-family models only.
+                'agy': {'executable': 'agy', 'default_model': 'gemini-test',
+                        'allowed_models': ['gemini-test'],
                         'default_effort': 'low', 'denied_dirs': ['.gemini'],
                         'state_dirs': {'policy': 'private-temp-only'},
                         'default_timeout': 600, 'max_timeout': 600},
