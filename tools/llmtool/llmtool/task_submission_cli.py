@@ -4598,8 +4598,9 @@ def _opencode_developer_profile():
     try:
         return opencode_direct_developer.validate_model(model), steps
     except opencode_direct_developer.DirectOpenCodeError:
-        raise LLMToolError('opencode-developer profile model must be an '
-                           'opencode/<name>-free model') from None
+        error = LLMToolError('opencode-developer profile model is invalid')
+        error.direct_opencode_code = 'OPENCODE_MODEL_INVALID'
+        raise error from None
 
 
 def _resolve_developer_role(role_name, *, owner_override=None, repository=None,
