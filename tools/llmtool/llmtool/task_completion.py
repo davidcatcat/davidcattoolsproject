@@ -2233,42 +2233,54 @@ def _recorded_model_family(model):
     return None
 
 
-def _reviewer_author_family(developer):
-    """Return the known family relevant to formal Reviewer separation.
+# Developer routes whose authoring run can give a formal review PASS.
+_REVIEWABLE_DEVELOPER_PROFILES = frozenset((
+    'claude', 'codex', 'agy', 'opencode', 'company-gw', 'gw-agent'))
 
-    The route profile and the recorded run model both count: a multi-model
-    route takes the family of its recorded model, and a single-family route
-    whose recorded model belongs to the other Reviewer family fails closed.
+
+def _reviewer_author_family(developer):
+    """Return the recorded model family of the authoring run, else None.
+
+    #2302 A3 (Owner decision 11-17): formal review independence uses the
+    family of the model the run actually used, never the route identity. The
+    family comes from developer_routes.model_family of the run's model: the
+    provider-reported model in developer.model_run when recorded, else the
+    recorded developer.model. None stands for UNKNOWN, which can never give a
+    formal PASS: an unknown or ambiguous model id, a model_run that does not
+    match the recorded model or its own stated family, or an unknown route.
+    Only a record with no model at all (a record-only Claude run or a Codex
+    run recovered without its model) keeps its CLI's own family, as before.
     """
+    from .developer_routes import MODEL_FAMILY_UNKNOWN, model_family
+
     if type(developer) is not dict:
         return None
     # A stored record may still carry the retired gw Agent id (#1502 WP-E).
     profile = worker_dispatch.stored_worker_id(developer.get('provider_profile'))
-    if profile == 'claude':
-        if _recorded_model_family(developer.get('model')) == 'codex':
-            return None
-        return 'claude'
-    elif profile == 'codex':
-        if _recorded_model_family(developer.get('model')) == 'claude':
-            return None
-        return 'codex'
-    elif profile == 'agy':
-        model = developer.get('model')
-        if type(model) is str and model.startswith('claude-'):
-            return 'claude'
-        if type(model) is str and model.startswith('gemini-'):
-            return 'other'
-        if type(model) is str and model.startswith('gpt-'):
-            return 'codex'  # #1604: OpenAI models (gpt-oss-*) share the codex family
+    if profile not in _REVIEWABLE_DEVELOPER_PROFILES:
         return None
-    elif profile in ('opencode', 'company-gw', 'gw-agent'):
-        return _recorded_model_family(developer.get('model')) or 'other'
+    model = developer.get('model')
+    run = developer.get('model_run')
+    if run is not None:
+        if type(run) is not dict or model is None or run.get('resolved') != model:
+            return None
+        reported = run.get('provider_reported')
+        family = model_family(reported if reported is not None else model)
+        if run.get('family') != family:
+            return None
+    elif model is None:
+        return profile if profile in ('claude', 'codex') else None
     else:
-        return None
+        family = model_family(model)
+    return None if family == MODEL_FAMILY_UNKNOWN else family
 
 
 def _review_family_compatible(developer, reviewer_identity):
-    """Require a known Developer family and the matching formal Reviewer family."""
+    """Require a known authoring-run model family and a Reviewer of another family.
+
+    #2302 A3: a same-family or UNKNOWN authoring run gives no formal PASS; a
+    Codex reviewer on a Claude-, Gemini- or other-family run stays valid.
+    """
     developer_family = _reviewer_author_family(developer)
     reviewer_family = {
         'claude-reviewer': 'claude',

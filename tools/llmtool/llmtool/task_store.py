@@ -384,8 +384,46 @@ CLAUDE_CLI_SUBTYPES = frozenset((
 CLAUDE_FAILURE_MAX_TURNS = _NO_CHANGES_MAX_TURNS
 CLAUDE_FAILURE_MAX_DURATION_MS = 86_400_000
 CLAUDE_FAILURE_EXIT_CODE_RANGE = (-255, 255)
+# #2302 A2: the model a Developer run used. Optional on every developer shape;
+# legacy records omit it. Checked strictly by valid_developer_model_run.
+_DEVELOPER_MODEL_RUN_FIELDS = frozenset(('model_run',))
+MODEL_RUN_KEYS = frozenset(('requested', 'resolved', 'source', 'family', 'provider_reported'))
+MODEL_RUN_SOURCES = frozenset(('cli', 'env', 'roles', 'repo_default', 'UNKNOWN'))
 _DEVELOPER_OPTIONAL_FIELDS = (_DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS |
-                              _DEVELOPER_CLAUDE_FAILURE_EVIDENCE_FIELDS)
+                              _DEVELOPER_CLAUDE_FAILURE_EVIDENCE_FIELDS |
+                              _DEVELOPER_MODEL_RUN_FIELDS)
+
+
+def valid_developer_model_run(developer):
+    """#2302 A2: strict value of developer.model_run.
+
+    model_run records the requested model (the user-config, env or CLI value,
+    else None for the repo default), the resolved model (always equal to the
+    record's model), the model source, the provider-reported model (None when
+    the provider reported none) and the model family. The family must be
+    developer_routes.model_family of the provider-reported model when there is
+    one, else of the resolved model ('UNKNOWN' when not recognised).
+    """
+    from .developer_routes import model_family, model_id_ok
+
+    if type(developer) is not dict:
+        return False
+    run = developer.get('model_run')
+    if type(run) is not dict or set(run) != MODEL_RUN_KEYS:
+        return False
+    resolved = run['resolved']
+    reported = run['provider_reported']
+    if (type(resolved) is not str or not model_id_ok(resolved) or
+            developer.get('model') != resolved or
+            (run['requested'] is not None and
+             (type(run['requested']) is not str or not model_id_ok(run['requested']))) or
+            type(run['source']) is not str or run['source'] not in MODEL_RUN_SOURCES or
+            (run['source'] == 'repo_default') != (run['requested'] is None) or
+            (reported is not None and
+             (type(reported) is not str or _SERVED_MODEL.fullmatch(reported) is None)) or
+            type(run['family']) is not str):
+        return False
+    return run['family'] == model_family(reported if reported is not None else resolved)
 
 
 def valid_claude_failure_evidence(evidence):
@@ -2728,8 +2766,9 @@ def _validate(record, *, strict=True):
             # #1815: the shapes carry the optional run timeout; legacy records omit it.
             # The validated --data-class a gw-agent delegate stored is an optional
             # key on every shape; legacy records omit it. So are the #1824
-            # Claude no_changes_diagnosis and the #2275 Claude
-            # claude_failure_evidence, each checked strictly below.
+            # Claude no_changes_diagnosis, the #2275 Claude
+            # claude_failure_evidence and the #2302 model_run, each checked
+            # strictly below.
             if (type(developer) is not dict or
                     frozenset(developer) - _DEVELOPER_OPTIONAL_FIELDS
                     not in _DEVELOPER_RECORD_SHAPES):
@@ -2739,6 +2778,8 @@ def _validate(record, *, strict=True):
                 _fail()
             if ('claude_failure_evidence' in developer and
                     not valid_claude_failure_evidence_record(developer)):
+                _fail()
+            if 'model_run' in developer and not valid_developer_model_run(developer):
                 _fail()
             if ('data_class' in developer and
                     (developer.get('provider_profile') != 'gw-agent' or

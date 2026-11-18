@@ -25,6 +25,7 @@ __all__ = [
     'AgyRoute', 'ClaudeRoute', 'GwAgentRoute', 'owner_assignment_gate', 'load_route_config',
     'check_route_model', 'check_route_model_family', 'check_registry_role_model',
     'route_has_family_check', 'REGISTRY_ROLES', 'registry_default_model',
+    'model_id_ok', 'model_family', 'MODEL_FAMILY_UNKNOWN',
     'resolve_route_timeout', 'resolve_route_max_diff_bytes', 'resolve_route_max_prompt_bytes',
     'resolve_route_max_task_paths', 'resolve_route_max_source_file_bytes',
     'resolve_route_max_source_total_bytes', 'max_prompt_bytes_ok',
@@ -45,7 +46,6 @@ def _timeout_value_ok(v):
 
 _MAX_ALLOWED_MODELS = 16
 _GENERIC_MODEL_PATTERN = r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}'
-_CLAUDE_MODEL_PATTERN = r'claude-[a-z0-9][a-z0-9.-]{0,120}'
 # Only OpenCode-hosted free models; the variant (for example high) is the
 # route's default_effort, never part of the model name.
 _OPENCODE_MODEL_PATTERN = r'opencode/[A-Za-z0-9][A-Za-z0-9._-]{0,94}-free'
@@ -58,10 +58,15 @@ def _generic_model_ok(value):
             re.fullmatch(_GENERIC_MODEL_PATTERN, value) is not None)
 
 
-def _claude_model_ok(value):
-    import re
+def model_id_ok(value):
+    """Return True when value is a well-formed model identifier (#2302).
 
-    return type(value) is str and re.fullmatch(_CLAUDE_MODEL_PATTERN, value) is not None
+    Owner decision 11-17 (#2302): this format check is the only model gate on
+    the Developer, Reviewer and Debug roles. Any model of any family passes;
+    developer-routes.json is not a per-model permit list. A model the provider
+    itself cannot serve fails from the provider path, never by a list here.
+    """
+    return _generic_model_ok(value)
 
 
 def _opencode_model_ok(value):
@@ -70,73 +75,84 @@ def _opencode_model_ok(value):
     return type(value) is str and re.fullmatch(_OPENCODE_MODEL_PATTERN, value) is not None
 
 
-# Security repair (PR #1782 CWE-693): each review/debug role accepts only
-# identifiers of its own model family, checked by allowlist on the full
-# identifier. Provider prefixes are part of the full identifier and are never
-# stripped, so a prefixed form (for example 'vendor/<model>') never matches a
-# family pattern. Only lower case is accepted.
-_CODEX_FAMILY_PATTERN = r'(?:gpt|codex)-[a-z0-9][a-z0-9.-]{0,120}'
-_CLAUDE_FAMILY_PATTERN = _CLAUDE_MODEL_PATTERN
-# Family names that must never appear anywhere in another family's identifier
-# (defence in depth on top of the allowlist).
-_CODEX_FAMILY_MARKERS = ('gpt', 'codex', 'openai')
-_CLAUDE_FAMILY_MARKERS = ('claude', 'anthropic')
+# #2302 A2: the model family of a recorded model id. Formal review
+# independence compares this family of the authoring run with the Reviewer's
+# family (task_completion._reviewer_author_family).
+MODEL_FAMILY_UNKNOWN = 'UNKNOWN'
+# Leading word of the bare model name (after any provider prefix up to the
+# last '/') -> family. gpt, codex and o-series names are one family, 'codex'.
+_MODEL_FAMILY_WORDS = {
+    'claude': 'claude', 'gpt': 'codex', 'codex': 'codex', 'gemini': 'gemini',
+    'qwen': 'qwen', 'deepseek': 'deepseek', 'llama': 'llama', 'mistral': 'mistral',
+    'grok': 'grok', 'kimi': 'kimi', 'glm': 'glm', 'minimax': 'minimax',
+}
+# Claude CLI model aliases name the Claude family.
+_CLAUDE_MODEL_ALIASES = frozenset(('opus', 'sonnet', 'haiku'))
+# A family marker of another family anywhere in the full identifier makes the
+# family ambiguous, so it is UNKNOWN (fail closed for review independence).
+_MODEL_FAMILY_MARKERS = {
+    'claude': ('claude', 'anthropic'),
+    'codex': ('gpt', 'codex', 'openai'),
+    'gemini': ('gemini',),
+    'qwen': ('qwen',),
+    'deepseek': ('deepseek',),
+}
 
 
-def _family_model_ok(value, pattern, foreign_markers):
+def model_family(model):
+    """Return the model family of a model id, else MODEL_FAMILY_UNKNOWN (#2302 A2).
+
+    The id is normalised by dropping a variant suffix from the first '#',
+    dropping any provider prefix up to the last '/', and case folding. The
+    family is the leading word of that bare name (claude, gpt/codex/o<digit>
+    as 'codex', gemini, qwen, deepseek and others); Claude CLI aliases opus,
+    sonnet and haiku are 'claude'. A malformed id, an unrecognised name, or a
+    name that also carries another family's marker is MODEL_FAMILY_UNKNOWN.
+    """
     import re
 
-    if type(value) is not str or re.fullmatch(pattern, value) is None:
-        return False
-    folded = value.casefold()
-    return not any(marker in folded for marker in foreign_markers)
+    if type(model) is not str or len(model) > 256:
+        return MODEL_FAMILY_UNKNOWN
+    full = model.split('#', 1)[0]
+    if not _generic_model_ok(full):
+        return MODEL_FAMILY_UNKNOWN
+    folded = full.casefold()
+    name = folded.rsplit('/', 1)[-1]
+    word = re.match(r'[a-z]+', name)
+    family = None
+    if word is not None:
+        family = _MODEL_FAMILY_WORDS.get(word.group(0))
+    if family is None:
+        if re.fullmatch(r'o[0-9][a-z0-9._-]*', name):
+            family = 'codex'
+        elif name in _CLAUDE_MODEL_ALIASES:
+            family = 'claude'
+        else:
+            return MODEL_FAMILY_UNKNOWN
+    if any(marker in folded for other, markers in _MODEL_FAMILY_MARKERS.items()
+           if other != family for marker in markers):
+        return MODEL_FAMILY_UNKNOWN
+    return family
 
 
-def _codex_role_model_ok(value):
-    """A Codex role model: a Codex/GPT family identifier, never another family."""
-    return _family_model_ok(value, _CODEX_FAMILY_PATTERN, _CLAUDE_FAMILY_MARKERS)
-
-
-def _claude_role_model_ok(value):
-    """A Claude role model: a Claude family identifier, never another family."""
-    return _family_model_ok(value, _CLAUDE_FAMILY_PATTERN, _CODEX_FAMILY_MARKERS)
-
-
-# Owner #2302 P2: the AGY route runs Gemini-family models only. Same allowlist
-# rules as the role families: full identifier, lower case, no prefix.
-_GEMINI_FAMILY_PATTERN = r'gemini-[a-z0-9][a-z0-9.-]{0,120}'
-
-
-def _agy_model_ok(value):
-    """An AGY route model: a Gemini family identifier, never another family."""
-    return _family_model_ok(value, _GEMINI_FAMILY_PATTERN,
-                            _CLAUDE_FAMILY_MARKERS + _CODEX_FAMILY_MARKERS)
-
-
-# Owner #2302 P2: a route accepts any model of its own provider family in a
-# valid provider format; allowed_models is not a membership list for these
-# routes. gw-agent is not listed: it has no provider family and keeps its
-# allowed_models gate on the gateway-served model (#1773) unchanged.
-# OpenCode stays free-only: its format admits only opencode/<name>-free.
+# Owner #2302 (decision 11-17): no route has a model family or membership
+# gate. Every route admits any well-formed model id (model_id_ok); a model the
+# provider cannot serve fails from the provider path with no fallback.
+# OpenCode keeps its free-only rule, a budget boundary that is not a model
+# permit list: its format admits only opencode/<name>-free.
 _ROUTE_MODEL_CHECKS = {
-    'agy': _agy_model_ok,
-    'claude': _claude_role_model_ok,
     'opencode': _opencode_model_ok,
 }
-# Owner #2302 P2 Repair 2: a route with no provider family (gw-agent) keeps
-# its allowed_models membership gate, but a malformed identifier is still
-# refused before any owner override is read.
-_GENERIC_ROUTE_CHECKS = {'gw-agent': _generic_model_ok}
 
 
-# #1502 WP-E, Owner #2302 P2: the family check for each review and AI Debug
-# role. A role accepts any model of its own family; its registry entry names
-# the default model (default_model, else the first allowed_models item).
+# #1502 WP-E, Owner #2302: each review and AI Debug role admits any
+# well-formed model id; its registry entry names only the default model
+# (default_model, else the first allowed_models item of an older file).
 _ROLE_MODEL_CHECKS = {
-    'codex-reviewer': _codex_role_model_ok,
-    'claude-reviewer': _claude_role_model_ok,
-    'codex-debug': _codex_role_model_ok,
-    'claude-debug': _claude_role_model_ok,
+    'codex-reviewer': model_id_ok,
+    'claude-reviewer': model_id_ok,
+    'codex-debug': model_id_ok,
+    'claude-debug': model_id_ok,
 }
 # The canonical review/debug role ids the roles registry governs. A legacy
 # alias (for example 'reviewer') is never accepted here; callers map it first.
@@ -149,10 +165,10 @@ _ROLE_ENTRY_KEYS = frozenset({'default_model', 'allowed_models', 'timeout'})
 def _role_models(roles):
     """Return the normalized roles registry or raise ROUTE_CONFIG_INVALID.
 
-    Owner #2302 P2: each entry names its default model with default_model,
-    allowed_models or both (at least one). allowed_models is accepted but not
-    a membership list: when present it is a well-formed list of the role's
-    family. Every named model must pass the role's family check.
+    Owner #2302: each entry names its default model with default_model,
+    allowed_models (an older file) or both (at least one). allowed_models is
+    accepted but is not a membership list. Every named model must be a
+    well-formed model id (model_id_ok); no model family is required.
     """
     if type(roles) is not dict or set(roles) != set(_ROLE_MODEL_CHECKS):
         raise RouteError('ROUTE_CONFIG_INVALID')
@@ -262,9 +278,9 @@ def _gw_agent_budgets_ok(budgets, profile=None):
 def _listed_models_ok(value, model_ok):
     """Return True when value is a well-formed allowed_models list.
 
-    Owner #2302 P2: allowed_models is accepted but not enforced as a
+    Owner #2302: allowed_models is accepted but not enforced as a
     membership list. When present it holds 1 to _MAX_ALLOWED_MODELS unique
-    strings, each passing model_ok (the route's or role's format and family).
+    strings, each passing model_ok (the route's or role's format check).
     """
     return (type(value) is list and 1 <= len(value) <= _MAX_ALLOWED_MODELS and
             all(type(item) is str for item in value) and
@@ -277,7 +293,8 @@ def _allowed_models_ok(value, default_model, model_ok):
 
     Security repair (PR #1759 F1): the gw-agent route's allowed_models must
     list only its current default model. Any extra or different entry is
-    refused at load. Owner #2302 P2 leaves this gw-agent rule unchanged.
+    refused at load. Owner #2302: this is a shape rule of the gateway entry
+    only; check_route_model never consults the list.
     """
     return (_listed_models_ok(value, model_ok) and
             len(value) == 1 and type(default_model) is str and
@@ -285,8 +302,9 @@ def _allowed_models_ok(value, default_model, model_ok):
 
 
 def _optional_listed_models_ok(entry, model_ok):
-    """Owner #2302 P2: a route's allowed_models is optional; when present it
-    must be well formed, but it need not contain default_model."""
+    """Owner #2302: a route's allowed_models is optional and never consulted;
+    when present (an older file) it must be well formed, but it need not
+    contain default_model."""
     return 'allowed_models' not in entry or _listed_models_ok(entry['allowed_models'], model_ok)
 
 
@@ -316,55 +334,38 @@ def check_route_model(config, route, model):
     """Return model when it is allowed for route in a load_route_config() result.
 
     Pure check: no file, network or environment reads. Raises
-    RouteError('ROLE_MODEL_NOT_ALLOWED') for an absent route or a non-str
-    model. Owner #2302 P2: agy, claude and opencode accept any model of their
-    own provider family in a valid format (_ROUTE_MODEL_CHECKS) and refuse a
-    wrong-family or malformed one; allowed_models is not consulted. gw-agent
-    keeps its allowed_models membership gate, but a malformed identifier is
-    refused here too, before membership (Repair 2).
+    RouteError('ROLE_MODEL_NOT_ALLOWED') for an absent route, a non-str model
+    or a malformed model id. Owner #2302 (decision 11-17): every route admits
+    any well-formed model id (model_id_ok) of any family; allowed_models is
+    never consulted, so a model switch in user config or a one-shot CLI needs
+    no repository change. OpenCode keeps its free-only format (a budget rule).
     """
     routes = config.get('routes') if type(config) is dict else None
     entry = (routes.get(route) if type(routes) is dict and type(route) is str
              else None)
     if type(entry) is not dict or type(model) is not str:
         raise RouteError('ROLE_MODEL_NOT_ALLOWED')
-    model_ok = _ROUTE_MODEL_CHECKS.get(route)
-    if model_ok is not None:
-        if not model_ok(model):
-            raise RouteError('ROLE_MODEL_NOT_ALLOWED')
-        return model
-    format_ok = _GENERIC_ROUTE_CHECKS.get(route)
-    if format_ok is not None and not format_ok(model):
-        raise RouteError('ROLE_MODEL_NOT_ALLOWED')
-    allowed = entry.get('allowed_models')
-    if (type(allowed) is not list or
-            not any(type(item) is str and item == model for item in allowed)):
-        raise RouteError('ROLE_MODEL_NOT_ALLOWED')
-    return model
+    return check_route_model_family(route, model)
 
 
 def route_has_family_check(route):
-    """Return True when route has a mandatory provider family/format check.
+    """Return True when route has a route-specific model format check.
 
-    Owner #2302 P2 Repair 2: agy, claude and opencode are gated by their
-    provider family and format, and no owner override may relax that gate.
-    gw-agent has no provider family, so only its allowed_models membership
-    gate may be relaxed.
+    Owner #2302: no route has a model family gate any more; only OpenCode
+    keeps its own free-only format. Kept for callers of the earlier API.
     """
     return route in _ROUTE_MODEL_CHECKS
 
 
 def check_route_model_family(route, model):
-    """Return model when a route's own format/family check admits it.
+    """Return model when the route's model format check admits it.
 
-    Owner #2302 P2 Repair 2: agy, claude and opencode have a mandatory
-    format/family check that no owner override may bypass. A model this function
-    refuses is refused on every path, before any override is read. gw-agent has
-    no provider family, so only its generic identifier format is checked here;
-    it keeps its allowed_models membership gate (which an override may relax).
+    Owner #2302: the only route model check is the format: OpenCode's
+    free-only format, else model_id_ok for every other route. No model family
+    is required. Kept under its earlier name for existing callers.
     """
-    model_ok = _ROUTE_MODEL_CHECKS.get(route, _GENERIC_ROUTE_CHECKS.get(route))
-    if model_ok is not None and not model_ok(model):
+    model_ok = _ROUTE_MODEL_CHECKS.get(route, model_id_ok)
+    if not model_ok(model):
         raise RouteError('ROLE_MODEL_NOT_ALLOWED')
     return model
 
@@ -380,13 +381,13 @@ def check_registry_role_model(config, role, model):
     * the file is unreadable or invalid, or its roles registry is absent or
       invalid (a route-only config admits no review/debug model);
     * role is not one of the canonical ids (aliases are mapped by the caller);
-    * model is not a str, or its full identifier is not of the role's model
-      family (no provider-prefix stripping, no case folding);
+    * model is not a str, or is not a well-formed model id (model_id_ok);
     * an unloadable repository file refuses ROUTE_CONFIG_UNAVAILABLE (#2027).
 
-    Owner #2302 P2: any model of the role's own family is admitted; the
-    role's allowed_models is not a membership list. There is no
-    owner_override exemption and no other bypass.
+    Owner #2302 (decision 11-17): any well-formed model id of any family is
+    admitted; the role's allowed_models is not a membership list. Review
+    independence is decided from the recorded model family of the authoring
+    run (task_completion._reviewer_author_family), not here.
     """
     if config is None:
         try:
@@ -453,14 +454,15 @@ def load_route_config(path=None):
         raise RouteError('ROUTE_CONFIG_INVALID')
     entry = routes['agy']
     expected = {'executable', 'default_model', 'default_effort', 'denied_dirs', 'state_dirs'}
-    # Owner #2302 P2: allowed_models is optional and not a membership list.
+    # Owner #2302: allowed_models is optional and not a membership list; the
+    # default model is any well-formed model id.
     if set(entry) - ROUTE_LIMIT_KEYS - {'allowed_models'} != expected:
         raise RouteError('ROUTE_CONFIG_INVALID')
-    if (entry['executable'] != 'agy' or not _agy_model_ok(entry['default_model']) or
+    if (entry['executable'] != 'agy' or not model_id_ok(entry['default_model']) or
             entry['default_effort'] not in ('minimal', 'low', 'medium', 'high') or
             type(entry['denied_dirs']) is not list or entry['denied_dirs'] != ['.gemini'] or
             entry['state_dirs'] != {'policy': 'private-temp-only'} or
-            not _optional_listed_models_ok(entry, _agy_model_ok)):
+            not _optional_listed_models_ok(entry, model_id_ok)):
         raise RouteError('ROUTE_CONFIG_INVALID')
     normalized = {'agy': _copy_route(entry)}
     if 'claude' in routes:
@@ -469,13 +471,13 @@ def load_route_config(path=None):
                            'denied_dirs', 'state_dirs'}
         if (set(claude) - ROUTE_LIMIT_KEYS - {'allowed_models'} != expected_claude or
                 claude.get('executable') != 'claude' or
-                not _claude_role_model_ok(claude.get('default_model')) or
+                not model_id_ok(claude.get('default_model')) or
                 type(claude.get('default_effort')) is not str or
                 claude['default_effort'] not in ('low', 'medium', 'high', 'xhigh', 'max') or
                 type(claude.get('denied_dirs')) is not list or
                 claude['denied_dirs'] != ['.claude'] or
                 claude.get('state_dirs') != {'policy': 'private-temp-only'} or
-                not _optional_listed_models_ok(claude, _claude_role_model_ok)):
+                not _optional_listed_models_ok(claude, model_id_ok)):
             raise RouteError('ROUTE_CONFIG_INVALID')
         normalized['claude'] = _copy_route(claude)
     if 'gw-agent' in routes:

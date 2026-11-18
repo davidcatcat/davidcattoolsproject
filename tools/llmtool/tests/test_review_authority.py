@@ -26,14 +26,15 @@ def tearDownModule(): review_trust_fixture.stop_module()
 REF='https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6130032828'
 LOAD_TOLERANT_TIMEOUT_SECONDS=15
 # #1502 WP-E R1: both claude-cli reviewer roles launch only a model the shared
-# registry check admits for claude-reviewer, so the fixture route uses it.
+# registry check admits for claude-reviewer; the fixture route uses its default.
 _ROLES=load_route_config()['roles']
-REVIEW_MODEL=_ROLES['claude-reviewer']['allowed_models'][0]
-CROSS_FAMILY_MODEL=_ROLES['codex-reviewer']['allowed_models'][0]
-# Owner #2302 P2: any Claude-family model is admitted, so the refused model
-# here is of another family (neither Claude nor Codex).
+REVIEW_MODEL=_ROLES['claude-reviewer']['default_model']
+CROSS_FAMILY_MODEL=_ROLES['codex-reviewer']['default_model']
+# Owner #2302 (decision 11-17): any well-formed model id of any family is
+# admitted; only a malformed id (or an unavailable registry) is refused.
 UNLISTED_MODEL='gemini-unlisted-model'
 SAME_FAMILY_MODEL='claude-fable-5-2'
+MALFORMED_MODEL='has space'
 FAKE_SCRIPT='''#!INTERPRETER -IB
 import json,sys
 v=json.loads(sys.stdin.read().split('\\n\\nUSER:\\n',1)[1])
@@ -796,37 +797,53 @@ def _policy_with_model(policy,model):
 
 
 class RegistryModelTests(unittest.TestCase):
-    """#1502 WP-E R1: policy and both launcher branches admit only the listed model."""
+    """#1502 WP-E R1, #2302: policy and both launcher branches use the shared check.
+
+    Owner #2302: the check admits any well-formed model id and refuses a
+    malformed id or an unavailable registry, before any spawn.
+    """
 
     def assert_model_refused(self,caught):
         self.assertEqual(caught.exception.review_code,'ROLE_MODEL_NOT_ALLOWED')
 
-    def test_policy_refuses_unlisted_and_cross_family_route_model(self):
-        for model in (UNLISTED_MODEL,'gpt-unlisted-model'):
+    def registry_refuses(self):
+        # The shared registry check refusing (as for a malformed model or an
+        # unavailable registry); the real refusal mapping still runs.
+        from llmtool import developer_routes
+        return patch.object(developer_routes,'check_registry_role_model',
+            side_effect=developer_routes.RouteError('ROLE_MODEL_NOT_ALLOWED'))
+
+    def test_policy_refuses_when_the_registry_check_refuses(self):
+        h=Harness();self.addCleanup(h.close)
+        with self.registry_refuses():
+            with self.assertRaises(LLMToolError) as caught:h.issuer.policy(h.policy.digest)
+            self.assert_model_refused(caught)
+            self.assertFalse(h.issuer.vouches_for(h.policy.digest))
+            with patch('subprocess.Popen',side_effect=AssertionError('spawn')):
+                result=h.run()
+        self.assertEqual(result['provider_calls'],0,result)
+        self.assertFalse(result['authorized'])
+        self.assertEqual(h.ledger._db.execute('SELECT count(*) FROM receipts').fetchone()[0],0)
+
+    def test_policy_admits_a_route_model_of_any_family(self):
+        for model in (REVIEW_MODEL,UNLISTED_MODEL,'gpt-unlisted-model'):
             with self.subTest(model=model):
                 h=Harness(model=model);self.addCleanup(h.close)
-                with self.assertRaises(LLMToolError) as caught:h.issuer.policy(h.policy.digest)
-                self.assert_model_refused(caught)
-                self.assertFalse(h.issuer.vouches_for(h.policy.digest))
-                with patch('subprocess.Popen',side_effect=AssertionError('spawn')):
-                    result=h.run()
-                self.assertEqual(result['provider_calls'],0,result)
-                self.assertFalse(result['authorized'])
-                self.assertEqual(h.ledger._db.execute('SELECT count(*) FROM receipts').fetchone()[0],0)
+                self.assertEqual(h.issuer.policy(h.policy.digest).model,model)
+                self.assertTrue(h.issuer.vouches_for(h.policy.digest))
 
-    def test_policy_admits_the_listed_route_model(self):
-        h=Harness();self.addCleanup(h.close)
-        self.assertEqual(h.issuer.policy(h.policy.digest).model,REVIEW_MODEL)
-        self.assertEqual(a.admit_reviewer_model(REVIEW_MODEL),REVIEW_MODEL)
-        self.assertEqual(a.admit_reviewer_model(SAME_FAMILY_MODEL),SAME_FAMILY_MODEL)
-        for model in (UNLISTED_MODEL,CROSS_FAMILY_MODEL,'anthropic/'+REVIEW_MODEL,
-                      REVIEW_MODEL.upper(),None):
+    def test_admit_reviewer_model_is_format_only(self):
+        for model in (REVIEW_MODEL,SAME_FAMILY_MODEL,UNLISTED_MODEL,CROSS_FAMILY_MODEL,
+                      'anthropic/'+REVIEW_MODEL,REVIEW_MODEL.upper()):
+            with self.subTest(model=model):
+                self.assertEqual(a.admit_reviewer_model(model),model)
+        for model in (MALFORMED_MODEL,'https://example.invalid/m','-leading-dash','',None,7):
             with self.subTest(model=model),self.assertRaises(LLMToolError) as caught:
                 a.admit_reviewer_model(model)
             self.assert_model_refused(caught)
 
-    def test_review_launch_refuses_unlisted_and_cross_family_model_before_spawn(self):
-        for model in (UNLISTED_MODEL,CROSS_FAMILY_MODEL):
+    def test_review_launch_refuses_a_malformed_model_before_spawn(self):
+        for model in (MALFORMED_MODEL,'https://example.invalid/m'):
             with self.subTest(model=model):
                 h=Harness();self.addCleanup(h.close)
                 b,packet=h.binding();ad=h.authority.admit(b)
@@ -838,9 +855,9 @@ class RegistryModelTests(unittest.TestCase):
                 self.assert_model_refused(caught)
                 spawn.assert_not_called()
 
-    def test_worker_launch_refuses_unlisted_and_cross_family_model_before_spawn(self):
+    def test_worker_launch_refuses_a_malformed_model_before_spawn(self):
         import time
-        for model in (UNLISTED_MODEL,CROSS_FAMILY_MODEL):
+        for model in (MALFORMED_MODEL,'https://example.invalid/m'):
             with self.subTest(model=model):
                 h=WorkerHarness(timeout=30);self.addCleanup(h.close)
                 b,packet=h.binding();ad=h.authority.admit(b)
@@ -855,16 +872,14 @@ class RegistryModelTests(unittest.TestCase):
                 spawn.assert_not_called()
                 self.assertFalse(h.argv_file.exists())
 
-    def test_foreground_worker_refuses_unlisted_route_model_before_effect(self):
-        for model in (UNLISTED_MODEL,'gpt-unlisted-model'):
-            with self.subTest(model=model):
-                h=WorkerHarness(model=model);self.addCleanup(h.close)
-                with patch('subprocess.Popen',side_effect=AssertionError('spawn')):
-                    with self.assertRaises(LLMToolError) as caught:
-                        a.run_foreground_review(h.issuer,h.ledger,budget=h.fake.budget)
-                self.assert_model_refused(caught)
-                self.assertFalse(h.argv_file.exists())
-                self.assertEqual(h.ledger._db.execute('SELECT count(*) FROM receipts').fetchone()[0],0)
+    def test_foreground_worker_refuses_before_effect_when_the_registry_check_refuses(self):
+        h=WorkerHarness();self.addCleanup(h.close)
+        with self.registry_refuses(),patch('subprocess.Popen',side_effect=AssertionError('spawn')):
+            with self.assertRaises(LLMToolError) as caught:
+                a.run_foreground_review(h.issuer,h.ledger,budget=h.fake.budget)
+        self.assert_model_refused(caught)
+        self.assertFalse(h.argv_file.exists())
+        self.assertEqual(h.ledger._db.execute('SELECT count(*) FROM receipts').fetchone()[0],0)
 
 
 class ForegroundEntryTests(unittest.TestCase):
@@ -1119,6 +1134,159 @@ class ForegroundEntryTests(unittest.TestCase):
         with patch.object(r,'run_review',side_effect=abort):
             with self.assertRaises(HostAbort):self.invoke(h)
         self.assertIs(h.issuer.pending_job,marker)
+
+
+class AuthoringRunFamilyTests(unittest.TestCase):
+    """#2302 A3/A4: formal review independence uses the recorded model family.
+
+    The family of the authoring run comes from its recorded model id (or the
+    provider-reported model in model_run), never from the route identity. A
+    same-family or UNKNOWN run gives no formal PASS.
+    """
+
+    @staticmethod
+    def developer(profile,model,**extra):
+        return dict({'provider_profile':profile,'model':model},**extra)
+
+    @staticmethod
+    def model_run(model,**changes):
+        from llmtool.developer_routes import model_family
+        run={'requested':model,'resolved':model,'source':'roles',
+             'family':model_family(model),'provider_reported':None}
+        run.update(changes)
+        return run
+
+    def family(self,developer):
+        from llmtool import task_completion
+        return task_completion._reviewer_author_family(developer)
+
+    def compatible(self,developer,reviewer):
+        from llmtool import task_completion
+        return task_completion._review_family_compatible(developer,reviewer)
+
+    def test_family_comes_from_the_recorded_model(self):
+        cases=(('agy','claude-sonnet-5-5-medium','claude'),('agy','gemini-3.8-flash-medium','gemini'),
+               ('agy','gpt-6.1-sol','codex'),('claude','claude-opus-5-5','claude'),
+               ('claude','gemini-4-hydrogen-medium','gemini'),('codex','gpt-6.1-sol','codex'),
+               ('opencode','opencode/deepseek-v4.1-flash-free','deepseek'),
+               ('gw-agent','qwen3-coder','qwen'))
+        for profile,model,family in cases:
+            with self.subTest(profile=profile,model=model):
+                self.assertEqual(self.family(self.developer(profile,model)),family)
+
+    def test_codex_reviewer_on_a_claude_or_gemini_run_stays_valid(self):
+        for profile,model in (('claude','claude-opus-5-5'),('agy','claude-sonnet-5-5-medium'),
+                              ('agy','gemini-3.8-flash-medium'),('gw-agent','qwen3-coder')):
+            with self.subTest(profile=profile,model=model):
+                self.assertTrue(self.compatible(self.developer(profile,model),'codex-reviewer'))
+        self.assertFalse(self.compatible(self.developer('claude','claude-opus-5-5'),
+                                         'claude-reviewer'))
+        self.assertFalse(self.compatible(self.developer('agy','claude-sonnet-5-5-medium'),
+                                         'claude-reviewer'))
+        self.assertTrue(self.compatible(self.developer('agy','gemini-3.8-flash-medium'),
+                                        'claude-reviewer'))
+
+    def test_codex_family_developer_model_refuses_a_codex_pass(self):
+        # #2302 A4: a Codex-family model on a Developer route is same family.
+        for profile in ('agy','claude','opencode','gw-agent','codex'):
+            for model in ('gpt-6.1-sol','codex-example-b','openai/gpt-oss-120b'):
+                with self.subTest(profile=profile,model=model):
+                    developer=self.developer(profile,model)
+                    self.assertFalse(self.compatible(developer,'codex-reviewer'))
+                    self.assertTrue(self.compatible(developer,'claude-reviewer'))
+
+    def test_unknown_family_gives_no_formal_pass(self):
+        for profile in ('agy','claude','codex','opencode','gw-agent','company-gw'):
+            for model in ('gw','example-model-b','claude-gpt-6','opencode/example-free'):
+                for reviewer in ('codex-reviewer','claude-reviewer'):
+                    with self.subTest(profile=profile,model=model,reviewer=reviewer):
+                        self.assertIsNone(self.family(self.developer(profile,model)))
+                        self.assertFalse(self.compatible(self.developer(profile,model),reviewer))
+        self.assertFalse(self.compatible(self.developer('agy','gemini-3.8-flash-medium'),
+                                         'gw-agent-reviewer'))
+        for developer in (None,[],'agy'):
+            with self.subTest(developer=developer):
+                self.assertIsNone(self.family(developer))
+
+    def test_a_record_without_a_model_keeps_its_cli_family(self):
+        # A record-only Claude run, or a Codex run recovered without its model.
+        self.assertEqual(self.family(self.developer('claude',None)),'claude')
+        self.assertEqual(self.family(self.developer('codex',None)),'codex')
+        for profile in ('agy','opencode','gw-agent','company-gw'):
+            with self.subTest(profile=profile):
+                self.assertIsNone(self.family(self.developer(profile,None)))
+
+    def test_model_run_provider_reported_model_decides(self):
+        model='claude-sonnet-5-5-medium'
+        run=self.model_run(model,provider_reported=model)
+        self.assertEqual(self.family(self.developer('agy',model,model_run=run)),'claude')
+        reported=self.model_run(model,provider_reported='gpt-6.1-sol',family='codex')
+        developer=self.developer('agy',model,model_run=reported)
+        self.assertEqual(self.family(developer),'codex')
+        self.assertFalse(self.compatible(developer,'codex-reviewer'))
+
+    def test_an_inconsistent_model_run_is_unknown(self):
+        model='claude-sonnet-5-5-medium'
+        for label,run in (('family mismatch',self.model_run(model,family='gemini')),
+                          ('resolved mismatch',self.model_run(model,resolved='claude-fable-5-2')),
+                          ('reported family mismatch',
+                           self.model_run(model,provider_reported='gpt-6.1-sol')),
+                          ('not a dict',['claude'])):
+            with self.subTest(case=label):
+                developer=self.developer('agy',model,model_run=run)
+                self.assertIsNone(self.family(developer))
+                self.assertFalse(self.compatible(developer,'codex-reviewer'))
+        self.assertIsNone(self.family(self.developer('claude',None,
+                                                     model_run=self.model_run(model))))
+
+
+class DeveloperModelRunRecordTests(unittest.TestCase):
+    """#2302 A2: the task store's strict check of developer.model_run."""
+
+    def valid(self,developer):
+        from llmtool.task_store import valid_developer_model_run
+        return valid_developer_model_run(developer)
+
+    @staticmethod
+    def record(**changes):
+        run={'requested':'claude-sonnet-5-5-medium','resolved':'claude-sonnet-5-5-medium',
+             'source':'roles','family':'claude','provider_reported':None}
+        run.update(changes)
+        return {'model':'claude-sonnet-5-5-medium','model_run':run}
+
+    def test_valid_records(self):
+        for changes in ({},{'provider_reported':'claude-sonnet-5-5-medium'},
+                        {'source':'cli'},{'source':'env'},{'source':'UNKNOWN'},
+                        {'requested':None,'source':'repo_default'},
+                        {'provider_reported':'gpt-6.1-sol','family':'codex'}):
+            with self.subTest(changes=changes):
+                self.assertTrue(self.valid(self.record(**changes)))
+        unknown={'model':'gw','model_run':{'requested':None,'resolved':'gw',
+                 'source':'repo_default','family':'UNKNOWN','provider_reported':None}}
+        self.assertTrue(self.valid(unknown))
+
+    def test_invalid_records(self):
+        cases={
+            'family not from the model':{'family':'gemini'},
+            'family not from the reported model':{'provider_reported':'gpt-6.1-sol'},
+            'resolved differs from the record model':{'resolved':'claude-fable-5-2'},
+            'unknown source':{'source':'user'},
+            'repo default with a requested model':{'source':'repo_default'},
+            'configured source without a requested model':{'requested':None},
+            'malformed requested':{'requested':'has space'},
+            'malformed reported':{'provider_reported':'has space'},
+            'non-str family':{'family':None},
+        }
+        for label,changes in cases.items():
+            with self.subTest(case=label):
+                self.assertFalse(self.valid(self.record(**changes)))
+        extra=self.record();extra['model_run']['note']='x'
+        missing=self.record();del missing['model_run']['family']
+        for label,developer in (('extra key',extra),('missing key',missing),
+                                ('not a dict',{'model':'gw','model_run':['gw']}),
+                                ('no record',None)):
+            with self.subTest(case=label):
+                self.assertFalse(self.valid(developer))
 
 
 if __name__ == "__main__":

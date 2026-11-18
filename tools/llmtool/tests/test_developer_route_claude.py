@@ -113,11 +113,19 @@ class ClaudeRouteTests(unittest.TestCase):
         with self.assertRaises(RouteError) as caught:
             self.route.validate_request(self.request('x' * (MAX_PROMPT_BYTES + 1)))
         self.assertEqual(caught.exception.code, 'CLAUDE_REQUEST_INVALID')
-        for model, effort in (('claude', 'high'), ('opus', 'high'),
-                              ('claude-opus-5-5', 'default')):
-            with self.assertRaises(RouteError) as caught:
-                self.route.validate_profile(model, effort)
-            self.assertEqual(caught.exception.code, 'CLAUDE_PROFILE_INVALID')
+        # Owner #2302 (decision 11-17): any well-formed model id; a model the
+        # CLI cannot serve fails from the provider path, not here.
+        for model in ('claude-opus-5-5', 'opus', 'claude', 'gemini-3.8-flash-medium',
+                      'gpt-6.1-sol', 'anthropic/claude-fable-5-2'):
+            with self.subTest(model=model):
+                self.assertEqual(self.route.validate_profile(model, 'high'), (model, 'high'))
+        for model, effort in (('claude-opus-5-5', 'default'), ('has space', 'high'),
+                              ('-leading-dash', 'high'), ('', 'high'), (None, 'high'),
+                              ('https://example.invalid/m', 'high'), ('x' * 129, 'high')):
+            with self.subTest(model=model, effort=effort):
+                with self.assertRaises(RouteError) as caught:
+                    self.route.validate_profile(model, effort)
+                self.assertEqual(caught.exception.code, 'CLAUDE_PROFILE_INVALID')
         route = ClaudeRoute({'executable': 'claude', 'config_dir': 'relative'})
         with self.assertRaises(RouteError) as caught:
             route.validate_request(self.request())
