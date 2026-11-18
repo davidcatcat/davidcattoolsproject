@@ -2202,9 +2202,12 @@ class GwAgentRealStoreTests(unittest.TestCase):
                          [('DISPATCH', 'BLOCKED', 'OWNER_PAUSED')])
 
     def test_store_refusing_the_dispatching_write_is_persisted(self):
-        # The store's own validation: a model name longer than it accepts.
-        code, task = self._delegate('gw-agent-long-model.md', provider_model='m' * 300,
-                                    route_runner=self._unused_runner)
+        # A store refusal on the dispatching write is persisted without claiming
+        # a provider binding. Injecting the refusal keeps this a persistence
+        # test; the role gate now refuses an overlong served model first.
+        code, task = self._delegate(
+            'gw-agent-dispatch-rejected.md', route_runner=self._unused_runner,
+            wrap_store=self._store_faulting(state='DEVELOPER_DISPATCHING'))
         self.assertEqual(code, 1)
         self._assert_failed(task, 'DEVELOPER_UNAVAILABLE',
                             'DEVELOPER_DISPATCH_PERSISTENCE_REJECTED',

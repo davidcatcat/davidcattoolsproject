@@ -453,12 +453,13 @@ class WorkerEnvelopeTests(unittest.TestCase):
             self.assertLess(time.monotonic()-started,1.5)
             self.assertIsNone(provider.pending_job)
 
-    def test_review_job_refuses_unlisted_and_cross_family_model_before_spawn(self):
-        # #1502 WP-E R1: the review job admits only the claude-reviewer listed model.
+    def test_review_job_refuses_other_family_and_malformed_model_before_spawn(self):
+        # #1502 WP-E R1, Owner #2302 P2: the review job admits only a model of
+        # the claude-reviewer family.
         import time
         with tempfile.TemporaryDirectory() as tmp:
             exe=Path(tmp)/'fake-unused';exe.write_text('#!'+sys.executable+' -IB\n');exe.chmod(0o700)
-            for model in ('claude-unlisted-model', CROSS_FAMILY_MODEL,
+            for model in ('gemini-unlisted-model', CROSS_FAMILY_MODEL,
                           'anthropic/'+REVIEW_MODEL, REVIEW_MODEL.upper(), None):
                 with self.subTest(model=model):
                     provider=ClaudeCLIProvider({'model':model},None)
@@ -471,21 +472,23 @@ class WorkerEnvelopeTests(unittest.TestCase):
                     spawn.assert_not_called()
                     self.assertIsNone(getattr(provider,'pending_job',None))
 
-    def test_review_job_launches_the_listed_model_explicitly(self):
+    def test_review_job_launches_the_admitted_model_explicitly(self):
+        # The listed model and (Owner #2302 P2) another Claude-family model.
         import time
-        with tempfile.TemporaryDirectory() as tmp:
-            exe=Path(tmp)/'fake-unused';exe.write_text('#!'+sys.executable+' -IB\n');exe.chmod(0o700)
-            provider=ClaudeCLIProvider({'model':REVIEW_MODEL},None)
-            launched=[]
-            def refuse_after_capture(argv,*args,**kwargs):
-                launched.append(argv)
-                raise OSError('fixture stops before a real process')
-            with patch('subprocess.Popen',side_effect=refuse_after_capture), \
-                    self.assertRaises(OSError):
-                provider._invoke_review_job(str(exe),'prompt',deadline=time.monotonic()+5,
-                    auth_home=tmp,launch_nonce='a'*32,runtime_pin='b'*64,forbidden_sessions=())
-        self.assertEqual(len(launched),1)
-        self.assertEqual(launched[0][launched[0].index('--model')+1],REVIEW_MODEL)
+        for model in (REVIEW_MODEL,'claude-fable-5-2'):
+            with self.subTest(model=model),tempfile.TemporaryDirectory() as tmp:
+                exe=Path(tmp)/'fake-unused';exe.write_text('#!'+sys.executable+' -IB\n');exe.chmod(0o700)
+                provider=ClaudeCLIProvider({'model':model},None)
+                launched=[]
+                def refuse_after_capture(argv,*args,**kwargs):
+                    launched.append(argv)
+                    raise OSError('fixture stops before a real process')
+                with patch('subprocess.Popen',side_effect=refuse_after_capture), \
+                        self.assertRaises(OSError):
+                    provider._invoke_review_job(str(exe),'prompt',deadline=time.monotonic()+5,
+                        auth_home=tmp,launch_nonce='a'*32,runtime_pin='b'*64,forbidden_sessions=())
+                self.assertEqual(len(launched),1)
+                self.assertEqual(launched[0][launched[0].index('--model')+1],model)
 
 
 if __name__ == "__main__":

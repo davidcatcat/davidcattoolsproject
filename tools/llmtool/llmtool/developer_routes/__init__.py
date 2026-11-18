@@ -23,7 +23,8 @@ from .write_boundary import (
 __all__ = [
     'DeveloperRoute', 'RouteError', 'RouteResult', 'capture_snapshot', 'run_route',
     'AgyRoute', 'ClaudeRoute', 'GwAgentRoute', 'owner_assignment_gate', 'load_route_config',
-    'check_route_model', 'check_registry_role_model', 'REGISTRY_ROLES',
+    'check_route_model', 'check_route_model_family', 'check_registry_role_model',
+    'route_has_family_check', 'REGISTRY_ROLES', 'registry_default_model',
     'resolve_route_timeout', 'resolve_route_max_diff_bytes', 'resolve_route_max_prompt_bytes',
     'resolve_route_max_task_paths', 'resolve_route_max_source_file_bytes',
     'resolve_route_max_source_total_bytes', 'max_prompt_bytes_ok',
@@ -101,9 +102,36 @@ def _claude_role_model_ok(value):
     return _family_model_ok(value, _CLAUDE_FAMILY_PATTERN, _CODEX_FAMILY_MARKERS)
 
 
-# #1502 WP-E: allowed models for the review and AI Debug roles. Each role
-# lists exactly the one model in use until the Owner decides to allow more
-# (same rule as PR #1759 F1 for routes).
+# Owner #2302 P2: the AGY route runs Gemini-family models only. Same allowlist
+# rules as the role families: full identifier, lower case, no prefix.
+_GEMINI_FAMILY_PATTERN = r'gemini-[a-z0-9][a-z0-9.-]{0,120}'
+
+
+def _agy_model_ok(value):
+    """An AGY route model: a Gemini family identifier, never another family."""
+    return _family_model_ok(value, _GEMINI_FAMILY_PATTERN,
+                            _CLAUDE_FAMILY_MARKERS + _CODEX_FAMILY_MARKERS)
+
+
+# Owner #2302 P2: a route accepts any model of its own provider family in a
+# valid provider format; allowed_models is not a membership list for these
+# routes. gw-agent is not listed: it has no provider family and keeps its
+# allowed_models gate on the gateway-served model (#1773) unchanged.
+# OpenCode stays free-only: its format admits only opencode/<name>-free.
+_ROUTE_MODEL_CHECKS = {
+    'agy': _agy_model_ok,
+    'claude': _claude_role_model_ok,
+    'opencode': _opencode_model_ok,
+}
+# Owner #2302 P2 Repair 2: a route with no provider family (gw-agent) keeps
+# its allowed_models membership gate, but a malformed identifier is still
+# refused before any owner override is read.
+_GENERIC_ROUTE_CHECKS = {'gw-agent': _generic_model_ok}
+
+
+# #1502 WP-E, Owner #2302 P2: the family check for each review and AI Debug
+# role. A role accepts any model of its own family; its registry entry names
+# the default model (default_model, else the first allowed_models item).
 _ROLE_MODEL_CHECKS = {
     'codex-reviewer': _codex_role_model_ok,
     'claude-reviewer': _claude_role_model_ok,
@@ -115,26 +143,55 @@ _ROLE_MODEL_CHECKS = {
 REGISTRY_ROLES = frozenset(_ROLE_MODEL_CHECKS)
 
 
+_ROLE_ENTRY_KEYS = frozenset({'default_model', 'allowed_models', 'timeout'})
+
+
 def _role_models(roles):
-    """Return the normalized roles registry or raise ROUTE_CONFIG_INVALID."""
+    """Return the normalized roles registry or raise ROUTE_CONFIG_INVALID.
+
+    Owner #2302 P2: each entry names its default model with default_model,
+    allowed_models or both (at least one). allowed_models is accepted but not
+    a membership list: when present it is a well-formed list of the role's
+    family. Every named model must pass the role's family check.
+    """
     if type(roles) is not dict or set(roles) != set(_ROLE_MODEL_CHECKS):
         raise RouteError('ROUTE_CONFIG_INVALID')
     normalized = {}
     for role, model_ok in _ROLE_MODEL_CHECKS.items():
         entry = roles[role]
-        if type(entry) is not dict or set(entry) not in ({'allowed_models'}, {'allowed_models', 'timeout'}):
+        if (type(entry) is not dict or set(entry) - _ROLE_ENTRY_KEYS or
+                not {'default_model', 'allowed_models'} & set(entry)):
             raise RouteError('ROUTE_CONFIG_INVALID')
-        models = entry['allowed_models']
-        if (type(models) is not list or len(models) != 1 or
-                not model_ok(models[0])):
+        if 'default_model' in entry and not model_ok(entry['default_model']):
             raise RouteError('ROUTE_CONFIG_INVALID')
+        if 'allowed_models' in entry and not _listed_models_ok(entry['allowed_models'], model_ok):
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        if 'timeout' in entry and not _timeout_value_ok(entry['timeout']):
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        normalized[role] = {}
+        if 'default_model' in entry:
+            normalized[role]['default_model'] = entry['default_model']
+        if 'allowed_models' in entry:
+            normalized[role]['allowed_models'] = list(entry['allowed_models'])
         if 'timeout' in entry:
-            if not _timeout_value_ok(entry['timeout']):
-                raise RouteError('ROUTE_CONFIG_INVALID')
-            normalized[role] = {'allowed_models': list(models), 'timeout': entry['timeout']}
-        else:
-            normalized[role] = {'allowed_models': list(models)}
+            normalized[role]['timeout'] = entry['timeout']
     return normalized
+
+
+def registry_default_model(entry):
+    """Return a roles-registry entry's default model, else None.
+
+    default_model wins; otherwise the first allowed_models item (the form the
+    registry used before Owner #2302). Shape only: callers family-check it.
+    """
+    if type(entry) is not dict:
+        return None
+    if 'default_model' in entry:
+        model = entry['default_model']
+    else:
+        models = entry.get('allowed_models')
+        model = models[0] if type(models) is list and models else None
+    return model if type(model) is str else None
 
 
 def _gw_agent_budgets_ok(budgets, profile=None):
@@ -195,20 +252,43 @@ def _gw_agent_budgets_ok(budgets, profile=None):
     return True
 
 
-def _allowed_models_ok(value, default_model, model_ok):
-    """Return True when value is exactly [default_model], a valid one-item list.
+def _listed_models_ok(value, model_ok):
+    """Return True when value is a well-formed allowed_models list.
 
-    Security repair (PR #1759 F1): until the Owner decides to allow more
-    models, a route's allowed_models must list only its current default
-    model. Any extra or different entry is refused at load.
+    Owner #2302 P2: allowed_models is accepted but not enforced as a
+    membership list. When present it holds 1 to _MAX_ALLOWED_MODELS unique
+    strings, each passing model_ok (the route's or role's format and family).
     """
     return (type(value) is list and 1 <= len(value) <= _MAX_ALLOWED_MODELS and
             all(type(item) is str for item in value) and
             len(set(value)) == len(value) and
-            all(model_ok(item) for item in value) and
-            default_model in value and
+            all(model_ok(item) for item in value))
+
+
+def _allowed_models_ok(value, default_model, model_ok):
+    """Return True when value is exactly [default_model], a valid one-item list.
+
+    Security repair (PR #1759 F1): the gw-agent route's allowed_models must
+    list only its current default model. Any extra or different entry is
+    refused at load. Owner #2302 P2 leaves this gw-agent rule unchanged.
+    """
+    return (_listed_models_ok(value, model_ok) and
             len(value) == 1 and type(default_model) is str and
             value[0] == default_model)
+
+
+def _optional_listed_models_ok(entry, model_ok):
+    """Owner #2302 P2: a route's allowed_models is optional; when present it
+    must be well formed, but it need not contain default_model."""
+    return 'allowed_models' not in entry or _listed_models_ok(entry['allowed_models'], model_ok)
+
+
+def _copy_route(entry):
+    """Return a copy of a route entry with its own allowed_models list, if any."""
+    copied = dict(entry)
+    if 'allowed_models' in copied:
+        copied['allowed_models'] = list(copied['allowed_models'])
+    return copied
 
 
 def _route_timeouts_ok(entry):
@@ -229,15 +309,55 @@ def check_route_model(config, route, model):
     """Return model when it is allowed for route in a load_route_config() result.
 
     Pure check: no file, network or environment reads. Raises
-    RouteError('ROLE_MODEL_NOT_ALLOWED') for an absent route, a non-str model
-    or a model not listed in that route's allowed_models.
+    RouteError('ROLE_MODEL_NOT_ALLOWED') for an absent route or a non-str
+    model. Owner #2302 P2: agy, claude and opencode accept any model of their
+    own provider family in a valid format (_ROUTE_MODEL_CHECKS) and refuse a
+    wrong-family or malformed one; allowed_models is not consulted. gw-agent
+    keeps its allowed_models membership gate, but a malformed identifier is
+    refused here too, before membership (Repair 2).
     """
     routes = config.get('routes') if type(config) is dict else None
     entry = (routes.get(route) if type(routes) is dict and type(route) is str
              else None)
-    allowed = entry.get('allowed_models') if type(entry) is dict else None
-    if (type(model) is not str or type(allowed) is not list or
+    if type(entry) is not dict or type(model) is not str:
+        raise RouteError('ROLE_MODEL_NOT_ALLOWED')
+    model_ok = _ROUTE_MODEL_CHECKS.get(route)
+    if model_ok is not None:
+        if not model_ok(model):
+            raise RouteError('ROLE_MODEL_NOT_ALLOWED')
+        return model
+    format_ok = _GENERIC_ROUTE_CHECKS.get(route)
+    if format_ok is not None and not format_ok(model):
+        raise RouteError('ROLE_MODEL_NOT_ALLOWED')
+    allowed = entry.get('allowed_models')
+    if (type(allowed) is not list or
             not any(type(item) is str and item == model for item in allowed)):
+        raise RouteError('ROLE_MODEL_NOT_ALLOWED')
+    return model
+
+
+def route_has_family_check(route):
+    """Return True when route has a mandatory provider family/format check.
+
+    Owner #2302 P2 Repair 2: agy, claude and opencode are gated by their
+    provider family and format, and no owner override may relax that gate.
+    gw-agent has no provider family, so only its allowed_models membership
+    gate may be relaxed.
+    """
+    return route in _ROUTE_MODEL_CHECKS
+
+
+def check_route_model_family(route, model):
+    """Return model when a route's own format/family check admits it.
+
+    Owner #2302 P2 Repair 2: agy, claude and opencode have a mandatory
+    format/family check that no owner override may bypass. A model this function
+    refuses is refused on every path, before any override is read. gw-agent has
+    no provider family, so only its generic identifier format is checked here;
+    it keeps its allowed_models membership gate (which an override may relax).
+    """
+    model_ok = _ROUTE_MODEL_CHECKS.get(route, _GENERIC_ROUTE_CHECKS.get(route))
+    if model_ok is not None and not model_ok(model):
         raise RouteError('ROLE_MODEL_NOT_ALLOWED')
     return model
 
@@ -255,10 +375,11 @@ def check_registry_role_model(config, role, model):
     * role is not one of the canonical ids (aliases are mapped by the caller);
     * model is not a str, or its full identifier is not of the role's model
       family (no provider-prefix stripping, no case folding);
-    * model is not exactly one of the role's allowed_models;
     * an unloadable repository file refuses ROUTE_CONFIG_UNAVAILABLE (#2027).
 
-    There is no owner_override exemption and no other bypass.
+    Owner #2302 P2: any model of the role's own family is admitted; the
+    role's allowed_models is not a membership list. There is no
+    owner_override exemption and no other bypass.
     """
     if config is None:
         try:
@@ -267,14 +388,11 @@ def check_registry_role_model(config, role, model):
             raise RouteError('ROUTE_CONFIG_UNAVAILABLE') from None
     try:
         roles = config.get('roles') if type(config) is dict else None
-        registry = _role_models(roles)
+        _role_models(roles)
     except RouteError:
         raise RouteError('ROLE_MODEL_NOT_ALLOWED') from None
     model_ok = _ROLE_MODEL_CHECKS.get(role) if type(role) is str else None
     if model_ok is None or type(model) is not str or not model_ok(model):
-        raise RouteError('ROLE_MODEL_NOT_ALLOWED')
-    if not any(type(item) is str and item == model
-               for item in registry[role]['allowed_models']):
         raise RouteError('ROLE_MODEL_NOT_ALLOWED')
     return model
 
@@ -327,39 +445,32 @@ def load_route_config(path=None):
                for item in routes.values() if 'max_source_total_bytes' in item):
         raise RouteError('ROUTE_CONFIG_INVALID')
     entry = routes['agy']
-    expected = {'executable', 'default_model', 'allowed_models', 'default_effort',
-                'denied_dirs', 'state_dirs'}
-    if set(entry) - ROUTE_LIMIT_KEYS != expected:
+    expected = {'executable', 'default_model', 'default_effort', 'denied_dirs', 'state_dirs'}
+    # Owner #2302 P2: allowed_models is optional and not a membership list.
+    if set(entry) - ROUTE_LIMIT_KEYS - {'allowed_models'} != expected:
         raise RouteError('ROUTE_CONFIG_INVALID')
-    if (entry['executable'] != 'agy' or type(entry['default_model']) is not str or
-            '://' in entry['default_model'] or
-            re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}', entry['default_model']) is None or
+    if (entry['executable'] != 'agy' or not _agy_model_ok(entry['default_model']) or
             entry['default_effort'] not in ('minimal', 'low', 'medium', 'high') or
             type(entry['denied_dirs']) is not list or entry['denied_dirs'] != ['.gemini'] or
             entry['state_dirs'] != {'policy': 'private-temp-only'} or
-            not _allowed_models_ok(entry['allowed_models'], entry['default_model'],
-                                   _generic_model_ok)):
+            not _optional_listed_models_ok(entry, _agy_model_ok)):
         raise RouteError('ROUTE_CONFIG_INVALID')
-    normalized = {'agy': dict(entry)}
-    normalized['agy']['allowed_models'] = list(entry['allowed_models'])
+    normalized = {'agy': _copy_route(entry)}
     if 'claude' in routes:
         claude = routes['claude']
-        expected_claude = {'executable', 'default_model', 'allowed_models', 'default_effort',
+        expected_claude = {'executable', 'default_model', 'default_effort',
                            'denied_dirs', 'state_dirs'}
-        if (set(claude) - ROUTE_LIMIT_KEYS != expected_claude or claude.get('executable') != 'claude' or
-                type(claude.get('default_model')) is not str or
-                re.fullmatch(r'claude-[a-z0-9][a-z0-9.-]{0,120}',
-                             claude['default_model']) is None or
+        if (set(claude) - ROUTE_LIMIT_KEYS - {'allowed_models'} != expected_claude or
+                claude.get('executable') != 'claude' or
+                not _claude_role_model_ok(claude.get('default_model')) or
                 type(claude.get('default_effort')) is not str or
                 claude['default_effort'] not in ('low', 'medium', 'high', 'xhigh', 'max') or
                 type(claude.get('denied_dirs')) is not list or
                 claude['denied_dirs'] != ['.claude'] or
                 claude.get('state_dirs') != {'policy': 'private-temp-only'} or
-                not _allowed_models_ok(claude.get('allowed_models'), claude['default_model'],
-                                       _claude_model_ok)):
+                not _optional_listed_models_ok(claude, _claude_role_model_ok)):
             raise RouteError('ROUTE_CONFIG_INVALID')
-        normalized['claude'] = dict(claude)
-        normalized['claude']['allowed_models'] = list(claude['allowed_models'])
+        normalized['claude'] = _copy_route(claude)
     if 'gw-agent' in routes:
         gw = routes['gw-agent']
         expected_gw = {'package_path', 'default_model', 'allowed_models', 'default_effort',
@@ -393,17 +504,15 @@ def load_route_config(path=None):
         normalized['gw-agent']['allowed_models'] = list(gw['allowed_models'])
     if 'opencode' in routes:
         opencode = routes['opencode']
-        if (set(opencode) - ROUTE_LIMIT_KEYS != {'executable', 'default_model',
-                                                 'allowed_models', 'default_effort'} or
+        if (set(opencode) - ROUTE_LIMIT_KEYS - {'allowed_models'} !=
+                {'executable', 'default_model', 'default_effort'} or
                 opencode.get('executable') != 'opencode' or
                 not _opencode_model_ok(opencode.get('default_model')) or
                 type(opencode.get('default_effort')) is not str or
                 opencode['default_effort'] not in ('low', 'medium', 'high') or
-                not _allowed_models_ok(opencode.get('allowed_models'),
-                                       opencode['default_model'], _opencode_model_ok)):
+                not _optional_listed_models_ok(opencode, _opencode_model_ok)):
             raise RouteError('ROUTE_CONFIG_INVALID')
-        normalized['opencode'] = dict(opencode)
-        normalized['opencode']['allowed_models'] = list(opencode['allowed_models'])
+        normalized['opencode'] = _copy_route(opencode)
     result = {'schema_version': 1, 'routes': normalized}
     if 'roles' in value:
         result['roles'] = _role_models(value['roles'])
