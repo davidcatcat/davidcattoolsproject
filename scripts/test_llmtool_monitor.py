@@ -11076,7 +11076,7 @@ class RouteRowTests(unittest.TestCase):
         return mon.RouteTask(route, task, running, words, when, issue, moved)
 
     @staticmethod
-    def run(route, *, started=NOW - 30, command="delegate", task=""):
+    def run(route, *, started=NOW - 30, command="delegate", task="a1b2c3d4" * 4):
         return mon.RouteDelegate(route, started, command, task)
 
     def rows(self, *, office=(), switches=None, problem="", reasons=None, tasks=(), board=None,
@@ -11145,7 +11145,7 @@ class RouteRowTests(unittest.TestCase):
                          "辦公室 · 工作中 0 · 等 PM 2 · 等你 0")
         # A newer run under way keeps the row 工作中 and still says and counts the older result.
         busy = self.rows(tasks=[older, self.task("Codex", running=True, when=NOW - 60, task="3d3d3d3d")],
-                         delegates=[self.run("Codex")])
+                         delegates=[self.run("Codex", task="3d3d3d3d" * 4)])
         row = self.by_name(busy)["Codex"]
         self.assertEqual((row.state, row.waiting), (mon.WORKING, 1))
         self.assertIn("另有 1 件結果等 PM", row.detail)
@@ -11157,12 +11157,12 @@ class RouteRowTests(unittest.TestCase):
         # older AGY record still saying it is being dispatched.
         stale = self.task("AGY", running=True, when=NOW - 86400, task="5f5f5f5f")
         fresh = self.task("AGY", running=True, when=NOW - 100, task="6a6a6a6a")
-        row = self.by_name(self.rows(tasks=[stale, fresh], delegates=[self.run("AGY")]))["AGY"]
+        row = self.by_name(self.rows(tasks=[stale, fresh], delegates=[self.run("AGY", task="6a6a6a6a" * 4)]))["AGY"]
         self.assertEqual(row.state, mon.WORKING)
         self.assertTrue(row.detail.startswith("task 6a6a6a6a"))
         self.assertIn("另有 1 件記錄派工中但沒看到程序", row.detail)
         # Only the stale record and an unrelated run: never 工作中.
-        for runs in ([], [self.run("Claude")], [self.run("AGY", command="advance")],
+        for runs in ([], [self.run("Claude")], [self.run("AGY", command="advance", task="")],
                      [self.run("AGY", command="drive", task="7" * 32)]):
             with self.subTest(runs=runs):
                 alone = self.by_name(self.rows(tasks=[stale], delegates=runs))["AGY"]
@@ -11172,10 +11172,11 @@ class RouteRowTests(unittest.TestCase):
         named = self.run("AGY", command="advance", task="5f5f5f5f" + "0" * 24, started=NOW - 5)
         self.assertEqual(self.by_name(self.rows(tasks=[stale], delegates=[named]))["AGY"].state,
                          mon.WORKING)
-        # A process that started before the Task was dispatched is not its run.
-        early = self.run("AGY", started=NOW - 100 - mon.ROUTE_START_SKEW - 1)
-        self.assertEqual(self.by_name(self.rows(tasks=[fresh], delegates=[early]))["AGY"].state,
-                         mon.UNCHECKED)
+        # An unidentified process (no task ID) never binds and reports uncertainty.
+        unidentified = self.run("AGY", task="")
+        alone_unidentified = self.by_name(self.rows(tasks=[fresh], delegates=[unidentified]))["AGY"]
+        self.assertEqual(alone_unidentified.state, mon.UNCHECKED)
+        self.assertIn("無法確認關聯", alone_unidentified.detail)
 
     def test_paused_route_names_who_when_and_why(self):
         switches = dict(self.ALLOWED, agy=("PAUSED", "Owner", "11-15"),
@@ -11495,8 +11496,13 @@ class MonitorRoutesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             rows = mon.monitor_routes([], [], RouteRowTests.BOARD, failed, NOW, canonical=root,
                                       dispatch=str(Path(root, "absent.json")), root=root)
-        self.assertEqual([row.name for row in rows], ROUTE_NAMES)   # no lane from a failed read
+        self.assertEqual([row.name for row in rows], ROUTE_NAMES + ["sub-PM"])   # recovered lease shown
         self.assertEqual({row.state for row in rows}, {mon.UNCHECKED})
+        subpm = rows[-1]
+        self.assertEqual(subpm.name, "sub-PM")
+        self.assertEqual(subpm.state, mon.UNCHECKED)
+        self.assertIn("本地復原", subpm.detail)
+        self.assertIn("GitHub 讀取未確認", subpm.detail)
 
 
 class RouteDelegateTests(unittest.TestCase):
@@ -11533,7 +11539,8 @@ class RouteDelegateTests(unittest.TestCase):
 
     def test_unrelated_llmtool_commands_never_make_a_route_busy(self):
         # A stale record on every route; only AGY and OpenCode have a run of their own.
-        tasks = [RouteRowTests.task(name, running=True, when=NOW - 600, task=f"{n}" * 8)
+        tasks = [RouteRowTests.task(name, running=True, when=NOW - 600,
+                                    task="c" * 8 if name == "AGY" else "f" * 8 if name == "OpenCode" else f"{n}" * 8)
                  for n, name in enumerate(ROUTE_NAMES)]
         rows = {row.name: row.state for row in mon.route_rows(
             [], RouteRowTests.ALLOWED, "", {}, tasks, RouteRowTests.BOARD, [], NOW,

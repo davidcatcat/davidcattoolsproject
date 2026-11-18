@@ -111,6 +111,16 @@ class TestMonitor2311Acceptance(unittest.TestCase):
         bound = mon._route_bound([t_newer, t_older], [mismatched_run])
         self.assertEqual(bound, set())
 
+        # Unidentified process (no Task ID) never binds and reports uncertainty
+        unidentified_run = mon.RouteDelegate("AGY", NOW - 30, "delegate", "")
+        self.assertEqual(mon._route_bound([t_newer, t_older], [unidentified_run]), set())
+        rows_unidentified = mon.route_rows([], switches, "", {}, [t_newer], mon.PmBoard("ok", 0, [], [], []), [], NOW,
+                                           delegates=[unidentified_run])
+        agy_unidentified = next(r for r in rows_unidentified if r.name == "AGY")
+        self.assertEqual(agy_unidentified.state, mon.UNCHECKED)
+        self.assertIn("無法確認關聯", agy_unidentified.detail)
+        self.assertIn("有未指定 Task 的派工程序執行中", agy_unidentified.detail)
+
     def test_a6_v1_f2_activity_tied_only_to_route_own_task(self):
         # A6 / Finding F2: reviewer rows or unrelated tasks do not make developer route working
         office_reviewer = [
@@ -145,6 +155,26 @@ class TestMonitor2311Acceptance(unittest.TestCase):
         # GitHubSource loads persisted leases on initialization
         gh = mon.GitHubSource("owner/repo", window_hours=12.0)
         self.assertEqual([l.holder for l in gh.leases], ["subpm-survivor"])
+
+        # Finding 2: Persisted HELD leases survive restart and are not suppressed on GitHub read failure
+        with tempfile.TemporaryDirectory() as root:
+            dispatch = Path(root, "worker-dispatch.json")
+            dispatch.write_text(json.dumps({"schema_version": 1, "workers": {
+                k: {"dispatch": "ALLOWED", "decided_by": "Owner", "decided_at": "2026-11-10",
+                    "reason": "open", "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6760670167"}
+                for k in mon.DISPATCH_WORKERS}}), encoding="utf-8")
+            tasks = Path(root, "tasks")
+            tasks.mkdir()
+            gh.read_failed = True
+            rows = mon.monitor_routes([], [], mon.PmBoard("ok", 0, [], [], []), gh, NOW,
+                                      canonical=root, dispatch=str(dispatch), root=str(tasks))
+            by_name = {r.name: r for r in rows}
+            self.assertIn("sub-PM", by_name)
+            subpm = by_name["sub-PM"]
+            self.assertEqual(subpm.state, mon.UNCHECKED)
+            self.assertIn("subpm-survivor", subpm.detail)
+            self.assertIn("本地復原", subpm.detail)
+            self.assertIn("GitHub 讀取未確認", subpm.detail)
 
     def test_a7_v1_f3_malformed_or_empty_task_file_never_successful_read(self):
         # A7 / Finding F3: malformed or empty task file fails read and triggers shortfall

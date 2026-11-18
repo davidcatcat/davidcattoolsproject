@@ -9001,24 +9001,15 @@ def route_delegates(processes, now: float) -> list[RouteDelegate]:
 
 
 def _route_bound(running: list[RouteTask], delegates) -> set[str]:
-    """The running Tasks (newest first) a route process is correlated to: a run
-    that names a Task binds that Task; a delegate or repair run that names none
-    of them binds the newest unbound Task dispatched before the process started.
-    Each process binds at most one Task, so a stale record never borrows the
-    process of a newer Task."""
-    bound, free = set(), []
+    """The running Tasks a route process is correlated to: only a run that names
+    an exact Task binds that Task. An unidentified process (with no Task ID)
+    is left unbound to avoid making an unrelated Task appear WORKING."""
+    bound = set()
     for item in delegates:
         if item.task:
             hit = next((entry for entry in running if item.task[:8] == entry.task), None)
             if hit is not None:
                 bound.add(hit.task)
-        elif item.command in ("delegate", "repair") and math.isfinite(item.started):
-            free.append(item)
-    for item in sorted(free, key=lambda item: item.started, reverse=True):
-        hit = next((entry for entry in running if entry.task not in bound
-                    and (entry.started or entry.when) - ROUTE_START_SKEW <= item.started), None)
-        if hit is not None:
-            bound.add(hit.task)
     return bound
 
 
@@ -9052,7 +9043,8 @@ def _more(items: list) -> str:
 
 
 def route_rows(office, switches: dict, problem: str, reasons: dict, tasks, board, leases,
-               now: float, *, delegates=(), task_problem: str = "") -> list[RouteRow]:
+               now: float, *, delegates=(), task_problem: str = "",
+               lease_fresh: bool = True) -> list[RouteRow]:
     """One row per route, then one per HELD sub-PM lease no route row names.
 
     Every unresolved Task of the route counts, however old. The rule, the same
@@ -9077,7 +9069,9 @@ def route_rows(office, switches: dict, problem: str, reasons: dict, tasks, board
         waiting = sorted((entry for entry in mine if not entry.running and not entry.moved),
                          key=lambda entry: entry.when, reverse=True)
         running_tasks = {entry.task for entry in running}
-        bound = _route_bound(running, [item for item in delegates or [] if item.route == name])
+        route_delegs = [item for item in delegates or [] if item.route == name]
+        bound = _route_bound(running, route_delegs)
+        unidentified = [item for item in route_delegs if not item.task]
         live = sorted((row for row in office or [] if row.state == WORKING and row.task
                        and row.role not in ("pm", "reviewer", "debug reviewer")
                        and not _switch_row(row)
@@ -9095,16 +9089,26 @@ def route_rows(office, switches: dict, problem: str, reasons: dict, tasks, board
             parts.append(_route_task_text(working[0]) + _more(working))
         elif unconfirmed:
             state, age, issue = UNCHECKED, now - unconfirmed[0].when, unconfirmed[0].issue
-            parts.append(f"{_route_task_text(unconfirmed[0])}{_more(unconfirmed)} 記錄派工中，"
-                         "但沒有看到這條路線由 llmtool 派工的程序")
+            if unidentified:
+                parts.append(f"{_route_task_text(unconfirmed[0])}{_more(unconfirmed)} 記錄派工中，"
+                             "有未指定 Task 的派工程序執行中（無法確認關聯）")
+            else:
+                parts.append(f"{_route_task_text(unconfirmed[0])}{_more(unconfirmed)} 記錄派工中，"
+                             "但沒有看到這條路線由 llmtool 派工的程序")
         elif waiting:
             state, age, issue = ROUTE_WAITING_PM, now - waiting[0].when, waiting[0].issue
             parts.append(f"{_route_task_text(waiting[0])} 結果：{waiting[0].words}，"
                          f"PM 還沒推進{_more(waiting)}")
+        elif unidentified:
+            state = UNCHECKED
+            age = (now - unidentified[0].started if math.isfinite(unidentified[0].started) else None)
+            parts.append("有未指定 Task 的派工程序執行中（無法確認關聯）")
         if state == WORKING and unconfirmed:
             parts.append(f"另有 {len(unconfirmed)} 件記錄派工中但沒看到程序")
         if state in (WORKING, UNCHECKED) and waiting:
             parts.append(f"另有 {len(waiting)} 件結果等 PM")
+        if state in (WORKING, ROUTE_WAITING_PM) and unidentified:
+            parts.append("另有未指定 Task 的派工程序執行中（無法確認關聯）")
         switch = None if problem else switches.get(key)
         if switch is None:
             note = DISPATCH_PROBLEMS[problem] if problem else "派工檔沒有這條路線"
@@ -9128,12 +9132,22 @@ def route_rows(office, switches: dict, problem: str, reasons: dict, tasks, board
         lease = next((lease for lease in reversed(leases) if issue and lease.issue == issue), None)
         if lease is not None:
             used.add(id(lease))
-            parts.append(f"sub-PM {lease.holder}")
+            if lease_fresh:
+                parts.append(f"sub-PM {lease.holder}")
+            else:
+                parts.append(f"sub-PM {lease.holder}（本地復原，GitHub 未確認）")
         out.append(RouteRow(name, state, "；".join(parts), _route_next(board, name, now),
                             None if age is None else max(0.0, age), len(waiting)))
-    out += [RouteRow("sub-PM", LEASE_HELD, f"{lease.holder}：WP {lease.wp or '?'}（#{lease.issue}）",
-                     "", max(0.0, now - lease.when))
-            for lease in leases if id(lease) not in used]
+    for lease in leases:
+        if id(lease) in used:
+            continue
+        if lease_fresh:
+            out.append(RouteRow("sub-PM", LEASE_HELD, f"{lease.holder}：WP {lease.wp or '?'}（#{lease.issue}）",
+                                "", max(0.0, now - lease.when)))
+        else:
+            out.append(RouteRow("sub-PM", UNCHECKED,
+                                f"{lease.holder}：WP {lease.wp or '?'}（#{lease.issue}）（本地復原，GitHub 讀取未確認）",
+                                "", max(0.0, now - lease.when)))
     return out
 
 
@@ -9146,9 +9160,13 @@ def monitor_routes(office, processes, board, github, now: float, *, canonical: s
     switches, problem = worker_dispatch(raw)
     tasks, task_problem = route_tasks(root)
     fresh = github is not None and github.successful_read and not github.read_failed
+    leases = getattr(github, "leases", None)
+    if leases is None:
+        leases = _load_subpm_leases()
     return route_rows(office, switches, problem, dispatch_reasons(raw), tasks, board,
-                      getattr(github, "leases", []) if fresh else [], now,
-                      delegates=route_delegates(processes, now), task_problem=task_problem)
+                      leases, now,
+                      delegates=route_delegates(processes, now), task_problem=task_problem,
+                      lease_fresh=fresh)
 
 
 def track_one_shot(state: dict, processes: list[Process], now: float,
