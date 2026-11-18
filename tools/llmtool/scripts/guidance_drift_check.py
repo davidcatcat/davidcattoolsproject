@@ -227,7 +227,10 @@ DEVELOPER_ROUTE = TimeoutPair(Obj(
         "max_prompt_bytes": Int(1),
         "max_source_file_bytes": Int(1),
         "max_source_total_bytes": Int(1),
-        # #2281 L9: gw-agent per-Task budgets object.
+        # #2281 L9, #2281 limit unblock: gw-agent per-Task budgets object.
+        # max_wall_seconds is 1800 s, no shorter than route default_timeout (1800 s)
+        # and bounded by max_timeout (3600 s). Basis: the route default timeout and
+        # the two recorded 600 s stops on #2302.
         "budgets": Obj(
             {
                 "max_turns": Int(1, 1000),
