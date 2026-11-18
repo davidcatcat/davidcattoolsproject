@@ -193,10 +193,10 @@ def owner_notice(state):
 def root_outcome(tasks):
     """OPEN, CLOSED or FAILED for a split ROOT from its child and REPLAN Tasks.
 
-    tasks: dicts with id, kind ('child' or 'replan'), state and, for a REPLAN,
-    replaces (the child ids whose obligation it takes over). A child replaced by
-    a CLOSED REPLAN has met its obligation. The ROOT result never notifies the
-    Owner again: each non-successful Task already did (D4).
+    tasks: dicts with id, kind ('child' or 'replan'), state and, for a REPLAN or
+    split child, replaces (the child ids whose obligation it takes over). A child
+    replaced by a CLOSED REPLAN or split child has met its obligation. The ROOT
+    result never notifies the Owner again: each non-successful Task already did (D4).
     """
     if type(tasks) is not list or not tasks or any(type(task) is not dict for task in tasks):
         return 'OPEN'
@@ -204,12 +204,12 @@ def root_outcome(tasks):
         return 'OPEN'
     covered = set()
     for task in tasks:
-        if task.get('kind') == 'replan' and task.get('state') == 'CLOSED':
+        if task.get('state') == 'CLOSED':
             covered.update(task.get('replaces') or ())
     for task in tasks:
         if task.get('state') == 'CLOSED':
             continue
-        if task.get('kind') == 'child' and task.get('id') in covered:
+        if task.get('id') in covered:
             continue
         return 'FAILED'
     return 'CLOSED'

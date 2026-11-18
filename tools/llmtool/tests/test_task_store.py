@@ -5763,5 +5763,40 @@ class FileOpsTaskStoreTests(unittest.TestCase):
         self.assertEqual(file_ops.ops_sha256(json_str.encode('utf-8')), hash1)
 
 
+class LineageValidationTests(unittest.TestCase):
+    """Issue #2373: lineage validation for child with replaces and duplicate/self replaces."""
+
+    def test_child_with_replaces_is_valid(self):
+        root_id = 'a' * 32
+        child_id = 'b' * 32
+        replaced_id = 'c' * 32
+        record = {
+            'task_id': child_id,
+            'lineage': {
+                'lineage_id': root_id,
+                'kind': 'child',
+                'parent': root_id,
+                'replaces': [replaced_id],
+                'state': 'OPEN',
+                'reason': None,
+                'base_sha': 'd' * 40,
+                'recorded_at': '2026-11-19T00:00:00Z',
+            },
+        }
+        task_store_module._validate_lineage(record)
+
+        # Duplicate replaces fails
+        dup_rec = {'task_id': child_id, 'lineage': dict(record['lineage'], replaces=[replaced_id, replaced_id])}
+        with self.assertRaises(LLMToolError) as caught:
+            task_store_module._validate_lineage(dup_rec)
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_LINEAGE_INVALID')
+
+        # Self-replacement fails
+        self_rec = {'task_id': child_id, 'lineage': dict(record['lineage'], replaces=[child_id])}
+        with self.assertRaises(LLMToolError) as caught:
+            task_store_module._validate_lineage(self_rec)
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_LINEAGE_INVALID')
+
+
 if __name__ == '__main__':
     unittest.main()

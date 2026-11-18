@@ -205,7 +205,8 @@ class LineageDropTests(LineageCase):
         import io
         import json
         from types import SimpleNamespace
-        child = self.member(self.parked_root())
+        root = self.parked_root()
+        child, other = self.member(root), self.member(root)
         outputs = []
         for reason, code in ((' ', 1), ('Original function is not affected.', 0)):
             out = io.StringIO()
@@ -215,6 +216,127 @@ class LineageDropTests(LineageCase):
             outputs.append(json.loads(out.getvalue()))
         self.assertEqual(outputs[0], {'code': 'DROP_REASON_REQUIRED'})
         self.assertEqual(outputs[1]['state'], 'DROPPED')
+
+    def test_a1_correct_hand_over_root_stays_open_and_closes_when_successor_closes(self):
+        root = self.parked_root()
+        c1, c2 = self.member(root), self.task()
+        cli.lineage_split(self.store, root, [c2], pm_session=PM, reason='C1 failed.',
+                          replaces=[c1], main_sha_reader=lambda: MAIN)
+        c2_line = self.store.get(c2)['lineage']
+        self.assertEqual((c2_line['kind'], c2_line['state'], c2_line['replaces']),
+                         ('child', 'OPEN', [c1]))
+        drop_res = cli.lineage_end(self.store, c1, 'DROPPED', pm_session=PM,
+                                   reason='Original approach abandoned in favor of C2.')
+        self.assertEqual(self.state(c1), 'DROPPED')
+        self.assertIsNone(drop_res['root'])
+        self.assertEqual(self.state(root), 'PARKED')
+
+        merged(self.store, c2)
+        close_res = cli.lineage_close_merged(self.store, c2)
+        self.assertEqual(self.state(c2), 'CLOSED')
+        self.assertEqual(close_res['root'], {'task_id': root, 'state': 'CLOSED', 'owner_notice': None})
+        self.assertEqual(self.state(root), 'CLOSED')
+
+    def test_a2_successor_first_c2_closed_then_drop_c1_root_closed_no_final_flag(self):
+        root = self.parked_root()
+        c1, c2 = self.member(root), self.task()
+        cli.lineage_split(self.store, root, [c2], pm_session=PM, reason='C1 failed.',
+                          replaces=[c1], main_sha_reader=lambda: MAIN)
+        merged(self.store, c2)
+        close_res = cli.lineage_close_merged(self.store, c2)
+        self.assertEqual(self.state(c2), 'CLOSED')
+        self.assertIsNone(close_res['root'])
+        self.assertEqual(self.state(root), 'PARKED')
+
+        drop_res = cli.lineage_end(self.store, c1, 'DROPPED', pm_session=PM,
+                                   reason='C1 superseded by closed C2.')
+        self.assertEqual(self.state(c1), 'DROPPED')
+        self.assertEqual(drop_res['root'], {'task_id': root, 'state': 'CLOSED', 'owner_notice': None})
+        self.assertEqual(self.state(root), 'CLOSED')
+
+    def test_a3_wrong_order_drop_last_open_child_refused_lineage_successor_required(self):
+        from types import SimpleNamespace
+        root = self.parked_root()
+        c1 = self.member(root)
+        before_sha = self.store.get(c1)['record_sha256']
+        args = SimpleNamespace(task_id=c1, state='DROPPED', reason='Giving up on C1.',
+                               pm_session=PM)
+        code, payload = run_command(cli.run_task_drop, args, store=self.store)
+        self.assertEqual(code, 1)
+        self.assertEqual(payload['code'], 'LINEAGE_SUCCESSOR_REQUIRED')
+        self.assertIn('task split', payload['message'])
+        self.assertIn('task replan', payload['message'])
+        self.assertIn('task drop --final', payload['message'])
+        self.assertEqual(self.state(c1), 'OPEN')
+        self.assertEqual(self.state(root), 'PARKED')
+        self.assertEqual(self.store.get(c1)['record_sha256'], before_sha)
+        self.refused('LINEAGE_SUCCESSOR_REQUIRED', cli.lineage_end, c1, 'DROPPED',
+                     pm_session=PM, reason='Giving up on C1.')
+
+    def test_a4_real_abandonment_drop_with_final_flag_gives_failed_final_and_notice(self):
+        from types import SimpleNamespace
+        root = self.parked_root()
+        c1 = self.member(root)
+        args = SimpleNamespace(task_id=c1, state='DROPPED', reason='Explicit lineage drop.',
+                               pm_session=PM, final=True)
+        code, payload = run_command(cli.run_task_drop, args, store=self.store)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload['state'], 'DROPPED')
+        self.assertEqual(payload['root'], {'task_id': root, 'state': 'FAILED_FINAL', 'owner_notice': None})
+        self.assertEqual(payload['owner_notice']['marker'], cli.OWNER_NOTICE_MARKER)
+        self.assertEqual(payload['owner_notice']['state'], 'DROPPED')
+        self.assertEqual(self.state(c1), 'DROPPED')
+        self.assertEqual(self.state(root), 'FAILED_FINAL')
+
+    def test_a5_no_legal_next_step_left_drop_ends_root_without_extra_blocking(self):
+        root = self.parked_root()
+        c1, c2, c3 = self.member(root), self.member(root), self.member(root)
+        replan = self.task()
+        cli.lineage_replan(self.store, c1, replan, [c1, c2], pm_session=PM,
+                           reason='Exhausted repair route.', main_sha_reader=lambda: MAIN)
+        # c1 and c2 are now STOPPED. replan is OPEN. c3 is OPEN.
+        # Now drop replan (kind=replan -> FAILED_FINAL).
+        cli.lineage_end(self.store, replan, 'FAILED_FINAL', pm_session=PM, reason='Replan route failed.')
+        # Now: child_count is 3 (max 3), replan_used is 1 (max 1).
+        # c3 is the last OPEN child. Next steps: child slots full (3), replan used (1).
+        drop_res = cli.lineage_end(self.store, c3, 'DROPPED', pm_session=PM,
+                                   reason='No remaining steps possible.')
+        self.assertEqual(self.state(c3), 'DROPPED')
+        self.assertEqual(drop_res['root'], {'task_id': root, 'state': 'FAILED_FINAL', 'owner_notice': None})
+        self.assertEqual(self.state(root), 'FAILED_FINAL')
+
+    def test_a6_safety_pending_reservation_not_counted_and_replaces_is_write_once(self):
+        root = self.parked_root()
+        c1, c2 = self.member(root), self.task()
+        from llmtool import task_store
+        # Reserve c2 as PENDING (not committed to root).
+        digest = self.store.get(c2)['record_sha256']
+        task_store.reserve_split_child(self.store, c2, {
+            'lineage_id': root, 'kind': 'child', 'parent': root,
+            'replaces': [c1], 'state': 'PENDING', 'reason': None,
+            'base_sha': MAIN, 'recorded_at': AT, 'split_op': 'f' * 32},
+            expected_sha256=digest)
+        # Uncommitted reservation is NOT a member:
+        members = cli._lineage_members(self.store, root)
+        self.assertEqual([m['id'] for m in members], [c1])
+        # Dropping c1 is refused because c2 does not count as committed open child:
+        self.refused('LINEAGE_SUCCESSOR_REQUIRED', cli.lineage_end, c1, 'DROPPED',
+                     pm_session=PM, reason='C1 abandoned.')
+
+        # Commit and finalize c2:
+        task_store.commit_split_root(self.store, root, {
+            'lineage_id': root, 'kind': 'root', 'parent': None, 'replaces': [],
+            'state': 'PARKED', 'reason': 'split', 'base_sha': None, 'recorded_at': AT,
+            'splits': [{'op_id': 'f' * 32, 'children': [c2]}]},
+            child_max=3, expected={'lineage': self.store.get(root)['lineage']})
+        task_store.finalize_split_child(self.store, c2)
+        self.assertEqual(self.store.get(c2)['lineage']['replaces'], [c1])
+
+        # replaces on split child is write-once: modifying it is refused TASK_LINEAGE_TRANSITION_INVALID
+        other = self.task()
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.update(c2, lineage=dict(self.store.get(c2)['lineage'], replaces=[other]))
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_LINEAGE_TRANSITION_INVALID')
 
 
 class LineageNewMemberTests(LineageCase):
@@ -314,6 +436,25 @@ class LineageSplitTests(LineageCase):
         self.assertNotIn('merge_attempt', self.store.get(root))
         self.assertEqual(self.state(root), 'PARKED')
         self.assertEqual(self.store.get(first)['lineage']['state'], 'OPEN')
+
+    def test_split_with_replaces_records_replaces_and_validates_replaces(self):
+        root, first = self.task(), self.task()
+        cli.lineage_split(self.store, root, [first], pm_session=PM,
+                          reason='Initial split.', main_sha_reader=lambda: MAIN)
+        c2, c3 = self.task(), self.task()
+        res = cli.lineage_split(self.store, root, [c2], pm_session=PM,
+                                reason='Successor for first.', replaces=[first],
+                                main_sha_reader=lambda: MAIN)
+        self.assertEqual(res['state'], 'PARKED')
+        self.assertEqual(self.store.get(c2)['lineage']['replaces'], [first])
+
+        # Bad replaces: self-replace, non-member, duplicate
+        plain = self.task()
+        for bad_replaces in ([c3], [first, first], [plain]):
+            self.refused('SPLIT_CHILDREN_INVALID', cli.lineage_split, root, [c3],
+                         pm_session=PM, reason='Invalid replaces.', replaces=bad_replaces,
+                         main_sha_reader=lambda: MAIN)
+            self.assertNotIn('lineage', self.store.get(c3))
 
 
 def run_command(function, args, **kwargs):
