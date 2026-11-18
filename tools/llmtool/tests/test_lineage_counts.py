@@ -1647,5 +1647,116 @@ class AutoReviewRepairTests(unittest.TestCase):
         self.assertEqual(result['claim']['family'], f'pr-{PR}-ec2')
 
 
+GROUP_ROOT = tid(500)
+
+
+def _group_lineage(task_id, kind='child', root=GROUP_ROOT, **extra):
+    line = {'lineage_id': root, 'kind': kind,
+            'parent': None if kind == 'root' else root, 'replaces': [],
+            'state': 'PARKED' if kind == 'root' else 'OPEN', 'reason': None,
+            'base_sha': None, 'recorded_at': AT}
+    line.update(extra)
+    return {'task_id': task_id, 'lineage': line}
+
+
+def _group_child(number, *, debugs=0, root=GROUP_ROOT):
+    record = _group_lineage(tid(number), root=root)
+    record['high_debug'] = [{'status': 'RCA_CONFIRMED'} for _ in range(debugs)]
+    return record
+
+
+class DebugGroupStore(DictStore):
+    """In-memory store for the High Debug reservation path."""
+
+    def append_high_debug(self, task_id, entry):
+        self.records[task_id].setdefault('high_debug', []).append(
+            json.loads(json.dumps(entry)))
+
+
+class LegacyChildDebugGroupTests(unittest.TestCase):
+    """Codex security v91 on PR #2381 (CWE-841): legacy split children share the group.
+
+    A ROOT written before Owner B has no 'splits'; its children are found by
+    their lineage, so each one cannot reserve a Debug as if it were alone.
+    """
+
+    def setUp(self):
+        from llmtool import high_debug
+        self.high_debug = high_debug
+        policy = dict(repair_policy.load_policy(), parent_debug_max=1, group_debug_max=3)
+        patcher = patch.object(repair_policy, 'load_policy', return_value=policy)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def used(self, store, child_id):
+        task = store.get(child_id)
+        return self.high_debug._group_debug_used(store, task, task.get('high_debug', []))
+
+    def reserve(self, store, child_id):
+        entries = store.get(child_id).get('high_debug', [])
+        return self.high_debug._reserve_debug(store, child_id, entries,
+                                              {'status': 'RESERVED'})
+
+    def assert_refused(self, call, code):
+        with self.assertRaises(LLMToolError) as caught:
+            call()
+        self.assertEqual(getattr(caught.exception, 'high_debug_code', None), code)
+
+    def test_legacy_siblings_without_splits_count_in_the_group(self):
+        store = DebugGroupStore(_group_lineage(GROUP_ROOT, kind='root'),
+                                _group_child(501, debugs=1), _group_child(502, debugs=1),
+                                _group_child(503))
+        self.assertEqual(self.used(store, tid(503)), 2)
+
+    def test_three_legacy_debugs_refuse_a_fourth_legacy_child(self):
+        store = DebugGroupStore(_group_lineage(GROUP_ROOT, kind='root'),
+                                _group_child(501, debugs=1), _group_child(502, debugs=1),
+                                _group_child(503, debugs=1), _group_child(504))
+        self.assert_refused(lambda: self.reserve(store, tid(504)),
+                            'HIGH_DEBUG_DEBUG_GROUP_USED')
+        self.assertEqual(store.get(tid(504)).get('high_debug'), [])
+
+    def test_legacy_child_within_the_group_still_reserves(self):
+        store = DebugGroupStore(_group_lineage(GROUP_ROOT, kind='root'),
+                                _group_child(501, debugs=1), _group_child(502))
+        self.assertEqual(self.reserve(store, tid(502)), 0)
+        self.assertEqual(store.get(tid(502))['high_debug'], [{'status': 'RESERVED'}])
+
+    def test_listed_and_legacy_children_both_count_once(self):
+        root = _group_lineage(GROUP_ROOT, kind='root',
+                              splits=[{'op_id': tid(599), 'children': [tid(501), tid(503)]}])
+        store = DebugGroupStore(root, _group_child(501, debugs=1),
+                                _group_child(502, debugs=1), _group_child(503))
+        self.assertEqual(self.used(store, tid(503)), 2)
+
+    def test_other_lineages_and_unstarted_runs_do_not_count(self):
+        other = _group_child(510, debugs=1, root=tid(509))
+        unstarted = _group_child(502)
+        unstarted['high_debug'] = [{'status': 'RUN_FAILED',
+                                    'report': 'HIGH_DEBUG_QUOTA_EXHAUSTED'}]
+        store = DebugGroupStore(_group_lineage(GROUP_ROOT, kind='root'),
+                                _group_lineage(tid(509), kind='root', root=tid(509)),
+                                other, _group_child(501), unstarted)
+        self.assertEqual(self.used(store, tid(501)), 0)
+
+    def test_a_store_scan_in_doubt_is_unknown_and_refuses(self):
+        store = DebugGroupStore(_group_lineage(GROUP_ROOT, kind='root'), _group_child(501))
+        with patch.object(DebugGroupStore, 'task_ids', side_effect=OSError('scan')):
+            self.assertEqual(self.used(store, tid(501)), UNKNOWN)
+            self.assert_refused(lambda: self.reserve(store, tid(501)),
+                                'HIGH_DEBUG_DEBUG_GROUP_USED')
+        self.assertEqual(store.get(tid(501)).get('high_debug'), [])
+
+    def test_a_malformed_lineage_or_missing_listed_child_is_unknown(self):
+        broken = {'task_id': tid(502), 'lineage': 'child'}
+        store = DebugGroupStore(_group_lineage(GROUP_ROOT, kind='root'),
+                                _group_child(501), broken)
+        self.assertEqual(self.used(store, tid(501)), UNKNOWN)
+        root = _group_lineage(GROUP_ROOT, kind='root',
+                              splits=[{'op_id': tid(599), 'children': [tid(501), tid(508)]}])
+        store = DebugGroupStore(root, _group_child(501))
+        self.assertEqual(self.used(store, tid(501)), UNKNOWN)
+
+
 if __name__ == '__main__':
     unittest.main()
