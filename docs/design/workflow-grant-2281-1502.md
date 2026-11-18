@@ -51,7 +51,7 @@ Write-path conclusion: within the inspected files, a `.github/workflows` write p
   - `tools/llmtool/llmtool/opencode_direct_developer.py`: `_valid_paths` for OpenCode direct read paths and the write-subset rule; maps to `OPENCODE_SCOPE_INVALID`.
 - Other F2 callers that can hit `_path` but are not Developer read/write-path checks:
   - `tools/llmtool/llmtool/task_lifecycle.py`: `AgentBinding` for root/common directory/branch.
-  - `tools/llmtool/llmtool/authorization_policy.py`: `ObservedState` and `ReceiptBinding`; `_path` failure becomes `DecisionCode.INVALID_REQUEST` inside `decide`.
+  - `tools/llmtool/llmtool/authorization_policy.py`: `ObservedState` and `ReceiptBinding` call `_path` in their own constructors; these are constructor checks, not input validation inside `decide`. Constructing `ObservedState` with a `.github/workflows` `target_path` raises `LLMToolError('action contract invalid; details omitted')` in `ObservedState.__post_init__` before `decide` can receive the state. `ReceiptBinding.__post_init__` also validates `action_paths`, `canonical_root` and `target_path`, and `decide` constructs the binding after its `INVALID_REQUEST` input-validation block, so a workflow path there propagates as `LLMToolError` rather than becoming `DecisionCode.INVALID_REQUEST`. Only the checks inside `decide`'s own input-validation block (its `_typed`/`_hex` validation and the `Requirement` membership test) produce `DecisionCode.INVALID_REQUEST`.
   - `tools/llmtool/llmtool/action_contract_cli.py`: `action`/`approval` validation catches the contract error and prints `ACTION_CONTRACT_INVALID`, returning exit status 1.
 
 ### Developer Task scope checks
