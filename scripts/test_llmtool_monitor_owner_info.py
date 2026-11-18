@@ -195,6 +195,20 @@ class TestSubPmLeases(unittest.TestCase):
         leases = mon.subpm_leases([comment(302, NOW, body)])
         self.assertEqual([(l.wp, l.holder) for l in leases], [("WP-7", "codex-subpm-b")])
 
+    def test_earlier_held_lease_stays_until_a_record_settles_it(self):
+        # Reviewer F5: a lease outside the comment window is not dropped.
+        earlier = mon.subpm_leases([comment(306, NOW - 13 * 3600,
+                                            "subpm-lease wp=WP-3 holder=claude-subpm-c status=HELD")])
+        self.assertEqual(mon.subpm_leases([], earlier), earlier)
+        other = comment(307, NOW, "subpm-lease wp=WP-4 holder=codex-subpm-d status=HELD")
+        self.assertEqual([l.issue for l in mon.subpm_leases([other], earlier)], ["306", "307"])
+        released = comment(306, NOW, "subpm-lease wp=WP-3 holder=claude-subpm-c status=RELEASED")
+        self.assertEqual(mon.subpm_leases([released], earlier), [])
+        # The claim comment itself edited to RELEASED settles it too.
+        edited = comment(306, NOW - 13 * 3600,
+                         "subpm-lease wp=WP-3 holder=claude-subpm-c status=RELEASED")
+        self.assertEqual(mon.subpm_leases([edited], earlier), [])
+
     def test_untrusted_or_incomplete_leases_are_ignored(self):
         untrusted = comment(303, NOW, "subpm-lease wp=WP-1 holder=x status=HELD")
         untrusted["user"] = {"login": "someone-else"}

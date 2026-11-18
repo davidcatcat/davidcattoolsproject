@@ -229,6 +229,9 @@ class Process:
     # gateway; checked tokens only.
     gw: tuple = ()
     drive_task: str = ""
+    # #2311: an llmtool CLI's (subcommand, 32-hex Task id or "") when it runs a
+    # Task command that can start a Developer; checked tokens only.
+    llmtool_run: tuple = ()
 
 
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._+-]")
@@ -343,6 +346,25 @@ def _llmtool_drive_task(command: str) -> str:
 
 def _llmtool_role(command: str) -> str:
     return "llmtool drive" if _llmtool_drive_task(command) else "llmtool CLI"
+
+
+# #2311: `llmtool task <command>` runs that can start a Developer. A delegate or
+# repair starts a new Developer run; drive and advance name the Task they move.
+LLMTOOL_DEVELOPER_RUNS = ("delegate", "repair", "drive", "advance")
+
+
+def _llmtool_run(command: str) -> tuple:
+    """(subcommand, 32-hex Task id or "") of `llmtool task <run>`, else ().
+    Only the allowlisted subcommand word and a strict 32-hex token are kept,
+    never any other argv text (see _row_facts)."""
+    if command.startswith("(") and command.endswith(")"):
+        command = command[1:-1]
+    parts = command.split()
+    for i in range(len(parts) - 1):
+        if parts[i] == "task" and parts[i + 1] in LLMTOOL_DEVELOPER_RUNS:
+            task = next((part.lower() for part in parts[i + 2:] if HEX_TASK_ID.fullmatch(part)), "")
+            return (parts[i + 1], task)
+    return ()
 
 
 def _codex_exec_command(command: str) -> bool:
@@ -487,15 +509,16 @@ def _argv_digest(command: str) -> bytes:
 
 
 def _row_facts(command: str) -> tuple:
-    """(role, safe name, remote-test job, codex exec, gw run, drive task) of a command
-    line; only these sanitized results are ever stored."""
+    """(role, safe name, remote-test job, codex exec, gw run, drive task, llmtool
+    run) of a command line; only these sanitized results are ever stored."""
     role = classify(command)
     job = _remote_test_job(command)
     drive_task = _llmtool_drive_task(command) if role == "llmtool drive" else ""
     return (role, safe_name(command), job,
             role is not None and role.startswith("Codex CLI") and _codex_exec_command(command),
             _gw_run_job(command, role),
-            drive_task)
+            drive_task,
+            _llmtool_run(command) if role in ("llmtool CLI", "llmtool drive") else ())
 
 
 def parse_processes(output: str, self_pid: int, remembered: dict | None = None) -> Snapshot:
@@ -585,7 +608,8 @@ def snapshot_from(entries, self_pid: int, remembered: dict | None = None) -> Sna
         if stat.startswith("Z"):
             role += " (zombie)"
         result.append(Process(pid, ppid, pgid, elapsed, stat, role, facts[1], owner, facts[2],
-                              facts[3], facts[4], facts[5] if len(facts) > 5 else ""))
+                              facts[3], facts[4], facts[5] if len(facts) > 5 else "",
+                              facts[6] if len(facts) > 6 else ()))
     watched = {g: {pid for pid, row in rows.items() if row[1] == g} for g in groups}
     watched.update(orphans)
     lingering = sorted(
@@ -2124,9 +2148,15 @@ class SubPmLease:
     holder: str
 
 
-def subpm_leases(comments) -> list[SubPmLease]:
-    """HELD sub-agent PM leases (pure): the newest record per issue and WP wins."""
-    latest: dict[tuple[str, str], tuple[float, str, SubPmLease]] = {}
+def subpm_leases(comments, earlier=()) -> list[SubPmLease]:
+    """HELD sub-agent PM leases (pure): the newest record per issue and WP wins.
+    earlier: leases still HELD at the previous read. Like owner_pending's
+    requests they stay HELD until a record in this read (a later comment, or
+    the claim comment itself edited to another status) settles them, so a
+    lease older than the comment window does not silently drop out."""
+    latest: dict[tuple[str, str], tuple[float, str, SubPmLease]] = {
+        (lease.issue, lease.wp or lease.holder): (lease.when, "HELD", lease)
+        for lease in earlier or () if type(lease) is SubPmLease}
     for comment in comments if type(comments) is list else []:
         if type(comment) is not dict or not _trusted_github_comment(comment):
             continue
@@ -2556,7 +2586,12 @@ class GitHubSource:
                      + (f"（只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則）" if more else "")
                      + "；監控開著時，更早還沒回覆的也會留著")
             self.events, self.pending, self.branch_prs, self.scope = events, pending, prs, scope
-            self.notices, self.leases = owner_notices(unique), subpm_leases(unique)
+            # A lease claim posted before the window but edited within it (the
+            # API's since= is the update time) still settles or renews its lease.
+            edited = [item for item in raw if type(item) is dict and "created_at" in item
+                      and _github_time(item.get("created_at")) < since]
+            self.notices = owner_notices(unique)
+            self.leases = subpm_leases(unique + edited, self.leases)
             self.comments_cut = more
             self.board_pulls = work_pulls
             self.board_page_count = board_page_count
@@ -7420,6 +7455,7 @@ class _WaitingScan:
         self.failed: set = set()   # names not read: unreadable, oversized or over budget
         self.deferred = None       # at most one name that did not fit the byte budget
         self.covered = False       # one whole pass and its cleanup are done
+        self.stepped = -math.inf   # monotonic time of the last step
 
     def close(self) -> None:
         it, self.it = self.it, None
@@ -7480,12 +7516,12 @@ class _WaitingScan:
             return False, 0
         if raw is None:   # refused on the open descriptor: link, special file or too big
             return (key, (), key[2] <= REMOTE_TEST_READ), 0
-        entry = _waiting_entry(_remote_test_json(raw) if raw else None)
-        return (key, (entry,) if entry is not None else (), True), len(raw)
+        return (key, _task_scan_entries(_remote_test_json(raw) if raw else None), True), len(raw)
 
     def step(self, root: str) -> None:
         """Advance the scan by at most WAITING_SCAN work units and at most one
         whole pass. Raises OSError when the folder cannot be read."""
+        self.stepped = time.monotonic()
         work = max(1, WAITING_SCAN)
         budget = WAITING_BUDGET
         if self.deferred is not None:
@@ -7540,14 +7576,31 @@ class _WaitingScan:
             else:
                 self._store(self.current, name, value)
 
-    def result(self) -> tuple[list, str]:
-        """The WAITING rows, newest file first, and any shortfall."""
+    def result(self, kind=None, unseen: str = WAITING_UNSEEN) -> tuple[list, str]:
+        """The rows of one kind (default WaitingRecord), newest file first, and
+        any shortfall; unseen names a pass that has not covered the folder yet."""
+        kind = WaitingRecord if kind is None else kind
         ordered = sorted(((mtime, name, entries) for name, (mtime, entries) in self.rows.items()),
                          reverse=True)
-        problem = (WAITING_UNSEEN if not self.covered
+        problem = (unseen if not self.covered
                    else REMOTE_TEST_OVER_BUDGET if self.failed or self.deferred is not None
                    else "")
-        return [entry for _, _, found in ordered for entry in found], problem
+        return [entry for _, _, found in ordered for entry in found
+                if isinstance(entry, kind)], problem
+
+
+def _task_scan_entries(record) -> tuple:
+    """What the full Task-folder scan keeps of one record: its WAITING row and
+    (#2311) its Developer route entry while that is unresolved (being
+    dispatched, or a result the PM has not moved on). Resolved Tasks keep nothing."""
+    found = []
+    waiting = _waiting_entry(record)
+    if waiting is not None:
+        found.append(waiting)
+    route = _route_task_entry(record)
+    if route is not None and (route.running or not route.moved):
+        found.append(route)
+    return tuple(found)
 
 
 def _waiting_drop(root: str) -> None:
@@ -7595,7 +7648,17 @@ def waiting_records(root: str | None = None) -> tuple[list[WaitingRecord], str]:
     rows; afterwards a file that could not be read names a shortfall. So a
     WAITING Task is never dropped silently. A folder that cannot be read
     returns WAITING_UNREADABLE and the next call starts a new scan."""
-    root = LLMTOOL_TASKS if root is None else root
+    return _task_folder_scan(LLMTOOL_TASKS if root is None else root, WaitingRecord,
+                             WAITING_UNSEEN, WAITING_UNREADABLE, 0.0)
+
+
+def _task_folder_scan(root: str, kind, unseen: str, unreadable: str,
+                      reuse: float) -> tuple[list, str]:
+    """The kind's rows of the one retained full scan of root (see
+    waiting_records), and its shortfall: unseen until a whole pass is done,
+    unreadable when the folder cannot be read. The scan is advanced one step
+    unless it was advanced less than reuse seconds ago, so two readers of one
+    office rebuild share a single step."""
     with _waiting_lock:
         try:
             info = os.stat(root)
@@ -7604,7 +7667,7 @@ def waiting_records(root: str | None = None) -> tuple[list[WaitingRecord], str]:
             return [], ""   # no Task folder yet: nothing to show and nothing missing
         except OSError:
             _waiting_drop(root)
-            return [], WAITING_UNREADABLE
+            return [], unreadable
         identity = (info.st_dev, info.st_ino)
         scan = _waiting_scans.get(root)
         if scan is not None and scan.identity != identity:
@@ -7614,18 +7677,19 @@ def waiting_records(root: str | None = None) -> tuple[list[WaitingRecord], str]:
             if len(_waiting_scans) >= WAITING_ROOTS:
                 _waiting_close_all()
             scan = _waiting_scans[root] = _WaitingScan(identity)
-        try:
-            scan.step(root)
-        except FileNotFoundError:
-            _waiting_drop(root)
-            return [], ""
-        except OSError:
-            _waiting_drop(root)
-            return [], WAITING_UNREADABLE
-        except BaseException:
-            _waiting_drop(root)   # never leave a half-advanced scan or an open folder
-            raise
-        return scan.result()
+        if time.monotonic() - scan.stepped >= reuse:
+            try:
+                scan.step(root)
+            except FileNotFoundError:
+                _waiting_drop(root)
+                return [], ""
+            except OSError:
+                _waiting_drop(root)
+                return [], unreadable
+            except BaseException:
+                _waiting_drop(root)   # never leave a half-advanced scan or an open folder
+                raise
+        return scan.result(kind, unseen)
 
 
 def waiting_notice_due(reason, since, now, hours=WAITING_NOTIFY_HOURS) -> bool:
@@ -8307,8 +8371,13 @@ def remote_test_row(processes: list[Process], now: float, root: str | None = Non
 
 
 def _task_pr(record: dict | None) -> int | None:
+    """The Task's PR: first the published_pr record TaskStore.record_published_pr
+    writes ({pr, head_sha, recorded_at}), then the older PR fields."""
     if not isinstance(record, dict):
         return None
+    published = _published_pr(record)
+    if published is not None:
+        return published
     for key in ("pr", "pr_number", "pull_request"):
         val = record.get(key)
         if isinstance(val, int) and val > 0:
@@ -8710,8 +8779,21 @@ ROUTES = (   # (row name, worker-dispatch.json key, words that name the route in
     ("home LLM", "gw-agent", ("gw-agent", "company-gw", "openai-compatible", "home llm")),
     ("Codex", "codex-developer", ("codex",)),
 )
-ROUTE_WINDOW = 24 * 3600   # an older Task record decides nothing
-ROUTE_BUDGET = 4 << 20     # bytes of new or changed Task files read per office rebuild
+# Task records come from the one full Task-folder scan (waiting_records): every
+# Task file counts, however old, and a scan that has not covered the folder or
+# could not read a file says so. Within this many seconds of the last step the
+# route reader reuses it, so one office rebuild steps it once.
+ROUTE_SCAN_REUSE = 5.0
+ROUTE_UNSEEN = "task 檔案尚未全部讀過，路線狀態可能不完整"
+ROUTE_UNREADABLE = "task 目錄無法讀取，路線狀態未確認"
+# A route process starts after llmtool recorded its dispatch; the record's
+# clock and the process table's may differ by this much.
+ROUTE_START_SKEW = 60.0
+# Roles of a running route process (launchers fold onto their CLI).
+ROUTE_PROCESS_ROLES = {"Claude Code CLI": "Claude", "AGY CLI": "AGY",
+                       "OpenCode CLI": "OpenCode", "OpenCode CLIENT": "OpenCode",
+                       "OpenCode SERVER": "OpenCode", GW_AGENT_ROLE: "home LLM",
+                       "Codex CLI": "Codex"}
 ROUTE_WAITING_PM, ROUTE_ONLY_OWNER, ROUTE_FREE, LEASE_HELD = "等 PM", "僅指定", "可派工", "持有"
 ROUTE_STYLES = {WORKING: "+", ROUTE_WAITING_PM: "!", UNCHECKED: "!"}   # anything else: plain
 ROUTE_BOARD_WORDS = {"missing": "PM 白板檔不存在", "unreadable": "PM 白板檔無法讀取",
@@ -8719,7 +8801,6 @@ ROUTE_BOARD_WORDS = {"missing": "PM 白板檔不存在", "unreadable": "PM 白�
 # The dispatch-switch rows of office_rows; the route rows say the same, so the
 # office view leaves them out when it shows routes.
 SWITCH_ROW_NAMES = frozenset(name for name, _, _ in WORKER_ROSTER + DEBUG_ROSTER)
-_route_parsed: dict = {}
 
 
 def route_of(text) -> str:
@@ -8746,7 +8827,8 @@ class RouteTask:
     words: str       # its result in plain words
     when: float
     issue: str
-    moved: bool      # the PM moved the result on: a PR or an EC2 run is recorded
+    moved: bool      # the PM moved the result on: a published PR or an EC2 run is recorded
+    started: float = 0.0   # when the Developer run was dispatched (0: unknown, use when)
 
 
 @dataclass(frozen=True)
@@ -8756,6 +8838,23 @@ class RouteRow:
     detail: str
     next: str = ""
     age: float | None = None
+    waiting: int = 0   # Developer results of the route the PM has not moved on
+
+
+@dataclass(frozen=True)
+class RouteDelegate:
+    """A running route process started by an llmtool Task command."""
+    route: str
+    started: float   # clock time the route process started (nan: unknown)
+    command: str     # the llmtool run behind it: delegate, repair, drive or advance
+    task: str        # the 32-hex Task id that run names, or ""
+
+
+def _published_pr(record) -> int | None:
+    """The PR number TaskStore.record_published_pr wrote ({pr, head_sha, recorded_at})."""
+    found = record.get("published_pr") if type(record) is dict else None
+    number = found.get("pr") if type(found) is dict else None
+    return number if type(number) is int and number > 0 else None
 
 
 def _route_task_entry(record) -> RouteTask | None:
@@ -8783,13 +8882,64 @@ def _route_task_entry(record) -> RouteTask | None:
                  for name in ("remote_test_receipts", "remote_test_outcomes"))
     return RouteTask(route, task[:8], state == "DEVELOPER_DISPATCHING",
                      DEVELOPER_RESULTS.get(code) or DEVELOPER_RESULTS.get(state) or code or state,
-                     when, found.group(1) if found else "", tested or _task_pr(record) is not None)
+                     when, found.group(1) if found else "", tested or _task_pr(record) is not None,
+                     _remote_test_time(developer.get("created_at")))
 
 
 def route_tasks(root: str | None = None) -> tuple[list[RouteTask], str]:
-    """Developer Tasks from the local Task store, bounded and unchanged-cached."""
-    root = LLMTOOL_TASKS if root is None else root
-    return _bounded_task_entries(root, _route_parsed, ROUTE_BUDGET, _route_task_entry)
+    """Every unresolved Developer Task in the local Task store (being dispatched,
+    or a result the PM has not moved on), from the one full Task-folder scan;
+    the second value names any shortfall (not yet covered, a file not read, or
+    the folder unreadable), so a missing Task is never taken for no work."""
+    return _task_folder_scan(LLMTOOL_TASKS if root is None else root, RouteTask,
+                             ROUTE_UNSEEN, ROUTE_UNREADABLE, ROUTE_SCAN_REUSE)
+
+
+def route_delegates(processes, now: float) -> list[RouteDelegate]:
+    """Running route processes whose nearest llmtool ancestor runs a Task
+    command that can start a Developer (LLMTOOL_DEVELOPER_RUNS). Any other
+    llmtool command (a review dispatch, a remote test, task show) or no llmtool
+    ancestor at all is not evidence for a Developer Task. One per llmtool run
+    and route: a launcher and the CLI it starts are one run."""
+    by_pid = {p.pid: p for p in processes or []}
+    found: dict[tuple[int, str], RouteDelegate] = {}
+    for proc in processes or []:
+        route = ROUTE_PROCESS_ROLES.get(proc.role.removesuffix(" (node launcher)"))
+        if route is None:   # not a route process, or a zombie
+            continue
+        parent, seen = by_pid.get(proc.ppid), 0
+        while (parent is not None and not parent.role.startswith("llmtool")
+               and seen < MAX_ANCESTRY):
+            parent, seen = by_pid.get(parent.ppid), seen + 1
+        if parent is None or not parent.role.startswith("llmtool") or len(parent.llmtool_run) != 2:
+            continue
+        ran = _elapsed_seconds(proc.elapsed)
+        started = now - ran if ran is not None else math.nan
+        held = found.get((parent.pid, route))
+        if held is None or (math.isfinite(started) and not started >= held.started):
+            found[(parent.pid, route)] = RouteDelegate(route, started, *parent.llmtool_run)
+    return list(found.values())
+
+
+def _route_bound(running: list[RouteTask], delegates) -> set[str]:
+    """The running Tasks (newest first) a route process is correlated to: a run
+    that names a Task binds that Task; a delegate or repair run that names none
+    of them binds the newest unbound Task dispatched before the process started.
+    Each process binds at most one Task, so a stale record never borrows the
+    process of a newer Task."""
+    bound, free = set(), []
+    for item in delegates:
+        hit = next((entry for entry in running if item.task and item.task[:8] == entry.task), None)
+        if hit is not None:
+            bound.add(hit.task)
+        elif item.command in ("delegate", "repair") and math.isfinite(item.started):
+            free.append(item)
+    for item in sorted(free, key=lambda item: item.started, reverse=True):
+        hit = next((entry for entry in running if entry.task not in bound
+                    and (entry.started or entry.when) - ROUTE_START_SKEW <= item.started), None)
+        if hit is not None:
+            bound.add(hit.task)
+    return bound
 
 
 def _route_task_text(entry: RouteTask) -> str:
@@ -8810,40 +8960,61 @@ def _route_next(board, route: str, now: float) -> str:
     return text
 
 
+def _more(items: list) -> str:
+    return f"（另有 {len(items) - 1} 件）" if len(items) > 1 else ""
+
+
 def route_rows(office, switches: dict, problem: str, reasons: dict, tasks, board, leases,
-               now: float, *, llmtool_running: bool, task_problem: str = "") -> list[RouteRow]:
+               now: float, *, delegates=(), task_problem: str = "") -> list[RouteRow]:
     """One row per route, then one per HELD sub-PM lease no route row names.
 
-    The rule, the same for every route; the first that applies sets the state:
-    1. 工作中: its newest Task is being dispatched while an llmtool process runs,
-       or a live session or process of the route is bound to a Task or PR;
-    2. 未確認: its newest Task says it is being dispatched, but no llmtool runs;
-    3. 等 PM: its newest Task has a Developer result and no PR or EC2 run yet;
-    4. otherwise the dispatch switch: 暫停中, 僅指定, 未確認 (no valid switch) or 可派工.
-    A switch that is not ALLOWED is always named with its reason, and the
-    sub-PM holding the lease on the Task's issue is named when one is recorded."""
+    Every unresolved Task of the route counts, however old. The rule, the same
+    for every route; the first that applies sets the state:
+    1. 工作中: a Task being dispatched is correlated to a running route process
+       of an llmtool Developer run (route_delegates, _route_bound), or a live
+       session or process of the route is bound to a Task or PR;
+    2. 未確認: a Task says it is being dispatched, but no such process is seen;
+    3. 等 PM: a Task has a Developer result and no published PR or EC2 run yet;
+    4. 未確認 when the Task records were not all read (task_problem), since a
+       missing Task must never read as no work; otherwise the dispatch switch:
+       暫停中, 僅指定, 未確認 (no valid switch) or 可派工.
+    Results waiting for the PM are counted on every row (RouteRow.waiting),
+    and said on a row whose state is another. A switch that is not ALLOWED is
+    always named with its reason, and the sub-PM holding the lease on the
+    Task's issue is named when one is recorded."""
     leases, used, out = list(leases or []), set(), []
     for name, key, _ in ROUTES:
-        newest = max((entry for entry in tasks or [] if entry.route == name
-                      and now - entry.when <= ROUTE_WINDOW),
-                     key=lambda entry: entry.when, default=None)
+        mine = [entry for entry in tasks or [] if entry.route == name]
+        running = sorted((entry for entry in mine if entry.running),
+                         key=lambda entry: entry.when, reverse=True)
+        waiting = sorted((entry for entry in mine if not entry.running and not entry.moved),
+                         key=lambda entry: entry.when, reverse=True)
+        bound = _route_bound(running, [item for item in delegates or [] if item.route == name])
+        working = [entry for entry in running if entry.task in bound]
+        unconfirmed = [entry for entry in running if entry.task not in bound]
         live = sorted((row for row in office or [] if row.state == WORKING and row.task
                        and row.role != "pm" and not _switch_row(row)
                        and _route_of_row(row) == name),
                       key=lambda row: row.age if row.age is not None else 1e12)
         state, parts, age, issue = "", [], None, ""
-        if newest is not None and newest.running and llmtool_running:
-            state, age, issue = WORKING, now - newest.when, newest.issue
-            parts.append(_route_task_text(newest))
+        if working:
+            state, age, issue = WORKING, now - working[0].when, working[0].issue
+            parts.append(_route_task_text(working[0]) + _more(working))
         elif live:
             state, age = WORKING, live[0].age
-            parts.append(live[0].task + (f"（另有 {len(live) - 1} 件）" if len(live) > 1 else ""))
-        elif newest is not None and newest.running:
-            state, age, issue = UNCHECKED, now - newest.when, newest.issue
-            parts.append(f"{_route_task_text(newest)} 記錄派工中，但沒有 llmtool 程序在跑")
-        elif newest is not None and not newest.moved:
-            state, age, issue = ROUTE_WAITING_PM, now - newest.when, newest.issue
-            parts.append(f"{_route_task_text(newest)} 結果：{newest.words}，PM 還沒推進")
+            parts.append(live[0].task + _more(live))
+        elif unconfirmed:
+            state, age, issue = UNCHECKED, now - unconfirmed[0].when, unconfirmed[0].issue
+            parts.append(f"{_route_task_text(unconfirmed[0])}{_more(unconfirmed)} 記錄派工中，"
+                         "但沒有看到這條路線由 llmtool 派工的程序")
+        elif waiting:
+            state, age, issue = ROUTE_WAITING_PM, now - waiting[0].when, waiting[0].issue
+            parts.append(f"{_route_task_text(waiting[0])} 結果：{waiting[0].words}，"
+                         f"PM 還沒推進{_more(waiting)}")
+        if state == WORKING and unconfirmed:
+            parts.append(f"另有 {len(unconfirmed)} 件記錄派工中但沒看到程序")
+        if state in (WORKING, UNCHECKED) and waiting:
+            parts.append(f"另有 {len(waiting)} 件結果等 PM")
         switch = None if problem else switches.get(key)
         if switch is None:
             note = DISPATCH_PROBLEMS[problem] if problem else "派工檔沒有這條路線"
@@ -8852,11 +9023,16 @@ def route_rows(office, switches: dict, problem: str, reasons: dict, tasks, board
         else:
             word = "暫停派工" if switch[0] == "PAUSED" else "僅 Owner 指定時派工"
             note = f"{switch[1]} {switch[2]} {word}" + (f"：{reasons[key]}" if reasons.get(key) else "")
+        if not state and task_problem:
+            state = UNCHECKED
+            parts.append(f"Task 紀錄未讀全，無法確認有沒有工作（{task_problem}）")
+        elif task_problem:
+            parts.append(f"Task 紀錄未讀全（{task_problem}）")
         if not state:
             state = (UNCHECKED if switch is None else PAUSED if switch[0] == "PAUSED"
                      else ROUTE_ONLY_OWNER if switch[0] == "OWNER_ASSIGNMENT_ONLY" else ROUTE_FREE)
             if state == ROUTE_FREE:
-                parts.append("沒有工作" + (f"（{task_problem}）" if task_problem else ""))
+                parts.append("沒有工作")
         if note:
             parts.append(note)
         lease = next((lease for lease in reversed(leases) if issue and lease.issue == issue), None)
@@ -8864,7 +9040,7 @@ def route_rows(office, switches: dict, problem: str, reasons: dict, tasks, board
             used.add(id(lease))
             parts.append(f"sub-PM {lease.holder}")
         out.append(RouteRow(name, state, "；".join(parts), _route_next(board, name, now),
-                            None if age is None else max(0.0, age)))
+                            None if age is None else max(0.0, age), len(waiting)))
     out += [RouteRow("sub-PM", LEASE_HELD, f"{lease.holder}：WP {lease.wp or '?'}（#{lease.issue}）",
                      "", max(0.0, now - lease.when))
             for lease in leases if id(lease) not in used]
@@ -8874,15 +9050,15 @@ def route_rows(office, switches: dict, problem: str, reasons: dict, tasks, board
 def monitor_routes(office, processes, board, github, now: float, *, canonical: str | None = None,
                    dispatch: str | None = None, root: str | None = None) -> list[RouteRow]:
     """route_rows from the live records: the dispatch file as the gate reads it,
-    the local Task store, the PM board and the last good GitHub read."""
+    the local Task store, the process table, the PM board and the last good
+    GitHub read."""
     raw, _ = load_dispatch(canonical or canonical_root(), dispatch)
     switches, problem = worker_dispatch(raw)
     tasks, task_problem = route_tasks(root)
     fresh = github is not None and github.successful_read and not github.read_failed
     return route_rows(office, switches, problem, dispatch_reasons(raw), tasks, board,
                       getattr(github, "leases", []) if fresh else [], now,
-                      llmtool_running=any(p.role.startswith("llmtool") for p in processes),
-                      task_problem=task_problem)
+                      delegates=route_delegates(processes, now), task_problem=task_problem)
 
 
 def track_one_shot(state: dict, processes: list[Process], now: float,
@@ -10046,14 +10222,14 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
     the gray rows are folded into one count per section (key a in the TUI).
     pending: GitHub requests waiting for the Owner, shown first.
     notices: Owner notices, listed apart from the requests and never starred.
-    routes: route_rows(); when given, the title counts the routes waiting for
-    the PM, the routes come before the members, and the dispatch-switch rows
-    they replace are left out of the member list."""
+    routes: route_rows(); when given, the title counts the Developer results
+    waiting for the PM on every route, the routes come before the members, and
+    the dispatch-switch rows they replace are left out of the member list."""
     working = sum(row.state == WORKING for row in rows)
     waiting_text = "?" if waiting is None else str(waiting)
     working_text = "?" if error else str(working)
     waiting_pm = ("" if routes is None else
-                  f" · 等 PM {sum(route.state == ROUTE_WAITING_PM for route in routes)}")
+                  f" · 等 PM {sum(route.waiting for route in routes)}")
     out = [(f"辦公室 · 工作中 {working_text}{waiting_pm} · 等你 {waiting_text}", "title")]
     now = time.time() if now is None else now
 

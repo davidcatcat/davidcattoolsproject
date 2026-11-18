@@ -126,6 +126,45 @@ class GitHubSourceIncrementalReadsTest(unittest.TestCase):
             self.assertEqual(spy_pending.call_args.args[0], passed_comments)
             self.assertEqual(spy_verdicts.call_args.args[0], passed_comments)
 
+    def test_held_lease_outlives_the_comment_window_until_released(self) -> None:
+        # Reviewer F5: a HELD lease stays after its claim leaves the window, and
+        # the claim edited to RELEASED (outside the window) ends it.
+        if monitor.GITHUB_IDENTITY_STATUS:
+            self.skipTest("GitHub identity settings not loadable: no comment is trusted")
+        source = self._make_source()
+        t0 = self.now
+        login = monitor.OWNER_GITHUB_LOGIN
+        claim = _comment(7, t0 - 3600, body="subpm-lease wp=WP-5 holder=claude-subpm-e status=HELD",
+                         issue=55, login=login)
+        released = _comment(7, t0 - 3600, updated_at=t0 + source.window + 60,
+                            body="subpm-lease wp=WP-5 holder=claude-subpm-e status=RELEASED",
+                            issue=55, login=login)
+        answers = [[claim], [], [released]]
+
+        def fake_get(path: str):
+            if path.startswith(f"repos/{self.repo}/issues/comments?"):
+                return answers[0]
+            return []
+
+        with (
+            mock.patch.object(source, "_get", side_effect=fake_get),
+            mock.patch.object(source, "refresh_rule_alerts"),   # no local alert file is written
+        ):
+            source.refresh(force=True)
+            self.assertEqual([(l.issue, l.holder) for l in source.leases],
+                             [("55", "claude-subpm-e")])
+            answers.pop(0)
+            self.now = t0 + source.window + 30   # the claim is now older than the window
+            source.refresh(force=True)
+            self.assertFalse(source.read_failed)
+            self.assertEqual([(l.issue, l.holder) for l in source.leases],
+                             [("55", "claude-subpm-e")])
+            answers.pop(0)
+            self.now += 60
+            source.refresh(force=True)
+            self.assertFalse(source.read_failed)
+            self.assertEqual(source.leases, [])
+
     def test_failed_comment_read_keeps_previous_and_forces_full_read(self) -> None:
         source = self._make_source()
         t0 = self.now

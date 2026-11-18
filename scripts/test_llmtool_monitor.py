@@ -10262,7 +10262,7 @@ class StuckAlertTests(unittest.TestCase):
                 self.behind = True
                 self.incidents = []
                 self.routes = [mon.RouteRow("Codex", mon.ROUTE_WAITING_PM,
-                                            "task 96596596 結果：成功回應，PM 還沒推進", "無", 60.0)]
+                                            "task 96596596 結果：成功回應，PM 還沒推進", "無", 60.0, 1)]
             def poll(self): pass
 
         class Screen:
@@ -11064,14 +11064,19 @@ class RouteRowTests(unittest.TestCase):
     BOARD = mon.PmBoard("ok", 0, [], [], [])
 
     @staticmethod
-    def task(route, *, running=False, moved=False, issue="2311", when=NOW - 120, words="成功回應"):
-        return mon.RouteTask(route, "a1b2c3d4", running, words, when, issue, moved)
+    def task(route, *, running=False, moved=False, issue="2311", when=NOW - 120, words="成功回應",
+             task="a1b2c3d4"):
+        return mon.RouteTask(route, task, running, words, when, issue, moved)
+
+    @staticmethod
+    def run(route, *, started=NOW - 30, command="delegate", task=""):
+        return mon.RouteDelegate(route, started, command, task)
 
     def rows(self, *, office=(), switches=None, problem="", reasons=None, tasks=(), board=None,
-             leases=(), llmtool_running=True, task_problem=""):
+             leases=(), delegates=(), task_problem=""):
         return mon.route_rows(list(office), self.ALLOWED if switches is None else switches, problem,
                               reasons or {}, list(tasks), self.BOARD if board is None else board,
-                              list(leases), NOW, llmtool_running=llmtool_running,
+                              list(leases), NOW, delegates=list(delegates),
                               task_problem=task_problem)
 
     def by_name(self, rows):
@@ -11086,17 +11091,19 @@ class RouteRowTests(unittest.TestCase):
     def test_every_route_follows_the_same_rule(self):
         # The same records give the same state on every route: no special cases.
         cases = (
-            (dict(running=True), True, mon.WORKING),
-            (dict(running=True), False, mon.UNCHECKED),
-            (dict(), True, mon.ROUTE_WAITING_PM),
-            (dict(moved=True), True, mon.ROUTE_FREE),
-            (dict(when=NOW - mon.ROUTE_WINDOW - 1), True, mon.ROUTE_FREE),
+            (dict(running=True), "own", mon.WORKING),
+            (dict(running=True), None, mon.UNCHECKED),
+            (dict(running=True), "other", mon.UNCHECKED),   # another route's run proves nothing
+            (dict(), None, mon.ROUTE_WAITING_PM),
+            (dict(moved=True), None, mon.ROUTE_FREE),
+            (dict(when=NOW - 3 * 86400), None, mon.ROUTE_WAITING_PM),   # no age limit
         )
-        for fields, running, expected in cases:
+        for fields, evidence, expected in cases:
             for name in ROUTE_NAMES:
-                with self.subTest(route=name, fields=fields, llmtool=running):
-                    rows = self.by_name(self.rows(tasks=[self.task(name, **fields)],
-                                                  llmtool_running=running))
+                other = ROUTE_NAMES[(ROUTE_NAMES.index(name) + 1) % len(ROUTE_NAMES)]
+                runs = {"own": [self.run(name)], "other": [self.run(other)], None: []}[evidence]
+                with self.subTest(route=name, fields=fields, evidence=evidence):
+                    rows = self.by_name(self.rows(tasks=[self.task(name, **fields)], delegates=runs))
                     self.assertEqual(rows[name].state, expected)
                     others = [row.state for key, row in rows.items() if key != name]
                     self.assertEqual(set(others), {mon.ROUTE_FREE})
@@ -11113,10 +11120,55 @@ class RouteRowTests(unittest.TestCase):
         self.assertIn("等 PM", line)
         self.assertEqual(dict(view)[line], "!")
 
-    def test_only_the_newest_task_of_a_route_decides(self):
-        rows = self.by_name(self.rows(tasks=[self.task("Codex", when=NOW - 60, moved=True),
-                                             self.task("Codex", when=NOW - 600)]))
-        self.assertEqual(rows["Codex"].state, mon.ROUTE_FREE)
+    def test_every_unresolved_task_of_a_route_counts(self):
+        # Reviewer F1: a newer Task the PM moved on (here: to a remote test)
+        # never hides an older result still waiting for the PM.
+        older = self.task("Codex", when=NOW - 600, task="0a0a0a0a")
+        rows = self.rows(tasks=[self.task("Codex", when=NOW - 60, moved=True, task="1b1b1b1b"), older])
+        codex = self.by_name(rows)["Codex"]
+        self.assertEqual((codex.state, codex.waiting, codex.age), (mon.ROUTE_WAITING_PM, 1, 600))
+        self.assertIn("task 0a0a0a0a · #2311 結果：成功回應，PM 還沒推進", codex.detail)
+        self.assertEqual(mon.office_view([], routes=rows, waiting=0, now=NOW)[0][0],
+                         "辦公室 · 工作中 0 · 等 PM 1 · 等你 0")
+        # Two results waiting: the newest is named, the other counted, both in the title.
+        two = self.rows(tasks=[older, self.task("Codex", when=NOW - 300, task="2c2c2c2c")])
+        self.assertIn("task 2c2c2c2c · #2311 結果：成功回應，PM 還沒推進（另有 1 件）",
+                      self.by_name(two)["Codex"].detail)
+        self.assertEqual(mon.office_view([], routes=two, waiting=0, now=NOW)[0][0],
+                         "辦公室 · 工作中 0 · 等 PM 2 · 等你 0")
+        # A newer run under way keeps the row 工作中 and still says and counts the older result.
+        busy = self.rows(tasks=[older, self.task("Codex", running=True, when=NOW - 60, task="3d3d3d3d")],
+                         delegates=[self.run("Codex")])
+        row = self.by_name(busy)["Codex"]
+        self.assertEqual((row.state, row.waiting), (mon.WORKING, 1))
+        self.assertIn("另有 1 件結果等 PM", row.detail)
+        self.assertEqual(mon.office_view([], routes=busy, waiting=0, now=NOW)[0][0],
+                         "辦公室 · 工作中 0 · 等 PM 1 · 等你 0")
+
+    def test_a_route_process_backs_one_task_and_a_stale_record_borrows_none(self):
+        # Reviewer F2: the process of a newer AGY run is not evidence for an
+        # older AGY record still saying it is being dispatched.
+        stale = self.task("AGY", running=True, when=NOW - 86400, task="5f5f5f5f")
+        fresh = self.task("AGY", running=True, when=NOW - 100, task="6a6a6a6a")
+        row = self.by_name(self.rows(tasks=[stale, fresh], delegates=[self.run("AGY")]))["AGY"]
+        self.assertEqual(row.state, mon.WORKING)
+        self.assertTrue(row.detail.startswith("task 6a6a6a6a"))
+        self.assertIn("另有 1 件記錄派工中但沒看到程序", row.detail)
+        # Only the stale record and an unrelated run: never 工作中.
+        for runs in ([], [self.run("Claude")], [self.run("AGY", command="advance")],
+                     [self.run("AGY", command="drive", task="7" * 32)]):
+            with self.subTest(runs=runs):
+                alone = self.by_name(self.rows(tasks=[stale], delegates=runs))["AGY"]
+                self.assertEqual(alone.state, mon.UNCHECKED)
+                self.assertIn("記錄派工中，但沒有看到這條路線由 llmtool 派工的程序", alone.detail)
+        # A run that names the Task backs it whenever it started.
+        named = self.run("AGY", command="advance", task="5f5f5f5f" + "0" * 24, started=NOW - 5)
+        self.assertEqual(self.by_name(self.rows(tasks=[stale], delegates=[named]))["AGY"].state,
+                         mon.WORKING)
+        # A process that started before the Task was dispatched is not its run.
+        early = self.run("AGY", started=NOW - 100 - mon.ROUTE_START_SKEW - 1)
+        self.assertEqual(self.by_name(self.rows(tasks=[fresh], delegates=[early]))["AGY"].state,
+                         mon.UNCHECKED)
 
     def test_paused_route_names_who_when_and_why(self):
         switches = dict(self.ALLOWED, agy=("PAUSED", "Owner", "11-15"),
@@ -11163,7 +11215,8 @@ class RouteRowTests(unittest.TestCase):
     def test_sub_pm_is_named_on_its_route_and_other_leases_get_lanes(self):
         leases = [mon.SubPmLease(NOW - 300, "2311", "WP-1", "claude-subpm-a"),
                   mon.SubPmLease(NOW - 600, "2400", "WP-9", "codex-subpm-b")]
-        rows = self.rows(tasks=[self.task("Claude", running=True)], leases=leases)
+        rows = self.rows(tasks=[self.task("Claude", running=True)], leases=leases,
+                         delegates=[self.run("Claude")])
         named = self.by_name(rows)
         self.assertEqual(named["Claude"].state, mon.WORKING)
         self.assertIn("sub-PM claude-subpm-a", named["Claude"].detail)
@@ -11186,9 +11239,22 @@ class RouteRowTests(unittest.TestCase):
         missing = self.by_name(self.rows(board=mon.PmBoard("missing", None, [], [], [])))
         self.assertEqual(missing["AGY"].next, "未確認（PM 白板檔不存在）")
 
-    def test_task_read_shortfall_is_said_on_free_routes(self):
-        rows = self.rows(task_problem=mon.REMOTE_TEST_CAPPED)
-        self.assertTrue(all(row.detail == f"沒有工作（{mon.REMOTE_TEST_CAPPED}）" for row in rows))
+    def test_task_read_shortfall_never_reads_as_no_work(self):
+        # Reviewer F3: with Task records not all read, no route says 可派工／沒有工作.
+        for problem in (mon.ROUTE_UNSEEN, mon.ROUTE_UNREADABLE, mon.REMOTE_TEST_OVER_BUDGET):
+            with self.subTest(problem=problem):
+                rows = self.rows(task_problem=problem)
+                self.assertEqual({row.state for row in rows}, {mon.UNCHECKED})
+                self.assertTrue(all(row.detail == f"Task 紀錄未讀全，無法確認有沒有工作（{problem}）"
+                                    for row in rows))
+                paused = self.by_name(self.rows(task_problem=problem, switches=dict(
+                    self.ALLOWED, agy=("PAUSED", "Owner", "11-15"))))["AGY"]
+                self.assertEqual(paused.state, mon.UNCHECKED)
+                self.assertIn("Owner 11-15 暫停派工", paused.detail)
+                # Work that was found still shows, and the shortfall is said with it.
+                found = self.by_name(self.rows(task_problem=problem, tasks=[self.task("OpenCode")]))
+                self.assertEqual(found["OpenCode"].state, mon.ROUTE_WAITING_PM)
+                self.assertIn(f"Task 紀錄未讀全（{problem}）", found["OpenCode"].detail)
 
 
 class RouteTaskRecordTests(unittest.TestCase):
@@ -11209,11 +11275,28 @@ class RouteTaskRecordTests(unittest.TestCase):
             with self.subTest(provider=provider):
                 self.assertEqual(mon._route_task_entry(self.record(provider_type=provider)).route, route)
 
-    def test_pr_or_ec2_run_means_the_pm_moved_on(self):
-        moved = dict(self.record(), pr=2330)
-        self.assertTrue(mon._route_task_entry(moved).moved)
+    def test_published_pr_or_ec2_run_means_the_pm_moved_on(self):
+        # Reviewer F4: the field TaskStore.record_published_pr writes.
+        published = dict(self.record(), published_pr={"pr": 2330, "head_sha": "a" * 40,
+                                                      "recorded_at": self.STAMP})
+        entry = mon._route_task_entry(published)
+        self.assertTrue(entry.moved)
+        self.assertEqual(mon._task_scan_entries(published), ())   # resolved: nothing kept
+        rows = mon.route_rows([], RouteRowTests.ALLOWED, "", {}, [entry], RouteRowTests.BOARD, [],
+                              NOW)
+        self.assertEqual({row.name: row.state for row in rows}["OpenCode"], mon.ROUTE_FREE)
+        for bad in (None, {}, {"pr": 0}, {"pr": "2330"}, {"pr": True}, [2330]):
+            with self.subTest(published_pr=bad):
+                record = dict(self.record(), published_pr=bad)
+                self.assertFalse(mon._route_task_entry(record).moved)
+                self.assertEqual(mon._task_scan_entries(record), (mon._route_task_entry(record),))
         tested = dict(self.record(), remote_test_receipts=[{"result": "PASS"}])
         self.assertTrue(mon._route_task_entry(tested).moved)
+
+    def test_dispatch_time_is_kept_for_matching_a_route_process(self):
+        stamp = datetime.fromtimestamp(NOW - 90, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        entry = mon._route_task_entry(self.record(state="DEVELOPER_DISPATCHING", created_at=stamp))
+        self.assertEqual((entry.running, entry.when, entry.started), (True, NOW - 60, NOW - 90))
 
     def test_ended_unknown_or_malformed_records_decide_nothing(self):
         for record in (dict(self.record(), lineage={"state": "DROPPED"}),
@@ -11226,12 +11309,68 @@ class RouteTaskRecordTests(unittest.TestCase):
             with self.subTest(record=record):
                 self.assertIsNone(mon._route_task_entry(record))
 
+    def setUp(self):
+        mon.waiting_scan_reset()
+
+    def tearDown(self):
+        mon.waiting_scan_reset()
+
     def test_route_tasks_read_the_task_store_bounded(self):
         with tempfile.TemporaryDirectory() as tasks:
             Path(tasks, "a.json").write_text(json.dumps(self.record()), encoding="utf-8")
             entries, problem = mon.route_tasks(tasks)
+            # The WAITING reader shares the scan and still gets only WAITING rows.
+            self.assertEqual(mon.waiting_records(tasks), ([], ""))
+            mon.waiting_scan_reset()
         self.assertEqual([entry.route for entry in entries], ["OpenCode"])
         self.assertEqual(problem, "")
+
+    def test_an_old_task_behind_many_newer_files_is_still_found(self):
+        # Reviewer F3: not only the newest 32 files count.
+        with tempfile.TemporaryDirectory() as tasks:
+            old = Path(tasks, "old.json")
+            old.write_text(json.dumps(dict(self.record(), task_id="d" * 32)), encoding="utf-8")
+            os.utime(old, (NOW - 7 * 86400, NOW - 7 * 86400))
+            for n in range(mon.REMOTE_TEST_FILES + 8):
+                record = dict(self.record(), task_id=f"{n:032x}",
+                              published_pr={"pr": 100 + n, "head_sha": "b" * 40,
+                                            "recorded_at": self.STAMP})
+                Path(tasks, f"t{n}.json").write_text(json.dumps(record), encoding="utf-8")
+            entries, problem = mon.route_tasks(tasks)
+            mon.waiting_scan_reset()
+        self.assertEqual([(entry.task, entry.moved) for entry in entries], [("d" * 8, False)])
+        self.assertEqual(problem, "")
+
+    def test_shortfalls_are_named_never_silent(self):
+        with tempfile.TemporaryDirectory() as tasks:
+            for n in range(3):
+                Path(tasks, f"t{n}.json").write_text(
+                    json.dumps(dict(self.record(), task_id=f"{n:032x}")), encoding="utf-8")
+            with patch.object(mon, "WAITING_SCAN", 1):   # the first pass is not done yet
+                self.assertEqual(mon.route_tasks(tasks)[1], mon.ROUTE_UNSEEN)
+            mon.waiting_scan_reset()
+            with patch.object(mon, "REMOTE_TEST_READ", 10):   # files it may not read
+                self.assertEqual(mon.route_tasks(tasks), ([], mon.REMOTE_TEST_OVER_BUDGET))
+            mon.waiting_scan_reset()
+            with patch.object(mon, "_waiting_open", side_effect=PermissionError("denied")):
+                self.assertEqual(mon.route_tasks(tasks), ([], mon.ROUTE_UNREADABLE))
+            mon.waiting_scan_reset()
+        missing = os.path.join(tasks, "gone")
+        self.assertEqual(mon.route_tasks(missing), ([], ""))   # no Task folder yet: nothing missing
+
+    def test_one_office_rebuild_steps_the_shared_scan_once(self):
+        with tempfile.TemporaryDirectory() as tasks:
+            Path(tasks, "a.json").write_text(json.dumps(self.record()), encoding="utf-8")
+            with patch.object(mon._WaitingScan, "step", autospec=True,
+                              side_effect=mon._WaitingScan.step) as step:
+                mon.waiting_records(tasks)
+                entries, _ = mon.route_tasks(tasks)
+                self.assertEqual(step.call_count, 1)
+                with patch.object(mon, "ROUTE_SCAN_REUSE", 0.0):
+                    mon.route_tasks(tasks)
+                self.assertEqual(step.call_count, 2)
+            mon.waiting_scan_reset()
+        self.assertEqual([entry.route for entry in entries], ["OpenCode"])
 
 
 class RouteOfficeViewTests(unittest.TestCase):
@@ -11258,8 +11397,7 @@ class RouteOfficeViewTests(unittest.TestCase):
     def test_switch_rows_leave_the_member_list_and_their_alerts_stay(self):
         rows = self.switch_rows()
         rows[0] = replace(rows[0], state=mon.STOPPED, alert="本 repo 上次失敗")
-        routes = mon.route_rows([], {}, "missing", {}, [], RouteRowTests.BOARD, [], NOW,
-                                llmtool_running=False)
+        routes = mon.route_rows([], {}, "missing", {}, [], RouteRowTests.BOARD, [], NOW)
         lines = [line for line, _ in mon.office_view(rows, routes=routes, expand=True, now=NOW)]
         names = {name for name, _, _ in mon.WORKER_ROSTER + mon.DEBUG_ROSTER}
         self.assertFalse(any(line.split("  ")[0] in names for line in lines))
@@ -11274,7 +11412,7 @@ class RouteOfficeViewTests(unittest.TestCase):
         progress = ("PM 進度：上次派工 ? · 排隊 ? · 今天合併 ?", "")   # the line #2311 removed
         before = mon.office_view(rows, top=top + [progress], width=120, now=NOW)
         routes = mon.route_rows(rows, RouteRowTests.ALLOWED, "", {}, [], RouteRowTests.BOARD, [],
-                                NOW, llmtool_running=False)
+                                NOW)
         after = mon.office_view(rows, top=top, routes=routes, width=120, now=NOW)
         self.assertLess(len(after), len(before))
         texts = [line for line, _ in after]
@@ -11336,3 +11474,58 @@ class MonitorRoutesTests(unittest.TestCase):
                                       dispatch=str(Path(root, "absent.json")), root=root)
         self.assertEqual([row.name for row in rows], ROUTE_NAMES)   # no lane from a failed read
         self.assertEqual({row.state for row in rows}, {mon.UNCHECKED})
+
+
+class RouteDelegateTests(unittest.TestCase):
+    """Reviewer F2: only a route process of an llmtool Developer run is evidence."""
+
+    ENTRIES = [
+        (10, 1, 10, "05:00", "S", "/usr/bin/python3 -m llmtool task delegate " + "c" * 32),
+        (11, 10, 10, "00:30", "S", "/opt/bin/agy run"),
+        (20, 1, 20, "05:00", "S", "/usr/bin/python3 -m llmtool task review-dispatch --reviewer x"),
+        (21, 20, 20, "00:40", "S", "/opt/bin/codex exec review"),
+        (30, 1, 30, "05:00", "S", "/usr/bin/python3 -m llmtool task show " + "e" * 32),
+        (40, 1, 40, "00:20", "S", "/opt/bin/claude -p hello"),
+        (50, 1, 50, "02:00", "S", "/usr/bin/python3 -m llmtool task repair " + "f" * 32 + " --pr 7"),
+        (51, 50, 50, "01:00", "S", "node /opt/lib/opencode run"),
+        (52, 51, 50, "00:58", "S", "/opt/bin/opencode run"),
+    ]
+
+    def processes(self, entries=None):
+        return mon.snapshot_from(self.ENTRIES if entries is None else entries,
+                                 self_pid=99999).processes
+
+    def test_llmtool_run_keeps_only_the_subcommand_and_a_task_id(self):
+        runs = {p.pid: p.llmtool_run for p in self.processes()}
+        self.assertEqual(runs[10], ("delegate", "c" * 32))
+        self.assertEqual(runs[50], ("repair", "f" * 32))
+        self.assertEqual((runs[20], runs[30], runs[11]), ((), (), ()))
+
+    def test_route_processes_need_an_llmtool_developer_run_above_them(self):
+        found = mon.route_delegates(self.processes(), NOW)
+        self.assertEqual(sorted(found, key=lambda item: item.route), [
+            mon.RouteDelegate("AGY", NOW - 30, "delegate", "c" * 32),
+            mon.RouteDelegate("OpenCode", NOW - 60, "repair", "f" * 32),   # launcher and CLI: one run
+        ])
+
+    def test_unrelated_llmtool_commands_never_make_a_route_busy(self):
+        # A stale record on every route; only AGY and OpenCode have a run of their own.
+        tasks = [RouteRowTests.task(name, running=True, when=NOW - 600, task=f"{n}" * 8)
+                 for n, name in enumerate(ROUTE_NAMES)]
+        rows = {row.name: row.state for row in mon.route_rows(
+            [], RouteRowTests.ALLOWED, "", {}, tasks, RouteRowTests.BOARD, [], NOW,
+            delegates=mon.route_delegates(self.processes(), NOW))}
+        self.assertEqual(rows, {"Claude": mon.UNCHECKED, "AGY": mon.WORKING,
+                                "OpenCode": mon.WORKING, "home LLM": mon.UNCHECKED,
+                                "Codex": mon.UNCHECKED})
+        # Only unrelated llmtool commands running: no route is 工作中.
+        unrelated = [entry for entry in self.ENTRIES if entry[0] in (20, 21, 30, 40)]
+        rows = mon.route_rows([], RouteRowTests.ALLOWED, "", {}, tasks, RouteRowTests.BOARD, [], NOW,
+                              delegates=mon.route_delegates(self.processes(unrelated), NOW))
+        self.assertEqual({row.state for row in rows}, {mon.UNCHECKED})
+
+    def test_zombie_or_orphaned_route_processes_are_not_evidence(self):
+        entries = [(10, 1, 10, "05:00", "S", "/usr/bin/python3 -m llmtool task delegate"),
+                   (11, 10, 10, "00:30", "Z", "(agy)"),
+                   (12, 1, 12, "00:30", "S", "/opt/bin/agy run")]
+        self.assertEqual(mon.route_delegates(self.processes(entries), NOW), [])
