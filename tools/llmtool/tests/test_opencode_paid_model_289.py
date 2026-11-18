@@ -18,7 +18,12 @@ from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from llmtool.developer_routes import check_route_model, load_route_config
+from llmtool.developer_routes import (
+    RouteError,
+    check_registry_role_model,
+    check_route_model,
+    load_route_config,
+)
 from llmtool.errors import LLMToolError
 from llmtool.opencode_direct_developer import (
     DirectOpenCodeError,
@@ -204,20 +209,21 @@ class OpenCodePaidModelAdmissionTests(unittest.TestCase):
         self.root = Path(self.temp.name).resolve() / "tasks"
         self.store = TaskStore(self.root)
         self.policy_path = worker_policy_fixture.install(self)
+        self.config = load_route_config()
 
     def test_paid_models_are_admitted_by_direct_developer_validators(self):
         for model in self.ADMITTED_PAID_MODELS:
             with self.subTest(model=model):
                 self.assertTrue(is_valid_model(model))
                 self.assertEqual(validate_model(model), model)
-                self.assertTrue(check_route_model("opencode", model))
+                self.assertEqual(check_route_model(self.config, "opencode", model), model)
 
     def test_other_provider_models_are_admitted_by_direct_developer_validators(self):
         for model in self.ADMITTED_OTHER_PROVIDER_MODELS:
             with self.subTest(model=model):
                 self.assertTrue(is_valid_model(model))
                 self.assertEqual(validate_model(model), model)
-                self.assertTrue(check_route_model("opencode", model))
+                self.assertEqual(check_route_model(self.config, "opencode", model), model)
 
     def test_free_models_are_admitted_by_direct_developer_validators(self):
         for model in self.ADMITTED_FREE_MODELS:
@@ -225,13 +231,15 @@ class OpenCodePaidModelAdmissionTests(unittest.TestCase):
                 self.assertTrue(is_valid_model(model))
                 self.assertTrue(is_free_model(model))
                 self.assertEqual(validate_model(model), model)
-                self.assertTrue(check_route_model("opencode", model))
+                self.assertEqual(check_route_model(self.config, "opencode", model), model)
 
     def test_malformed_models_are_refused_by_direct_developer_validators(self):
         for model in self.MALFORMED_MODELS:
             with self.subTest(model=model):
                 self.assertFalse(is_valid_model(model))
-                self.assertFalse(check_route_model("opencode", model))
+                with self.assertRaises(RouteError) as route_caught:
+                    check_route_model(self.config, "opencode", model)
+                self.assertEqual(route_caught.exception.code, "ROLE_MODEL_NOT_ALLOWED")
                 with self.assertRaises(DirectOpenCodeError) as caught:
                     validate_model(model)
                 self.assertEqual(
@@ -379,27 +387,41 @@ class OpenCodePaidModelAdmissionTests(unittest.TestCase):
     def test_other_routes_model_checks_remain_unchanged(self):
         # A3: AGY, Claude, gw-agent, and Codex roles keep their checks unchanged.
         # AGY: Gemini family only
-        self.assertTrue(check_route_model("agy", "gemini-3.8-flash-medium"))
-        self.assertFalse(check_route_model("agy", "claude-opus-5-5"))
-        self.assertFalse(check_route_model("agy", "gpt-6.1-sol"))
-        self.assertFalse(check_route_model("agy", "opencode/paid-model"))
+        self.assertEqual(
+            check_route_model(self.config, "agy", "gemini-3.8-flash-medium"),
+            "gemini-3.8-flash-medium",
+        )
+        for bad_model in ("claude-opus-5-5", "gpt-6.1-sol", "opencode/paid-model"):
+            with self.assertRaises(RouteError) as caught:
+                check_route_model(self.config, "agy", bad_model)
+            self.assertEqual(caught.exception.code, "ROLE_MODEL_NOT_ALLOWED")
 
         # Claude: Claude family only
-        self.assertTrue(check_route_model("claude", "claude-opus-5-5"))
-        self.assertFalse(check_route_model("claude", "gemini-3.8-flash-medium"))
-        self.assertFalse(check_route_model("claude", "gpt-6.1-sol"))
-        self.assertFalse(check_route_model("claude", "opencode/paid-model"))
+        self.assertEqual(
+            check_route_model(self.config, "claude", "claude-opus-5-5"),
+            "claude-opus-5-5",
+        )
+        for bad_model in ("gemini-3.8-flash-medium", "gpt-6.1-sol", "opencode/paid-model"):
+            with self.assertRaises(RouteError) as caught:
+                check_route_model(self.config, "claude", bad_model)
+            self.assertEqual(caught.exception.code, "ROLE_MODEL_NOT_ALLOWED")
 
         # gw-agent: allowed_models gate (default 'gw')
-        self.assertTrue(check_route_model("gw-agent", "gw"))
-        self.assertFalse(check_route_model("gw-agent", "opencode/paid-model"))
-        self.assertFalse(check_route_model("gw-agent", "other-unlisted-model"))
+        self.assertEqual(check_route_model(self.config, "gw-agent", "gw"), "gw")
+        for bad_model in ("opencode/paid-model", "other-unlisted-model"):
+            with self.assertRaises(RouteError) as caught:
+                check_route_model(self.config, "gw-agent", bad_model)
+            self.assertEqual(caught.exception.code, "ROLE_MODEL_NOT_ALLOWED")
 
         # Codex role check: Codex/GPT family only
-        from llmtool.developer_routes import check_registry_role_model
-        self.assertTrue(check_registry_role_model("codex-reviewer", "gpt-6.1-sol"))
-        self.assertFalse(check_registry_role_model("codex-reviewer", "claude-opus-5-5"))
-        self.assertFalse(check_registry_role_model("codex-reviewer", "gemini-3.8-flash-medium"))
+        self.assertEqual(
+            check_registry_role_model(self.config, "codex-reviewer", "gpt-6.1-sol"),
+            "gpt-6.1-sol",
+        )
+        for bad_model in ("claude-opus-5-5", "gemini-3.8-flash-medium"):
+            with self.assertRaises(RouteError) as caught:
+                check_registry_role_model(self.config, "codex-reviewer", bad_model)
+            self.assertEqual(caught.exception.code, "ROLE_MODEL_NOT_ALLOWED")
 
 
 class OpenCodeDelegateEndToEndModelTests(unittest.TestCase):
@@ -435,6 +457,7 @@ class OpenCodeDelegateEndToEndModelTests(unittest.TestCase):
             selection_source="USER",
             context_stdin=False,
             executor_task="executor-d6-test",
+            provider="opencode",
             read_path=["sample.py"],
             write_path=["sample.py"],
             acceptance=["sample.py updated."],
@@ -485,6 +508,16 @@ class OpenCodeDelegateEndToEndModelTests(unittest.TestCase):
         )
 
         with patch.dict(os.environ, {"HOME": str(self.home)}), \
+                patch.object(submission_cli, "_check_delegate_repair_cap"), \
+                patch.object(submission_cli, "_delegate_chain_gate", side_effect=lambda a, s, b, claim: claim()), \
+                patch.object(submission_cli, "_developer_card_prefix", return_value=("prefix\n", "a" * 64)), \
+                patch.object(submission_cli, "_record_skill_delivery"), \
+                patch.object(submission_cli, "_refresh_d6_binding_after_bootstrap", return_value=registration), \
+                patch.object(submission_cli.task_completion, "_worktree_diff", return_value=(["sample.py"], b"diff --git a/sample.py b/sample.py\n--- a/sample.py\n+++ b/sample.py\n@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n")), \
+                patch.object(submission_cli, "_developer_output_rejection", return_value=None), \
+                patch.object(submission_cli, "_revision_sources", return_value={"sample.py": "VALUE = 1\n"}), \
+                patch.object(submission_cli, "_bind_direct_native_session", return_value=True), \
+                patch.object(submission_cli, "run_task_direct_result_event", return_value=0), \
                 patch.object(submission_cli.task_completion, "validate_task_binding"), \
                 patch.object(submission_cli.task_completion, "collect_git_snapshot", return_value=snapshot), \
                 patch.object(submission_cli.task_completion, "bind_executor_task", return_value=(registration, snapshot)), \
@@ -530,6 +563,7 @@ class OpenCodeDelegateEndToEndModelTests(unittest.TestCase):
         )
 
         with patch.dict(os.environ, {"HOME": str(self.home)}), \
+                patch.object(submission_cli, "_check_delegate_repair_cap"), \
                 patch.object(submission_cli.task_completion, "validate_task_binding"), \
                 patch.object(submission_cli.task_completion, "collect_git_snapshot", return_value=snapshot), \
                 patch.object(submission_cli.task_completion, "bind_executor_task", return_value=(registration, snapshot)), \

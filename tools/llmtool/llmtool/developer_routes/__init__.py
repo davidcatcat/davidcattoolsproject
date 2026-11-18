@@ -319,6 +319,11 @@ def check_route_model(config, route, model):
     keeps its allowed_models membership gate, but a malformed identifier is
     refused here too, before membership (Repair 2).
     """
+    if config is None:
+        try:
+            config = load_route_config()
+        except RouteError:
+            raise RouteError('ROUTE_CONFIG_UNAVAILABLE') from None
     routes = config.get('routes') if type(config) is dict else None
     entry = (routes.get(route) if type(routes) is dict and type(route) is str
              else None)

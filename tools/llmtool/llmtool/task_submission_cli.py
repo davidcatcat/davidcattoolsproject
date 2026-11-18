@@ -8129,7 +8129,8 @@ def run_task_delegate(args, *, store=None):
         return _run_background_delegate(
             args, provider=provider, store=store,
             d6_binding=(registration, _snapshot))
-    if args.provider == 'agy':
+    provider = getattr(args, 'provider', None)
+    if provider == 'agy':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider agy requires --mode direct')
         # #785 M18: no owner-ref check here. The repair cap and High Debug
@@ -8139,7 +8140,7 @@ def run_task_delegate(args, *, store=None):
         _check_delegate_repair_cap(args, store)
         return _with_quota_observation(
             store, args.task_id, lambda: run_task_agy_delegate(args, store=store))
-    if args.provider == 'claude':
+    if provider == 'claude':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider claude requires --mode direct')
         if getattr(args, 'background', False):
@@ -8148,23 +8149,23 @@ def run_task_delegate(args, *, store=None):
         _check_delegate_repair_cap(args, store)
         return _with_quota_observation(
             store, args.task_id, lambda: run_task_claude_delegate(args, store=store))
-    if args.provider == 'gw-agent':
+    if provider == 'gw-agent':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider gw-agent requires --mode direct')
         _check_delegate_repair_cap(args, store)
         return _with_quota_observation(
             store, args.task_id, lambda: run_task_gw_agent_delegate(args, store=store))
-    _validate_acceptance_scope(args.acceptance)
+    _validate_acceptance_scope(getattr(args, 'acceptance', None))
     if getattr(args, 'mode', 'proposal') == 'direct':
-        if args.provider != 'codex':
+        if provider != 'codex':
             raise LLMToolError('--mode direct is supported only for the Codex Developer route')
         _check_delegate_repair_cap(args, store)
         return run_task_codex_delegate(args, store=store)
-    if args.provider == 'opencode':
+    if provider == 'opencode':
         _check_delegate_repair_cap(args, store)
         return _with_quota_observation(
             store, args.task_id, lambda: run_task_opencode_delegate(args, store=store))
-    if args.provider != 'codex':
+    if provider != 'codex':
         raise LLMToolError('unsupported Developer route')
     if not getattr(args, 'context_stdin', False) and not hasattr(args, 'context'):
         raise LLMToolError('text Developer delegation requires explicit --context-stdin')
