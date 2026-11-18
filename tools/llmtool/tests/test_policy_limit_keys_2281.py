@@ -61,13 +61,14 @@ class PolicyLimitKeysTests(unittest.TestCase):
                             rp.load_policy(self._write(dict(GOOD, **{key: value})))
                         self.assertEqual(str(caught.exception), 'POLICY_INVALID')
 
-    def test_values_above_the_quoted_bound_refuse_policy_invalid(self):
-        # The table value is the limit, so a larger value is invalid too.
-        for key in VALUES:
+    def test_values_above_the_quoted_value_load(self):
+        # #2281 design rule 3: no arbitrary upper ceiling. An authorized
+        # increase above the quoted table value is accepted.
+        for key, value in VALUES.items():
             with self.subTest(key=key):
-                with self.assertRaises(LLMToolError) as caught:
-                    rp.load_policy(self._write(dict(GOOD, **{key: VALUES[key] + 1})))
-                self.assertEqual(str(caught.exception), 'POLICY_INVALID')
+                higher = value + 100
+                self.assertEqual(rp.load_policy(self._write(dict(GOOD, **{key: higher}))),
+                                 dict(GOOD, **{key: higher}))
 
     def test_missing_key_keeps_the_caller_default(self):
         # A3: none of the new keys is required, so a policy file without them

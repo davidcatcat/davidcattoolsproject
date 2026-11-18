@@ -18,13 +18,13 @@ POLICY_KEYS = ('repair_max', 'parent_debug_max', 'group_debug_max', 'child_max',
                'replan_max', 'test_fail_max', 'review_fail_max',
                'waiting_notify_after_hours')
 # #1815 T3: optional limits as key -> (min, max); an absent key keeps its caller default.
-# #2281 L0b: the table limits with no stated basis become configurable (row 2, 15, 16),
-# each at the value recorded in that table; callers are wired in later pieces.
+# #2281 L0b (design rule 3): the table limits with no stated basis become
+# configurable (row 2, 15, 16); positive integer (>= 1) with no arbitrary upper ceiling.
 OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3),
-                          'spec_preflight_large_file_lines': (1, 2000),
-                          'merge_train_max_members': (1, 6),
-                          'merge_train_max_files_per_pr': (1, 100),
-                          'revert_max_prs': (1, 5)}
+                          'spec_preflight_large_file_lines': (1, None),
+                          'merge_train_max_members': (1, None),
+                          'merge_train_max_files_per_pr': (1, None),
+                          'revert_max_prs': (1, None)}
 # #2281 L0a (design rule 3): the bound is a real technical limit, not an
 # arbitrary cap. policy.json is untrusted input, so load_policy reads at most
 # _MAX_BYTES + 1 bytes in one bounded buffer instead of the whole file. The
@@ -62,7 +62,8 @@ def load_policy(path=None):
         _refuse('POLICY_INVALID')
     allowed = {'schema_version', *POLICY_KEYS, *OPTIONAL_POLICY_LIMITS}
     if (type(data) is not dict or not {'schema_version', *POLICY_KEYS} <= set(data) <= allowed or
-            any(key in data and (type(data[key]) is not int or not low <= data[key] <= high)
+            any(key in data and (type(data[key]) is not int or
+                                 data[key] < low or (high is not None and data[key] > high))
                 for key, (low, high) in OPTIONAL_POLICY_LIMITS.items()) or
             type(data['schema_version']) is not int or data['schema_version'] != 1 or
             any(type(data[key]) is not int or not 0 <= data[key] <= 1000

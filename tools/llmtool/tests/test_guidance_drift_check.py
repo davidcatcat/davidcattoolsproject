@@ -407,6 +407,26 @@ class RuleFileSchemaTests(unittest.TestCase):
         }
         self.assertEqual(self.findings_after("developer-routes.json", routes), [])
 
+    def test_policy_optional_limit_keys_accepted(self):
+        # #2281 L0b: optional policy keys accept positive integers with no hard ceiling.
+        policy = dict(self.valid["policy.json"])
+        policy.update({
+            "timeout_continuation_max": 1,
+            "spec_preflight_large_file_lines": 2000,
+            "merge_train_max_members": 6,
+            "merge_train_max_files_per_pr": 100,
+            "revert_max_prs": 5,
+        })
+        self.assertEqual(self.findings_after("policy.json", policy), [])
+        # Higher values above the table values also pass (no ceiling).
+        policy.update({
+            "spec_preflight_large_file_lines": 50000,
+            "merge_train_max_members": 20,
+            "merge_train_max_files_per_pr": 500,
+            "revert_max_prs": 50,
+        })
+        self.assertEqual(self.findings_after("policy.json", policy), [])
+
     def test_unknown_top_level_key_fails_for_each_rule_file(self):
         for name, value in self.valid.items():
             with self.subTest(name=name):
@@ -518,6 +538,14 @@ class RuleFileSchemaTests(unittest.TestCase):
             ("policy.json", {**policy, "waiting_notify_after_hours": 0}, "integer"),
             ("policy.json", policy_missing, 'missing key "repair_max"'),
         ]
+        for key in ("spec_preflight_large_file_lines", "merge_train_max_members",
+                    "merge_train_max_files_per_pr", "revert_max_prs"):
+            cases += [
+                ("policy.json", {**policy, key: 0}, f"{key} must be an integer >= 1"),
+                ("policy.json", {**policy, key: -1}, f"{key} must be an integer >= 1"),
+                ("policy.json", {**policy, key: "10"}, f"{key} must be an integer >= 1"),
+                ("policy.json", {**policy, key: True}, f"{key} must be an integer >= 1"),
+            ]
         dispatch = self.valid["worker-dispatch.json"]
         worker = dispatch["workers"]["fixture-worker"]
         worker_missing = {key: value for key, value in worker.items() if key != "evidence"}
