@@ -388,8 +388,9 @@ def _pm_assignment(response):
                 not 1 <= len(assignment['acceptance']) <= 16):
             return None
         result = {'schema_version': 1, **assignment}
-        _screen_text(result['goal'], 512)
-        result['acceptance'] = [_screen_text(item, 512) for item in result['acceptance']]
+        # #2281 limit row 8: goal and items have no own byte cap; the response bound holds.
+        _screen_text(result['goal'], RESPONSE_LIMIT)
+        result['acceptance'] = [_screen_text(item, RESPONSE_LIMIT) for item in result['acceptance']]
         return result
     except (ValueError, TypeError, LLMToolError, UnicodeError):
         return None
@@ -412,15 +413,6 @@ def _pm_assignment_limit_error(response):
         count = len(assignment['acceptance'])
         if not 1 <= count <= 16:
             return f'PM_RESPONSE_ACCEPTANCE_COUNT: {count} items (allowed 1-16)'
-        goal_bytes = len(assignment['goal'].encode('utf-8'))
-        if goal_bytes > 512:
-            return f'PM_RESPONSE_GOAL_TOO_LONG: goal is {goal_bytes} bytes (max 512)'
-        for index, item in enumerate(assignment['acceptance']):
-            if type(item) is str:
-                item_bytes = len(item.encode('utf-8'))
-                if item_bytes > 512:
-                    return (f'PM_RESPONSE_ACCEPTANCE_ITEM_TOO_LONG: acceptance[{index}] is '
-                            f'{item_bytes} bytes (max 512)')
     except (ValueError, TypeError, UnicodeError):
         return None
     return None
@@ -433,19 +425,8 @@ def _validate_acceptance_scope(acceptance):
     if not 1 <= count <= 16:
         raise LLMToolError(
             f'PM_RESPONSE_ACCEPTANCE_COUNT: {count} items (allowed 1-16)')
-    result = []
-    for index, item in enumerate(acceptance):
-        if type(item) is str:
-            try:
-                item_bytes = len(item.encode('utf-8'))
-            except UnicodeError:
-                item_bytes = None
-            if item_bytes is not None and item_bytes > 512:
-                raise LLMToolError(
-                    f'PM_RESPONSE_ACCEPTANCE_ITEM_TOO_LONG: acceptance[{index}] is '
-                    f'{item_bytes} bytes (max 512)')
-        result.append(_screen_text(item, 512))
-    return result
+    # #2281 limit row 8: no per-item byte cap; the response bound holds.
+    return [_screen_text(item, RESPONSE_LIMIT) for item in acceptance]
 
 
 def _strict_json_object(raw):
@@ -1877,9 +1858,9 @@ def run_task_review_prompt(args, *, store=None):
                 not 1 <= len(pm_assignment['acceptance']) <= 16):
             refuse('REVIEW_PROMPT_CONTRACT_MISSING')
         try:
-            _screen_text(pm_assignment['goal'], 512)
+            _screen_text(pm_assignment['goal'], RESPONSE_LIMIT)
             for item in pm_assignment['acceptance']:
-                _screen_text(item, 512)
+                _screen_text(item, RESPONSE_LIMIT)
         except LLMToolError:
             refuse('REVIEW_PROMPT_CONTRACT_MISSING')
         return pm_assignment
@@ -4922,7 +4903,7 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
-    acceptance = [_screen_text(item, 512) for item in args.acceptance]
+    acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
     egress_basis = _screen_text(args.egress_basis, 512)
     _screen_text(task['request'], REQUEST_LIMIT)
     _screen_text(task['response'], RESPONSE_LIMIT)
@@ -5395,7 +5376,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
-    acceptance = [_screen_text(item, 512) for item in args.acceptance]
+    acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
     egress_basis = _screen_text(args.egress_basis, 512)
     request = _screen_text(task['request'], REQUEST_LIMIT)
     _screen_text(task['response'], RESPONSE_LIMIT)
@@ -6035,7 +6016,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
-    acceptance = [_screen_text(item, 512) for item in args.acceptance]
+    acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
     egress_basis = _screen_text(args.egress_basis, 512)
     request = _screen_text(task['request'], REQUEST_LIMIT)
     _screen_text(task['response'], RESPONSE_LIMIT)
@@ -6362,7 +6343,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
-    acceptance = [_screen_text(item, 512) for item in args.acceptance]
+    acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
     request = _screen_text(task['request'], REQUEST_LIMIT)
     _screen_text(task['response'], RESPONSE_LIMIT)
     route_config = load_route_config()['routes'].get('gw-agent')
@@ -6990,7 +6971,7 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
-    acceptance = [_screen_text(item, 512) for item in args.acceptance]
+    acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
     egress_basis = _screen_text(args.egress_basis, 512)
     recovering_timeout = previous_developer is not None
     task_source_sha = (previous_developer.get('source_sha')
@@ -8193,7 +8174,7 @@ def run_task_delegate(args, *, store=None):
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
-    acceptance = [_screen_text(item, 512) for item in args.acceptance]
+    acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
     context = _screen_text(args.context if hasattr(args, 'context') else
                            sys.stdin.read(48 * 1024 + 1), 48 * 1024)
     egress_basis = _screen_text(args.egress_basis, 512)

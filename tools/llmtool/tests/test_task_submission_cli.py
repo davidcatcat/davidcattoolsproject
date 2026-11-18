@@ -998,13 +998,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(parser.parse_args(['task', 'show', 'a' * 32]).action, 'show')
 
     def test_record_pm_reports_safe_assignment_limit_diagnostics(self):
+        # #2281 limit row 8: the goal and item byte caps are gone; the count stays.
         cases = (
-            ({'route': 'codex', 'risk': 'LOW', 'goal': 'g' * 515,
-              'acceptance': ['A test passes.']},
-             'PM_RESPONSE_GOAL_TOO_LONG: goal is 515 bytes (max 512)'),
-            ({'route': 'codex', 'risk': 'LOW', 'goal': 'Do one task.',
-              'acceptance': ['x' * 539]},
-             'PM_RESPONSE_ACCEPTANCE_ITEM_TOO_LONG: acceptance[0] is 539 bytes (max 512)'),
             ({'route': 'codex', 'risk': 'LOW', 'goal': 'Do one task.',
               'acceptance': ['ok'] * 22},
              'PM_RESPONSE_ACCEPTANCE_COUNT: 22 items (allowed 1-16)'),
@@ -1023,15 +1018,104 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 self.assertEqual(str(raised.exception), expected)
                 self.assertFalse(store.root.exists())
 
-    def test_task_delegate_reports_acceptance_item_size_without_echoing_text(self):
-        secretish = 'x' * 513
-        args = Namespace(provider='codex', acceptance=[secretish])
+    def test_record_pm_accepts_goal_and_item_over_512_bytes(self):
+        # #2281 limit row 8: no own byte cap on the goal or an acceptance item.
+        goal = 'Keep the whole goal in plain prose. ' * 40
+        item = 'The focused regression test passes. ' * 40
+        self.assertGreater(len(goal.encode('utf-8')), 1024)
+        self.assertGreater(len(item.encode('utf-8')), 1024)
+        response = json.dumps({
+            'schema_version': 1, 'summary': 'Bounded.',
+            'developer_assignment': {'route': 'codex', 'risk': 'LOW', 'goal': goal,
+                                     'acceptance': [item, 'A short item.']},
+        })
+        envelope = json.dumps({'request': 'Build feature', 'response': response})
+        store = TaskStore(Path(self.temp.name).resolve() / 'long-goal')
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(run_task_record_pm(Namespace(stdin_json=True), store=store,
+                                                input_stream=io.StringIO(envelope)), 0)
+        record_path = next(store.root.glob('*.json'))
+        assignment = store.get(record_path.stem)['pm_assignment']
+        self.assertEqual(assignment['goal'], goal)
+        self.assertEqual(assignment['acceptance'], [item, 'A short item.'])
+
+    def test_goal_and_item_still_screened_and_response_bound_kept(self):
+        # #2281 limit row 8: the sensitive screen still runs on the goal and on
+        # each item (screen mocked here, per the test data rule), and the total
+        # response bound still refuses.
+        long_goal = 'Keep the whole goal in plain prose. ' * 40
+        long_item = 'The focused regression test passes. ' * 40
+        flagged = 'Text the mocked screen is told to flag.'
+
+        def response_with(goal, acceptance):
+            return json.dumps({'schema_version': 1, 'summary': 'Bounded.',
+                               'developer_assignment': {
+                                   'route': 'codex', 'risk': 'LOW', 'goal': goal,
+                                   'acceptance': acceptance}})
+
+        screen = patch.object(submission_cli, '_emitted_sensitive',
+                              side_effect=lambda text: (isinstance(text, str) and
+                                                        flagged in text))
+        with screen as mocked:
+            clean = submission_cli._pm_assignment(response_with(long_goal, [long_item]))
+            self.assertEqual((clean['goal'], clean['acceptance']), (long_goal, [long_item]))
+            screened = [call.args[0] for call in mocked.call_args_list]
+            self.assertIn(long_goal, screened)
+            self.assertIn(long_item, screened)
+            self.assertIsNone(submission_cli._pm_assignment(
+                response_with(long_goal + flagged, [long_item])))
+            self.assertIsNone(submission_cli._pm_assignment(
+                response_with(long_goal, [long_item + flagged])))
+            self.assertEqual(submission_cli._validate_acceptance_scope([long_item]),
+                             [long_item])
+            with self.assertRaises(LLMToolError) as raised:
+                submission_cli._validate_acceptance_scope([long_item + flagged])
+            self.assertEqual(str(raised.exception), 'request or response contains '
+                             'recognizable credential material; redact it first')
         with self.assertRaises(LLMToolError) as raised:
-            run_task_delegate(args, store=object())
-        self.assertEqual(str(raised.exception),
-                         'PM_RESPONSE_ACCEPTANCE_ITEM_TOO_LONG: acceptance[0] is '
-                         '513 bytes (max 512)')
-        self.assertNotIn(secretish, str(raised.exception))
+            submission_cli._validate_acceptance_scope(['a' * (RESPONSE_LIMIT + 1)])
+        self.assertEqual(str(raised.exception), 'request or response exceeds the supported size')
+
+    def test_long_goal_and_item_pass_codex_delegate_end_to_end(self):
+        # #2281 limit row 8 regression: a goal and an item each well over 512 bytes
+        # pass PM submit, codex delegate and the Task store validation.
+        goal = 'Keep the whole goal in plain prose. ' * 40
+        item = 'The focused regression test passes. ' * 40
+        self.assertGreater(len(goal.encode('utf-8')), 1024)
+        self.assertGreater(len(item.encode('utf-8')), 1024)
+        response = json.dumps({
+            'schema_version': 1, 'summary': 'Bounded low-risk task.',
+            'developer_assignment': {'route': 'codex', 'risk': 'LOW', 'goal': goal,
+                                     'acceptance': [item]},
+        })
+        code, task, _, _ = self.invoke(client=FakeClient(Reply(response, {
+            'prompt_tokens': 12, 'completion_tokens': 18, 'total_tokens': 30,
+        })))
+        self.assertEqual(code, 0)
+        patch_text = ('diff --git a/sample.py b/sample.py\n'
+                      '--- a/sample.py\n+++ b/sample.py\n@@ -1 +1 @@\n'
+                      '-VALUE = 1\n+VALUE = 2\n')
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=codex_developer_config()), \
+                patch.object(CodexCLIProvider, 'complete', autospec=True,
+                             return_value=Reply(patch_text, {'elapsed_seconds': 0.25,
+                                                             'model': 'gpt-6-luna'})) as complete, \
+                redirect_stdout(output):
+            code = run_task_delegate(self._codex_delegate_args(task, acceptance=[item]))
+        self.assertEqual(code, 0, output.getvalue())
+        complete.assert_called_once()
+        # Plain ASCII prose without quotes or backslashes survives JSON nesting unchanged.
+        prompt_text = json.dumps(complete.call_args.args[1])
+        self.assertIn(goal.strip(), prompt_text)
+        self.assertIn(item.strip(), prompt_text)
+        store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+        saved = store.get(task['task_id'])
+        self.assertEqual(saved['pm_assignment']['goal'], goal)
+        self.assertEqual(saved['pm_assignment']['acceptance'], [item])
+        self.assertEqual(saved['developer']['acceptance'], [item])
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
 
     def test_background_rejects_codex_proposal_before_fork(self):
         args = Namespace(task_id='a' * 32, provider='codex', mode='proposal',
