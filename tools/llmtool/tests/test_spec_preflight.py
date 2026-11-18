@@ -203,6 +203,78 @@ class SpecPreflightTests(unittest.TestCase):
                     record_refuses = False
                 self.assertEqual(bool(check(spec)), record_refuses)
 
+    def run_main_with_stderr(self, spec, extra_args=()):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "spec.json"
+            path.write_text(json.dumps(spec), encoding="utf-8")
+            output, errors = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                status = spec_preflight.main([*extra_args, str(path)])
+            return status, output.getvalue(), errors.getvalue()
+
+    def test_spec_with_edits_field_is_refused(self):
+        """#1502 WP-G: any 'edits' field is refused, whatever its value or provider."""
+        answer_text = "value = 2"
+        edit = {"path": "tools/example.py", "old": "value = 1", "new": answer_text}
+        values = (("one edit", [edit]), ("empty list", []), ("null", None),
+                  ("string", "x"), ("object", edit))
+        for provider in (None, "gw-agent", "codex"):
+            for name, value in values:
+                with self.subTest(provider=provider, edits=name):
+                    spec = dict(self.spec, edits=value, write=["tools/example.py"])
+                    if provider is not None:
+                        spec["provider"] = provider
+                    status, output, errors = self.run_main_with_stderr(spec)
+                    self.assertEqual(status, 2)
+                    self.assertEqual(output, "SPEC_PREFLIGHT_INVALID:EDITS_FORBIDDEN\n")
+                    self.assertEqual(errors, spec_preflight.EDITS_FORBIDDEN_MESSAGE + "\n")
+                    self.assertIn("'edits' is not allowed", errors)
+                    self.assertNotIn(answer_text, output + errors)
+
+    def test_edits_refusal_also_applies_with_repo_and_ladder(self):
+        spec = dict(self.spec, provider="gw-agent", edits=[])
+        with tempfile.TemporaryDirectory() as repo:
+            ladder = Path(repo) / "ladder.jsonl"
+            ladder.write_text("", encoding="utf-8")
+            status, output, _ = self.run_main_with_stderr(
+                spec, ("--repo", repo, "--ladder", str(ladder)))
+        self.assertEqual((status, output), (2, "SPEC_PREFLIGHT_INVALID:EDITS_FORBIDDEN\n"))
+
+    def test_has_edits_field(self):
+        self.assertFalse(spec_preflight.has_edits_field(self.spec))
+        self.assertTrue(spec_preflight.has_edits_field(dict(self.spec, edits=None)))
+        self.assertTrue(spec_preflight.has_edits_field(dict(self.spec, edits=[])))
+
+    def test_edits_support_is_removed(self):
+        self.assertFalse(hasattr(spec_preflight, "check_edits"))
+
+    def test_specs_without_edits_behave_as_before(self):
+        # Plain spec: unchanged OK and no stderr message.
+        self.assertEqual(self.run_main_with_stderr(self.spec), (0, "SPEC_PREFLIGHT_OK\n", ""))
+        with tempfile.TemporaryDirectory() as repo:
+            (Path(repo) / "small.txt").write_text("one\ntwo\n", encoding="utf-8")
+            (Path(repo) / "large.txt").write_text(
+                "line\n" * spec_preflight.LARGE_FILE_LINES, encoding="utf-8")
+            small = dict(self.spec, provider="gw-agent", write=["small.txt"])
+            self.assertEqual(self.run_main_with_stderr(small, ("--repo", repo)),
+                             (0, "SPEC_PREFLIGHT_OK\n", ""))
+            # #1570: a gw-agent spec that writes a long file is still refused.
+            large = dict(self.spec, provider="gw-agent", write=["large.txt"])
+            status, output, _ = self.run_main_with_stderr(large, ("--repo", repo))
+            self.assertEqual((status, output),
+                             (2, "SPEC_PREFLIGHT_INVALID:EDIT_LINE_HINT_MISSING:-1\n"))
+            # Other providers are not held to the long-file rule.
+            other = dict(self.spec, provider="codex", write=["large.txt"])
+            self.assertEqual(self.run_main_with_stderr(other, ("--repo", repo))[:2],
+                             (0, "SPEC_PREFLIGHT_OK\n"))
+
+    def test_gw_agent_text_checks_still_cover_goal_and_acceptance(self):
+        spec = dict(self.spec, provider="gw-agent", goal="café",
+                    acceptance=['Add "items = ["'])
+        self.assertEqual(spec_preflight.check_ascii(spec), ["goal_non_ascii"])
+        self.assertEqual(spec_preflight.check_open_bracket_ends(spec),
+                         ["acceptance[0]_open_bracket_line_end"])
+
     def test_wrong_field_type_and_argument_count(self):
         spec = dict(self.spec, acceptance=[1])
         status, output = self.run_main(spec)
