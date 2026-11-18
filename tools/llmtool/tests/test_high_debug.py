@@ -2231,8 +2231,10 @@ class HighDebugTests(unittest.TestCase):
         self._poster.assert_not_called()
         return caught.exception.high_debug_code
 
-    def test_claude_debug_unlisted_and_cross_family_models_refused_before_d6(self):
-        for model in ('claude-unlisted-model', high_debug._CODEX_MODEL,
+    # Owner #2302 P2: an unlisted model of the Debug role's own family is
+    # admitted, so the refused models below are of another family or malformed.
+    def test_claude_debug_other_family_and_cross_family_models_refused_before_d6(self):
+        for model in ('gemini-unlisted-model', high_debug._CODEX_MODEL,
                       'anthropic/' + high_debug._CLAUDE_MODEL):
             with self.subTest(model=model):
                 self.assertEqual(self._debug_refusal(route='claude', resolved={
@@ -2240,8 +2242,8 @@ class HighDebugTests(unittest.TestCase):
                     'config_dir': '/safe/claude', 'provider': 'claude', 'model': model}),
                     'ROLE_MODEL_NOT_ALLOWED')
 
-    def test_codex_debug_unlisted_and_cross_family_models_refused_before_d6(self):
-        for model in ('gpt-unlisted-model', high_debug._CLAUDE_MODEL):
+    def test_codex_debug_other_family_and_cross_family_models_refused_before_d6(self):
+        for model in ('gemini-unlisted-model', high_debug._CLAUDE_MODEL):
             with self.subTest(model=model), patch.object(high_debug, '_CODEX_MODEL', model):
                 self.assertEqual(self._debug_refusal(route='codex'),
                                  'ROLE_MODEL_NOT_ALLOWED')
@@ -2289,13 +2291,13 @@ class HighDebugTests(unittest.TestCase):
                 route='claude', resolve=lambda role: real(role, environ={}, home=home))
         self.assertEqual(code, 'ROLE_MODEL_NOT_ALLOWED')
 
-    def test_run_codex_and_run_claude_refuse_unlisted_and_cross_family_at_launch(self):
+    def test_run_codex_and_run_claude_refuse_other_family_and_cross_family_at_launch(self):
         cases = (
-            (high_debug._run_codex, {}, ('gpt-unlisted-model', high_debug._CLAUDE_MODEL,
+            (high_debug._run_codex, {}, ('gemini-unlisted-model', high_debug._CLAUDE_MODEL,
                                          'openai/' + high_debug._CODEX_MODEL,
                                          high_debug._CODEX_MODEL.upper())),
             (high_debug._run_claude, {'config_dir': '/safe/claude'},
-             ('claude-unlisted-model', high_debug._CODEX_MODEL,
+             ('gemini-unlisted-model', high_debug._CODEX_MODEL,
               high_debug._CLAUDE_MODEL.upper(), None)),
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -2327,8 +2329,8 @@ class HighDebugTests(unittest.TestCase):
         self.assertNotIn('ROLE_MODEL_NOT_ALLOWED', high_debug.DEBUG_FALLBACK_CODES)
         self.assertNotIn('ROLE_MODEL_NOT_ALLOWED', high_debug._CLAUDE_DEBUG_UNAVAILABLE)
         real = high_debug.run_high_debug
-        # An unlisted and a cross-family Codex Debug model: no switch to Claude.
-        for model in ('gpt-unlisted-model', high_debug._CLAUDE_MODEL):
+        # An other-family and a cross-family Codex Debug model: no switch to Claude.
+        for model in ('gemini-unlisted-model', high_debug._CLAUDE_MODEL):
             with self.subTest(route='codex', model=model), \
                  patch.object(high_debug, '_CODEX_MODEL', model), \
                  patch.object(high_debug.worker_dispatch, 'evaluate',
@@ -2339,8 +2341,8 @@ class HighDebugTests(unittest.TestCase):
                 self.assertEqual(caught.exception.high_debug_code, 'ROLE_MODEL_NOT_ALLOWED')
                 self.assertEqual([call.kwargs['route'] for call in wrapped.call_args_list],
                                  ['codex'])
-        # After a real fallback code, a refused Claude Debug model (unlisted or
-        # cross-family) still stops with its own code, never HIGH_DEBUG_WAITING.
+        # After a real fallback code, a refused Claude Debug model (other family
+        # or cross-family) still stops with its own code, never HIGH_DEBUG_WAITING.
         def staged(*, route, codex_attempt=None, **rest):
             if route == 'codex':
                 # Stands in for a Codex runner that ran and reported quota
@@ -2348,7 +2350,7 @@ class HighDebugTests(unittest.TestCase):
                 codex_attempt.code = 'HIGH_DEBUG_QUOTA_EXHAUSTED'
                 high_debug._refuse('HIGH_DEBUG_QUOTA_EXHAUSTED')
             return real(route=route, **rest)
-        for model in ('claude-unlisted-model', high_debug._CODEX_MODEL):
+        for model in ('gemini-unlisted-model', high_debug._CODEX_MODEL):
             with self.subTest(route='claude', model=model), \
                  patch.object(high_debug, 'run_high_debug', side_effect=staged), \
                  patch.object(high_debug.worker_dispatch, 'evaluate',

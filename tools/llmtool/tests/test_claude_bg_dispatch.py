@@ -30,6 +30,10 @@ from llmtool.developer_routes import load_route_config  # noqa: E402
 _REGISTRY = load_route_config()['roles']
 REVIEW_MODEL = _REGISTRY['claude-reviewer']['allowed_models'][0]
 CROSS_FAMILY_MODEL = _REGISTRY['codex-reviewer']['allowed_models'][0]
+# Owner #2302 P2: a Claude-family model that is not the listed one is admitted.
+SAME_FAMILY_MODEL = 'claude-fable-5-2'
+# Neither Claude nor Codex family: refused for the Claude Reviewer.
+OTHER_FAMILY_MODEL = 'gemini-unlisted-model'
 
 TARGET = '2b128608-8b94-4c12-96b9-e6cdf9a388c7'
 COPY = '95c9758e-1111-4222-8333-944455556666'
@@ -478,9 +482,9 @@ class ClaudeBgDispatchTests(unittest.TestCase):
             args += ['--model', model]
         return self.run_tool(*args)
 
-    def test_reviewer_unlisted_and_cross_family_models_are_refused_before_cli(self):
+    def test_reviewer_other_family_and_malformed_models_are_refused_before_cli(self):
         for new in (True, False):
-            for model in ('claude-unlisted-model', CROSS_FAMILY_MODEL,
+            for model in (OTHER_FAMILY_MODEL, CROSS_FAMILY_MODEL,
                           'anthropic/' + REVIEW_MODEL, REVIEW_MODEL.upper()):
                 for layer in ('cli', 'resolved'):
                     with self.subTest(new=new, model=model, layer=layer):
@@ -510,7 +514,7 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         config_path = user_config_path(str(user_home))
         config_path.parent.mkdir(parents=True)
         config_path.write_text('roles:\n  reviewer:\n    model: %s\n' % CROSS_FAMILY_MODEL)
-        for model in (None, 'claude-unlisted-model'):
+        for model in (None, 'anthropic/' + REVIEW_MODEL):
             with self.subTest(model=model):
                 self.reset()
                 with patch.object(dispatch_tool.role_config, 'resolve_role',
@@ -520,31 +524,33 @@ class ClaudeBgDispatchTests(unittest.TestCase):
                 self.assertEqual((code, receipt['reason']), (2, 'ROLE_MODEL_NOT_ALLOWED'))
                 self.assertEqual(self.calls(), [])
 
-    def test_reviewer_listed_model_is_explicit_for_new_and_resumed_sessions(self):
-        for new in (True, False):
-            for layer in ('cli', 'resolved'):
-                with self.subTest(new=new, layer=layer):
-                    self.reset()
-                    if new:
-                        self.scenario(after=[[row('NEW-SESSION', name='claude-reviewer',
-                                                  cwd=self.root)]],
-                                      transcripts=[{'session': 'NEW-SESSION',
-                                                    'new_action': True}])
-                    else:
-                        self.scenario(all=[row(TARGET, status='done', cwd=self.cwd)],
-                                      before=[], after=[[]])
-                    resolved = self.reviewer_role(REVIEW_MODEL if layer == 'resolved' else None)
-                    with patch.object(dispatch_tool.role_config, 'resolve_role',
-                                      return_value=resolved), \
-                            patch.dict(os.environ, {'ANTHROPIC_MODEL': 'claude-other-model'}):
-                        self.reviewer_dispatch(new=new,
-                                               model=REVIEW_MODEL if layer == 'cli' else None)
-                    [launch] = self.launches()
-                    argv = launch['argv']
-                    self.assertEqual(argv[argv.index('--model') + 1], REVIEW_MODEL)
-                    self.assertIn('--session-id' if new else '--resume', argv)
-                    # An inherited ANTHROPIC_MODEL never differs from the explicit model.
-                    self.assertEqual(launch['model'], REVIEW_MODEL)
+    def test_reviewer_admitted_model_is_explicit_for_new_and_resumed_sessions(self):
+        # The listed model and (Owner #2302 P2) any other Claude-family model.
+        for model in (REVIEW_MODEL, SAME_FAMILY_MODEL):
+            for new in (True, False):
+                for layer in ('cli', 'resolved'):
+                    with self.subTest(model=model, new=new, layer=layer):
+                        self.reset()
+                        if new:
+                            self.scenario(after=[[row('NEW-SESSION', name='claude-reviewer',
+                                                      cwd=self.root)]],
+                                          transcripts=[{'session': 'NEW-SESSION',
+                                                        'new_action': True}])
+                        else:
+                            self.scenario(all=[row(TARGET, status='done', cwd=self.cwd)],
+                                          before=[], after=[[]])
+                        resolved = self.reviewer_role(model if layer == 'resolved' else None)
+                        with patch.object(dispatch_tool.role_config, 'resolve_role',
+                                          return_value=resolved), \
+                                patch.dict(os.environ, {'ANTHROPIC_MODEL': 'claude-other-model'}):
+                            self.reviewer_dispatch(new=new,
+                                                   model=model if layer == 'cli' else None)
+                        [launch] = self.launches()
+                        argv = launch['argv']
+                        self.assertEqual(argv[argv.index('--model') + 1], model)
+                        self.assertIn('--session-id' if new else '--resume', argv)
+                        # An inherited ANTHROPIC_MODEL never differs from the explicit model.
+                        self.assertEqual(launch['model'], model)
 
     def test_busy_resume_refuses_using_resolved_account(self):
         role_dir = self.home / 'developer-account'
