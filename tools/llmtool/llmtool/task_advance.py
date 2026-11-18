@@ -1037,7 +1037,7 @@ def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, rela
         mac_capacity = _mac_capacity_cancel(run, head, github_get, number)
         if mac_capacity is not None:
             return mac_capacity
-    action = _remote_fail_action(related, head)
+    action = _remote_fail_action(related, head, d6=d6)
     if action in ('WAITING_REPAIR', 'REPAIR_OUTCOME_UNKNOWN'):
         return action, [action], None
     if action == 'DEVELOPER_START_FAILED':
@@ -1052,7 +1052,7 @@ def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, rela
     if action == 'REPAIR_RETRY':
         retry = next((item for item in reversed(related.get('repair_claims', []))
                       if type(item) is dict and item.get('head_sha') == head and
-                      item.get('state') == 'DISPATCHED'), None)
+                      item.get('state') in ('DISPATCHED', 'UNKNOWN')), None)
         retry_claim_id = retry.get('repair_task_id') if type(retry) is dict else None
         if type(retry_claim_id) is not str:
             return 'CI_FAILED', [fail_code, 'REPAIR_CLAIM_UNAVAILABLE'], None
@@ -2316,12 +2316,33 @@ def _record_cleared_pr(store, task_id, number, head, d6, gh_runner, root):
     return codes
 
 
-def _remote_fail_action(related, result_head):
+def _repair_cleanup_confirmed(current_repair, d6):
+    if type(current_repair) is not dict or type(d6) is not dict:
+        return False
+    if d6.get('dirty') is True or d6.get('state') == 'DIRTY':
+        return False
+    result_head = d6.get('result_head')
+    if (type(result_head) is not str or
+            result_head != current_repair.get('head_sha') or
+            d6.get('recorded_result_head') != result_head):
+        return False
+    if current_repair.get('cleanup_status') == 'CONFIRMED':
+        return True
+    repair_rec = current_repair.get('repair_record')
+    if type(repair_rec) is dict:
+        dev = repair_rec.get('developer')
+        exec_info = dev.get('execution') if type(dev) is dict else None
+        if type(exec_info) is dict and exec_info.get('cleanup_status') == 'CONFIRMED':
+            return True
+    return False
+
+
+def _remote_fail_action(related, result_head, d6=None):
     """Return the repair action for an exact-head EC2 FAIL."""
     repairs = related.get('repair_claims', []) if type(related) is dict else []
     current_repair = next((item for item in reversed(repairs)
                            if type(item) is dict and item.get('head_sha') == result_head), None)
-    if current_repair is not None and current_repair.get('state') == 'DISPATCHED':
+    if current_repair is not None and current_repair.get('state') in ('DISPATCHED', 'UNKNOWN'):
         state = current_repair.get('repair_state')
         if state == 'START_FAILED':
             return 'DEVELOPER_START_FAILED'
@@ -2330,6 +2351,8 @@ def _remote_fail_action(related, result_head):
         if state in ('RUNNING', 'PENDING'):
             return 'WAITING_REPAIR'
         if state == 'UNKNOWN':
+            if _repair_cleanup_confirmed(current_repair, d6):
+                return 'REPAIR_RETRY'
             return 'REPAIR_OUTCOME_UNKNOWN'
         if state == 'RECORD_UNAVAILABLE':
             return 'DEVELOPER_ATTENTION'
@@ -2406,7 +2429,7 @@ def _pre_review_action(record, d6, pr, related, result_head):
     if remote_status == 'NOT_EXECUTED':
         return 'NEEDS_ATTENTION'
     if remote_status == 'FAIL':
-        return _remote_fail_action(related, result_head)
+        return _remote_fail_action(related, result_head, d6=d6)
     if remote_status not in ('PASS', 'ADMISSION_DENIED'):
         return 'RUN_REMOTE_TEST'
     if type(pr) is dict and pr.get('merged') is True:
@@ -2426,7 +2449,14 @@ def decide(record, d6, pr, related):
         return 'DEVELOPER_ATTENTION'
     if developer.get('state') != 'DEVELOPER_RESPONDED':
         return 'DEVELOPER_ATTENTION'
-    if type(d6) is not dict or d6.get('dirty') is True or d6.get('state') == 'DIRTY':
+    active_repairs = related.get('repair_claims', []) if type(related) is dict else []
+    dirty = type(d6) is not dict or d6.get('dirty') is True or d6.get('state') == 'DIRTY'
+    current_head = d6.get('result_head') if type(d6) is dict else None
+    if dirty and any(type(item) is dict and item.get('head_sha') == current_head and
+                     item.get('state') in ('DISPATCHED', 'UNKNOWN') and
+                     item.get('repair_state') == 'UNKNOWN' for item in active_repairs):
+        return 'REPAIR_OUTCOME_UNKNOWN'
+    if dirty:
         return 'PUBLISH'
     result_head = d6.get('result_head')
     if (type(result_head) is not str or re.fullmatch(r'[0-9a-f]{40}', result_head) is None or
@@ -2451,7 +2481,7 @@ def decide(record, d6, pr, related):
         if remote_status == 'NOT_EXECUTED':
             return 'NEEDS_ATTENTION'
         if remote_status == 'FAIL':
-            return _remote_fail_action(related, result_head)
+            return _remote_fail_action(related, result_head, d6=d6)
         return 'PUBLISH'
 
     matching = [claim for claim in claims if type(claim) is dict and
@@ -2482,23 +2512,25 @@ def decide(record, d6, pr, related):
             repairs = (related.get('repair_claims', []) if type(related) is dict else [])
             current_repair = next((item for item in reversed(repairs)
                                    if type(item) is dict and item.get('head_sha') == result_head), None)
-            if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
+            if (current_repair is not None and current_repair.get('state') in ('DISPATCHED', 'UNKNOWN') and
                     current_repair.get('repair_state') == 'START_FAILED'):
                 return 'DEVELOPER_START_FAILED'
-            if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
+            if (current_repair is not None and current_repair.get('state') in ('DISPATCHED', 'UNKNOWN') and
                     current_repair.get('repair_state') in (
                         'UNAVAILABLE', 'BLOCKED', 'OUTPUT_REJECTED')):
                 return 'REPAIR_RETRY'
-            if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
+            if (current_repair is not None and current_repair.get('state') in ('DISPATCHED', 'UNKNOWN') and
                     current_repair.get('repair_state') in ('RUNNING', 'PENDING')):
                 return 'WAITING_REPAIR'
-            if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
+            if (current_repair is not None and current_repair.get('state') in ('DISPATCHED', 'UNKNOWN') and
                     current_repair.get('repair_state') == 'UNKNOWN'):
+                if _repair_cleanup_confirmed(current_repair, d6):
+                    return 'REPAIR_RETRY'
                 return 'REPAIR_OUTCOME_UNKNOWN'
-            if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
+            if (current_repair is not None and current_repair.get('state') in ('DISPATCHED', 'UNKNOWN') and
                     current_repair.get('repair_state') == 'RECORD_UNAVAILABLE'):
                 return 'DEVELOPER_ATTENTION'
-            if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
+            if (current_repair is not None and current_repair.get('state') in ('DISPATCHED', 'UNKNOWN') and
                     current_repair.get('repair_state') == 'RESPONDED'):
                 return 'PUBLISH'
             # Only a COMPLETED claim's outcome carries a count. Without a code
@@ -3231,13 +3263,20 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         if type(claim) is not dict:
             continue
         repair_record = None
+        cleanup_status = 'UNKNOWN'
         try:
             repair_record = store.get(claim['repair_task_id'])
             repair_state = (derive_repair_state(repair_record)
                             if type(repair_record) is dict else 'RECORD_UNAVAILABLE')
+            if type(repair_record) is dict:
+                dev = repair_record.get('developer')
+                exec_info = dev.get('execution') if type(dev) is dict else None
+                if type(exec_info) is dict and exec_info.get('cleanup_status') == 'CONFIRMED':
+                    cleanup_status = 'CONFIRMED'
         except Exception:
             repair_state = 'RECORD_UNAVAILABLE'
-        repair_claims.append(dict(claim, repair_state=repair_state))
+        repair_claims.append(dict(claim, repair_state=repair_state, cleanup_status=cleanup_status,
+                                  repair_record=repair_record))
     related['repair_claims'] = repair_claims
     try:
         review_outcomes = _review_outcomes(record, _claims(record), get)
@@ -3520,7 +3559,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                 if step == 'REPAIR_RETRY':
                     repair_claim = next((item for item in reversed(record.get('review_repair_claims', []))
                                          if type(item) is dict and item.get('head_sha') == d6['result_head'] and
-                                         item.get('state') == 'DISPATCHED'), None)
+                                         item.get('state') in ('DISPATCHED', 'UNKNOWN')), None)
                     if repair_claim is None:
                         step, codes = 'REFUSED', ['REPAIR_CLAIM_UNAVAILABLE']
                 remote_status, _, failure_receipt = _remote_test_status(record, d6)

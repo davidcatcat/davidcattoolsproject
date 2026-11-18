@@ -310,7 +310,8 @@ def _registered_d6(task, executor_task):
         _refuse('REPAIR_HEAD_MOVED')
     if (snapshot.head != registration.result_sha or snapshot.root != registration.root or
             snapshot.common_dir != registration.common_dir or
-            snapshot.branch != registration.branch):
+            snapshot.branch != registration.branch or
+            getattr(snapshot, 'dirty', False) is True):
         _refuse('REPAIR_HEAD_MOVED')
     return registration, snapshot
 
@@ -787,7 +788,7 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                         claim.get('repair_task_id') == retry_claim_id and
                         claim.get('pr') == pr_number and
                         claim.get('head_sha') == packet['failed_head'] and
-                        claim.get('state') == 'DISPATCHED'), None)
+                        claim.get('state') in ('DISPATCHED', 'UNKNOWN')), None)
     if retry_claim_id is not None and retry_claim is None:
         _refuse('REPAIR_CLAIM_UNAVAILABLE')
     if existing is not None and existing is not retry_claim:
@@ -796,6 +797,49 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
             existing = _auto_replay_claim(store, task, task_id, existing)
         task_id_for_repair = existing.get('repair_task_id')
         dispatched = existing.get('state') == 'DISPATCHED'
+        if not dispatched and existing.get('state') == 'UNKNOWN':
+            try:
+                repair_record = store.get(task_id_for_repair)
+            except Exception:
+                repair_record = None
+            if (type(repair_record) is dict and repair_record.get('task_id') == task_id_for_repair and
+                    repair_record.get('developer') is None):
+                if _current_d6_head(task, executor_task, current_head) == packet['failed_head']:
+                    adapter = dispatch_adapter
+                    if adapter is None:
+                        adapter = lambda **request: _delegate_repair(
+                            **request, delegate=delegate_callable, store=store)
+                    try:
+                        result = adapter(task=repair_record, developer=developer, packet=packet,
+                                         executor_task=executor_task, provider_profile=profile,
+                                         model=developer.get('model'))
+                    except Exception:
+                        _update_claim_state(store, task_id, existing, 'UNKNOWN')
+                        raise
+                    _update_claim_state(store, task_id, existing, 'DISPATCHED')
+                    existing['state'] = 'DISPATCHED'
+                    response = {'result': result, 'attempt': existing['attempt'],
+                                'repair_task_id': repair_record['task_id'],
+                                'claim': existing,
+                                'next_action': f"review-dispatch --version {packet_version + 1}"}
+                    if auto_review:
+                        try:
+                            published_head = _current_d6_head(task, executor_task, current_head)
+                        except Exception:
+                            published_head = packet['failed_head']
+                        if (type(published_head) is str and
+                                re.fullmatch(r'[0-9a-f]{40}', published_head) is not None and
+                                published_head != packet['failed_head']):
+                            dispatch = review_dispatcher
+                            if dispatch is None:
+                                from .review_dispatch import dispatch_review
+                                dispatch = dispatch_review
+                            response['review'] = dispatch(
+                                store=store, task_id=task_id, executor_task=executor_task,
+                                pr_number=pr_number, version=packet_version + 1)
+                        else:
+                            response['review'] = {'state': 'NOT_READY', 'reason': 'REPAIR_NOT_PUBLISHED'}
+                    return response
         return {'claim': existing, 'repair_task_id': task_id_for_repair,
                 'replayed': dispatched,
                 'next_action': (f"review-dispatch --version {packet_version + 1}"
@@ -874,7 +918,7 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         if retry_claim is not None:
             retry_index = next((index for index, item in enumerate(next_claims)
                                 if item.get('repair_task_id') == retry_claim_id and
-                                item.get('state') == 'DISPATCHED'), None)
+                                item.get('state') in ('DISPATCHED', 'UNKNOWN')), None)
             if retry_index is None:
                 _refuse('REPAIR_CLAIM_UNAVAILABLE')
             next_claims[retry_index] = dict(next_claims[retry_index], state='FAILED')
