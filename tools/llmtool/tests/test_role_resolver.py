@@ -377,7 +377,7 @@ class AliasTests(AccountBase):
             self.assert_alias_refused('unbound-tester')
 
 
-class DispatchPathTests(ResolverBase):
+class DispatchPathTests(AccountBase):
     def routes(self):
         return load_route_config()['routes']
 
@@ -408,14 +408,18 @@ class DispatchPathTests(ResolverBase):
     def test_claude_dispatch_accepts_a_same_family_model_from_user_config(self):
         # Owner #2302 P2: claude-fable-5-2 is not in allowed_models.
         calls = self.isolated_resolver()
-        self.save({'roles': {'claude-developer': {'model': 'claude-fable-5-2'}}})
+        self.save({'accounts': self.accounts,
+                   'roles': {'claude-developer': {'account': 'work',
+                                                  'model': 'claude-fable-5-2'}}})
         model, _effort = task_submission_cli._claude_developer_profile(dict(self.routes()['claude']))
         self.assertEqual(model, 'claude-fable-5-2')
         self.assertEqual(calls, ['claude-developer'])
 
     def test_claude_dispatch_refuses_a_wrong_family_model(self):
         calls = self.isolated_resolver()
-        self.save({'roles': {'claude-developer': {'model': 'gemini-4-hydrogen-medium'}}})
+        self.save({'accounts': self.accounts,
+                   'roles': {'claude-developer': {'account': 'work',
+                                                  'model': 'gemini-4-hydrogen-medium'}}})
         with self.assertRaises(LLMToolError) as caught:
             task_submission_cli._claude_developer_profile(dict(self.routes()['claude']))
         self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
