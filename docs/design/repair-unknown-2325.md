@@ -140,10 +140,10 @@ Observed instances:
   - *Risk*: None. The worktree is verified clean before re-dispatch. If the retried Developer run succeeds, HEAD moves and passes through standard remote-test and formal cross-family review before merge.
 - **Risks to Dispatch Gating**:
   - *Execution-Cleanup Guard Requirement*:
-    An unconditional mapping of `repair_state == 'UNKNOWN'` to `REPAIR_RETRY` omits an execution-cleanup guard. In `opencode_direct_developer.py:1077–1088`, exceptions such as `OPENCODE_CLEANUP_UNKNOWN` are raised with `attempted=True`. In `tools/llmtool/llmtool/task_submission_cli.py:5059–5074` (and line 5101), this is persisted as `DEVELOPER_OUTCOME_UNKNOWN` with its `cleanup_status` in `developer.execution`.
+    An unconditional mapping of `repair_state == 'UNKNOWN'` to `REPAIR_RETRY` omits an execution-cleanup guard. In `opencode_direct_developer.py:1077–1088`, exceptions such as `OPENCODE_CLEANUP_UNKNOWN` are raised with `attempted=True`. In `tools/llmtool/llmtool/task_submission_cli.py:5059–5074` (and line 5101), this is persisted as `DEVELOPER_OUTCOME_UNKNOWN` with its `cleanup_status` in `developer.execution`. Specifically, the adapter records `'CONFIRMED'` when lifecycle cleanup is confirmed and `'UNKNOWN'` otherwise (`opencode_direct_developer.py:1034–1037`), and the CLI persists `exc.cleanup_status` unchanged (`task_submission_cli.py:5069, 5101`).
     A clean and unchanged worktree (`d6['dirty'] is False` and `d6['result_head'] == snapshot.head`) establishes only that repository files are unmodified; it does not establish that the previous writer process has actually terminated or that its cleanup completed.
     If `state == 'UNKNOWN'` were unconditionally retried, `task advance` could launch a new Developer writer while a prior process is still active or in an unconfirmed state, violating the single-writer D6 invariant (Common core rule 2).
-  - *Narrowed Proposal*: Automatic retry must be narrowed strictly to runs with confirmed process termination, verified cleanup (`cleanup_status == 'CLEAN'`), and released writer ownership. Runs with uncertain execution or unconfirmed cleanup must retain a hold (e.g., `DEVELOPER_ATTENTION` or `REPAIR_OUTCOME_UNKNOWN`) to prevent concurrent writer dispatch.
+  - *Narrowed Proposal*: Automatic retry must be narrowed strictly to runs with confirmed process termination, verified cleanup (`cleanup_status == 'CONFIRMED'`), and released writer ownership. Runs with uncertain execution or unconfirmed cleanup must retain a hold (e.g., `DEVELOPER_ATTENTION` or `REPAIR_OUTCOME_UNKNOWN`) to prevent concurrent writer dispatch.
   - Dispatch authority in `worker-dispatch.json` must be re-evaluated before re-dispatch, stopping cleanly if the route was paused.
 
 ### Candidate Fix 2: Provide an Explicit PM Recovery Command / Parameter for Stuck Repair Claims
@@ -162,8 +162,8 @@ Observed instances:
 - **Description**:
   In `tools/llmtool/llmtool/task_advance.py`:
   - When `derive_repair_state()` observes `DEVELOPER_OUTCOME_UNKNOWN`:
-    - If process termination or cleanup is unconfirmed (`cleanup_status != 'CLEAN'`), retain `'UNKNOWN'` (holding advancement under `REPAIR_OUTCOME_UNKNOWN`).
-    - If process termination and cleanup are confirmed (`cleanup_status == 'CLEAN'`) on a clean, unchanged worktree, return `'DEVELOPER_ATTENTION'` (or a dedicated actionable state).
+    - If process termination or cleanup is unconfirmed (`cleanup_status != 'CONFIRMED'`), retain `'UNKNOWN'` (holding advancement under `REPAIR_OUTCOME_UNKNOWN`).
+    - If process termination and cleanup are confirmed (`cleanup_status == 'CONFIRMED'`) on a clean, unchanged worktree, return `'DEVELOPER_ATTENTION'` (or a dedicated actionable state).
   - In `_remote_fail_action()`, map this to `'DEVELOPER_ATTENTION'` with code `'REPAIR_OUTCOME_UNKNOWN'`, allowing `task advance` to present an actionable hold for PM decision (such as replan, route switch, or manual recovery) rather than a dead-end exit `1` loop.
 - **Risks to Counts**:
   - Low risk: Halts advancement cleanly under PM attention. The PM can choose to replan, drop, or retry. Any subsequent repair command routes through `review_repair.py:836–851`, which enforces attempt increments and the 2-repair ceiling (`REPAIR_LIMIT_REACHED`).
