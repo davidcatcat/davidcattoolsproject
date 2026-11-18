@@ -253,10 +253,8 @@ class AgentLoop:
             if self.turns >= self.b['max_turns']:
                 raise BudgetExceeded('TURN_BUDGET_EXCEEDED')
             remaining = self._check_wall()
-            out_left = self.b['max_output_tokens'] - self.out_tokens
-            if out_left <= 0:
-                raise BudgetExceeded('OUTPUT_TOKEN_BUDGET_EXCEEDED')
-            max_tokens = min(self.profile.max_output_tokens, out_left)
+            # #2281: the output-token budget is gone; the profile limit still bounds one reply.
+            max_tokens = self.profile.max_output_tokens
             self._compact(max_tokens)
             body, redactions = self.screener.obj(self._body(max_tokens))
             data = canonical(body)
@@ -265,8 +263,7 @@ class AgentLoop:
             if self.sent_bytes + len(data) > self.b['max_sent_bytes']:
                 raise BudgetExceeded('SENT_BYTES_EXCEEDED')
             estimate = self._estimate(data)
-            if self.in_tokens + estimate > self.b['max_input_tokens']:
-                raise BudgetExceeded('INPUT_TOKEN_BUDGET_EXCEEDED')
+            # #2281: token counts are reported, never used to stop a run.
             self.sent_bytes += len(data)
             self.turns += 1
             try:
@@ -305,10 +302,6 @@ class AgentLoop:
             consecutive_lengths = 0
             group = [msg]
             self.hist['groups'].append(group)
-            if self.out_tokens > self.b['max_output_tokens']:
-                raise BudgetExceeded('OUTPUT_TOKEN_BUDGET_EXCEEDED')
-            if self.in_tokens > self.b['max_input_tokens']:
-                raise BudgetExceeded('INPUT_TOKEN_BUDGET_EXCEEDED')
             self._check_wall()
             if not calls:
                 no_tool += 1
