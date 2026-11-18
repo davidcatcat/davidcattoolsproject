@@ -139,16 +139,16 @@ def _read_grants(list_path):
         with Path(list_path).open('rb') as stream:
             raw = stream.read(MAX_GRANTS_BYTES + 1)
     except FileNotFoundError:
-        raise _Refusal(WorkflowGrantCode.GRANT_FILE_MISSING)
+        raise _Refusal(WorkflowGrantCode.GRANT_FILE_MISSING) from None
     except OSError:
-        raise _Refusal(WorkflowGrantCode.GRANT_FILE_MALFORMED)
+        raise _Refusal(WorkflowGrantCode.GRANT_FILE_MALFORMED) from None
     if len(raw) > MAX_GRANTS_BYTES:
         raise _Refusal(WorkflowGrantCode.GRANT_FILE_MALFORMED)
     try:
         value = json.loads(raw.decode('utf-8'), object_pairs_hook=_unique_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
     except (UnicodeError, ValueError, TypeError, RecursionError):
-        raise _Refusal(WorkflowGrantCode.GRANT_FILE_MALFORMED)
+        raise _Refusal(WorkflowGrantCode.GRANT_FILE_MALFORMED) from None
     if (type(value) is not dict or set(value) != frozenset(('schema_version', 'grants')) or
             type(value.get('schema_version')) is not int or value['schema_version'] != 1):
         raise _Refusal(WorkflowGrantCode.GRANT_FILE_MALFORMED)
