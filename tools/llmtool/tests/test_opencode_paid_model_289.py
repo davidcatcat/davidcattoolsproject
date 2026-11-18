@@ -189,8 +189,16 @@ class OpenCodePaidModel289Tests(unittest.TestCase):
             self.assertEqual(model, opencode_direct_developer.MODEL)
             self.assertEqual(steps, opencode_direct_developer.DEFAULT_AGENT_STEPS)
 
+    def test_profile_resolution_when_profile_model_is_none(self):
+        mock_profile = _make_mock_profile(None)
+        with patch('llmtool.task_submission_cli.resolve_profile_config', return_value=mock_profile), \
+                patch('llmtool.role_config.resolve_role', return_value={}):
+            model, steps = task_submission_cli._opencode_developer_profile()
+            self.assertEqual(model, opencode_direct_developer.MODEL)
+            self.assertEqual(steps, opencode_direct_developer.DEFAULT_AGENT_STEPS)
+
     def test_profile_resolution_refuses_malformed_model_with_stable_code(self):
-        for bad_model in ('opencode/a/b', 'bare-model', '', None, 'opencode/m#HIGH'):
+        for bad_model in ('opencode/a/b', 'bare-model', '', '   ', 'opencode/m#HIGH'):
             with self.subTest(model=bad_model):
                 mock_profile = _make_mock_profile(bad_model)
                 with patch('llmtool.task_submission_cli.resolve_profile_config', return_value=mock_profile), \
