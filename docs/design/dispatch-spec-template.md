@@ -176,6 +176,7 @@ Five distinct dispatch kinds cover all AI roles in the team:
 - **Read Scope**: Target inspection directories and reference documents.
 - **Base / Head**: `base` and `result_head` both match the canonical `origin/main` commit SHA.
 - **Goal / Acceptance**: Read-only exploratory findings, architectural options, or feasibility analysis.
+- **Dispatch Entrypoint**: Dispatched via `llmtool task delegate` in read-only mode (`write_paths: []`). Pre-dispatch enforcement validates that `write_paths` is strictly empty, `base` and `result_head` match canonical `origin/main`, and worker route is authorized, returning `SPEC_READONLY_ROLE_HAS_WRITES` or `SPEC_DISPATCH_UNAUTHORIZED` on failure.
 - **Worker Dispatch Authority**: Dispatch requires resolving a recognized worker in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) (such as an authorized developer route operating in read-only mode with empty `write_paths`) with an affirmative dispatch evaluation (`ALLOWED` or `OWNER_ASSIGNMENT_ONLY` with a matching `owner_ref`). The role key `claude-subpm` is not an entry in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json); template specifications naming unlisted workers or unsupported routes are classified as `TEMPLATE_ONLY` and non-dispatchable. Prior to policy addition and adapter support, preflight checks evaluate unlisted workers as `WORKER_UNKNOWN` and refuse dispatch with `SPEC_DISPATCH_UNAUTHORIZED`. Tools must not invent affirmative authorization or claim preflight approval for unlisted workers.
 
 ```json
@@ -223,6 +224,7 @@ Five distinct dispatch kinds cover all AI roles in the team:
 - **Write Scope**: Strictly empty `[]` (`HIGH_DEBUG_WROTE_FILES` guard).
 - **Read Scope**: Source files under investigation, failing reproducer, test module, and error logs.
 - **Base / Head**: `base` is the source merge base; `result_head` is the examined failing commit HEAD.
+- **Dispatch Entrypoint**: Dispatched via `llmtool task high-debug` in `task_submission_cli.py` which invokes `high_debug.py`. Pre-dispatch enforcement validates that `write_paths` is empty, `result_head` matches the examined failing commit HEAD, and `predecessor_spec` and lineage are valid before launching High Debug.
 - **Lineage**: Mandatory `predecessor_spec` and `continued_lineage` referencing the failing execution run.
 - **Reporting**: Mandates mandatory sections defined in [high-debug-report.md](../../.claude/skills/ai-team-delivery/high-debug-report.md).
 
@@ -330,6 +332,7 @@ Five distinct dispatch kinds cover all AI roles in the team:
 - **Write Scope**: Bounded work package directory and file paths granted under the `subpm-lease`.
 - **Read Scope**: Full work package context, architecture notes, and task lists.
 - **Base / Head**: `base` and `result_head` both match the canonical `origin/main` commit SHA.
+- **Dispatch Entrypoint**: Dispatched via `llmtool task delegate` under an authorized subpm lease once a sub-PM worker is supported.
 - **Constraints & Worker Dispatch Authority**: Sub-agent PM execution (PM Mode B) requires verified lease registration in issue comments before dispatch per [pm-continuation.md](../../.claude/skills/ai-team-delivery/pm-continuation.md). Dispatch requires resolving a recognized worker in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) with a supported, kind-compatible execution harness. Because [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) currently contains no `claude-subpm` entry, an unlisted worker key cannot be affirmatively authorized (`ALLOWED`). The template specification for unlisted sub-PM workers is non-dispatchable (`route: "TEMPLATE_ONLY"`), and preflight checks evaluate it as `WORKER_UNKNOWN` with refusal code `SPEC_DISPATCH_UNAUTHORIZED`. Tooling must refuse dispatch rather than fabricating an authorized status.
 
 ```json
@@ -380,7 +383,7 @@ Five distinct dispatch kinds cover all AI roles in the team:
 
 ## 3. Pre-Dispatch Automated Validation and Refusal Codes
 
-Tools must automatically validate every candidate dispatch specification prior to executing dispatch commands (`llmtool task delegate`, `llmtool task repair`, `review_dispatch.py`, `llmtool task high-debug`).
+Tools must automatically validate every candidate dispatch specification prior to executing dispatch commands (`llmtool task delegate`, `llmtool task repair`, `llmtool task high-debug` calling `high_debug.py`, and `review_dispatch.py`).
 
 ### 3.1 Refusal Enforcement Rules
 
@@ -453,13 +456,21 @@ Implementation of this design is phased into small, independent PRs. No producti
   - `tools/llmtool/llmtool/errors.py` (add error constants for standard refusal codes)
   - `tools/llmtool/tests/test_spec_preflight.py` (test coverage for all refusal paths including SPEC_BASE_STALE and SPEC_DISPATCH_UNAUTHORIZED)
 
-### PR 3: Dispatch Enforcement Hook in Task Submission CLI & Review Dispatcher
-- **Goal**: Enforce automatic pre-dispatch checks inside `llmtool task delegate`, `llmtool task repair`, and `review_dispatch.py`.
+### PR 3: Dispatch Enforcement Hooks Across Task Submission CLI, High Debug & Review Dispatcher
+- **Goal**: Enforce automatic pre-dispatch checks across all dispatch entrypoints for every kind: `llmtool task delegate` (covering `developer`, read-only `investigation`, and `sub_pm` tasks), `llmtool task repair` (developer repairs), `llmtool task high-debug` / `high_debug.py` (`debug` tasks), and `review_dispatch.py` (`reviewer` tasks).
 - **Files**:
-  - `tools/llmtool/llmtool/task_submission_cli.py` (invoke preflight before recording or dispatching tasks; reject invalid specs back to PM, halt sensitive content as BLOCKED, preserve failed HEAD on repairs)
-  - `tools/llmtool/llmtool/review_dispatch.py` (validate reviewer spec, result HEAD, and review range before creating reviewer D6)
-  - `tools/llmtool/tests/test_task_submission_cli.py` (integration tests asserting pre-dispatch abort, repair HEAD preservation, and PM spec error logging)
+  - `tools/llmtool/llmtool/task_submission_cli.py` (invoke preflight before recording or dispatching tasks across `task delegate`, `task repair`, and `task high-debug`; validate role-specific spec constraints, reject invalid specs back to PM, halt sensitive content as BLOCKED, preserve failed HEAD on repairs)
+  - `tools/llmtool/llmtool/high_debug.py` (invoke preflight and enforce read-only write scope, predecessor spec, lineage, and failing result HEAD bindings before launching High Debug sessions)
+  - `tools/llmtool/llmtool/review_dispatch.py` (validate reviewer spec, result HEAD, three-dot review range, and model pairing before creating reviewer D6)
+  - `tools/llmtool/tests/test_task_submission_cli.py` (integration tests asserting pre-dispatch abort across delegate [including developer, investigation, and sub-PM specs], repair, and high-debug entrypoints, repair HEAD preservation, and PM spec error logging)
+  - `tools/llmtool/tests/test_high_debug.py` (unit and integration tests verifying pre-dispatch spec preflight enforcement and refusal handling for High Debug dispatch)
   - `tools/llmtool/tests/test_review_dispatch.py` (unit tests verifying preflight enforcement on review dispatch)
+- **Dispatch Kind Coverage**:
+  - `developer`: Gated at `llmtool task delegate` (fresh tasks) and `llmtool task repair` (repairs resuming failed HEAD in executor D6).
+  - `investigation`: Gated at `llmtool task delegate` (PM Mode A read-only analysis: verifies `write_paths: []`, canonical `origin/main` commit sync for `base` and `result_head`, authorized worker route, and returns `SPEC_READONLY_ROLE_HAS_WRITES` if any write path is specified).
+  - `debug`: Gated at `llmtool task high-debug` entrypoint in `task_submission_cli.py` and internally in `high_debug.py` (PM AI Debug: verifies `write_paths: []`, failing `result_head`, mandatory `predecessor_spec` and lineage, authorized debug route, and returns `SPEC_READONLY_ROLE_HAS_WRITES` or `SPEC_PREDECESSOR_MISSING` if violated).
+  - `reviewer`: Gated at `review_dispatch.py` (formal cross-family review: verifies `write_paths: []`, unmerged `result_head`, three-dot `review_range`, and cross-family model pairing before creating reviewer D6).
+  - `sub_pm`: Gated at `llmtool task delegate` (PM Mode B sub-agent PM: verifies registered subpm-lease, bounded write paths, and worker dispatch authority, refusing unlisted workers such as `claude-subpm` with `SPEC_DISPATCH_UNAUTHORIZED`).
 
 ### PR 4: Process and Documentation Alignment
 - **Goal**: Update delivery skills to reference standard dispatch templates and procedures.
