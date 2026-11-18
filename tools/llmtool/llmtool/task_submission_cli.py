@@ -6236,8 +6236,15 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     if (task.get('state') != 'PM_RESPONDED' or not task.get('response') or
             task.get('schema_version') != 2):
         raise LLMToolError('task has no successful PM response')
-    if task.get('developer') is not None:
-        raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
+    # #2310: a gw-agent developer refused before any model call is restarted on
+    # this Task as a START_RETRY; every other stored developer is a duplicate.
+    restart = None
+    if previous is not None:
+        if not start_failure.gw_agent_record_checks(task).start_failure:
+            raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
+        if _start_retry_count(task) >= worker_dispatch.MAX_START_RETRIES_PER_TASK:
+            raise LLMToolError('START_RETRY_LIMIT_REACHED: a third start failure goes to the PM')
+        restart = previous
     binding = task.get('task_binding')
     task_completion.validate_task_binding(
         stored_binding=binding, task_id=task.get('task_id'), run_id=task.get('run_id'),
@@ -6414,13 +6421,20 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
+    if restart is not None:
+        claim = _gw_agent_restart_claim(args, store, task, restart, developer, completion,
+                                        registration, snapshot)
+    else:
+        claim = lambda: store.d6_bind_compare_and_update(
+            task['task_id'], executor_task_id=registration.task_id,
+            expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
+                      'completion': None}, developer=developer, completion=completion)
     try:
-        claimed = _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
-            store.d6_bind_compare_and_update(task['task_id'],
-                executor_task_id=registration.task_id,
-                expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
-                          'completion': None}, developer=developer, completion=completion)))
+        claimed = _delegate_chain_gate(args, store, (registration, snapshot), claim)
     except TaskStoreConflict:
+        if restart is not None:
+            raise LLMToolError('START_RETRY_CONFLICT: the Task changed before the retry '
+                               'write; nothing was written') from None
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
     expected_developer = copy.deepcopy(claimed['developer'])
 
@@ -8405,6 +8419,76 @@ def _start_retry_claim(args, store, task, failed, developer, completion, registr
             raise LLMToolError('START_RETRY_LIMIT_REACHED: a third start failure goes to the PM')
         if _start_retry_repair_packet(store, current) != validated_packet:
             raise LLMToolError('START_RETRY_REPAIR_PACKET_MISMATCH')
+        stored = current.get('start_failures', [])
+        entry = {
+            'failed_developer': failed, 'record_sha256': current.get('record_sha256'),
+            'retry_assignment_id': developer['assignment_id'], 'd6_head': snapshot.head,
+            'retried_at': _timestamp(), 'pm_session_id': current.get('pm_session_id'),
+        }
+        return store.d6_bind_compare_and_update(
+            task['task_id'], executor_task_id=registration.task_id,
+            expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': failed,
+                      'completion': stored_completion,
+                      'record_sha256': current.get('record_sha256')},
+            d6_unchanged=probe, developer=developer,
+            start_failures=list(stored) + [entry])
+
+    return claim
+
+
+# #2310: the new gw-agent developer of a restart keeps these of the failed one.
+_GW_AGENT_RESTART_SCOPE_FIELDS = (
+    'selection_source', 'source_sha', 'read_paths', 'write_paths', 'acceptance',
+    'egress_basis', 'data_class',
+)
+
+
+def _gw_agent_restart_claim(args, store, task, failed, developer, completion, registration,
+                            snapshot, d6_unchanged=None):
+    """#2310: check a rebuilt gw-agent request, then return its restart CAS.
+
+    ``failed`` passed start_failure.gw_agent_record_checks: it was refused
+    before its DISPATCHING write persisted, so no route or model call was
+    made. The fresh D6 must be the failed start's D6 at its source SHA, the
+    rebuilt completion must equal the stored one and the new developer keeps
+    the failed one's scope. The returned claim runs under the chain locks: it
+    re-reads the Task, runs checks 1-6 on that snapshot and replaces the
+    failed developer by the new PENDING one, archiving it in one
+    ``start_failures`` entry, in one CAS. The store gate audits that write as
+    a gw-agent START_RETRY under the current Owner policy. Nothing else on
+    the Task changes: no repair claim, run count or review gate.
+    """
+    stored_completion = task.get('completion')
+    failed_callback = failed.get('direct_result_callback')
+    if (type(stored_completion) is not dict or type(failed_callback) is not dict or
+            registration.task_id != stored_completion.get('executor_task_id') or
+            registration.task_id != failed_callback.get('executor_task_id') or
+            snapshot.head != failed.get('source_sha')):
+        raise LLMToolError('START_RETRY_D6_CHANGED: the D6 is not at the failed start\'s '
+                           'source SHA; no Task or D6 write was made')
+    if completion != stored_completion:
+        raise LLMToolError('START_RETRY_D6_CHANGED: the D6 binding differs from the stored '
+                           'completion; no Task or D6 write was made')
+    if any(field not in failed or developer.get(field) != failed[field]
+           for field in _GW_AGENT_RESTART_SCOPE_FIELDS):
+        raise LLMToolError('START_RETRY_CONFLICT: the rebuilt request differs from the '
+                           'failed start; no Task or D6 write was made')
+    probe = (d6_unchanged if d6_unchanged is not None
+             else _d6_unchanged_probe(args, (registration, snapshot)))
+
+    def claim():
+        current = store.get(task['task_id'])
+        if (current.get('developer') != failed or
+                current.get('completion') != stored_completion or
+                current.get('state') != 'PM_RESPONDED' or
+                current.get('schema_version') != 2):
+            raise LLMToolError('START_RETRY_CONFLICT: the Task changed before the retry '
+                               'write; nothing was written')
+        verdict = start_failure.classify_restart(current, probe)
+        if not verdict.start_failure:
+            raise _not_start_failure(verdict)
+        if _start_retry_count(current) >= worker_dispatch.MAX_START_RETRIES_PER_TASK:
+            raise LLMToolError('START_RETRY_LIMIT_REACHED: a third start failure goes to the PM')
         stored = current.get('start_failures', [])
         entry = {
             'failed_developer': failed, 'record_sha256': current.get('record_sha256'),

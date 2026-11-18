@@ -676,21 +676,48 @@ _START_RETRY_SAME_FIELDS = (
 _START_RETRY_EMPTY_FIELDS = (
     'provider_type', 'model', 'artifact', 'execution', 'usage', 'error_code',
 )
+# #2310: a gw-agent developer records no executor_task_id or owner ref; its D6
+# is bound by the unchanged completion and the result callback instead, and
+# it keeps the --data-class it was dispatched with.
+_GW_AGENT_START_RETRY_SAME_FIELDS = (
+    'selection_source', 'provider_profile', 'backend_session_semantics', 'source_sha',
+    'source_sha_binding', 'read_paths', 'write_paths', 'acceptance', 'egress_basis',
+    'data_class',
+)
+
+
+def _gw_agent_restart_d6_kept(current, old, new):
+    """#2310: the new gw-agent assignment names the failed start's D6."""
+    completion = current.get('completion')
+    executor = completion.get('executor_task_id') if type(completion) is dict else None
+    callbacks = [item.get('direct_result_callback') for item in (old, new)]
+    return (type(executor) is str and executor and
+            all(type(callback) is dict and callback.get('executor_task_id') == executor
+                for callback in callbacks))
 
 
 def _start_retry_valid(current, changes, expected, old, new, d6_unchanged=None):
-    """#2188 design section 3: one Claude start failure D re-dispatched as a new assignment.
+    """#2188 design section 3: one start failure D re-dispatched as a new assignment.
 
     Checks section 2 checks 1-6. Live D6 check 6 requires an injected
     d6_unchanged probe that returns True; an unknown, raising or failing probe
-    refuses (fail closed). Any check that cannot be made fails."""
+    refuses (fail closed). Any check that cannot be made fails.
+
+    #2310: D is a Claude start failure (start_failure.classify) or a gw-agent
+    developer refused before any model call (start_failure.gw_agent_record_checks);
+    start_failure.classify_restart picks the checks of D's route."""
     probe = d6_unchanged
     if probe is None and type(expected) is dict:
         probe = expected.get('d6_unchanged')
     try:
-        valid_start = start_failure.classify(current, probe).start_failure
+        valid_start = start_failure.classify_restart(current, probe).start_failure
     except Exception:
         valid_start = False
+    gw_agent = type(old) is dict and old.get('provider_profile') == 'gw-agent'
+    same_fields = _GW_AGENT_START_RETRY_SAME_FIELDS if gw_agent else _START_RETRY_SAME_FIELDS
+    if gw_agent and not (type(current) is dict and type(new) is dict and
+                         _gw_agent_restart_d6_kept(current, old, new)):
+        return False
     if not (type(current) is dict and type(changes) is dict and
             type(old) is dict and type(new) is dict and
             type(expected) is dict and
@@ -702,7 +729,7 @@ def _start_retry_valid(current, changes, expected, old, new, d6_unchanged=None):
             new.get('state') == 'DEVELOPER_PENDING' and
             all(field in new and new[field] is None for field in _START_RETRY_EMPTY_FIELDS) and
             all(field in old and field in new and old[field] == new[field]
-                for field in _START_RETRY_SAME_FIELDS) and
+                for field in same_fields) and
             _assignment_audit_binding(current, new) is not None):
         return False
     assignment_id, session_id = new.get('assignment_id'), new.get('session_id')
@@ -823,6 +850,18 @@ def task_store_attempts(current, changes):
             old_developer.get('state') == 'BLOCKED' and
             new_developer.get('state') == 'DEVELOPER_PENDING'):
         attempts.append(('claude-developer', 'START_RETRY'))
+        return attempts
+
+    # #2310: a gw-agent developer that ended DEVELOPER_UNAVAILABLE, moved back
+    # to PENDING by a write that also appends to start_failures, is a
+    # START_RETRY. Without that append the write keeps its old path (REASSIGN,
+    # refused WORKER_REASSIGN_PRECONDITION), so this removes no refusal; the
+    # gate below admits only a gw-agent record refused before any model call.
+    if (old_developer.get('provider_profile') == 'gw-agent' and
+            old_developer.get('state') == 'DEVELOPER_UNAVAILABLE' and
+            new_developer.get('state') == 'DEVELOPER_PENDING' and
+            'start_failures' in changes):
+        attempts.append(('gw-agent', 'START_RETRY'))
         return attempts
 
     if _developer_identity_changed(old_developer, new_developer):

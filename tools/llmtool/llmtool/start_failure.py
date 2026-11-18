@@ -7,6 +7,10 @@ check (section 2 check 6) is the caller's injected ``d6_unchanged`` probe.
 Every check fails closed: a value that is unknown, malformed or failing makes
 the record "not a start failure", and a packet that cannot be bound does not
 match.
+
+#2310 adds the gw-agent pre-model failure (gw_agent_record_checks) and the
+route dispatchers restart_record_checks and classify_restart; the Claude
+checks (record_checks, classify) are unchanged.
 """
 
 from __future__ import annotations
@@ -138,6 +142,127 @@ def record_checks(record):
         if value is not None and not (type(value) is list and not value):
             return _not(5)
     return _START_FAILURE
+
+
+# #2310: a gw-agent result also carries these; a pre-model record has none.
+_GW_AGENT_ABSENT_RESULT_FIELDS = _ABSENT_RESULT_FIELDS + (
+    'audit_sha256', 'audit_copy_path_sha256',
+)
+
+
+def gw_agent_record_checks(record):
+    """#2310: checks 1-5 for a gw-agent developer refused before any model call.
+
+    The gw-agent delegate (task_submission_cli.run_task_gw_agent_delegate)
+    runs the route only after its DISPATCHING write has persisted, and that
+    write is the one that records ``provider_type`` and ``model``. The store
+    never lets those identity fields go back to None (worker_dispatch REASSIGN
+    needs a PENDING developer). A DEVELOPER_UNAVAILABLE record that still has
+    both as None therefore never reached the route or the provider: its
+    failure was persisted from the DISPATCHING write's own refusal (the Owner
+    gate or a rejected write). Any other gw-agent record is refused, so a run
+    that reached the provider (any model call) is never a start failure.
+    """
+    if type(record) is not dict:
+        return _not(1)
+    developer = record.get('developer')
+    # Check 1: a gw-agent CLI developer that ended DEVELOPER_UNAVAILABLE.
+    if not (type(developer) is dict and
+            developer.get('provider_profile') == 'gw-agent' and
+            developer.get('backend_session_semantics') == 'CLI_REPORTED_SESSION_ID' and
+            developer.get('state') == 'DEVELOPER_UNAVAILABLE'):
+        return _not(1)
+    # Check 2: the DISPATCHING write never persisted, so no route identity, and
+    # the code is one the gw-agent delegate writes (DEVELOPER_*).
+    code = developer.get('error_code')
+    if not ('provider_type' in developer and developer['provider_type'] is None and
+            'model' in developer and developer['model'] is None and
+            type(code) is str and code.startswith('DEVELOPER_')):
+        return _not(2)
+    # Check 3: no result, progress, diagnosis or gateway audit.
+    if not _no_result(developer, _GW_AGENT_ABSENT_RESULT_FIELDS):
+        return _not(3)
+    # Check 4: no execution at all, and no audit entry other than a refusal
+    # (or the START_RETRY that created this assignment) was allowed for this
+    # assignment. An entry without an assignment counts as this one.
+    assignment_id = developer.get('assignment_id')
+    audit = record.get('dispatch_audit', [])
+    if ('execution' not in developer or developer['execution'] is not None or
+            type(assignment_id) is not str or type(audit) is not list):
+        return _not(4)
+    for entry in audit:
+        if type(entry) is not dict:
+            return _not(4)
+        if (entry.get('assignment_id') in (None, assignment_id) and
+                entry.get('decision') != 'BLOCKED' and
+                entry.get('action') != 'START_RETRY'):
+            return _not(4)
+    # Check 5: as for Claude.
+    if not _still_waiting(record):
+        return _not(5)
+    return _START_FAILURE
+
+
+def restart_record_checks(record):
+    """#2310: the record checks of the stored developer's own route.
+
+    A gw-agent developer takes gw_agent_record_checks; every other record takes
+    the #2188 Claude record_checks, unchanged.
+    """
+    developer = record.get('developer') if type(record) is dict else None
+    if type(developer) is dict and developer.get('provider_profile') == 'gw-agent':
+        return gw_agent_record_checks(record)
+    return record_checks(record)
+
+
+def _no_result(developer, absent_fields):
+    """Section 2 check 3 with the route's list of fields that must be absent."""
+    changed_files_empty = ('changed_files' not in developer or
+                           (type(developer['changed_files']) is list and
+                            not developer['changed_files']))
+    return (all(field in developer and developer[field] is None
+                for field in _EMPTY_RESULT_FIELDS) and
+            not any(field in developer for field in absent_fields) and
+            changed_files_empty)
+
+
+def _still_waiting(record):
+    """Section 2 check 5: the completion waits with no result, nothing later started."""
+    completion = record.get('completion')
+    evidence = completion.get('evidence') if type(completion) is dict else None
+    if not (type(completion) is dict and completion.get('state') == 'WAITING_EXECUTOR' and
+            type(evidence) is dict and 'result_head' in evidence and
+            evidence['result_head'] is None):
+        return False
+    for field in _NO_PROGRESS_RECORD_FIELDS:
+        value = record.get(field)
+        if value is not None and not (type(value) is list and not value):
+            return False
+    return True
+
+
+def _probe_d6(record, d6_unchanged):
+    """Section 2 check 6 on a record that passed checks 1-5."""
+    developer = record['developer']
+    try:
+        unchanged = d6_unchanged(developer.get('source_sha'),
+                                 write_paths=developer.get('write_paths'))
+    except Exception:
+        return _not(6)
+    if unchanged is not True:
+        return _not(6)
+    return _START_FAILURE
+
+
+def classify_restart(record, d6_unchanged):
+    """#2310: restart_record_checks, then the live D6 check 6; returns a Verdict.
+
+    For a Claude record this is exactly ``classify``.
+    """
+    verdict = restart_record_checks(record)
+    if not verdict.start_failure:
+        return verdict
+    return _probe_d6(record, d6_unchanged)
 
 
 def classify(record, d6_unchanged):
