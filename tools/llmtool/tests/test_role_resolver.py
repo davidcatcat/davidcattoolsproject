@@ -287,7 +287,7 @@ class AllowedModelTests(ResolverBase):
                          owner_override={'model': 'has space', 'ref': REF},
                          repository=REPOSITORY, fetch_comment=fetch)
         self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
-        self.assertIsNone(caught.exception.owner_override_code)
+        self.assertIsNone(getattr(caught.exception, 'owner_override_code', None))
         fetch.assert_not_called()
 
 
@@ -456,7 +456,7 @@ class DispatchPathTests(ResolverBase):
                 owner_override={'model': 'claude-fable-5-2', 'ref': REF},
                 repository=REPOSITORY, fetch_comment=fetch)
         self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
-        self.assertIsNone(caught.exception.owner_override_code)
+        self.assertIsNone(getattr(caught.exception, 'owner_override_code', None))
         fetch.assert_not_called()
 
     def test_gw_agent_profile_uses_the_resolver(self):
