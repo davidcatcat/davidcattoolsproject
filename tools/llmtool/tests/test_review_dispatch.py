@@ -654,8 +654,11 @@ class ReviewDispatchTests(unittest.TestCase):
     CODEX_PREFLIGHT = (TASK, SimpleNamespace(root='/repo/worktree', common_dir='/repo/.git'),
                        HEAD, 'd' * 40, 'codex-reviewer')
 
-    def test_registry_refuses_unlisted_and_cross_family_claude_reviewer_model(self):
-        for model in ('claude-unlisted-model', CODEX_REVIEW_MODEL):
+    # Owner #2302 P2: an unlisted model of the Reviewer's own family is admitted,
+    # so the refused models are of another family or malformed.
+    def test_registry_refuses_other_family_and_cross_family_claude_reviewer_model(self):
+        for model in ('gemini-unlisted-model', CODEX_REVIEW_MODEL,
+                      'anthropic/' + CLAUDE_REVIEW_MODEL):
             with self.subTest(model=model):
                 with self.assertRaises(LLMToolError) as raised:
                     self.invoke(reviewer_role={
@@ -665,9 +668,10 @@ class ReviewDispatchTests(unittest.TestCase):
                                  'ROLE_MODEL_NOT_ALLOWED')
                 self.assert_refused_without_side_effects()
 
-    def test_registry_refuses_unlisted_and_cross_family_codex_reviewer_model(self):
+    def test_registry_refuses_other_family_and_cross_family_codex_reviewer_model(self):
         calls = []
-        for model in ('gpt-unlisted-model', CLAUDE_REVIEW_MODEL):
+        for model in ('gemini-unlisted-model', CLAUDE_REVIEW_MODEL,
+                      'openai/' + CODEX_REVIEW_MODEL):
             with self.subTest(model=model):
                 with self.assertRaises(LLMToolError) as raised:
                     self.invoke(
@@ -724,10 +728,11 @@ class ReviewDispatchTests(unittest.TestCase):
                                  'ROLE_MODEL_NOT_ALLOWED')
                 self.assert_refused_without_side_effects()
 
-    def test_launch_helpers_refuse_unlisted_and_cross_family_models(self):
+    def test_launch_helpers_refuse_other_family_and_cross_family_models(self):
         task = {'task_id': TASK, 'run_id': 'c' * 32,
                 'task_binding': {'contract_digest': 'd' * 64}}
-        for model in ('gpt-unlisted-model', CLAUDE_REVIEW_MODEL, 'OPENAI/' + CODEX_REVIEW_MODEL):
+        for model in ('gemini-unlisted-model', CLAUDE_REVIEW_MODEL,
+                      'OPENAI/' + CODEX_REVIEW_MODEL):
             with self.subTest(launch='codex', model=model), \
                     patch.object(review_dispatch.shutil, 'which') as which, \
                     patch.object(review_dispatch.subprocess, 'run') as run:
@@ -743,7 +748,8 @@ class ReviewDispatchTests(unittest.TestCase):
                                      'ROLE_MODEL_NOT_ALLOWED')
                 which.assert_not_called()
                 run.assert_not_called()
-        for model in ('claude-unlisted-model', CODEX_REVIEW_MODEL, None):
+        for model in ('gemini-unlisted-model', CODEX_REVIEW_MODEL,
+                      'anthropic/' + CLAUDE_REVIEW_MODEL, None):
             with self.subTest(launch='claude', model=model), \
                     patch.object(review_dispatch.subprocess, 'run') as run:
                 with self.assertRaises(LLMToolError) as raised:
@@ -756,14 +762,16 @@ class ReviewDispatchTests(unittest.TestCase):
     def test_claude_bridge_receives_the_admitted_model_explicitly(self):
         receipt = SimpleNamespace(returncode=0, stdout=json.dumps({
             'result': 'DELIVERED', 'actual_session_id': 'native-session'}).encode('utf-8'))
-        with patch.object(review_dispatch.subprocess, 'run', return_value=receipt) as run:
-            session = review_dispatch._dispatch(task_id='reviewer-task', prompt='p',
-                                                repo_root='/repo', env={},
-                                                model=CLAUDE_REVIEW_MODEL)
-        self.assertEqual(session, 'native-session')
-        argv = run.call_args.args[0]
-        self.assertEqual(argv[argv.index('--model') + 1], CLAUDE_REVIEW_MODEL)
-        self.assertEqual(argv[argv.index('--name') + 1], 'claude-reviewer')
+        # The listed model and (Owner #2302 P2) another Claude-family model.
+        for model in (CLAUDE_REVIEW_MODEL, 'claude-fable-5-2'):
+            with self.subTest(model=model), \
+                    patch.object(review_dispatch.subprocess, 'run', return_value=receipt) as run:
+                session = review_dispatch._dispatch(task_id='reviewer-task', prompt='p',
+                                                    repo_root='/repo', env={}, model=model)
+                self.assertEqual(session, 'native-session')
+                argv = run.call_args.args[0]
+                self.assertEqual(argv[argv.index('--model') + 1], model)
+                self.assertEqual(argv[argv.index('--name') + 1], 'claude-reviewer')
 
     def test_replay_after_restart_returns_claim_without_redispatch(self):
         first = self.invoke()

@@ -40,10 +40,20 @@ class RouteConfigUnavailableTests(unittest.TestCase):
             'claude-sonnet-5-5',
         )
 
+    def test_review_dispatch_admit_review_model_same_family_model_returns_model(self):
+        # Owner #2302 P2: a Claude-family model other than the default is admitted.
+        self.assertEqual(
+            review_dispatch._admit_review_model('claude-reviewer', 'claude-opus-5-5'),
+            'claude-opus-5-5',
+        )
+
     def test_review_dispatch_admit_review_model_disallowed_model_refuses_role_model_not_allowed(self):
-        with self.assertRaises(LLMToolError) as caught:
-            review_dispatch._admit_review_model('claude-reviewer', 'claude-opus-5-5')
-        self.assertEqual(getattr(caught.exception, 'review_dispatch_code', None), 'ROLE_MODEL_NOT_ALLOWED')
+        for model in ('gpt-6.1-sol', 'anthropic/claude-opus-5-5'):
+            with self.subTest(model=model):
+                with self.assertRaises(LLMToolError) as caught:
+                    review_dispatch._admit_review_model('claude-reviewer', model)
+                self.assertEqual(getattr(caught.exception, 'review_dispatch_code', None),
+                                 'ROLE_MODEL_NOT_ALLOWED')
 
     def test_explicit_config_dict_with_no_roles_key_refuses_role_model_not_allowed(self):
         with self.assertRaises(RouteError) as caught:
@@ -82,12 +92,26 @@ class RouteConfigUnavailableTests(unittest.TestCase):
         self.assertEqual(claude_role['model'], 'claude-sonnet-5-5')
 
     def test_role_config_registry_default_missing_roles_entry_refuses_role_model_not_allowed(self):
-        with self.assertRaises(LLMToolError) as caught:
-            role_config._registry_default('codex-reviewer', {'roles': {}})
-        self.assertEqual(
-            getattr(caught.exception, 'role_config_code', None),
-            'ROLE_MODEL_NOT_ALLOWED',
-        )
+        for registry in ({'roles': {}}, {'roles': {'codex-reviewer': {}}},
+                         {'roles': {'codex-reviewer': {'allowed_models': []}}},
+                         {'roles': {'codex-reviewer': {'default_model': 7}}}, {}, []):
+            with self.subTest(registry=registry):
+                with self.assertRaises(LLMToolError) as caught:
+                    role_config._registry_default('codex-reviewer', registry)
+                self.assertEqual(
+                    getattr(caught.exception, 'role_config_code', None),
+                    'ROLE_MODEL_NOT_ALLOWED',
+                )
+
+    def test_role_config_registry_default_prefers_default_model(self):
+        # Owner #2302 P2: roles.*.default_model names the default when present.
+        registry = {'roles': {'codex-reviewer': {'default_model': 'gpt-example-b',
+                                                 'allowed_models': ['gpt-6.1-sol']}}}
+        self.assertEqual(role_config._registry_default('codex-reviewer', registry),
+                         (registry, 'gpt-example-b'))
+        registry = {'roles': {'codex-reviewer': {'allowed_models': ['gpt-6.1-sol']}}}
+        self.assertEqual(role_config._registry_default('codex-reviewer', registry)[1],
+                         'gpt-6.1-sol')
 
 
 if __name__ == '__main__':

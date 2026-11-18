@@ -279,6 +279,18 @@ RULE_SCHEMAS: dict[str, Any] = {
         "hashes": Obj({"AGENTS.md": Str(SHA256), "CLAUDE.md": Str(SHA256)}),
         "codex_only": ListOf(Obj({"value": Str(), "reason": Str()})),
     }),
+    "workflow-grants.json": Obj({
+        "schema_version": Const(1),
+        # #2281 W0: exact workflow files only, keyed by Issue and mode.
+        "grants": ListOf(Obj({
+            "issue": Int(1),
+            "owner_record_url": Str(r"https://[A-Za-z0-9.-]+/\S+"),
+            "mode": OneOf("read", "write"),
+            "paths": ListOf(
+                Str(r"\.github/workflows/\w[\w.-]*\.(?:yml|yaml)"),
+                min_items=1),
+        })),
+    }),
     "sensitive-paths.json": Obj({
         "schema_version": Const(1),
         "exact": ListOf(Str(REPO_PATH), min_items=1),
