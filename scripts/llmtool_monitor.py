@@ -8858,6 +8858,7 @@ ROUTES = (   # (row name, worker-dispatch.json key, words that name the route in
     ("home LLM", "gw-agent", ("gw-agent", "company-gw", "openai-compatible", "home llm")),
     ("Codex", "codex-developer", ("codex",)),
 )
+ROUTE_NAMES = [name for name, _, _ in ROUTES]
 # Task records come from the one full Task-folder scan (waiting_records): every
 # Task file counts, however old, and a scan that has not covered the folder or
 # could not read a file says so. Within this many seconds of the last step the

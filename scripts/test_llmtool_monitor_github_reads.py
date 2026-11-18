@@ -1,8 +1,10 @@
 from datetime import datetime, timezone
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -13,6 +15,20 @@ assert SPEC is not None and SPEC.loader is not None
 monitor = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = monitor
 SPEC.loader.exec_module(monitor)
+
+_SUBPM_LEASE_ISOLATED = tempfile.TemporaryDirectory()
+_SUBPM_LEASE_PATCH = mock.patch.object(
+    monitor, "SUBPM_LEASE_FILE",
+    os.path.join(_SUBPM_LEASE_ISOLATED.name, "subpm-leases.json"))
+
+
+def setUpModule():
+    _SUBPM_LEASE_PATCH.start()
+
+
+def tearDownModule():
+    _SUBPM_LEASE_PATCH.stop()
+    _SUBPM_LEASE_ISOLATED.cleanup()
 
 
 def _iso(ts: float) -> str:

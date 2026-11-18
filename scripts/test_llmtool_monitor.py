@@ -11057,7 +11057,7 @@ class MainAiGhConfigTests(unittest.TestCase):
                 self.assertNotIn('GITHUB_TOKEN', os.environ)
 
 
-ROUTE_NAMES = ["Claude", "AGY", "OpenCode", "home LLM", "Codex"]
+ROUTE_NAMES = mon.ROUTE_NAMES
 ROUTE_KEYS = {"Claude": "claude-developer", "AGY": "agy", "OpenCode": "opencode-developer",
               "home LLM": "gw-agent", "Codex": "codex-developer"}
 ROUTE_PROVIDERS = {"Claude": "claude-cli", "AGY": "agy-cli", "OpenCode": "opencode-cli",
