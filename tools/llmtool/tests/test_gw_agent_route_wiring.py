@@ -6,6 +6,7 @@ import inspect
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -45,6 +46,21 @@ def setUpModule():
 
 def tearDownModule():
     review_trust_fixture.stop_module()
+
+
+def _install_repo_gateway(parent):
+    """Copy the repository gateway as the fake installed gateway (#2310).
+
+    The route's stale-install check compares the installed sources with the
+    repository copy, so a fake install must be that package, outside the
+    request root, without bytecode or cache files.
+    """
+    source = (Path(__file__).resolve().parents[2] /
+              'api-agent-gateway' / 'api_agent_gateway')
+    target = Path(parent) / 'api_agent_gateway'
+    shutil.copytree(source, target,
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '*.pyo'))
+    return Path(parent)
 
 
 class GwAgentRouteWiringTests(unittest.TestCase):
@@ -950,10 +966,9 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             read_path=['src.py'], write_path=['src.py'])
         store = Store()
         self.addCleanup(store._temp.cleanup)
-        gateway_package = Path(tempfile.mkdtemp(prefix='gw-agent-gateway-'))
-        (gateway_package / 'api_agent_gateway').mkdir()
-        (gateway_package / 'api_agent_gateway' / '__init__.py').write_text('', encoding='utf-8')
-        self.addCleanup(lambda: __import__('shutil').rmtree(gateway_package, ignore_errors=True))
+        gateway_package = _install_repo_gateway(
+            tempfile.mkdtemp(prefix='gw-agent-gateway-'))
+        self.addCleanup(shutil.rmtree, gateway_package, ignore_errors=True)
         config_home = Path(tempfile.mkdtemp(prefix='gw-agent-config-'))
         self.addCleanup(lambda: __import__('shutil').rmtree(config_home, ignore_errors=True))
         config_path = config_home / '.config' / 'llmtool' / 'config.yaml'
@@ -1268,7 +1283,7 @@ class GwAgentProfileTimeoutTests(unittest.TestCase):
     def _serialized_profile(self, profile):
         with tempfile.TemporaryDirectory() as package_root, \
              tempfile.TemporaryDirectory() as route_tmp:
-            (Path(package_root) / 'api_agent_gateway').mkdir()
+            _install_repo_gateway(package_root)
             config = load_route_config()['routes']['gw-agent']
             config['package_path'] = package_root
             config['profile'] = profile
