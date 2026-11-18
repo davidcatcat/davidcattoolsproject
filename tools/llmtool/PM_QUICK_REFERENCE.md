@@ -5,6 +5,7 @@ An index for the Claude Integrator/PM, not a rule source (#1502 WP-H). Each item
 ## Dispatch
 
 - **Authority:** reread [worker-dispatch.json](worker-dispatch.json) through the dispatch gate before every dispatch, retry, repair, recovery and Reviewer hand-off; `PAUSED` refuses whatever the live health and `OWNER_ASSIGNMENT_ONLY` needs an explicit Owner assignment ([CLAUDE.md Worker dispatch](../../CLAUDE.md#worker-dispatch)).
+- **Owner PM rules:** write only problem, observable acceptance, constraints, scopes and evidence; no solutions, code, edits, exact test values, or PM technical inferences ([PM role card](../../.claude/skills/role-cards/pm.md#owner-pm-working-rules)).
 - **Route and model:** take each Developer route's executable, model and timeout, and each Reviewer and Debug role model, from [developer-routes.json](developer-routes.json), never from memory or chat.
 - **Reviewer pairing:** the formal Reviewer comes from the other model family than the Developer ([CLAUDE.md Review](../../CLAUDE.md#review)).
 - **Spec preflight:** run [spec_preflight.py](scripts/spec_preflight.py) on every hand-made spec, and record or dispatch it only after a `SPEC_PREFLIGHT_OK` result ([dispatch hygiene](../../.claude/skills/ai-team-delivery/pm-continuation.md#dispatch-hygiene)).

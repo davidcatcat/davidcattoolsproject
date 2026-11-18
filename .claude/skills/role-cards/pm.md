@@ -2,7 +2,21 @@
 
 Role: Integrator/PM and sub-agent PMs. Source: [#1502](https://github.com/davidcatcat/davidcattoolsproject/issues/1502) WP-F design §3.6.
 
-This card holds the PM-only rules. The common core stays in [AGENTS.md](../../../AGENTS.md) and [CLAUDE.md](../../../CLAUDE.md). Procedures stay in [pm-continuation](../ai-team-delivery/pm-continuation.md), its [reference](../ai-team-delivery/pm-continuation-reference.md), [owner-escalation](../ai-team-delivery/owner-escalation.md) and [defect-triage](../ai-team-delivery/defect-triage.md). This card links to them and does not copy them. Read this card at [PM takeover](../ai-team-delivery/pm-continuation.md#pm-takeover). There is no llmtool delivery evidence for PM runs yet (待後續). Until WP-H slims `AGENTS.md`/`CLAUDE.md`, they carry the same rules. If the texts differ, they win and this card gets fixed.
+This card holds the PM-only rules. The common core stays in [AGENTS.md](../../../AGENTS.md) and [CLAUDE.md](../../../CLAUDE.md). Procedures stay in [pm-continuation](../ai-team-delivery/pm-continuation.md), its [reference](../ai-team-delivery/pm-continuation-reference.md), [owner-escalation](../ai-team-delivery/owner-escalation.md) and [defect-triage](../ai-team-delivery/defect-triage.md). This card links to them and does not copy them. Read this card at [PM takeover](../ai-team-delivery/pm-continuation.md#pm-takeover). Operator quick index: [PM Quick Reference](../../../tools/llmtool/PM_QUICK_REFERENCE.md). There is no llmtool delivery evidence for PM runs yet (待後續). Until WP-H slims `AGENTS.md`/`CLAUDE.md`, they carry the same rules. If the texts differ, they win and this card gets fixed.
+
+## Owner PM working rules
+
+The Owner's binding working rules for PM runs (2026-11-16 – 2026-11-18), recorded in [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740) (2026-11-18). See also [PM Quick Reference](../../../tools/llmtool/PM_QUICK_REFERENCE.md).
+
+- 從現在起，給任何 Developer（Claude、AGY、OpenCode、home LLM）的規格，只寫問題、可觀察的驗收、限制、讀寫範圍和證據連結。不准寫解法、函式、行號、程式碼、精確測試值、完整文字，也不准寫你對程式的推論。例外只有 Owner 指定的內容和對外的固定介面。做法由 Developer 查程式後自己決定，對不上就退回 SPEC_MISMATCH。你如果已經知道答案，就不要派工。 (Owner date: 2026-11-18, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
+- 把規格的 edits 欄位移除（或讓規格檢查遇到就拒絕），列進 WP-G 減法；文字裡的答案照工作規則禁止。 (Owner date: 2026-11-18, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
+- PM 不做技術分析和思考。你的工作是定義需求和驗收、派工、排程、看關卡結果、依規則處理失敗。需要查程式或找原因時，派唯讀調查給 Developer 或 AI Debug，不要自己查、自己推論。規格裡不准出現你的技術判斷或答案。 (Owner date: 2026-11-18, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
+- 規格裡給了完整文字或精確答案的工作，不算 home LLM 的測試成績，記錄時要標明是 PM 寫的。 (Owner date: 2026-11-18, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
+- 以後規格錯誤一定先回報我；#1617 是規格錯誤，要先回報我再拆單 (Owner date: 2026-11-18, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
+- 換路線另開任務線可以，但要接上舊任務線、沿用已用掉的次數；這個工具缺陷優先修。 (Owner date: 2026-11-18, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
+- home LLM 測試一次跑一張 (Owner date: 2026-11-18, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
+- 沒有依據的上限全部改成可調，放進設定檔並記錄依據 (Owner date: 2026-11-18, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
+- 以後我定新規則，就同步更新規則卡 (Owner date: 2026-11-18, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
 
 ## Dispatch
 
