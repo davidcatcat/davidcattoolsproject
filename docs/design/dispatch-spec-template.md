@@ -213,7 +213,7 @@ Five distinct dispatch kinds cover all AI roles in the team:
 ### 4. Reviewer Spec (`kind: "reviewer"`)
 - **Write Scope**: Strictly empty `[]`.
 - **Read Scope**: Task contract, full diff, test files, CI logs, and runtime evidence.
-- **Revisions & Review Range**: A Reviewer D6 is provisioned at the unmerged result HEAD of the PR, not `origin/main`, as enforced by [review_dispatch.py](../../tools/llmtool/scripts/review_dispatch.py). The spec defines `base` (PR base commit on main), `result_head` (unmerged result commit to be reviewed), and `review_range` (the explicit commit range `base..result_head` or delta since last reviewed HEAD).
+- **Revisions & Review Range**: A Reviewer D6 is provisioned at the unmerged result HEAD of the PR, not `origin/main`, as enforced by [review_dispatch.py](../../tools/llmtool/llmtool/review_dispatch.py). The spec defines `base` (PR base commit on main), `result_head` (unmerged result commit to be reviewed), and `review_range` (the explicit commit range `base..result_head` or delta since last reviewed HEAD).
 - **Model Pairing**: Verified cross-family route (Codex Reviewer for Claude work, Claude Reviewer for AGY/OpenCode/gw-agent work) per [formal-verdict.md](../../.claude/skills/ai-team-delivery/formal-verdict.md).
 
 ```json
@@ -337,8 +337,8 @@ Tools must automatically validate every candidate dispatch specification prior t
 | `SPEC_EDITS_FORBIDDEN` | Policy | Spec carries forbidden `edits` field ([spec_preflight.py](../../tools/llmtool/scripts/spec_preflight.py)). |
 | `SPEC_SENSITIVE_CONTENT` | Security | Any text field contains credential-shaped strings or fails the sensitive detector screen ([pm-continuation.md](../../.claude/skills/ai-team-delivery/pm-continuation.md)). Halts immediately as `BLOCKED` with metadata only; no rewriting permitted. |
 | `SPEC_BASE_STALE` | Git / State | For `developer`, `investigation`, and `sub_pm`, spec `base` does not match canonical `origin/main` commit ([pm-continuation.md](../../.claude/skills/ai-team-delivery/pm-continuation.md)). |
-| `SPEC_REVIEW_HEAD_INVALID` | Git / State | For `reviewer` and `debug`, `result_head` is missing or does not match the registered result/examined HEAD in the task/PR ([review_dispatch.py](../../tools/llmtool/scripts/review_dispatch.py), [formal-verdict.md](../../.claude/skills/ai-team-delivery/formal-verdict.md)). |
-| `SPEC_REVIEW_RANGE_INVALID` | Git / State | For `reviewer`, `review_range` is missing, malformed, or does not resolve to `base..result_head` (or delta since previous reviewed HEAD) ([review_dispatch.py](../../tools/llmtool/scripts/review_dispatch.py), [reviewer.md](../../.claude/skills/role-cards/reviewer.md)). |
+| `SPEC_REVIEW_HEAD_INVALID` | Git / State | For `reviewer` and `debug`, `result_head` is missing or does not match the registered result/examined HEAD in the task/PR ([review_dispatch.py](../../tools/llmtool/llmtool/review_dispatch.py), [formal-verdict.md](../../.claude/skills/ai-team-delivery/formal-verdict.md)). |
+| `SPEC_REVIEW_RANGE_INVALID` | Git / State | For `reviewer`, `review_range` is missing, malformed, or does not resolve to `base..result_head` (or delta since previous reviewed HEAD) ([review_dispatch.py](../../tools/llmtool/llmtool/review_dispatch.py), [reviewer.md](../../.claude/skills/role-cards/reviewer.md)). |
 | `SPEC_SCOPE_READ_MISSING_ACCEPTANCE` | Scope | A repository path cited in `acceptance` is missing from `read_paths` ([spec_preflight.py](../../tools/llmtool/scripts/spec_preflight.py)). |
 | `SPEC_SCOPE_FILE_NOT_FOUND` | Scope | A path listed in `read_paths` that is not also present in `write_paths` does not exist in the repository ([spec_preflight.py](../../tools/llmtool/scripts/spec_preflight.py)). |
 | `SPEC_SCOPE_TEST_MODULE_MISSING` | Scope | Code modification under `tools/` or `scripts/` lacks an admitted test module in `read_paths` ([spec_preflight.py](../../tools/llmtool/scripts/spec_preflight.py)). |
@@ -356,7 +356,7 @@ Tools must automatically validate every candidate dispatch specification prior t
 Every field and pre-dispatch check in this design directly derives from established repository governance and automation:
 - **Preflight validator script**: [spec_preflight.py](../../tools/llmtool/scripts/spec_preflight.py) screens text limits, byte boundaries, forbidden `edits`, acceptance item counts, and read scope coverage.
 - **Preflight test suite**: [test_spec_preflight.py](../../tools/llmtool/tests/test_spec_preflight.py) tests strict JSON loading, boundary handling, and screen refusal mechanics.
-- **Reviewer dispatch tool**: [review_dispatch.py](../../tools/llmtool/scripts/review_dispatch.py) enforces preflight checks on reviewer D6 worktrees, unmerged result HEAD validation, and role pairing.
+- **Reviewer dispatch tool**: [review_dispatch.py](../../tools/llmtool/llmtool/review_dispatch.py) enforces preflight checks on reviewer D6 worktrees, unmerged result HEAD validation, and role pairing.
 - **Workflow & Delivery gates**: [WORKFLOW.md](../../tools/llmtool/WORKFLOW.md) governs the progression of tasks through remote testing, PR creation, Linux CI, and review.
 - **Repository Authority**: [CLAUDE.md](../../CLAUDE.md) establishes worker dispatch rules, cross-family review requirements, documentation check rules, and single-writer constraints.
 - **PM Role Card**: [pm.md](../../.claude/skills/role-cards/pm.md) details dispatch hygiene, review handoff, and lease rules.
@@ -391,7 +391,7 @@ Implementation of this design is phased into small, independent PRs. No producti
 - **Goal**: Enforce automatic pre-dispatch checks inside `llmtool task delegate`, `llmtool task repair`, and `review_dispatch.py`.
 - **Files**:
   - `tools/llmtool/llmtool/task_submission_cli.py` (invoke preflight before recording or dispatching tasks; reject invalid specs back to PM, halt sensitive content as BLOCKED)
-  - `tools/llmtool/scripts/review_dispatch.py` (validate reviewer spec, result HEAD, and review range before creating reviewer D6)
+  - `tools/llmtool/llmtool/review_dispatch.py` (validate reviewer spec, result HEAD, and review range before creating reviewer D6)
   - `tools/llmtool/tests/test_task_submission_cli.py` (integration tests asserting pre-dispatch abort and PM spec error logging)
   - `tools/llmtool/tests/test_review_dispatch.py` (unit tests verifying preflight enforcement on review dispatch)
 
