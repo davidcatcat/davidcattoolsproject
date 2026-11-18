@@ -296,9 +296,10 @@ def _preflight(store, task_id, executor_task, pr_number, version, *, task=None,
 
 
 def _create_d6(*, task_id, base_sha, repo_root, executor_task, github_login,
-               reviewer_key='claude-reviewer'):
+               reviewer_key='claude-reviewer', review_kind='formal'):
     lifecycle = Path(__file__).resolve().parents[1] / 'scripts' / 'd6_worktree_lifecycle.py'
-    lease = f'read-only formal review of executor task {executor_task} at {base_sha}'
+    label = 'security review' if review_kind == 'security' else 'formal review'
+    lease = f'read-only {label} of executor task {executor_task} at {base_sha}'
     args = [sys.executable, '-B', str(lifecycle), '--task-id', task_id,
             '--agent-id', reviewer_key, '--session-ref', 'pending-' + task_id,
             '--lease-ref', lease, '--branch', 'llmtool/reviewer-' + task_id,
@@ -341,8 +342,17 @@ def _iter_jsonl_lines(raw):
             yield line
 
 
-def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, version=1):
-    """Accept one exact, binding-complete Codex review object from JSONL."""
+def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, version=1,
+                              kind='formal'):
+    """Accept one exact, binding-complete Codex review object from JSONL.
+
+    #2199 PR 2 (design §3.3): ``kind='security'`` expects the security marker,
+    the same status line, the security binding line and, for PASS, the
+    ``SECURITY ACCEPT`` line; review_result._security_verdict must agree. A
+    formal body is never accepted as security, nor the reverse.
+    """
+    if kind not in ('formal', 'security'):
+        _refuse('REVIEW_KIND_UNSUPPORTED')
     if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_STREAM_CEILING:
         _refuse('REVIEW_NOT_POSTED', reason='OUTPUT_UNREADABLE')
     final = None
@@ -409,26 +419,35 @@ def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, ve
     status = verdict['verdict']
     displayed_status = 'PASS' if status == 'PASS' else 'FAIL'
     marker_status = 'PASS' if status == 'PASS' else 'FIX'
-    expected_marker = (f'<!-- activity: type=review_verdict actor=Codex target=PM '
+    from . import review_result
+    marker_type = 'security_review_verdict' if kind == 'security' else 'review_verdict'
+    expected_marker = (f'<!-- activity: type={marker_type} actor=Codex target=PM '
                        f'status={marker_status} -->')
     expected_status = (f'Verdict: {displayed_status} | Version: v{version} | HEAD: {head}')
-    binding_line = (f'LLMTOOL-REVIEW-BINDING v1 task={task_id} run={run_id} '
-                    f'contract={contract_digest} head={head}')
+    if kind == 'security':
+        binding_line = review_result.security_binding_line(
+            task_id, run_id, contract_digest, head)
+    else:
+        binding_line = (f'LLMTOOL-REVIEW-BINDING v1 task={task_id} run={run_id} '
+                        f'contract={contract_digest} head={head}')
     if len(lines) < 3 or lines[0] != expected_marker or lines[1] != expected_status:
         _refuse('REVIEW_NOT_POSTED', reason='REVIEW_HEADER_MISMATCH')
     if binding_line not in lines:
         _refuse('REVIEW_NOT_POSTED', reason='REVIEW_BINDING_LINE_MISSING')
     # Use the persisted-result classifier as the authority for the body shape.
     # This keeps direct Codex results and later comment classification in parity.
-    from . import review_result
-    classified = review_result._comment_verdict(
-        {'id': 0, 'body': verdict['review'],
-         'created_at': '2000-01-01T00:00:00Z',
-         'updated_at': '2000-01-01T00:00:00Z'},
-        head=head, version=version,
-        task={'task_id': task_id, 'run_id': run_id,
-              'task_binding': {'contract_digest': contract_digest},
-              'developer': {'provider_profile': 'claude'}})
+    classifier_task = {'task_id': task_id, 'run_id': run_id,
+                       'task_binding': {'contract_digest': contract_digest},
+                       'developer': {'provider_profile': 'claude'}}
+    if kind == 'security':
+        classified = review_result._security_verdict(
+            verdict['review'], head, version, classifier_task)
+    else:
+        classified = review_result._comment_verdict(
+            {'id': 0, 'body': verdict['review'],
+             'created_at': '2000-01-01T00:00:00Z',
+             'updated_at': '2000-01-01T00:00:00Z'},
+            head=head, version=version, task=classifier_task)
     expected_outcome = 'REVIEW_PASS' if status == 'PASS' else 'REVIEW_FAIL'
     if classified is None or classified[2] != expected_outcome:
         _refuse('REVIEW_NOT_POSTED', reason='REVIEW_CLASSIFIER_REJECTED')
@@ -499,12 +518,13 @@ def _codex_final_message(raw):
     return final
 
 
-def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=1):
+def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=1,
+                        kind='formal'):
     """Parse a bound review and attach only a screened excerpt to refusals."""
     try:
         return _parse_codex_review_inner(
             raw, task_id=task_id, run_id=run_id,
-            contract_digest=contract_digest, head=head, version=version)
+            contract_digest=contract_digest, head=head, version=version, kind=kind)
     except LLMToolError as exc:
         if getattr(exc, 'review_dispatch_code', None) != 'REVIEW_NOT_POSTED':
             raise
@@ -680,7 +700,7 @@ def _record_codex_quota(raw_stdout):
 
 def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
                     model=_CODEX_REVIEW_MODEL, effort=_CODEX_REVIEW_EFFORT,
-                    config_dir=None):
+                    config_dir=None, kind='formal'):
     model = _admit_review_model('codex-reviewer', model)
     try:
         timeout = developer_routes.role_timeout('codex-reviewer')
@@ -717,7 +737,7 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
     return _parse_codex_review(
         result.stdout, task_id=task.get('task_id'), run_id=task.get('run_id'),
         contract_digest=binding.get('contract_digest'),
-        head=head, version=version)
+        head=head, version=version, kind=kind)
 
 
 def _dispatch(*, task_id, prompt, repo_root, env, model):
@@ -1031,11 +1051,15 @@ def _write_receipt(directory, name, record):
         raise _PostError('VERDICT_POST_RECEIPT_WRITE_FAILED') from None
 
 
-def _verdict_binding_line(task, task_id, claim, text):
-    """Return the run-bound binding line the stored verdict text must carry."""
+def _verdict_binding_line(task, task_id, claim, text, kind='formal'):
+    """Return the run-bound binding line the stored verdict text must carry.
+
+    #2199 PR 2: a security claim's text carries the security binding line.
+    """
     result = claim.get('review_result')
     binding = task.get('task_binding') if type(task) is dict else None
-    if (type(result) is not dict or type(binding) is not dict or
+    if (kind not in ('formal', 'security') or
+            type(result) is not dict or type(binding) is not dict or
             result.get('task_id') != task_id or
             type(result.get('run_id')) is not str or
             result.get('run_id') != task.get('run_id') or
@@ -1045,21 +1069,40 @@ def _verdict_binding_line(task, task_id, claim, text):
             result.get('contract_digest') != binding.get('contract_digest') or
             result.get('review_text') != text):
         raise _PostError('VERDICT_POST_BINDING_INVALID')
-    line = (f"LLMTOOL-REVIEW-BINDING v1 task={task_id} run={result['run_id']} "
-            f"contract={result['contract_digest']} head={result['head']}")
+    if kind == 'security':
+        from . import review_result
+        line = review_result.security_binding_line(
+            task_id, result['run_id'], result['contract_digest'], result['head'])
+    else:
+        line = (f"LLMTOOL-REVIEW-BINDING v1 task={task_id} run={result['run_id']} "
+                f"contract={result['contract_digest']} head={result['head']}")
     if line not in text.splitlines():
         raise _PostError('VERDICT_POST_BINDING_INVALID')
     return line
 
 
-def _find_posted_verdict(comments, login, text, binding_line):
+def _binding_prefix(kind):
+    if kind == 'security':
+        return 'LLMTOOL-SECURITY-REVIEW-BINDING v1 '
+    if kind == 'formal':
+        return 'LLMTOOL-REVIEW-BINDING v1 '
+    return None
+
+
+def _find_posted_verdict(comments, login, text, binding_line, kind='formal'):
     """Return (exact comment, conflict, duplicate) from the expected login's comments.
 
     A body alone never counts: the author must be the posting login and the
     body must equal the stored text byte for byte, binding line included. A
     bound comment by that login whose body differs is a conflict, not a match.
     More than one exact match is a duplicate, never an already-posted verdict.
+
+    #2199 PR 2: the binding line must be of ``kind``. Otherwise nothing is a
+    match and the lookup reports a conflict, so no copy is ever posted.
     """
+    prefix = _binding_prefix(kind)
+    if prefix is None or type(binding_line) is not str or not binding_line.startswith(prefix):
+        return None, True, False
     match, conflict, duplicate = None, False, False
     for comment in comments:
         if type(comment) is not dict:
@@ -1135,11 +1178,15 @@ def _post_under_lock(*, fd, directory, name, task, task_id, claim, text, login_r
                      root, lister, poster, clock, allowed):
     identity = _receipt_identity(task_id, claim, text)
     lock_path = Path(directory) / (name + '.lock')
+    from . import review_result
+    # #2199 PR 2: only an explicit security claim posts a security copy; every
+    # other claim keeps the formal binding check it had before.
+    kind = 'security' if review_result.review_kind(claim) == 'security' else 'formal'
     try:
         receipt = _read_receipt(directory, name)
         if receipt is not None:
             _check_receipt(receipt, identity)
-        binding_line = _verdict_binding_line(task, task_id, claim, text)
+        binding_line = _verdict_binding_line(task, task_id, claim, text, kind=kind)
     except _PostError as exc:
         raise _verdict_post_failure(exc.code) from None
     now = clock()
@@ -1155,7 +1202,7 @@ def _post_under_lock(*, fd, directory, name, task, task_id, claim, text, login_r
         except Exception:
             comments = None
         match, _conflict, duplicate = (
-            _find_posted_verdict(comments, login, text, binding_line)
+            _find_posted_verdict(comments, login, text, binding_line, kind=kind)
             if type(comments) is list else (None, False, False))
         if duplicate:
             # Record the conflict durably on the receipt, keeping its POSTED
@@ -1197,7 +1244,8 @@ def _post_under_lock(*, fd, directory, name, task, task_id, claim, text, login_r
         comments = None
     if type(comments) is not list:
         raise failed('VERDICT_POST_LIST_FAILED')
-    match, conflict, duplicate = _find_posted_verdict(comments, login, text, binding_line)
+    match, conflict, duplicate = _find_posted_verdict(
+        comments, login, text, binding_line, kind=kind)
     if duplicate:
         raise failed('VERDICT_POST_DUPLICATE')
     if match is not None:
@@ -1241,34 +1289,84 @@ def _post_under_lock(*, fd, directory, name, task, task_id, claim, text, login_r
     return output
 
 
+_SECURITY_REVIEWER = 'codex-reviewer'
+
+
+def _security_reviewer(task, requested):
+    """#2199 PR 2 (design §3.3, §6): the security Reviewer is always Codex.
+
+    A requested Claude (or any other) Reviewer is refused
+    SECURITY_REVIEWER_INVALID, and a Codex-family Developer is refused
+    SECURITY_REVIEWER_SAME_FAMILY. There is no fallback route.
+    """
+    if requested not in (None, _SECURITY_REVIEWER):
+        _refuse('SECURITY_REVIEWER_INVALID')
+    developer = task.get('developer') if type(task) is dict else None
+    family = task_completion._reviewer_author_family(developer)
+    if family is None:
+        _refuse('REVIEWER_FAMILY_UNSUPPORTED')
+    if family == 'codex':
+        _refuse('SECURITY_REVIEWER_SAME_FAMILY')
+    return _SECURITY_REVIEWER
+
+
+def _security_precondition(task, pr_number, head, github_get):
+    """#2199 PR 2 (design §3.3): a security claim is written only where required.
+
+    security_required runs on the Task snapshot whose record_sha256 the claim
+    append expects. Not required refuses SECURITY_REVIEW_NOT_REQUIRED; unknown
+    refuses SECURITY_REVIEW_REQUIRED_UNKNOWN. Nothing is written either way.
+    """
+    from . import review_result
+    get = task_completion._github_get if github_get is None else github_get
+    required = review_result.security_required(task, pr_number, head, get)
+    if required is True:
+        return
+    if required is False:
+        _refuse('SECURITY_REVIEW_NOT_REQUIRED')
+    _refuse('SECURITY_REVIEW_REQUIRED_UNKNOWN')
+
+
 def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                     create_d6=None, dispatch_session=None, bind_session=None,
                     prompt_renderer=None, codex_runner=None, reviewer=None,
                     comment_lister=None, comment_poster=None, post_clock=None,
-                    kind='formal'):
+                    kind='formal', github_get=None):
     """Claim once, create a read-only Reviewer D6 and bind its dispatched session.
 
     #1705: a fresh COMPLETED Codex verdict is handed to the caller to post under
     a durable caller-owned post receipt. A replay of a COMPLETED claim posts the
     stored text itself, once and verbatim, under the claim's exclusive lock.
 
-    #2199 PR 1 (security v91 F1, CWE-841): only ``kind='formal'`` is accepted.
-    PR 1 adds no security writer, so any other kind is refused
-    ``REVIEW_KIND_UNSUPPORTED`` before the store is read, before any preflight,
-    claim, Reviewer D6 or session. The kind-aware readers below stay in place.
+    #2199 PR 2 (design §3.3): ``kind`` is ``'formal'`` or ``'security'``; any
+    other kind is refused ``REVIEW_KIND_UNSUPPORTED`` before the store is read.
+    A security dispatch runs only on the Codex route (never the Claude
+    DISPATCHED route), and before any claim, Reviewer D6 or session it needs
+    ``review_result.security_required`` to answer True on the Task snapshot
+    read here (``github_get`` reads the PR; default: the GitHub reader). Its
+    claim stores ``review_kind: "security"``. This function is the only writer
+    of security claims. No CLI option or advance step calls it with
+    ``kind='security'`` yet, and until the CLI renders a security prompt a
+    security dispatch needs an injected ``prompt_renderer``.
     """
-    if type(kind) is not str or kind != 'formal':
+    if type(kind) is not str or kind not in ('formal', 'security'):
         _refuse('REVIEW_KIND_UNSUPPORTED')
     clock = post_clock or time.time
     task = store.get(task_id)
+    if kind == 'security':
+        reviewer = _security_reviewer(task, reviewer)
     _, executor, head, _base, reviewer_key = _preflight(
         store, task_id, executor_task, pr_number, version, task=task,
         reviewer=reviewer, kind=kind)
+    if kind == 'security' and reviewer_key != _SECURITY_REVIEWER:
+        _refuse('SECURITY_REVIEWER_INVALID')
     # Authorization must be checked before a durable claim is created. The
     # policy is re-read again immediately before each external side effect.
     gate = _policy(task, reviewer_key)
     if not gate.allowed:
         _refuse('REVIEWER_NOT_ALLOWED')
+    if kind == 'security':
+        _security_precondition(task, pr_number, head, github_get)
     stored_claims = task.get('review_dispatch_claim')
     claims = ([stored_claims] if type(stored_claims) is dict else
               list(stored_claims) if type(stored_claims) is list else [])
@@ -1334,6 +1432,12 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             'REVIEW_DISPATCH_VERSION_USED',
             f'Review version {version} is already used for PR {pr_number} '
             f'on another head; use version {next_version}.')
+    if kind == 'security' and prompt_renderer is None:
+        # The CLI review-prompt path renders only the formal prompt until the
+        # security prompt lands with its CLI entry point (design §3.3, PR 3).
+        # A formal prompt can never yield a security verdict, so refuse here,
+        # before any claim, Reviewer D6 or session.
+        _refuse('SECURITY_REVIEW_PROMPT_UNAVAILABLE')
     reviewer_role = _resolve_reviewer_role(reviewer_key)
     config_dir = reviewer_role['config_dir'] if reviewer_role is not None else None
     # #1777 (CWE-863): the Claude Reviewer never runs under another provider's
@@ -1396,9 +1500,11 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         if not gate.allowed:
             _refuse(gate.reason_code)
         github_login = _resolve_github_login()
+        # Formal calls keep their exact keyword set; only security adds its kind.
+        kind_kwargs = {'review_kind': kind} if kind == 'security' else {}
         create(task_id=reviewer_task, base_sha=head, repo_root=repo_root,
                executor_task=executor_task, github_login=github_login,
-               reviewer_key=reviewer_key)
+               reviewer_key=reviewer_key, **kind_kwargs)
         try:
             if prompt_renderer is None:
                 from . import task_submission_cli
@@ -1447,12 +1553,23 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             codex_result = run_codex(reviewer_root=reviewer.root, prompt=prompt,
                                      task=task, head=head, version=version,
                                      model=codex_model, effort=codex_effort,
-                                     config_dir=config_dir)
+                                     config_dir=config_dir,
+                                     **({'kind': kind} if kind == 'security' else {}))
             if type(codex_result) is not dict:
                 _refuse('REVIEW_NOT_POSTED')
             session_id = codex_result.get('thread_id')
             if type(session_id) is not str or not session_id:
                 _refuse('REVIEW_NOT_POSTED')
+            if kind == 'security':
+                # The stored security result must be what the security
+                # classifier reads from its own text; otherwise nothing is kept.
+                from . import review_result
+                checked = review_result._security_verdict(
+                    codex_result.get('review_text'), head, version, task)
+                if (checked is None or codex_result.get('verdict') not in
+                        ('PASS', 'FIX', 'FAIL', 'BLOCKED') or
+                        (checked[2] == 'REVIEW_PASS') != (codex_result['verdict'] == 'PASS')):
+                    _refuse('REVIEW_NOT_POSTED', reason='REVIEW_CLASSIFIER_REJECTED')
             bind(task_id=reviewer_task, session_id=session_id, repo_root=repo_root)
         else:
             session_id = send(task_id=reviewer_task, prompt=prompt,

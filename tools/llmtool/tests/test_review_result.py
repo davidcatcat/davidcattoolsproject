@@ -665,11 +665,12 @@ class ReviewKindTests(unittest.TestCase):
             self.assertEqual(caught.exception.review_dispatch_code,
                              'REVIEW_KIND_UNSUPPORTED')
 
-    def test_record_review_result_refuses_non_formal_kind_before_any_read_or_write(self):
-        # #2199 PR 1 (security v91 F1, CWE-841): record_review_result has no
-        # security writer path. Even with a hand-built COMPLETED security PASS
-        # claim present, every kind but 'formal' is refused with one stable
-        # code before the store or GitHub is read and before any event.
+    def test_record_review_result_refuses_unknown_kind_before_any_read_or_write(self):
+        # #2199 PR 1 (security v91 F1, CWE-841), kept by PR 2: even with a
+        # hand-built COMPLETED security PASS claim present, every kind but
+        # 'formal' and 'security' is refused with one stable code before the
+        # store or GitHub is read and before any event. The security path is
+        # covered by test_security_review_binding_2199.
         security_claim = {
             'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD, 'version': 91,
             'state': 'COMPLETED', 'reviewer_task': 'reviewer-sec',
@@ -706,7 +707,7 @@ class ReviewKindTests(unittest.TestCase):
                 calls.append('github_get')
                 return []
 
-            for kind in ('security', 'invalid', '', 'FORMAL', None, 1):
+            for kind in ('SECURITY', 'invalid', '', 'FORMAL', None, 1):
                 with self.subTest(kind=kind):
                     calls.clear()
                     with self.assertRaises(LLMToolError) as caught:
@@ -784,12 +785,13 @@ class ReviewKindTests(unittest.TestCase):
             self.assertEqual(after_task['review_dispatch_claim'], seeded_claims)
             self.assertEqual(after_task['completion_events'], seeded_events)
 
-            # PR 1 has no security writer: the kind is refused and nothing changes.
+            # #2199 PR 2: a security result at a formal version is refused on
+            # its range, before the store is read, and nothing changes.
             with self.assertRaises(LLMToolError) as caught:
                 review_result.record_review_result(
                     store=family_store, task_id=TASK, executor_task=EXECUTOR, pr_number=PR,
                     version=1, kind='security')
             self.assertEqual(caught.exception.review_dispatch_code,
-                             'REVIEW_KIND_UNSUPPORTED')
+                             'REVIEW_VERSION_RANGE_INVALID')
             self.assertEqual(store.get(TASK)['completion_events'], seeded_events)
             self.assertEqual(store.get(TASK)['review_dispatch_claim'], seeded_claims)

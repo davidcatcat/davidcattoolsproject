@@ -423,9 +423,11 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(caught.exception.review_dispatch_code,
                          'REVIEW_DISPATCH_CLAIM_MISMATCH')
 
-        # 2. Existing claim has review_kind='formal', dispatch asks for 'security':
-        # PR 1 has no security writer, so the kind itself is refused and the
-        # stored claim is left exactly as it was.
+        # 2. Existing claim has review_kind='formal', dispatch asks for 'security'
+        # at the same (pr, head, version). #2199 PR 2: the head is required (it
+        # touches AGENTS.md), so the dispatch reaches the prior claim and is
+        # refused on its kind; the stored claim is left exactly as it was.
+        self.store.data['developer'] = {'provider_profile': 'claude'}
         self.store.data['review_dispatch_claim'] = [{
             'executor_task': 'executor-d6', 'pr': 42, 'head_sha': HEAD,
             'version': 91, 'state': 'CLAIMED', 'reviewer_task': 'reviewer-f',
@@ -435,28 +437,41 @@ class ReviewDispatchTests(unittest.TestCase):
         }]
         before = json.loads(json.dumps(self.store.data['review_dispatch_claim']))
         gate = SimpleNamespace(allowed=True, reason_code='ALLOWED')
+
+        def rule_file_pr(path):
+            if path == 'pulls/42':
+                return {'number': 42, 'head': {'sha': HEAD}}
+            if path.startswith('pulls/42/files'):
+                return [{'filename': 'AGENTS.md'}]
+            raise AssertionError('unexpected GitHub read')
+
         with patch.object(review_dispatch, '_preflight',
                           return_value=(TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer')), \
                 patch.object(review_dispatch.worker_dispatch, 'evaluate', return_value=gate), \
                 self.assertRaises(LLMToolError) as caught:
             review_dispatch.dispatch_review(
                 store=self.store, task_id=TASK, executor_task='executor-d6',
-                pr_number=42, version=91, kind='security')
+                pr_number=42, version=91, kind='security', github_get=rule_file_pr)
         self.assertEqual(caught.exception.review_dispatch_code,
-                         'REVIEW_KIND_UNSUPPORTED')
+                         'REVIEW_DISPATCH_CLAIM_MISMATCH')
         self.assertEqual(self.store.data['review_dispatch_claim'], before)
 
         # 3. Existing claim is legacy unkinded at version >= 91: a formal
-        # dispatch fails closed on the unknown prior kind; a security dispatch
-        # is refused on its kind before the claim is even looked at.
+        # dispatch fails closed on the unknown prior kind; for a security
+        # dispatch the unknown kind makes security_required unknown, so it is
+        # refused before the claim is looked at and before any GitHub read.
         self.store.data['review_dispatch_claim'] = [{
             'executor_task': 'executor-d6', 'pr': 42, 'head_sha': HEAD,
             'version': 91, 'state': 'CLAIMED', 'reviewer_task': 'reviewer-old',
             'native_session_id': None, 'account_mode': 'CODEX_CLI',
             'claimed_at': '2026-10-27T00:00:00Z', 'updated_at': '2026-10-27T00:00:00Z',
         }]
+
+        def no_github(_path):
+            raise AssertionError('unexpected GitHub read')
+
         for kind, code in (('formal', 'REVIEW_DISPATCH_CLAIM_MISMATCH'),
-                           ('security', 'REVIEW_KIND_UNSUPPORTED')):
+                           ('security', 'SECURITY_REVIEW_REQUIRED_UNKNOWN')):
             with self.subTest(kind=kind), \
                     patch.object(review_dispatch, '_preflight',
                                  return_value=(TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer')), \
@@ -464,7 +479,7 @@ class ReviewDispatchTests(unittest.TestCase):
                     self.assertRaises(LLMToolError) as caught:
                 review_dispatch.dispatch_review(
                     store=self.store, task_id=TASK, executor_task='executor-d6',
-                    pr_number=42, version=91, kind=kind)
+                    pr_number=42, version=91, kind=kind, github_get=no_github)
             self.assertEqual(caught.exception.review_dispatch_code, code)
             self.assertEqual(self.store.data['review_dispatch_claim'][0]['state'], 'CLAIMED')
 
@@ -500,24 +515,33 @@ class ReviewDispatchTests(unittest.TestCase):
                          'REVIEW_DISPATCH_VERSION_USED')
         self.assertIn('use version 2.', str(caught.exception))
 
-        # A security dispatch is refused on its kind (PR 1 has no security
-        # writer); the stored claims are untouched.
+        # #2199 PR 2: re-dispatching security v91 on this head is required by
+        # the sticky rule (a security claim exists for the PR and no formal
+        # claim exists at this head, so no GitHub read is needed). Its next
+        # version is max(security) + 1 = 92; the stored claims are untouched.
+        self.store.data['developer'] = {'provider_profile': 'claude'}
         before = json.loads(json.dumps(self.store.data['review_dispatch_claim']))
+
+        def no_github(_path):
+            raise AssertionError('unexpected GitHub read')
+
         with patch.object(review_dispatch, '_preflight',
                           return_value=(TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer')), \
                 patch.object(review_dispatch.worker_dispatch, 'evaluate', return_value=gate), \
                 self.assertRaises(LLMToolError) as caught:
             review_dispatch.dispatch_review(
                 store=self.store, task_id=TASK, executor_task='executor-d6',
-                pr_number=42, version=91, kind='security')
+                pr_number=42, version=91, kind='security', github_get=no_github)
         self.assertEqual(caught.exception.review_dispatch_code,
-                         'REVIEW_KIND_UNSUPPORTED')
+                         'REVIEW_DISPATCH_VERSION_USED')
+        self.assertIn('use version 92.', str(caught.exception))
         self.assertEqual(self.store.data['review_dispatch_claim'], before)
 
-    def test_non_formal_dispatch_is_refused_before_any_read_preflight_claim_d6_or_session(self):
-        # #2199 PR 1 (security v91 F1, CWE-841): dispatch_review has no
-        # security writer path. Every kind but 'formal' is refused with one
-        # stable code before the store is read and before any side effect.
+    def test_unknown_kind_dispatch_is_refused_before_any_read_preflight_claim_d6_or_session(self):
+        # #2199 PR 1 (security v91 F1, CWE-841), kept by PR 2: every kind but
+        # 'formal' and 'security' is refused with one stable code before the
+        # store is read and before any side effect. The security path is
+        # covered by test_security_review_binding_2199.
         self.store.data.update({
             'developer': {'provider_profile': 'claude'},
             'run_id': 'c' * 32,
@@ -538,7 +562,7 @@ class ReviewDispatchTests(unittest.TestCase):
         def record(name):
             return lambda *args, **kwargs: calls.append(name)
 
-        for kind in ('security', 'invalid_kind', '', 'FORMAL', None, 1):
+        for kind in ('SECURITY', 'invalid_kind', '', 'FORMAL', None, 1):
             with self.subTest(kind=kind):
                 calls.clear()
                 with patch.object(review_dispatch, '_preflight',
@@ -574,16 +598,19 @@ class ReviewDispatchTests(unittest.TestCase):
         }
         self.store.data.update(task_data)
         self.store.path.write_text(json.dumps(self.store.data))
-        # A formal dispatch outside 1..90 is refused on its range; any other
-        # kind is refused on the kind itself (PR 1 has no security writer).
+        # A dispatch outside its kind's range is refused on the range; an
+        # unknown kind is refused on the kind itself. #2199 PR 2: a security
+        # dispatch in range reaches the security_required precondition, which
+        # cannot read a file list here (the injected reader returns the PR for
+        # every path), so it is refused as unknown. Nothing is written.
         cases = [
             ('formal', 91, 'REVIEW_VERSION_RANGE_INVALID'),
             ('formal', 0, 'REVIEW_VERSION_RANGE_INVALID'),
             ('formal', 92, 'REVIEW_VERSION_RANGE_INVALID'),
-            ('security', 1, 'REVIEW_KIND_UNSUPPORTED'),
-            ('security', 90, 'REVIEW_KIND_UNSUPPORTED'),
-            ('security', 91, 'REVIEW_KIND_UNSUPPORTED'),
-            ('security', 10000, 'REVIEW_KIND_UNSUPPORTED'),
+            ('security', 1, 'REVIEW_VERSION_RANGE_INVALID'),
+            ('security', 90, 'REVIEW_VERSION_RANGE_INVALID'),
+            ('security', 91, 'SECURITY_REVIEW_REQUIRED_UNKNOWN'),
+            ('security', 10000, 'REVIEW_VERSION_RANGE_INVALID'),
             ('invalid_kind', 1, 'REVIEW_KIND_UNSUPPORTED'),
         ]
         executor = SimpleNamespace(
