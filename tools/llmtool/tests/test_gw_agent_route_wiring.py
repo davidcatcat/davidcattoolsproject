@@ -1039,7 +1039,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                               'allowed_models': ['gw-agent-default', 'authorized-model'],
                               'default_effort': 'low',
                               'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
-                                          'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                                          'max_output_tokens': 65536, 'max_wall_seconds': 1800,
                                           'max_tool_result_bytes': 262144,
                                           'max_sent_bytes': 16777216}}}}), \
              patch.dict(os.environ, {'HOME': str(config_home)}), \
@@ -1093,6 +1093,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(seen['task']['budgets']['max_input_tokens'], 262144)
         self.assertEqual(seen['task']['budgets']['max_output_tokens'], 65536)
         self.assertEqual(seen['task']['budgets']['max_turns'], 512)
+        self.assertEqual(seen['task']['budgets']['max_wall_seconds'], 1800)
         self.assertEqual(developer['usage']['prompt_tokens'], 1)
         self.assertEqual(developer['usage']['completion_tokens'], 2)
         self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
@@ -2089,6 +2090,9 @@ class GwAgentRealStoreTests(unittest.TestCase):
             acceptance=[f'Only {target} is created.'], selection_source='PM',
             executor_task='executor-d6', read_path=[target], write_path=[target],
             cwd=str(self.root))
+        real_config = load_route_config()
+        real_config['routes']['gw-agent']['package_path'] = str(
+            Path(__file__).resolve().parents[2] / 'api-agent-gateway')
         seen_requests = []
         def fake_runner(_route, request, *, gate, on_launch, **_kwargs):
             seen_requests.append(copy.deepcopy(request))
@@ -2097,7 +2101,9 @@ class GwAgentRealStoreTests(unittest.TestCase):
 
         decision = worker_dispatch.PolicyDecision('gw-agent', True,
                                                   'OWNER_POLICY_ALLOWED', 'f' * 64)
-        with patch.object(task_submission_cli, 'for_platform',
+        with patch.object(task_submission_cli, 'load_route_config',
+                          return_value=real_config), \
+             patch.object(task_submission_cli, 'for_platform',
                           return_value=_NoSandboxBoundary()), \
              patch.object(worker_dispatch, 'authorize_dispatch'), \
              patch.object(worker_dispatch, 'evaluate', return_value=decision), \
