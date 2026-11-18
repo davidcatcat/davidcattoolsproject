@@ -84,12 +84,12 @@ Five distinct dispatch kinds cover all AI roles in the team:
     "route": "ALLOWED",
     "owner_ref": null
   },
-  "problem": "Implement standard dispatch spec template parser and pre-dispatch checks.",
-  "goal": "Add dispatch spec template parser and preflight validation script.",
+  "problem": "Dispatched tasks frequently fail due to malformed specs, missing write paths, stale base commits, and invalid link forms (#1817).",
+  "goal": "Standardize task dispatch specifications across AI roles with automated pre-dispatch validation and refusal.",
   "acceptance": [
-    "A new module tools/llmtool/llmtool/spec_template.py defines templates for 5 dispatch kinds.",
-    "tools/llmtool/scripts/spec_preflight.py validates template fields and returns refusal codes.",
-    "tools/llmtool/tests/test_spec_preflight.py covers all refusal paths."
+    "Candidate dispatch specifications adhere to standard fixed field schemas across all five AI dispatch kinds.",
+    "Non-conforming, malformed, or unauthorized specifications are automatically refused prior to execution with deterministic refusal codes.",
+    "Automated preflight checks reject invalid specifications while permitting compliant task specifications to proceed."
   ],
   "read_paths": [
     "CLAUDE.md",
@@ -390,6 +390,12 @@ Tools must automatically validate every candidate dispatch specification prior t
 - **Standard Specification Refusals**: If any check fails (e.g. malformed syntax, schema mismatch, byte limit exceeded, missing paths, stale base commit, invalid links, or unauthorized worker dispatch), the tool aborts dispatch, writes no files to the worktree, emits a deterministic refusal code, and returns the specification to the PM for rewriting.
 - **Worker Authorization Refusals (`SPEC_DISPATCH_UNAUTHORIZED`)**: Dispatch requires an affirmative decision from the authoritative dispatch gate ([CLAUDE.md](../../CLAUDE.md)). A worker with policy state `PAUSED` is refused unconditionally. A worker with policy state `OWNER_ASSIGNMENT_ONLY` is authorized only when carrying a valid matching Owner assignment reference (`owner_ref`), while `ALLOWED` proceeds through regular gates. Refusal occurs whenever the authoritative gate does not return an authorized decision, including when a requested worker is missing or unrecognized in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) (such as `claude-subpm`, which evaluates to `WORKER_UNKNOWN`), or when a template specifies a non-dispatchable `TEMPLATE_ONLY` route.
 - **Sensitive Content Refusals (`SPEC_SENSITIVE_CONTENT`)**: Per Common Core Rule 5 and [pm-continuation.md](../../.claude/skills/ai-team-delivery/pm-continuation.md), a sensitive detector refusal stops execution immediately as `BLOCKED`. It reports metadata only (rule, field, Task ID, refusal type `SPEC_SENSITIVE_CONTENT`). Tooling and agents must never suggest how to rewrite, reword, or reshape content to pass the screen, and the spec must not be returned to the generic rewrite path.
+- **Relative Link Syntax Enforcement (`SPEC_INVALID_LINK_SYNTAX`)**: All Markdown links in specification fields (`problem`, `goal`, `acceptance`) and documentation must strictly adhere to the relative file-path rule ([CLAUDE.md](../../CLAUDE.md)). Links must use pure repository-relative file paths without line anchors. Pre-dispatch validation checks all Markdown links and immediately refuses candidate specifications with code `SPEC_INVALID_LINK_SYNTAX` under any of the following conditions:
+  - **Line anchors**: Any link containing `#L<start>[-L<end>]` line anchors (e.g. `file.md#L10` or `#L1-L20`).
+  - **Absolute filesystem paths**: Any link starting with `/` (e.g. `/Users/...` or `/tools/...`).
+  - **File or network URI schemes**: Any link using URI schemes (e.g. `file://...` or `https://github.com/.../blob/...` referencing repository files rather than local relative markdown links).
+  - **Non-relative links**: Any link that is not a clean relative path (e.g. unescaped relative traversal escaping the repository root, or bare filenames without required directory context).
+  - **Missing targets**: Any relative link whose target path does not resolve to an existing file in the repository.
 - **Post-Dispatch Auditing**: If a specification is dispatched without passing this gate and the Developer later halts due to a specification defect (such as an unlisted write path or stale base), the failure is audited and recorded as a **PM specification error (`PM_SPEC_ERROR`)**.
 
 ### 3.2 Refusal Code Catalogue
@@ -413,7 +419,7 @@ Tools must automatically validate every candidate dispatch specification prior t
 | `SPEC_WRITE_PATHS_EMPTY` | Scope | `developer` or `sub_pm` dispatch has an empty `write_paths` array. |
 | `SPEC_READONLY_ROLE_HAS_WRITES` | Scope | `investigation`, `debug`, or `reviewer` has a non-empty `write_paths` array ([debug.md](../../.claude/skills/role-cards/debug.md), [reviewer.md](../../.claude/skills/role-cards/reviewer.md)). |
 | `SPEC_PREDECESSOR_MISSING` | Lineage | Repair, re-review, or AI Debug dispatch lacks `predecessor_spec` or unbroken lineage tracking ([WORKFLOW.md](../../tools/llmtool/WORKFLOW.md), [high-debug-report.md](../../.claude/skills/ai-team-delivery/high-debug-report.md)). |
-| `SPEC_INVALID_LINK_SYNTAX` | Docs / Quality | Markdown links in spec criteria contain line anchors (`#L...`) instead of pure relative file paths ([CLAUDE.md](../../CLAUDE.md)). |
+| `SPEC_INVALID_LINK_SYNTAX` | Docs / Quality | Markdown links in specification fields violate the relative file-path rule: containing line anchors (`#L...`), absolute filesystem paths (starting with `/`), file/http URI schemes (e.g. `file://...` or GitHub blob URLs), missing target files, or non-relative file paths instead of pure repository-relative file links ([CLAUDE.md](../../CLAUDE.md)). |
 | `SPEC_DISPATCH_UNAUTHORIZED` | Authority | Target worker is refused by the authoritative dispatch gate (`worker_dispatch.py::evaluate`): worker policy is `PAUSED`, entry is missing or unrecognized in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) (such as `claude-subpm`), route is `TEMPLATE_ONLY`, or policy is `OWNER_ASSIGNMENT_ONLY` without a valid matching Owner assignment reference (`owner_ref`) ([CLAUDE.md](../../CLAUDE.md)). |
 | `SPEC_D6_CONFLICT` | D6 Lifecycle | Assigned D6 worktree is already bound to another active writer ([developer.md](../../.claude/skills/role-cards/developer.md)). |
 
@@ -422,8 +428,8 @@ Tools must automatically validate every candidate dispatch specification prior t
 ## 4. Cited Rule and Tool Foundations
 
 Every field and pre-dispatch check in this design directly derives from established repository governance and automation:
-- **Preflight validator script**: [spec_preflight.py](../../tools/llmtool/scripts/spec_preflight.py) screens text limits, byte boundaries, forbidden `edits`, acceptance item counts, and read scope coverage.
-- **Preflight test suite**: [test_spec_preflight.py](../../tools/llmtool/tests/test_spec_preflight.py) tests strict JSON loading, boundary handling, and screen refusal mechanics.
+- **Preflight validator script**: [spec_preflight.py](../../tools/llmtool/scripts/spec_preflight.py) screens text limits, byte boundaries, forbidden `edits`, acceptance item counts, read scope coverage, and relative link syntax compliance.
+- **Preflight test suite**: [test_spec_preflight.py](../../tools/llmtool/tests/test_spec_preflight.py) tests strict JSON loading, boundary handling, screen refusal mechanics, and full relative file-path link validation (line anchors, absolute paths, URI schemes, and non-relative links).
 - **Reviewer dispatch tool**: [review_dispatch.py](../../tools/llmtool/llmtool/review_dispatch.py) enforces preflight checks on reviewer D6 worktrees, unmerged result HEAD validation, and role pairing.
 - **Workflow & Delivery gates**: [WORKFLOW.md](../../tools/llmtool/WORKFLOW.md) governs the progression of tasks through remote testing, PR creation, Linux CI, and review.
 - **Repository Authority**: [CLAUDE.md](../../CLAUDE.md) establishes worker dispatch rules, cross-family review requirements, documentation check rules, and single-writer constraints.
@@ -452,9 +458,9 @@ Implementation of this design is phased into small, independent PRs. No producti
 ### PR 2: Preflight Automated Validation Expansion
 - **Goal**: Integrate all refusal codes into `spec_preflight.py` and provide a standalone validation entrypoint.
 - **Files**:
-  - `tools/llmtool/scripts/spec_preflight.py` (add checks for kind schemas, role-specific base/result_head rules for fresh tasks vs repairs, write scope rules, link syntax, authoritative dispatch gate evaluation with owner_ref, and refusal codes)
+  - `tools/llmtool/scripts/spec_preflight.py` (add checks for kind schemas, role-specific base/result_head rules for fresh tasks vs repairs, write scope rules, link syntax enforcing the full relative file-path rule [refusing line anchors `#L...`, absolute paths `/...`, `file://` URIs, external repository URLs, and non-relative paths], authoritative dispatch gate evaluation with owner_ref, and refusal codes)
   - `tools/llmtool/llmtool/errors.py` (add error constants for standard refusal codes)
-  - `tools/llmtool/tests/test_spec_preflight.py` (test coverage for all refusal paths including SPEC_BASE_STALE and SPEC_DISPATCH_UNAUTHORIZED)
+  - `tools/llmtool/tests/test_spec_preflight.py` (comprehensive test coverage for all refusal paths including SPEC_BASE_STALE, SPEC_DISPATCH_UNAUTHORIZED, and dedicated test cases for the full relative file-path rule under SPEC_INVALID_LINK_SYNTAX covering line anchors, absolute paths, URI schemes, non-relative links, and valid relative links)
 
 ### PR 3: Dispatch Enforcement Hooks Across Task Submission CLI, High Debug & Review Dispatcher
 - **Goal**: Enforce automatic pre-dispatch checks across all dispatch entrypoints for every kind: `llmtool task delegate` (covering `developer`, read-only `investigation`, and `sub_pm` tasks), `llmtool task repair` (developer repairs), `llmtool task high-debug` / `high_debug.py` (`debug` tasks), and `review_dispatch.py` (`reviewer` tasks).
