@@ -6,6 +6,7 @@
     "scripts/llmtool_monitor.py",
     "tools/llmtool/policy.json",
     "tools/llmtool/worker-dispatch.json",
+    "tools/llmtool/workflow-grants.json",
     "tools/llmtool/developer-routes.json",
     "tools/llmtool/execution-resources.json",
     "tools/llmtool/sensitive-paths.json",
