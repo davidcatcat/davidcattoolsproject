@@ -37,7 +37,9 @@ class GwAgentInstallCheckTests(unittest.TestCase):
     def _write_stale_init_bytecode(self, source):
         """Write a loadable stale __init__ .pyc beside the installed source."""
         info = source.stat()
-        marker = b'STALE_INSTALL_MARKER = True\n'
+        # The marker's value is the control output below, so the assertion
+        # proves the stale cached bytecode itself ran (#2319 f73cdb01).
+        marker = b"STALE_INSTALL_MARKER = 'STALE_INSTALL'\n"
         padding = info.st_size - len(marker) - 1
         self.assertGreaterEqual(padding, 0)
         stale_source = Path(self.temp.name) / 'stale_init.py'
