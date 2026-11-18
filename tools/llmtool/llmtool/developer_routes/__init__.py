@@ -24,7 +24,7 @@ __all__ = [
     'DeveloperRoute', 'RouteError', 'RouteResult', 'capture_snapshot', 'run_route',
     'AgyRoute', 'ClaudeRoute', 'GwAgentRoute', 'owner_assignment_gate', 'load_route_config',
     'check_route_model', 'check_route_model_family', 'check_registry_role_model',
-    'REGISTRY_ROLES', 'registry_default_model',
+    'route_has_family_check', 'REGISTRY_ROLES', 'registry_default_model',
     'resolve_route_timeout', 'resolve_route_max_diff_bytes', 'resolve_route_max_prompt_bytes',
     'resolve_route_max_task_paths', 'resolve_route_max_source_file_bytes',
     'resolve_route_max_source_total_bytes', 'max_prompt_bytes_ok',
@@ -313,7 +313,8 @@ def check_route_model(config, route, model):
     model. Owner #2302 P2: agy, claude and opencode accept any model of their
     own provider family in a valid format (_ROUTE_MODEL_CHECKS) and refuse a
     wrong-family or malformed one; allowed_models is not consulted. gw-agent
-    is unchanged: the model must be listed in its allowed_models.
+    keeps its allowed_models membership gate, but a malformed identifier is
+    refused here too, before membership (Repair 2).
     """
     routes = config.get('routes') if type(config) is dict else None
     entry = (routes.get(route) if type(routes) is dict and type(route) is str
@@ -325,11 +326,25 @@ def check_route_model(config, route, model):
         if not model_ok(model):
             raise RouteError('ROLE_MODEL_NOT_ALLOWED')
         return model
+    format_ok = _GENERIC_ROUTE_CHECKS.get(route)
+    if format_ok is not None and not format_ok(model):
+        raise RouteError('ROLE_MODEL_NOT_ALLOWED')
     allowed = entry.get('allowed_models')
     if (type(allowed) is not list or
             not any(type(item) is str and item == model for item in allowed)):
         raise RouteError('ROLE_MODEL_NOT_ALLOWED')
     return model
+
+
+def route_has_family_check(route):
+    """Return True when route has a mandatory provider family/format check.
+
+    Owner #2302 P2 Repair 2: agy, claude and opencode are gated by their
+    provider family and format, and no owner override may relax that gate.
+    gw-agent has no provider family, so only its allowed_models membership
+    gate may be relaxed.
+    """
+    return route in _ROUTE_MODEL_CHECKS
 
 
 def check_route_model_family(route, model):

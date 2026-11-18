@@ -306,6 +306,7 @@ def check_role_model(route, route_config, model, *, owner_override=None,
     """
     from .developer_routes import (
         RouteError, check_route_model, check_route_model_family,
+        route_has_family_check,
     )
     from .owner_override import OwnerOverrideError, validate_owner_override
 
@@ -320,7 +321,11 @@ def check_role_model(route, route_config, model, *, owner_override=None,
         check_route_model({"routes": {route: route_config}}, route, model)
         return None
     except RouteError:
-        pass
+        # Repair 2: only a route without a provider family (gw-agent) has a
+        # membership gate an override may relax. A family/format route never
+        # reaches override validation.
+        if route_has_family_check(route):
+            _fail_model()
     if owner_override is None:
         _fail_model()
     try:
