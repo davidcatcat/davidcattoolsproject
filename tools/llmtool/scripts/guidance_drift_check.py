@@ -3,9 +3,11 @@
 
 - CLAUDE.md acknowledges hard values in AGENTS.md (hash-pinned).
 - Every tools/llmtool/*.json rule file matches a strict schema (#1502 WP-G).
-- Normative docs name only models listed in developer-routes.json
-  allowed_models, for a route or a review/debug role (#1502 WP-E, WP-G);
-  docs/history and docs/reports are exempt.
+- Normative docs name only models whose family is configured in
+  developer-routes.json for a route or a review/debug role (#1502 WP-E,
+  WP-G); docs/history and docs/reports are exempt. Since #2302 a doc or the
+  configuration may name any model of a configured family, so switching to
+  another model of the same family needs no rule-file change.
 """
 
 from __future__ import annotations
@@ -185,15 +187,32 @@ ROUTE_PROFILE = Obj(
         "data_class_map": MapOf(Str(r"[a-z_]+"), r"[A-Z][A-Z_]*"),
     },
 )
+
+
+class NeedsModel:
+    """An Obj that must name a model by default_model or allowed_models (#2302)."""
+
+    def __init__(self, inner: Obj):
+        self.inner = inner
+
+    def errors(self, value: Any, where: str) -> list[str]:
+        errors = self.inner.errors(value, where)
+        if type(value) is dict and "default_model" not in value and "allowed_models" not in value:
+            errors.append(f"{where} needs default_model or allowed_models")
+        return errors
+
+
 DEVELOPER_ROUTE = TimeoutPair(Obj(
     {
         "default_model": Str(),
-        "allowed_models": ListOf(Str(), min_items=1),
         "default_effort": Str(r"[a-z]+"),
         "default_timeout": Int(1, ROUTE_TIMEOUT_CAP_SECONDS),
         "max_timeout": Int(1, ROUTE_TIMEOUT_CAP_SECONDS),
     },
     {
+        # #2302: optional and deprecated; the route model is not limited to
+        # one listed entry. When present it must still be a non-empty list.
+        "allowed_models": ListOf(Str(), min_items=1),
         "executable": Str(r"[A-Za-z0-9._-]+"),
         "package_path": Str(),
         "denied_dirs": ListOf(Str(r"[A-Za-z0-9._-]+")),
@@ -226,11 +245,16 @@ DEVELOPER_ROUTE = TimeoutPair(Obj(
     },
 ))
 # Review/AI Debug role model registry (#1502 WP-E). The route loader checks
-# the exact role names; this schema checks shape only.
-ROLE_MODELS = Obj(
-    {"allowed_models": ListOf(Str(), min_items=1)},
-    {"timeout": Int(1, ROUTE_TIMEOUT_CAP_SECONDS)},
-)
+# the exact role names; this schema checks shape only. #2302: a role names
+# its model by default_model, by the deprecated allowed_models list, or both.
+ROLE_MODELS = NeedsModel(Obj(
+    {},
+    {
+        "default_model": Str(),
+        "allowed_models": ListOf(Str(), min_items=1),
+        "timeout": Int(1, ROUTE_TIMEOUT_CAP_SECONDS),
+    },
+))
 WORKER_DISPATCH_ENTRY = Obj({
     "dispatch": OneOf(*sorted(DISPATCH_VALUES)),
     "decided_by": Str(),
@@ -432,15 +456,36 @@ def check_rule_files(root: Path) -> list[str]:
     return findings
 
 
-def _allowed_models(root: Path) -> tuple[set[str] | None, list[str]]:
+def _model_family(name: str) -> str | None:
+    """Return the family of a model-shaped name, or None (#2302).
+
+    The family is the leading word of the bare model name after any provider
+    prefix; gpt and o-series names are one family, "openai". Names that are
+    not model-shaped (such as the gw-agent profile name) have no family.
+    """
+    if not MODEL_NAME.fullmatch(name):
+        return None
+    bare = name.lower().rsplit("/", 1)[-1]
+    family = re.match(r"[a-z]+", bare)
+    if family is None:
+        return None
+    return "openai" if family.group(0) in {"gpt", "o"} else family.group(0)
+
+
+def _configured_families(root: Path) -> tuple[set[str] | None, list[str]]:
+    """Model families named by any route or role in developer-routes.json."""
     label = ROUTES_PATH.as_posix()
     value, error = _read_rule_json(root / ROUTES_PATH)
     if error is None and RULE_SCHEMAS["developer-routes.json"].errors(value, "$"):
         error = "schema invalid"
     if error is not None:
         return None, [_finding(label, "MODEL_ALLOWLIST_UNAVAILABLE", error)]
-    entries = [*value["routes"].values(), *value.get("roles", {}).values()]
-    return {model.lower() for entry in entries for model in entry["allowed_models"]}, []
+    models: list[str] = []
+    for entry in [*value["routes"].values(), *value.get("roles", {}).values()]:
+        if "default_model" in entry:
+            models.append(entry["default_model"])
+        models.extend(entry.get("allowed_models", []))
+    return {family for family in map(_model_family, models) if family is not None}, []
 
 
 def _normative_docs(root: Path) -> list[tuple[str, Path]]:
@@ -453,20 +498,18 @@ def _normative_docs(root: Path) -> list[tuple[str, Path]]:
     return sorted(docs.items())
 
 
-def _model_allowed(name: str, allowed: set[str]) -> bool:
-    lowered = name.lower()
-    return lowered in allowed or lowered.rsplit("/", 1)[-1] in allowed
-
-
 def check_model_names(root: Path) -> list[str]:
-    """Normative docs may name a model only if developer-routes.json allows it
-    for a route or a review/debug role.
+    """Normative docs may name a model only if its family is configured in
+    developer-routes.json for a route or a review/debug role.
 
+    #2302: any model of a configured family passes, whether or not it is the
+    route default or an allowed_models entry, so a same-family model switch
+    needs no rule-file change. A model of an unconfigured family still fails.
     Only model-shaped names are scanned; dispatch states, counts and worker
     IDs such as claude-reviewer or gw-agent are not model names.
     """
-    allowed, findings = _allowed_models(root)
-    if allowed is None:
+    families, findings = _configured_families(root)
+    if families is None:
         return findings
     for label, path in _normative_docs(root):
         try:
@@ -478,7 +521,7 @@ def check_model_names(root: Path) -> list[str]:
         findings.extend(
             _finding(label, "MODEL_NOT_ALLOWED", name)
             for name in sorted(names)
-            if not _model_allowed(name, allowed)
+            if _model_family(name) not in families
         )
     return findings
 

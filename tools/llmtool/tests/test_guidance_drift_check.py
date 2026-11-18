@@ -20,7 +20,7 @@ FIXTURE_MODELS = ("gpt-6-luna", "gpt-6.1-sol", "gpt-7-x", "gpt-8-y", "qwen3-code
 _DELETE = object()
 
 
-def fixture_routes(models=FIXTURE_MODELS, roles=None):
+def fixture_routes(models=FIXTURE_MODELS, roles=None, *, allowed=True):
     routes = {
         "schema_version": 1,
         "routes": {
@@ -34,6 +34,9 @@ def fixture_routes(models=FIXTURE_MODELS, roles=None):
             },
         },
     }
+    if not allowed:
+        # #2302: allowed_models is optional; the route names only its default.
+        del routes["routes"]["fixture"]["allowed_models"]
     if roles is not None:
         routes["roles"] = roles
     return routes
@@ -268,7 +271,10 @@ class GuidanceDriftCheckTests(unittest.TestCase):
         repository = Path(__file__).resolve().parents[3]
         self.assertEqual(check(repository), [])
 
-    def test_claude_md_agy_model_matches_route_default(self):
+    def test_claude_md_agy_model_is_same_family_as_route_default(self):
+        # #2302: CLAUDE.md need not name the exact AGY route default, so a
+        # same-family switch by configuration needs no rule-file change; it
+        # must still name a model of the route default's family.
         repository = Path(__file__).resolve().parents[3]
         claude_md = (repository / "CLAUDE.md").read_text(encoding="utf-8")
         agy_lines = [line for line in claude_md.splitlines() if line.startswith("  - AGY: use `")]
@@ -277,7 +283,31 @@ class GuidanceDriftCheckTests(unittest.TestCase):
         routes_path = repository / "tools" / "llmtool" / "developer-routes.json"
         with routes_path.open(encoding="utf-8") as routes_file:
             data = json.load(routes_file)
-        self.assertEqual(model, data["routes"]["agy"]["default_model"])
+        family = guidance_drift_check._model_family(data["routes"]["agy"]["default_model"])
+        self.assertIsNotNone(family)
+        self.assertEqual(guidance_drift_check._model_family(model), family)
+
+    def test_same_family_model_switch_passes_full_check(self):
+        # #2302: docs name a same-family model that is not the route default
+        # nor any allowed_models entry; the route has no allowed_models and a
+        # role has only a default_model. No finding.
+        self.agents = "Model `gpt-9-next`; reviewer kimi-k3.\n"
+        self.claude = self.agents
+        self.write_guidance()
+        self.write_config()
+        self.write_rule("developer-routes.json", fixture_routes(
+            ("gpt-6-luna",), allowed=False,
+            roles={"fixture-reviewer": {"default_model": "kimi-k2"}}))
+        self.assertEqual(check(self.repo), [])
+
+    def test_cross_family_model_still_fails_full_check(self):
+        self.agents = "Model `llama-9-other`.\n"
+        self.claude = self.agents
+        self.write_guidance()
+        self.write_config()
+        self.write_rule("developer-routes.json", fixture_routes(("gpt-6-luna",), allowed=False))
+        self.assertEqual(check(self.repo), ["AGENTS.md: MODEL_NOT_ALLOWED llama-9-other",
+                                            "CLAUDE.md: MODEL_NOT_ALLOWED llama-9-other"])
 
 
 def valid_rule_files():
@@ -514,6 +544,47 @@ class RuleFileSchemaTests(unittest.TestCase):
     def test_routes_without_roles_still_pass(self):
         self.assertEqual(self.findings_after("developer-routes.json", fixture_routes()), [])
 
+    def test_route_without_allowed_models_passes(self):
+        # #2302: allowed_models is optional; default_model alone is enough.
+        self.assertEqual(self.route_findings(allowed_models=_DELETE), [])
+
+    def test_route_allowed_models_need_not_be_a_single_default_entry(self):
+        # #2302: several entries, and a default that is not listed, both pass.
+        self.assertEqual(self.route_findings(allowed_models=["gpt-6-luna", "gpt-7-x"]), [])
+        self.assertEqual(self.route_findings(default_model="gpt-9-next", allowed_models=["gpt-6-luna"]), [])
+
+    def test_route_default_model_is_still_required(self):
+        prefix = "tools/llmtool/developer-routes.json: RULE_SCHEMA $.routes.fixture"
+        self.assertIn(f'{prefix} is missing key "default_model"',
+                      self.route_findings(default_model=_DELETE, allowed_models=_DELETE))
+
+    def test_role_default_model_shapes_pass(self):
+        # #2302: a role may carry default_model, allowed_models, or both.
+        for role in ({"default_model": "gpt-6.1-sol"},
+                     {"default_model": "gpt-6.1-sol", "allowed_models": ["gpt-6.1-sol", "gpt-7-x"]},
+                     {"default_model": "gpt-7-x", "allowed_models": ["gpt-6.1-sol"]},
+                     {"allowed_models": ["gpt-6.1-sol", "gpt-7-x"]},
+                     {"default_model": "gpt-6.1-sol", "timeout": 600}):
+            with self.subTest(role=role):
+                routes = fixture_routes(roles={"fixture-reviewer": role})
+                self.assertEqual(self.findings_after("developer-routes.json", routes), [])
+
+    def test_role_without_any_model_or_with_bad_default_fails(self):
+        prefix = "tools/llmtool/developer-routes.json: RULE_SCHEMA $.roles.fixture-reviewer"
+        cases = [
+            ({}, f"{prefix} needs default_model or allowed_models"),
+            ({"timeout": 600}, f"{prefix} needs default_model or allowed_models"),
+            ({"default_model": ""}, f"{prefix}.default_model must be a non-empty string"),
+            ({"default_model": ["gpt-6.1-sol"]}, f"{prefix}.default_model must be a non-empty string"),
+            ({"default_model": "gpt-6.1-sol\nx"}, f"{prefix}.default_model must be one line"),
+            ({"default_model": "gpt-6.1-sol", "allowed_models": []},
+             f"{prefix}.allowed_models needs at least 1 item(s)"),
+        ]
+        for role, expected in cases:
+            with self.subTest(role=role):
+                routes = fixture_routes(roles={"fixture-reviewer": role})
+                self.assertIn(expected, self.findings_after("developer-routes.json", routes))
+
     def route_findings(self, **changes):
         routes = fixture_routes()
         entry = routes["routes"]["fixture"]
@@ -579,7 +650,7 @@ class RuleFileSchemaTests(unittest.TestCase):
 
     def test_invalid_route_timeouts_make_model_allowlist_unavailable(self):
         self.route_findings(max_timeout=3601)
-        self.assertEqual(guidance_drift_check._allowed_models(self.repo)[1],
+        self.assertEqual(guidance_drift_check._configured_families(self.repo)[1],
                          ["tools/llmtool/developer-routes.json: MODEL_ALLOWLIST_UNAVAILABLE schema invalid"])
 
     def test_timeout_cap_is_3600(self):
@@ -733,7 +804,7 @@ class RuleFileSchemaTests(unittest.TestCase):
 
 
 class ModelNameTests(unittest.TestCase):
-    """#1502 WP-G: normative docs name only models in allowed_models."""
+    """#1502 WP-G, #2302: normative docs name only models of a configured family."""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -755,8 +826,8 @@ class ModelNameTests(unittest.TestCase):
         for relative in ("AGENTS.md", "CLAUDE.md", ".claude/skills/demo/SKILL.md",
                          "docs/governance/rule.md", "tools/llmtool/WORKFLOW.md"):
             with self.subTest(doc=relative):
-                self.write_doc(relative, "Use `gpt-9-wrong` for this route.\n")
-                self.assertIn(f"{relative}: MODEL_NOT_ALLOWED gpt-9-wrong",
+                self.write_doc(relative, "Use `llama-9-wrong` for this route.\n")
+                self.assertIn(f"{relative}: MODEL_NOT_ALLOWED llama-9-wrong",
                               guidance_drift_check.check_model_names(self.repo))
                 (self.repo / relative).unlink()
 
@@ -764,15 +835,52 @@ class ModelNameTests(unittest.TestCase):
         self.write_doc("CLAUDE.md", "Use `gpt-6-luna`, GPT-6-LUNA or openrouter/kimi-k2.\n")
         self.assertEqual(guidance_drift_check.check_model_names(self.repo), [])
 
+    def test_same_family_model_other_than_route_default_passes(self):
+        # #2302: a doc may name another model of a configured family, so a
+        # same-family switch needs no rule-file change.
+        self.write_doc("CLAUDE.md", (
+            "Use `gpt-9-next`, GPT-7-X, openrouter/gpt-8-y, gpt5, o4-mini, "
+            "kimi-k3 or openrouter/kimi-k9.\n"))
+        self.assertEqual(guidance_drift_check.check_model_names(self.repo), [])
+
+    def test_same_family_passes_without_allowed_models(self):
+        # #2302: families come from default_model when allowed_models is absent.
+        (self.repo / "tools" / "llmtool" / "developer-routes.json").write_text(json.dumps(fixture_routes(
+            ("gemini-3.8-flash-medium",), allowed=False,
+            roles={"claude-reviewer": {"default_model": "claude-sonnet-5-5"},
+                   "codex-reviewer": {"default_model": "gpt-6.1-sol", "allowed_models": ["gpt-6.1-sol"]}})),
+            encoding="utf-8")
+        self.write_doc("CLAUDE.md", (
+            "AGY `gemini-3.9-pro`; review claude-opus-5-5 or anthropic/claude-haiku-5-5; "
+            "debug gpt-7-x; not qwen3-coder.\n"))
+        self.assertEqual(guidance_drift_check.check_model_names(self.repo),
+                         ["CLAUDE.md: MODEL_NOT_ALLOWED qwen3-coder"])
+
+    def test_model_family(self):
+        family = guidance_drift_check._model_family
+        cases = {
+            "gpt-6-luna": "openai", "GPT5": "openai", "o4-mini": "openai",
+            "openrouter/gpt-8-y": "openai", "claude-opus-5-5": "claude",
+            "anthropic/claude-sonnet-5-5": "claude", "gemini-3.8-flash-medium": "gemini",
+            "opencode/deepseek-v4.1-flash-free": "deepseek", "qwen3-coder": "qwen",
+            "kimi-k2": "kimi", "glm-5": "glm", "minimax-m2": "minimax", "llama-3": "llama",
+        }
+        for name, expected in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(family(name), expected)
+        for name in ("gw", "claude2", "claude-reviewer", "gw-agent", "fixture", "gpt-6-luna.md"):
+            with self.subTest(name=name):
+                self.assertIsNone(family(name))
+
     def test_role_registry_models_are_allowed(self):
-        # #1502 WP-E: review and AI Debug role models count as allowed names.
+        # #1502 WP-E: review and AI Debug role models count as allowed families.
         (self.repo / "tools" / "llmtool" / "developer-routes.json").write_text(json.dumps(fixture_routes(
             ("gpt-6-luna",),
             roles={"codex-debug": {"allowed_models": ["gpt-7-x"]},
                    "claude-reviewer": {"allowed_models": ["claude-opus-5-5"]}})), encoding="utf-8")
-        self.write_doc("AGENTS.md", "Debug `gpt-7-x`, review claude-opus-5-5, route gpt-6-luna, not gpt-9-wrong.\n")
+        self.write_doc("AGENTS.md", "Debug `gpt-7-x`, review claude-opus-5-5, route gpt-6-luna, not llama-9-wrong.\n")
         self.assertEqual(guidance_drift_check.check_model_names(self.repo),
-                         ["AGENTS.md: MODEL_NOT_ALLOWED gpt-9-wrong"])
+                         ["AGENTS.md: MODEL_NOT_ALLOWED llama-9-wrong"])
 
     def test_invalid_role_registry_fails_closed(self):
         (self.repo / "tools" / "llmtool" / "developer-routes.json").write_text(json.dumps(fixture_routes(
@@ -784,7 +892,7 @@ class ModelNameTests(unittest.TestCase):
     def test_history_reports_and_non_normative_files_are_not_checked(self):
         for relative in ("docs/history/old.md", "docs/reports/run.md",
                          "tools/llmtool/llmtool/notes.md", "README.txt"):
-            self.write_doc(relative, "Old model gpt-9-wrong.\n")
+            self.write_doc(relative, "Old model llama-9-wrong.\n")
         self.assertEqual(guidance_drift_check.check_model_names(self.repo), [])
 
     def test_worker_ids_state_values_and_counts_are_not_blocked(self):
@@ -797,9 +905,9 @@ class ModelNameTests(unittest.TestCase):
         self.assertEqual(guidance_drift_check.check_model_names(self.repo), [])
 
     def test_each_wrong_model_is_reported_once_per_file(self):
-        self.write_doc("CLAUDE.md", "gpt-9-wrong and gpt-9-wrong and qwen3-coder\n")
+        self.write_doc("CLAUDE.md", "llama-9-wrong and llama-9-wrong and qwen3-coder\n")
         self.assertEqual(guidance_drift_check.check_model_names(self.repo), [
-            "CLAUDE.md: MODEL_NOT_ALLOWED gpt-9-wrong",
+            "CLAUDE.md: MODEL_NOT_ALLOWED llama-9-wrong",
             "CLAUDE.md: MODEL_NOT_ALLOWED qwen3-coder",
         ])
 
@@ -815,7 +923,7 @@ class ModelNameTests(unittest.TestCase):
                          ["tools/llmtool/developer-routes.json: MODEL_ALLOWLIST_UNAVAILABLE FileNotFoundError"])
 
     def test_check_reports_model_findings(self):
-        text = "Model `gpt-9-wrong`.\n"
+        text = "Model `llama-9-wrong`.\n"
         self.write_doc("AGENTS.md", text)
         self.write_doc("CLAUDE.md", text)
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -823,8 +931,8 @@ class ModelNameTests(unittest.TestCase):
             "schema_version": 1, "hashes": {"AGENTS.md": digest, "CLAUDE.md": digest}, "codex_only": [],
         }))
         self.assertEqual(check(self.repo), [
-            "AGENTS.md: MODEL_NOT_ALLOWED gpt-9-wrong",
-            "CLAUDE.md: MODEL_NOT_ALLOWED gpt-9-wrong",
+            "AGENTS.md: MODEL_NOT_ALLOWED llama-9-wrong",
+            "CLAUDE.md: MODEL_NOT_ALLOWED llama-9-wrong",
         ])
 
 
