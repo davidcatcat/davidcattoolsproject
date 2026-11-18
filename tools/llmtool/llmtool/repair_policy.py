@@ -19,7 +19,14 @@ POLICY_KEYS = ('repair_max', 'parent_debug_max', 'group_debug_max', 'child_max',
                'waiting_notify_after_hours')
 # #1815 T3: optional limits as key -> (min, max); an absent key keeps its caller default.
 OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
-_MAX_BYTES = 4096
+# #2281 L0a (design rule 3): the bound is a real technical limit, not an
+# arbitrary cap. policy.json is untrusted input, so load_policy reads at most
+# _MAX_BYTES + 1 bytes in one bounded buffer instead of the whole file. The
+# bound must stay above the largest possible valid policy.json (schema_version,
+# the POLICY_KEYS as small ints and the planned #2281 keys: a few hundred
+# bytes), so it can never refuse a valid policy; 16 KiB keeps the read buffer
+# bounded while leaving room for those keys.
+_MAX_BYTES = 16 * 1024
 
 
 def _refuse(code):
