@@ -11,6 +11,10 @@ screen function is changed and no test string is credential-shaped.
 real adapter-boundary gate (worker_dispatch.authorize_dispatch) on the real
 store with only its Owner policy decision injected, or inject a refusal of
 building the route, so the record and its audit are what production writes.
+
+#2310 F1 repair 2: the final dispatch refusal runs the real run_route and the
+delegate's real route_gate, with only the Owner decision that gate reads
+injected, after the real store and adapter gates allowed.
 """
 
 import copy
@@ -45,6 +49,9 @@ _GATED_ACTIONS = ('DISPATCH', 'START_RETRY', 'RETRY', 'RECOVERY', 'REPAIR', 'REA
 _REAL_AUTHORIZE_DISPATCH = worker_dispatch.authorize_dispatch
 
 
+_REAL_RUN_ROUTE = task_submission_cli.run_route
+
+
 def _real_adapter_gate(decision):
     """The real adapter-boundary gate on the real store; only its Owner decision is injected."""
     def authorize(store, task_id, worker_key, action='DISPATCH'):
@@ -53,13 +60,40 @@ def _real_adapter_gate(decision):
     return authorize
 
 
+def _final_gate_decision(decision, launches, process_starts):
+    """The real run_route, with only the Owner decision its final gate reads injected.
+
+    The delegate's own route_gate runs unchanged inside the real run_route; it
+    reads ``decision`` instead of the store and adapter gates' decision. The
+    launch callback and the gateway process runner only record that they ran.
+    """
+    def run_route(route, request, *, on_launch, **kwargs):
+        def launch():
+            launches.append(True)
+            return on_launch()
+
+        def process_runner(*args, **_kwargs):
+            process_starts.append(args)
+            raise AssertionError('the gateway process must not start')
+
+        with patch.object(worker_dispatch, 'evaluate', return_value=decision):
+            return _REAL_RUN_ROUTE(route, request, runner=process_runner,
+                                   on_launch=launch, **kwargs)
+    return run_route
+
+
 class GwAgentPreModelRestartTests(wiring.GwAgentRealStoreTests):
     """Reuses the real-store fixture (setUp, D6, PM Task, fake model server)."""
 
     def _run(self, task_id, target, *, gate=_ALLOWED, reach_model=True,
              served_model='qwen3.8-27b', wrap_store=None, authorize=None,
-             route_factory=None):
-        """One ``run_task_delegate`` call for ``task_id``; returns (code, reloaded Task)."""
+             route_factory=None, run_route=None):
+        """One ``run_task_delegate`` call for ``task_id``; returns (code, reloaded Task).
+
+        ``gate`` is the Owner decision of every policy read; ``authorize`` and
+        ``run_route`` may wrap the real adapter gate and the real run_route to
+        give its own read another decision.
+        """
         self.task_id = task_id
         if reach_model:
             self.server.script.extend((
@@ -85,6 +119,7 @@ class GwAgentPreModelRestartTests(wiring.GwAgentRealStoreTests):
              patch.object(worker_dispatch, 'evaluate', return_value=gate), \
              patch.object(task_submission_cli, 'GwAgentRoute',
                           route_factory or task_submission_cli.GwAgentRoute), \
+             patch.object(task_submission_cli, 'run_route', run_route or _REAL_RUN_ROUTE), \
              patch.object(task_submission_cli, '_bind_direct_native_session',
                           return_value=False), \
              redirect_stdout(io.StringIO()):
@@ -371,6 +406,109 @@ class GwAgentPreModelRestartTests(wiring.GwAgentRealStoreTests):
         verdict = start_failure.gw_agent_record_checks(failed)
         self.assertEqual((verdict.start_failure, verdict.failed_check), (False, 2))
         # It still counts as a run toward the D6 and chain repair caps.
+        self.assertIsNotNone(task_submission_cli._repair_run_stamp(
+            task_id, failed['developer'], lambda *_args, **_kwargs: False))
+
+        self._assert_still_duplicate(task_id, target, failed)
+
+    # #2310 F1 repair 2: the final dispatch refusal inside run_route, after the
+    # adapter authorization and before the provider launch.
+
+    def test_final_route_gate_refusal_before_launch_restarts_on_the_same_task(self):
+        target = 'gw-agent-restart-final-gate.md'
+        task_id = self._active_pm_task(target)
+        launches, process_starts = [], []
+        # The store gate and the real adapter gate allow; only the real final
+        # route_gate inside the real run_route reads a paused Owner policy.
+        code, failed = self._run(
+            task_id, target, authorize=_real_adapter_gate(_ALLOWED),
+            run_route=_final_gate_decision(_PAUSED, launches, process_starts))
+        self.assertEqual(code, 1)
+        # No launch, no gateway process and no model call before the refusal:
+        # both scripted model replies are still unserved.
+        self.assertEqual(launches, [])
+        self.assertEqual(process_starts, [])
+        self.assertEqual(len(self.server.script), 2)
+        self.server.script.clear()
+        self._assert_failed(failed, 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_DISPATCH_DENIED')
+        self.assertIsNone(failed['developer']['execution'])
+        self.assertEqual(self._gated(failed), [
+            ('gw-agent', 'DISPATCH', 'ALLOWED', 'OWNER_POLICY_ALLOWED'),
+            ('gw-agent', 'DISPATCH', 'ALLOWED', 'OWNER_POLICY_ALLOWED')])
+        self.assertEqual(['authorization_id' in item for item in failed['dispatch_audit']
+                          if item['action'] == 'DISPATCH'], [False, True])
+        self.assertTrue(start_failure.gw_agent_record_checks(failed).start_failure)
+        # The same refusal with process facts, or with a second adapter
+        # authorization, is not a start failure.
+        launched = copy.deepcopy(failed)
+        launched['developer']['execution'] = {
+            'status': 'UNKNOWN', 'native_session_id': None, 'process_exit_code': 1,
+            'stdout_sha256': None, 'cleanup_status': 'CONFIRMED'}
+        verdict = start_failure.gw_agent_record_checks(launched)
+        self.assertEqual((verdict.start_failure, verdict.failed_check), (False, 4))
+        twice = copy.deepcopy(failed)
+        adapter_entry = [item for item in twice['dispatch_audit']
+                         if item['action'] == 'DISPATCH' and 'authorization_id' in item][-1]
+        twice['dispatch_audit'].append(dict(
+            adapter_entry, attempt_id=task_store.new_id(),
+            authorization_id=task_store.new_id()))
+        verdict = start_failure.gw_agent_record_checks(twice)
+        self.assertEqual((verdict.start_failure, verdict.failed_check), (False, 4))
+
+        task = self._assert_restarted(task_id, target, failed)
+
+        self.assertEqual(len([item for item in task['dispatch_audit']
+                              if item['action'] == 'START_RETRY']), 1)
+        self.assertEqual(task['start_failures'][0]['failed_developer']['error_code'],
+                         'DEVELOPER_DISPATCH_DENIED')
+        self.assertNotEqual(task['developer']['session_id'],
+                            failed['developer']['session_id'])
+
+    def test_final_route_gate_refusal_after_launch_is_still_a_duplicate(self):
+        target = 'gw-agent-final-gate-after-launch.md'
+        task_id = self._active_pm_task(target)
+
+        def launched_then_denied(_route, _request, *, gate, on_launch, **_kwargs):
+            # A gate denial after the launch callback ran: the delegate must
+            # not store it as the pre-launch DEVELOPER_DISPATCH_DENIED.
+            on_launch()
+            with patch.object(worker_dispatch, 'evaluate', return_value=_PAUSED):
+                self.assertIs(gate(), False)
+            raise RouteError('GW_AGENT_DISPATCH_DENIED')
+
+        code, failed = self._run(task_id, target, reach_model=False,
+                                 authorize=_real_adapter_gate(_ALLOWED),
+                                 run_route=launched_then_denied)
+        self.assertEqual(code, 1)
+        self._assert_failed(failed, 'DEVELOPER_UNAVAILABLE',
+                            'DEVELOPER_GW_AGENT_DISPATCH_DENIED')
+        verdict = start_failure.gw_agent_record_checks(failed)
+        self.assertEqual((verdict.start_failure, verdict.failed_check), (False, 2))
+
+        self._assert_still_duplicate(task_id, target, failed)
+
+    def test_run_that_reached_the_model_after_the_final_gate_is_a_duplicate(self):
+        target = 'gw-agent-final-gate-reached-model.md'
+        task_id = self._active_pm_task(target)
+        launches, process_starts = [], []
+
+        def allowed_run_route(route, request, *, on_launch, **kwargs):
+            def launch():
+                launches.append(True)
+                return on_launch()
+            return _REAL_RUN_ROUTE(route, request, on_launch=launch, **kwargs)
+
+        # The final gate allows, the fake model answers, and the result is then
+        # refused after the model calls.
+        code, failed = self._run(task_id, target, served_model='gw',
+                                 authorize=_real_adapter_gate(_ALLOWED),
+                                 run_route=allowed_run_route)
+        self.assertEqual(code, 1)
+        self.assertEqual(launches, [True])
+        self._assert_failed(failed, 'DEVELOPER_UNAVAILABLE',
+                            'DEVELOPER_GW_AGENT_MODEL_UNVERIFIED')
+        verdict = start_failure.gw_agent_record_checks(failed)
+        self.assertEqual((verdict.start_failure, verdict.failed_check), (False, 2))
         self.assertIsNotNone(task_submission_cli._repair_run_stamp(
             task_id, failed['developer'], lambda *_args, **_kwargs: False))
 

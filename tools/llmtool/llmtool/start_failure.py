@@ -12,7 +12,7 @@ match.
 route dispatchers restart_record_checks and classify_restart; the Claude
 checks (record_checks, classify) are unchanged. #2310 F1 extends the gw-agent
 checks to a failure after the DISPATCHING write persisted but before the
-route was called, proven by the dispatch audit or the code.
+provider was launched, proven by the dispatch audit or the code.
 """
 
 from __future__ import annotations
@@ -165,10 +165,21 @@ _GW_AGENT_PROVIDER_TYPE = 'gw-agent-cli'
 # writes its input files (gw_agent.py:359), and its post-launch codes are
 # GW_AGENT_<status> (gw_agent.py:553, statuses at :45), GW_AGENT_OUTPUT_INVALID,
 # GW_AGENT_MODEL_UNVERIFIED and GW_AGENT_TASK_ID_MISMATCH[_<gateway code>],
-# each stored with the DEVELOPER_ prefix. Both codes are also listed as
-# pre-launch in task_submission_cli._POST_RUN_NO_WORK_GW_AGENT_REFUSALS.
+# each stored with the DEVELOPER_ prefix.
+#
+# #2310 F1 repair 2: the boundary is the provider launch, not the route call.
+# DEVELOPER_DISPATCH_DENIED is written only from the delegate's route_gate
+# branch (owner_gate_denied): run_route calls that gate before it launches the
+# gateway (its on_launch callback runs "at the launch boundary after every
+# refusal check"), the gate denies only while on_launch has not run, and the
+# refusal then stores no execution and no provider evidence. A gate refusal
+# after a launch keeps the route's own DEVELOPER_GW_AGENT_* code instead, which
+# is not listed here. All three codes are also listed as pre-launch in
+# task_submission_cli._POST_RUN_NO_WORK_GW_AGENT_REFUSALS and
+# _PRELAUNCH_REPAIR_REFUSALS.
 GW_AGENT_PRE_ROUTE_CODES = frozenset((
     'DEVELOPER_GW_AGENT_CONFIG_INVALID', 'DEVELOPER_DISPATCH_FAILED',
+    'DEVELOPER_DISPATCH_DENIED',
 ))
 
 
@@ -226,11 +237,13 @@ def gw_agent_record_checks(record):
       write), so the route never ran. No ALLOWED DISPATCH entry exists.
     - Bound (#2310 F1): the DISPATCHING write persisted (``gw-agent-cli`` and
       a model), with exactly its one ALLOWED transition entry, and a failure
-      proven to come before the route call: either the adapter gate refused
-      (its BLOCKED DISPATCH entry gives the stored code, and no adapter
-      authorization was saved for the assignment), or the code is in
+      proven to come before the provider launch: either the adapter gate
+      refused (its BLOCKED DISPATCH entry gives the stored code, and no
+      adapter authorization was saved for the assignment), or the code is in
       GW_AGENT_PRE_ROUTE_CODES, with at most the one adapter authorization
-      the delegate makes before it builds the route.
+      the delegate makes before it builds the route. That includes the final
+      dispatch refusal inside run_route (DEVELOPER_DISPATCH_DENIED), which
+      comes after that authorization and before the launch.
 
     Any other gw-agent record is refused, so a run that reached the provider
     (any model call) is never a start failure.
@@ -246,7 +259,7 @@ def gw_agent_record_checks(record):
         return _not(1)
     # Check 2: a code the gw-agent delegate writes (DEVELOPER_*), and either no
     # route identity (the DISPATCHING write never persisted), or the bound
-    # identity with a failure that is shown to be before the route call.
+    # identity with a failure that is shown to be before the provider launch.
     code = developer.get('error_code')
     assignment_id = developer.get('assignment_id')
     audit = _gw_agent_dispatch_audit(record.get('dispatch_audit', []), assignment_id)

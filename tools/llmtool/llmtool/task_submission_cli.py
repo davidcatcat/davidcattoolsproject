@@ -6240,7 +6240,9 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     # this Task as a START_RETRY; every other stored developer is a duplicate.
     # #2310 F1: that includes a refusal after the DISPATCHING write persisted
     # and before the route call (the adapter gate, building the route or its
-    # validate_profile below), as start_failure.gw_agent_record_checks proves.
+    # validate_profile below), and (repair 2) the final dispatch refusal of
+    # route_gate inside run_route before the provider launch, as
+    # start_failure.gw_agent_record_checks proves.
     restart = None
     if previous is not None:
         if not start_failure.gw_agent_record_checks(task).start_failure:
@@ -6531,14 +6533,23 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         if current_registration != registration or current_snapshot != snapshot:
             raise RouteError('GW_AGENT_D6_BINDING_CHANGED')
     owner_gate_denied = False
+    # #2310 F1 repair 2: DEVELOPER_DISPATCH_DENIED proves a refusal before the
+    # provider launch (start_failure.GW_AGENT_PRE_ROUTE_CODES), so it is kept
+    # only while on_launch has not run; a later denial keeps the route's code.
+    launched = False
     def route_gate():
         nonlocal owner_gate_denied
         validate_binding()
         decision = worker_dispatch.evaluate('gw-agent', task_id=task['task_id'])
         if decision.allowed is True and decision.reason_code == 'OWNER_POLICY_ALLOWED':
             return decision
-        owner_gate_denied = True
+        if not launched:
+            owner_gate_denied = True
         return False
+    def on_launch():
+        nonlocal launched
+        launched = True
+        _record_gw_agent_skill_not_delivered(task)
     repair_packet = getattr(args, 'repair_packet', None)
     if repair_packet is not None:
         repair_packet = _validate_repair_packet(repair_packet)
@@ -6558,7 +6569,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 'prompt': prompt, 'task': task_input, 'timeout': timeout,
                 'state_dirs': (), **site.route_fields()}, gate=route_gate, boundary=for_platform(),
                 snapshot=capture_snapshot,
-                on_launch=lambda: _record_gw_agent_skill_not_delivered(task))
+                on_launch=on_launch)
         finally:
             cleanup_audit_copies()
         after_registration = task_completion.read_d6_registration(
@@ -8452,7 +8463,7 @@ def _gw_agent_restart_claim(args, store, task, failed, developer, completion, re
 
     ``failed`` passed start_failure.gw_agent_record_checks: it was refused
     before its DISPATCHING write persisted, or (#2310 F1) after it and before
-    the route call, so no route or model call was made. The fresh D6 must be the failed start's D6 at its source SHA, the
+    the provider launch, so no model call was made. The fresh D6 must be the failed start's D6 at its source SHA, the
     rebuilt completion must equal the stored one and the new developer keeps
     the failed one's scope. The returned claim runs under the chain locks: it
     re-reads the Task, runs checks 1-6 on that snapshot and replaces the
