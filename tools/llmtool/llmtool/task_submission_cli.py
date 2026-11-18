@@ -5356,7 +5356,8 @@ def _optional_agy_owner_ref(args):
     return owner_ref
 
 
-def run_task_agy_delegate(args, *, store, route_runner=None):
+def run_task_agy_delegate(args, *, store, route_runner=None,
+                          expected_failed_developer=None, d6_unchanged=None):
     """Run the provider-neutral AGY adapter against its registered D6 task."""
     owner_ref = _optional_agy_owner_ref(args)
     if getattr(args, 'mode', None) != 'direct':
@@ -5374,8 +5375,6 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     if (task.get('state') != 'PM_RESPONDED' or not task.get('response') or
             task.get('schema_version') != 2):
         raise LLMToolError('task has no successful PM response')
-    if task.get('developer') is not None:
-        raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
     binding = task.get('task_binding')
     task_completion.validate_task_binding(
         stored_binding=binding, task_id=task.get('task_id'), run_id=task.get('run_id'),
@@ -5386,7 +5385,21 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                 assignment.get('risk') != 'LOW' or args.acceptance != assignment.get('acceptance')):
             raise LLMToolError('no matching low-risk AGY recommendation from the selected PM route')
     registration, snapshot = _delegate_d6_binding(args)
-    if previous_developer is None:
+    retry = expected_failed_developer is not None
+    if not retry and previous_developer is not None:
+        probe = (d6_unchanged if d6_unchanged is not None
+                 else _d6_unchanged_probe(args, (registration, snapshot)))
+        if start_failure.classify(task, probe).start_failure:
+            retry = True
+            expected_failed_developer = previous_developer
+    if retry:
+        # #2188 / #2310: a retry replaces exactly the failed developer it was given.
+        if type(expected_failed_developer) is not dict or previous_developer != expected_failed_developer:
+            raise LLMToolError('START_RETRY_CONFLICT: the Task developer changed; '
+                               'no Task or D6 write was made')
+    elif previous_developer is not None:
+        raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
+    if previous_developer is None or retry:
         _reject_claude_reserved_d6(registration)
     # A fresh Owner decision is required before creating the durable assignment.
     decision = worker_dispatch.evaluate('agy', owner_ref, task['task_id'])
@@ -5472,13 +5485,22 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
+    if retry:
+        validated_packet = _start_retry_repair_packet(store, task)
+        claim = _start_retry_claim(
+            args, store, task, expected_failed_developer, developer, completion,
+            registration, snapshot, validated_packet, d6_unchanged)
+    else:
+        claim = lambda: store.d6_bind_compare_and_update(
+            task['task_id'], executor_task_id=registration.task_id,
+            expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
+                      'completion': None}, developer=developer, completion=completion)
     try:
-        _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
-            store.d6_bind_compare_and_update(task['task_id'],
-                executor_task_id=registration.task_id,
-                expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
-                          'completion': None}, developer=developer, completion=completion)))
+        _delegate_chain_gate(args, store, (registration, snapshot), claim)
     except TaskStoreConflict:
+        if retry:
+            raise LLMToolError('START_RETRY_CONFLICT: the Task changed before the retry '
+                               'write; nothing was written') from None
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
     owner_gate_denied = False
     try:
@@ -6010,13 +6032,6 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
     if (task.get('state') != 'PM_RESPONDED' or not task.get('response') or
             task.get('schema_version') != 2):
         raise LLMToolError('task has no successful PM response')
-    if retry:
-        # #2188: a retry replaces exactly the failed developer it was given.
-        if type(expected_failed_developer) is not dict or previous != expected_failed_developer:
-            raise LLMToolError('START_RETRY_CONFLICT: the Task developer changed; '
-                               'no Task or D6 write was made')
-    elif previous is not None:
-        raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
     binding = task.get('task_binding')
     task_completion.validate_task_binding(
         stored_binding=binding, task_id=task.get('task_id'), run_id=task.get('run_id'),
@@ -6027,6 +6042,19 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
             getattr(args, 'acceptance', None) != assignment.get('acceptance')):
         raise LLMToolError('no matching low-risk Claude recommendation from the selected PM route')
     registration, snapshot = _delegate_d6_binding(args)
+    if not retry and previous is not None:
+        probe = (d6_unchanged if d6_unchanged is not None
+                 else _d6_unchanged_probe(args, (registration, snapshot)))
+        if start_failure.classify(task, probe).start_failure:
+            retry = True
+            expected_failed_developer = previous
+    if retry:
+        # #2188 / #2310: a retry replaces exactly the failed developer it was given.
+        if type(expected_failed_developer) is not dict or previous != expected_failed_developer:
+            raise LLMToolError('START_RETRY_CONFLICT: the Task developer changed; '
+                               'no Task or D6 write was made')
+    elif previous is not None:
+        raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
     if registration.trusted_agent_id != 'claude-developer':
         raise LLMToolError('D6_CLAUDE_AGENT_REQUIRED')
     decision = worker_dispatch.evaluate('claude-developer', owner_ref, registration.task_id)
@@ -6081,6 +6109,12 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
         # #2188 design section 4: the stored form is canonical(P), the exact
         # bytes nested in TASK_JSON below.
         packet_text = start_failure.canonical(validated_packet)
+    elif retry and task.get('repair_packet') is not None:
+        packet_dict = start_failure.decode_repair_packet(task['repair_packet'])
+        if packet_dict is not None:
+            validated_packet = packet_dict
+            packet_text = task['repair_packet']
+            prompt_packet['untrusted_repair_reference'] = validated_packet
     if retry and packet_text != task.get('repair_packet'):
         # A retry re-sends exactly the persisted packet, and none without one.
         raise LLMToolError('START_RETRY_REPAIR_PACKET_MISMATCH')
@@ -6326,7 +6360,8 @@ def _gw_agent_endpoint():
     return provider, {'max_tokens': gateway['max_output_tokens']}
 
 
-def run_task_gw_agent_delegate(args, *, store, route_runner=None):
+def run_task_gw_agent_delegate(args, *, store, route_runner=None,
+                               expected_failed_developer=None, d6_unchanged=None):
     """Run the company Gw Agent Gateway route against its registered D6 task."""
     from . import gw_agent_sessions
     gw_agent_sessions.sweep_quietly(store)
@@ -6347,8 +6382,6 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     if (task.get('state') != 'PM_RESPONDED' or not task.get('response') or
             task.get('schema_version') != 2):
         raise LLMToolError('task has no successful PM response')
-    if task.get('developer') is not None:
-        raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
     binding = task.get('task_binding')
     task_completion.validate_task_binding(
         stored_binding=binding, task_id=task.get('task_id'), run_id=task.get('run_id'),
@@ -6358,7 +6391,22 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             assignment.get('risk') != 'LOW' or args.acceptance != assignment.get('acceptance')):
         raise LLMToolError('no matching low-risk gw-agent recommendation from the selected PM route')
     registration, snapshot = _delegate_d6_binding(args)
-    _reject_claude_reserved_d6(registration)
+    retry = expected_failed_developer is not None
+    if not retry and previous is not None:
+        probe = (d6_unchanged if d6_unchanged is not None
+                 else _d6_unchanged_probe(args, (registration, snapshot)))
+        if start_failure.classify(task, probe).start_failure:
+            retry = True
+            expected_failed_developer = previous
+    if retry:
+        # #2188 / #2310: a retry replaces exactly the failed developer it was given.
+        if type(expected_failed_developer) is not dict or previous != expected_failed_developer:
+            raise LLMToolError('START_RETRY_CONFLICT: the Task developer changed; '
+                               'no Task or D6 write was made')
+    elif previous is not None:
+        raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
+    if previous is None or retry:
+        _reject_claude_reserved_d6(registration)
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
@@ -6525,13 +6573,22 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
+    if retry:
+        validated_packet = _start_retry_repair_packet(store, task)
+        claim = _start_retry_claim(
+            args, store, task, expected_failed_developer, developer, completion,
+            registration, snapshot, validated_packet, d6_unchanged)
+    else:
+        claim = lambda: store.d6_bind_compare_and_update(
+            task['task_id'], executor_task_id=registration.task_id,
+            expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
+                      'completion': None}, developer=developer, completion=completion)
     try:
-        claimed = _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
-            store.d6_bind_compare_and_update(task['task_id'],
-                executor_task_id=registration.task_id,
-                expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
-                          'completion': None}, developer=developer, completion=completion)))
+        claimed = _delegate_chain_gate(args, store, (registration, snapshot), claim)
     except TaskStoreConflict:
+        if retry:
+            raise LLMToolError('START_RETRY_CONFLICT: the Task changed before the retry '
+                               'write; nothing was written') from None
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
     expected_developer = copy.deepcopy(claimed['developer'])
 
@@ -6992,7 +7049,14 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
         raise LLMToolError('developer acceptance scope is invalid')
     acceptance = [_screen_text(item, 512) for item in args.acceptance]
     egress_basis = _screen_text(args.egress_basis, 512)
-    recovering_timeout = previous_developer is not None
+    retry = False
+    expected_failed_developer = None
+    if previous_developer is not None:
+        probe = _d6_unchanged_probe(args, (registration, snapshot))
+        if start_failure.classify(task, probe).start_failure:
+            retry = True
+            expected_failed_developer = previous_developer
+    recovering_timeout = previous_developer is not None and not retry
     task_source_sha = (previous_developer.get('source_sha')
                        if recovering_timeout and type(previous_developer) is dict
                        else snapshot.head)
@@ -7069,15 +7133,24 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
         'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
+    if retry:
+        validated_packet = _start_retry_repair_packet(store, task)
+        claim = _start_retry_claim(
+            args, store, task, expected_failed_developer, developer, completion,
+            registration, snapshot, validated_packet, None)
+    else:
+        claim = lambda: store.d6_bind_compare_and_update(task['task_id'],
+            executor_task_id=registration.task_id,
+            expected={'schema_version': 2, 'state': 'PM_RESPONDED',
+                      'developer': previous_developer,
+                      'completion': task.get('completion')},
+            developer=developer, completion=completion)
     try:
-        _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
-            store.d6_bind_compare_and_update(task['task_id'],
-                executor_task_id=registration.task_id,
-                expected={'schema_version': 2, 'state': 'PM_RESPONDED',
-                          'developer': previous_developer,
-                          'completion': task.get('completion')},
-                developer=developer, completion=completion)))
+        _delegate_chain_gate(args, store, (registration, snapshot), claim)
     except TaskStoreConflict:
+        if retry:
+            raise LLMToolError('START_RETRY_CONFLICT: the Task changed before the retry '
+                               'write; nothing was written') from None
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
     except worker_dispatch.WorkerDispatchDenied as exc:
         detail = ('Codex timeout continuation denied' if recovering_timeout else
@@ -7375,18 +7448,50 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
 
 
 _PRELAUNCH_REPAIR_REFUSALS = frozenset((
-    ('codex', 'DEVELOPER_UNAVAILABLE',
-     'DEVELOPER_PROFILE_UNAVAILABLE'),
-    ('codex', 'DEVELOPER_UNAVAILABLE',
-     'DEVELOPER_CALL_BINDING_INVALID'),
-    ('gw-agent', 'DEVELOPER_UNAVAILABLE',
-     'DEVELOPER_GW_AGENT_CONFIG_INVALID'),
-    ('gw-agent', 'DEVELOPER_UNAVAILABLE',
-     'DEVELOPER_DISPATCH_DENIED'),
-    ('gw-agent', 'DEVELOPER_UNAVAILABLE',
-     'DEVELOPER_GW_AGENT_DISPATCH_DENIED'),
+    ('codex', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_PROFILE_UNAVAILABLE'),
+    ('codex', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_CALL_BINDING_INVALID'),
+    ('codex', 'DEVELOPER_UNAVAILABLE', 'CODEX_D6_BINDING_CHANGED'),
+    ('codex', 'DEVELOPER_UNAVAILABLE', 'ENV_BOOTSTRAP_REJECTED'),
+    ('codex', 'DEVELOPER_UNAVAILABLE', 'CODEX_ENV2_MARKER_INVALID'),
+    ('codex', 'DEVELOPER_UNAVAILABLE', 'CODEX_IGNORED_BASELINE_UNAVAILABLE'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_OWNER_PAUSED'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_DISPATCH_PERSISTENCE_REJECTED'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_CONFIG_INVALID'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_PROFILE_INVALID'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_REQUEST_INVALID'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_CREDENTIAL_MISSING'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_SESSION_HOME_UNSAFE'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_SESSION_LOCKED'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_INVALID'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_UNKNOWN_FIELDS'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_SCHEMA_VERSION_INVALID'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_TASK_ID_INVALID'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_SOURCE_SHA_INVALID'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_GOAL_INVALID'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_PATHS_INVALID'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_EGRESS_BASIS_INVALID'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_DATA_CLASS_INVALID'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TASK_BUDGETS_INVALID'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_DISPATCH_FAILED'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'GW_AGENT_D6_BINDING_CHANGED'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_DISPATCH_DENIED'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_DISPATCH_DENIED'),
+    ('agy', 'BLOCKED', 'AGY_PROFILE_INVALID'),
+    ('agy', 'BLOCKED', 'AGY_ENV_INVALID'),
+    ('agy', 'BLOCKED', 'AGY_REQUEST_INVALID'),
+    ('agy', 'BLOCKED', 'AGY_CONFIG_INVALID'),
+    ('agy', 'BLOCKED', 'AGY_D6_BINDING_CHANGED'),
     ('agy', 'BLOCKED', 'AGY_DISPATCH_DENIED'),
+    ('agy', 'BLOCKED', 'BLOCKED_WRITE_ISOLATION'),
+    ('agy', 'BLOCKED', 'GIT_STATE_CHANGED_SNAPSHOT'),
+    ('claude', 'BLOCKED', 'CLAUDE_PROFILE_INVALID'),
+    ('claude', 'BLOCKED', 'CLAUDE_ENV_INVALID'),
+    ('claude', 'BLOCKED', 'CLAUDE_REQUEST_INVALID'),
+    ('claude', 'BLOCKED', 'CLAUDE_CONFIG_INVALID'),
+    ('claude', 'BLOCKED', 'CLAUDE_D6_BINDING_CHANGED'),
     ('claude', 'BLOCKED', 'CLAUDE_DISPATCH_DENIED'),
+    ('claude', 'BLOCKED', 'BLOCKED_WRITE_ISOLATION'),
+    ('claude', 'BLOCKED', 'GIT_STATE_CHANGED_SNAPSHOT'),
 ))
 
 
@@ -8392,7 +8497,7 @@ def run_task_delegate_checked(args, *, store=None):
 # #2188 design section 3: the new developer of a start retry keeps these of D.
 _START_RETRY_SCOPE_FIELDS = (
     'selection_source', 'source_sha', 'executor_task_id', 'owner_assignment_ref',
-    'read_paths', 'write_paths', 'acceptance', 'egress_basis',
+    'read_paths', 'write_paths', 'acceptance', 'egress_basis', 'data_class',
 )
 
 
@@ -8487,14 +8592,17 @@ def _start_retry_claim(args, store, task, failed, developer, completion, registr
     that snapshot, and writes ``developer`` and ``start_failures`` only.
     """
     stored_completion = task.get('completion')
-    if (registration.task_id != failed.get('executor_task_id') or
+    stored_executor = (failed.get('executor_task_id') or
+                       (stored_completion.get('executor_task_id')
+                        if type(stored_completion) is dict else None))
+    if (registration.task_id != stored_executor or
             snapshot.head != failed.get('source_sha')):
         raise LLMToolError('START_RETRY_D6_CHANGED: the D6 is not at the failed start\'s '
                            'source SHA; no Task or D6 write was made')
     if completion != stored_completion:
         raise LLMToolError('START_RETRY_D6_CHANGED: the D6 binding differs from the stored '
                            'completion; no Task or D6 write was made')
-    if any(field not in failed or developer.get(field) != failed[field]
+    if any(failed.get(field) != developer.get(field)
            for field in _START_RETRY_SCOPE_FIELDS):
         raise LLMToolError('START_RETRY_CONFLICT: the rebuilt request differs from the '
                            'failed start; no Task or D6 write was made')

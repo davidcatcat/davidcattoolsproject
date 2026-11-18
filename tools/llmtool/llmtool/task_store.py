@@ -2109,8 +2109,8 @@ def _validate_start_failures(record):
         failed = item.get('failed_developer') if type(item) is dict else None
         if (type(item) is not dict or set(item) != _START_FAILURE_ENTRY_FIELDS or
                 type(failed) is not dict or
-                failed.get('provider_profile') != 'claude' or
-                failed.get('state') != 'BLOCKED' or
+                failed.get('provider_profile') not in ('claude', 'agy', 'gw-agent', 'codex', 'opencode') or
+                failed.get('state') not in ('BLOCKED', 'DEVELOPER_UNAVAILABLE') or
                 not _hex32(failed.get('assignment_id')) or
                 type(item['record_sha256']) is not str or
                 re.fullmatch(r'[0-9a-f]{64}', item['record_sha256']) is None or
@@ -2154,6 +2154,9 @@ def _check_start_failures_write(current, changes):
     stored = current.get('start_failures', [])
     proposed = changes['start_failures']
     new_developer = changes.get('developer')
+    old_developer = current.get('developer')
+    worker = (worker_dispatch.worker_key_for(old_developer.get('provider_profile'))
+              if type(old_developer) is dict else None)
     if (type(stored) is not list or type(proposed) is not list or
             len(proposed) != len(stored) + 1 or len(proposed) > MAX_START_FAILURES or
             proposed[:-1] != stored or type(proposed[-1]) is not dict or
@@ -2161,7 +2164,7 @@ def _check_start_failures_write(current, changes):
             proposed[-1].get('failed_developer') != current['developer'] or
             type(new_developer) is not dict or
             proposed[-1].get('retry_assignment_id') != new_developer.get('assignment_id') or
-            ('claude-developer', 'START_RETRY') not in
+            (worker, 'START_RETRY') not in
             worker_dispatch.task_store_attempts(current, changes)):
         _fail('START_RETRY_INVALID')
 

@@ -670,7 +670,7 @@ def _role_timeout_retry_valid(current, changes, expected, old, new):
 _START_RETRY_SAME_FIELDS = (
     'selection_source', 'provider_profile', 'backend_session_semantics', 'source_sha',
     'source_sha_binding', 'owner_assignment_ref', 'executor_task_id', 'read_paths',
-    'write_paths', 'acceptance', 'egress_basis',
+    'write_paths', 'acceptance', 'egress_basis', 'data_class',
 )
 # ... and has none of these yet (a fresh PENDING assignment).
 _START_RETRY_EMPTY_FIELDS = (
@@ -679,7 +679,7 @@ _START_RETRY_EMPTY_FIELDS = (
 
 
 def _start_retry_valid(current, changes, expected, old, new, d6_unchanged=None):
-    """#2188 design section 3: one Claude start failure D re-dispatched as a new assignment.
+    """#2188 design section 3: one start failure D re-dispatched as a new assignment.
 
     Checks section 2 checks 1-6. Live D6 check 6 requires an injected
     d6_unchanged probe that returns True; an unknown, raising or failing probe
@@ -701,7 +701,7 @@ def _start_retry_valid(current, changes, expected, old, new, d6_unchanged=None):
             set(changes) == {'developer', 'start_failures'} and
             new.get('state') == 'DEVELOPER_PENDING' and
             all(field in new and new[field] is None for field in _START_RETRY_EMPTY_FIELDS) and
-            all(field in old and field in new and old[field] == new[field]
+            all(old.get(field) == new.get(field)
                 for field in _START_RETRY_SAME_FIELDS) and
             _assignment_audit_binding(current, new) is not None):
         return False
@@ -815,14 +815,15 @@ def task_store_attempts(current, changes):
         attempts.append((worker or 'unknown', 'ROLE_TIMEOUT_RETRY'))
         return attempts
 
-    # #2188 design section 3: a BLOCKED Claude developer moved back to PENDING
-    # is a START_RETRY. Before this branch every such write was refused
-    # (REASSIGN needs an old PENDING state, RETRY allows none), so it removes
-    # no refusal; the gate below admits only a recorded start failure.
-    if (old_developer.get('provider_profile') == 'claude' and
-            old_developer.get('state') == 'BLOCKED' and
-            new_developer.get('state') == 'DEVELOPER_PENDING'):
-        attempts.append(('claude-developer', 'START_RETRY'))
+    # #2188 design section 3 / #2310: a BLOCKED or DEVELOPER_UNAVAILABLE developer
+    # moved back to PENDING with start_failures is a START_RETRY. Before this branch
+    # every such write was refused (REASSIGN needs an old PENDING state, RETRY allows
+    # none), so it removes no refusal; the gate below admits only a recorded start failure.
+    if (old_developer.get('state') in ('BLOCKED', 'DEVELOPER_UNAVAILABLE') and
+            new_developer.get('state') == 'DEVELOPER_PENDING' and
+            'start_failures' in changes):
+        worker = worker_key_for(old_developer.get('provider_profile'))
+        attempts.append((worker or 'unknown', 'START_RETRY'))
         return attempts
 
     if _developer_identity_changed(old_developer, new_developer):

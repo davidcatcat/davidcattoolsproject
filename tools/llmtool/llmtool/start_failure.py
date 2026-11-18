@@ -16,38 +16,56 @@ import hashlib
 import json
 import re
 
-# Section 2 check 2. Each code below is raised by run_route before the provider
-# process starts (confirmed at source 89dbd330, developer_routes/base.py:774-928):
-# - CLAUDE_PROFILE_INVALID: ClaudeRoute.validate_profile (claude.py:68), called by
-#   DeveloperRoute.validate_request (base.py:213), which run_route calls first
-#   (base.py:799).
-# - CLAUDE_REQUEST_INVALID: ClaudeRoute.validate_request (claude.py:103) and the
-#   base request checks (base.py:201-234); run_route also raises it at
-#   base.py:795, :797, :803, :892 and :925. All are before execute (base.py:928).
-# - CLAUDE_CONFIG_INVALID: ClaudeRoute.validate_request (claude.py:105, :109),
-#   inside base.py:799.
-# - CLAUDE_ENV_INVALID: ClaudeRoute.build_env (claude.py:90), called at
-#   base.py:916, before execute (base.py:928).
-# None of them is raised after base.py:928, so a record with one of them never
-# had a provider process. Any code that could follow a spawn is never here.
+# Section 2 check 2. Codes raised before any provider process starts
+# across direct Developer routes (Claude, AGY, gw-agent, Codex, OpenCode).
+# None of them is raised after provider launch or model execution.
 START_FAILURE_CODES = frozenset((
+    # Claude pre-launch codes
     'CLAUDE_PROFILE_INVALID', 'CLAUDE_ENV_INVALID',
     'CLAUDE_REQUEST_INVALID', 'CLAUDE_CONFIG_INVALID',
+    'CLAUDE_D6_BINDING_CHANGED', 'CLAUDE_DISPATCH_DENIED',
+    # AGY pre-launch codes
+    'AGY_PROFILE_INVALID', 'AGY_ENV_INVALID',
+    'AGY_REQUEST_INVALID', 'AGY_CONFIG_INVALID',
+    'AGY_D6_BINDING_CHANGED', 'AGY_DISPATCH_DENIED',
+    # Shared route isolation & git state codes
+    'BLOCKED_WRITE_ISOLATION', 'GIT_STATE_CHANGED_SNAPSHOT',
+    # Gw-agent pre-launch codes
+    'DEVELOPER_OWNER_PAUSED', 'DEVELOPER_DISPATCH_PERSISTENCE_REJECTED',
+    'DEVELOPER_GW_AGENT_CONFIG_INVALID', 'DEVELOPER_GW_AGENT_PROFILE_INVALID',
+    'DEVELOPER_GW_AGENT_REQUEST_INVALID', 'DEVELOPER_GW_AGENT_CREDENTIAL_MISSING',
+    'DEVELOPER_GW_AGENT_SESSION_HOME_UNSAFE', 'DEVELOPER_GW_AGENT_SESSION_LOCKED',
+    'DEVELOPER_GW_AGENT_TASK_INVALID', 'DEVELOPER_GW_AGENT_TASK_UNKNOWN_FIELDS',
+    'DEVELOPER_GW_AGENT_TASK_SCHEMA_VERSION_INVALID', 'DEVELOPER_GW_AGENT_TASK_TASK_ID_INVALID',
+    'DEVELOPER_GW_AGENT_TASK_SOURCE_SHA_INVALID', 'DEVELOPER_GW_AGENT_TASK_GOAL_INVALID',
+    'DEVELOPER_GW_AGENT_TASK_PATHS_INVALID', 'DEVELOPER_GW_AGENT_TASK_EGRESS_BASIS_INVALID',
+    'DEVELOPER_GW_AGENT_TASK_DATA_CLASS_INVALID', 'DEVELOPER_GW_AGENT_TASK_BUDGETS_INVALID',
+    'DEVELOPER_DISPATCH_FAILED', 'GW_AGENT_D6_BINDING_CHANGED',
+    'DEVELOPER_DISPATCH_DENIED', 'DEVELOPER_GW_AGENT_DISPATCH_DENIED',
+    # Codex pre-launch codes
+    'DEVELOPER_PROFILE_UNAVAILABLE', 'DEVELOPER_CALL_BINDING_INVALID',
+    'CODEX_D6_BINDING_CHANGED', 'ENV_BOOTSTRAP_REJECTED',
+    'CODEX_ENV2_MARKER_INVALID', 'CODEX_IGNORED_BASELINE_UNAVAILABLE',
 ))
 
 # Section 2 "Never a start failure": codes raised after a run (or possibly after
-# one), and the Owner denials. Listed for review and tests; the classifier
-# admits only START_FAILURE_CODES, so any other code is refused as well.
+# one). Listed for review and tests; the classifier admits only
+# START_FAILURE_CODES, so any other code is refused as well.
 NEVER_START_FAILURE_CODES = frozenset((
     'CLAUDE_RESULT_UNKNOWN', 'CLAUDE_NO_CHANGES', 'CLAUDE_WRITE_SCOPE_VIOLATION',
     'CLAUDE_OUTPUT_TOO_LARGE', 'CLAUDE_OUTPUT_INVALID', 'CLAUDE_STATUS_FAILED',
-    'CLAUDE_QUOTA_EXHAUSTED', 'CLAUDE_D6_BINDING_CHANGED',
-    'CLAUDE_DISPATCH_DENIED', 'OWNER_DISPATCH_DENIED',
+    'CLAUDE_QUOTA_EXHAUSTED', 'AGY_RESULT_UNKNOWN', 'AGY_NO_CHANGES',
+    'AGY_WRITE_SCOPE_VIOLATION', 'AGY_OUTPUT_TOO_LARGE', 'AGY_OUTPUT_INVALID',
+    'AGY_STATUS_FAILED', 'AGY_QUOTA_EXHAUSTED',
 ))
 
 # Section 2 check 3: present and None, and absent.
 _EMPTY_RESULT_FIELDS = ('artifact', 'artifact_sha256', 'usage')
-_ABSENT_RESULT_FIELDS = ('progress', 'no_changes_diagnosis', 'blocked_reason')
+_ABSENT_RESULT_FIELDS = ('progress', 'no_changes_diagnosis')
+_PRE_SPAWN_BLOCKED_REASONS = frozenset((
+    'OWNER_DISPATCH_DENIED', 'UNSUPPORTED_BOUNDARY',
+    'BOUNDARY_PREPARATION_FAILED', 'BOUNDARY_UNVERIFIED',
+))
 # Section 2 check 4: a pre-spawn execution record has none of these.
 _NO_PROCESS_FIELDS = ('native_session_id', 'process_exit_code', 'stdout_sha256')
 # Section 2 check 5: none of these may hold anything. A tombstone is a compacted
@@ -96,11 +114,11 @@ def record_checks(record):
     if type(record) is not dict:
         return _not(1)
     developer = record.get('developer')
-    # Check 1: a Claude CLI developer that ended BLOCKED.
+    # Check 1: a direct CLI developer that ended BLOCKED or DEVELOPER_UNAVAILABLE.
     if not (type(developer) is dict and
-            developer.get('provider_profile') == 'claude' and
-            developer.get('backend_session_semantics') == 'CLI_REPORTED_SESSION_ID' and
-            developer.get('state') == 'BLOCKED'):
+            developer.get('provider_profile') in ('claude', 'agy', 'gw-agent', 'codex', 'opencode') and
+            developer.get('backend_session_semantics') in ('CLI_REPORTED_SESSION_ID', 'NO_NATIVE_SESSION_ID_EXPOSED') and
+            developer.get('state') in ('BLOCKED', 'DEVELOPER_UNAVAILABLE')):
         return _not(1)
     # Check 2: a code raised before the spawn.
     code = developer.get('error_code')
@@ -110,9 +128,13 @@ def record_checks(record):
     changed_files_empty = ('changed_files' not in developer or
                            (type(developer['changed_files']) is list and
                             not developer['changed_files']))
+    blocked_reason_ok = ('blocked_reason' not in developer or
+                         developer['blocked_reason'] is None or
+                         developer['blocked_reason'] in _PRE_SPAWN_BLOCKED_REASONS)
     if not (all(field in developer and developer[field] is None
                 for field in _EMPTY_RESULT_FIELDS) and
             not any(field in developer for field in _ABSENT_RESULT_FIELDS) and
+            blocked_reason_ok and
             changed_files_empty):
         return _not(3)
     # Check 4: no process facts, or only a confirmed cleanup with none.
