@@ -835,9 +835,12 @@ def _test_fail_count(record, number, store=None):
     EC2 and CI repair of every chain Task, predecessors and successors and its
     own, on any PR, as review_repair does under the chain lock. A chain link or
     store scan in doubt (or no store) gives repair_policy.UNKNOWN, never 0.
+    #2190: with no PR (number None) the pre-PR family is counted, as
+    review_repair counts it; a PR count includes the pre-PR repairs.
     """
     return lineage_counts.lineage_counts(
-        store, record, base_family=f'pr-{number}', include_successors=True)['test_fails']
+        store, record, base_family=lineage_counts.repair_base_family(number),
+        include_successors=True)['test_fails']
 
 
 def _live_repair_claim(record, head):

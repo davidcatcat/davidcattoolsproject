@@ -41,6 +41,17 @@ STORE_SCAN_MAX = 20000
 _HEX32 = re.compile(r'[0-9a-f]{32}')
 _HEX40 = re.compile(r'[0-9a-f]{40}')
 _EC2_SUFFIX = '-ec2'   # review_repair.EC2_FAMILY_SUFFIX
+# #2190: the one base family of an EC2 FAIL before any PR exists. It is
+# reserved (never chosen by a caller) and its claims are stored in
+# PREPR_FAMILY with pr None. Every later PR count of the Task includes them,
+# so opening the PR never gives the test-failure count a fresh budget.
+PREPR_BASE_FAMILY = 'prepr'
+PREPR_FAMILY = PREPR_BASE_FAMILY + _EC2_SUFFIX
+
+
+def repair_base_family(pr_number):
+    """The base repair family for a PR number; PREPR_BASE_FAMILY when there is no PR."""
+    return PREPR_BASE_FAMILY if pr_number is None else f'pr-{pr_number}'
 
 
 def _hex32(value):
@@ -184,6 +195,10 @@ def lineage_counts(store, task, *, base_family, include_successors=False):
     A Task alone in its chain (no continues and, when include_successors, no
     successor) counts as before: only its claims in the stored base_family
     (review) and '<base>-ec2' plus legacy EC2 claims in base_family (tests).
+    #2190: its test count also adds every PREPR_FAMILY claim (a repair used
+    before the PR existed). With base_family PREPR_BASE_FAMILY (no PR yet) the
+    test count adds every '-ec2' and legacy EC2 claim of the Task, any PR, so
+    no family key gives a fresh budget; a claim family in doubt is UNKNOWN.
 
     include_successors (review_repair under the chain lock, and
     task_advance._test_fail_count so both agree): every Task that
@@ -210,6 +225,7 @@ def lineage_counts(store, task, *, base_family, include_successors=False):
     # Family-local counting only for a Task alone in its chain; in a chain every
     # Task's claims count on any PR, the Task's own included (#1502 F1).
     local = len(records) == 1
+    prepr = base_family == PREPR_BASE_FAMILY
     review, tests, heads, heads_known = 0, 0, {}, True
     for record in records:
         claims = record.get('review_repair_claims', [])
@@ -218,10 +234,17 @@ def lineage_counts(store, task, *, base_family, include_successors=False):
         for claim in claims:
             family = claim.get('family', f"pr-{claim.get('pr')}")
             legacy = ec2_claim_kind(claim) == 'LEGACY'
-            if local:
+            if local and prepr:
+                # #2190: no PR yet; every EC2 claim of the Task counts.
+                if type(family) is not str:
+                    return _unknown()
+                is_review = family == base_family
+                is_test = family.endswith(_EC2_SUFFIX) or legacy
+            elif local:
                 is_review = family == base_family
                 is_test = (family == base_family + _EC2_SUFFIX or
-                           (family == base_family and legacy))
+                           (family == base_family and legacy) or
+                           family == PREPR_FAMILY)
             elif type(family) is not str:
                 return _unknown()
             else:

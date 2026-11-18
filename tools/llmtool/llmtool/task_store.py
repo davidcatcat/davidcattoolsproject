@@ -153,6 +153,16 @@ _REVIEW_REPAIR_CLAIM_FIELDS = frozenset((
     'comment_id', 'packet_sha256', 'claimed_at'))
 _REVIEW_REPAIR_OPTIONAL_FIELDS = frozenset(('repair_task_id', 'family',
                                              'high_debug_report_sha256'))
+
+
+def _prepr_repair_claim(item):
+    """#2190: an EC2 repair claim made before any PR existed.
+
+    Only such a claim may have pr None: it is stored in the reserved pre-PR
+    family (lineage_counts.PREPR_FAMILY) and has no review comment.
+    """
+    return (item.get('pr') is None and item.get('family') == 'prepr-ec2' and
+            'comment_id' in item and item['comment_id'] is None)
 _V2_REPAIR_BASES = (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
                     *_V2_REMOTE_OUTCOME_SHAPES,
                     *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES,
@@ -2420,7 +2430,9 @@ def _validate(record, *, strict=True):
                     set(item) - _REVIEW_REPAIR_CLAIM_FIELDS - _REVIEW_REPAIR_OPTIONAL_FIELDS or
                     type(item.get('executor_task')) is not str or
                     not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', item['executor_task']) or
-                    type(item.get('pr')) is not int or not 1 <= item['pr'] <= 999999999 or
+                    not (_prepr_repair_claim(item) or
+                         (type(item.get('pr')) is int and
+                          1 <= item['pr'] <= 999999999)) or
                     type(item.get('head_sha')) is not str or
                     re.fullmatch(r'[0-9a-f]{40}', item['head_sha']) is None or
                     type(item.get('version')) is not int or not 1 <= item['version'] <= 9999 or

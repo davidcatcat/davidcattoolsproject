@@ -712,7 +712,19 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     # #1816: after the Owner policy, before any claim, Task or D6 write.
     if worker_availability.fresh_quota_fail(store, worker):
         _refuse(worker_availability.REFUSAL_CODE)
-    base_family = f'pr-{pr_number}' if family is None else family
+    from . import lineage_counts
+    # #2190: an EC2 FAIL before any PR exists (pr_number None) uses the one
+    # reserved pre-PR family; every later PR count includes its claims. Only
+    # an EC2 receipt may have no PR, and no caller may choose or switch to
+    # the reserved family, so a family key never gives a fresh budget.
+    if family == lineage_counts.PREPR_BASE_FAMILY:
+        _refuse('REPAIR_FAMILY_INVALID')
+    if pr_number is None:
+        if remote_test_receipt is None or family is not None:
+            _refuse('REPAIR_FAMILY_INVALID')
+        base_family = lineage_counts.PREPR_BASE_FAMILY
+    else:
+        base_family = f'pr-{pr_number}' if family is None else family
     if (type(base_family) is not str or
             re.fullmatch(r'[a-z0-9._-]{1,64}', base_family) is None or
             base_family.endswith(EC2_FAMILY_SUFFIX)):
@@ -811,7 +823,6 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     # counts also cover later Tasks of the chain. A lock that cannot be taken
     # refuses REPAIR_CHAIN_LOCK_UNAVAILABLE before any count or write; the lock
     # is released on every path, before the provider call.
-    from . import lineage_counts
     key = lineage_counts.chain_key(store, task)
     try:
         release_chain = lineage_counts.acquire_chain_lock(store, key)
