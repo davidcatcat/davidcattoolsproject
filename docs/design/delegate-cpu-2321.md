@@ -8,6 +8,7 @@ This technical design note documents:
 1. The exact locations (with file and line references) where `llmtool task delegate` waits for each provider's Developer run, including a dedicated analysis of how `opencode` differs from the provider-neutral routes.
 2. The root cause analysis, strictly separating confirmed source code facts from hypotheses, and enumerating the empirical diagnostic evidence required to prove the CPU consumption mechanism.
 3. Candidate architectural fixes, analyzing risks to result integrity, timeout accuracy, cancellation responsiveness (assessing cancellation-delay risk across timeout variants), and process group ownership/descendant cleanup under `CLIProcessLifecycle`.
+4. A recommendation that is explicitly conditional on empirical profiling evidence, acknowledging that theoretical CPU reduction is unverified until the active mechanism is confirmed.
 
 ---
 
@@ -222,7 +223,7 @@ The following facts are established directly by inspection of the source code:
 4. **Necessary Condition for High CPU**:
    High CPU utilization within `llmtool task delegate` can only occur if `selector.select()` is returning immediately (or after a near-zero interval) rather than blocking for 100 ms, or if a high volume of events continuously triggers chunk reads and loop processing.
 5. **OpenCode Stdin Writable State**:
-   In `opencode_direct_developer.py` (lines 959–960), `stdin` is registered with `selectors.EVENT_WRITE`. Under POSIX semantics, an OS pipe buffer with available space is continuously ready for writing. As long as `stdin` remains registered, `selector.select()` will report `stdin` ready immediately with 0 ms sleep.
+   In `opencode_direct_developer.py` (lines 959–960), `stdin` is registered with `selectors.EVENT_WRITE`. Under POSIX semantics, an OS pipe buffer with available space is continuously ready for writing. As long as `stdin` remains registered, `selector.select()` will report `stdin` ready immediately with 0 ms sleep until all bytes are delivered at lines 984–993.
 
 ---
 
@@ -230,16 +231,16 @@ The following facts are established directly by inspection of the source code:
 
 The following mechanisms are plausible explanations for elevated CPU consumption, but remain hypotheses pending empirical profiling evidence:
 
-- **Hypothesis 1: Continuous Writable Readiness on `stdin` in OpenCode**:
+- **Hypothesis 1: Continuous Writable Readiness on `stdin` in OpenCode [UNVERIFIED]**:
   During the prompt transmission phase, `stdin` is registered for `EVENT_WRITE`. If the pipe buffer does not fill up immediately, `selector.select()` returns without delay on every call. If prompt delivery spans multiple iterations or encounters partial writes, the selector spins in a 0 ms loop until delivery completes and `stdin` is unregistered.
-- **Hypothesis 2: Spurious Readiness or Level-Triggered Spinning on Pipe EOF**:
+- **Hypothesis 2: Spurious Readiness or Level-Triggered Spinning on Pipe EOF [UNVERIFIED]**:
   On macOS (`selectors.KqueueSelector`), pipes monitored with `KQ_FILTER_READ` enter a ready state when the peer closes the write end or reaches EOF. If there is any lag, unhandled state, or race condition between a stream reporting EOF and being unregistered via `selector.unregister(key.fileobj)`, or if one stream remains open while the other spins on EOF, `select()` returns immediately on every call.
-- **Hypothesis 3: High-Frequency Sub-Process Stream Chunks**:
+- **Hypothesis 3: High-Frequency Sub-Process Stream Chunks [UNVERIFIED]**:
   If the child developer process (`agy`, `claude`, or `opencode`) writes small chunks of output, ANSI progress indicators, or unbuffered debug logs to `stdout`/`stderr`, `selector.select()` wakes upon every chunk. In OpenCode, every newline in `stdout` triggers string slicing and `_has_structured_tool_denial` regex evaluation (lines 1009–1020), amplifying user-space CPU usage.
-- **Hypothesis 4: Short Remaining Time or Clock Precision Artifacts**:
+- **Hypothesis 4: Short Remaining Time or Clock Precision Artifacts [UNVERIFIED]**:
   If `remaining` approaches zero or clock queries produce negative or zero values, `min(remaining, 0.1)` collapses to `0`, converting the selector into a non-blocking poll.
-- **Hypothesis 5: Process Attribution Misidentification**:
-  Informal reports of high CPU during delegate runs may reflect CPU consumption by child processes (e.g. Node/Python/Go provider processes) or sibling helper processes, rather than the parent `llmtool task delegate` process itself [UNVERIFIED].
+- **Hypothesis 5: Process Attribution Misidentification [UNVERIFIED]**:
+  Informal reports of high CPU during delegate runs may reflect CPU consumption by child processes (e.g. Node/Python/Go provider processes) or sibling helper processes, rather than the parent `llmtool task delegate` process itself.
 
 ---
 
@@ -272,6 +273,8 @@ Process lifecycle management is governed by `CLIProcessLifecycle` (`tools/llmtoo
    The lifecycle installs signal handlers for `SIGINT`, `SIGTERM`, and `SIGHUP` (lines 265–271). In `_record(signum, frame)` (lines 235–240), the handler explicitly **does not raise an exception**:
    ```python
    def _record(self, signum, frame):
+       # No raising, killing, waiting, I/O or cleanup in a handler. In particular,
+       # never unwind Popen between child creation and ownership assignment.
        if self.signum is None:
            self.signum = signum
    ```
@@ -299,50 +302,81 @@ Retain the single-threaded `DefaultSelector` loop, but increase the timeout slic
 **Risk Assessment**:
 - **Results**: *Risk: None.* Whenever `stdout` or `stderr` receives data from the child process, the operating system kernel wakes `selector.select()` immediately. Data draining, chunk limits, and buffer accumulation are identical.
 - **Timeouts**: *Risk: None.* Overall task timeout remains bounded by `remaining = deadline - time.monotonic()`.
-- **Process Ownership & Descendant Cleanup (F2)**: *Risk: None.* The execution remains single-threaded. Normal context manager exit (`finally` / `__exit__`) invokes `bounded_terminate`, preserving full process group teardown and descendant verification.
-- **Cancellation-Delay Risk (F4)**:
+- **Cancellation-Delay Risk**:
   - *Under PEP 475*, Python automatically retries interrupted system calls (such as `kevent`/`select`) on `EINTR` if the signal handler does not raise an exception.
-  - Because `CLIProcessLifecycle._record` only records `self.signum = signum` without raising, `select()` will *not* return to Python when a signal arrives; it will continue sleeping in the kernel until the timeout expires or stream data arrives!
-  - **In Variant 1A (Full Timeout, up to 3600s)**: If the child process is quiet and a `SIGINT` (Ctrl-C) arrives, `selector.select()` will block for the entire remaining task duration (minutes or hours). `lifecycle.check()` will not execute, and the process will not respond to cancellation. **Variant 1A presents an unacceptable cancellation-delay risk.**
+  - Because `CLIProcessLifecycle._record` only records `self.signum = signum` without raising, `select()` will *not* return to Python when a signal arrives; it will continue sleeping in the kernel until the timeout expires or stream data arrives.
+  - **In Variant 1A (Full Timeout, up to 3600s)**: If the child process is quiet and a `SIGINT` (Ctrl-C) or `SIGTERM` arrives, `selector.select()` will block for the entire remaining task duration (minutes or hours). `lifecycle.check()` will not execute, and the process will not respond to cancellation. **Variant 1A presents an unacceptable cancellation-delay risk.**
   - **In Variant 1B (Bounded 1.0s Slice)**: The maximum delay between signal arrival and cancellation detection via `lifecycle.check()` is strictly bounded to 1.0 second. This provides acceptable cancellation responsiveness while reducing idle iteration frequency by 90% (from 10 Hz to 1 Hz) if `select` is blocking.
+- **Process Ownership & Descendant Cleanup**:
+  - **In Variant 1A**: *Risk: High.* When cancellation is delayed because `select()` blocks for minutes or hours, child and descendant processes continue executing un-terminated in the background. If an external orchestrator or CI supervisor escalates cancellation by sending `SIGKILL` to the unresponsive parent process (after a typical 5–10s grace period), `lifecycle.__exit__` is never executed; `bounded_terminate` is completely bypassed, leaving orphaned descendant processes running indefinitely in the D6 worktree. Furthermore, if the selector sleeps until the overall deadline expires, the finite cleanup reserve (`deadline + 5`) is exhausted before `bounded_terminate` is invoked, preventing confirmed verification and degrading cleanup status to `UNKNOWN`.
+  - **In Variant 1B**: *Risk: Low.* The maximum cancellation delay is 1.0 second, which is well within standard cancellation grace periods. Normal context manager exit (`finally` / `__exit__`) invokes `bounded_terminate` promptly, preserving process group teardown and descendant absence verification before cleanup reserves expire.
+- **CPU Reduction**:
+  - *Outcome [UNVERIFIED]*: Increasing the selector slice only reduces CPU utilization if the high CPU is caused by the 100 ms polling frequency of an otherwise idle loop. If `select()` is returning immediately due to continuous stream readiness (e.g. `stdin` write readiness, EOF level triggering, or rapid chunk output), increasing the timeout parameter has zero effect on CPU utilization.
 
 ---
 
-#### Candidate Fix 2: Self-Pipe / Wakeup Pipe Event Loop
+#### Candidate Fix 2: Self-Pipe / Wakeup Pipe Event Loop via `signal.set_wakeup_fd`
 
 **Description**:
-Create a non-blocking internal pipe (`wake_r, wake_w = os.pipe()`) and register `wake_r` in the selector with `EVENT_READ`.
-When `CLIProcessLifecycle` receives a signal, or via a signal callback, write a single byte to `wake_w`.
-This allows using the full remaining timeout:
+To allow the selector to block for the full remaining timeout (`selector.select(timeout=max(0.0, remaining))`) without suffering cancellation delays under PEP 475, an internal wakeup pipe can be used to notify the selector of signal delivery.
+
+**Contractual Constraint in `CLIProcessLifecycle`**:
+`cli_lifecycle.py` lines 235–239 explicitly mandate:
 ```python
-ready = selector.select(timeout=max(0.0, remaining))
+def _record(self, signum, frame):
+    # No raising, killing, waiting, I/O or cleanup in a handler. In particular,
+    # never unwind Popen between child creation and ownership assignment.
+    if self.signum is None:
+        self.signum = signum
 ```
-If a signal arrives, the write to `wake_w` wakes `selector.select()` immediately (0 ms latency). When `wake_r` is ready, the loop calls `lifecycle.check()` and raises `_Cancelled()`.
+Because `_record` explicitly forbids performing I/O in a signal handler to protect process ownership, writing to a pipe from within `_record` (or from an ordinary Python signal callback) is prohibited. Furthermore, an ordinary Python callback cannot execute while `select()` is blocked inside the C-level system call under PEP 475 unless an event wakes the kernel call.
+
+**Viable Architectural Implementation**:
+Use Python's runtime C-level mechanism: `signal.set_wakeup_fd(wake_w, warn_on_full=False)`.
+- When an OS signal arrives, the Python C runtime signal trampoline writes a byte directly to `wake_w` at the C/OS layer, without invoking Python bytecode or performing I/O in `_record`. `CLIProcessLifecycle._record` remains completely unchanged and compliant with the "no I/O in handler" invariant.
+- `wake_r` is registered with `selector.register(wake_r, selectors.EVENT_READ, 'wakeup')`.
+- The arrival of the wakeup byte causes the kernel `select()` call to return immediately (0 ms latency).
+- Upon return, Python executes `_record(signum, frame)` (setting `self.signum`), drains `wake_r` via a non-blocking read, and invokes `lifecycle.check()`, which raises `_Cancelled()` and exits the loop.
 
 **Risk Assessment**:
 - **Results**: *Risk: None.* Stream collection for child pipes is unchanged.
 - **Timeouts**: *Risk: None.* Bounded by `remaining`.
-- **Process Ownership & Descendant Cleanup (F2)**: *Risk: Low.* Single-threaded execution model is preserved. Upon `_Cancelled`, control flow exits the loop and reaches `lifecycle.__exit__`, triggering `bounded_terminate` on the child process group. The only cleanup requirement is closing `wake_r` and `wake_w` in a `finally` block to prevent file descriptor leaks.
-- **Cancellation-Delay Risk (F4)**: *Risk: None.* Signals wake `selector.select()` with 0 ms delay.
+- **Cancellation-Delay Risk**: *Risk: None.* Signals wake `selector.select()` with 0 ms delay.
+- **Process Ownership & Descendant Cleanup**: *Risk: Low (requires careful descriptor & global state management).*
+  - `signal.set_wakeup_fd` is a process-global Python setting. The caller must save the previous wakeup fd and restore it via `signal.set_wakeup_fd(old_fd)` in a `finally` block to avoid clobbering other subsystems or leaking state.
+  - Pipe file descriptors `wake_r` and `wake_w` must be created non-blocking (`os.set_blocking(fd, False)`) and closed in a `finally` block to prevent file descriptor leaks.
+  - Draining `wake_r` must handle `BlockingIOError`.
+  - Must run strictly on the main thread (consistent with `CLIProcessLifecycle.__enter__`).
+  - Upon `_Cancelled`, control flow exits the loop and reaches `lifecycle.__exit__`, triggering `bounded_terminate` on the child process group without delay.
+- **CPU Reduction**:
+  - *Outcome [UNVERIFIED]*: Allows `select()` to block passively for the full duration during idle periods, but provides no CPU reduction if continuous stream readiness is causing immediate selector returns.
 
 ---
 
-#### Candidate Fix 3: Spin Prevention with Backoff and State-Driven Stdin Registration
+#### Candidate Fix 3: Cooperative Spin Backoff & OpenCode Stdin Invariant Preservation
 
 **Description**:
-Address the specific conditions that cause `selector.select()` to return immediately without blocking:
-1. **OpenCode Stdin Management**: In `opencode_direct_developer.py`, do not register `stdin` with `EVENT_WRITE` continuously. Only register `stdin` when there are pending prompt bytes to write. Once `offset >= len(payload)`, unregister and close `stdin` immediately. If a write returns `BlockingIOError`, leave it registered; otherwise unregister until the next write slice.
-2. **Cooperative Spin Backoff**: If `selector.select()` returns an empty list or returns with elapsed time < 1 ms without transferring any stream bytes, execute an explicit cooperative yield (`time.sleep(0.01)` or `0.02`).
+Address the specific conditions that cause `selector.select()` to return immediately without blocking, while strictly maintaining prompt delivery and stream invariants:
+
+1. **Preserving OpenCode Stdin Delivery Invariants**:
+   - In `opencode_direct_developer.py` (lines 984–993), `stdin` must remain registered with `EVENT_WRITE` continuously while `offset < len(payload)` so that the selector wakes whenever the kernel pipe buffer has space.
+   - Once `offset >= len(payload)`, `stdin` is unregistered from the selector and closed immediately (`key.fileobj.close()`).
+   - *Rejection of Partial-Write Unregistration*: Unregistering `stdin` after a partial write without an external scheduling mechanism or timer would stall prompt delivery until timeout (`OPENCODE_TIMEOUT`), because no subsequent event would schedule the next write slice while the child process blocks waiting for prompt input. Therefore, `stdin` must remain registered until all prompt bytes are delivered.
+2. **Cooperative Spin Backoff**:
+   - If `selector.select()` returns immediately (elapsed wall-clock time < 1 ms) and transfers 0 bytes across all streams (e.g. due to persistent writable readiness on an un-drained pipe, level-triggered EOF readiness, or high-frequency polling), execute a brief cooperative yield via `time.sleep(0.01)` or `0.02` (10–20 ms).
+   - This caps the maximum loop frequency at 50–100 iterations per second even during continuous readiness, preventing 100% CPU core spinning while preserving prompt delivery and stream draining.
 
 **Risk Assessment**:
-- **Results**: *Risk: None.* Preserves identical payload delivery, buffer bounds, and hash verification.
+- **Results**: *Risk: None.* Preserves identical payload delivery, buffer bounds, stream parsing (`_has_structured_tool_denial`), and hash verification.
 - **Timeouts**: *Risk: None.* Backoff sleep (10–20 ms) does not affect multi-minute timeouts.
-- **Process Ownership & Descendant Cleanup (F2)**: *Risk: None.* Retains the proven single-threaded lifecycle model; `bounded_terminate` and group cleanup operate without modification.
-- **Cancellation-Delay Risk (F4)**: *Risk: Low.* Cancellation delay is bounded by the 100 ms selector slice plus backoff (at most ~120 ms), maintaining high responsiveness to `SIGINT` and `SIGTERM`.
+- **Cancellation-Delay Risk**: *Risk: Low.* Cancellation delay is bounded by the selector slice plus backoff (at most ~110–120 ms), maintaining high responsiveness to `SIGINT` and `SIGTERM`.
+- **Process Ownership & Descendant Cleanup**: *Risk: None.* Retains the single-threaded lifecycle model; `bounded_terminate` and group cleanup operate without modification.
+- **CPU Reduction**:
+  - *Outcome [UNVERIFIED]*: Throttles loop execution frequency and caps CPU utilization regardless of whether the spin is caused by idle timeout polling or continuous stream readiness, but actual CPU reduction remains unverified pending empirical measurement.
 
 ---
 
-### C. Analysis of Threaded `communicate()` Models and Cleanup Risks (F2)
+### C. Analysis of Threaded `communicate()` Models and Cleanup Risks
 
 Prior discussions considered adopting standard library `subprocess.Popen.communicate()` or background reader threads. This recommendation is rejected because it introduces significant risks to process ownership and descendant cleanup:
 
@@ -359,15 +393,29 @@ Prior discussions considered adopting standard library `subprocess.Popen.communi
 
 | Metric / Dimension | Candidate Fix 1A (Full Timeout) | Candidate Fix 1B (Bounded 1s Slice) | Candidate Fix 2 (Self-Pipe Wakeup) | Candidate Fix 3 (Spin Backoff & Stdin State) | Threaded `communicate()` (Rejected) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **CPU Reduction** | Eliminates idle spin | Eliminates idle spin | Eliminates idle spin | Eliminates idle spin | Eliminates idle spin |
-| **Architectural Complexity** | Trivial (1 line) | Trivial (1 line) | Low (self-pipe added) | Low (backoff + stdin gating) | High (threading model) |
-| **Cancellation-Delay Risk (F4)** | **HIGH** (blocks up to 3600s on signal due to PEP 475) | **LOW** (max 1.0s delay to detect cancellation) | **NONE** (instant wakeup via pipe) | **LOW** (max ~120ms delay) | **HIGH** (threads block on pipe) |
-| **Descendant Cleanup Risk (F2)** | **NONE** (single-threaded `bounded_terminate`) | **NONE** (single-threaded `bounded_terminate`) | **LOW** (close pipe fds in `finally`) | **NONE** (single-threaded `bounded_terminate`) | **HIGH** (thread hangs, orphaned descendants) |
+| **CPU Reduction** | [UNVERIFIED] Reduces CPU only if idle 100ms polling is the cause; ineffective if readiness triggers immediate return | [UNVERIFIED] Reduces CPU only if idle 100ms polling is the cause; ineffective if readiness triggers immediate return | [UNVERIFIED] Reduces CPU only if idle 100ms polling is the cause; ineffective if readiness triggers immediate return | [UNVERIFIED] Caps loop frequency to 50–100 Hz even under continuous readiness; unverified until profiled | [UNVERIFIED] Eliminates polling; unverified |
+| **Architectural Complexity** | Trivial (1 line) | Trivial (1 line) | Moderate (`set_wakeup_fd` + fd lifecycle) | Low (cooperative sleep on 0-byte return) | High (threading model rewrite) |
+| **Cancellation-Delay Risk** | **HIGH** (blocks up to 3600s on signal due to PEP 475) | **LOW** (max 1.0s delay to detect cancellation) | **NONE** (instant wakeup via pipe) | **LOW** (max ~120ms delay) | **HIGH** (threads block on pipe) |
+| **Descendant Cleanup Risk** | **HIGH** (descendants run un-terminated during delay; external SIGKILL orphans group; deadline exhausted) | **LOW** (max 1.0s delay allows prompt `bounded_terminate`) | **LOW** (must clean up global fd and pipe descriptors in `finally`) | **NONE** (single-threaded `bounded_terminate` unaffected) | **HIGH** (thread hangs, orphaned descendants) |
 | **Result Integrity Risk** | None | None | None | None | Low |
-| **Applicability to OpenCode** | Requires stdin fix | Requires stdin fix | Requires stdin fix | Directly addresses stdin spin | High rewrite cost |
+| **OpenCode Applicability** | Ineffective if stdin/EOF spins | Ineffective if stdin/EOF spins | Ineffective if stdin/EOF spins | Directly addresses spin without breaking stdin delivery | High rewrite cost |
+
+---
 
 ### Recommendation
-The optimal path is a combination of **Candidate Fix 3** (resolving the OpenCode `stdin` continuous writable state and adding spin backoff) and **Candidate Fix 1B** (raising the polling slice to a bounded 1.0 second). This combination:
-- Eliminates CPU spinning during both prompt delivery and idle execution.
-- Bounds cancellation delay to at most 1.0 second under PEP 475 without requiring complex self-pipe machinery.
-- Retains single-threaded `CLIProcessLifecycle` ownership, ensuring reliable `bounded_terminate` PGID teardown and descendant cleanup.
+
+Any architectural fix must be **conditional on empirical profiling evidence** obtained through the diagnostic procedures in Section 2.C:
+
+1. **Diagnostic Phase (Prerequisite)**:
+   - Profile `llmtool task delegate` using `py-spy` and system call tracing (`dtruss`/`strace`) to establish the active CPU consumption mechanism.
+   - Distinguish between:
+     - Passive idle loop polling frequency (100 ms timeout slice).
+     - Continuous stream readiness (e.g. `stdin` write readiness or pipe EOF level-triggering).
+     - Sub-process CPU utilization (misattributed child process activity).
+
+2. **Conditional Implementation Path**:
+   - **If profiling confirms idle loop polling frequency is the primary cause**:
+     Adopt **Candidate Fix 1B** (raising the selector slice to a bounded 1.0 second). This reduces loop iteration overhead by 90% during idle periods, strictly bounds cancellation delay to at most 1.0 second under PEP 475, and avoids the complexity of global wakeup pipes while preserving `CLIProcessLifecycle` descendant cleanup.
+   - **If profiling confirms continuous stream readiness (e.g. pipe spin or OpenCode stdin readiness)**:
+     Adopt **Candidate Fix 3** (cooperative spin backoff while maintaining continuous `stdin` registration until delivery completes at opencode_direct_developer.py:984–993). This caps CPU consumption to <= 50–100 iterations per second without stalling prompt delivery or altering process ownership contracts.
+   - Candidate Fix 1A and Threaded `communicate()` are firmly rejected due to unacceptable descendant cleanup and cancellation-delay risks.
