@@ -431,16 +431,34 @@ class PrePrClaimStoreTests(unittest.TestCase):
         snap = SimpleNamespace(head=HEADS[0], root=self.temp.name,
                                common_dir=self.temp.name, branch='main')
         card = '\nREQUIRED_SKILL_BEGIN path=card\nRules.\nREQUIRED_SKILL_END path=card'
-        route = type('Route', (), {'run': lambda *a, **kw: None})()
-        def fail_route(*_args, **_kwargs):
-            raise RouteError('CLAUDE_CONFIG_INVALID')
-        route.run = fail_route
+        class Boundary:
+            def prepare(self, root, paths, state_dirs=()):
+                return ('fixture-policy', True)
+
+            def verify(self, root, paths, state_dirs=(), *, runner):
+                return {'verified': True, 'policy_sha256': hashlib.sha256(b'boundary').hexdigest()}
+
+        class Route:
+            def __call__(self, route, request, *, gate, boundary, snapshot):
+                raise RouteError('CLAUDE_CONFIG_INVALID')
+
         args = Namespace(
             task_id=TASK, provider='claude', mode='direct', selection_source='PM',
             executor_task=EXECUTOR, read_path=['docs/notes.md'], write_path=['docs/notes.md'],
             acceptance=['Fix pre-PR failure.'], egress_basis='Plain test egress basis.',
             owner_ref=None, repair_packet=packet, context_stdin=False, timeout=None)
         with patch.object(task_submission_cli, '_delegate_d6_binding', return_value=(reg, snap)), \
+                patch.object(task_submission_cli.task_completion, 'bind_executor_task',
+                             return_value=(reg, snap)), \
+                patch.object(task_submission_cli, '_delegate_timeout', return_value=600), \
+                patch.object(task_submission_cli, 'load_route_config',
+                             return_value={'routes': {'claude': {'denied_dirs': []}}}), \
+                patch.object(task_submission_cli, '_claude_developer_profile',
+                             return_value=('fixture-model', 'medium', '/nonexistent/config')), \
+                patch.object(task_submission_cli.shutil, 'which', return_value='/nonexistent/bin/claude'), \
+                patch.object(task_submission_cli, '_DiagnosedClaudeRoute',
+                             side_effect=lambda config: SimpleNamespace()), \
+                patch.object(task_submission_cli, 'for_platform', return_value=Boundary()), \
                 patch.object(task_submission_cli, '_developer_card_prefix',
                              return_value=(card, hashlib.sha256(card.encode()).hexdigest())), \
                 patch.object(task_submission_cli, '_delegate_chain_gate',
@@ -450,7 +468,7 @@ class PrePrClaimStoreTests(unittest.TestCase):
                 patch.object(task_submission_cli.worker_dispatch, 'evaluate', return_value=ALLOWED), \
                 patch('llmtool.pm_caller.check_caller', return_value=None), \
                 redirect_stdout(StringIO()):
-            rc = task_submission_cli.run_task_claude_delegate(args, store=store, route_runner=route)
+            rc = task_submission_cli.run_task_claude_delegate(args, store=store, route_runner=Route())
         self.assertEqual(rc, 1)
         persisted = store.get(TASK)
         expected_text = start_failure.canonical(packet)
