@@ -5043,12 +5043,21 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
                 _background_launch_notifier(pid)
             return saved
 
+        workflow_grant_base_commit = task.get('base_commit') or snapshot.head
+        workflow_grant_issue = task.get('issue')
+        if workflow_grant_issue is None and isinstance(task.get('task_contract'), dict):
+            workflow_grant_issue = task['task_contract'].get('issue')
+        if isinstance(workflow_grant_issue, str) and workflow_grant_issue.isdigit():
+            workflow_grant_issue = int(workflow_grant_issue)
+
         result = opencode_direct_developer.run(
             root=registration.root, read_paths=read_paths,
             write_paths=write_paths, prompt=prompt,
             dispatch_store=store, dispatch_task_id=task['task_id'], steps=steps,
             prelaunch_validate=validate_prelaunch_d6_binding, model=model,
-            launch_callback=record_opencode_launch, timeout_seconds=timeout)
+            launch_callback=record_opencode_launch, timeout_seconds=timeout,
+            workflow_grant_base_commit=workflow_grant_base_commit,
+            workflow_grant_issue=workflow_grant_issue)
         _record_skill_delivery(task, registration, snapshot, 'opencode', model,
                                card_prefix_sha256, result)
     except opencode_direct_developer.DirectOpenCodeError as exc:
