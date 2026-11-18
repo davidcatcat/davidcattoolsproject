@@ -47,7 +47,7 @@
         "max_turns": 512,
         "max_input_tokens": 262144,
         "max_output_tokens": 65536,
-        "max_wall_seconds": 600,
+        "max_wall_seconds": 1800,
         "max_tool_result_bytes": 262144,
         "max_sent_bytes": 16777216
       },
