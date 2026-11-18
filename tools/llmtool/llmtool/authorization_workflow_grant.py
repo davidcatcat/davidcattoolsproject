@@ -1,15 +1,18 @@
 """Evaluate an exact workflow-file grant for a Task Issue and mode.
 
 The grant source is the reviewed in-repository rule file
-``tools/llmtool/workflow-grants.json`` at the Task base commit. This module only
-answers a grant question; it has no caller yet and grants no authority beyond an
-exact Issue, mode and path match.
+``tools/llmtool/workflow-grants.json`` at the caller-supplied Task base commit.
+The file is read from the Git object store, never from the working tree, so an
+uncommitted edit cannot widen a grant. This module only answers a grant
+question; it has no caller yet and grants no authority beyond an exact Issue,
+mode and workflow-file path match.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import subprocess
 import unicodedata
 from dataclasses import dataclass
 from enum import Enum
@@ -17,17 +20,21 @@ from pathlib import Path
 
 MAX_GRANTS_BYTES = 65536
 MAX_PATH_BYTES = 1024
-MAX_PATH_COMPONENTS = 32
 MAX_PATHS_PER_GRANT = 32
+GIT_TIMEOUT_SECONDS = 30
+GRANT_FILE = 'tools/llmtool/workflow-grants.json'
 MODES = frozenset(('read', 'write'))
 _ENTRY_FIELDS = frozenset(('issue', 'owner_record_url', 'mode', 'paths'))
 _OWNER_RECORD = re.compile(r'https://[A-Za-z0-9.-]+/[^\s]+')
+_BASE_COMMIT = re.compile(r'[0-9a-f]{40}')
 
 
 class WorkflowGrantCode(str, Enum):
     GRANTED = 'GRANTED'
     GRANT_FILE_MISSING = 'GRANT_FILE_MISSING'
     GRANT_FILE_MALFORMED = 'GRANT_FILE_MALFORMED'
+    GRANT_BASE_COMMIT_INVALID = 'GRANT_BASE_COMMIT_INVALID'
+    GRANT_SOURCE_UNAVAILABLE = 'GRANT_SOURCE_UNAVAILABLE'
     GRANT_ISSUE_INVALID = 'GRANT_ISSUE_INVALID'
     GRANT_MODE_INVALID = 'GRANT_MODE_INVALID'
     GRANT_PATH_INVALID = 'GRANT_PATH_INVALID'
@@ -79,6 +86,12 @@ def _safe_text(value, limit):
 
 
 def _workflow_parts(path):
+    """Return the components of an exact workflow file, or None.
+
+    GitHub runs only top-level ``.github/workflows/*.yml`` and ``*.yaml``
+    files, so a nested path or a name without that extension is not a
+    workflow file and is refused rather than treated as one.
+    """
     if not _safe_text(path, MAX_PATH_BYTES):
         return None
     if unicodedata.normalize('NFC', path) != path:
@@ -86,7 +99,7 @@ def _workflow_parts(path):
     if path.startswith('/') or path.endswith('/') or '\\' in path:
         return None
     parts = path.split('/')
-    if not 3 <= len(parts) <= MAX_PATH_COMPONENTS:
+    if len(parts) != 3:
         return None
     if parts[0] != '.github' or parts[1] != 'workflows':
         return None
@@ -94,6 +107,15 @@ def _workflow_parts(path):
         if (part in ('', '.', '..') or part.startswith('-') or
                 any(not (char.isalnum() or char in '._-') for char in part)):
             return None
+    name = parts[2]
+    if name.endswith('.yml'):
+        stem = name[:-4]
+    elif name.endswith('.yaml'):
+        stem = name[:-5]
+    else:
+        return None
+    if not stem or stem.startswith('.'):
+        return None
     return tuple(parts)
 
 
@@ -134,15 +156,29 @@ def _owner_record_ok(value):
     return type(value) is str and _OWNER_RECORD.fullmatch(value) is not None
 
 
-def _read_grants(list_path):
+def _git(root, *arguments):
+    return subprocess.run(
+        ['git', '-C', str(root), *arguments],
+        check=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, timeout=GIT_TIMEOUT_SECONDS)
+
+
+def _source_bytes(root, base_commit):
+    """Read the rule file blob at the Task base commit, never the worktree."""
     try:
-        with Path(list_path).open('rb') as stream:
-            raw = stream.read(MAX_GRANTS_BYTES + 1)
-    except FileNotFoundError:
-        raise _Refusal(WorkflowGrantCode.GRANT_FILE_MISSING) from None
-    except OSError:
-        raise _Refusal(WorkflowGrantCode.GRANT_FILE_MALFORMED) from None
-    if len(raw) > MAX_GRANTS_BYTES:
+        kind = _git(root, 'cat-file', '-t', base_commit + '^{commit}')
+        if kind.returncode != 0 or kind.stdout.strip() != b'commit':
+            raise _Refusal(WorkflowGrantCode.GRANT_BASE_COMMIT_INVALID)
+        blob = _git(root, 'cat-file', 'blob', f'{base_commit}:{GRANT_FILE}')
+    except (OSError, subprocess.SubprocessError):
+        raise _Refusal(WorkflowGrantCode.GRANT_SOURCE_UNAVAILABLE) from None
+    if blob.returncode != 0:
+        raise _Refusal(WorkflowGrantCode.GRANT_FILE_MISSING)
+    return blob.stdout
+
+
+def _parse_grants(raw):
+    if type(raw) is not bytes or len(raw) > MAX_GRANTS_BYTES:
         raise _Refusal(WorkflowGrantCode.GRANT_FILE_MALFORMED)
     try:
         value = json.loads(raw.decode('utf-8'), object_pairs_hook=_unique_pairs,
@@ -191,16 +227,25 @@ def _read_grants(list_path):
     return tuple(grants)
 
 
-def evaluate_workflow_grant(*, issue, path, mode, grants_path=None, root=None):
-    """Return an allowed decision only for one exact Issue, mode and path match."""
+def evaluate_workflow_grant(*, base_commit, issue, path, mode, root=None):
+    """Return an allowed decision only for one exact Issue, mode and path match.
+
+    ``base_commit`` is the Task base commit: the rule file is read from that
+    commit, so the answer cannot be changed by an uncommitted or later edit.
+    """
     if type(issue) is not int or issue < 1:
         return WorkflowGrantDecision(False, WorkflowGrantCode.GRANT_ISSUE_INVALID)
     if type(mode) is not str or mode not in MODES:
         return WorkflowGrantDecision(False, WorkflowGrantCode.GRANT_MODE_INVALID)
     if _workflow_parts(path) is None:
         return WorkflowGrantDecision(False, WorkflowGrantCode.GRANT_PATH_INVALID)
+    if (type(base_commit) is not str or
+            _BASE_COMMIT.fullmatch(base_commit) is None):
+        return WorkflowGrantDecision(
+            False, WorkflowGrantCode.GRANT_BASE_COMMIT_INVALID)
     try:
-        grants = _read_grants(_grant_list_path() if grants_path is None else grants_path)
+        grants = _parse_grants(_source_bytes(
+            _repository_root() if root is None else root, base_commit))
     except _Refusal as refusal:
         return WorkflowGrantDecision(False, refusal.code)
     if _has_symlink(_repository_root() if root is None else root, path):

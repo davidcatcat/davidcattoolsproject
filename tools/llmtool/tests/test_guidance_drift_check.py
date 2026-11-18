@@ -332,6 +332,10 @@ def valid_rule_files():
                 },
             },
         },
+        "workflow-grants.json": {
+            "schema_version": 1,
+            "grants": [],
+        },
         "sensitive-paths.json": {
             "schema_version": 1,
             "exact": ["tools/llmtool/sensitive-paths.json"],
@@ -467,6 +471,19 @@ class RuleFileSchemaTests(unittest.TestCase):
             ("sensitive-paths.json", {**self.valid["sensitive-paths.json"], "exact": ["/abs"]}, "invalid format"),
             ("sensitive-paths.json", {**self.valid["sensitive-paths.json"], "prefixes": ["secret"]}, "invalid format"),
             ("sensitive-paths.json", {**self.valid["sensitive-paths.json"], "globs": ["a", "a"]}, "duplicate"),
+            ("workflow-grants.json", {"schema_version": 1, "grants": [{
+                "issue": 2281, "owner_record_url": "https://example.invalid/record",
+                "mode": "write", "paths": ["docs/ci.yml"]}]}, "invalid format"),
+            ("workflow-grants.json", {"schema_version": 1, "grants": [{
+                "issue": 2281, "owner_record_url": "https://example.invalid/record",
+                "mode": "write",
+                "paths": [".github/workflows/nested/ci.yml"]}]}, "invalid format"),
+            ("workflow-grants.json", {"schema_version": 1, "grants": [{
+                "issue": 2281, "mode": "write",
+                "paths": [".github/workflows/ci.yml"]}]}, 'missing key "owner_record_url"'),
+            ("workflow-grants.json", {"schema_version": 1, "grants": [{
+                "issue": 2281, "owner_record_url": "https://example.invalid/record",
+                "mode": "admin", "paths": [".github/workflows/ci.yml"]}]}, "must be one of"),
         ]
         host = self.valid["execution-resources.json"]["hosts"][0]
         resources = self.valid["execution-resources.json"]
