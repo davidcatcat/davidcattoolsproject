@@ -73,11 +73,41 @@ class RoleConfigTests(unittest.TestCase):
         self.assertEqual((reviewer["account"], reviewer["model"], reviewer["source"]),
                          ("work", REVIEWER_MODEL, "roles"))
 
-    def test_reviewer_model_outside_the_registry_is_refused_at_every_layer(self):
+    def test_reviewer_same_family_model_is_accepted_at_every_layer(self):
+        # Owner #2302 P2: any Claude-family model passes the registry check.
+        model = "claude-fable-5-2"
+        config = self.account_config()
+        config["roles"]["reviewer"]["model"] = model
+        self.save(config)
+        for cli, env, source in (
+                (None, {}, "roles"),
+                (None, {"LLMTOOL_ROLE_REVIEWER_MODEL": model}, "env"),
+                ({"model": model}, {}, "cli")):
+            with self.subTest(source=source):
+                resolved = resolve_role("reviewer", cli=cli, environ=env, home=self.home)
+                self.assertEqual((resolved["model"], resolved["model_source"]),
+                                 (model, source))
+
+    def test_developer_same_family_model_is_accepted_from_user_config(self):
+        # Owner #2302 P2: user config admits any same-family model for developer roles.
+        self.save({
+            "roles": {
+                "agy-developer": {"model": "gemini-4-hydrogen-medium"},
+                "claude-developer": {"model": "claude-fable-5-2"},
+            }
+        })
+        resolved_agy = resolve_role("agy-developer", environ={}, home=self.home)
+        self.assertEqual((resolved_agy["model"], resolved_agy["model_source"]),
+                         ("gemini-4-hydrogen-medium", "roles"))
+        resolved_claude = resolve_role("claude-developer", environ={}, home=self.home)
+        self.assertEqual((resolved_claude["model"], resolved_claude["model_source"]),
+                         ("claude-fable-5-2", "roles"))
+
+    def test_reviewer_model_outside_its_family_is_refused_at_every_layer(self):
         # #1502 WP-E R1: the resolver applies the shared check after precedence.
         self.save(self.account_config())
         for cli, env in (
-                (None, {"LLMTOOL_ROLE_REVIEWER_MODEL": "claude-other-model"}),
+                (None, {"LLMTOOL_ROLE_REVIEWER_MODEL": "gemini-other-model"}),
                 ({"model": "gpt-6.1-sol"}, {}),
                 ({"model": "anthropic/" + REVIEWER_MODEL}, {})):
             with self.subTest(cli=cli, env=env):

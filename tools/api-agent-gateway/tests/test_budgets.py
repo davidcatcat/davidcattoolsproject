@@ -42,19 +42,31 @@ class BudgetTests(GatewayCase):
         self.assert_budget(self.run_task(self.budgets(max_sent_bytes=1024)), 'SENT_BYTES_EXCEEDED')
         self.assertEqual(self.server.requests, [])
 
-    def test_input_token_budget(self):
-        self.assert_budget(self.run_task(self.budgets(max_input_tokens=10)), 'INPUT_TOKEN_BUDGET_EXCEEDED')
-        self.assertEqual(self.server.requests, [])
-        self.server.script = [reply(tool_call('list_dir', path='src'), usage=(900, 5))] * 3
-        self.assert_budget(self.run_task(self.budgets(max_input_tokens=1500)), 'INPUT_TOKEN_BUDGET_EXCEEDED')
+    def test_token_budget_fields_are_accepted_and_not_enforced(self):
+        # #2281: old callers may still send token budgets, but the run never stops on tokens.
+        self.server.script = [reply(tool_call('list_dir', path='src'), usage=(900, 500)),
+                              reply(tool_call('finish', summary='ok'), usage=(900, 500))]
+        code, result, _ = self.run_task(self.budgets(max_input_tokens=10, max_output_tokens=10))
+        self.assertEqual((code, result['status']), (0, 'DONE'), result)
+        self.assertEqual(len(self.server.requests), 2)
+        self.assertEqual(result['turns'], 2)
+        self.assertEqual(result['budget_used']['input_tokens'], 1800)
+        self.assertEqual(result['budget_used']['output_tokens'], 1000)
 
-    def test_output_token_budget(self):
-        self.server.script = [reply(tool_call('apply_edit', path='src/app.py', old='hello', new='x'),
-                                    usage=(10, 500))]
-        self.assert_budget(self.run_task(self.budgets(max_output_tokens=100)), 'OUTPUT_TOKEN_BUDGET_EXCEEDED')
-        # Tool calls from the over-budget reply were not executed.
-        self.assertIn('hello', self.read('src/app.py'))
-        self.assertEqual(self.server.requests[0]['max_tokens'], 100)
+    def test_task_without_token_budget_fields_is_accepted(self):
+        # #2281: a task that omits the token budgets is valid and runs normally.
+        budgets = dict(self.task()['budgets'])
+        for key in ('max_input_tokens', 'max_output_tokens'):
+            budgets.pop(key, None)
+        self.server.script = [reply(tool_call('finish', summary='ok'))]
+        code, result, _ = self.run_task(self.task(budgets=budgets))
+        self.assertEqual((code, result['status']), (0, 'DONE'), result)
+        self.assertEqual(len(self.server.requests), 1)
+
+    def test_invalid_token_budget_field_is_refused(self):
+        # #2281: token budgets are optional, but a supplied value is still validated.
+        code, result, _ = self.run_task(self.budgets(max_output_tokens=0))
+        self.assertEqual((code, result['status'], result['code']), (5, 'POLICY_REFUSED', 'TASK_INVALID'))
 
     def test_wall_time_budget(self):
         now = [1_000_000.0]
