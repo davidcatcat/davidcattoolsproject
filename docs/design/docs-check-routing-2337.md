@@ -74,6 +74,18 @@ in `CI_REPAIR_CHECKS` at `tools/llmtool/llmtool/review_repair.py:451` with `CI_F
 `CI_REPAIR_CHECKS` is currently `('check (Linux 3.14)', 'check (macOS 3.13)')`
 (`tools/llmtool/llmtool/review_repair.py:433`).
 
+Furthermore, packet validation cannot accept check names by a `check (...)` shape.
+The required Linux-workflow checks defined in `task_advance.py` include
+`_GATEWAY_CHECK = 'gateway tests (Linux 3.14)'`
+(`tools/llmtool/llmtool/task_advance.py:530`) and `_AI_LOOP_CHECK = 'ai-loop helper tests (Python 3.14)'`
+(`tools/llmtool/llmtool/task_advance.py:529`, in `_LINUX_FLAG_CHECKS` at
+`tools/llmtool/llmtool/task_advance.py:532`). Neither name has a `check (...)` shape.
+If packet validation accepted names by a `check (...)` shape, failures of `_GATEWAY_CHECK`
+or `_AI_LOOP_CHECK` would still be refused by the packet validator at
+`tools/llmtool/llmtool/review_repair.py:450-456` with `CI_FAILURE_INVALID`
+(`tools/llmtool/llmtool/review_repair.py:456`). Packet validation must therefore validate
+against exact required-check names rather than a shape filter.
+
 There are therefore three independent restrictions in the pre-review CI path that exclude
 `check (docs)`:
 1. The routing condition in `task_advance.py` (`tools/llmtool/llmtool/task_advance.py:3383`).
@@ -160,6 +172,10 @@ A complete fix should cover both the pre-review gate and this post-PASS merge ga
    `_read_check_run(d6['result_head'], _LINUX_CHECK, gate_latest.get('id'), get)` to pass
    `gate_latest.get('name')` instead of hard-coded `_LINUX_CHECK`, so `_read_check_run`
    matches `run.get('name') == name` at `tools/llmtool/llmtool/task_advance.py:804`.
+   To account for the packet validator restriction at `tools/llmtool/llmtool/review_repair.py:450-456`,
+   this candidate avoids shape matching entirely and validates strictly against exact check names,
+   because required checks like `_GATEWAY_CHECK` (`tools/llmtool/llmtool/task_advance.py:530`)
+   and `_AI_LOOP_CHECK` (`tools/llmtool/llmtool/task_advance.py:529`) do not share a `check (...)` shape.
    In addition, update the merge path at `tools/llmtool/llmtool/task_advance.py:3312` and
    `tools/llmtool/llmtool/task_advance.py:3606` to inspect failed required checks instead of
    only `_MAC_CHECK`.
@@ -173,9 +189,15 @@ A complete fix should cover both the pre-review gate and this post-PASS merge ga
    To account for the restriction at `tools/llmtool/llmtool/task_advance.py:3386`, pass
    the matched run's actual name `gate_latest.get('name')` to `_read_check_run` instead of
    `_LINUX_CHECK`, avoiding the mismatch refusal at `tools/llmtool/llmtool/task_advance.py:804`.
-   In `review_repair.py`, validate the check name in `_ci_failure`
-   (`tools/llmtool/llmtool/review_repair.py:451`) by shape (for example a `check (...)` name)
-   or against an exported set of required workflow checks instead of a fixed tuple.
+   To account for the packet validator restriction at `tools/llmtool/llmtool/review_repair.py:450-456`,
+   remove any shape option (such as `check (...)`), because `_GATEWAY_CHECK`
+   (`tools/llmtool/llmtool/task_advance.py:530`) and `_AI_LOOP_CHECK`
+   (`tools/llmtool/llmtool/task_advance.py:529`) do not have that shape and would be refused with
+   `CI_FAILURE_INVALID` (`tools/llmtool/llmtool/review_repair.py:456`); instead, specify validation
+   in `_ci_failure` (`tools/llmtool/llmtool/review_repair.py:451`) against the exact required-check
+   names (for example against an exported set of required workflow checks such as
+   `_LINUX_FLAG_CHECKS` at `tools/llmtool/llmtool/task_advance.py:532` or a shared definition
+   instead of a fixed two-element tuple).
    Generalize the merge-gate lookup at `tools/llmtool/llmtool/task_advance.py:3312` to query
    the newest run of whichever required check failed.
    Risks: this changes policy for code PRs too, because gateway and ai-loop check failures
@@ -191,6 +213,10 @@ A complete fix should cover both the pre-review gate and this post-PASS merge ga
    (`tools/llmtool/llmtool/task_advance.py:3391`); if check metadata is logged, it reads
    `gate_latest.get('name')` rather than assuming `_LINUX_CHECK` to prevent lookup failure at
    `tools/llmtool/llmtool/task_advance.py:804`.
+   To account for the packet validator restriction at `tools/llmtool/llmtool/review_repair.py:450-456`,
+   this approach does not route any check to `review_repair.repair_review` or `_ci_failure`, so
+   non-matching check names such as `_GATEWAY_CHECK` (`tools/llmtool/llmtool/task_advance.py:530`) or
+   `_AI_LOOP_CHECK` (`tools/llmtool/llmtool/task_advance.py:529`) never reach packet validation.
    Risks: this does not satisfy the goal of sending the failure to the original Developer,
    it adds a new step name to consumers and tests, and repeated calls could still look
    like a stall unless the state is recorded.
@@ -203,6 +229,11 @@ A complete fix should cover both the pre-review gate and this post-PASS merge ga
 - The check-run lookup at `tools/llmtool/llmtool/task_advance.py:3386` successfully retrieves
   the `check (docs)` run via `_read_check_run` without triggering `CI_CHECK_RUN_UNAVAILABLE`
   (`tools/llmtool/llmtool/task_advance.py:3388-3389`).
+- If Candidate 2 is chosen, packet validation in `_ci_failure` (`tools/llmtool/llmtool/review_repair.py:450-456`)
+  accepts exact names for all required Linux checks, including `_GATEWAY_CHECK`
+  (`tools/llmtool/llmtool/task_advance.py:530`) and `_AI_LOOP_CHECK`
+  (`tools/llmtool/llmtool/task_advance.py:529`), without refusing `CI_FAILURE_INVALID`
+  (`tools/llmtool/llmtool/review_repair.py:456`).
 - Replaying the same failed check run reuses the claim instead of spending a second
   test-failure attempt (`_ci_failure` binds the identity to Task, PR, head, check name
   and run id at `tools/llmtool/llmtool/review_repair.py:481-486`, replayed at
