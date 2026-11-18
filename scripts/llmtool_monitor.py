@@ -348,9 +348,8 @@ def _llmtool_role(command: str) -> str:
     return "llmtool drive" if _llmtool_drive_task(command) else "llmtool CLI"
 
 
-# #2311: `llmtool task <command>` runs that can start a Developer. A delegate or
-# repair starts a new Developer run; drive and advance name the Task they move.
-LLMTOOL_DEVELOPER_RUNS = ("delegate", "repair", "drive", "advance")
+# #2311: `llmtool task <command>` runs that can start a Developer.
+LLMTOOL_DEVELOPER_RUNS = ("delegate", "repair")
 
 
 def _llmtool_run(command: str) -> tuple:
@@ -2148,6 +2147,68 @@ class SubPmLease:
     holder: str
 
 
+SUBPM_LEASE_FILE = os.path.join(os.path.expanduser("~"), ".local/state/llmtool/subpm-leases.json")
+
+
+def _load_subpm_leases(path: str = SUBPM_LEASE_FILE) -> list:
+    """Load persisted HELD sub-PM leases across restarts. Returns [] when absent or invalid."""
+    try:
+        with open(path, "rb") as stream:
+            raw = stream.read(1 << 20)
+    except (OSError, ValueError):
+        return []
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return []
+    if type(data) is not dict or data.get("schema_version") != 1 or type(data.get("leases")) is not list:
+        return []
+    out = []
+    for item in data["leases"]:
+        if type(item) is dict:
+            when = item.get("when")
+            issue = item.get("issue")
+            wp = item.get("wp")
+            holder = item.get("holder")
+            if (isinstance(when, (int, float)) and math.isfinite(when)
+                    and isinstance(issue, str) and isinstance(wp, str)
+                    and isinstance(holder, str) and holder):
+                out.append(SubPmLease(float(when), issue, wp, holder))
+    return out
+
+
+def _save_subpm_leases(leases: list, path: str = SUBPM_LEASE_FILE) -> None:
+    """Atomically save HELD sub-PM leases to disk with private file and directory modes."""
+    try:
+        parent = os.path.dirname(os.path.abspath(path))
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        os.chmod(parent, 0o700)
+        fd, temporary = tempfile.mkstemp(prefix=".subpm-leases-", dir=parent)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                fd = -1
+                record = {
+                    "schema_version": 1,
+                    "leases": [{"when": lease.when, "issue": lease.issue,
+                                "wp": lease.wp, "holder": lease.holder}
+                               for lease in leases if isinstance(lease, SubPmLease)],
+                }
+                json.dump(record, stream, ensure_ascii=False, separators=(",", ":"))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+    except Exception:
+        return
+
+
 def subpm_leases(comments, earlier=()) -> list[SubPmLease]:
     """HELD sub-agent PM leases (pure): the newest record per issue and WP wins.
     earlier: leases still HELD at the previous read. Like owner_pending's
@@ -2271,7 +2332,7 @@ class GitHubSource:
         self._comment_updated: float | None = None
         self.pending: list[OwnerPending] = []
         self.notices: list[OwnerNotice] = []   # #2311: Owner notices, shown apart from asks
-        self.leases: list[SubPmLease] = []     # #2311: HELD sub-agent PM leases
+        self.leases: list[SubPmLease] = _load_subpm_leases()  # #2311: HELD sub-agent PM leases across restarts
         self.scope = ""   # what the ★ list could see, said next to it
         self.branch_prs: dict[str, tuple[int, str]] = {}   # head branch -> (PR, MERGED/CLOSED/OPEN)
         self.verdicts: dict | None = None   # review_verdicts(); None until GitHub was read
@@ -2592,6 +2653,7 @@ class GitHubSource:
                       and _github_time(item.get("created_at")) < since]
             self.notices = owner_notices(unique)
             self.leases = subpm_leases(unique + edited, self.leases)
+            _save_subpm_leases(self.leases)
             self.comments_cut = more
             self.board_pulls = work_pulls
             self.board_page_count = board_page_count
@@ -7516,7 +7578,10 @@ class _WaitingScan:
             return False, 0
         if raw is None:   # refused on the open descriptor: link, special file or too big
             return (key, (), key[2] <= REMOTE_TEST_READ), 0
-        return (key, _task_scan_entries(_remote_test_json(raw) if raw else None), True), len(raw)
+        parsed = _remote_test_json(raw) if raw else None
+        if not raw or parsed is None or type(parsed) is not dict:
+            return (key, kept, False), len(raw or b"")
+        return (key, _task_scan_entries(parsed), True), len(raw)
 
     def step(self, root: str) -> None:
         """Advance the scan by at most WAITING_SCAN work units and at most one
@@ -7981,7 +8046,10 @@ def _task_load(path: str, budget: int):
     if opened is None or opened[1] is False:
         return None
     key, raw = opened
-    return key, _remote_test_json(raw) if raw else None, len(raw or b"")
+    parsed = _remote_test_json(raw) if raw else None
+    if not raw or parsed is None or type(parsed) is not dict:
+        return None
+    return key, parsed, len(raw or b"")
 
 
 def _bounded_task_entries(root: str, cache: dict, budget: int, extract):
@@ -8121,7 +8189,11 @@ def pm_last_dispatch(now: float, root: str | None = None) -> tuple[DispatchRecor
                 break
             key, raw = opened
             budget -= len(raw or b"")
-            entry = _dispatch_entry(_remote_test_json(raw) if raw else None)
+            parsed = _remote_test_json(raw) if raw else None
+            if not raw or parsed is None or type(parsed) is not dict:
+                problem = "本機 Task 紀錄讀取失敗"
+                break
+            entry = _dispatch_entry(parsed)
         kept[path] = (key, entry)
         if (entry is not None and entry.created <= now + REMOTE_TEST_SKEW
                 and (newest is None or entry.created > newest.created)):
@@ -8310,8 +8382,15 @@ def remote_test_latest(root: str | None = None) -> tuple[tuple[float, str] | Non
             if raw is False:
                 short = True   # read the rest on a later rebuild
                 continue
+            if raw is None:
+                short = True
+                continue
             budget -= len(raw or b"")
-            entries = _remote_test_entries(_remote_test_json(raw)) if raw else ()
+            parsed = _remote_test_json(raw) if raw else None
+            if not raw or parsed is None or type(parsed) is not dict:
+                short = True
+                continue
+            entries = _remote_test_entries(parsed)
         kept[path] = (key, entries)
         for entry in entries:
             if best is None or entry[0] > best[0]:
@@ -8929,9 +9008,10 @@ def _route_bound(running: list[RouteTask], delegates) -> set[str]:
     process of a newer Task."""
     bound, free = set(), []
     for item in delegates:
-        hit = next((entry for entry in running if item.task and item.task[:8] == entry.task), None)
-        if hit is not None:
-            bound.add(hit.task)
+        if item.task:
+            hit = next((entry for entry in running if item.task[:8] == entry.task), None)
+            if hit is not None:
+                bound.add(hit.task)
         elif item.command in ("delegate", "repair") and math.isfinite(item.started):
             free.append(item)
     for item in sorted(free, key=lambda item: item.started, reverse=True):
@@ -8940,6 +9020,13 @@ def _route_bound(running: list[RouteTask], delegates) -> set[str]:
         if hit is not None:
             bound.add(hit.task)
     return bound
+
+
+def _row_task_matches(row_task: str, running_tasks: set[str]) -> bool:
+    if not row_task or not running_tasks:
+        return False
+    target = row_task[5:].strip() if row_task.startswith("task ") else row_task.strip()
+    return any(target.startswith(t) or t.startswith(target) for t in running_tasks if t)
 
 
 def _route_task_text(entry: RouteTask) -> str:
@@ -8989,20 +9076,23 @@ def route_rows(office, switches: dict, problem: str, reasons: dict, tasks, board
                          key=lambda entry: entry.when, reverse=True)
         waiting = sorted((entry for entry in mine if not entry.running and not entry.moved),
                          key=lambda entry: entry.when, reverse=True)
+        running_tasks = {entry.task for entry in running}
         bound = _route_bound(running, [item for item in delegates or [] if item.route == name])
-        working = [entry for entry in running if entry.task in bound]
-        unconfirmed = [entry for entry in running if entry.task not in bound]
         live = sorted((row for row in office or [] if row.state == WORKING and row.task
-                       and row.role != "pm" and not _switch_row(row)
-                       and _route_of_row(row) == name),
+                       and row.role not in ("pm", "reviewer", "debug reviewer")
+                       and not _switch_row(row)
+                       and _route_of_row(row) == name
+                       and _row_task_matches(row.task, running_tasks)),
                       key=lambda row: row.age if row.age is not None else 1e12)
+        live_tasks = {entry.task for entry in running
+                      if any(_row_task_matches(row.task, {entry.task}) for row in live)}
+        active = bound | live_tasks
+        working = [entry for entry in running if entry.task in active]
+        unconfirmed = [entry for entry in running if entry.task not in active]
         state, parts, age, issue = "", [], None, ""
         if working:
             state, age, issue = WORKING, now - working[0].when, working[0].issue
             parts.append(_route_task_text(working[0]) + _more(working))
-        elif live:
-            state, age = WORKING, live[0].age
-            parts.append(live[0].task + _more(live))
         elif unconfirmed:
             state, age, issue = UNCHECKED, now - unconfirmed[0].when, unconfirmed[0].issue
             parts.append(f"{_route_task_text(unconfirmed[0])}{_more(unconfirmed)} 記錄派工中，"

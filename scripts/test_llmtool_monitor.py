@@ -35,6 +35,10 @@ _RULE_ALERT_ISOLATED = tempfile.TemporaryDirectory()
 _RULE_ALERT_PATCH = patch.object(
     mon, "RULE_ALERT_FILE",
     os.path.join(_RULE_ALERT_ISOLATED.name, "rule-file-alerts.json"))
+_SUBPM_LEASE_ISOLATED = tempfile.TemporaryDirectory()
+_SUBPM_LEASE_PATCH = patch.object(
+    mon, "SUBPM_LEASE_FILE",
+    os.path.join(_SUBPM_LEASE_ISOLATED.name, "subpm-leases.json"))
 
 
 def setUpModule():
@@ -43,12 +47,15 @@ def setUpModule():
     for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CODEX_STATE", "CLAUDE_PROJECTS", "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS", "GW_AUDIT_ROOT"):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
     _RULE_ALERT_PATCH.start()
+    _SUBPM_LEASE_PATCH.start()
     mon.waiting_scan_reset()   # no WAITING folder scan from before this module
 
 
 def tearDownModule():
     # Monitor.refresh in any test may leave a WAITING folder scan open: close it.
     mon.waiting_scan_reset()
+    _SUBPM_LEASE_PATCH.stop()
+    _SUBPM_LEASE_ISOLATED.cleanup()
     _RULE_ALERT_PATCH.stop()
     _RULE_ALERT_ISOLATED.cleanup()
     _ISOLATED.cleanup()
@@ -11206,11 +11213,17 @@ class RouteRowTests(unittest.TestCase):
             mon.OfficeRow("agy", mon.WORKING, "switch", 5, 60, kind="worker", task="task x"),
         ]
         rows = self.by_name(self.rows(office=office))
-        self.assertEqual(rows["Codex"].state, mon.WORKING)
-        self.assertEqual(rows["Codex"].detail, "PR #5 @abcdef0")
-        self.assertEqual(rows["Codex"].age, 30)
+        # Reviewer rows do not count as developer activity
+        self.assertEqual(rows["Codex"].state, mon.ROUTE_FREE)
         self.assertEqual(rows["Claude"].state, mon.ROUTE_FREE)
         self.assertEqual(rows["AGY"].state, mon.ROUTE_FREE)
+
+        # Activity counts only when bound to the route's own running developer task
+        running_t = self.task("Claude", running=True, task="abcdef12")
+        dev_row = mon.OfficeRow("claude developer", mon.WORKING, "coding", 30, 10,
+                                role="developer", task="task abcdef12")
+        rows_with_dev = self.by_name(self.rows(tasks=[running_t], office=[dev_row]))
+        self.assertEqual(rows_with_dev["Claude"].state, mon.WORKING)
 
     def test_sub_pm_is_named_on_its_route_and_other_leases_get_lanes(self):
         leases = [mon.SubPmLease(NOW - 300, "2311", "WP-1", "claude-subpm-a"),
@@ -11372,6 +11385,16 @@ class RouteTaskRecordTests(unittest.TestCase):
             mon.waiting_scan_reset()
         self.assertEqual([entry.route for entry in entries], ["OpenCode"])
 
+    def test_malformed_or_empty_task_file_is_never_successful_read(self):
+        # Finding F3: malformed or empty Task files must never report as successful read
+        with tempfile.TemporaryDirectory() as tasks:
+            Path(tasks, "empty.json").write_text("", encoding="utf-8")
+            Path(tasks, "bad.json").write_text("{not json", encoding="utf-8")
+            Path(tasks, "good.json").write_text(json.dumps(self.record()), encoding="utf-8")
+            entries, problem = mon.route_tasks(tasks)
+            mon.waiting_scan_reset()
+        self.assertEqual(problem, mon.REMOTE_TEST_OVER_BUDGET)
+
 
 class RouteOfficeViewTests(unittest.TestCase):
     """#2311: beside the routes the office view shows only what needs attention."""
@@ -11529,3 +11552,11 @@ class RouteDelegateTests(unittest.TestCase):
                    (11, 10, 10, "00:30", "Z", "(agy)"),
                    (12, 1, 12, "00:30", "S", "/opt/bin/agy run")]
         self.assertEqual(mon.route_delegates(self.processes(entries), NOW), [])
+
+    def test_mismatched_task_id_never_binds_to_older_task(self):
+        # Finding F1: a delegate run naming a specific mismatched task ID never binds an older task
+        older = RouteRowTests.task("AGY", running=True, when=NOW - 100, task="11111111")
+        newer = RouteRowTests.task("AGY", running=True, when=NOW - 50, task="22222222")
+        mismatched_run = mon.RouteDelegate("AGY", NOW - 40, "delegate", "99999999" * 4)
+        bound = mon._route_bound([newer, older], [mismatched_run])
+        self.assertEqual(bound, set())
