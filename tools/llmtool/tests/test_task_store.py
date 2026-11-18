@@ -1476,6 +1476,54 @@ class TaskStoreTests(unittest.TestCase):
                         task['task_id'], expected={'developer': None},
                         developer=developer)
 
+    def test_goal_and_acceptance_items_over_512_bytes_are_stored(self):
+        # #2281 limit row 8: no own byte cap on the PM goal, a PM acceptance item
+        # or a Developer acceptance item.
+        goal = 'Keep the whole goal in plain prose. ' * 40
+        item = 'The focused regression test passes. ' * 40
+        self.assertGreater(len(goal.encode('utf-8')), 1024)
+        self.assertGreater(len(item.encode('utf-8')), 1024)
+        task = self._codex_dispatch_task()
+        self.assertEqual(task['schema_version'], 2)
+        task['pm_assignment'] = dict(task['pm_assignment'], goal=goal,
+                                     acceptance=[item, 'A short item.'])
+        created = self.store.create(task)
+        self.assertEqual(created['pm_assignment']['goal'], goal)
+        self.assertEqual(created['pm_assignment']['acceptance'], [item, 'A short item.'])
+        developer = dict(self._developer_assignment(), acceptance=[item])
+        saved = self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=developer)
+        self.assertEqual(saved['developer']['acceptance'], [item])
+        self.assertEqual(self.store.get(task['task_id']), saved)
+
+    def test_long_goal_and_items_still_screened_and_bounded(self):
+        # #2281 limit row 8: the sensitive screen still runs on the goal and each
+        # item (screen mocked, per the test data rule); the 64 KiB bound stays.
+        long_goal = 'Keep the whole goal in plain prose. ' * 40
+        flagged = 'Text the mocked screen is told to flag.'
+        cases = (
+            ('goal_screen', {'goal': long_goal + flagged}),
+            ('item_screen', {'acceptance': [long_goal + flagged]}),
+            ('goal_bound', {'goal': 'a' * (64 * 1024 + 1)}),
+            ('item_bound', {'acceptance': ['a' * (64 * 1024 + 1)]}),
+        )
+        for name, change in cases:
+            with self.subTest(case=name):
+                task = self._codex_dispatch_task()
+                task['pm_assignment'] = dict(task['pm_assignment'], **change)
+                with patch.object(task_store_module, '_emitted_sensitive',
+                                  side_effect=lambda text: (isinstance(text, str) and
+                                                            flagged in text)), \
+                        self.assertRaises(LLMToolError):
+                    self.store.create(task)
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        developer = dict(self._developer_assignment(),
+                         acceptance=['a' * (64 * 1024 + 1)])
+        with self.assertRaises(LLMToolError):
+            self.store.compare_and_update(
+                task['task_id'], expected={'developer': None}, developer=developer)
+
     def test_developer_timeout_seconds_is_optional_and_bounded(self):
         # #1815: legacy records without the field stay valid.
         task = self._codex_dispatch_task()

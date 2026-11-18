@@ -2664,11 +2664,11 @@ def _validate(record, *, strict=True):
                     assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'claude', 'none') or
                     assignment['risk'] not in ('LOW', 'OTHER') or
                     type(assignment['goal']) is not str or not assignment['goal'] or
-                    len(assignment['goal'].encode('utf-8')) > 512 or
+                    len(assignment['goal'].encode('utf-8')) > 64 * 1024 or
                     _emitted_sensitive(assignment['goal']) or
                     type(assignment['acceptance']) is not list or
                     not 1 <= len(assignment['acceptance']) <= 16 or
-                    any(type(item) is not str or not item or len(item.encode('utf-8')) > 512 or
+                    any(type(item) is not str or not item or len(item.encode('utf-8')) > 64 * 1024 or
                         _emitted_sensitive(item) for item in assignment['acceptance'])):
                 _fail()
         if 'pm_provenance' in record:
@@ -3074,7 +3074,7 @@ def _validate(record, *, strict=True):
                 _fail()
             acceptance = developer['acceptance']
             if (type(acceptance) is not list or not 1 <= len(acceptance) <= 16 or
-                    any(type(item) is not str or not item or len(item.encode('utf-8')) > 512
+                    any(type(item) is not str or not item or len(item.encode('utf-8')) > 64 * 1024
                         for item in acceptance)):
                 _fail()
             artifact = developer['artifact']
