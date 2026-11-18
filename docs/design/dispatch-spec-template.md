@@ -43,13 +43,13 @@ Five distinct dispatch kinds cover all AI roles in the team:
 | `run_id` | Unique execution run UUID | **Tool** (Runner) | All |
 | `base` | Source/merge-base 40-character commit SHA (verified against canonical `origin/main` for fresh developer, investigation, sub-PM; verified ancestor merge-base on `origin/main` for developer repair; PR base commit for reviewer/debug) | **Tool** (Git / TaskStore) | All |
 | `result_head` | Target/examined 40-character commit SHA (unmerged result HEAD for reviewer; examined target HEAD for debug; unmerged failed HEAD for developer repair; synced base HEAD for fresh developer, investigation, sub-PM) | **Tool** (Git / PR reader / TaskStore) | All |
-| `review_range` | Git revision range string (`base..result_head` or delta since last reviewed HEAD) | **Tool** (Git / PR review dispatcher) | `reviewer` |
+| `review_range` | Git revision range string (`base...result_head`, matching the dispatcher's three-dot PR diff scope) | **Tool** (Git / PR review dispatcher) | `reviewer` |
 | `read_paths` | Allowlist of readable repository paths | **Tool** (computed from acceptance, tests, and context) | All |
 | `write_paths` | Allowlist of writable repository paths | **Tool** (strictly empty for read-only roles; validated for developer/sub-PM) | All |
 | `predecessor_spec` | Prior task ID and contract digest in this lineage | **Tool** (lineage tracker, required on repair/rereview/debug) | All |
 | `continued_lineage` | Ordered list of ancestor task/run IDs | **Tool** (lineage tracker) | All |
 | `carried_counts` | Mapping of carried repairs, test failures, and attempts | **Tool** (audit counter) | All |
-| `author` | Originating PM actor, assigned worker, evaluated dispatch authorization route (e.g. `ALLOWED` or `OWNER_ASSIGNMENT_ONLY`), and validated Owner assignment reference (`owner_ref`) when required | **Tool** (session / dispatch gate) | All |
+| `author` | Originating PM actor, assigned worker, evaluated dispatch authorization route (e.g. `ALLOWED`, `OWNER_ASSIGNMENT_ONLY`, or `TEMPLATE_ONLY` when unlisted/non-dispatchable), and validated Owner assignment reference (`owner_ref`) when required | **Tool** (session / dispatch gate) | All |
 | `check_results` | Preflight check receipt and validation status | **Tool** (preflight validator) | All |
 | `role_card_digest` | SHA-256 digest of main-pinned role card | **Tool** (harness controller) | All |
 | `contract_digest` | SHA-256 digest of bounded task contract | **Tool** (contract generator) | All |
@@ -176,6 +176,7 @@ Five distinct dispatch kinds cover all AI roles in the team:
 - **Read Scope**: Target inspection directories and reference documents.
 - **Base / Head**: `base` and `result_head` both match the canonical `origin/main` commit SHA.
 - **Goal / Acceptance**: Read-only exploratory findings, architectural options, or feasibility analysis.
+- **Worker Dispatch Authority**: Dispatch requires resolving a recognized worker in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) (such as an authorized developer route operating in read-only mode with empty `write_paths`) with an affirmative dispatch evaluation (`ALLOWED` or `OWNER_ASSIGNMENT_ONLY` with a matching `owner_ref`). The role key `claude-subpm` is not an entry in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json); template specifications naming unlisted workers or unsupported routes are classified as `TEMPLATE_ONLY` and non-dispatchable. Prior to policy addition and adapter support, preflight checks evaluate unlisted workers as `WORKER_UNKNOWN` and refuse dispatch with `SPEC_DISPATCH_UNAUTHORIZED`. Tools must not invent affirmative authorization or claim preflight approval for unlisted workers.
 
 ```json
 {
@@ -187,7 +188,7 @@ Five distinct dispatch kinds cover all AI roles in the team:
   "author": {
     "role": "pm",
     "worker": "claude-subpm",
-    "route": "ALLOWED",
+    "route": "TEMPLATE_ONLY",
     "owner_ref": null
   },
   "problem": "Evaluate feasibility of caching git status queries during test execution.",
@@ -209,8 +210,8 @@ Five distinct dispatch kinds cover all AI roles in the team:
     "attempts": 1
   },
   "check_results": {
-    "preflight_status": "SPEC_PREFLIGHT_OK",
-    "d6_worktree_registered": true,
+    "preflight_status": "SPEC_DISPATCH_UNAUTHORIZED",
+    "d6_worktree_registered": false,
     "source_synced": true
   },
   "role_card_digest": "89f30b...",
@@ -274,7 +275,7 @@ Five distinct dispatch kinds cover all AI roles in the team:
 ### 4. Reviewer Spec (`kind: "reviewer"`)
 - **Write Scope**: Strictly empty `[]`.
 - **Read Scope**: Task contract, full diff, test files, CI logs, and runtime evidence.
-- **Revisions & Review Range**: A Reviewer D6 is provisioned at the unmerged result HEAD of the PR, not `origin/main`, as enforced by [review_dispatch.py](../../tools/llmtool/llmtool/review_dispatch.py). The spec defines `base` (PR base commit on main), `result_head` (unmerged result commit to be reviewed), and `review_range` (the explicit commit range `base..result_head` or delta since last reviewed HEAD).
+- **Revisions & Review Range**: A Reviewer D6 is provisioned at the unmerged result HEAD of the PR, not `origin/main`, as enforced by [review_dispatch.py](../../tools/llmtool/llmtool/review_dispatch.py). The spec defines `base` (PR base commit on main), `result_head` (unmerged result commit to be reviewed), and `review_range` (the explicit three-dot commit range `base...result_head`). The prompt builder in `task_submission_cli.py` emits `Scope: git diff base...expected_head`, using the three-dot diff against the PR merge base so that advancing main commits after branch creation do not pollute the review scope. The current dispatcher emits this full three-dot PR scope for all versions; any incremental re-review delta comparison remains a separate, non-automatic capability that must be explicitly scoped rather than assumed as default prompt behavior.
 - **Model Pairing**: Verified cross-family route (Codex Reviewer for Claude work, Claude Reviewer for AGY/OpenCode/gw-agent work) per [formal-verdict.md](../../.claude/skills/ai-team-delivery/formal-verdict.md).
 
 ```json
@@ -284,7 +285,7 @@ Five distinct dispatch kinds cover all AI roles in the team:
   "run_id": "59218ab28e4444589d71fa99018442a0",
   "base": "611d4cb31d35c1a1becf7b197d1ee08e86968268",
   "result_head": "57db49f8408ce9ea87df8c9ca31c1d971fa43052",
-  "review_range": "611d4cb31d35c1a1becf7b197d1ee08e86968268..57db49f8408ce9ea87df8c9ca31c1d971fa43052",
+  "review_range": "611d4cb31d35c1a1becf7b197d1ee08e86968268...57db49f8408ce9ea87df8c9ca31c1d971fa43052",
   "author": {
     "role": "pm",
     "worker": "codex-reviewer",
@@ -329,7 +330,7 @@ Five distinct dispatch kinds cover all AI roles in the team:
 - **Write Scope**: Bounded work package directory and file paths granted under the `subpm-lease`.
 - **Read Scope**: Full work package context, architecture notes, and task lists.
 - **Base / Head**: `base` and `result_head` both match the canonical `origin/main` commit SHA.
-- **Constraints**: Lease registration verified in issue comments before dispatch per [pm-continuation.md](../../.claude/skills/ai-team-delivery/pm-continuation.md).
+- **Constraints & Worker Dispatch Authority**: Sub-agent PM execution (PM Mode B) requires verified lease registration in issue comments before dispatch per [pm-continuation.md](../../.claude/skills/ai-team-delivery/pm-continuation.md). Dispatch requires resolving a recognized worker in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) with a supported, kind-compatible execution harness. Because [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) currently contains no `claude-subpm` entry, an unlisted worker key cannot be affirmatively authorized (`ALLOWED`). The template specification for unlisted sub-PM workers is non-dispatchable (`route: "TEMPLATE_ONLY"`), and preflight checks evaluate it as `WORKER_UNKNOWN` with refusal code `SPEC_DISPATCH_UNAUTHORIZED`. Tooling must refuse dispatch rather than fabricating an authorized status.
 
 ```json
 {
@@ -341,7 +342,7 @@ Five distinct dispatch kinds cover all AI roles in the team:
   "author": {
     "role": "pm",
     "worker": "claude-subpm",
-    "route": "ALLOWED",
+    "route": "TEMPLATE_ONLY",
     "owner_ref": null
   },
   "problem": "Coordinate work package WP-H: sub-agent PM role card delivery.",
@@ -365,8 +366,8 @@ Five distinct dispatch kinds cover all AI roles in the team:
     "attempts": 1
   },
   "check_results": {
-    "preflight_status": "SPEC_PREFLIGHT_OK",
-    "d6_worktree_registered": true,
+    "preflight_status": "SPEC_DISPATCH_UNAUTHORIZED",
+    "d6_worktree_registered": false,
     "lease_registered": true,
     "source_synced": true
   },
@@ -384,7 +385,7 @@ Tools must automatically validate every candidate dispatch specification prior t
 ### 3.1 Refusal Enforcement Rules
 
 - **Standard Specification Refusals**: If any check fails (e.g. malformed syntax, schema mismatch, byte limit exceeded, missing paths, stale base commit, invalid links, or unauthorized worker dispatch), the tool aborts dispatch, writes no files to the worktree, emits a deterministic refusal code, and returns the specification to the PM for rewriting.
-- **Worker Authorization Refusals (`SPEC_DISPATCH_UNAUTHORIZED`)**: Dispatch requires an affirmative decision from the authoritative dispatch gate ([CLAUDE.md](../../CLAUDE.md)). A worker with policy state `PAUSED` is refused unconditionally. A worker with policy state `OWNER_ASSIGNMENT_ONLY` is authorized only when carrying a valid matching Owner assignment reference (`owner_ref`), while `ALLOWED` proceeds through regular gates. Refusal occurs whenever the authoritative gate does not return an authorized decision.
+- **Worker Authorization Refusals (`SPEC_DISPATCH_UNAUTHORIZED`)**: Dispatch requires an affirmative decision from the authoritative dispatch gate ([CLAUDE.md](../../CLAUDE.md)). A worker with policy state `PAUSED` is refused unconditionally. A worker with policy state `OWNER_ASSIGNMENT_ONLY` is authorized only when carrying a valid matching Owner assignment reference (`owner_ref`), while `ALLOWED` proceeds through regular gates. Refusal occurs whenever the authoritative gate does not return an authorized decision, including when a requested worker is missing or unrecognized in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) (such as `claude-subpm`, which evaluates to `WORKER_UNKNOWN`), or when a template specifies a non-dispatchable `TEMPLATE_ONLY` route.
 - **Sensitive Content Refusals (`SPEC_SENSITIVE_CONTENT`)**: Per Common Core Rule 5 and [pm-continuation.md](../../.claude/skills/ai-team-delivery/pm-continuation.md), a sensitive detector refusal stops execution immediately as `BLOCKED`. It reports metadata only (rule, field, Task ID, refusal type `SPEC_SENSITIVE_CONTENT`). Tooling and agents must never suggest how to rewrite, reword, or reshape content to pass the screen, and the spec must not be returned to the generic rewrite path.
 - **Post-Dispatch Auditing**: If a specification is dispatched without passing this gate and the Developer later halts due to a specification defect (such as an unlisted write path or stale base), the failure is audited and recorded as a **PM specification error (`PM_SPEC_ERROR`)**.
 
@@ -402,7 +403,7 @@ Tools must automatically validate every candidate dispatch specification prior t
 | `SPEC_SENSITIVE_CONTENT` | Security | Any text field contains credential-shaped strings or fails the sensitive detector screen ([pm-continuation.md](../../.claude/skills/ai-team-delivery/pm-continuation.md)). Halts immediately as `BLOCKED` with metadata only; no rewriting permitted. |
 | `SPEC_BASE_STALE` | Git / State | For fresh `developer`, `investigation`, and `sub_pm` tasks, spec `base` does not match the canonical `origin/main` commit ([pm-continuation.md](../../.claude/skills/ai-team-delivery/pm-continuation.md)). For `developer` repair tasks, spec `base` does not match the lineage ancestor merge-base on `origin/main` or the executor D6 cannot be resumed at the predecessor's verified failed HEAD (`snapshot.head`). |
 | `SPEC_REVIEW_HEAD_INVALID` | Git / State | For `reviewer` and `debug`, `result_head` is missing or does not match the registered result/examined HEAD in the task/PR ([review_dispatch.py](../../tools/llmtool/llmtool/review_dispatch.py), [formal-verdict.md](../../.claude/skills/ai-team-delivery/formal-verdict.md)). |
-| `SPEC_REVIEW_RANGE_INVALID` | Git / State | For `reviewer`, `review_range` is missing, malformed, or does not resolve to `base..result_head` (or delta since previous reviewed HEAD) ([review_dispatch.py](../../tools/llmtool/llmtool/review_dispatch.py), [reviewer.md](../../.claude/skills/role-cards/reviewer.md)). |
+| `SPEC_REVIEW_RANGE_INVALID` | Git / State | For `reviewer`, `review_range` is missing, malformed, or does not resolve to the dispatcher's three-dot scope `base...result_head` ([review_dispatch.py](../../tools/llmtool/llmtool/review_dispatch.py), [reviewer.md](../../.claude/skills/role-cards/reviewer.md)). |
 | `SPEC_SCOPE_READ_MISSING_ACCEPTANCE` | Scope | A repository path cited in `acceptance` is missing from `read_paths` ([spec_preflight.py](../../tools/llmtool/scripts/spec_preflight.py)). |
 | `SPEC_SCOPE_FILE_NOT_FOUND` | Scope | A path listed in `read_paths` that is not also present in `write_paths` does not exist in the repository ([spec_preflight.py](../../tools/llmtool/scripts/spec_preflight.py)). |
 | `SPEC_SCOPE_TEST_MODULE_MISSING` | Scope | Code modification under `tools/` or `scripts/` lacks an admitted test module in `read_paths` ([spec_preflight.py](../../tools/llmtool/scripts/spec_preflight.py)). |
@@ -410,7 +411,7 @@ Tools must automatically validate every candidate dispatch specification prior t
 | `SPEC_READONLY_ROLE_HAS_WRITES` | Scope | `investigation`, `debug`, or `reviewer` has a non-empty `write_paths` array ([debug.md](../../.claude/skills/role-cards/debug.md), [reviewer.md](../../.claude/skills/role-cards/reviewer.md)). |
 | `SPEC_PREDECESSOR_MISSING` | Lineage | Repair, re-review, or AI Debug dispatch lacks `predecessor_spec` or unbroken lineage tracking ([WORKFLOW.md](../../tools/llmtool/WORKFLOW.md), [high-debug-report.md](../../.claude/skills/ai-team-delivery/high-debug-report.md)). |
 | `SPEC_INVALID_LINK_SYNTAX` | Docs / Quality | Markdown links in spec criteria contain line anchors (`#L...`) instead of pure relative file paths ([CLAUDE.md](../../CLAUDE.md)). |
-| `SPEC_DISPATCH_UNAUTHORIZED` | Authority | Target worker is refused by the authoritative dispatch gate (`worker_dispatch.py::evaluate`): worker policy is `PAUSED`, entry is missing or unrecognized, or policy is `OWNER_ASSIGNMENT_ONLY` without a valid matching Owner assignment reference (`owner_ref`) ([CLAUDE.md](../../CLAUDE.md)). |
+| `SPEC_DISPATCH_UNAUTHORIZED` | Authority | Target worker is refused by the authoritative dispatch gate (`worker_dispatch.py::evaluate`): worker policy is `PAUSED`, entry is missing or unrecognized in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) (such as `claude-subpm`), route is `TEMPLATE_ONLY`, or policy is `OWNER_ASSIGNMENT_ONLY` without a valid matching Owner assignment reference (`owner_ref`) ([CLAUDE.md](../../CLAUDE.md)). |
 | `SPEC_D6_CONFLICT` | D6 Lifecycle | Assigned D6 worktree is already bound to another active writer ([developer.md](../../.claude/skills/role-cards/developer.md)). |
 
 ---
@@ -423,6 +424,7 @@ Every field and pre-dispatch check in this design directly derives from establis
 - **Reviewer dispatch tool**: [review_dispatch.py](../../tools/llmtool/llmtool/review_dispatch.py) enforces preflight checks on reviewer D6 worktrees, unmerged result HEAD validation, and role pairing.
 - **Workflow & Delivery gates**: [WORKFLOW.md](../../tools/llmtool/WORKFLOW.md) governs the progression of tasks through remote testing, PR creation, Linux CI, and review.
 - **Repository Authority**: [CLAUDE.md](../../CLAUDE.md) establishes worker dispatch rules, cross-family review requirements, documentation check rules, and single-writer constraints.
+- **Worker Dispatch Policy**: [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) is the sole source of Owner dispatch authority; entries not recognized by the dispatch gate are refused as unauthorized.
 - **PM Role Card**: [pm.md](../../.claude/skills/role-cards/pm.md) details dispatch hygiene, review handoff, and lease rules.
 - **Developer Role Card**: [developer.md](../../.claude/skills/role-cards/developer.md) restricts execution strictly to assigned D6 and bounded `write_paths`.
 - **Reviewer Role Card**: [reviewer.md](../../.claude/skills/role-cards/reviewer.md) defines read-only context and mandatory formal review verdict formatting.
