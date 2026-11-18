@@ -3,7 +3,8 @@
 Owner #2302 P2: an owner override is optional and never required. A route
 accepts any model of its own provider family without one (see
 role_config.check_role_model); the override is read only for a model the
-route check refuses.
+route's membership gate refuses (gw-agent). It never bypasses a route's
+format/family check (Repair 2).
 
 This check is an accident guard, not a security boundary: it catches a
 malformed, stale or mismatched owner override before it is used, but it

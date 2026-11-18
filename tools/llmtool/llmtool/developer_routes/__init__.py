@@ -23,8 +23,8 @@ from .write_boundary import (
 __all__ = [
     'DeveloperRoute', 'RouteError', 'RouteResult', 'capture_snapshot', 'run_route',
     'AgyRoute', 'ClaudeRoute', 'GwAgentRoute', 'owner_assignment_gate', 'load_route_config',
-    'check_route_model', 'check_registry_role_model', 'REGISTRY_ROLES',
-    'registry_default_model',
+    'check_route_model', 'check_route_model_family', 'check_registry_role_model',
+    'REGISTRY_ROLES', 'registry_default_model',
     'resolve_route_timeout', 'resolve_route_max_diff_bytes', 'resolve_route_max_prompt_bytes',
     'resolve_route_max_task_paths', 'resolve_route_max_source_file_bytes',
     'resolve_route_max_source_total_bytes', 'max_prompt_bytes_ok',
@@ -324,6 +324,21 @@ def check_route_model(config, route, model):
     allowed = entry.get('allowed_models')
     if (type(allowed) is not list or
             not any(type(item) is str and item == model for item in allowed)):
+        raise RouteError('ROLE_MODEL_NOT_ALLOWED')
+    return model
+
+
+def check_route_model_family(route, model):
+    """Return model when a route's own format/family check admits it.
+
+    Owner #2302 P2 Repair 2: agy, claude and opencode have a mandatory
+    format/family check that no owner override may bypass. A model this function
+    refuses is refused on every path, before any override is read. gw-agent has
+    no family check, so any model passes here unchanged and keeps its
+    allowed_models membership gate (which an override may relax).
+    """
+    model_ok = _ROUTE_MODEL_CHECKS.get(route)
+    if model_ok is not None and not model_ok(model):
         raise RouteError('ROLE_MODEL_NOT_ALLOWED')
     return model
 

@@ -295,13 +295,18 @@ def check_role_model(route, route_config, model, *, owner_override=None,
     format is accepted with no owner_override (the override is optional, never
     required, and is not read). allowed_models is not consulted for agy,
     claude or opencode; gw-agent keeps its allowed_models gate (see
-    developer_routes.check_route_model). A model the route check refuses is
-    refused with ROLE_MODEL_NOT_ALLOWED unless owner_override ({"model",
-    "ref"}) names the same model and owner_override.py verifies that its ref
-    names this route and model. fetch_comment(comment_id) is the injected
-    GitHub reader; without it the ref is unreadable and the override is refused.
+    developer_routes.check_route_model). A model the route check refuses for a
+    wrong family or malformed identifier is refused with
+    ROLE_MODEL_NOT_ALLOWED on every path, before any override is read
+    (Repair 2). Otherwise, owner_override ({"model", "ref"}) may relax only the
+    gw-agent membership gate when it names the same model and owner_override.py
+    verifies that its ref names this route and model. fetch_comment(comment_id)
+    is the injected GitHub reader; without it the ref is unreadable and the
+    override is refused.
     """
-    from .developer_routes import RouteError, check_route_model
+    from .developer_routes import (
+        RouteError, check_route_model, check_route_model_family,
+    )
     from .owner_override import OwnerOverrideError, validate_owner_override
 
     try:
@@ -309,6 +314,12 @@ def check_role_model(route, route_config, model, *, owner_override=None,
         return None
     except RouteError:
         pass
+    # Owner #2302 P2 Repair 2: an override never bypasses the route's own
+    # format/family check. Only a membership refusal (gw-agent) may be relaxed.
+    try:
+        check_route_model_family(route, model)
+    except RouteError:
+        _fail_model()
     if owner_override is None:
         _fail_model()
     try:
