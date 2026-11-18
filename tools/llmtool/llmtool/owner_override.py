@@ -1,13 +1,19 @@
 """#1502 WP-E owner model override validation.
 
+Owner #2302 P2: an owner override is optional and never required. A route
+accepts any model of its own provider family without one (see
+role_config.check_role_model); the override is read only for a model the
+route's membership gate refuses (gw-agent). It never bypasses a route's
+format/family check (Repair 2).
+
 This check is an accident guard, not a security boundary: it catches a
 malformed, stale or mismatched owner override before it is used, but it
 cannot prove who authored a comment. The repository argument is supplied by
 the caller and is never hard-coded here.
 
-The module uses only the standard library and ``llmtool.errors``. It never
-writes files, opens a network connection, runs a process or reads the
-environment.
+The module uses the standard library, ``llmtool.errors`` and, at call time,
+the shared developer-routes family/format check. It never writes files, opens a
+network connection, runs a process or reads the environment.
 """
 
 import re
@@ -51,6 +57,14 @@ def validate_owner_override(override, route, *, repository, fetch_comment):
         _fail('OWNER_OVERRIDE_INVALID')
     if type(route) is not str or _ROUTE.fullmatch(route) is None:
         _fail('OWNER_OVERRIDE_INVALID')
+    # Owner #2302 P2 Repair 2: an override never bypasses the route's own
+    # format/family check. Refuse here too so every caller is protected before
+    # the ref is read.
+    from .developer_routes import RouteError, check_route_model_family
+    try:
+        check_route_model_family(route, model)
+    except RouteError:
+        _fail('ROLE_MODEL_NOT_ALLOWED')
 
     ref = override['ref']
     ref_match = None
