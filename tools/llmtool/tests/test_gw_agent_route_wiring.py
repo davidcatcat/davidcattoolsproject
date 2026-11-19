@@ -1317,6 +1317,50 @@ class GwAgentProfileTimeoutTests(unittest.TestCase):
         del expected['timeout_seconds']
         self.assertEqual(without_timeout, expected)
 
+    def _gateway_parse(self, profile):
+        """Parse a serialized profile with the real gateway contract parser."""
+        gateway_path = str(Path(__file__).resolve().parents[2] / 'api-agent-gateway')
+        sys.path.insert(0, gateway_path)
+        try:
+            from api_agent_gateway.contract import parse_profile
+            return parse_profile({'schema_version': 1, 'profiles': {'llmtool-direct': profile}},
+                                 'llmtool-direct')
+        finally:
+            sys.path.remove(gateway_path)
+
+    def _gateway_refusal(self):
+        gateway_path = str(Path(__file__).resolve().parents[2] / 'api-agent-gateway')
+        sys.path.insert(0, gateway_path)
+        try:
+            from api_agent_gateway.contract import POLICY_REFUSED, Refusal
+            return Refusal, POLICY_REFUSED
+        finally:
+            sys.path.remove(gateway_path)
+
+    def test_gateway_accepts_serialized_profile_at_owner_bounds(self):
+        # #2281 (Owner 2026-11-19): the gateway accepts the route profile it is
+        # given: the 3 h default (10800 s) and the 5 h maximum (18000 s).
+        shipped = self._serialized_profile(self._shipped_profile())
+        self.assertEqual(self._gateway_parse(shipped).timeout_seconds, 10800)
+        route = load_route_config()['routes']['gw-agent']
+        for timeout in (1, route['default_timeout'], route['max_timeout'], 18000):
+            with self.subTest(timeout=timeout):
+                profile = self._shipped_profile()
+                profile['timeout_seconds'] = timeout
+                parsed = self._gateway_parse(self._serialized_profile(profile))
+                self.assertEqual(parsed.timeout_seconds, timeout)
+
+    def test_gateway_refuses_profile_timeout_above_five_hours(self):
+        refusal, policy_refused = self._gateway_refusal()
+        for timeout in (18001, 86400, 0, True, 10800.0):
+            with self.subTest(timeout=timeout):
+                profile = self._serialized_profile(self._shipped_profile())
+                profile['timeout_seconds'] = timeout
+                with self.assertRaises(refusal) as raised:
+                    self._gateway_parse(profile)
+                self.assertEqual(raised.exception.status, policy_refused)
+                self.assertEqual(raised.exception.code, 'PROFILE_INVALID')
+
 
 class GwAgentShippedServedModelTests(unittest.TestCase):
     """#1502 WP-E: the shipped route accepts today's served model 'gw' only.

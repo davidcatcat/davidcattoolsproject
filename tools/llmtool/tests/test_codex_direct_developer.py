@@ -135,9 +135,12 @@ class CodexDirectDeveloperTests(unittest.TestCase):
                 reasoning_effort='high', dispatch_store=object(), dispatch_task_id='a' * 32,
                 prelaunch_validate=lambda: True)
 
-    def test_default_timeout_uses_600_seconds(self):
+    def test_default_timeout_uses_10800_seconds(self):
+        # #2281 (Owner 2026-11-19): Codex direct defaults to 3 hours (10800 s).
+        from llmtool.config import CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS
+        self.assertEqual(CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS, 10800)
         with patch('llmtool.codex_direct_developer.codex_direct_timeout',
-                   return_value=600) as config_loader, \
+                   return_value=CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS) as config_loader, \
                 patch('llmtool.codex_direct_developer.worker_dispatch.authorize_dispatch'):
             result = direct.run(root=self.root, prompt='bounded prompt', model='gpt-6-luna',
                 reasoning_effort='high', dispatch_store=object(), dispatch_task_id='a' * 32,

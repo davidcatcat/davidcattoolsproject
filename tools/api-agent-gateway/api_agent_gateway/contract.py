@@ -42,6 +42,10 @@ TASK_KEYS = frozenset((
 ))
 SCOPE_KEYS = ('read_paths', 'write_paths', 'egress_basis', 'data_class', 'budgets')
 MAX_SESSION_EXPIRY_HOURS = 72
+# #2281 (Owner 2026-11-19): an AI run may last up to 5 hours. The llmtool
+# gw-agent route serializes its profile timeout (default 10800 s) into the
+# gateway profile, so the profile accepts the same 18000 s hard cap.
+MAX_PROFILE_TIMEOUT_SECONDS = 18000
 MAX_JSON_FILE = 1024 * 1024
 _TASK_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
 _SHA = re.compile(r'[0-9a-f]{40}|[0-9a-f]{64}')
@@ -267,7 +271,7 @@ def parse_profile(profiles: Any, name: str) -> Profile:
         if type(expiry) is not int or not 1 <= expiry <= MAX_SESSION_EXPIRY_HOURS:
             raise bad('PROFILE_EXPIRY_INVALID')
         timeout = p.get('timeout_seconds', 120)
-        if type(timeout) is not int or not 1 <= timeout <= 3600:
+        if type(timeout) is not int or not 1 <= timeout <= MAX_PROFILE_TIMEOUT_SECONDS:
             raise ValueError
         tool_choice = p.get('tool_choice', 'auto')
         if tool_choice not in ('auto', 'required'):
