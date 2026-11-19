@@ -2028,7 +2028,7 @@ class TaskAdvancePublishTests(unittest.TestCase):
             return subprocess.CompletedProcess(['gh', *args], 0, b'', b'')
         raise AssertionError('unexpected fake gh command')
 
-    def publish(self, *, write_paths=None):
+    def publish(self, *, write_paths=None, git_runner=None):
         record = {'task_id': self.TASK_ID,
                   'developer': {'write_paths': self.WRITE_PATHS if write_paths is None else write_paths}}
         d6_binding = {'root': self.root, 'common_dir': os.path.join(self.tmp.name, 'canonical', '.git'),
@@ -2036,8 +2036,24 @@ class TaskAdvancePublishTests(unittest.TestCase):
                       'recorded_result_head': self.initial_head}
         return task_advance._publish_task(record, d6_binding, self.EXECUTOR_TASK,
             pre_pr_gate=lambda _head, _branch: None,
-            git_runner=self.git_runner, gh_runner=self.gh,
+            git_runner=self.git_runner if git_runner is None else git_runner, gh_runner=self.gh,
             record_result_call=self.record_result)
+
+    def recording_git_runner(self):
+        calls = []
+
+        def runner(root, args):
+            calls.append(list(args))
+            return self.git_runner(root, args)
+        return runner, calls
+
+    def assert_no_main_sync(self, git_calls):
+        """#2367 (M1): PUBLISH never fetches or merges main into the head."""
+        self.assertFalse(any(args[:1] in (['fetch'], ['merge']) or 'origin/main' in args
+                             for args in git_calls), git_calls)
+
+    def parents(self):
+        return self.git(['rev-list', '--parents', '-n', '1', 'HEAD'], cwd=self.root).split()
 
     def head(self):
         return self.git(['rev-parse', 'HEAD'], cwd=self.root).strip()
@@ -2549,34 +2565,86 @@ class TaskAdvancePublishTests(unittest.TestCase):
         self.git(['push', 'origin', 'HEAD:refs/heads/main'], cwd=peer)
         return self.git(['rev-parse', 'HEAD'], cwd=peer).strip()
 
-    def test_real_moved_main_is_merged_and_the_merge_is_pushed(self):
-        main_head = self.move_main('main-file.txt', 'main\n')
+    def test_real_moved_main_is_not_merged_and_the_head_is_pushed_as_is(self):
+        self.move_main('main-file.txt', 'main\n')
         self.change_file()
+        runner, calls = self.recording_git_runner()
 
-        result = self.publish()
+        result = self.publish(git_runner=runner)
 
         head = self.head()
+        self.assert_no_main_sync(calls)
         self.assertEqual(result, {'pr': 23, 'head': head})
+        self.assertEqual(self.parents(), [head, self.initial_head])
         self.assertEqual(self.pushed_head(), head)
-        self.assertEqual(self.git(['rev-parse', 'HEAD^2'], cwd=self.root).strip(), main_head)
-        self.assertEqual(self.git(['show', 'HEAD^1:allowed.txt'], cwd=self.root), 'published\n')
-        self.assertEqual(self.git(['show', 'HEAD:main-file.txt'], cwd=self.root), 'main\n')
+        self.assertNotEqual(self.git_runner(
+            self.root, ['cat-file', '-e', 'HEAD:main-file.txt']).returncode, 0)
         self.assertEqual(len(self.recorded), 1)
 
-    def test_real_merge_conflict_aborts_and_pushes_nothing(self):
+    def test_behind_main_with_conflicting_file_records_pushes_and_opens_pr(self):
+        """#2367/#2376 shape: main changed the same file; publish no longer merges or aborts."""
         self.move_main('allowed.txt', 'main\n')
         self.change_file()
+        runner, calls = self.recording_git_runner()
 
-        with self.assertRaises(task_advance._PublishRefusal) as caught:
-            self.publish()
+        result = self.publish(git_runner=runner)
 
-        self.assertEqual(caught.exception.code, 'PUBLISH_MERGE_CONFLICT')
+        head = self.head()
+        self.assert_no_main_sync(calls)
+        self.assertEqual(result, {'pr': 23, 'head': head})
+        self.assertEqual(self.parents(), [head, self.initial_head])
+        self.assertEqual(self.git(['show', 'HEAD:allowed.txt'], cwd=self.root), 'published\n')
         self.assertNotEqual(self.git_runner(
             self.root, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']).returncode, 0)
         self.assertEqual(self.git(['status', '--porcelain'], cwd=self.root), '')
-        self.assertEqual(self.pushed_head(), self.initial_head)
-        self.assertEqual(self.recorded, [])
-        self.assertEqual(self.gh_calls, [])
+        self.assertEqual(self.pushed_head(), head)
+        self.assertEqual([item['task_id'] for item in self.recorded], [self.EXECUTOR_TASK])
+        self.assertTrue(any(args[:2] == ['pr', 'create'] for args in self.gh_calls))
+
+    def test_behind_main_with_conflicting_file_updates_open_pr(self):
+        self.pr_exists = True
+        self.move_main('allowed.txt', 'main\n')
+        self.change_file()
+        runner, calls = self.recording_git_runner()
+
+        result = self.publish(git_runner=runner)
+
+        head = self.head()
+        self.assert_no_main_sync(calls)
+        self.assertEqual(result, {'pr': 23, 'head': head})
+        self.assertEqual(self.pushed_head(), head)
+        self.assertEqual(len(self.recorded), 1)
+        self.assertFalse(any(args[:2] == ['pr', 'create'] for args in self.gh_calls))
+
+    def test_rerun_records_committed_but_unrecorded_head_behind_main(self):
+        """#2376: an earlier publish committed the result, then stopped before recording it."""
+        self.change_file()
+        self.git(['commit', '-am', 'earlier publish'], cwd=self.root)
+        committed = self.head()
+        self.move_main('allowed.txt', 'main\n')
+        runner, calls = self.recording_git_runner()
+
+        result = self.publish(git_runner=runner)
+
+        self.assert_no_main_sync(calls)
+        self.assertFalse(any(args[:1] == ['commit'] for args in calls))
+        self.assertEqual(result, {'pr': 23, 'head': committed})
+        self.assertEqual(self.head(), committed)
+        self.assertEqual(self.pushed_head(), committed)
+        self.assertEqual([item['task_id'] for item in self.recorded], [self.EXECUTOR_TASK])
+
+    def test_head_up_to_date_with_main_publishes_unchanged(self):
+        self.change_file()
+        runner, calls = self.recording_git_runner()
+
+        result = self.publish(git_runner=runner)
+
+        head = self.head()
+        self.assert_no_main_sync(calls)
+        self.assertEqual(result, {'pr': 23, 'head': head})
+        self.assertEqual(self.parents(), [head, self.initial_head])
+        self.assertEqual(self.pushed_head(), head)
+        self.assertEqual(len(self.recorded), 1)
 
 
 class TaskAdvancePublishLookupTests(unittest.TestCase):
@@ -2717,9 +2785,11 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
         self.assertEqual(len(self.gh_calls), 4)
         self.assertEqual(pause.call_args_list, [call(2)] * 3)
 
-    def _fake_publish(self, *, main_state='contained', fetch_failed=False):
+    def _fake_publish(self, *, main_state='contained', committed_before=False):
+        """Fake-git publish. main_state is what a main sync would see; the fake still
+        answers fetch and merge so a reintroduced sync shows up in git_calls."""
         initial_head, committed_head, merged_head = 'a' * 40, 'b' * 40, 'c' * 40
-        state = {'head': initial_head}
+        state = {'head': committed_head if committed_before else initial_head}
         events = []
         git_calls = []
 
@@ -2738,7 +2808,7 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
                         ['ls-files', '--others', '--exclude-standard', '-z']):
                 return result(args)
             if args == ['diff', '--no-renames', '--name-only', '-z', 'HEAD']:
-                return result(args, output=b'allowed.txt\0')
+                return result(args, output=b'' if committed_before else b'allowed.txt\0')
             if args == ['ls-remote', '--heads', 'origin', 'refs/heads/feature/task']:
                 return result(args, output=f'{initial_head}\trefs/heads/feature/task\n'.encode())
             if args == ['rev-parse', '--verify', 'HEAD']:
@@ -2755,7 +2825,7 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
                 state['head'] = committed_head
                 return result(args)
             if args == ['fetch', 'origin', 'main']:
-                return result(args, 1 if fetch_failed else 0)
+                return result(args)
             if args == ['merge', '--no-edit', 'origin/main']:
                 if main_state == 'conflict':
                     return result(args, 1)
@@ -2793,31 +2863,44 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
             value = exc.code
         return value, events, git_calls, committed_head, merged_head
 
-    def test_main_already_contained_does_not_merge(self):
-        result, events, git_calls, committed, _merged = self._fake_publish()
-        self.assertEqual(result['head'], committed)
-        self.assertIn(['merge-base', '--is-ancestor', 'origin/main', 'HEAD'], git_calls)
-        self.assertNotIn(['merge', '--no-edit', 'origin/main'], git_calls)
+    def assert_no_main_sync(self, git_calls):
+        self.assertFalse(any(args[:1] in (['fetch'], ['merge']) or 'origin/main' in args
+                             for args in git_calls), git_calls)
 
-    def test_moved_main_merges_then_records_then_pushes_new_head(self):
-        result, events, _git_calls, _committed, merged = self._fake_publish(main_state='moved')
-        self.assertEqual(result['head'], merged)
-        merge = events.index(('git', ('merge', '--no-edit', 'origin/main')))
-        record = events.index(('record', merged))
-        push = events.index(('push', merged))
-        self.assertLess(merge, record)
-        self.assertLess(record, push)
+    def assert_recorded_then_pushed(self, events, head):
+        self.assertEqual([event for event in events if event[0] == 'record'], [('record', head)])
+        self.assertEqual([event for event in events if event[0] == 'push'], [('push', head)])
+        self.assertLess(events.index(('record', head)), events.index(('push', head)))
 
-    def test_merge_conflict_aborts_and_never_pushes(self):
-        result, events, _git_calls, _committed, _merged = self._fake_publish(main_state='conflict')
-        self.assertEqual(result, 'PUBLISH_MERGE_CONFLICT')
-        self.assertIn(('abort', ('merge', '--abort')), events)
-        self.assertFalse(any(event[0] == 'push' for event in events))
+    def test_publish_never_syncs_main_whatever_main_holds(self):
+        for main_state in ('contained', 'moved', 'conflict'):
+            with self.subTest(main_state=main_state):
+                result, events, git_calls, committed, _merged = self._fake_publish(
+                    main_state=main_state)
+                self.assertEqual(result, {'pr': 23, 'head': committed})
+                self.assert_no_main_sync(git_calls)
+                self.assert_recorded_then_pushed(events, committed)
 
-    def test_fetch_failure_refuses_without_push(self):
-        result, events, _git_calls, _committed, _merged = self._fake_publish(fetch_failed=True)
-        self.assertEqual(result, 'PUBLISH_COMMAND_FAILED')
-        self.assertFalse(any(event[0] == 'push' for event in events))
+    def test_conflicting_main_records_the_developer_result_before_push(self):
+        """#2376 shape: the committed result is recorded; no merge, no abort, no refusal."""
+        result, events, git_calls, committed, merged = self._fake_publish(main_state='conflict')
+        self.assertEqual(result, {'pr': 23, 'head': committed})
+        self.assert_no_main_sync(git_calls)
+        self.assertNotIn(('abort', ('merge', '--abort')), events)
+        self.assertNotIn(('record', merged), events)
+        commit = next(index for index, event in enumerate(events)
+                      if event[0] == 'git' and event[1][:1] == ('commit',))
+        self.assertLess(commit, events.index(('record', committed)))
+        self.assert_recorded_then_pushed(events, committed)
+
+    def test_rerun_on_committed_unrecorded_head_continues_from_it(self):
+        """#2376: a re-run records and pushes the head an earlier publish committed."""
+        result, events, git_calls, committed, _merged = self._fake_publish(
+            main_state='conflict', committed_before=True)
+        self.assertEqual(result, {'pr': 23, 'head': committed})
+        self.assertFalse(any(args[:1] in (['add'], ['commit']) for args in git_calls))
+        self.assert_no_main_sync(git_calls)
+        self.assert_recorded_then_pushed(events, committed)
 
 
 
