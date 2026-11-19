@@ -2653,7 +2653,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
                  set_(**{**source, 'source_bytes': 2 * 1024 * 1024 + 1})),
                 ('source-bytes-bool', set_(**{**source, 'source_bytes': True})),
                 ('source-files-zero', set_(**{**source, 'source_file_count': 0})),
-                ('source-files-too-many', set_(**{**source, 'source_file_count': 33})),
+                ('source-files-too-many', set_(**{**source, 'source_file_count': 1025})),
                 ('source-files-bool', set_(**{**source, 'source_file_count': True})),
                 ('manifest-uppercase',
                  set_(**{**source, 'source_manifest_sha256': 'B' * 64})),
