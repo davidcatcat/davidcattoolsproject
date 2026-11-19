@@ -10138,11 +10138,13 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
                 expected_native_session_id=evidence['executor_native_session_id'],
                 read_paths=developer['read_paths'], write_paths=developer['write_paths'],
                 artifact=developer['artifact'], artifact_sha256=developer['artifact_sha256'])
-            main_pin = _direct_result_main_pin(task, developer, evidence)
             tests = _direct_result_tests(task, evidence, result, developer)
             # Tests can run long enough for the D6 record or files to change.
             # Recollect the full registration and worktree snapshot before READY.
             _recollect_direct_worktree(task, developer, callback, result)
+            # Capture the authenticated main pin only for a fully verified
+            # result, so a failed verification never leaves publish evidence.
+            main_pin = _direct_result_main_pin(task, developer, evidence)
             evidence.update({
                 'verification_state': 'READY', 'result': result, 'tests': tests,
                 'review_pr_ci': {'stage': 'EXECUTOR_RESULT',
