@@ -8944,12 +8944,149 @@ def run_task_show(args, *, store=None, stdout=None):
     return 0
 
 
+_CONTINUATION_WALK_MAX = 64
+
+
+def _continuation_successors(task, store, *, executor_task):
+    """#1886: the Tasks that continue task on its executor D6, nearest first.
+
+    A successor is a Task whose stored completion names this D6 and whose
+    write-once 'continues' links lead back to task (through any Tasks). The
+    D6 index and every link are read from the store; nothing is matched by
+    D6 or SHA alone. An unreadable link, a cycle, an over-long walk or a fork
+    (two successors at one place in the chain) raises; the caller fails closed.
+    """
+    from .task_store import D6_TASK_ID
+    task_id = task.get('task_id') if type(task) is dict else None
+    scan = getattr(store, 'completion_d6_task_ids', None)
+    if (type(task_id) is not str or scan is None or type(executor_task) is not str or
+            D6_TASK_ID.fullmatch(executor_task) is None):
+        # No D6 index, or no D6 a Task could be bound to: no continuation is
+        # admitted and the chain keeps the root's own repair records.
+        return []
+    found = []
+    for other_id in scan(executor_task):
+        if other_id == task_id:
+            continue
+        record = store.get(other_id)
+        if type(record) is not dict or record.get('task_id') != other_id:
+            raise LLMToolError('continuation record is unreadable')
+        if 'continues' not in record:
+            continue
+        depth, current, seen = 0, record, {other_id}
+        while 'continues' in current:
+            depth += 1
+            previous = current['continues']
+            if previous == task_id:
+                break
+            if (type(previous) is not str or previous in seen or
+                    depth >= _CONTINUATION_WALK_MAX):
+                raise LLMToolError('continuation chain is invalid')
+            seen.add(previous)
+            current = store.get(previous)
+            if type(current) is not dict or current.get('task_id') != previous:
+                raise LLMToolError('continuation record is unreadable')
+        else:
+            continue   # the chain ends without reaching task: not its successor
+        found.append((depth, other_id, record))
+    found.sort(key=lambda item: (item[0], item[1]))
+    if (len({depth for depth, _, _ in found}) != len(found) or
+            len({record['continues'] for _, _, record in found}) != len(found)):
+        raise LLMToolError('continuation chain is forked')
+    return [record for _, _, record in found]
+
+
+def _continuation_repair_entry(record, *, executor_task, common_dir, root, branch):
+    """#1886: (start head, Developer or None, write paths) of one continuation repair.
+
+    Admitted only on its recorded binding: the Task's own TaskBinding and
+    completion evidence, the same executor D6 root, branch and common dir,
+    and, for a Developer result, an Owner-policy ALLOWED dispatch recorded
+    for that exact assignment, head and contract. Anything else raises.
+    """
+    from . import review_repair_recovery
+    completion = record.get('completion')
+    binding = record.get('task_binding')
+    evidence = completion.get('evidence') if type(completion) is dict else None
+    if (record.get('schema_version') != 2 or type(evidence) is not dict or
+            completion.get('executor_task_id') != executor_task or
+            evidence.get('root') != root or evidence.get('branch') != branch or
+            evidence.get('common_dir') != common_dir or
+            evidence.get('task_id') != record.get('task_id') or
+            evidence.get('run_id') != record.get('run_id')):
+        raise LLMToolError('continuation binding is invalid')
+    task_completion.validate_task_binding(
+        stored_binding=binding, task_id=record.get('task_id'), run_id=record.get('run_id'),
+        contract_digest=evidence.get('contract_digest'))
+    head = evidence.get('source_sha')
+    if type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None:
+        raise LLMToolError('continuation head is invalid')
+    developer = record.get('developer')
+    if not (type(developer) is dict and developer.get('state') == 'DEVELOPER_RESPONDED'):
+        return head, None, None
+    write_paths = developer.get('write_paths')
+    if (developer.get('source_sha') != head or
+            developer.get('executor_task_id', executor_task) != executor_task or
+            type(write_paths) is not list or
+            not review_repair_recovery.dispatch_authorized(
+                developer.get('provider_profile'), developer, binding,
+                record.get('dispatch_audit'), head)):
+        raise LLMToolError('continuation repair is not authorized')
+    return head, developer, write_paths
+
+
+def _order_repair_entries(entries, git_root, first, last):
+    """#1886: order repair entries by D6 history of their start heads.
+
+    Every head must be a full SHA, and first (the Task source), the heads and
+    last (the D6 result head) one ancestry line. On one head a run without a
+    Developer result (no commit) goes first, then the stored order. Anything
+    not on that line raises.
+    """
+    import functools
+    heads = []
+    for head, _, _ in entries:
+        if type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None:
+            raise LLMToolError('repair head is invalid')
+        if head not in heads:
+            heads.append(head)
+
+    def compare(left, right):
+        if left == right:
+            return 0
+        if task_completion._is_ancestor(git_root, left, right):
+            return -1
+        if task_completion._is_ancestor(git_root, right, left):
+            return 1
+        raise LLMToolError('repair heads are not on one line')
+
+    for anchor in (first, last):
+        if type(anchor) is not str or re.fullmatch(r'[0-9a-f]{40}', anchor) is None:
+            raise LLMToolError('repair head is invalid')
+    ranked = sorted(heads, key=functools.cmp_to_key(compare))
+    line = [first] + ranked + [last]
+    if any(older != newer and not task_completion._is_ancestor(git_root, older, newer)
+           for older, newer in zip(line, line[1:])):
+        raise LLMToolError('repair heads are not on one line')
+    rank = {head: index for index, head in enumerate(ranked)}
+    return [entry for _, entry in sorted(
+        enumerate(entries),
+        key=lambda item: (rank[item[1][0]], item[1][1] is not None, item[0]))]
+
+
 def _completion_repair_artifact_segments(task, store, *, executor_task, common_dir,
-                                         root, branch, source_sha):
-    """Bind the original and repair proposals to consecutive D6 heads."""
+                                         root, branch, source_sha, continuations=True):
+    """Bind the original and repair proposals to consecutive D6 heads.
+
+    Repairs are the Task's own review and EC2/CI repair claims and, since
+    #1886, the PM continuation repairs: Tasks that continue this Task on its
+    executor D6 (_continuation_successors), each admitted only on its recorded
+    binding and dispatch authorization. With continuation repairs the entries
+    are ordered by the D6 history of their start heads. Every segment is still
+    verified by task_completion.collect_executor_result. continuations=False
+    (the Claude route, which binds no artifact chain) reads the claims only.
+    """
     claims = task.get('review_repair_claims')
-    if claims is None:
-        return None
 
     def invalid():
         error = LLMToolError('developer artifact repair chain is invalid')
@@ -8957,7 +9094,16 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
         raise error
 
     try:
-        if type(claims) is not list or not claims:
+        successors = (_continuation_successors(task, store, executor_task=executor_task)
+                      if continuations else [])
+    except Exception:
+        invalid()
+    if claims is None and not successors:
+        return None
+    try:
+        if claims is None:
+            claims = []
+        elif type(claims) is not list or not claims:
             invalid()
         # Review and EC2 repairs number their attempts per family, so each
         # family must hold attempts 1..n in stored order; the chain itself is
@@ -8990,14 +9136,10 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
         if (registration.root != root or registration.branch != branch or
                 registration.source_sha != source_sha):
             invalid()
-        # #1745: a repair whose Task has no usable Developer result (refused,
-        # BLOCKED, outcome unknown, never delegated) is skipped only when it
-        # made no commit: its claim head must equal the next chain head. A
-        # repair that moved the head without a recorded result, and an UNKNOWN
-        # claim whose repair Task did respond, stay invalid (fail closed).
-        dispatched = []
-        repairs = {}
-        for index, claim in enumerate(candidates):
+        # Each entry is (start head, Developer result or None, the repair's
+        # own write paths or None). Claim entries keep their stored order.
+        entries = []
+        for claim in candidates:
             head = claim.get('head_sha')
             repair_id = claim.get('repair_task_id')
             if type(repair_id) is not str:
@@ -9014,24 +9156,46 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
                 if (claim.get('state') != 'DISPATCHED' or
                         developer.get('source_sha') != head):
                     invalid()
-                dispatched.append(claim)
-                repairs[id(claim)] = developer
+                entries.append((head, developer, None))
                 continue
-            next_head = (candidates[index + 1].get('head_sha')
-                         if index + 1 < len(candidates) else registration.result_sha)
+            entries.append((head, None, None))
+        # #1886: a continuation Task that a claim names is that claim's repair,
+        # never a second entry.
+        claimed = {claim.get('repair_task_id') for claim in claims}
+        continuation_entries = [
+            _continuation_repair_entry(record, executor_task=executor_task,
+                                       common_dir=common_dir, root=root, branch=branch)
+            for record in successors if record.get('task_id') not in claimed]
+        if continuation_entries:
+            entries = _order_repair_entries(entries + continuation_entries,
+                                            registration.root, source_sha,
+                                            registration.result_sha)
+        # #1745: a repair whose Task has no usable Developer result (refused,
+        # BLOCKED, outcome unknown, never delegated) is skipped only when it
+        # made no commit: its head must equal the next chain head. A repair
+        # that moved the head without a recorded result, and an UNKNOWN claim
+        # whose repair Task did respond, stay invalid (fail closed).
+        for index, (head, developer, _) in enumerate(entries):
+            if developer is not None:
+                continue
+            next_head = (entries[index + 1][0]
+                         if index + 1 < len(entries) else registration.result_sha)
             if (type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None or
                     head != next_head):
                 invalid()
+        dispatched = [entry for entry in entries if entry[1] is not None]
         artifacts = [(original.get('artifact'), original.get('artifact_sha256'),
                       source_sha,
-                      dispatched[0].get('head_sha') if dispatched else registration.result_sha)]
-        for index, claim in enumerate(dispatched):
-            developer = repairs[id(claim)]
-            next_head = (dispatched[index + 1].get('head_sha')
+                      dispatched[0][0] if dispatched else registration.result_sha)]
+        segment_scopes = [write_paths]
+        for index, (head, developer, own_paths) in enumerate(dispatched):
+            next_head = (dispatched[index + 1][0]
                          if index + 1 < len(dispatched) else registration.result_sha)
             artifacts.append((developer.get('artifact'), developer.get('artifact_sha256'),
-                              claim.get('head_sha'), next_head))
-        for segment_artifact, segment_digest, _, _ in artifacts:
+                              head, next_head))
+            segment_scopes.append(write_paths if own_paths is None else own_paths)
+        for (segment_artifact, segment_digest, _, _), own_scope in zip(artifacts,
+                                                                       segment_scopes):
             if (type(segment_artifact) is not str or not segment_artifact or
                     type(segment_digest) is not str or
                     hashlib.sha256(segment_artifact.encode('utf-8')).hexdigest() !=
@@ -9044,8 +9208,10 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
                     if match is None or match.group(1) != match.group(2):
                         invalid()
                     paths.append(match.group(1))
-            if not paths or len(paths) != len(set(paths)) or not set(paths).issubset(
-                    set(write_paths)):
+            # A continuation repair stays inside its own scope and the Task's.
+            if (not paths or len(paths) != len(set(paths)) or
+                    not set(paths).issubset(set(write_paths)) or
+                    not set(paths).issubset(set(own_scope))):
                 invalid()
     except LLMToolError as exc:
         if getattr(exc, 'completion_code', None) == 'DEVELOPER_ARTIFACT_CHAIN_INVALID':
@@ -9053,7 +9219,7 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
         invalid()
     except Exception:
         invalid()
-    if candidates and not dispatched:
+    if (candidates or continuation_entries) and not dispatched:
         # Every repair was skipped as a no-commit attempt: the original
         # proposal alone ends at the D6 head, so use the single-artifact path.
         return None
@@ -9061,9 +9227,17 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
 
 
 def _repair_head_admitted(task, store, evidence, *, executor_task, head):
-    """Return whether head ends a verified Task-bound repair chain."""
+    """Return whether head ends a verified Task-bound repair chain.
+
+    The chain holds the Task's repair claims and (#1886) its continuation
+    repairs on this D6; with neither, nothing is read and head is refused.
+    """
     if not task.get('review_repair_claims'):
-        return False
+        try:
+            if not _continuation_successors(task, store, executor_task=executor_task):
+                return False
+        except Exception:
+            return False
     try:
         developer = task['developer']
         root = evidence.get('root')
@@ -9267,7 +9441,8 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
         artifact_segments = _completion_repair_artifact_segments(
             task, store, executor_task=args.executor_task,
             common_dir=initial.get('common_dir'), root=initial.get('root'),
-            branch=initial.get('branch'), source_sha=developer['source_sha'])
+            branch=initial.get('branch'), source_sha=developer['source_sha'],
+            continuations=not claude_route)
         if claude_route:
             git_evidence = task_completion.collect_claude_result(
                 task_id=args.executor_task, expected_common_dir=initial.get('common_dir'),

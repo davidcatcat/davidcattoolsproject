@@ -1761,6 +1761,167 @@ class TaskCompletionTests(unittest.TestCase):
         del task['review_repair_claims']
         self.assertFalse(self._repair_head_passes(task, store, recorded, head, self.source_sha))
 
+    # #1886: PM continuation repairs (Tasks recorded with --continues and
+    # delegated on the same D6) join the completion artifact chain.
+
+    def _continuation_root(self, recorded, claims=None):
+        artifact = self._artifact(self.source_sha, recorded)
+        task = {
+            'task_id': '1' * 32, 'run_id': '2' * 32,
+            'task_binding': {'task_id': '1' * 32, 'run_id': '2' * 32,
+                             'contract_digest': '3' * 64},
+            'developer': {'source_sha': self.source_sha, 'write_paths': [self.source_path],
+                          'artifact': artifact,
+                          'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest()},
+            'completion': {'executor_task_id': self.task_id},
+        }
+        if claims is not None:
+            task['review_repair_claims'] = claims
+        return task
+
+    def _continuation_record(self, task_id, continues, head, artifact, *, authorized=True):
+        """A continuation Task as record-pm --continues and a Codex delegate store it."""
+        from llmtool.review_repair import _worker_key
+        run_id, digest = task_id[::-1], hashlib.sha256(task_id.encode()).hexdigest()
+        assignment = hashlib.sha256(('assignment' + task_id).encode()).hexdigest()[:32]
+        audit = [{'attempt_id': hashlib.sha256(('attempt' + task_id).encode()).hexdigest()[:32],
+                  'worker_key': _worker_key('codex'), 'action': 'DISPATCH',
+                  'decision': 'ALLOWED', 'reason_code': 'OWNER_POLICY_ALLOWED',
+                  'policy_sha256': None, 'at': '2026-11-20T00:00:00Z',
+                  'assignment_id': assignment, 'source_sha': head,
+                  'contract_digest': digest}] if authorized else []
+        return {
+            'schema_version': 2, 'task_id': task_id, 'run_id': run_id, 'continues': continues,
+            'task_binding': {'task_id': task_id, 'run_id': run_id, 'contract_digest': digest},
+            'developer': {'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'codex',
+                          'assignment_id': assignment, 'source_sha': head,
+                          'executor_task_id': self.task_id,
+                          'write_paths': [self.source_path], 'artifact': artifact,
+                          'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest()},
+            'completion': {'executor_task_id': self.task_id, 'evidence': {
+                'task_id': task_id, 'run_id': run_id, 'contract_digest': digest,
+                'root': str(self.root), 'branch': 'feat/executor',
+                'common_dir': self.common, 'source_sha': head}},
+            'dispatch_audit': audit,
+        }
+
+    def _continuation_store(self, task, *records, repairs=None):
+        """A read-only store with get() and the D6 index TaskStore has."""
+        values = {task['task_id']: task, **{item['task_id']: item for item in records},
+                  **(repairs or {})}
+
+        class Store:
+            def get(self, task_id):
+                if task_id not in values:
+                    raise LLMToolError('task not found')
+                return json.loads(json.dumps(values[task_id]))
+
+            def completion_d6_task_ids(self, executor_task_id):
+                return sorted(key for key, value in values.items()
+                              if type(value.get('completion')) is dict and
+                              value['completion'].get('executor_task_id') == executor_task_id)
+
+        return Store()
+
+    def _collect_chain(self, task, store):
+        """Build the completion chain as task complete does, then collect the result."""
+        from llmtool.task_submission_cli import _completion_repair_artifact_segments
+        segments = _completion_repair_artifact_segments(
+            task, store, executor_task=self.task_id, common_dir=self.common,
+            root=str(self.root), branch='feat/executor', source_sha=self.source_sha)
+        developer = task['developer']
+        return task_completion.collect_executor_result(
+            **self._segment_collector_kwargs(
+                {'segment_start': self.source_sha, 'trusted_base': self.source_sha},
+                [self.source_path]),
+            artifact=developer['artifact'], artifact_sha256=developer['artifact_sha256'],
+            **({} if segments is None else {'artifact_segments': segments}))
+
+    def _assert_completion_code(self, task, store, code):
+        with self.assertRaises(LLMToolError) as raised:
+            self._collect_chain(task, store)
+        self.assertEqual(raised.exception.completion_code, code)
+
+    def _pr_2407_shape(self):
+        """The original result, then two chained PM continuation repairs, no claims."""
+        recorded = self._developer_commit()
+        first = self._developer_commit(text='# continuation repair one\n')
+        head = self._register_head(self._developer_commit(text='# continuation repair two\n'))
+        task = self._continuation_root(recorded)
+        one = self._continuation_record('4' * 32, task['task_id'], recorded,
+                                        self._artifact(recorded, first))
+        two = self._continuation_record('5' * 32, '4' * 32, first, self._artifact(first, head))
+        return recorded, head, task, one, two
+
+    def test_pr_2407_shape_continuation_repairs_complete_the_chain_1886(self):
+        recorded, head, task, one, two = self._pr_2407_shape()
+        store = self._continuation_store(task, one, two)
+        # The failure shape before #1886: only the root's records were read.
+        self._assert_completion_code(task, SimpleNamespace(get=store.get),
+                                     'DEVELOPER_ARTIFACT_RESULT_TREE_MISMATCH')
+        result = self._collect_chain(task, store)
+        # A5: the evidence stays bound to the root Task, its source and the head.
+        self.assertEqual((result['task_id'], result['run_id']), ('1' * 32, '2' * 32))
+        self.assertEqual(result['executor_task_id'], self.task_id)
+        self.assertEqual(result['source_sha'], self.source_sha)
+        self.assertEqual(result['result_head'], head)
+        self.assertEqual(result['developer_changed_paths'], [self.source_path])
+        self.assertTrue(self._repair_head_passes(task, store, recorded, head, self.source_sha))
+
+    def test_pr_2402_shape_continuation_before_a_recorded_review_repair_1886(self):
+        recorded = self._developer_commit()
+        continued = self._developer_commit(text='# continuation repair\n')
+        head = self._register_head(self._developer_commit(text='# review repair\n'))
+        review_artifact = self._artifact(continued, head)
+        claims = [{'pr': 10, 'attempt': 1, 'state': 'DISPATCHED', 'head_sha': continued,
+                   'repair_task_id': '6' * 32}]
+        task = self._continuation_root(recorded, claims)
+        repairs = {'6' * 32: {'developer': {
+            'state': 'DEVELOPER_RESPONDED', 'source_sha': continued,
+            'artifact': review_artifact,
+            'artifact_sha256': hashlib.sha256(review_artifact.encode()).hexdigest()}}}
+        continuation = self._continuation_record('4' * 32, task['task_id'], recorded,
+                                                 self._artifact(recorded, continued))
+        store = self._continuation_store(task, continuation, repairs=repairs)
+        # The failure shape before #1886: the original artifact ran to the claim head.
+        self._assert_completion_code(task, SimpleNamespace(get=store.get),
+                                     'DEVELOPER_ARTIFACT_CHAIN_INVALID')
+        self.assertEqual(self._collect_chain(task, store)['result_head'], head)
+        self.assertTrue(self._repair_head_passes(task, store, recorded, head, self.source_sha))
+
+    def test_continuation_artifact_that_differs_from_the_tree_is_refused_1886(self):
+        recorded = self._developer_commit()
+        continued = self._register_head(
+            self._developer_commit(text='# continuation repair\n'))
+        task = self._continuation_root(recorded)
+        claimed = self._artifact(recorded, continued).replace(
+            'continuation repair', 'another change')
+        record = self._continuation_record('4' * 32, task['task_id'], recorded, claimed)
+        self._assert_completion_code(task, self._continuation_store(task, record),
+                                     'DEVELOPER_ARTIFACT_CHAIN_INVALID')
+
+    def test_bare_commit_after_continuation_repairs_is_refused_1886(self):
+        recorded, _, task, one, two = self._pr_2407_shape()
+        head = self._register_head(self._developer_commit(text='# bare change\n'))
+        store = self._continuation_store(task, one, two)
+        self._assert_completion_code(task, store, 'DEVELOPER_ARTIFACT_CHAIN_INVALID')
+        self.assertFalse(self._repair_head_passes(task, store, recorded, head, self.source_sha))
+
+    def test_continuation_without_lineage_or_authorization_is_refused_1886(self):
+        recorded, head, task, one, two = self._pr_2407_shape()
+        unlinked = dict(two)
+        del unlinked['continues']
+        # Same D6, same heads, valid artifacts: without the continues link the
+        # second repair is not admitted, so its change is unexplained.
+        self._assert_completion_code(task, self._continuation_store(task, one, unlinked),
+                                     'DEVELOPER_ARTIFACT_CHAIN_INVALID')
+        unauthorized = self._continuation_record(
+            '5' * 32, '4' * 32, two['developer']['source_sha'],
+            two['developer']['artifact'], authorized=False)
+        store = self._continuation_store(task, one, unauthorized)
+        self._assert_completion_code(task, store, 'DEVELOPER_ARTIFACT_CHAIN_INVALID')
+        self.assertFalse(self._repair_head_passes(task, store, recorded, head, self.source_sha))
+
     def test_clean_main_merge_of_other_files_is_not_developer_change(self):
         tip = self._developer_commit()
         trusted = self._move_main('README.md', 'Main moved.\n')

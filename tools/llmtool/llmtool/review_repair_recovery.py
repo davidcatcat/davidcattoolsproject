@@ -127,17 +127,22 @@ def _dicts(*values):
         refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
 
 
-def check_authorization(root, repair, claim):
-    """E3: the Owner policy allowed this repair dispatch for its exact binding."""
+def dispatch_authorized(profile, developer, task_binding, audit, head):
+    """True when the stored audit holds an Owner-policy ALLOWED DISPATCH for this binding.
+
+    The binding is the Developer's assignment id, the head it was dispatched on
+    and the Task's contract digest; the worker is the one profile maps to. An
+    adapter route (gw-agent, opencode) also needs its adapter authorization.
+    Shared by E3 and by #1886 continuation repairs in task completion.
+    """
     from .review_repair import _worker_key
     from .worker_dispatch import stored_worker_id
-    _dicts(root.get('developer'), repair.get('developer'), repair.get('task_binding'))
-    profile = root['developer'].get('provider_profile')
-    worker, audit = _worker_key(profile), repair.get('dispatch_audit')
-    binding = (repair['developer'].get('assignment_id'), claim['head_sha'],
-               repair['task_binding'].get('contract_digest'))
+    if type(developer) is not dict or type(task_binding) is not dict:
+        return False
+    worker = _worker_key(profile)
+    binding = (developer.get('assignment_id'), head, task_binding.get('contract_digest'))
     if worker is None or type(audit) is not list or any(type(v) is not str for v in binding):
-        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+        return False
     allowed = [entry for entry in audit if type(entry) is dict and
                entry.get('action') == 'DISPATCH' and entry.get('decision') == 'ALLOWED' and
                stored_worker_id(entry.get('worker_key')) == worker and
@@ -148,7 +153,15 @@ def check_authorization(root, repair, claim):
                    and _HEX32.fullmatch(entry['attempt_id'])}
     adapted = any(type(entry.get('authorization_id')) is str and
                   entry['authorization_id'] in transitions for entry in allowed)
-    if not transitions or (profile in _ADAPTER_PROFILES and not adapted):
+    return bool(transitions) and not (profile in _ADAPTER_PROFILES and not adapted)
+
+
+def check_authorization(root, repair, claim):
+    """E3: the Owner policy allowed this repair dispatch for its exact binding."""
+    _dicts(root.get('developer'), repair.get('developer'), repair.get('task_binding'))
+    if not dispatch_authorized(root['developer'].get('provider_profile'), repair['developer'],
+                               repair['task_binding'], repair.get('dispatch_audit'),
+                               claim['head_sha']):
         refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
 
 
