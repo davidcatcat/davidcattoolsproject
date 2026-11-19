@@ -50,6 +50,7 @@ CARD = 'a' * 64
 CONTRACT = 'b' * 64
 PREDECESSOR_TASK = '00112233445566778899aabbccddeeff'
 PREDECESSOR_CONTRACT = 'c' * 64
+OTHER_TASK = 'ffeeddccbbaa99887766554433221100'
 WRITE = 'tools/llmtool/llmtool/spec_template.py'
 TEST = 'tools/llmtool/tests/test_spec_template.py'
 
@@ -226,6 +227,24 @@ class AutoFillTests(TemplateTestBase):
         self.assertEqual(spec['continued_lineage'], [PREDECESSOR_TASK])
         self.assertEqual(spec['carried_counts']['repairs'], 1)
 
+    def test_lineage_may_list_older_ancestors_before_the_predecessor(self):
+        spec = build('developer', repaired_facts(
+            continued_lineage=[OTHER_TASK, PREDECESSOR_TASK]))
+        self.assertEqual(spec['continued_lineage'],
+                         [OTHER_TASK, PREDECESSOR_TASK])
+        self.assertEqual(spec['predecessor_spec']['task_id'], PREDECESSOR_TASK)
+
+    def test_template_only_author_keeps_the_non_dispatchable_receipt(self):
+        self.decisions['claude-subpm'] = gate_decision(
+            'claude-subpm', False, 'WORKER_UNKNOWN')
+        spec = build('investigation', facts_for(
+            'investigation', author_worker='claude-subpm',
+            author_route='TEMPLATE_ONLY',
+            check_results={'preflight_status': 'SPEC_DISPATCH_UNAUTHORIZED'}))
+        self.assertEqual(spec['author']['route'], 'TEMPLATE_ONLY')
+        self.assertEqual(spec['check_results']['preflight_status'],
+                         'SPEC_DISPATCH_UNAUTHORIZED')
+
     def test_repair_counts_are_derived_from_the_predecessor_audit(self):
         spec = build('developer', repaired_facts(
             predecessor_audit={'repairs': 3, 'test_failures': 2, 'attempts': 5},
@@ -290,9 +309,12 @@ class AutoFillTests(TemplateTestBase):
         for worker, route, decision, owner_ref in cases:
             with self.subTest(route=route):
                 self.decisions[worker] = decision
+                status = ('SPEC_DISPATCH_UNAUTHORIZED'
+                          if route == 'TEMPLATE_ONLY' else 'SPEC_PREFLIGHT_OK')
                 spec = build('developer', facts_for(
                     'developer', author_worker=worker,
-                    author_route=route, owner_ref=owner_ref))
+                    author_route=route, owner_ref=owner_ref,
+                    check_results={'preflight_status': status}))
                 self.assertEqual(spec['author'], {
                     'role': 'pm',
                     'worker': worker,
@@ -485,6 +507,30 @@ class RefusalTests(TemplateTestBase):
             with self.subTest(facts=facts):
                 self.assert_refusal(SPEC_LINEAGE_INVALID, build, 'developer', facts)
 
+    def test_lineage_tail_must_be_the_immediate_predecessor(self):
+        rereview = {
+            'fresh': False,
+            'predecessor_spec': {'task_id': PREDECESSOR_TASK,
+                                 'contract_digest': PREDECESSOR_CONTRACT},
+            'continued_lineage': [PREDECESSOR_TASK, OTHER_TASK],
+            'predecessor_audit': {'repairs': 1, 'test_failures': 0,
+                                  'attempts': 1},
+            'carried_counts': {'repairs': 1, 'test_failures': 0,
+                               'attempts': 2},
+        }
+        cases = (
+            ('developer', repaired_facts(
+                continued_lineage=[PREDECESSOR_TASK, OTHER_TASK])),
+            ('debug', facts_for(
+                'debug', continued_lineage=[PREDECESSOR_TASK, OTHER_TASK])),
+            ('reviewer', facts_for('reviewer', **rereview)),
+        )
+        for kind, facts in cases:
+            with self.subTest(kind=kind):
+                error = self.assert_refusal(
+                    SPEC_LINEAGE_INVALID, build, kind, facts)
+                self.assertEqual(error.spec_field, 'continued_lineage')
+
     def test_repair_counts_must_show_a_failure_and_incremented_attempts(self):
         cases = (
             {'carried_counts': {'repairs': 0, 'test_failures': 0, 'attempts': 2}},
@@ -584,6 +630,22 @@ class RefusalTests(TemplateTestBase):
                 self.assert_refusal(
                     SPEC_DIGEST_INVALID, build, 'developer',
                     facts_for('developer', **overrides))
+
+    def test_check_receipt_must_match_the_derived_dispatch_route(self):
+        self.decisions['claude-subpm'] = gate_decision(
+            'claude-subpm', False, 'WORKER_UNKNOWN')
+        # A non-dispatchable TEMPLATE_ONLY author cannot claim a passing receipt.
+        self.assert_refusal(
+            SPEC_CHECK_RESULTS_INVALID, build, 'developer',
+            facts_for('developer', author_worker='claude-subpm',
+                      author_route='TEMPLATE_ONLY',
+                      check_results={'preflight_status': 'SPEC_PREFLIGHT_OK'}))
+        # A dispatchable author cannot claim the non-dispatchable receipt either.
+        self.assert_refusal(
+            SPEC_CHECK_RESULTS_INVALID, build, 'developer',
+            facts_for('developer',
+                      check_results={'preflight_status':
+                                     'SPEC_DISPATCH_UNAUTHORIZED'}))
 
     def test_check_receipt_is_required(self):
         for value in (None, [], 'ok', {}, {'d6_worktree_registered': True},

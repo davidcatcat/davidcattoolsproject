@@ -98,6 +98,13 @@ _ACCEPTANCE_PATH = re.compile(
 _TEMPLATE_ONLY_REASONS = frozenset((
     'WORKER_UNKNOWN', 'WORKER_POLICY_ENTRY_MISSING',
 ))
+# Design examples: a dispatchable author route yields a passing preflight
+# receipt; a non-dispatchable TEMPLATE_ONLY route yields the unauthorized status.
+_PREFLIGHT_STATUS_BY_ROUTE = {
+    'ALLOWED': 'SPEC_PREFLIGHT_OK',
+    'OWNER_ASSIGNMENT_ONLY': 'SPEC_PREFLIGHT_OK',
+    'TEMPLATE_ONLY': SPEC_DISPATCH_UNAUTHORIZED,
+}
 
 
 class SpecTemplateError(LLMToolError):
@@ -270,7 +277,9 @@ def _continued_lineage(facts, carried, *, require_failure, require_increment):
     lineage = _lineage(facts.continued_lineage)
     if not lineage:
         _refuse(SPEC_PREDECESSOR_MISSING, 'continued_lineage')
-    if predecessor['task_id'] not in lineage:
+    # The ordered lineage ends at the immediate predecessor; a predecessor that
+    # appears anywhere else is not the predecessor chain (review F1).
+    if lineage[-1] != predecessor['task_id']:
         _refuse(SPEC_LINEAGE_INVALID, 'continued_lineage')
     audit = _audit_counts(facts.predecessor_audit)
     expected = {
@@ -415,11 +424,15 @@ def _digest(value, field):
     return _hex(value, 64, SPEC_DIGEST_INVALID, field)
 
 
-def _check_results(value):
+def _check_results(value, route):
     if type(value) is not dict or not value:
         _refuse(SPEC_CHECK_RESULTS_INVALID, 'check_results')
     status = value.get('preflight_status')
     if type(status) is not str or not status.strip():
+        _refuse(SPEC_CHECK_RESULTS_INVALID, 'check_results')
+    # The receipt must agree with the route derived from the dispatch gate: a
+    # TEMPLATE_ONLY author is non-dispatchable (review F2).
+    if status != _PREFLIGHT_STATUS_BY_ROUTE[route]:
         _refuse(SPEC_CHECK_RESULTS_INVALID, 'check_results')
     return dict(value)
 
@@ -442,7 +455,7 @@ def build_spec(kind, problem, goal, acceptance, facts):
     author = _author(facts, task_id)
     role_card_digest = _digest(facts.role_card_digest, 'role_card_digest')
     contract_digest = _digest(facts.contract_digest, 'contract_digest')
-    check_results = _check_results(facts.check_results)
+    check_results = _check_results(facts.check_results, author['route'])
     review_range = None
 
     if kind == 'developer':
