@@ -27,6 +27,9 @@ Source-fact model
 - Read scope derives paths cited in acceptance, including repository paths
   outside the tool/document directories, and, when code is written, needs an
   admitted test module (design section 2.2).
+- Scope paths are repository-relative: absolute, drive-qualified and
+  parent-traversal paths are refused, and a read-only kind must supply an
+  explicit empty write scope rather than leaving the fact absent.
 - Base/result-head rules follow design section 2.2, including the three-dot
   ``review_range`` for reviewers.
 """
@@ -85,6 +88,7 @@ FIELDS_BY_KIND = {
 _HEX32 = re.compile(r'[0-9a-f]{32}\Z')
 _HEX40 = re.compile(r'[0-9a-f]{40}\Z')
 _HEX64 = re.compile(r'[0-9a-f]{64}\Z')
+_DRIVE_PATH = re.compile(r'[A-Za-z]:/')
 _COUNT_FIELDS = ('repairs', 'test_failures', 'attempts')
 _ACCEPTANCE_PATH = re.compile(
     r'(?<![a-zA-Z0-9_./-])'
@@ -161,13 +165,25 @@ def _hex(value, size, code, field):
     return value
 
 
+def _scope_path(item, field):
+    """Refuse anything that is not a repository-relative scope path."""
+    if type(item) is not str or not item.strip():
+        _refuse(SPEC_SCOPE_INVALID, field)
+    normalized = item.replace('\\', '/')
+    if (normalized.startswith('/') or normalized.startswith('~/')
+            or _DRIVE_PATH.match(normalized) is not None):
+        _refuse(SPEC_SCOPE_INVALID, field)
+    if '..' in normalized.split('/'):
+        _refuse(SPEC_SCOPE_INVALID, field)
+    return item
+
+
 def _path_list(value, field):
     if type(value) not in (list, tuple):
         _refuse(SPEC_SCOPE_INVALID, field)
     paths = []
     for item in value:
-        if type(item) is not str or not item:
-            _refuse(SPEC_SCOPE_INVALID, field)
+        item = _scope_path(item, field)
         if item not in paths:
             paths.append(item)
     return paths
@@ -349,16 +365,17 @@ def _scopes(kind, facts, acceptance):
     seen = {_norm_path(path) for path in reads}
     # Design section 2.2: read scope covers every path cited in acceptance.
     for path in _cited_paths(acceptance):
+        _scope_path(path, 'read_paths')
         normalized = _norm_path(path)
         if normalized not in seen:
             reads.append(normalized)
             seen.add(normalized)
     if kind in READ_ONLY_KINDS:
-        if facts.write_paths not in (None, [], ()):
-            writes = _path_list(facts.write_paths, 'write_paths')
-            if writes:
-                _refuse(SPEC_READONLY_ROLE_HAS_WRITES, 'write_paths')
-        writes = []
+        # Design section 2.2: read-only kinds carry a strictly empty write
+        # scope, so an absent write fact is refused rather than defaulted.
+        writes = _path_list(facts.write_paths, 'write_paths')
+        if writes:
+            _refuse(SPEC_READONLY_ROLE_HAS_WRITES, 'write_paths')
     else:
         if type(facts.write_paths) not in (list, tuple) or not facts.write_paths:
             _refuse(SPEC_WRITE_PATHS_EMPTY, 'write_paths')

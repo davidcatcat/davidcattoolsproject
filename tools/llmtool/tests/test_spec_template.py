@@ -463,6 +463,41 @@ class RefusalTests(TemplateTestBase):
                     SPEC_READONLY_ROLE_HAS_WRITES, build, kind,
                     facts_for(kind, write_paths=[WRITE]))
 
+    def test_read_only_kinds_require_an_explicit_empty_write_scope(self):
+        for kind in READ_ONLY_KINDS:
+            with self.subTest(kind=kind):
+                error = self.assert_refusal(
+                    SPEC_SCOPE_INVALID, build, kind,
+                    facts_for(kind, write_paths=None))
+                self.assertEqual(error.spec_field, 'write_paths')
+
+    def test_scope_paths_must_be_repository_relative(self):
+        bad_paths = ('/tmp/out.py', '../out.py', 'tools/../out.py',
+                     'C:/tmp/out.py')
+        for kind in KINDS:
+            for path in bad_paths:
+                with self.subTest(kind=kind, scope='read', path=path):
+                    error = self.assert_refusal(
+                        SPEC_SCOPE_INVALID, build, kind,
+                        facts_for(kind, read_paths=[path]))
+                    self.assertEqual(error.spec_field, 'read_paths')
+        for kind in KINDS:
+            for path in bad_paths:
+                with self.subTest(kind=kind, scope='write', path=path):
+                    error = self.assert_refusal(
+                        SPEC_SCOPE_INVALID, build, kind,
+                        facts_for(kind, write_paths=[path]))
+                    self.assertEqual(error.spec_field, 'write_paths')
+
+    def test_acceptance_cited_scope_paths_must_be_repository_relative(self):
+        for path in ('../out.py', 'tools/../out.py'):
+            with self.subTest(path=path):
+                error = self.assert_refusal(
+                    SPEC_SCOPE_INVALID, build_spec, 'developer',
+                    'A problem.', 'A goal.', [f'Update {path} as required.'],
+                    facts_for('developer'))
+                self.assertEqual(error.spec_field, 'read_paths')
+
     def test_invalid_scope_shapes_are_refused(self):
         for overrides in ({'read_paths': None},
                           {'read_paths': ['']},
