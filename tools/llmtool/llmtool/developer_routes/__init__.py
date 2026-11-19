@@ -317,13 +317,10 @@ def check_route_model(config, route, model):
     own provider family in a valid format (_ROUTE_MODEL_CHECKS) and refuse a
     wrong-family or malformed one; allowed_models is not consulted. gw-agent
     keeps its allowed_models membership gate, but a malformed identifier is
-    refused here too, before membership (Repair 2).
+    refused here too, before membership (Repair 2). A config that is not a
+    load_route_config() mapping (including None) admits no model: this check
+    never loads the repository file itself.
     """
-    if config is None:
-        try:
-            config = load_route_config()
-        except RouteError:
-            raise RouteError('ROUTE_CONFIG_UNAVAILABLE') from None
     routes = config.get('routes') if type(config) is dict else None
     entry = (routes.get(route) if type(routes) is dict and type(route) is str
              else None)

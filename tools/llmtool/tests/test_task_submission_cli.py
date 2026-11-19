@@ -2408,7 +2408,12 @@ class TaskSubmissionCLITests(unittest.TestCase):
 
     def test_opencode_developer_profile_non_free_model_is_refused_before_claim(self):
         # Owner decision #289: paid models and other providers are admitted; malformed models are refused before claim.
-        for model in ('opencode/paid-model', 'other/name-free'):
+        # A1: the Owner's configured model (opencode-go/deepseek-v4.1-flash#high)
+        # and the shipped free default run end to end through the real delegate path.
+        for model in ('opencode/paid-model', 'other/name-free',
+                      'opencode-go/deepseek-v4.1-flash',
+                      'opencode-go/deepseek-v4.1-flash#high',
+                      'opencode/deepseek-v4.1-flash-free'):
             with self.subTest(admitted_model=model):
                 task = self._pm_task_with_opencode_assignment()
                 self._write_opencode_developer_model(model, steps=24)

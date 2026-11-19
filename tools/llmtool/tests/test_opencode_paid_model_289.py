@@ -4,18 +4,18 @@ The OpenCode Developer route admits whatever model the Owner configures
 (free or paid, any provider prefix OpenCode supports, with or without a
 #variant), with no free-only check and no per-model allow-list refusal,
 while preserving strict input validation against malformed models.
+
+The full delegate path (claim, CLI launch, stored DEVELOPER_RESPONDED) with
+a configured paid model is covered in test_task_submission_cli
+(test_opencode_developer_profile_non_free_model_is_refused_before_claim),
+which has the registered D6 fixture that path needs.
 """
 
-import copy
 import hashlib
-import io
-import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
-from contextlib import redirect_stdout
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from llmtool.developer_routes import (
@@ -27,561 +27,378 @@ from llmtool.developer_routes import (
 from llmtool.errors import LLMToolError
 from llmtool.opencode_direct_developer import (
     DirectOpenCodeError,
-    DirectResult,
     is_free_model,
     is_valid_model,
     validate_model,
 )
 from llmtool.task_store import TaskStore, new_id
 import llmtool.task_submission_cli as submission_cli
-from llmtool.task_submission_cli import run_task_delegate
-from llmtool.task_verification import AcceptanceCriterion, CriterionKind, TaskContract
+from llmtool.task_submission_cli import _record
 
+import review_trust_fixture
 import worker_policy_fixture
 
 
-def make_test_task(route="opencode"):
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
+
+
+ADMITTED_PAID_MODELS = (
+    'opencode/paid-model',
+    'opencode/paid-model#high',
+    'opencode/deepseek-v4.1',
+    'opencode/deepseek-v4.1#low',
+    'opencode/claude-sonnet-4',
+    'opencode/gpt-5-mini#medium',
+)
+
+ADMITTED_OTHER_PROVIDER_MODELS = (
+    'opencode-go/deepseek-v4.1-flash',
+    'opencode-go/deepseek-v4.1-flash#high',
+    'other/name-free',
+    'other/name-paid',
+    'fireworks/deepseek-v3',
+    'together/llama-3.3-70b#low',
+    'custom-provider/special-model',
+)
+
+ADMITTED_FREE_MODELS = (
+    'opencode/deepseek-v4.1-flash-free',
+    'opencode/deepseek-v4.1-flash-free#high',
+    'opencode/test-free',
+)
+
+ALL_ADMITTED_MODELS = (ADMITTED_PAID_MODELS + ADMITTED_OTHER_PROVIDER_MODELS +
+                       ADMITTED_FREE_MODELS)
+
+MALFORMED_MODELS = (
+    '',
+    '   ',
+    '\t',
+    'opencode/model\n',
+    'opencode/model\r',
+    'opencode/model\x01',
+    'opencode/..',
+    '../model',
+    'opencode/../model',
+    'https://example.invalid/m',
+    'opencode://deepseek',
+    'bare-model',
+    'deepseek-v4.1-flash-free',
+    '-leading/model',
+    'opencode/-model',
+    'opencode/a/b',
+    'opencode/a/b-free',
+    'opencode/' + 'a' * 125,
+    'opencode/example-free#',
+    'opencode/example-free#HIGH',
+    'opencode/example-free#a b',
+    'opencode/example-free#x#y',
+    'opencode/example-free#toolongvariantname123',
+)
+
+
+def opencode_dispatch_task():
+    """A PM_RESPONDED Task routed to opencode (shape of test_task_store)."""
+    request = 'Bounded non-sensitive OpenCode proposal task.'
     task_id, run_id = new_id(), new_id()
-    request = "Bounded test task request."
-    request_sha = hashlib.sha256(request.encode("utf-8")).hexdigest()
-    contract = TaskContract(
-        schema_version=1,
-        task_id=task_id,
-        contract_version=1,
-        previous_digest=None,
-        goal="PM intake request sha256:" + request_sha,
-        authorized_scope=("test-scope",),
-        forbidden_scope=(),
-        criteria=(
-            AcceptanceCriterion(
-                "task_response",
-                CriterionKind.ARTIFACT,
-                "Record the developer outcome.",
-            ),
-        ),
+    request_sha = hashlib.sha256(request.encode()).hexdigest()
+    task = _record(
+        task_id, run_id, 'pm-' + new_id(), 'pm-profile', request,
+        state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+        backend='NO_NATIVE_SESSION_ID_EXPOSED', request_sha=request_sha)
+    task.update(
+        pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                          'base_url': None},
+        response='PM returned a bounded task.', error_code=None,
+        pm_assignment={'schema_version': 1, 'route': 'opencode', 'risk': 'LOW',
+                       'goal': 'Produce a proposal diff.',
+                       'acceptance': ['the proposal is recorded']},
     )
-    response = json.dumps(
-        {
-            "schema_version": 1,
-            "summary": "Ready.",
-            "developer_assignment": {
-                "route": route,
-                "risk": "LOW",
-                "goal": "Do task.",
-                "acceptance": ["A test passes."],
-            },
-        },
-        separators=(",", ":"),
-    )
+    return task
+
+
+def opencode_pending_assignment():
+    """A DEVELOPER_PENDING OpenCode assignment (shape of test_task_store)."""
     return {
-        "schema_version": 2,
-        "task_id": task_id,
-        "run_id": run_id,
-        "pm_session_id": "pm-" + new_id(),
-        "pm_provider_profile": "active-pm-runtime",
-        "pm_provider_type": "active-pm-runtime",
-        "pm_model": None,
-        "backend_session_semantics": "ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL",
-        "pm_route_binding": {
-            "type": "active-pm-runtime",
-            "model": None,
-            "base_url": None,
-        },
-        "native_session_id": None,
-        "state": "PM_RESPONDED",
-        "created_at": "2026-11-18T00:00:00Z",
-        "updated_at": "2026-11-18T00:00:00Z",
-        "task_contract": contract.to_dict(),
-        "task_binding": contract.binding(run_id).to_dict(),
-        "request": request,
-        "request_sha256": request_sha,
-        "response": response,
-        "usage": None,
-        "error_code": None,
-        "record_sha256": None,
-        "developer": None,
-        "pm_assignment": {
-            "schema_version": 1,
-            "route": route,
-            "risk": "LOW",
-            "goal": "Do task.",
-            "acceptance": ["A test passes."],
-        },
-        "completion": None,
-        "pm_provenance": {
-            "source": "ACTIVE_PM_RUNTIME",
-            "provider_invoked": False,
-            "native_session_id_status": "UNAVAILABLE",
-            "usage_status": "UNKNOWN",
-            "session_restored": False,
-            "automatic_callback": False,
-        },
+        'assignment_id': new_id(), 'selection_source': 'PM',
+        'state': 'DEVELOPER_PENDING', 'provider_profile': 'opencode',
+        'provider_type': None, 'model': None,
+        'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+        'session_id': 'dev-' + new_id(), 'source_sha': 'a' * 40,
+        'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+        'read_paths': ['src.py'], 'write_paths': ['src.py'],
+        'acceptance': ['the proposal is recorded'],
+        'context_sha256': 'b' * 64,
+        'egress_basis': 'Approved non-sensitive test context.', 'input_bytes': 10,
+        'max_tokens': 128, 'artifact_format': 'unified_diff',
+        'artifact': None, 'artifact_sha256': None, 'usage': None,
+        'error_code': None, 'created_at': '2026-10-23T00:00:00Z',
+        'execution': None,
     }
 
 
-def developer_assignment_for(task, *, provider="opencode", max_tokens=128):
+def opencode_execution(status, session):
     return {
-        "assignment_id": new_id(),
-        "selection_source": "PM",
-        "state": "DEVELOPER_PENDING",
-        "provider_profile": provider,
-        "provider_type": None,
-        "model": None,
-        "timeout_seconds": 60,
-        "account": None,
-        "backend_session_semantics": "CLI_REPORTED_SESSION_ID",
-        "session_id": "dev-" + new_id(),
-        "source_sha": "a" * 40,
-        "source_sha_binding": "D6_REGISTRY_OBSERVED",
-        "context_sha256": "b" * 64,
-        "egress_basis": "Bounded non-sensitive test context.",
-        "input_bytes": 128,
-        "max_tokens": max_tokens,
-        "read_paths": ["source.py"],
-        "write_paths": ["source.py"],
-        "acceptance": ["The change is tested."],
-        "artifact_format": "unified_diff",
-        "artifact": None,
-        "artifact_sha256": None,
-        "usage": None,
-        "error_code": None,
-        "created_at": "2026-11-18T00:00:00Z",
-        "execution": None,
+        'status': status, 'native_session_id': session,
+        'process_exit_code': 0 if status == 'SUCCEEDED' else 1,
+        'stdout_sha256': 'c' * 64, 'elapsed_ms': 12, 'cleanup_status': 'CONFIRMED',
+        'usage_source': 'UNKNOWN', 'source_bytes': 10, 'source_file_count': 1,
+        'source_manifest_sha256': 'd' * 64,
     }
 
 
-class OpenCodePaidModelAdmissionTests(unittest.TestCase):
-    """Test model admission, validation and persistence per Owner #289 / #2302."""
-
-    ADMITTED_PAID_MODELS = (
-        "opencode/paid-model",
-        "opencode/paid-model#high",
-        "opencode/deepseek-v4.1",
-        "opencode/deepseek-v4.1#low",
-        "opencode/claude-sonnet-4",
-        "opencode/gpt-5-mini#medium",
-    )
-
-    ADMITTED_OTHER_PROVIDER_MODELS = (
-        "opencode-go/deepseek-v4.1-flash#high",
-        "other/name-free",
-        "other/name-paid",
-        "fireworks/deepseek-v3",
-        "together/llama-3.3-70b#low",
-        "custom-provider/special-model",
-    )
-
-    ADMITTED_FREE_MODELS = (
-        "opencode/deepseek-v4.1-flash-free",
-        "opencode/deepseek-v4.1-flash-free#high",
-        "opencode/test-free",
-    )
-
-    MALFORMED_MODELS = (
-        "",
-        "   ",
-        "\t",
-        "opencode/model\n",
-        "opencode/model\r",
-        "opencode/model\x01",
-        "opencode/..",
-        "../model",
-        "opencode/../model",
-        "https://example.invalid/m",
-        "opencode://deepseek",
-        "bare-model",
-        "deepseek-v4.1-flash-free",
-        "-leading/model",
-        "opencode/-model",
-        "opencode/a/b",
-        "opencode/a/b-free",
-        "opencode/" + "a" * 125,
-        "opencode/example-free#",
-        "opencode/example-free#HIGH",
-        "opencode/example-free#a b",
-        "opencode/example-free#x#y",
-        "opencode/example-free#toolongvariantname123",
-    )
+class OpenCodeModelValidatorTests(unittest.TestCase):
+    """A4: paid, other-provider and free models admitted; malformed refused."""
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name).resolve() / "tasks"
-        self.store = TaskStore(self.root)
-        self.policy_path = worker_policy_fixture.install(self)
         self.config = load_route_config()
 
-    def test_paid_models_are_admitted_by_direct_developer_validators(self):
-        for model in self.ADMITTED_PAID_MODELS:
+    def assert_admitted(self, models):
+        for model in models:
             with self.subTest(model=model):
                 self.assertTrue(is_valid_model(model))
                 self.assertEqual(validate_model(model), model)
-                self.assertEqual(check_route_model(self.config, "opencode", model), model)
+                self.assertEqual(check_route_model(self.config, 'opencode', model), model)
 
-    def test_other_provider_models_are_admitted_by_direct_developer_validators(self):
-        for model in self.ADMITTED_OTHER_PROVIDER_MODELS:
+    def test_paid_models_are_admitted(self):
+        self.assert_admitted(ADMITTED_PAID_MODELS)
+        for model in ADMITTED_PAID_MODELS:
             with self.subTest(model=model):
-                self.assertTrue(is_valid_model(model))
-                self.assertEqual(validate_model(model), model)
-                self.assertEqual(check_route_model(self.config, "opencode", model), model)
+                self.assertFalse(is_free_model(model))
 
-    def test_free_models_are_admitted_by_direct_developer_validators(self):
-        for model in self.ADMITTED_FREE_MODELS:
+    def test_other_provider_models_are_admitted(self):
+        self.assert_admitted(ADMITTED_OTHER_PROVIDER_MODELS)
+
+    def test_free_models_are_admitted(self):
+        self.assert_admitted(ADMITTED_FREE_MODELS)
+        for model in ADMITTED_FREE_MODELS:
             with self.subTest(model=model):
-                self.assertTrue(is_valid_model(model))
                 self.assertTrue(is_free_model(model))
-                self.assertEqual(validate_model(model), model)
-                self.assertEqual(check_route_model(self.config, "opencode", model), model)
 
-    def test_malformed_models_are_refused_by_direct_developer_validators(self):
-        for model in self.MALFORMED_MODELS:
+    def test_admission_does_not_consult_allowed_models(self):
+        # A1: no per-model allow-list refusal for the OpenCode route, with or
+        # without allowed_models in the route entry.
+        entry = dict(self.config['routes']['opencode'])
+        entry.pop('allowed_models', None)
+        unlisted = {'routes': {'opencode': entry}}
+        for model in ALL_ADMITTED_MODELS:
+            with self.subTest(model=model):
+                self.assertEqual(check_route_model(unlisted, 'opencode', model), model)
+
+    def test_malformed_models_are_refused_with_stable_codes(self):
+        for model in MALFORMED_MODELS:
             with self.subTest(model=model):
                 self.assertFalse(is_valid_model(model))
                 with self.assertRaises(RouteError) as route_caught:
-                    check_route_model(self.config, "opencode", model)
-                self.assertEqual(route_caught.exception.code, "ROLE_MODEL_NOT_ALLOWED")
+                    check_route_model(self.config, 'opencode', model)
+                self.assertEqual(route_caught.exception.code, 'ROLE_MODEL_NOT_ALLOWED')
                 with self.assertRaises(DirectOpenCodeError) as caught:
                     validate_model(model)
-                self.assertEqual(
-                    caught.exception.direct_opencode_code,
-                    "OPENCODE_MODEL_INVALID",
-                )
+                self.assertEqual(caught.exception.direct_opencode_code,
+                                 'OPENCODE_MODEL_INVALID')
 
-    def test_task_store_persists_admitted_models_across_all_states(self):
-        artifact = (
-            "diff --git a/source.py b/source.py\n"
-            "--- a/source.py\n"
-            "+++ b/source.py\n"
-            "@@ -1 +1 @@\n"
-            "-x = 1\n"
-            "+x = 2\n"
-        )
-        succeeded_execution = {
-            "status": "SUCCEEDED",
-            "native_session_id": "ses_abcdefgh12345678",
-            "process_exit_code": 0,
-            "stdout_sha256": "c" * 64,
-            "elapsed_ms": 15,
-            "cleanup_status": "CONFIRMED",
-            "usage_source": "UNKNOWN",
-            "source_bytes": 20,
-            "source_file_count": 1,
-            "source_manifest_sha256": "d" * 64,
-        }
-        all_admitted = (
-            self.ADMITTED_PAID_MODELS
-            + self.ADMITTED_OTHER_PROVIDER_MODELS
-            + self.ADMITTED_FREE_MODELS
-        )
-        for model in all_admitted:
-            with self.subTest(admitted_model=model):
-                task = make_test_task(route="opencode")
-                self.store.create(task)
-                pending = developer_assignment_for(task, provider="opencode")
-                self.store.compare_and_update(
-                    task["task_id"],
-                    expected={"developer": None},
-                    developer=pending,
-                )
-
-                # State: DEVELOPER_DISPATCHING
-                dispatching = {
-                    **pending,
-                    "state": "DEVELOPER_DISPATCHING",
-                    "provider_type": "opencode-cli",
-                    "model": model,
-                }
-                self.store.update(task["task_id"], developer=dispatching)
-                saved_dispatching = self.store.get(task["task_id"])
-                self.assertEqual(
-                    saved_dispatching["developer"]["model"], model
-                )
-                self.assertEqual(
-                    saved_dispatching["developer"]["state"],
-                    "DEVELOPER_DISPATCHING",
-                )
-
-                # State: DEVELOPER_RESPONDED
-                responded = {
-                    **dispatching,
-                    "state": "DEVELOPER_RESPONDED",
-                    "artifact": artifact,
-                    "artifact_sha256": hashlib.sha256(
-                        artifact.encode("utf-8")
-                    ).hexdigest(),
-                    "execution": succeeded_execution,
-                }
-                self.store.update(task["task_id"], developer=responded)
-                saved_responded = self.store.get(task["task_id"])
-                self.assertEqual(
-                    saved_responded["developer"]["model"], model
-                )
-                self.assertEqual(
-                    saved_responded["developer"]["state"],
-                    "DEVELOPER_RESPONDED",
-                )
-
-                # State: DEVELOPER_OUTCOME_UNKNOWN (on fresh task)
-                task_unknown = make_test_task(route="opencode")
-                self.store.create(task_unknown)
-                self.store.compare_and_update(
-                    task_unknown["task_id"],
-                    expected={"developer": None},
-                    developer=pending,
-                )
-                self.store.update(task_unknown["task_id"], developer=dispatching)
-                failed_execution = {
-                    "status": "FAILED",
-                    "native_session_id": "ses_fail12345678",
-                    "process_exit_code": 1,
-                    "stdout_sha256": "c" * 64,
-                    "elapsed_ms": 15,
-                    "cleanup_status": "CONFIRMED",
-                    "usage_source": "UNKNOWN",
-                    "source_bytes": 20,
-                    "source_file_count": 1,
-                    "source_manifest_sha256": "d" * 64,
-                }
-                unknown = {
-                    **dispatching,
-                    "state": "DEVELOPER_OUTCOME_UNKNOWN",
-                    "error_code": "OPENCODE_EXECUTION_FAILED",
-                    "execution": failed_execution,
-                }
-                self.store.update(task_unknown["task_id"], developer=unknown)
-                saved_unknown = self.store.get(task_unknown["task_id"])
-                self.assertEqual(
-                    saved_unknown["developer"]["model"], model
-                )
-                self.assertEqual(
-                    saved_unknown["developer"]["state"],
-                    "DEVELOPER_OUTCOME_UNKNOWN",
-                )
-
-    def test_task_store_refuses_malformed_models_on_opencode_record(self):
-        task = make_test_task(route="opencode")
-        self.store.create(task)
-        pending = developer_assignment_for(task, provider="opencode")
-        self.store.compare_and_update(
-            task["task_id"],
-            expected={"developer": None},
-            developer=pending,
-        )
-        for malformed in self.MALFORMED_MODELS:
-            with self.subTest(malformed=malformed):
-                invalid_dispatch = {
-                    **pending,
-                    "state": "DEVELOPER_DISPATCHING",
-                    "provider_type": "opencode-cli",
-                    "model": malformed,
-                }
-                with self.assertRaises(LLMToolError) as caught:
-                    self.store.update(
-                        task["task_id"], developer=invalid_dispatch
-                    )
-                self.assertEqual(
-                    caught.exception.task_store_error_code,
-                    "TASK_STORE_INVALID",
-                )
+    def test_non_str_models_are_refused(self):
+        for model in (None, 7, True, ['opencode/paid-model']):
+            with self.subTest(model=model):
+                self.assertFalse(is_valid_model(model))
+                with self.assertRaises(RouteError):
+                    check_route_model(self.config, 'opencode', model)
 
     def test_other_routes_model_checks_remain_unchanged(self):
-        # A3: AGY, Claude, gw-agent, and Codex roles keep their checks unchanged.
-        # AGY: Gemini family only
+        # A3: AGY, Claude, gw-agent and Codex roles keep their checks.
+        self.assertEqual(check_route_model(self.config, 'agy', 'gemini-3.8-flash-medium'),
+                         'gemini-3.8-flash-medium')
+        for bad_model in ('claude-opus-5-5', 'gpt-6.1-sol', 'opencode/paid-model'):
+            with self.subTest(route='agy', model=bad_model):
+                with self.assertRaises(RouteError) as caught:
+                    check_route_model(self.config, 'agy', bad_model)
+                self.assertEqual(caught.exception.code, 'ROLE_MODEL_NOT_ALLOWED')
+        self.assertEqual(check_route_model(self.config, 'claude', 'claude-opus-5-5'),
+                         'claude-opus-5-5')
+        for bad_model in ('gemini-3.8-flash-medium', 'gpt-6.1-sol', 'opencode/paid-model'):
+            with self.subTest(route='claude', model=bad_model):
+                with self.assertRaises(RouteError) as caught:
+                    check_route_model(self.config, 'claude', bad_model)
+                self.assertEqual(caught.exception.code, 'ROLE_MODEL_NOT_ALLOWED')
+        self.assertEqual(check_route_model(self.config, 'gw-agent', 'gw'), 'gw')
+        for bad_model in ('opencode/paid-model', 'other-unlisted-model'):
+            with self.subTest(route='gw-agent', model=bad_model):
+                with self.assertRaises(RouteError) as caught:
+                    check_route_model(self.config, 'gw-agent', bad_model)
+                self.assertEqual(caught.exception.code, 'ROLE_MODEL_NOT_ALLOWED')
         self.assertEqual(
-            check_route_model(self.config, "agy", "gemini-3.8-flash-medium"),
-            "gemini-3.8-flash-medium",
-        )
-        for bad_model in ("claude-opus-5-5", "gpt-6.1-sol", "opencode/paid-model"):
-            with self.assertRaises(RouteError) as caught:
-                check_route_model(self.config, "agy", bad_model)
-            self.assertEqual(caught.exception.code, "ROLE_MODEL_NOT_ALLOWED")
-
-        # Claude: Claude family only
-        self.assertEqual(
-            check_route_model(self.config, "claude", "claude-opus-5-5"),
-            "claude-opus-5-5",
-        )
-        for bad_model in ("gemini-3.8-flash-medium", "gpt-6.1-sol", "opencode/paid-model"):
-            with self.assertRaises(RouteError) as caught:
-                check_route_model(self.config, "claude", bad_model)
-            self.assertEqual(caught.exception.code, "ROLE_MODEL_NOT_ALLOWED")
-
-        # gw-agent: allowed_models gate (default 'gw')
-        self.assertEqual(check_route_model(self.config, "gw-agent", "gw"), "gw")
-        for bad_model in ("opencode/paid-model", "other-unlisted-model"):
-            with self.assertRaises(RouteError) as caught:
-                check_route_model(self.config, "gw-agent", bad_model)
-            self.assertEqual(caught.exception.code, "ROLE_MODEL_NOT_ALLOWED")
-
-        # Codex role check: Codex/GPT family only
-        self.assertEqual(
-            check_registry_role_model(self.config, "codex-reviewer", "gpt-6.1-sol"),
-            "gpt-6.1-sol",
-        )
-        for bad_model in ("claude-opus-5-5", "gemini-3.8-flash-medium"):
-            with self.assertRaises(RouteError) as caught:
-                check_registry_role_model(self.config, "codex-reviewer", bad_model)
-            self.assertEqual(caught.exception.code, "ROLE_MODEL_NOT_ALLOWED")
+            check_registry_role_model(self.config, 'codex-reviewer', 'gpt-6.1-sol'),
+            'gpt-6.1-sol')
+        for bad_model in ('claude-opus-5-5', 'gemini-3.8-flash-medium',
+                          'opencode/paid-model'):
+            with self.subTest(role='codex-reviewer', model=bad_model):
+                with self.assertRaises(RouteError) as caught:
+                    check_registry_role_model(self.config, 'codex-reviewer', bad_model)
+                self.assertEqual(caught.exception.code, 'ROLE_MODEL_NOT_ALLOWED')
 
 
-class OpenCodeDelegateEndToEndModelTests(unittest.TestCase):
-    """Test delegate execution and profile handling with admitted models."""
+class OpenCodeModelPersistenceTests(unittest.TestCase):
+    """A-store: admitted models persist in every state; malformed stay refused."""
+
+    ARTIFACT = ('diff --git a/src.py b/src.py\n'
+                '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.home = Path(self.temp.name) / "home"
-        self.home.mkdir(mode=0o700)
-        self.tasks_root = self.home / ".local/state/llmtool/tasks"
-        self.store = TaskStore(self.tasks_root)
-        self.executor_root = Path(self.temp.name) / "worktree"
-        self.executor_root.mkdir(mode=0o700)
-        (self.executor_root / "sample.py").write_text("VALUE = 1\n")
+        self.store = TaskStore(Path(self.temp.name).resolve() / 'tasks')
+        # #1692: the shared all-ALLOWED test policy, never the live file.
         self.policy_path = worker_policy_fixture.install(self)
 
-    def _write_config(self, model, steps=10):
-        config_dir = self.home / ".config/llmtool"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        content = (
-            "schema_version: 1\n"
-            "profiles:\n"
-            "  opencode-developer:\n"
-            f"    model: {model}\n"
-            f"    steps: {steps}\n"
-        )
-        (config_dir / "config.yaml").write_text(content, encoding="utf-8")
-
-    def _opencode_delegate_args(self, task):
-        return SimpleNamespace(
-            task_id=task["task_id"],
-            selection_source="USER",
-            context_stdin=False,
-            executor_task="executor-d6-test",
-            provider="opencode",
-            read_path=["sample.py"],
-            write_path=["sample.py"],
-            acceptance=["sample.py updated."],
-            egress_basis="Approved non-sensitive test context.",
-        )
-
-    def test_delegate_admits_configured_paid_model_end_to_end(self):
-        task = make_test_task(route="opencode")
+    def _dispatching_task(self, model):
+        task = opencode_dispatch_task()
         self.store.create(task)
-        self._write_config("opencode-go/deepseek-v4.1-flash#high", steps=20)
-        output = io.StringIO()
+        pending = opencode_pending_assignment()
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+        dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                       'provider_type': 'opencode-cli', 'model': model}
+        self.store.update(task['task_id'], developer=dispatching)
+        return task['task_id'], pending, dispatching
 
-        def fake_run(**kwargs):
-            self.assertEqual(kwargs["model"], "opencode-go/deepseek-v4.1-flash#high")
-            self.assertEqual(kwargs["steps"], 20)
-            (self.executor_root / "sample.py").write_text("VALUE = 2\n")
-            return DirectResult(
-                0,
-                "ses_Abc12345678",
-                "Updated fixture.",
-                None,
-                "UNKNOWN",
-                "a" * 64,
-                100,
-                "CONFIRMED",
-                "opencode v2.1.4",
-                10,
-                1,
-                "b" * 64,
-            )
+    def assert_stored(self, task_id, model, state):
+        developer = self.store.get(task_id)['developer']
+        self.assertEqual(developer['model'], model)
+        self.assertEqual(developer['state'], state)
 
-        snapshot = SimpleNamespace(
-            root=str(self.executor_root),
-            common_dir="/repo/.git",
-            branch="task-branch",
-            head="a" * 40,
-        )
-        registration = SimpleNamespace(
-            task_id="executor-d6-test",
-            trusted_agent_id="opencode-developer",
-            session_ref="session-ref",
-            native_session_id=None,
-            root=str(self.executor_root),
-            common_dir=snapshot.common_dir,
-            branch=snapshot.branch,
-            env2_pass_marker="pass",
-            source_sha=snapshot.head,
-        )
+    def test_admitted_models_persist_across_developer_states(self):
+        for model in ALL_ADMITTED_MODELS:
+            with self.subTest(model=model):
+                task_id, _, dispatching = self._dispatching_task(model)
+                self.assert_stored(task_id, model, 'DEVELOPER_DISPATCHING')
+                responded = {
+                    **dispatching, 'state': 'DEVELOPER_RESPONDED',
+                    'artifact': self.ARTIFACT,
+                    'artifact_sha256': hashlib.sha256(self.ARTIFACT.encode()).hexdigest(),
+                    'execution': opencode_execution('SUCCEEDED', 'ses_abcdefgh12345678'),
+                }
+                self.store.update(task_id, developer=responded)
+                self.assert_stored(task_id, model, 'DEVELOPER_RESPONDED')
 
-        with patch.dict(os.environ, {"HOME": str(self.home)}), \
-                patch.object(submission_cli, "_check_delegate_repair_cap"), \
-                patch.object(submission_cli, "_delegate_chain_gate", side_effect=lambda a, s, b, claim: claim()), \
-                patch.object(submission_cli, "_developer_card_prefix", return_value=("prefix\n", "a" * 64)), \
-                patch.object(submission_cli, "_record_skill_delivery"), \
-                patch.object(submission_cli, "_refresh_d6_binding_after_bootstrap", return_value=registration), \
-                patch.object(submission_cli.task_completion, "_worktree_diff", return_value=(["sample.py"], b"diff --git a/sample.py b/sample.py\n--- a/sample.py\n+++ b/sample.py\n@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n")), \
-                patch.object(submission_cli, "_developer_output_rejection", return_value=None), \
-                patch.object(submission_cli, "_revision_sources", return_value={"sample.py": "VALUE = 1\n"}), \
-                patch.object(submission_cli, "_bind_direct_native_session", return_value=True), \
-                patch.object(submission_cli, "run_task_direct_result_event", return_value=0), \
-                patch.object(submission_cli.task_completion, "validate_task_binding"), \
-                patch.object(submission_cli.task_completion, "collect_git_snapshot", return_value=snapshot), \
-                patch.object(submission_cli.task_completion, "bind_executor_task", return_value=(registration, snapshot)), \
-                patch.object(submission_cli.task_completion, "validate_env2_pass_marker"), \
-                patch.object(submission_cli.task_completion, "read_d6_registration", return_value=registration), \
-                patch.object(submission_cli.task_completion, "_git", return_value=b""), \
-                patch.object(submission_cli, "_bootstrap_registered_d6"), \
-                patch.object(submission_cli, "_ignored_file_fingerprints", return_value={}), \
-                patch.object(submission_cli, "_ignored_output_rejection", return_value=None), \
-                patch("llmtool.task_submission_cli.opencode_direct_developer.run", side_effect=fake_run) as invoke, \
-                redirect_stdout(output):
-            run_task_delegate(self._opencode_delegate_args(task))
+                other_id, _, other_dispatching = self._dispatching_task(model)
+                unknown = {
+                    **other_dispatching, 'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                    'error_code': 'OPENCODE_EXECUTION_FAILED',
+                    'execution': opencode_execution('UNKNOWN', 'ses_unknown12345678'),
+                }
+                self.store.update(other_id, developer=unknown)
+                self.assert_stored(other_id, model, 'DEVELOPER_OUTCOME_UNKNOWN')
 
-        self.assertEqual(invoke.call_count, 1)
-        stored = self.store.get(task["task_id"])
-        self.assertEqual(stored["developer"]["state"], "DEVELOPER_RESPONDED")
-        self.assertEqual(
-            stored["developer"]["model"],
-            "opencode-go/deepseek-v4.1-flash#high",
-        )
-
-    def test_delegate_refuses_malformed_model_before_cli_launch(self):
-        task = make_test_task(route="opencode")
+    def test_malformed_models_are_refused_by_store_validation(self):
+        task = opencode_dispatch_task()
         self.store.create(task)
-        self._write_config("bare-model-without-provider")
+        pending = opencode_pending_assignment()
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+        for model in MALFORMED_MODELS:
+            with self.subTest(model=model):
+                invalid = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                           'provider_type': 'opencode-cli', 'model': model}
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.update(task['task_id'], developer=invalid)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_STORE_INVALID')
+        stored = self.store.get(task['task_id'])['developer']
+        self.assertEqual(stored['state'], 'DEVELOPER_PENDING')
+        self.assertIsNone(stored['model'])
 
-        snapshot = SimpleNamespace(
-            root=str(self.executor_root),
-            common_dir="/repo/.git",
-            branch="task-branch",
-            head="a" * 40,
-        )
-        registration = SimpleNamespace(
-            task_id="executor-d6-test",
-            trusted_agent_id="opencode-developer",
-            session_ref="session-ref",
-            native_session_id=None,
-            root=str(self.executor_root),
-            common_dir=snapshot.common_dir,
-            branch=snapshot.branch,
-            env2_pass_marker="pass",
-            source_sha=snapshot.head,
-        )
-
-        with patch.dict(os.environ, {"HOME": str(self.home)}), \
-                patch.object(submission_cli, "_check_delegate_repair_cap"), \
-                patch.object(submission_cli.task_completion, "validate_task_binding"), \
-                patch.object(submission_cli.task_completion, "collect_git_snapshot", return_value=snapshot), \
-                patch.object(submission_cli.task_completion, "bind_executor_task", return_value=(registration, snapshot)), \
-                patch.object(submission_cli.task_completion, "validate_env2_pass_marker"), \
-                patch.object(submission_cli.task_completion, "read_d6_registration", return_value=registration), \
-                patch.object(submission_cli.task_completion, "_git", return_value=b""), \
-                patch.object(submission_cli, "_bootstrap_registered_d6"), \
-                patch("llmtool.task_submission_cli.opencode_direct_developer.run") as invoke:
-            with self.assertRaises(LLMToolError) as caught:
-                run_task_delegate(self._opencode_delegate_args(task))
-            self.assertEqual(
-                getattr(caught.exception, "direct_opencode_code", None),
-                "OPENCODE_MODEL_INVALID",
-            )
-        invoke.assert_not_called()
-        stored = self.store.get(task["task_id"])
-        self.assertIsNone(stored["developer"])
+    def test_invalid_outcome_evidence_stays_refused_for_admitted_model(self):
+        # Outcome persistence is not weakened: a paid model does not relax
+        # the evidence checks on a responded or unknown outcome.
+        model = 'opencode-go/deepseek-v4.1-flash#high'
+        task_id, _, dispatching = self._dispatching_task(model)
+        responded = {
+            **dispatching, 'state': 'DEVELOPER_RESPONDED',
+            'artifact': self.ARTIFACT,
+            'artifact_sha256': hashlib.sha256(self.ARTIFACT.encode()).hexdigest(),
+            'execution': opencode_execution('SUCCEEDED', 'ses_abcdefgh12345678'),
+        }
+        invalid_records = {
+            'responded without execution': {**responded, 'execution': None},
+            'responded with failed execution': {
+                **responded, 'execution': opencode_execution('FAILED', 'ses_abcdefgh12345678')},
+            'responded with wrong artifact digest': {
+                **responded, 'artifact_sha256': 'e' * 64},
+            'responded without artifact': {
+                **responded, 'artifact': None, 'artifact_sha256': None},
+            'unknown without error code': {
+                **dispatching, 'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                'execution': opencode_execution('UNKNOWN', 'ses_unknown12345678')},
+            'bad native session id': {
+                **responded, 'execution': opencode_execution('SUCCEEDED', 'not-a-session')},
+        }
+        for label, invalid in invalid_records.items():
+            with self.subTest(case=label):
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.update(task_id, developer=invalid)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_STORE_INVALID')
+        self.assert_stored(task_id, model, 'DEVELOPER_DISPATCHING')
 
 
-if __name__ == "__main__":
+class OpenCodeDeveloperProfileModelTests(unittest.TestCase):
+    """A1/A2: the configured user-config model passes the delegate profile check."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name).resolve() / 'home'
+        self.home.mkdir(mode=0o700)
+        self.policy_path = worker_policy_fixture.install(self)
+
+    def _write_opencode_developer_model(self, model, *, steps=None):
+        config = self.home / '.config/llmtool/config.yaml'
+        config.parent.mkdir(parents=True, exist_ok=True)
+        text = 'providers:\n  opencode-developer:\n    model: ' + model + '\n'
+        if steps is not None:
+            text += '    provider_options:\n      steps: ' + str(steps) + '\n'
+        config.write_text(text)
+
+    def test_configured_admitted_models_are_returned_unchanged(self):
+        for model in ALL_ADMITTED_MODELS:
+            with self.subTest(model=model):
+                self._write_opencode_developer_model(model, steps=24)
+                with patch.dict(os.environ, {'HOME': str(self.home)}):
+                    self.assertEqual(submission_cli._opencode_developer_profile(),
+                                     (model, 24))
+
+    def test_configured_malformed_models_are_refused_with_stable_code(self):
+        # YAML-safe malformed values; control-character values are covered by
+        # the validator tests above.
+        for model in ('bare-model', 'deepseek-v4.1-flash-free', 'opencode/a/b',
+                      'opencode/a/b-free', 'opencode/-model', '-leading/model',
+                      'opencode/..', '../model', 'https://example.invalid/m',
+                      'opencode/example-free#HIGH', 'opencode/' + 'a' * 125):
+            with self.subTest(model=model):
+                self._write_opencode_developer_model(model)
+                with patch.dict(os.environ, {'HOME': str(self.home)}):
+                    with self.assertRaises(LLMToolError) as caught:
+                        submission_cli._opencode_developer_profile()
+                self.assertEqual(getattr(caught.exception, 'direct_opencode_code', None),
+                                 'OPENCODE_MODEL_INVALID')
+
+    def test_no_fallback_model_replaces_a_refused_model(self):
+        # A2: a refused model is never swapped for the default or another model.
+        self._write_opencode_developer_model('opencode/a/b')
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch.object(submission_cli.opencode_direct_developer, 'validate_model',
+                             wraps=validate_model) as checked:
+            with self.assertRaises(LLMToolError):
+                submission_cli._opencode_developer_profile()
+        self.assertTrue(checked.call_args_list)
+        for call in checked.call_args_list:
+            self.assertEqual(call.args, ('opencode/a/b',))
+
+
+if __name__ == '__main__':
     unittest.main()
