@@ -1701,6 +1701,14 @@ class TaskSubmissionCLITests(unittest.TestCase):
         with redirect_stdout(io.StringIO()), patch('sys.stderr', io.StringIO()), \
                 self.assertRaises(SystemExit):
             parser.parse_args(base + ['--timeout', 'soon'])
+        # #2281 (Owner 2026-11-19): the help names the 5-hour hard cap.
+        task_action = next(action for action in parser._actions
+                           if action.dest == 'command').choices['task']
+        delegate = task_action._subparsers._group_actions[0].choices['delegate']
+        timeout_help = next(action.help for action in delegate._actions
+                            if action.dest == 'timeout')
+        self.assertIn('never above 18000', timeout_help)
+        self.assertNotIn('3600', timeout_help)
 
     def test_delegate_refuses_bad_timeout_before_task_read_or_fork(self):
         import copy

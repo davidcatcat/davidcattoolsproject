@@ -1095,7 +1095,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(seen['task']['budgets']['max_input_tokens'], 262144)
         self.assertEqual(seen['task']['budgets']['max_output_tokens'], 65536)
         self.assertEqual(seen['task']['budgets']['max_turns'], 512)
-        self.assertEqual(seen['task']['budgets']['max_wall_seconds'], 1800)
+        # #2281 (PR #2390 F1): the wall budget is the resolved run timeout
+        # (route default 10800 s), not the fixture's route budget of 1800 s.
+        self.assertEqual(seen['task']['budgets']['max_wall_seconds'], 10800)
+        self.assertEqual(seen['prepared_task']['budgets']['max_wall_seconds'], 10800)
         self.assertEqual(developer['usage']['prompt_tokens'], 1)
         self.assertEqual(developer['usage']['completion_tokens'], 2)
         self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
@@ -1251,7 +1254,9 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(seen_requests[0]['task']['budgets']['max_input_tokens'], 262144)
         self.assertEqual(seen_requests[0]['task']['budgets']['max_output_tokens'], 65536)
         self.assertEqual(seen_requests[0]['task']['budgets']['max_turns'], 512)
-        self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], 1800)
+        # #2281 (PR #2390 F1): the wall budget is the resolved run timeout
+        # (route default 10800 s), not the fixture's route budget of 1800 s.
+        self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], 10800)
 
     def test_old_audit_copies_are_removed_and_recent_copies_retained(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -2125,26 +2130,20 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertEqual(seen_requests[0]['task']['budgets']['max_input_tokens'], 262144)
         self.assertEqual(seen_requests[0]['task']['budgets']['max_output_tokens'], 65536)
         self.assertEqual(seen_requests[0]['task']['budgets']['max_turns'], 512)
-        self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], 1800)
+        # #2281 (PR #2390 F1): the wall budget is the resolved run timeout
+        # (route default 10800 s), not the fixture's route budget of 1800 s.
+        self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], 10800)
 
-    def test_delegate_passes_configured_wall_seconds_budget(self):
-        # #2281: the whole-run wall budget passed to the gateway equals the configured value.
-        target = 'gw-agent-wall-budget.txt'
+    def _wall_budget_delegate(self, target, requested_timeout, route_runner):
         task_id = self.task_id = self._active_pm_task(target)
         args = Namespace(task_id=task_id, mode='direct', context_stdin=False,
             data_class='SYNTHETIC', egress_basis='Synthetic test context.',
             acceptance=[f'Only {target} is created.'], selection_source='PM',
             executor_task='executor-d6', read_path=[target], write_path=[target],
-            cwd=str(self.root))
+            cwd=str(self.root), timeout=requested_timeout)
         real_config = load_route_config()
         real_config['routes']['gw-agent']['package_path'] = str(
             Path(__file__).resolve().parents[2] / 'api-agent-gateway')
-        seen_requests = []
-        def fake_runner(_route, request, *, gate, on_launch, **_kwargs):
-            seen_requests.append(copy.deepcopy(request))
-            on_launch()
-            raise RouteError('GW_AGENT_TIMEOUT')
-
         decision = worker_dispatch.PolicyDecision('gw-agent', True,
                                                   'OWNER_POLICY_ALLOWED', 'f' * 64)
         with patch.object(task_submission_cli, 'load_route_config',
@@ -2154,14 +2153,51 @@ class GwAgentRealStoreTests(unittest.TestCase):
              patch.object(worker_dispatch, 'authorize_dispatch'), \
              patch.object(worker_dispatch, 'evaluate', return_value=decision), \
              redirect_stdout(io.StringIO()):
-            task_submission_cli.run_task_gw_agent_delegate(
-                args, store=self.store, route_runner=fake_runner)
+            return task_submission_cli.run_task_gw_agent_delegate(
+                args, store=self.store, route_runner=route_runner)
 
-        self.assertEqual(len(seen_requests), 1)
-        configured_budget = load_route_config()['routes']['gw-agent']['budgets']['max_wall_seconds']
-        self.assertEqual(configured_budget, 10800)
-        self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], 10800)
-        self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], configured_budget)
+    def test_delegate_wall_budget_follows_the_resolved_run_timeout(self):
+        # #2281 (PR #2390 F1): the gateway ends the whole run at max_wall_seconds,
+        # so the budget it receives is the resolved run timeout: the route
+        # default (3 h) without --timeout, and a requested 5 h run gets 5 h.
+        route = load_route_config()['routes']['gw-agent']
+        self.assertEqual((route['default_timeout'], route['max_timeout']), (10800, 18000))
+        for requested, expected in ((None, 10800), (18000, 18000)):
+            with self.subTest(requested=requested):
+                self._fresh_store()
+                seen_requests = []
+
+                def fake_runner(_route, request, *, gate, on_launch, **_kwargs):
+                    seen_requests.append(copy.deepcopy(request))
+                    on_launch()
+                    raise RouteError('GW_AGENT_TIMEOUT')
+
+                self._wall_budget_delegate(f'gw-agent-wall-budget-{expected}.txt',
+                                           requested, fake_runner)
+                self.assertEqual(len(seen_requests), 1)
+                self.assertEqual(seen_requests[0]['timeout'], expected)
+                self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'],
+                                 expected)
+                self.assertEqual(self._reloaded()['developer']['timeout_seconds'], expected)
+                # The gateway contract itself accepts the 5-hour wall budget.
+                gateway_path = str(Path(__file__).resolve().parents[2] / 'api-agent-gateway')
+                sys.path.insert(0, gateway_path)
+                try:
+                    from api_agent_gateway.contract import BUDGET_LIMITS
+                finally:
+                    sys.path.remove(gateway_path)
+                low, high = BUDGET_LIMITS['max_wall_seconds']
+                self.assertTrue(low <= expected <= high)
+
+    def test_delegate_above_five_hours_is_refused_before_the_gateway(self):
+        # #2281: a run above 18000 s is still refused before any Task mutation.
+        self._fresh_store()
+        with self.assertRaisesRegex(LLMToolError, 'TIMEOUT_OVER_HARD_CAP'):
+            self._wall_budget_delegate('gw-agent-wall-budget-over.txt', 18001,
+                                       self._unused_runner)
+        reloaded = self._reloaded()
+        self.assertEqual(reloaded['state'], 'PM_RESPONDED')
+        self.assertIsNone(reloaded.get('developer'))
 
     def test_gateway_profile_model_outside_allowed_models_is_refused(self):
         # #1773 (CWE-863): the real repo route lists only its default model; a

@@ -914,7 +914,7 @@ def add_task_submission_parsers(actions):
     delegate.add_argument('--timeout', type=int, default=None, metavar='SECONDS',
                           help=('Claude, OpenCode, AGY and gw-agent direct runs: wall-clock '
                                 'limit in seconds (default: the route default_timeout; at most '
-                                'the route max_timeout and never above 3600)'))
+                                'the route max_timeout and never above 18000)'))
     delegate.add_argument('--context-stdin', action='store_true',
                           help='codex text proposals only: read bounded, sensitive-screened context from stdin')
     delegate.add_argument('--pm-session',
@@ -6440,6 +6440,11 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         for val, low, high in budget_bounds:
             if type(val) is not int or type(val) is bool or not low <= val <= high:
                 raise ValueError
+        # #2281 (PR #2390 F1): the gateway ends the whole run at max_wall_seconds,
+        # so the wall budget follows the resolved run timeout (route default
+        # 10800 s, at most the route max_timeout of 18000 s) rather than the
+        # fixed route budget; otherwise a 5-hour run would stop at 3 hours.
+        max_wall_seconds = timeout
         if (company_provider.get('type') != 'openai-compatible' or
                 type(model) is not str or not model or type(base_url) is not str or
                 not base_url or type(max_output_tokens) is not int or
