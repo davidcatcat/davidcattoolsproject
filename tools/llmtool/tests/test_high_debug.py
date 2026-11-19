@@ -2190,7 +2190,8 @@ class HighDebugTests(unittest.TestCase):
         self.assertIn('--model', argv)
         self.assertEqual(argv[argv.index('--model') + 1], 'claude-opus-5-5')
         self.assertIn('--strict-mcp-config', argv)
-        self.assertEqual(kwargs['timeout'], 1800)
+        # #2281 (Owner 2026-11-19): the claude-debug role defaults to 10800 s.
+        self.assertEqual(kwargs['timeout'], 10800)
         self.assertFalse(kwargs['check'])
         self.assertEqual(kwargs['stdin'], subprocess.DEVNULL)
         self.assertEqual(env['CLAUDE_CONFIG_DIR'], directory)

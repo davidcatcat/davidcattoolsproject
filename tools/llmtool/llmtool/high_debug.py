@@ -1021,7 +1021,8 @@ def _resolve_debug_role(role):
         raise
 
 
-# #1815 T2b: Debug run timeout from the developer-routes.json role entry (default 1800, max 3600).
+# #1815 T2b: Debug run timeout from the developer-routes.json role entry
+# (#2281: default DEFAULT_ROLE_TIMEOUT_SECONDS 10800, max HARD_TIMEOUT_CAP_SECONDS 18000).
 def _debug_timeout(role):
     """Return the configured run timeout for role; refuse before launch on bad config.
 
