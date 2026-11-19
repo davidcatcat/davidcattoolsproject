@@ -45,7 +45,6 @@ class TimeoutContinuationPolicyTests(unittest.TestCase):
                          code or 'OWNER_POLICY_ALLOWED')
         return code
 
-
     def test_default_limit_is_one_continuation(self):
         self.assertEqual(worker_dispatch.MAX_TIMEOUT_CONTINUATIONS_PER_TASK, 1)
         self.assertIsNone(self.continue_after(0, GOOD))

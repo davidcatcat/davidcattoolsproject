@@ -90,7 +90,7 @@ def repair_attempts_max(path=None):
     return max(policy['repair_max'], policy['test_fail_max'])
 
 
-KINDS =('root', 'child', 'replan')
+KINDS = ('root', 'child', 'replan')
 # Where a Task goes when its review route is used up (spec section 3-2).
 _ESCALATION = {'root': 'SPLIT', 'child': 'PM_DECIDE', 'replan': 'FAILED_FINAL'}
 _FAIL_OUTCOMES = ('PASS', 'FAIL', 'FAIL_NO_BLOCKING')
@@ -250,6 +250,7 @@ def root_outcome(tasks):
             continue
         return 'FAILED'
     return 'CLOSED'
+
 
 def waiting_notice_due(*, reason, waiting_since, now, policy):
     """E5: AUTH notifies at once; any other WAITING after waiting_notify_after_hours.
