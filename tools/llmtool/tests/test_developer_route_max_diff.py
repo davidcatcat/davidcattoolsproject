@@ -21,12 +21,17 @@ DRIFT_SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'guidance_drift
 
 class ResolveRouteMaxDiffTests(unittest.TestCase):
     def test_real_file_values(self):
-        # #2281: AGY and OpenCode are 5 MiB; Claude and gw-agent are unchanged.
-        for route in ('agy', 'opencode'):
+        # #2281 (Owner 2026-11-19): every Developer route is 5 MiB.
+        for route in ('agy', 'claude', 'gw-agent', 'opencode'):
             with self.subTest(route=route):
                 self.assertEqual(resolve_route_max_diff_bytes(route), 5 * 1024 * 1024)
-        self.assertEqual(resolve_route_max_diff_bytes('claude'), 262144)
-        self.assertEqual(resolve_route_max_diff_bytes('gw-agent'), 65536)
+
+    def test_route_without_max_diff_bytes_defaults_to_5_mib(self):
+        # #2281: no old 64 KiB default remains for a route without the key.
+        self.assertEqual(llmtool.developer_routes.base.DEFAULT_MAX_DIFF_BYTES, 5 * 1024 * 1024)
+        self.assertEqual(
+            resolve_route_max_diff_bytes('gw-agent', config={'routes': {'gw-agent': {}}}),
+            5 * 1024 * 1024)
 
     def test_injected_config_validation(self):
         base_cfg = load_route_config()

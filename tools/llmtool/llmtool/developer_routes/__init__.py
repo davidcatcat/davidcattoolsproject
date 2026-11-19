@@ -1,10 +1,10 @@
 """Provider-neutral execution contracts for direct CLI Developer routes."""
 
 from .base import (
-    DEFAULT_TIMEOUT_SECONDS, HARD_TIMEOUT_CAP_SECONDS, ROUTE_LIMIT_KEYS,
+    DEFAULT_TIMEOUT_SECONDS, HARD_MAX_ROUTE_BYTES, HARD_TIMEOUT_CAP_SECONDS, ROUTE_LIMIT_KEYS,
     TIMEOUT_KEYS as _TIMEOUT_KEYS, DeveloperRoute, RouteError, RouteResult,
     capture_snapshot, max_diff_bytes_ok, max_prompt_bytes_ok, max_task_paths_ok,
-    max_source_file_bytes_ok, max_source_total_bytes_ok,
+    max_source_file_bytes_ok, max_source_total_bytes_ok, max_tool_result_bytes_ok,
     resolve_route_max_diff_bytes, resolve_route_max_prompt_bytes,
     resolve_route_max_task_paths,
     resolve_route_max_source_file_bytes, resolve_route_max_source_total_bytes,
@@ -28,8 +28,8 @@ __all__ = [
     'resolve_route_timeout', 'resolve_route_max_diff_bytes', 'resolve_route_max_prompt_bytes',
     'resolve_route_max_task_paths', 'resolve_route_max_source_file_bytes',
     'resolve_route_max_source_total_bytes', 'max_prompt_bytes_ok',
-    'max_source_file_bytes_ok', 'max_source_total_bytes_ok',
-    'DEFAULT_TIMEOUT_SECONDS', 'HARD_TIMEOUT_CAP_SECONDS',
+    'max_source_file_bytes_ok', 'max_source_total_bytes_ok', 'max_tool_result_bytes_ok',
+    'DEFAULT_TIMEOUT_SECONDS', 'HARD_MAX_ROUTE_BYTES', 'HARD_TIMEOUT_CAP_SECONDS',
     'DEFAULT_ROLE_TIMEOUT_SECONDS', 'DEFAULT_REMOTE_TEST_TIMEOUT_SECONDS',
     'role_timeout', 'remote_test_timeout',
     'SandboxExecBoundary', 'UnsupportedBoundary', 'WriteBoundary',
@@ -204,7 +204,7 @@ def _gw_agent_budgets_ok(budgets, profile=None):
     and bounded by max_timeout (3600 s). Basis: the route default timeout and
     the two recorded 600 s stops (N3 and N1, AI Debug RCA_CONFIRMED on #2302)
     where runs were ended by the whole-run wall budget before the route default
-    timeout.
+    timeout. #2281 (Owner 2026-11-19): max_tool_result_bytes is 256..5 MiB.
     """
     if type(budgets) is not dict:
         return False
@@ -223,9 +223,7 @@ def _gw_agent_budgets_ok(budgets, profile=None):
     if (type(max_wall_seconds) is not int or type(max_wall_seconds) is bool or
             not 1 <= max_wall_seconds <= 86400):
         return False
-    max_tool_result_bytes = budgets.get('max_tool_result_bytes')
-    if (type(max_tool_result_bytes) is not int or type(max_tool_result_bytes) is bool or
-            not 256 <= max_tool_result_bytes <= 1048576):
+    if not max_tool_result_bytes_ok(budgets.get('max_tool_result_bytes')):
         return False
     max_sent_bytes = budgets.get('max_sent_bytes')
     if (type(max_sent_bytes) is not int or type(max_sent_bytes) is bool or

@@ -1251,6 +1251,134 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(seen_requests[0]['task']['budgets']['max_turns'], 512)
         self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], 1800)
 
+    def _delegate_task_budgets(self, max_tool_result_bytes):
+        """Run the delegate to the runner with one route tool-result budget.
+
+        Returns the budgets the runner received; a refused budget raises.
+        """
+        task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
+            'state': 'PM_RESPONDED', 'response': 'PM response', 'request': 'bounded task',
+            'task_binding': {'contract_digest': 'c' * 64},
+            'pm_assignment': {'route': 'gw-agent', 'risk': 'LOW', 'goal': 'goal',
+                              'acceptance': ['record result']},
+            'developer': None, 'completion': None}
+
+        class Store:
+            def __init__(self):
+                self.value = copy.deepcopy(task)
+
+            def get(self, _task_id):
+                return copy.deepcopy(self.value)
+
+            def compare_and_update(self, _task_id, *, expected, **updates):
+                self.value.update(copy.deepcopy(updates))
+                return copy.deepcopy(self.value)
+
+            def d6_bind_compare_and_update(self, task_id, *, executor_task_id, expected, **updates):
+                return self.compare_and_update(task_id, expected=expected, **updates)
+
+            def update(self, _task_id, **updates):
+                self.value.update(copy.deepcopy(updates))
+                return copy.deepcopy(self.value)
+
+        registration = SimpleNamespace(task_id='executor-d6', root=str(Path.cwd()),
+            common_dir='/repo/.git', branch='task-branch', trusted_agent_id='codex',
+            session_ref='session-ref', native_session_id=None)
+        snapshot = SimpleNamespace(head='d' * 40, root=str(Path.cwd()),
+            common_dir='/repo/.git', branch='task-branch')
+        args = Namespace(task_id='a' * 32, mode='direct', context_stdin=False,
+            data_class='SYNTHETIC', egress_basis='Synthetic test context.',
+            acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
+            read_path=['src.py'], write_path=['src.py'])
+        gateway_profile = {'adapter': 'openai-chat-tools', 'base_url': 'http://10.20.30.40:8080/v1',
+                           'model': 'authorized-model', 'context_cap_tokens': 32768,
+                           'max_output_tokens': 16384, 'auth_env': None,
+                           'allowed_data_classes': ['synthetic', 'public_repo']}
+        route_entry = {
+            'allowed_data_classes': ['synthetic', 'public_repo'],
+            'profile': gateway_profile,
+            'profile_name': 'llmtool-direct',
+            'authorization_ref': 'pm-task-ref',
+            'default_model': 'authorized-model',
+            'allowed_models': ['authorized-model'],
+            'default_effort': 'low',
+            'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
+                        'max_output_tokens': 65536, 'max_wall_seconds': 1800,
+                        'max_tool_result_bytes': max_tool_result_bytes,
+                        'max_sent_bytes': 16777216},
+        }
+        seen_requests = []
+
+        def fake_runner(_route, request, *, gate, on_launch, **_kwargs):
+            seen_requests.append(copy.deepcopy(request))
+            on_launch()
+            raise RouteError('GW_AGENT_TIMEOUT')
+
+        with patch.object(task_completion, 'validate_task_binding'), \
+             patch.object(task_completion, 'bind_executor_task',
+                          return_value=(registration, snapshot)), \
+             patch.object(task_submission_cli, '_delegate_d6_binding',
+                          return_value=(registration, snapshot)), \
+             patch.object(task_submission_cli, '_assignment_paths',
+                          return_value=(['src.py'], ['src.py'])), \
+             patch.object(task_submission_cli, '_remote_receipt_test_policy', return_value='REMOTE_RECEIPT'), \
+             patch.object(task_submission_cli, '_direct_result_callback', return_value={}), \
+             patch.object(task_submission_cli, 'load_route_config',
+                          return_value={'routes': {'gw-agent': route_entry}}), \
+             patch.object(task_submission_cli, '_gw_agent_endpoint', return_value=({
+                 'type': 'openai-compatible', 'model': 'authorized-model',
+                 'base_url': 'http://10.20.30.40:8080'}, {'max_tokens': 49152})), \
+             patch.object(worker_dispatch, 'authorize_dispatch'), \
+             patch.object(worker_dispatch, 'evaluate', return_value=worker_dispatch.PolicyDecision(
+                 'gw-agent', True, 'OWNER_POLICY_ALLOWED', 'f' * 64)), \
+             patch.object(task_submission_cli, 'GwAgentRoute',
+                          return_value=SimpleNamespace(validate_profile=lambda *_args: None)), \
+             patch.object(task_submission_cli, 'for_platform', return_value=object()), \
+             patch.object(task_submission_cli, '_task_view', return_value={}):
+            task_submission_cli.run_task_gw_agent_delegate(
+                args, store=Store(), route_runner=fake_runner)
+        self.assertEqual(len(seen_requests), 1)
+        return seen_requests[0]['task']['budgets']
+
+    def test_delegate_passes_tool_result_budget_up_to_5_mib(self):
+        # #2281 (Owner 2026-11-19, review F3): a tool-result budget just over the
+        # old 1 MiB validator ceiling and exactly 5 MiB reach the gateway task.
+        for value in (1024 * 1024 + 1, 5 * 1024 * 1024):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    self._delegate_task_budgets(value)['max_tool_result_bytes'], value)
+
+    def test_delegate_refuses_tool_result_budget_over_5_mib(self):
+        with self.assertRaisesRegex(LLMToolError, 'gateway profile is unavailable or invalid'):
+            self._delegate_task_budgets(5 * 1024 * 1024 + 1)
+
+    def test_shipped_gw_agent_byte_bounds_are_5_mib(self):
+        route = load_route_config()['routes']['gw-agent']
+        self.assertEqual(route['budgets']['max_tool_result_bytes'], 5 * 1024 * 1024)
+        self.assertEqual(route['max_diff_bytes'], 5 * 1024 * 1024)
+        self.assertEqual(route['max_prompt_bytes'], 5 * 1024 * 1024)
+
+    def test_route_loader_tool_result_budget_boundary(self):
+        shipped = json.loads((Path(__file__).resolve().parents[1] /
+                              'developer-routes.json').read_text(encoding='utf-8'))
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'developer-routes.json'
+            for value, accepted in ((1024 * 1024 + 1, True), (5 * 1024 * 1024, True),
+                                    (5 * 1024 * 1024 + 1, False)):
+                with self.subTest(value=value):
+                    data = copy.deepcopy(shipped)
+                    data['routes']['gw-agent']['budgets']['max_tool_result_bytes'] = value
+                    path.write_text(json.dumps(data), encoding='utf-8')
+                    if accepted:
+                        loaded = load_route_config(path)
+                        self.assertEqual(
+                            loaded['routes']['gw-agent']['budgets']['max_tool_result_bytes'],
+                            value)
+                    else:
+                        with self.assertRaises(RouteError) as caught:
+                            load_route_config(path)
+                        self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
+
     def test_old_audit_copies_are_removed_and_recent_copies_retained(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1314,6 +1442,74 @@ class GwAgentProfileTimeoutTests(unittest.TestCase):
         expected = dict(with_timeout)
         del expected['timeout_seconds']
         self.assertEqual(without_timeout, expected)
+
+
+class GwAgentToolResultBudgetTests(unittest.TestCase):
+    """#2281 (Owner 2026-11-19, review F3): the adapter and the gateway task
+    contract accept a tool-result budget up to 5 MiB; the adapter refuses more."""
+
+    def setUp(self):
+        package_root = tempfile.TemporaryDirectory()
+        self.addCleanup(package_root.cleanup)
+        work_root = tempfile.TemporaryDirectory()
+        self.addCleanup(work_root.cleanup)
+        self.root = work_root.name
+        (Path(package_root.name) / 'api_agent_gateway').mkdir()
+        config = load_route_config()['routes']['gw-agent']
+        config['package_path'] = package_root.name
+        profile = copy.deepcopy(config['profile'])
+        profile['base_url'] = 'http://127.0.0.1:9/v1'
+        config['profile'] = profile
+        self.route = GwAgentRoute(config)
+
+    def _request(self, max_tool_result_bytes):
+        task = {'schema_version': 1, 'task_id': 'b' * 32, 'source_sha': 'a' * 40,
+                'goal': 'Edit src.py.', 'acceptance': ['record the result'],
+                'read_paths': ['src.py'], 'write_paths': ['src.py'],
+                'budgets': {'max_turns': 4, 'max_input_tokens': 10000,
+                            'max_output_tokens': 1000, 'max_wall_seconds': 60,
+                            'max_tool_result_bytes': max_tool_result_bytes,
+                            'max_sent_bytes': 100000},
+                'egress_basis': 'Synthetic test content.', 'data_class': 'synthetic',
+                'findings': []}
+        return {'root': self.root, 'model': 'gw', 'effort': 'low',
+                'expected_branch': 'main', 'expected_head': 'a' * 40,
+                'write_paths': ['src.py'], 'executable': sys.executable, 'task': task}
+
+    def test_adapter_accepts_tool_result_budget_up_to_5_mib(self):
+        for value in (1024 * 1024 + 1, 5 * 1024 * 1024):
+            with self.subTest(value=value):
+                validated = self.route.validate_request(self._request(value))
+                self.assertEqual(validated['task']['budgets']['max_tool_result_bytes'], value)
+
+    def test_adapter_refuses_tool_result_budget_over_5_mib(self):
+        with self.assertRaises(RouteError) as caught:
+            self.route.validate_request(self._request(5 * 1024 * 1024 + 1))
+        self.assertEqual(caught.exception.code,
+                         'GW_AGENT_TASK_BUDGET_MAX_TOOL_RESULT_BYTES_INVALID')
+
+    def test_gateway_task_contract_accepts_tool_result_budget_up_to_5_mib(self):
+        # End to end: the task file the adapter writes for a budget just over
+        # the old 1 MiB ceiling and at 5 MiB parses under the in-repo gateway
+        # contract, as the dispatch test above parses its task file.
+        gateway_path = str(Path(__file__).resolve().parents[2] / 'api-agent-gateway')
+        sys.path.insert(0, gateway_path)
+        try:
+            from api_agent_gateway.contract import parse_task
+            for value in (1024 * 1024 + 1, 5 * 1024 * 1024):
+                with self.subTest(value=value), \
+                        tempfile.TemporaryDirectory() as route_tmp:
+                    request = self._request(value)
+                    with patch.object(self.route, '_load_credential', return_value=None):
+                        self.route._prepare_files(route_tmp, request)
+                    prepared = json.loads(
+                        (Path(route_tmp) / 'task.json').read_text(encoding='utf-8'))
+                    self.assertEqual(prepared['budgets']['max_tool_result_bytes'], value)
+                    serialized = json.dumps(prepared, sort_keys=True,
+                                            separators=(',', ':')).encode('utf-8')
+                    parse_task(prepared, serialized)
+        finally:
+            sys.path.remove(gateway_path)
 
 
 class GwAgentShippedServedModelTests(unittest.TestCase):

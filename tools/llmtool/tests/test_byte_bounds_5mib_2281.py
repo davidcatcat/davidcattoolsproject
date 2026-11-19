@@ -8,6 +8,7 @@ packet).
 """
 
 import copy
+import importlib.util
 import json
 from pathlib import Path
 import tempfile
@@ -16,8 +17,15 @@ import unittest
 from llmtool import opencode_direct_developer, task_store
 from llmtool.developer_routes import (
     AgyRoute,
+    ClaudeRoute,
+    HARD_MAX_ROUTE_BYTES,
     RouteError,
     load_route_config,
+    max_diff_bytes_ok,
+    max_prompt_bytes_ok,
+    max_source_file_bytes_ok,
+    max_source_total_bytes_ok,
+    max_tool_result_bytes_ok,
     resolve_route_max_diff_bytes,
     resolve_route_max_prompt_bytes,
     resolve_route_max_source_file_bytes,
@@ -25,6 +33,7 @@ from llmtool.developer_routes import (
 )
 from llmtool.developer_routes import agy as agy_route
 from llmtool.developer_routes import base
+from llmtool.developer_routes import gw_agent as gw_agent_route
 from llmtool.opencode_direct_developer import (
     DirectOpenCodeError,
     _read_scoped_file,
@@ -34,27 +43,40 @@ from llmtool.opencode_direct_developer import (
 
 FIVE_MIB = 5 * 1024 * 1024
 ROUTES_FILE = Path(__file__).resolve().parents[1] / 'developer-routes.json'
+DRIFT_SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'guidance_drift_check.py'
+ALL_ROUTES = ('agy', 'claude', 'gw-agent', 'opencode')
 
 
 class ShippedBoundsTests(unittest.TestCase):
     def test_route_file_values_are_5_mib(self):
         routes = json.loads(ROUTES_FILE.read_text(encoding='utf-8'))['routes']
-        self.assertEqual(routes['agy']['max_prompt_bytes'], FIVE_MIB)
-        self.assertEqual(routes['agy']['max_diff_bytes'], FIVE_MIB)
-        for key in ('max_prompt_bytes', 'max_diff_bytes',
-                    'max_source_file_bytes', 'max_source_total_bytes'):
+        # Review F1/F3: Claude and gw-agent are 5 MiB too; no route keeps a lower bound.
+        for route in ALL_ROUTES:
+            for key in ('max_prompt_bytes', 'max_diff_bytes'):
+                with self.subTest(route=route, key=key):
+                    self.assertEqual(routes[route][key], FIVE_MIB)
+        for key in ('max_source_file_bytes', 'max_source_total_bytes'):
             with self.subTest(key=key):
                 self.assertEqual(routes['opencode'][key], FIVE_MIB)
+        self.assertEqual(routes['gw-agent']['budgets']['max_tool_result_bytes'], FIVE_MIB)
 
     def test_resolvers_return_5_mib(self):
-        self.assertEqual(resolve_route_max_prompt_bytes('agy'), FIVE_MIB)
-        self.assertEqual(resolve_route_max_diff_bytes('agy'), FIVE_MIB)
-        self.assertEqual(resolve_route_max_prompt_bytes('opencode'), FIVE_MIB)
-        self.assertEqual(resolve_route_max_diff_bytes('opencode'), FIVE_MIB)
+        for route in ALL_ROUTES:
+            with self.subTest(route=route):
+                self.assertEqual(resolve_route_max_prompt_bytes(route), FIVE_MIB)
+                self.assertEqual(resolve_route_max_diff_bytes(route), FIVE_MIB)
         self.assertEqual(resolve_route_max_source_file_bytes('opencode'), FIVE_MIB)
         self.assertEqual(resolve_route_max_source_total_bytes('opencode'), FIVE_MIB)
 
     def test_defaults_mirror_route_values(self):
+        self.assertEqual(HARD_MAX_ROUTE_BYTES, FIVE_MIB)
+        self.assertEqual(base.DEFAULT_MAX_DIFF_BYTES, FIVE_MIB)
+        self.assertEqual(base.DEFAULT_CLAUDE_MAX_PROMPT_BYTES, FIVE_MIB)
+        self.assertEqual(base.DEFAULT_GW_AGENT_MAX_PROMPT_BYTES, FIVE_MIB)
+        self.assertEqual(base.HARD_MAX_TOOL_RESULT_BYTES, FIVE_MIB)
+        self.assertEqual(gw_agent_route._GATEWAY_BUDGETS['max_tool_result_bytes'],
+                         (256, FIVE_MIB))
+        self.assertEqual(task_store.MAX_DEVELOPER_INPUT_BYTES, FIVE_MIB)
         self.assertEqual(base.DEFAULT_AGY_MAX_PROMPT_BYTES, FIVE_MIB)
         self.assertEqual(base.DEFAULT_OPENCODE_MAX_PROMPT_BYTES, FIVE_MIB)
         self.assertEqual(base.DEFAULT_OPENCODE_MAX_SOURCE_FILE_BYTES, FIVE_MIB)
@@ -75,6 +97,78 @@ class ShippedBoundsTests(unittest.TestCase):
         self.assertGreaterEqual(task_store.MAX_RECORD_BYTES, 2 * task_store.MAX_ARTIFACT_BYTES)
         self.assertEqual(task_store.MAX_EXECUTION_SOURCE_BYTES,
                          resolve_route_max_source_total_bytes('opencode'))
+
+    def test_drift_check_ceiling_matches_route_ceiling(self):
+        spec = importlib.util.spec_from_file_location('guidance_drift_check', DRIFT_SCRIPT)
+        drift = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(drift)
+        self.assertEqual(drift.ROUTE_MAX_BYTES, HARD_MAX_ROUTE_BYTES)
+
+
+class ValidatorCeilingTests(unittest.TestCase):
+    """Security repair (Codex security v91, CWE-400): every byte-bound validator
+    fails closed above 5 MiB instead of accepting any positive integer."""
+
+    def test_each_validator_accepts_5_mib_and_refuses_more(self):
+        for validator in (max_diff_bytes_ok, max_prompt_bytes_ok, max_source_file_bytes_ok,
+                          max_source_total_bytes_ok, max_tool_result_bytes_ok):
+            with self.subTest(validator=validator.__name__):
+                self.assertTrue(validator(FIVE_MIB))
+                self.assertFalse(validator(FIVE_MIB + 1))
+                self.assertFalse(validator(10 * FIVE_MIB))
+
+    def test_loader_refuses_each_byte_bound_over_5_mib(self):
+        shipped = json.loads(ROUTES_FILE.read_text(encoding='utf-8'))
+        cases = [(route, key) for route in ALL_ROUTES
+                 for key in ('max_prompt_bytes', 'max_diff_bytes')]
+        cases += [('opencode', 'max_source_file_bytes'), ('opencode', 'max_source_total_bytes')]
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'developer-routes.json'
+            for route, key in cases:
+                with self.subTest(route=route, key=key):
+                    data = copy.deepcopy(shipped)
+                    data['routes'][route][key] = FIVE_MIB + 1
+                    path.write_text(json.dumps(data), encoding='utf-8')
+                    with self.assertRaises(RouteError) as caught:
+                        load_route_config(path)
+                    self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
+            data = copy.deepcopy(shipped)
+            data['routes']['gw-agent']['budgets']['max_tool_result_bytes'] = FIVE_MIB + 1
+            path.write_text(json.dumps(data), encoding='utf-8')
+            with self.assertRaises(RouteError) as caught:
+                load_route_config(path)
+            self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
+
+    def test_adapter_supplied_values_over_5_mib_are_refused(self):
+        # An adapter config is checked like the route file; it can never widen a bound.
+        cases = (
+            (resolve_route_max_prompt_bytes, 'max_prompt_bytes', AgyRoute, 'agy'),
+            (resolve_route_max_prompt_bytes, 'max_prompt_bytes', ClaudeRoute, 'claude'),
+            (resolve_route_max_source_file_bytes, 'max_source_file_bytes', AgyRoute, 'agy'),
+            (resolve_route_max_source_total_bytes, 'max_source_total_bytes', AgyRoute, 'agy'),
+        )
+        for resolve, key, adapter_type, executable in cases:
+            with self.subTest(key=key, adapter=executable):
+                adapter = adapter_type({'executable': executable, key: FIVE_MIB + 1})
+                with self.assertRaises(RouteError) as caught:
+                    resolve(adapter)
+                self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
+                adapter = adapter_type({'executable': executable, key: FIVE_MIB})
+                self.assertEqual(resolve(adapter), FIVE_MIB)
+
+    def test_agy_adapter_over_5_mib_does_not_widen_its_prompt_check(self):
+        route = AgyRoute({'executable': 'agy', 'max_prompt_bytes': FIVE_MIB + 1})
+        with tempfile.TemporaryDirectory() as temp:
+            request = {
+                'root': temp,
+                'model': load_route_config()['routes']['agy']['default_model'],
+                'effort': 'medium', 'expected_branch': 'main', 'expected_head': '0' * 40,
+                'write_paths': ['source.py'], 'executable': '/usr/bin/agy',
+                'log_path': 'agy.log', 'prompt': 'x' * (FIVE_MIB + 1),
+            }
+            with self.assertRaises(RouteError) as caught:
+                route.validate_request(request)
+        self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
 
 
 class LoaderDiffBoundTests(unittest.TestCase):

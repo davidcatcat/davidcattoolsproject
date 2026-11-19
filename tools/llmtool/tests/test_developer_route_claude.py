@@ -8,9 +8,11 @@ import unittest
 from unittest import mock
 import uuid
 
-from llmtool.developer_routes import ClaudeRoute, RouteError, load_route_config
-from llmtool.developer_routes.claude import MAX_PROMPT_BYTES
+from llmtool.developer_routes import (ClaudeRoute, RouteError, load_route_config,
+                                     resolve_route_max_prompt_bytes)
 from llmtool.developer_routes.base import capture_snapshot, run_route
+
+FIVE_MIB = 5 * 1024 * 1024
 
 
 class Boundary:
@@ -109,9 +111,16 @@ class ClaudeRouteTests(unittest.TestCase):
             self.assertNotIn(forbidden, expected)
 
     def test_prompt_profile_and_config_validation(self):
-        self.route.validate_request(self.request('x' * MAX_PROMPT_BYTES))
+        # #2281 (Owner 2026-11-19): the shipped Claude route accepts a prompt
+        # just over the old 64 KiB bound and up to 5 MiB, and refuses one byte more.
+        self.assertEqual(resolve_route_max_prompt_bytes(self.route), FIVE_MIB)
+        for size in (64 * 1024 + 1, FIVE_MIB):
+            with self.subTest(size=size):
+                prompt = 'x' * size
+                self.assertEqual(
+                    self.route.validate_request(self.request(prompt))['prompt'], prompt)
         with self.assertRaises(RouteError) as caught:
-            self.route.validate_request(self.request('x' * (MAX_PROMPT_BYTES + 1)))
+            self.route.validate_request(self.request('x' * (FIVE_MIB + 1)))
         self.assertEqual(caught.exception.code, 'CLAUDE_REQUEST_INVALID')
         for model, effort in (('claude', 'high'), ('opus', 'high'),
                               ('claude-opus-5-5', 'default')):

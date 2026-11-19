@@ -1637,6 +1637,26 @@ class TaskStoreTests(unittest.TestCase):
             self.store.compare_and_update(
                 task['task_id'], expected={'developer': None}, developer=developer)
 
+    def test_developer_input_bytes_up_to_5_mib_are_stored(self):
+        # #2281 (Owner 2026-11-19): a Developer prompt may be up to 5 MiB, so the
+        # recorded input_bytes may be too. Just over the old 64 KiB bound and
+        # exactly 5 MiB are stored; one byte over 5 MiB is refused.
+        self.assertEqual(task_store_module.MAX_DEVELOPER_INPUT_BYTES, 5 * 1024 * 1024)
+        for size in (64 * 1024 + 1, 5 * 1024 * 1024):
+            with self.subTest(size=size):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                developer = dict(self._developer_assignment(), input_bytes=size)
+                saved = self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None}, developer=developer)
+                self.assertEqual(saved['developer']['input_bytes'], size)
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        developer = dict(self._developer_assignment(), input_bytes=5 * 1024 * 1024 + 1)
+        with self.assertRaises(LLMToolError):
+            self.store.compare_and_update(
+                task['task_id'], expected={'developer': None}, developer=developer)
+
     def test_developer_timeout_seconds_is_optional_and_bounded(self):
         # #1815: legacy records without the field stay valid.
         task = self._codex_dispatch_task()

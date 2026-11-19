@@ -34,29 +34,37 @@ DEFAULT_TIMEOUT_SECONDS = 600
 HARD_TIMEOUT_CAP_SECONDS = 3600
 MAX_TIMEOUT_SECONDS = DEFAULT_TIMEOUT_SECONDS
 TIMEOUT_KEYS = frozenset({'default_timeout', 'max_timeout'})
-DEFAULT_MAX_DIFF_BYTES = 64 * 1024
+# #2281 (Owner 2026-11-19, relayed c7003366463): every Developer route byte
+# bound (prompt, diff, source file, source total, gw-agent tool result) is
+# 5 MiB. It is also the hard ceiling: a configured or adapter-supplied value
+# above it is refused (fail closed, CWE-400).
+HARD_MAX_ROUTE_BYTES = 5 * 1024 * 1024
+DEFAULT_MAX_DIFF_BYTES = HARD_MAX_ROUTE_BYTES
 MIN_MAX_DIFF_BYTES = 1024
 # #1815: the TaskStore artifact limit (task_store.MAX_ARTIFACT_BYTES).
-# #2281 (Owner 2026-11-19): 5 MiB.
-HARD_MAX_DIFF_BYTES = 5 * 1024 * 1024
+HARD_MAX_DIFF_BYTES = HARD_MAX_ROUTE_BYTES
+# gw-agent budgets.max_tool_result_bytes range; the minimum is unchanged.
+MIN_MAX_TOOL_RESULT_BYTES = 256
+HARD_MAX_TOOL_RESULT_BYTES = HARD_MAX_ROUTE_BYTES
 # #2157: Developer read and write path caps per route. TaskStore stores at most
 # 32 of each per Developer record, so a route may lower the cap but not raise it.
 DEFAULT_MAX_TASK_PATHS = 32
 HARD_MAX_TASK_PATHS = 32
-DEFAULT_CLAUDE_MAX_PROMPT_BYTES = 65536
-# #2281 (Owner 2026-11-19): AGY and OpenCode byte bounds are 5 MiB.
-DEFAULT_AGY_MAX_PROMPT_BYTES = 5 * 1024 * 1024
-DEFAULT_OPENCODE_MAX_PROMPT_BYTES = 5 * 1024 * 1024
+DEFAULT_CLAUDE_MAX_PROMPT_BYTES = HARD_MAX_ROUTE_BYTES
+DEFAULT_AGY_MAX_PROMPT_BYTES = HARD_MAX_ROUTE_BYTES
+DEFAULT_OPENCODE_MAX_PROMPT_BYTES = HARD_MAX_ROUTE_BYTES
+DEFAULT_GW_AGENT_MAX_PROMPT_BYTES = HARD_MAX_ROUTE_BYTES
 DEFAULT_ROUTE_MAX_PROMPT_BYTES = {
     'claude': DEFAULT_CLAUDE_MAX_PROMPT_BYTES,
     'agy': DEFAULT_AGY_MAX_PROMPT_BYTES,
     'opencode': DEFAULT_OPENCODE_MAX_PROMPT_BYTES,
+    'gw-agent': DEFAULT_GW_AGENT_MAX_PROMPT_BYTES,
 }
-DEFAULT_OPENCODE_MAX_SOURCE_FILE_BYTES = 5 * 1024 * 1024
+DEFAULT_OPENCODE_MAX_SOURCE_FILE_BYTES = HARD_MAX_ROUTE_BYTES
 DEFAULT_ROUTE_MAX_SOURCE_FILE_BYTES = {
     'opencode': DEFAULT_OPENCODE_MAX_SOURCE_FILE_BYTES,
 }
-DEFAULT_OPENCODE_MAX_SOURCE_TOTAL_BYTES = 5 * 1024 * 1024
+DEFAULT_OPENCODE_MAX_SOURCE_TOTAL_BYTES = HARD_MAX_ROUTE_BYTES
 DEFAULT_ROUTE_MAX_SOURCE_TOTAL_BYTES = {
     'opencode': DEFAULT_OPENCODE_MAX_SOURCE_TOTAL_BYTES,
 }
@@ -66,36 +74,35 @@ ROUTE_LIMIT_KEYS = TIMEOUT_KEYS | {
 }
 
 
+def _route_bytes_ok(value: Any) -> bool:
+    """Return True only for an int (not bool) with 1 <= value <= HARD_MAX_ROUTE_BYTES."""
+    return type(value) is int and 1 <= value <= HARD_MAX_ROUTE_BYTES
+
+
 def max_diff_bytes_ok(value: Any) -> bool:
     """Return True only for an int (not bool) with MIN_MAX_DIFF_BYTES <= value <= HARD_MAX_DIFF_BYTES."""
     return type(value) is int and MIN_MAX_DIFF_BYTES <= value <= HARD_MAX_DIFF_BYTES
 
 
 def max_prompt_bytes_ok(value: Any) -> bool:
-    """Return True only for an int (not bool) >= 1.
-
-    No upper bound is enforced here; the configured value is bounded only by
-    available memory and provider limits.
-    """
-    return type(value) is int and value >= 1
+    """Return True only for an int (not bool) with 1 <= value <= HARD_MAX_ROUTE_BYTES (#2281)."""
+    return _route_bytes_ok(value)
 
 
 def max_source_file_bytes_ok(value: Any) -> bool:
-    """Return True only for an int (not bool) >= 1.
-
-    No upper bound is enforced here; the configured value is bounded only by
-    available memory and provider limits.
-    """
-    return type(value) is int and value >= 1
+    """Return True only for an int (not bool) with 1 <= value <= HARD_MAX_ROUTE_BYTES (#2281)."""
+    return _route_bytes_ok(value)
 
 
 def max_source_total_bytes_ok(value: Any) -> bool:
-    """Return True only for an int (not bool) >= 1.
+    """Return True only for an int (not bool) with 1 <= value <= HARD_MAX_ROUTE_BYTES (#2281)."""
+    return _route_bytes_ok(value)
 
-    No upper bound is enforced here; the configured value is bounded only by
-    available memory and provider limits.
-    """
-    return type(value) is int and value >= 1
+
+def max_tool_result_bytes_ok(value: Any) -> bool:
+    """Return True only for an int (not bool) with 256 <= value <= HARD_MAX_TOOL_RESULT_BYTES (#2281)."""
+    return (type(value) is int and
+            MIN_MAX_TOOL_RESULT_BYTES <= value <= HARD_MAX_TOOL_RESULT_BYTES)
 
 
 def max_task_paths_ok(value: Any) -> bool:
@@ -362,8 +369,9 @@ def resolve_route_max_diff_bytes(route: Any, *,
 
     route is a registered route name or a DeveloperRoute; config is a
     load_route_config() result (None loads the repository file). A route
-    without max_diff_bytes returns DEFAULT_MAX_DIFF_BYTES. An invalid value,
-    unknown str route or bad config raises RouteError('ROUTE_CONFIG_INVALID').
+    without max_diff_bytes returns DEFAULT_MAX_DIFF_BYTES (5 MiB, #2281). An
+    invalid value, unknown str route or bad config raises
+    RouteError('ROUTE_CONFIG_INVALID').
     """
     if isinstance(route, DeveloperRoute):
         name = getattr(route, 'name', None)
@@ -438,9 +446,10 @@ def resolve_route_max_prompt_bytes(route: Any, *,
 
     route is a registered route name or a DeveloperRoute; config is a
     load_route_config() result (None loads the repository file). A route
-    without max_prompt_bytes returns today's default for that route
-    (65536 for claude, 5242880 for agy and opencode). An invalid value, unknown str route
-    or bad config raises RouteError('ROUTE_CONFIG_INVALID').
+    without max_prompt_bytes returns its default (5242880 for every route).
+    An adapter-supplied value is checked like a configured one: a value that
+    is not an int in 1..HARD_MAX_ROUTE_BYTES, an unknown str route or a bad
+    config raises RouteError('ROUTE_CONFIG_INVALID').
     """
     if isinstance(route, DeveloperRoute):
         name = getattr(route, 'name', None)
@@ -468,11 +477,11 @@ def resolve_route_max_prompt_bytes(route: Any, *,
     if entry is None:
         if registered_only:
             raise RouteError('ROUTE_CONFIG_INVALID')
-        return DEFAULT_ROUTE_MAX_PROMPT_BYTES.get(key, DEFAULT_CLAUDE_MAX_PROMPT_BYTES)
+        return DEFAULT_ROUTE_MAX_PROMPT_BYTES.get(key, HARD_MAX_ROUTE_BYTES)
     if not isinstance(entry, Mapping):
         raise RouteError('ROUTE_CONFIG_INVALID')
     if 'max_prompt_bytes' not in entry:
-        return DEFAULT_ROUTE_MAX_PROMPT_BYTES.get(key, DEFAULT_CLAUDE_MAX_PROMPT_BYTES)
+        return DEFAULT_ROUTE_MAX_PROMPT_BYTES.get(key, HARD_MAX_ROUTE_BYTES)
     val = entry['max_prompt_bytes']
     if not max_prompt_bytes_ok(val):
         raise RouteError('ROUTE_CONFIG_INVALID')
@@ -486,7 +495,8 @@ def resolve_route_max_source_file_bytes(route: Any, *,
     route is a registered route name or a DeveloperRoute; config is a
     load_route_config() result (None loads the repository file). A route
     without max_source_file_bytes returns today's default for that route
-    (5242880 for opencode). An invalid value, unknown str route or bad config
+    (5242880 for opencode). A configured or adapter-supplied value that is not
+    an int in 1..HARD_MAX_ROUTE_BYTES, an unknown str route or a bad config
     raises RouteError('ROUTE_CONFIG_INVALID').
     """
     if isinstance(route, DeveloperRoute):
@@ -533,7 +543,8 @@ def resolve_route_max_source_total_bytes(route: Any, *,
     route is a registered route name or a DeveloperRoute; config is a
     load_route_config() result (None loads the repository file). A route
     without max_source_total_bytes returns today's default for that route
-    (5242880 for opencode). An invalid value, unknown str route or bad config
+    (5242880 for opencode). A configured or adapter-supplied value that is not
+    an int in 1..HARD_MAX_ROUTE_BYTES, an unknown str route or a bad config
     raises RouteError('ROUTE_CONFIG_INVALID').
     """
     if isinstance(route, DeveloperRoute):

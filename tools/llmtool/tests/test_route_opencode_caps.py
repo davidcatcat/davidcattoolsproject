@@ -50,14 +50,17 @@ class RouteOpenCodeCapsTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_validators_ok(self):
-        for valid in (1, 100, 65536, 1048576, 2097152, 10_000_000):
+        # #2281: 1..5 MiB; a value above 5 MiB is refused (fail closed, CWE-400).
+        for valid in (1, 100, 65536, 1048576, 2097152, 5242880):
             with self.subTest(valid=valid):
                 self.assertTrue(max_prompt_bytes_ok(valid))
                 self.assertTrue(max_source_file_bytes_ok(valid))
                 self.assertTrue(max_source_total_bytes_ok(valid))
 
-        for invalid in (0, -1, -500, True, False, "1048576", 1048576.0, None, [], {}):
+        for invalid in (0, -1, -500, True, False, "1048576", 1048576.0, None, [], {},
+                        5242881, 10_000_000):
             with self.subTest(invalid=invalid):
+                self.assertFalse(max_prompt_bytes_ok(invalid))
                 self.assertFalse(max_source_file_bytes_ok(invalid))
                 self.assertFalse(max_source_total_bytes_ok(invalid))
 
@@ -71,7 +74,8 @@ class RouteOpenCodeCapsTests(unittest.TestCase):
 
     def test_loader_refuses_bad_source_and_prompt_bytes_values(self):
         base_config = load_route_config()
-        bad_values = (0, -1, -100, True, False, "1048576", 1048576.0, None, [1048576])
+        bad_values = (0, -1, -100, True, False, "1048576", 1048576.0, None, [1048576],
+                      5242881, 10_000_000)
         for key in ("max_prompt_bytes", "max_source_file_bytes", "max_source_total_bytes"):
             for bad in bad_values:
                 with self.subTest(key=key, bad=bad):
@@ -144,6 +148,44 @@ class RouteOpenCodeCapsTests(unittest.TestCase):
                 "opencode", config={"routes": {"opencode": {"max_source_total_bytes": 0}}}
             )
         self.assertEqual(caught.exception.code, "ROUTE_CONFIG_INVALID")
+
+        # #2281 security repair (CWE-400): above 5 MiB is refused by every resolver.
+        resolvers = (
+            ("max_prompt_bytes", resolve_route_max_prompt_bytes, resolved_max_prompt_bytes),
+            ("max_source_file_bytes", resolve_route_max_source_file_bytes,
+             resolved_max_source_file_bytes),
+            ("max_source_total_bytes", resolve_route_max_source_total_bytes,
+             resolved_max_source_total_bytes),
+        )
+        for key, resolve, resolved in resolvers:
+            config = {"routes": {"opencode": {key: 5242881}}}
+            with self.subTest(key=key):
+                with self.assertRaises(RouteError) as caught:
+                    resolve("opencode", config=config)
+                self.assertEqual(caught.exception.code, "ROUTE_CONFIG_INVALID")
+                with self.assertRaises(DirectOpenCodeError) as caught:
+                    resolved(config=config)
+                self.assertEqual(caught.exception.direct_opencode_code, "ROUTE_CONFIG_INVALID")
+                self.assertEqual(
+                    resolve("opencode", config={"routes": {"opencode": {key: 5242880}}}),
+                    5242880)
+
+    def test_over_5_mib_config_never_widens_prompt_or_source_reads(self):
+        # #2281 security repair: a config above 5 MiB fails closed before any
+        # prompt or source is read, rather than permitting a larger read.
+        (self.root / "test.py").write_text("x" * 10, encoding="utf-8")
+        for key in ("max_prompt_bytes", "max_source_file_bytes", "max_source_total_bytes"):
+            config = {"routes": {"opencode": {key: 5242881}}}
+            with self.subTest(key=key), \
+                    patch("llmtool.developer_routes.load_route_config", return_value=config):
+                with self.assertRaises(DirectOpenCodeError) as caught:
+                    if key == "max_prompt_bytes":
+                        _screen_prompt("x" * 10)
+                    elif key == "max_source_file_bytes":
+                        _read_scoped_file(self.root, "test.py")
+                    else:
+                        _screen_sources(self.root, ["test.py"])
+                self.assertEqual(caught.exception.direct_opencode_code, "ROUTE_CONFIG_INVALID")
 
     def test_configured_smaller_value_enforced_prompt(self):
         custom_config = {
@@ -230,13 +272,15 @@ class RouteOpenCodeCapsTests(unittest.TestCase):
         }
         self.assertEqual(schema.errors(valid_entry, "route"), [])
 
-        for key in ("max_source_file_bytes", "max_source_total_bytes"):
-            for bad in (0, -1, True, False, "1048576"):
+        for key in ("max_prompt_bytes", "max_source_file_bytes", "max_source_total_bytes"):
+            self.assertEqual(schema.errors(dict(valid_entry, **{key: 5242880}), "route"), [])
+            for bad in (0, -1, True, False, "1048576", 5242881):
                 with self.subTest(key=key, bad=bad):
                     bad_entry = dict(valid_entry, **{key: bad})
                     errors = schema.errors(bad_entry, "route")
                     self.assertTrue(
-                        any(f"{key} must be an integer >= 1" in err for err in errors),
+                        any(f"{key} must be an integer >= 1 and <= 5242880" in err
+                            for err in errors),
                         errors,
                     )
 

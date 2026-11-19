@@ -418,6 +418,41 @@ class RuleFileSchemaTests(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertIn("max_diff_bytes", findings[0])
 
+    def test_prompt_and_source_bounds_over_5_mib_refused(self):
+        # #2281 security repair (CWE-400): the schema has the same 5 MiB ceiling
+        # as developer_routes.base, not "any integer >= 1".
+        for key in ("max_prompt_bytes", "max_source_file_bytes", "max_source_total_bytes"):
+            with self.subTest(key=key):
+                self.reset_rules()
+                routes = fixture_routes()
+                routes["routes"]["fixture"][key] = 5 * 1024 * 1024 + 1
+                findings = self.findings_after("developer-routes.json", routes)
+                self.assertEqual(len(findings), 1)
+                self.assertIn(f"{key} must be an integer >= 1 and <= 5242880", findings[0])
+
+    def test_tool_result_budget_up_to_5_mib_accepted_and_over_refused(self):
+        # #2281 (Owner 2026-11-19, review F3): the gw-agent tool-result budget
+        # may be 5 MiB; one byte more is refused.
+        budgets = {
+            "max_turns": 512, "max_input_tokens": 262144, "max_output_tokens": 65536,
+            "max_wall_seconds": 1800, "max_sent_bytes": 16777216,
+        }
+        for value in (1024 * 1024 + 1, 5 * 1024 * 1024):
+            with self.subTest(value=value):
+                self.reset_rules()
+                routes = fixture_routes()
+                routes["routes"]["fixture"]["budgets"] = dict(
+                    budgets, max_tool_result_bytes=value)
+                self.assertEqual(self.findings_after("developer-routes.json", routes), [])
+        self.reset_rules()
+        routes = fixture_routes()
+        routes["routes"]["fixture"]["budgets"] = dict(
+            budgets, max_tool_result_bytes=5 * 1024 * 1024 + 1)
+        findings = self.findings_after("developer-routes.json", routes)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("max_tool_result_bytes must be an integer >= 256 and <= 5242880",
+                      findings[0])
+
     def test_budgets_accepted(self):
         routes = fixture_routes()
         routes["routes"]["fixture"]["budgets"] = {

@@ -63,6 +63,9 @@ MAX_ARTIFACT_BYTES = 5 * 1024 * 1024
 # #2281: an OpenCode run records the source bytes it screened. That total is at
 # most the route max_source_total_bytes, which may be up to 5 MiB.
 MAX_EXECUTION_SOURCE_BYTES = 5 * 1024 * 1024
+# #2281: developer.input_bytes is the size of the prompt sent to a Developer
+# route, which may be up to the route max_prompt_bytes (at most 5 MiB).
+MAX_DEVELOPER_INPUT_BYTES = 5 * 1024 * 1024
 TASK_ID = re.compile(r'[0-9a-f]{32}')
 D6_TASK_ID = re.compile(r'[a-z0-9][a-z0-9-]{0,95}')
 SESSION_ID = re.compile(r'pm-[a-z0-9-]{1,60}')
@@ -121,9 +124,10 @@ _START_FAILURE_ENTRY_FIELDS = frozenset((
     'failed_developer', 'record_sha256', 'retry_assignment_id', 'd6_head',
     'retried_at', 'pm_session_id'))
 # #2188 design section 4: the persisted repair packet is the ASCII string
-# start_failure.canonical(P). It admits every packet a Claude delegate accepts
-# today: canonical(P) is a strict substring of the prompt, which is at most
-# developer_routes.claude.MAX_PROMPT_BYTES (65536) bytes.
+# start_failure.canonical(P). It was sized to the former 65536-byte Claude
+# prompt cap. #2281 raised that prompt cap to 5 MiB; this packet bound is
+# unchanged, so a packet whose canonical form exceeds 65536 bytes is refused
+# here (fail closed) at the claim write.
 REPAIR_PACKET_MAX_BYTES = 65536
 # Owner-exception merge evidence (#1253, #1519). Only this one exception type
 # is persisted; its evidence is the exact owner_exception.verify() result.
@@ -2812,7 +2816,7 @@ def _validate(record, *, strict=True):
                     not developer['egress_basis'] or len(developer['egress_basis'].encode('utf-8')) > 512 or
                     _emitted_sensitive(developer['egress_basis']) or
                     type(developer['input_bytes']) is not int or
-                    not 1 <= developer['input_bytes'] <= 64 * 1024 or
+                    not 1 <= developer['input_bytes'] <= MAX_DEVELOPER_INPUT_BYTES or
                     (developer['max_tokens'] is not None and
                      (type(developer['max_tokens']) is not int or
                       not 1 <= developer['max_tokens'] <= 1_000_000)) or
