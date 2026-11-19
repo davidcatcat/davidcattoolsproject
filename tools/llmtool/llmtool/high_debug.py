@@ -1036,11 +1036,30 @@ def _debug_timeout(role):
         _refuse('ROUTE_CONFIG_UNAVAILABLE')
 
 
+class _LaunchRefused(LLMToolError):
+    """#2367: a launcher refused its own settings before it started any provider process."""
+
+
+def _launch_settings(role, model):
+    """Return (admitted model, timeout) for role; the first step of every launcher.
+
+    #2367 (Owner #2405 A): this runs before the launcher builds its argv or
+    starts a provider process, so a refusal here is raised as _LaunchRefused,
+    which keeps high_debug_code. run_high_debug records ROLE_MODEL_NOT_ALLOWED
+    only from it, which makes that recorded code trusted not-started evidence.
+    """
+    try:
+        return _admit_debug_model(role, model), _debug_timeout(role)
+    except LLMToolError as error:
+        refused = _LaunchRefused('High-debug diagnosis refused; details omitted')
+        refused.high_debug_code = getattr(error, 'high_debug_code', None)
+        raise refused from None
+
+
 def _run_codex(*, prompt, cwd, output_path, model=_CODEX_MODEL):
     from . import codex_direct_developer
-    model = _admit_debug_model('codex-debug', model)
-    timeout = _debug_timeout('codex-debug')
-    argv = ['codex', 'exec', '--ignore-user-config', '--ignore-rules',
+    model, timeout = _launch_settings('codex-debug', model)
+    argv =['codex', 'exec', '--ignore-user-config', '--ignore-rules',
             '-m', model]
     for setting in _CODEX_SETTINGS + (
             'shell_environment_policy.set.PATH=' +
@@ -1055,8 +1074,7 @@ def _run_codex(*, prompt, cwd, output_path, model=_CODEX_MODEL):
 
 def _run_claude(*, prompt, cwd, output_path, config_dir, model=_CLAUDE_MODEL):
     from .developer_routes.claude import ClaudeRoute
-    model = _admit_debug_model('claude-debug', model)
-    timeout = _debug_timeout('claude-debug')
+    model, timeout = _launch_settings('claude-debug', model)
     route = ClaudeRoute({'executable': 'claude', 'config_dir': config_dir})
     argv = [
         'claude', '-p', '--output-format', 'json', '--model', model,
@@ -1309,21 +1327,59 @@ def _require_screen_cleared(task_id, family):
                                    omitted=record['omitted']))
 
 
-# #1502 WP-D: Debug outcomes that use up a Debug; a launch that recorded
-# RUN_FAILED did not run one, so a fallback route may still run.
+# #1502 WP-D: Debug outcomes that use up a Debug. A RUN_FAILED entry is used
+# too, unless its recorded report confirms that no Debug started.
 _DEBUG_USED_STATUSES = ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED', 'REPORT_INVALID')
 # #1502 WP-D O7: RUN_FAILED reports confirming that no Debug started.
 _DEBUG_NOT_STARTED = ('HIGH_DEBUG_QUOTA_EXHAUSTED', 'HIGH_DEBUG_AUTH_FAILED',
                       'HIGH_DEBUG_D6_CREATE_FAILED')
+# #2367 (Owner #2405 A): RUN_FAILED reports recorded only from a launcher's
+# _launch_settings refusal, before any provider process started. Such an entry
+# frees its slot only when it also observed nothing (model, effort and usage
+# all UNKNOWN) and its report digest matches; anything else stays used.
+#
+# #2367 A1 finding (PR #2407 F1): does ROLE_MODEL_NOT_ALLOWED in a PR
+# #2405-shaped entry (RUN_FAILED, model_observed/effort_observed/usage
+# UNKNOWN) happen before the Debug model is launched? Conclusion: yes. Call
+# path, all in tools/llmtool/llmtool/high_debug.py:
+#   1. run_high_debug builds actual_runner as functools.partial(_run_codex,
+#      ...) or functools.partial(_run_claude, ...) and calls it.
+#   2. The first statement of _run_codex and of _run_claude is
+#      _launch_settings(role, model), which calls _admit_debug_model ->
+#      role_config.check_registry_model. A refusal there raises
+#      _refuse('ROLE_MODEL_NOT_ALLOWED'), re-raised as _LaunchRefused.
+#   3. Only after _launch_settings returns does the launcher build its argv
+#      and call subprocess.run (the provider process: codex exec / claude -p).
+#   4. run_high_debug's `except _LaunchRefused` handler is the only place
+#      that records failure='ROLE_MODEL_NOT_ALLOWED'; failed(...) then writes
+#      it with observed/effort/usage still at their 'UNKNOWN' defaults.
+# The same code raised any other way (not as _LaunchRefused, for example by
+# _refuse inside a runner) is recorded as HIGH_DEBUG_RUN_FAILED and stays used. Tests: test_high_debug_not_started_2367
+# (LaunchOrderTests, NotStartedRunTests).
+_DEBUG_PRELAUNCH_REFUSED = ('ROLE_MODEL_NOT_ALLOWED',)
+
+
+def _prelaunch_refused(entry, report):
+    return (report in _DEBUG_PRELAUNCH_REFUSED and
+            entry.get('model_observed') == 'UNKNOWN' and
+            entry.get('effort_observed') == 'UNKNOWN' and
+            entry.get('usage') == 'UNKNOWN' and
+            entry.get('report_sha256') == hashlib.sha256(report.encode('utf-8')).hexdigest())
 
 
 def _debug_entry_used(entry):
-    """True unless entry is a RUN_FAILED confirmed not started; any doubt is used."""
+    """True unless entry is a RUN_FAILED confirmed not started; any doubt is used.
+
+    RUN_FAILED alone, a missing report, UNKNOWN usage or no output never
+    confirm it: only a recorded not-started code does.
+    """
     if type(entry) is not dict:
         return True
     if entry.get('status') == 'RUN_FAILED':
         report = entry.get('report')
-        return not (type(report) is str and report in _DEBUG_NOT_STARTED)
+        if type(report) is not str:
+            return True
+        return not (report in _DEBUG_NOT_STARTED or _prelaunch_refused(entry, report))
     return True
 
 
@@ -1707,6 +1763,10 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
     # #1502 WP-E R1: admitted before any D6 or entry exists, so a refusal uses
     # no Debug and never triggers the quota/auth fallback.
     debug_model = _admit_debug_model(worker_key, debug_model)
+    if runner is None:
+        # #2367 A2: the real launcher's other setting is checked here too,
+        # before the reservation, so its refusal records no entry.
+        _debug_timeout(worker_key)
     completion = task.get('completion')
     ev = completion.get('evidence') if type(completion) is dict else None
     # #1943 WP-5: an Issue target must be a verified Issue, never a pull request.
@@ -1892,8 +1952,12 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
         if status_result.returncode != 0 or status_result.stdout:
             raise _AttemptFailed('HIGH_DEBUG_WROTE_FILES')
     except _AttemptFailed as error: failure = error.code
-    except LLMToolError as error:
-        # A launch-time model refusal keeps its own code (never a fallback code).
+    except _LaunchRefused as error:
+        # A launcher's model refusal, raised before its provider process
+        # started, keeps its own code (never a fallback code). #2367: this is
+        # the only place ROLE_MODEL_NOT_ALLOWED is recorded, so the recorded
+        # code is trusted not-started evidence (_DEBUG_PRELAUNCH_REFUSED). The
+        # same code raised any other way is an unknown outcome and stays used.
         failure = ('ROLE_MODEL_NOT_ALLOWED'
                    if getattr(error, 'high_debug_code', None) == 'ROLE_MODEL_NOT_ALLOWED'
                    else 'HIGH_DEBUG_RUN_FAILED')
