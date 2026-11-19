@@ -148,6 +148,18 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertEqual(result.status, 'DONE')
         config_loader.assert_called_once_with(cwd=self.root.resolve())
 
+    def test_run_ceiling_is_the_configured_18000_second_maximum(self):
+        # #2281 (Owner 2026-11-19): Codex direct allows at most 5 hours (18000 s).
+        from llmtool.config import CODEX_DIRECT_MAX_TIMEOUT_SECONDS
+        self.assertEqual(CODEX_DIRECT_MAX_TIMEOUT_SECONDS, 18000)
+        self.assertEqual(direct.MAX_WALL_CLOCK_SECONDS, CODEX_DIRECT_MAX_TIMEOUT_SECONDS)
+        self.assertEqual(self.run_fake(timeout=18000).status, 'DONE')
+        self.invoked.unlink()
+        with self.assertRaises(direct.DirectCodexError) as caught:
+            self.run_fake(timeout=18001)
+        self.assertEqual(caught.exception.direct_codex_code, 'CODEX_BUDGET_INVALID')
+        self.assertFalse(self.invoked.exists())
+
     def test_prompt_at_exact_byte_limit_is_accepted_unchanged(self):
         prompt = 'x' * direct.MAX_PROMPT_BYTES
         self.assertEqual(self.run_fake(prompt=prompt).status, 'DONE')

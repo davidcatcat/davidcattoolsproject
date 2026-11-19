@@ -25,7 +25,9 @@ from . import developer_routes, github_identity, role_config, skill_manifest, ta
 _CODEX_REVIEW_MODEL = 'gpt-6.1-sol'
 _CLAUDE_REVIEW_MODEL = 'claude-sonnet-5-5'
 _CODEX_REVIEW_EFFORT = 'high'
-_CODEX_REVIEW_TIMEOUT = 1800
+# #2281: the Codex Reviewer run timeout comes from role_timeout('codex-reviewer');
+# this fallback names the same 3 h role default, not a separate value.
+_CODEX_REVIEW_TIMEOUT = developer_routes.DEFAULT_ROLE_TIMEOUT_SECONDS
 _CODEX_REVIEW_MAX_OUTPUT = 1024 * 1024
 # #2212: larger hard ceiling for Codex JSONL output streams; intermediate
 # events are skipped while retained data (thread_id and final message) stays <= 1 MiB.
