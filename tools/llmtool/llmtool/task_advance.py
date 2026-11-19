@@ -1917,7 +1917,8 @@ def _publish_recorded_main_pin(record):
     return pin['sha']
 
 
-def _publish_base_commits(git_runner, root, remote_head, recorded_main=None):
+def _publish_base_commits(git_runner, root, remote_head, recorded_main=None, *,
+                          materialize=None):
     """Return the published commits that bound what HEAD adds (#2367 A-sec).
 
     Only published commits count: this branch's head and the main tip from
@@ -1925,18 +1926,31 @@ def _publish_base_commits(git_runner, root, remote_head, recorded_main=None):
     main pin (#2367 F1: a new branch whose main moved to a tip this D6 does
     not hold), each when that commit is present locally. Local refs are
     never a base, because a D6 writer that can commit can also move them.
-    With no base the added commits are unknown, so publish fails closed.
+    ``materialize`` may make the recorded pin's commit local (a direct-route
+    result verifies its pin before its first publish); it is never used for
+    the unauthenticated remote tip. With no base the added commits are
+    unknown, so publish fails closed.
     """
     bases = [remote_head] if remote_head else []
 
-    def add_if_present(sha):
-        if sha in bases:
-            return
+    def present(sha):
         try:
-            present = git_runner(root, ['cat-file', '-e', f'{sha}^{{commit}}'])
+            result = git_runner(root, ['cat-file', '-e', f'{sha}^{{commit}}'])
         except Exception:
             raise _PublishRefusal('PUBLISH_COMMAND_FAILED') from None
-        if getattr(present, 'returncode', 1) == 0:
+        return getattr(result, 'returncode', 1) == 0
+
+    def add_if_present(sha, *, fetch_ok=False):
+        if sha in bases:
+            return
+        is_present = present(sha)
+        if not is_present and fetch_ok and materialize is not None:
+            try:
+                materialize(sha)
+            except Exception:
+                pass
+            is_present = present(sha)
+        if is_present:
             bases.append(sha)
 
     listed = _publish_command(git_runner, root,
@@ -1949,7 +1963,7 @@ def _publish_base_commits(git_runner, root, remote_head, recorded_main=None):
             continue
         add_if_present(parts[0])
     if type(recorded_main) is str and _HEX40.fullmatch(recorded_main) is not None:
-        add_if_present(recorded_main)
+        add_if_present(recorded_main, fetch_ok=True)
     if not bases:
         raise _PublishRefusal('PUBLISH_BINDING_UNAVAILABLE')
     return bases
@@ -2135,8 +2149,21 @@ def _publish_task(record, d6, executor_task, *, pre_pr_gate, git_runner=None,
     # D6 writer) pass the same write-scope check and Developer-output
     # sensitive screen as uncommitted changes, before this publish commits,
     # records or pushes anything.
-    bases = _publish_base_commits(git_runner, root, remote_head,
-                                  _publish_recorded_main_pin(record))
+    recorded_main = _publish_recorded_main_pin(record)
+
+    # A direct-route result records its authenticated pin before this publish.
+    # If that pin's commit was not materialized then (the capture is best
+    # effort), fetch only this validated pin now; other records and the
+    # unauthenticated remote tip keep today's local-presence rule.
+    def materialize_main(sha):
+        return task_completion.ensure_main_commit(root, sha)
+
+    materialize = None
+    if (recorded_main is not None and
+            type(developer.get('direct_result_callback')) is dict):
+        materialize = materialize_main
+    bases = _publish_base_commits(git_runner, root, remote_head, recorded_main,
+                                  materialize=materialize)
     committed = _publish_added_commits(git_runner, root, bases)
     if any(path not in write_paths
            for commit, parents in committed

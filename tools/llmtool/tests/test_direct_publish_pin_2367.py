@@ -191,6 +191,44 @@ class DirectPublishPinTests(unittest.TestCase):
                          [['ls-remote', '--heads'], ['cat-file', '-e'],
                           ['cat-file', '-e']])
 
+    def test_recorded_pin_is_materialized_before_the_base_lookup_gives_up(self):
+        present = set()
+
+        def materialize(sha):
+            present.add(sha)
+
+        def runner(_root, args):
+            if args[:2] == ['ls-remote', '--heads']:
+                return _Result(0, f'{MOVED_MAIN}\trefs/heads/main\n'.encode())
+            if args[:1] == ['cat-file'] and args[1] == '-e':
+                return _Result(0 if args[2] == f'{MAIN_SHA}^{{commit}}' and
+                               MAIN_SHA in present else 1)
+            raise AssertionError('unexpected git call: ' + repr(args))
+
+        self.assertEqual(
+            task_advance._publish_base_commits(
+                runner, '/repo/task', None, MAIN_SHA, materialize=materialize),
+            [MAIN_SHA])
+        # Only the recorded authenticated pin is materialized, never the
+        # unauthenticated remote tip.
+        self.assertEqual(present, {MAIN_SHA})
+
+    def test_unmaterializable_recorded_pin_still_fails_closed(self):
+        def materialize(_sha):
+            raise RuntimeError('fetch unavailable')
+
+        def runner(_root, args):
+            if args[:2] == ['ls-remote', '--heads']:
+                return _Result(0, f'{MOVED_MAIN}\trefs/heads/main\n'.encode())
+            if args[:1] == ['cat-file'] and args[1] == '-e':
+                return _Result(1)
+            raise AssertionError('unexpected git call: ' + repr(args))
+
+        with self.assertRaises(task_advance._PublishRefusal) as caught:
+            task_advance._publish_base_commits(
+                runner, '/repo/task', None, MAIN_SHA, materialize=materialize)
+        self.assertEqual(caught.exception.code, 'PUBLISH_BINDING_UNAVAILABLE')
+
     def test_committed_content_screen_still_refuses_with_a_recorded_pin(self):
         def runner(_root, _args):
             return _Result(0, b'--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+flagged\n')
