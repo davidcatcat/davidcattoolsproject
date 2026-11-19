@@ -560,31 +560,60 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         self._assert_prewrite_refusal(
             configure, message=skill_manifest.SKILL_MANIFEST_PREFIX_TOO_LARGE)
 
-    def test_whole_prompt_limit_refuses_and_never_truncates(self):
-        def padding(size):
-            # No newline: TASK_JSON escapes it to two bytes.
-            return (' goal rule' * (size // 10 + 1))[:size]
+    def test_whole_prompt_above_old_64_kib_is_sent_whole(self):
+        # #2281 (Owner 2026-11-19, review F1): the assembled prompt is bounded
+        # only by the route max_prompt_bytes (5 MiB); the old 64 KiB cap is gone.
+        self.assertEqual(resolve_route_max_prompt_bytes('claude'), 5 * 1024 * 1024)
+        # No newline: TASK_JSON escapes it to two bytes. The goal itself stays
+        # under the unchanged 64 KiB PM goal bound.
+        goal = 'Claude goal' + (' goal rule' * 6500)
+        self.assertLessEqual(len(goal.encode('utf-8')), 64 * 1024)
+        cli, store, args, _reg, _evaluations, prompts, _requests, patches, runner = self._setup()
+        store.task['pm_assignment']['goal'] = goal
+        with contextlib.ExitStack() as stack:
+            for item in patches:
+                stack.enter_context(item)
+            self.assertEqual(cli.run_task_claude_delegate(
+                args, store=store, route_runner=runner), 0)
+        raw = prompts[0].encode('utf-8')
+        self.assertGreater(len(raw), 64 * 1024)
+        self.assertLess(len(raw), 5 * 1024 * 1024)
+        self.assertIn(json.dumps(goal), prompts[0])
+        self.assertEqual(_sent_prefix(prompts[0]), _wrapped(_CARDS))
+        self.assertEqual(store.task['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(store.task['developer']['input_bytes'], len(raw))
 
-        def run(extra):
+    def test_whole_prompt_5_mib_limit_refuses_and_never_truncates(self):
+        # A prompt above 5 MiB cannot be built from the bounded PM fields, so
+        # the card prefix is injected at a fixed size to reach the boundary.
+        # The size check itself is the production check, unchanged.
+        limit = resolve_route_max_prompt_bytes('claude')
+        self.assertEqual(limit, 5 * 1024 * 1024)
+
+        def prefixed(prefix):
+            return patch.object(
+                task_submission_cli, '_developer_card_prefix',
+                return_value=(prefix, hashlib.sha256(prefix.encode('utf-8')).hexdigest()))
+
+        def run(prefix):
             cli, store, args, _reg, _evaluations, prompts, _requests, patches, runner = self._setup()
-            store.task['pm_assignment']['goal'] = 'Claude goal' + padding(extra)
+            patches.append(prefixed(prefix))
             with contextlib.ExitStack() as stack:
                 for item in patches:
                     stack.enter_context(item)
                 self.assertEqual(cli.run_task_claude_delegate(
                     args, store=store, route_runner=runner), 0)
-            return prompts[0]
+            return prompts[0], store.task['developer']
 
-        limit = min(64 * 1024 - 1, resolve_route_max_prompt_bytes('claude'))
-        self.assertLess(limit, 64 * 1024)
-        room = limit - len(run(0).encode('utf-8'))
-        self.assertGreater(room, 0)
-        fitted = run(room)
+        room = limit - len(run('')[0].encode('utf-8'))
+        fitted_prefix = _filler(room)
+        fitted, developer = run(fitted_prefix)
         self.assertEqual(len(fitted.encode('utf-8')), limit)
-        self.assertEqual(_sent_prefix(fitted), _wrapped(_CARDS))
+        self.assertIn(fitted_prefix, fitted)
+        self.assertEqual(developer['input_bytes'], limit)
 
-        def configure(_cli, store, _args, _patches):
-            store.task['pm_assignment']['goal'] = 'Claude goal' + padding(room + 1)
+        def configure(_cli, _store, _args, patches):
+            patches.append(prefixed(_filler(room + 1)))
         self._assert_prewrite_refusal(configure, message='CLAUDE_SKILL_PROMPT_TOO_LARGE')
 
     def test_generic_record_still_refuses_controller_delivered(self):

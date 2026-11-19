@@ -10,8 +10,8 @@
       "state_dirs": {"policy": "private-temp-only"},
       "default_timeout": 1800,
       "max_timeout": 3600,
-      "max_diff_bytes": 262144,
-      "max_prompt_bytes": 524288
+      "max_diff_bytes": 5242880,
+      "max_prompt_bytes": 5242880
     },
     "claude": {
       "executable": "claude",
@@ -22,8 +22,8 @@
       "state_dirs": {"policy": "private-temp-only"},
       "default_timeout": 1800,
       "max_timeout": 3600,
-      "max_diff_bytes": 262144,
-      "max_prompt_bytes": 65536
+      "max_diff_bytes": 5242880,
+      "max_prompt_bytes": 5242880
     },
     "gw-agent": {
       "package_path": "~/.local/lib/api-agent-gateway",
@@ -48,11 +48,13 @@
         "max_input_tokens": 262144,
         "max_output_tokens": 65536,
         "max_wall_seconds": 1800,
-        "max_tool_result_bytes": 262144,
+        "max_tool_result_bytes": 5242880,
         "max_sent_bytes": 16777216
       },
       "default_timeout": 1800,
-      "max_timeout": 3600
+      "max_timeout": 3600,
+      "max_diff_bytes": 5242880,
+      "max_prompt_bytes": 5242880
     },
     "opencode": {
       "executable": "opencode",
@@ -61,10 +63,10 @@
       "default_effort": "high",
       "default_timeout": 1800,
       "max_timeout": 3600,
-      "max_diff_bytes": 262144,
-      "max_prompt_bytes": 65536,
-      "max_source_file_bytes": 1048576,
-      "max_source_total_bytes": 2097152
+      "max_diff_bytes": 5242880,
+      "max_prompt_bytes": 5242880,
+      "max_source_file_bytes": 5242880,
+      "max_source_total_bytes": 5242880
     }
   },
   "roles": {

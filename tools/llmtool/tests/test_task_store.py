@@ -1637,6 +1637,26 @@ class TaskStoreTests(unittest.TestCase):
             self.store.compare_and_update(
                 task['task_id'], expected={'developer': None}, developer=developer)
 
+    def test_developer_input_bytes_up_to_5_mib_are_stored(self):
+        # #2281 (Owner 2026-11-19): a Developer prompt may be up to 5 MiB, so the
+        # recorded input_bytes may be too. Just over the old 64 KiB bound and
+        # exactly 5 MiB are stored; one byte over 5 MiB is refused.
+        self.assertEqual(task_store_module.MAX_DEVELOPER_INPUT_BYTES, 5 * 1024 * 1024)
+        for size in (64 * 1024 + 1, 5 * 1024 * 1024):
+            with self.subTest(size=size):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                developer = dict(self._developer_assignment(), input_bytes=size)
+                saved = self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None}, developer=developer)
+                self.assertEqual(saved['developer']['input_bytes'], size)
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        developer = dict(self._developer_assignment(), input_bytes=5 * 1024 * 1024 + 1)
+        with self.assertRaises(LLMToolError):
+            self.store.compare_and_update(
+                task['task_id'], expected={'developer': None}, developer=developer)
+
     def test_developer_timeout_seconds_is_optional_and_bounded(self):
         # #1815: legacy records without the field stay valid.
         task = self._codex_dispatch_task()
@@ -3483,7 +3503,8 @@ class TaskStoreTests(unittest.TestCase):
         self.store.update(task['task_id'], developer=responded)
         self.assertEqual(self.store.get(task['task_id'])['developer']['artifact'], artifact)
 
-    def test_developer_artifact_over_512_kib_is_refused(self):
+    def test_developer_artifact_just_over_old_512_kib_round_trips(self):
+        # #2281: the old 512 KiB artifact bound no longer refuses a result.
         task = self._codex_dispatch_task()
         self.store.create(task)
         pending = self._developer_assignment(provider='codex', max_tokens=None)
@@ -3496,6 +3517,34 @@ class TaskStoreTests(unittest.TestCase):
         header = ('diff --git a/src.py b/src.py\n'
                   '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n')
         artifact = header + '+y = 1\n' * ((512 * 1024 - len(header)) // 7 + 1)
+        self.assertGreater(len(artifact.encode('utf-8')), 512 * 1024)
+        execution = {'status': 'DONE',
+            'native_session_id': '12345678-1234-4234-8234-123456789abc',
+            'process_exit_code': 0, 'stdout_sha256': 'c' * 64, 'elapsed_ms': 12,
+            'cleanup_status': 'CONFIRMED', 'usage_source': 'CLI_REPORTED',
+            'source_bytes': None, 'source_file_count': None,
+            'source_manifest_sha256': None, 'native_session_binding': 'BOUND'}
+        responded = {**dispatching, 'state': 'DEVELOPER_RESPONDED',
+            'artifact': artifact, 'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
+            'execution': execution,
+            'usage': {'prompt_tokens': 13, 'completion_tokens': 8, 'total_tokens': 21}}
+        self.store.update(task['task_id'], developer=responded)
+        self.assertEqual(self.store.get(task['task_id'])['developer']['artifact'], artifact)
+
+    def test_developer_artifact_over_5_mib_is_refused(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        pending = self._developer_assignment(provider='codex', max_tokens=None)
+        pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+        dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                       'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+        self.store.update(task['task_id'], developer=dispatching)
+        header = ('diff --git a/src.py b/src.py\n'
+                  '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n')
+        artifact = header + '+y = 1\n' * ((5 * 1024 * 1024 - len(header)) // 7 + 1)
+        self.assertGreater(len(artifact.encode('utf-8')), 5 * 1024 * 1024)
         execution = {'status': 'DONE',
             'native_session_id': '12345678-1234-4234-8234-123456789abc',
             'process_exit_code': 0, 'stdout_sha256': 'c' * 64, 'elapsed_ms': 12,
@@ -3512,6 +3561,49 @@ class TaskStoreTests(unittest.TestCase):
             self.store.get(task['task_id'])['developer']['state'],
             'DEVELOPER_DISPATCHING',
         )
+
+    def test_opencode_source_bytes_up_to_5_mib_are_stored(self):
+        # #2281: an OpenCode run may screen up to 5 MiB of sources, so the record
+        # accepts source_bytes just over the old 2 MiB and refuses over 5 MiB.
+        artifact = ('diff --git a/src.py b/src.py\n'
+                    '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')
+        cases = ((2 * 1024 * 1024 + 1, True), (5 * 1024 * 1024, True),
+                 (5 * 1024 * 1024 + 1, False))
+        for source_bytes, accepted in cases:
+            with self.subTest(source_bytes=source_bytes):
+                task = self._codex_dispatch_task()
+                task['pm_assignment']['route'] = 'opencode'
+                self.store.create(task)
+                pending = self._developer_assignment(provider='opencode', max_tokens=128)
+                pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+                pending['execution'] = None
+                self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None}, developer=pending)
+                dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                               'provider_type': 'opencode-cli',
+                               'model': 'opencode/deepseek-v4.1-flash-free'}
+                self.store.update(task['task_id'], developer=dispatching)
+                responded = {
+                    **dispatching, 'state': 'DEVELOPER_RESPONDED', 'artifact': artifact,
+                    'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
+                    'execution': {
+                        'status': 'SUCCEEDED', 'native_session_id': 'ses_abcdefgh12345678',
+                        'process_exit_code': 0, 'stdout_sha256': 'c' * 64,
+                        'elapsed_ms': 12, 'cleanup_status': 'CONFIRMED',
+                        'usage_source': 'UNKNOWN', 'source_bytes': source_bytes,
+                        'source_file_count': 1, 'source_manifest_sha256': 'd' * 64,
+                    },
+                }
+                if accepted:
+                    self.store.update(task['task_id'], developer=responded)
+                    self.assertEqual(
+                        self.store.get(task['task_id'])['developer']['execution']['source_bytes'],
+                        source_bytes)
+                else:
+                    with self.assertRaises(LLMToolError):
+                        self.store.update(task['task_id'], developer=responded)
+                    self.assertEqual(self.store.get(task['task_id'])['developer']['state'],
+                                     'DEVELOPER_DISPATCHING')
 
     def test_native_session_binding_rejected_for_opencode_and_invalid_values(self):
         artifact = ('diff --git a/src.py b/src.py\n'

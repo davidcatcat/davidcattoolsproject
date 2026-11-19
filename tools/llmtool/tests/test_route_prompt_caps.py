@@ -37,22 +37,26 @@ class RoutePromptCapsTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_max_prompt_bytes_ok(self):
-        for valid in (1, 100, 65536, 524288, 10_000_000):
+        # #2281: 1..5 MiB; a value above 5 MiB is refused (fail closed).
+        for valid in (1, 100, 65536, 65537, 524288, 5242880):
             with self.subTest(valid=valid):
                 self.assertTrue(max_prompt_bytes_ok(valid))
 
-        for invalid in (0, -1, -500, True, False, "65536", 65536.0, None, [], {}):
+        for invalid in (0, -1, -500, True, False, "65536", 65536.0, None, [], {},
+                        5242881, 10_000_000):
             with self.subTest(invalid=invalid):
                 self.assertFalse(max_prompt_bytes_ok(invalid))
 
     def test_loader_accepts_repository_keys(self):
         config = load_route_config()
-        self.assertEqual(config["routes"]["claude"]["max_prompt_bytes"], 65536)
-        self.assertEqual(config["routes"]["agy"]["max_prompt_bytes"], 524288)
+        # #2281 (Owner 2026-11-19): every route is 5 MiB.
+        self.assertEqual(config["routes"]["claude"]["max_prompt_bytes"], 5242880)
+        self.assertEqual(config["routes"]["agy"]["max_prompt_bytes"], 5242880)
 
     def test_loader_refuses_bad_max_prompt_bytes_values(self):
         base_config = load_route_config()
-        bad_values = (0, -1, -100, True, False, "65536", 65536.0, None, [65536])
+        bad_values = (0, -1, -100, True, False, "65536", 65536.0, None, [65536],
+                      5242881, 10_000_000)
         for route_name in ("claude", "agy"):
             for bad in bad_values:
                 with self.subTest(route=route_name, bad=bad):
@@ -112,6 +116,23 @@ class RoutePromptCapsTests(unittest.TestCase):
             )
         self.assertEqual(caught.exception.code, "ROUTE_CONFIG_INVALID")
 
+        # #2281 security repair (CWE-400): above 5 MiB is refused, whether it
+        # comes from a config or from the adapter itself.
+        for route_name in ("claude", "agy"):
+            with self.subTest(route=route_name):
+                with self.assertRaises(RouteError) as caught:
+                    resolve_route_max_prompt_bytes(
+                        route_name,
+                        config={"routes": {route_name: {"max_prompt_bytes": 5242881}}},
+                    )
+                self.assertEqual(caught.exception.code, "ROUTE_CONFIG_INVALID")
+        for adapter in (ClaudeRoute({"executable": "claude", "max_prompt_bytes": 5242881}),
+                        AgyRoute({"executable": "agy", "max_prompt_bytes": 5242881})):
+            with self.subTest(adapter=adapter.name):
+                with self.assertRaises(RouteError) as caught:
+                    resolve_route_max_prompt_bytes(adapter)
+                self.assertEqual(caught.exception.code, "ROUTE_CONFIG_INVALID")
+
     def test_configured_smaller_value_enforced_by_claude_route(self):
         model = load_route_config()["routes"]["claude"]["default_model"]
         route = ClaudeRoute({"executable": "claude", "max_prompt_bytes": 100})
@@ -168,12 +189,14 @@ class RoutePromptCapsTests(unittest.TestCase):
         }
         self.assertEqual(schema.errors(valid_entry, "route"), [])
 
-        for bad in (0, -1, True, False, "65536"):
+        self.assertEqual(schema.errors(dict(valid_entry, max_prompt_bytes=5242880), "route"), [])
+        for bad in (0, -1, True, False, "65536", 5242881):
             with self.subTest(bad=bad):
                 bad_entry = dict(valid_entry, max_prompt_bytes=bad)
                 errors = schema.errors(bad_entry, "route")
                 self.assertTrue(
-                    any("max_prompt_bytes must be an integer >= 1" in err for err in errors),
+                    any("max_prompt_bytes must be an integer >= 1 and <= 5242880" in err
+                        for err in errors),
                     errors,
                 )
 
@@ -211,7 +234,7 @@ class RoutePromptCapsTests(unittest.TestCase):
             "loaded = developer_routes.load_route_config()\n"
             "assert 'agy' in loaded['routes']\n"
             "assert 'claude' not in loaded['routes']\n"
-            "assert developer_routes.resolve_route_max_prompt_bytes('agy') == 524288\n"
+            "assert developer_routes.resolve_route_max_prompt_bytes('agy') == 5242880\n"
             "try:\n"
             "    developer_routes.resolve_route_max_prompt_bytes('claude')\n"
             "    sys.exit(201)\n"

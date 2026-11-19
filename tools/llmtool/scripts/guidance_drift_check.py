@@ -172,6 +172,9 @@ class TimeoutPair:
 # tests/test_developer_route_timeout.py keeps the two in step. This script and
 # its own test do not import the llmtool package.
 ROUTE_TIMEOUT_CAP_SECONDS = 3600
+# Same value as llmtool.developer_routes.HARD_MAX_ROUTE_BYTES (#2281, 5 MiB);
+# tests/test_byte_bounds_5mib_2281.py keeps the two in step.
+ROUTE_MAX_BYTES = 5 * 1024 * 1024
 REPO_PATH = r"(?!/)(?!.*\\)(?!(?:.*/)?\.\.(?:/|$))[^\s]+"
 ROUTE_PROFILE = Obj(
     {"adapter": Str(), "model": Str()},
@@ -221,12 +224,14 @@ DEVELOPER_ROUTE = TimeoutPair(Obj(
         "profile": ROUTE_PROFILE,
         "authorization_ref": Str(r"https://\S+"),
         "allowed_data_classes": ListOf(Str(r"[a-z_]+"), min_items=1),
-        # #1815: same bounds as developer_routes.base max_diff_bytes_ok.
-        "max_diff_bytes": Int(1024, 512 * 1024),
-        # #2281: same rule as developer_routes.base max_prompt_bytes_ok (>= 1, no hard ceiling).
-        "max_prompt_bytes": Int(1),
-        "max_source_file_bytes": Int(1),
-        "max_source_total_bytes": Int(1),
+        # #1815: same bounds as developer_routes.base max_diff_bytes_ok
+        # (#2281: hard maximum 5 MiB).
+        "max_diff_bytes": Int(1024, ROUTE_MAX_BYTES),
+        # #2281: same rule as developer_routes.base max_prompt_bytes_ok,
+        # max_source_file_bytes_ok and max_source_total_bytes_ok (1..5 MiB).
+        "max_prompt_bytes": Int(1, ROUTE_MAX_BYTES),
+        "max_source_file_bytes": Int(1, ROUTE_MAX_BYTES),
+        "max_source_total_bytes": Int(1, ROUTE_MAX_BYTES),
         # #2281 L9, #2281 limit unblock: gw-agent per-Task budgets object.
         # max_wall_seconds is 1800 s, no shorter than route default_timeout (1800 s)
         # and bounded by max_timeout (3600 s). Basis: the route default timeout and
@@ -235,7 +240,8 @@ DEVELOPER_ROUTE = TimeoutPair(Obj(
             {
                 "max_turns": Int(1, 1000),
                 "max_wall_seconds": Int(1, 86400),
-                "max_tool_result_bytes": Int(256, 1048576),
+                # #2281: same range as developer_routes.base max_tool_result_bytes_ok.
+                "max_tool_result_bytes": Int(256, ROUTE_MAX_BYTES),
                 "max_sent_bytes": Int(1024, 512 * 1024 * 1024),
             },
             {

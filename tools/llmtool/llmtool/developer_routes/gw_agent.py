@@ -18,7 +18,8 @@ import sys
 import tempfile
 from urllib.parse import urlsplit
 
-from .base import DeveloperRoute, RouteError, usage_reported
+from .base import (DeveloperRoute, HARD_MAX_TOOL_RESULT_BYTES, MIN_MAX_TOOL_RESULT_BYTES,
+                   RouteError, usage_reported)
 from .write_boundary import SandboxExecBoundary
 from .. import config as llm_config
 from .. import gateway_profiles
@@ -39,7 +40,8 @@ _GATEWAY_BUDGETS = {
     'max_turns': (1, 1000),  # Documented gateway ceiling; accepts 512 (#2281 L9).
     'max_input_tokens': (1, 50_000_000),
     'max_output_tokens': (1, 5_000_000), 'max_wall_seconds': (1, 86_400),
-    'max_tool_result_bytes': (256, 1_048_576),
+    # #2281 (Owner 2026-11-19): up to 5 MiB, the same range as the route loader.
+    'max_tool_result_bytes': (MIN_MAX_TOOL_RESULT_BYTES, HARD_MAX_TOOL_RESULT_BYTES),
     'max_sent_bytes': (1024, 512 * 1024 * 1024),
 }
 _STATUS_EXIT = {'DONE': 0, 'BLOCKED': 3, 'MODEL_ERROR': 4,

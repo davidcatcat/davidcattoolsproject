@@ -1012,6 +1012,19 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(task['developer']['state'], 'DEVELOPER_RESPONDED')
 
+    def test_agy_diff_just_over_old_512_kib_is_accepted_and_stored(self):
+        # #2281: over the old 256 KiB route value and the old 512 KiB hard cap.
+        header = b'diff --git a/src.py b/src.py\n'
+        line = b'+y = 1\n'
+        repeats = ((512 * 1024 - len(header)) // len(line)) + 2
+        diff = header + line * repeats
+        self.assertGreater(len(diff), 512 * 1024)
+        self.assertLess(len(diff), resolve_route_max_diff_bytes('agy'))
+        status, task, _events, _prompts = self._run_agy_delegate(diff_bytes=diff)
+        self.assertEqual(status, 0)
+        self.assertEqual(task['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(task['developer']['artifact'].encode('utf-8'), diff)
+
     def test_agy_diff_cap_follows_route_config(self):
         with patch.object(task_submission_cli, 'resolve_route_max_diff_bytes',
                           return_value=1024) as mock_resolver:
@@ -1247,26 +1260,61 @@ class AgyRouteWiringTests(unittest.TestCase):
         self._assert_skill_refusal(skill_manifest.SKILL_MANIFEST_PREFIX_TOO_LARGE,
                                    card_git=_CardGit(over))
 
-    def test_whole_prompt_limit_refuses_and_never_truncates(self):
-        def padding(size):
-            # No newline: TASK_JSON escapes it to two bytes.
-            return (' goal rule' * (size // 10 + 1))[:size]
+    def test_whole_prompt_above_old_64_kib_is_sent_whole_and_stored(self):
+        # #2281 (Owner 2026-11-19): the assembled prompt is bounded only by the
+        # route max_prompt_bytes (5 MiB). A prompt just over the old 64 KiB
+        # cap is dispatched whole and its size is stored by the real TaskStore.
+        self.assertEqual(resolve_route_max_prompt_bytes('agy'), 5 * 1024 * 1024)
+        # No newline: TASK_JSON escapes it to two bytes. The goal itself stays
+        # under the unchanged 64 KiB PM goal bound.
+        goal = 'AGY goal' + (' goal rule' * 6500)
+        self.assertLessEqual(len(goal.encode('utf-8')), 64 * 1024)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve() / 'tasks'
+            store = TaskStore(root)
+            decision = worker_dispatch.PolicyDecision(
+                worker_key='agy', allowed=True, reason_code='OWNER_POLICY_ALLOWED',
+                policy_sha256='f' * 64)
+            with patch.object(task_submission_cli, '_agy_developer_profile',
+                              return_value=('gemini-test', 'high')):
+                status, task, _events, prompts = self._run_agy_delegate(
+                    store=store, goal=goal, decisions=(decision,) * 4)
+            persisted = TaskStore(root).get('a' * 32)
+        self.assertEqual(status, 0)
+        raw = prompts[0].encode('utf-8')
+        self.assertGreater(len(raw), 64 * 1024)
+        self.assertLess(len(raw), 5 * 1024 * 1024)
+        self.assertIn(json.dumps(goal), prompts[0])
+        self.assertEqual(_sent_prefix(prompts[0]), _wrapped(_CARDS))
+        self.assertEqual(task, persisted)
+        self.assertEqual(persisted['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(persisted['developer']['input_bytes'], len(raw))
 
-        def run(extra):
-            status, _task, _events, prompts = self._run_agy_delegate(
-                goal='AGY goal' + padding(extra))
-            self.assertEqual(status, 0)
-            return prompts[0]
+    def test_whole_prompt_5_mib_limit_refuses_and_never_truncates(self):
+        # A prompt above 5 MiB cannot be built from the bounded PM fields, so
+        # the card prefix is injected at a fixed size to reach the boundary.
+        # The size check itself is the production check, unchanged.
+        limit = resolve_route_max_prompt_bytes('agy')
+        self.assertEqual(limit, 5 * 1024 * 1024)
 
-        limit = min(64 * 1024 - 1, resolve_route_max_prompt_bytes('agy'))
-        self.assertEqual(limit, 64 * 1024 - 1)
-        room = limit - len(run(0).encode('utf-8'))
-        self.assertGreater(room, 0)
-        fitted = run(room)
-        self.assertEqual(len(fitted.encode('utf-8')), limit)
-        self.assertEqual(_sent_prefix(fitted), _wrapped(_CARDS))
-        self._assert_skill_refusal('AGY_SKILL_PROMPT_TOO_LARGE',
-                                   goal='AGY goal' + padding(room + 1))
+        def prefixed(prefix):
+            return patch.object(
+                task_submission_cli, '_developer_card_prefix',
+                return_value=(prefix, hashlib.sha256(prefix.encode('utf-8')).hexdigest()))
+
+        with prefixed(''):
+            status, _task, _events, prompts = self._run_agy_delegate()
+        self.assertEqual(status, 0)
+        room = limit - len(prompts[0].encode('utf-8'))
+        fitted_prefix = _filler(room)
+        with prefixed(fitted_prefix):
+            status, task, _events, prompts = self._run_agy_delegate()
+        self.assertEqual(status, 0)
+        self.assertEqual(len(prompts[0].encode('utf-8')), limit)
+        self.assertIn(fitted_prefix, prompts[0])
+        self.assertEqual(task['developer']['input_bytes'], limit)
+        with prefixed(_filler(room + 1)):
+            self._assert_skill_refusal('AGY_SKILL_PROMPT_TOO_LARGE')
 
     def test_generic_record_still_refuses_controller_delivered(self):
         with tempfile.TemporaryDirectory() as temp:

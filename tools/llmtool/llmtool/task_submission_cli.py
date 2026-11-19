@@ -28,7 +28,8 @@ from .errors import LLMToolError
 from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
 from .task_store import (TaskStore, TaskStoreConflict, new_id, _json_bytes,
-                         _DIRECT_EXECUTION_FIELDS, _NO_CHANGES_MAX_TURNS,
+                         _DIRECT_EXECUTION_FIELDS, MAX_EXECUTION_SOURCE_BYTES,
+                         _NO_CHANGES_MAX_TURNS,
                          _NO_CHANGES_REASON_MAX_CHARS, valid_provider_evidence,
                          CLAUDE_FAILURE_EXIT_CODE_RANGE, valid_claude_failure_evidence,
                          valid_claude_failure_evidence_record, _valid_reported_text)
@@ -49,6 +50,7 @@ from . import source_freshness
 from . import start_failure
 from . import trust
 from .developer_routes import (AgyRoute, ClaudeRoute, GwAgentRoute, RouteError, capture_snapshot,
+                               HARD_MAX_ROUTE_BYTES,
                                UnsupportedBoundary, check_route_model, for_platform,
                                load_route_config, resolve_route_max_diff_bytes,
                                resolve_route_max_prompt_bytes,
@@ -4377,7 +4379,7 @@ def _store_accepts_direct_execution(developer):
             execution['cleanup_status'] != 'CONFIRMED' or
             type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None or
             not _bounded_int(execution['elapsed_ms'], 0, 86_400_000) or
-            not _bounded_int(execution['source_bytes'], 0, 2 * 1024 * 1024) or
+            not _bounded_int(execution['source_bytes'], 0, MAX_EXECUTION_SOURCE_BYTES) or
             not _bounded_int(execution['source_file_count'], 1, 32) or
             (manifest is not None and
              (type(manifest) is not str or
@@ -5455,7 +5457,9 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         raise LLMToolError('request or response exceeds the supported size')
     card_prefix, card_prefix_sha256 = _developer_card_prefix(task, registration, 'agy')
     prompt = instructions + card_prefix + task_json
-    if len(prompt.encode('utf-8')) > min(64 * 1024 - 1, agy_max_prompt_bytes):
+    # #2281 (Owner 2026-11-19): the whole sent prompt is bounded by the route
+    # max_prompt_bytes (5 MiB) alone; the former 64 KiB cap is gone.
+    if len(prompt.encode('utf-8')) > agy_max_prompt_bytes:
         raise LLMToolError('AGY_SKILL_PROMPT_TOO_LARGE')
     provider_input_bytes = len(prompt.encode('utf-8'))
     test_policy = _remote_receipt_test_policy(task, read_paths=read_paths)
@@ -5945,14 +5949,17 @@ def _claude_failure_evidence(route, exc, result):
 
 
 def _claude_committed_carry(task, store, registration, snapshot, developer, completion,
-                            result, write_paths, test_policy):
+                            result, write_paths, test_policy, *, max_diff_bytes=None):
     """#1148/#1279: return (developer, completion) that carry the D6's committed head.
 
     Only a finished Claude run with no new edit qualifies: the registered D6 result
     head is the launch head, the committed work since the D6 base is inside
-    write_paths and 64 KiB, and no other Task delivered a result on this D6.
-    Anything else, or any error, returns None (CLAUDE_NO_CHANGES)."""
+    write_paths and the Claude route max_diff_bytes (5 MiB, #2281; the value
+    bound at dispatch when given), and no other Task delivered a result on this
+    D6. Anything else, or any error, returns None (CLAUDE_NO_CHANGES)."""
     try:
+        if max_diff_bytes is None:
+            max_diff_bytes = resolve_route_max_diff_bytes('claude')
         base, head = registration.source_sha, snapshot.head
         if (result.status != 'DONE' or result.exit_code != 0 or not result.session_id or
                 result.cleanup_status != 'CONFIRMED' or type(result.stdout_sha256) is not str or
@@ -5965,7 +5972,7 @@ def _claude_committed_carry(task, store, registration, snapshot, developer, comp
                              limit=4096)
         committed = task_completion._committed_changed_paths(registration.root, base, head)
         changed_paths, raw = task_completion._worktree_diff(registration.root, base)
-        if (sorted(set(changed_paths)) != committed or not raw or len(raw) > 64 * 1024 or
+        if (sorted(set(changed_paths)) != committed or not raw or len(raw) > max_diff_bytes or
                 any(path not in write_paths for path in committed) or any(
                     (store.get(other).get('developer') or {}).get('executor_task_id') ==
                     registration.task_id and store.get(other)['developer']['state'] ==
@@ -6122,7 +6129,9 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
         raise LLMToolError('request or response exceeds the supported size')
     card_prefix, card_prefix_sha256 = _developer_card_prefix(task, registration, 'claude')
     prompt = instructions + card_prefix + task_json
-    if len(prompt.encode('utf-8')) > min(64 * 1024 - 1, claude_max_prompt_bytes):
+    # #2281 (Owner 2026-11-19): the whole sent prompt is bounded by the route
+    # max_prompt_bytes (5 MiB) alone; the former 64 KiB cap is gone.
+    if len(prompt.encode('utf-8')) > claude_max_prompt_bytes:
         raise LLMToolError('CLAUDE_SKILL_PROMPT_TOO_LARGE')
     provider_input_bytes = len(prompt.encode('utf-8'))
     test_policy = _remote_receipt_test_policy(task, read_paths=read_paths)
@@ -6234,9 +6243,13 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
                 after.head != snapshot.head):
             raise RouteError('CLAUDE_D6_BINDING_CHANGED')
         changed_paths, raw = task_completion._worktree_diff(registration.root, snapshot.head)
+        # #1815: the route cap from developer-routes.json (max_diff_bytes).
+        # #2049: use the config bound at dispatch; a merge during the run must not change it.
+        claude_max_diff_bytes = resolve_route_max_diff_bytes("claude", config=config)
         if not changed_paths or not raw:
             carry = _claude_committed_carry(task, store, registration, snapshot, developer,
-                                            completion, result, write_paths, test_policy)
+                                            completion, result, write_paths, test_policy,
+                                            max_diff_bytes=claude_max_diff_bytes)
             if carry is None:
                 raise RouteError('CLAUDE_NO_CHANGES')
             try:
@@ -6245,9 +6258,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
             except Exception:
                 raise RouteError('CLAUDE_NO_CHANGES') from None
             raise _ClaudeCommittedCarry()
-        # #1815: the route cap from developer-routes.json (max_diff_bytes).
-        # #2049: use the config bound at dispatch; a merge during the run must not change it.
-        if len(raw) > resolve_route_max_diff_bytes("claude", config=config):
+        if len(raw) > claude_max_diff_bytes:
             raise RouteError('CLAUDE_OUTPUT_TOO_LARGE')
         if any(path not in write_paths for path in changed_paths):
             raise RouteError('CLAUDE_WRITE_SCOPE_VIOLATION')
@@ -6384,7 +6395,9 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
     request = _screen_text(task['request'], REQUEST_LIMIT)
     _screen_text(task['response'], RESPONSE_LIMIT)
-    route_config = load_route_config()['routes'].get('gw-agent')
+    # #2049: the route config bound at dispatch also supplies the byte bounds below.
+    route_settings = load_route_config()
+    route_config = route_settings['routes'].get('gw-agent')
     route_profile = (route_config.get('profile')
                      if type(route_config) is dict else None)
     data_class_map = (route_profile.get('data_class_map')
@@ -6434,7 +6447,8 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             (max_input_tokens_budget, 1, 50_000_000),
             (max_output_tokens_budget, 1, 5_000_000),
             (max_wall_seconds, 1, 86400),
-            (max_tool_result_bytes, 256, 1048576),
+            # #2281 (Owner 2026-11-19): up to 5 MiB, as the route loader checks.
+            (max_tool_result_bytes, 256, HARD_MAX_ROUTE_BYTES),
             (max_sent_bytes, 1024, 512 * 1024 * 1024),
         )
         for val, low, high in budget_bounds:
@@ -6493,7 +6507,9 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
               '\nTASK_JSON=' +
               json.dumps(prompt_packet, ensure_ascii=True, sort_keys=True,
                          separators=(',', ':')))
-    if len(prompt.encode('utf-8')) > 48 * 1024:
+    # #2281 (Owner 2026-11-19): the route max_prompt_bytes (5 MiB), not 48 KiB.
+    if len(prompt.encode('utf-8')) > resolve_route_max_prompt_bytes(
+            'gw-agent', config=route_settings):
         raise LLMToolError('gw-agent request exceeds the supported size')
     task_input = {
         'schema_version': 1,
@@ -6682,7 +6698,8 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 after.head != snapshot.head):
             raise RouteError('GW_AGENT_D6_BINDING_CHANGED')
         changed_paths, raw = task_completion._worktree_diff(registration.root, snapshot.head)
-        if len(raw) > 64 * 1024:
+        # #2281: the route max_diff_bytes (5 MiB) bound at dispatch, not 64 KiB.
+        if len(raw) > resolve_route_max_diff_bytes('gw-agent', config=route_settings):
             raise RouteError('GW_AGENT_OUTPUT_TOO_LARGE')
         if any(path not in write_paths for path in changed_paths):
             raise RouteError('GW_AGENT_WRITE_SCOPE_VIOLATION')

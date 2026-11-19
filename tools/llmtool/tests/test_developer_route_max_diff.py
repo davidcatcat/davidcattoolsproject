@@ -21,14 +21,21 @@ DRIFT_SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'guidance_drift
 
 class ResolveRouteMaxDiffTests(unittest.TestCase):
     def test_real_file_values(self):
-        for route in ('agy', 'claude', 'opencode'):
+        # #2281 (Owner 2026-11-19): every Developer route is 5 MiB.
+        for route in ('agy', 'claude', 'gw-agent', 'opencode'):
             with self.subTest(route=route):
-                self.assertEqual(resolve_route_max_diff_bytes(route), 262144)
-        self.assertEqual(resolve_route_max_diff_bytes('gw-agent'), 65536)
+                self.assertEqual(resolve_route_max_diff_bytes(route), 5 * 1024 * 1024)
+
+    def test_route_without_max_diff_bytes_defaults_to_5_mib(self):
+        # #2281: no old 64 KiB default remains for a route without the key.
+        self.assertEqual(llmtool.developer_routes.base.DEFAULT_MAX_DIFF_BYTES, 5 * 1024 * 1024)
+        self.assertEqual(
+            resolve_route_max_diff_bytes('gw-agent', config={'routes': {'gw-agent': {}}}),
+            5 * 1024 * 1024)
 
     def test_injected_config_validation(self):
         base_cfg = load_route_config()
-        for bad in (True, 1.5, 0, 1023, 512 * 1024 + 1):
+        for bad in (True, 1.5, 0, 1023, 5 * 1024 * 1024 + 1):
             with self.subTest(bad=bad):
                 cfg = copy.deepcopy(base_cfg)
                 cfg['routes']['agy']['max_diff_bytes'] = bad
@@ -36,7 +43,7 @@ class ResolveRouteMaxDiffTests(unittest.TestCase):
                     resolve_route_max_diff_bytes('agy', config=cfg)
                 self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
 
-        for ok in (1024, 512 * 1024):
+        for ok in (1024, 512 * 1024, 512 * 1024 + 1, 5 * 1024 * 1024):
             with self.subTest(ok=ok):
                 cfg = copy.deepcopy(base_cfg)
                 cfg['routes']['agy']['max_diff_bytes'] = ok
@@ -97,8 +104,11 @@ class GuidanceDriftSchemaTests(unittest.TestCase):
         with open(ROUTES_FILE, encoding='utf-8') as f:
             real_data = json.load(f)
         bad_data = copy.deepcopy(real_data)
-        bad_data['routes']['agy']['max_diff_bytes'] = 512 * 1024 + 1
+        bad_data['routes']['agy']['max_diff_bytes'] = 5 * 1024 * 1024 + 1
         self.assertEqual(len(drift_mod.RULE_SCHEMAS['developer-routes.json'].errors(bad_data, '$')), 1)
+        good_data = copy.deepcopy(real_data)
+        good_data['routes']['agy']['max_diff_bytes'] = 5 * 1024 * 1024
+        self.assertEqual(drift_mod.RULE_SCHEMAS['developer-routes.json'].errors(good_data, '$'), [])
 
 
 if __name__ == '__main__':
