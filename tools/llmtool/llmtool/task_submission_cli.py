@@ -8944,20 +8944,222 @@ def run_task_show(args, *, store=None, stdout=None):
     return 0
 
 
+def _artifact_chain_invalid():
+    error = LLMToolError('developer artifact repair chain is invalid')
+    error.completion_code = 'DEVELOPER_ARTIFACT_CHAIN_INVALID'
+    raise error
+
+
+# #1886: a continuation lineage longer than this is not walked (fail closed).
+_CONTINUATION_LINEAGE_MAX = 64
+# Audit actions that put a Developer on its bound assignment (E3 of #1928 reads
+# DISPATCH; a timeout continuation and a start retry rebind the same Task).
+_CONTINUATION_DISPATCH_ACTIONS = ('DISPATCH', 'TIMEOUT_CONTINUATION', 'START_RETRY')
+# Delegates that also record an adapter authorization (as review_repair_recovery E3).
+_CONTINUATION_ADAPTER_PROFILES = ('gw-agent', 'opencode')
+
+
+def _continuation_repair_members(task, store, executor_task):
+    """#1886: the Tasks continuing ``task``'s lineage whose completion names this D6.
+
+    A PM continuation repair is recorded with ``continues`` (record-pm, write-once
+    and bound into its contract digest), not as a review repair claim of the root
+    Task, so the claim records alone miss it. Members come back in lineage order
+    (nearest successor first). A Task a root claim already names is left to the
+    claim path. Only lineage and the D6 binding select a member here; admission
+    also needs the recorded dispatch authorization (_continuation_repair_entries).
+
+    A store without the D6 scan (a test double), or whose scan fails, gives no
+    members, as before #1886: a repair missed here can only make the artifact
+    check refuse, never pass. A Task on this D6 whose record or lineage is in
+    doubt raises DEVELOPER_ARTIFACT_CHAIN_INVALID. Never writes.
+    """
+    scan = getattr(store, 'completion_d6_task_ids', None)
+    root_id = task.get('task_id') if type(task) is dict else None
+    if not callable(scan) or type(root_id) is not str or type(executor_task) is not str:
+        return []
+    try:
+        scanned = list(scan(executor_task))
+    except Exception:
+        return []
+    try:
+        claims = task.get('review_repair_claims')
+        claimed = ({claim.get('repair_task_id') for claim in claims if type(claim) is dict}
+                   if type(claims) is list else set())
+        members = {}
+        for task_id in scanned:
+            if type(task_id) is not str or task_id == root_id or task_id in claimed:
+                continue
+            record = store.get(task_id)
+            completion = record.get('completion') if type(record) is dict else None
+            if (record.get('task_id') != task_id or type(completion) is not dict or
+                    completion.get('executor_task_id') != executor_task):
+                continue
+            current, depth, seen = record, 0, {task_id}
+            while True:
+                predecessor = current.get('continues')
+                if predecessor is None:
+                    depth = None   # not in this Task's lineage
+                    break
+                depth += 1
+                if (type(predecessor) is not str or predecessor in seen or
+                        depth > _CONTINUATION_LINEAGE_MAX):
+                    _artifact_chain_invalid()
+                if predecessor == root_id:
+                    break
+                seen.add(predecessor)
+                current = store.get(predecessor)
+                if type(current) is not dict or current.get('task_id') != predecessor:
+                    _artifact_chain_invalid()
+            if depth is None:
+                continue
+            if depth in members:
+                # record-pm gives a Task at most one successor: two at one depth is doubt.
+                _artifact_chain_invalid()
+            members[depth] = record
+    except LLMToolError as exc:
+        if getattr(exc, 'completion_code', None) == 'DEVELOPER_ARTIFACT_CHAIN_INVALID':
+            raise
+        _artifact_chain_invalid()
+    except Exception:
+        _artifact_chain_invalid()
+    return [members[depth] for depth in sorted(members)]
+
+
+def _continuation_dispatch_authorized(record, developer, registration):
+    """#1886 A3: an ALLOWED dispatch audit binds this exact repair run.
+
+    The entry must name the repair's assignment, its D6 start HEAD and its
+    contract digest, and the worker must be the D6's registered agent or the
+    worker key of the repair's route. Adapter routes also need the adapter
+    authorization of that transition, as #1928 E3 requires.
+    """
+    audit = record.get('dispatch_audit')
+    binding = record.get('task_binding')
+    if type(audit) is not list or type(binding) is not dict:
+        return False
+    expected = (developer.get('assignment_id'), developer.get('source_sha'),
+                binding.get('contract_digest'))
+    if any(type(value) is not str or not value for value in expected):
+        return False
+    workers = set()
+    agent = getattr(registration, 'trusted_agent_id', None)
+    if type(agent) is str and agent:
+        workers.add(agent)
+    profile = developer.get('provider_profile')
+    try:
+        route_worker = worker_dispatch.worker_key_for(profile)
+    except Exception:
+        route_worker = None
+    if type(route_worker) is str and route_worker:
+        workers.add(route_worker)
+    allowed = [entry for entry in audit if type(entry) is dict and
+               entry.get('action') in _CONTINUATION_DISPATCH_ACTIONS and
+               entry.get('decision') == 'ALLOWED' and
+               entry.get('worker_key') in workers and
+               (entry.get('assignment_id'), entry.get('source_sha'),
+                entry.get('contract_digest')) == expected]
+    transitions = {entry['attempt_id'] for entry in allowed
+                   if 'authorization_id' not in entry and
+                   type(entry.get('attempt_id')) is str and
+                   re.fullmatch(r'[0-9a-f]{32}', entry['attempt_id'])}
+    if not transitions:
+        return False
+    if profile in _CONTINUATION_ADAPTER_PROFILES:
+        return any(type(entry.get('authorization_id')) is str and
+                   entry['authorization_id'] in transitions for entry in allowed)
+    return True
+
+
+def _continuation_repair_entries(members, *, executor_task, registration):
+    """#1886: (head, responded developer or None) for each lineage member.
+
+    A member with no Developer never ran in the D6 and is left out. A member
+    whose Developer responded is admitted only on its recorded authorization and
+    Task binding; any other Developer state is a no-commit attempt the caller
+    skips only when the head did not move.
+    """
+    entries = []
+    for record in members:
+        developer = record.get('developer')
+        if developer is None:
+            continue
+        if type(developer) is not dict:
+            _artifact_chain_invalid()
+        head = developer.get('source_sha')
+        binding = record.get('task_binding')
+        if (type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None or
+                developer.get('executor_task_id', executor_task) != executor_task):
+            _artifact_chain_invalid()
+        if developer.get('state') != 'DEVELOPER_RESPONDED':
+            entries.append((head, None))
+            continue
+        if (type(binding) is not dict or binding.get('task_id') != record.get('task_id') or
+                binding.get('run_id') != record.get('run_id') or
+                not _continuation_dispatch_authorized(record, developer, registration)):
+            _artifact_chain_invalid()
+        entries.append((head, developer))
+    return entries
+
+
+def _merge_repair_entries(claim_entries, continuation_entries, git_root):
+    """Merge two ordered repair lists into one D6 order by start-HEAD ancestry.
+
+    At one HEAD a no-commit attempt goes first; two responded repairs at one
+    HEAD, or HEADs on different lines, are doubt and refuse.
+    """
+    def before(first, second):
+        if first[0] == second[0]:
+            if first[1] is not None and second[1] is not None:
+                _artifact_chain_invalid()
+            return first[1] is None
+        if task_completion._is_ancestor(git_root, first[0], second[0]):
+            return True
+        if task_completion._is_ancestor(git_root, second[0], first[0]):
+            return False
+        _artifact_chain_invalid()
+
+    for head, _ in (*claim_entries, *continuation_entries):
+        if type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None:
+            _artifact_chain_invalid()
+    merged, left, right = [], 0, 0
+    while left < len(claim_entries) and right < len(continuation_entries):
+        if before(claim_entries[left], continuation_entries[right]):
+            merged.append(claim_entries[left])
+            left += 1
+        else:
+            merged.append(continuation_entries[right])
+            right += 1
+    return merged + list(claim_entries[left:]) + list(continuation_entries[right:])
+
+
+def _binds_no_artifact(task):
+    """The Claude Developer route: completion binds its result, not an artifact."""
+    developer = task.get('developer') if type(task) is dict else None
+    return (type(developer) is dict and developer.get('provider_profile') == 'claude' and
+            developer.get('backend_session_semantics') == 'NO_NATIVE_SESSION_ID_EXPOSED')
+
+
 def _completion_repair_artifact_segments(task, store, *, executor_task, common_dir,
                                          root, branch, source_sha):
-    """Bind the original and repair proposals to consecutive D6 heads."""
-    claims = task.get('review_repair_claims')
-    if claims is None:
-        return None
+    """Bind the original and repair proposals to consecutive D6 heads.
 
-    def invalid():
-        error = LLMToolError('developer artifact repair chain is invalid')
-        error.completion_code = 'DEVELOPER_ARTIFACT_CHAIN_INVALID'
-        raise error
+    Repairs are the root Task's review and EC2 repair claims and, since #1886,
+    the PM continuation repairs of its lineage on the same D6. The Claude
+    route binds no artifact, so it reads the claims only. Every segment is
+    still verified against the D6 tree by collect_executor_result.
+    """
+    claims = task.get('review_repair_claims')
+    members = ([] if _binds_no_artifact(task)
+               else _continuation_repair_members(task, store, executor_task))
+    if claims is None and not members:
+        return None
+    invalid = _artifact_chain_invalid
 
     try:
-        if type(claims) is not list or not claims:
+        if claims is None:
+            claims = []
+        if type(claims) is not list or (not claims and not members):
             invalid()
         # Review and EC2 repairs number their attempts per family, so each
         # family must hold attempts 1..n in stored order; the chain itself is
@@ -8995,9 +9197,9 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
         # made no commit: its claim head must equal the next chain head. A
         # repair that moved the head without a recorded result, and an UNKNOWN
         # claim whose repair Task did respond, stay invalid (fail closed).
-        dispatched = []
-        repairs = {}
-        for index, claim in enumerate(candidates):
+        # Each entry is (start HEAD, responded Developer or None).
+        claim_entries = []
+        for claim in candidates:
             head = claim.get('head_sha')
             repair_id = claim.get('repair_task_id')
             if type(repair_id) is not str:
@@ -9014,23 +9216,35 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
                 if (claim.get('state') != 'DISPATCHED' or
                         developer.get('source_sha') != head):
                     invalid()
-                dispatched.append(claim)
-                repairs[id(claim)] = developer
+                claim_entries.append((head, developer))
+            else:
+                claim_entries.append((head, None))
+        entries = claim_entries
+        if members:
+            # #1886: PM continuation repairs of this lineage on this D6 join
+            # the chain where their start HEAD falls.
+            entries = _merge_repair_entries(
+                claim_entries, _continuation_repair_entries(
+                    members, executor_task=executor_task, registration=registration),
+                registration.root)
+        dispatched = []
+        for index, (head, developer) in enumerate(entries):
+            if developer is not None:
+                dispatched.append((head, developer))
                 continue
-            next_head = (candidates[index + 1].get('head_sha')
-                         if index + 1 < len(candidates) else registration.result_sha)
+            next_head = (entries[index + 1][0]
+                         if index + 1 < len(entries) else registration.result_sha)
             if (type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None or
                     head != next_head):
                 invalid()
         artifacts = [(original.get('artifact'), original.get('artifact_sha256'),
                       source_sha,
-                      dispatched[0].get('head_sha') if dispatched else registration.result_sha)]
-        for index, claim in enumerate(dispatched):
-            developer = repairs[id(claim)]
-            next_head = (dispatched[index + 1].get('head_sha')
+                      dispatched[0][0] if dispatched else registration.result_sha)]
+        for index, (head, developer) in enumerate(dispatched):
+            next_head = (dispatched[index + 1][0]
                          if index + 1 < len(dispatched) else registration.result_sha)
             artifacts.append((developer.get('artifact'), developer.get('artifact_sha256'),
-                              claim.get('head_sha'), next_head))
+                              head, next_head))
         for segment_artifact, segment_digest, _, _ in artifacts:
             if (type(segment_artifact) is not str or not segment_artifact or
                     type(segment_digest) is not str or
@@ -9053,7 +9267,7 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
         invalid()
     except Exception:
         invalid()
-    if candidates and not dispatched:
+    if not dispatched and (entries or not claims):
         # Every repair was skipped as a no-commit attempt: the original
         # proposal alone ends at the D6 head, so use the single-artifact path.
         return None
@@ -9063,7 +9277,13 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
 def _repair_head_admitted(task, store, evidence, *, executor_task, head):
     """Return whether head ends a verified Task-bound repair chain."""
     if not task.get('review_repair_claims'):
-        return False
+        # #1886: a PM continuation repair of this lineage can end the chain too.
+        try:
+            if (_binds_no_artifact(task) or
+                    not _continuation_repair_members(task, store, executor_task)):
+                return False
+        except Exception:
+            return False
     try:
         developer = task['developer']
         root = evidence.get('root')
