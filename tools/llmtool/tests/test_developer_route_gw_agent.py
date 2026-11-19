@@ -1522,5 +1522,164 @@ class GatewayCredentialConfigTests(unittest.TestCase):
             self.assertEqual(gw_agent.llm_config.api_key(config_value), 'synthetic-value')
 
 
+class GwAgentAvailabilityProbeRouteTests(unittest.TestCase):
+    """#2367: the probe makes one gateway run through the route's own path.
+
+    The gateway process is replaced by a runner that writes result.json; the
+    route's credential loader yields no credential, so no credential value
+    exists anywhere in these tests.
+    """
+
+    BUDGETS = {'max_turns': 512, 'max_input_tokens': 10000, 'max_output_tokens': 1000,
+               'max_wall_seconds': 60, 'max_tool_result_bytes': 4096,
+               'max_sent_bytes': 100000}
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        home = mock.patch.dict(os.environ, {'HOME': self.temp.name})
+        home.start()
+        self.addCleanup(home.stop)
+        package = Path(self.temp.name).resolve() / 'gateway'
+        (package / 'api_agent_gateway').mkdir(parents=True)
+        os.chmod(package, 0o755)
+        os.chmod(package / 'api_agent_gateway', 0o755)
+        self.route = GwAgentRoute({
+            'package_path': str(package), 'profile_name': 'fake',
+            'profile': {'adapter': 'openai-chat-tools', 'base_url': 'http://127.0.0.1:9/v1',
+                        'model': 'fake-model', 'auth_env': None,
+                        'context_cap_tokens': 10000, 'max_output_tokens': 1000,
+                        'allowed_data_classes': ['synthetic']},
+            'default_model': 'fake-model', 'default_effort': 'low',
+            'authorization_ref': 'pm-task-ref', 'allowed_data_classes': ['synthetic'],
+        })
+        no_credential = mock.patch.object(self.route, '_load_credential', return_value=None)
+        no_credential.start()
+        self.addCleanup(no_credential.stop)
+        self.seen = {}
+
+    @staticmethod
+    def result(task_id, status='DONE', code=None, turns=1, **extra):
+        value = {'schema_version': 1, 'status': status, 'code': code, 'run_id': 'a' * 24,
+                 'session_id': None, 'task_id': task_id, 'changed_paths': [],
+                 'summary': 'ok', 'served_model': 'fake-model', 'usage': {}, 'turns': turns,
+                 'budget_used': None, 'audit_sha256': 'b' * 64}
+        value.update(extra)
+        return value
+
+    def runner(self, make_result, returncode=0, error=None):
+        def run(argv, *, env, cwd, stdin, stdout, stderr, timeout):
+            flag = lambda name: argv[argv.index(name) + 1]
+            task = json.loads(Path(flag('--task-file')).read_text(encoding='utf-8'))
+            workdir = Path(flag('--workdir'))
+            self.seen['route_argv'] = self.route.build_argv(sys.executable, {
+                '_route_tmpdir': str(Path(flag('--task-file')).parent), 'root': str(workdir)})
+            self.seen.update(argv=list(argv), env_keys=sorted(env), cwd=cwd, timeout=timeout,
+                             task=task, workdir=workdir,
+                             workdir_files=sorted(p.name for p in workdir.iterdir()),
+                             inside_git=gw_agent._is_inside_git(workdir),
+                             stdout=stdout, stderr=stderr)
+            self.seen['calls'] = self.seen.get('calls', 0) + 1
+            if error is not None:
+                raise error
+            value = make_result(task['task_id'])
+            if value is not None:
+                fd = os.open(flag('--result-file'), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                    json.dump(value, stream)
+            return subprocess.CompletedProcess(argv, returncode)
+        return run
+
+    def probe(self, make_result, returncode=0, error=None):
+        return gw_agent.probe_availability(
+            self.route, self.BUDGETS, runner=self.runner(make_result, returncode, error))
+
+    def test_done_reports_every_layer_pass_through_one_minimal_run(self):
+        report = self.probe(lambda task_id: self.result(task_id))
+        self.assertEqual((report['outcome'], report['tcp'], report['auth'], report['inference']),
+                         ('PASS', 'PASS', 'PASS', 'PASS'))
+        self.assertRegex(report['checked_at'], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
+        self.assertIsInstance(report['elapsed_ms'], int)
+        self.assertEqual(self.seen['calls'], 1)
+        argv = self.seen['argv']
+        self.assertEqual(argv, self.seen['route_argv'])
+        self.assertIn('run', argv)
+        self.assertNotIn('resume', argv)
+        self.assertEqual(argv[argv.index('--profile') + 1], 'fake')
+        task = self.seen['task']
+        self.assertEqual(task['budgets']['max_turns'], 1)
+        self.assertEqual(task['data_class'], 'synthetic')
+        self.assertEqual(task['read_paths'], ['probe.txt'])
+        self.assertEqual(self.seen['timeout'], self.BUDGETS['max_wall_seconds'])
+        self.assertEqual(self.seen['workdir_files'], ['probe.txt'])
+        self.assertFalse(self.seen['inside_git'])
+        self.assertEqual((self.seen['stdout'], self.seen['stderr']),
+                         (subprocess.DEVNULL, subprocess.DEVNULL))
+        self.assertIn('PYTHONPATH', self.seen['env_keys'])
+        self.assertNotIn('GW_AGENT_API_KEY', self.seen['env_keys'])
+        self.assertFalse(self.seen['workdir'].exists())
+        serialized = json.dumps(report)
+        for private in ('127.0.0.1', 'pm-task-ref', 'fake-model'):
+            self.assertNotIn(private, serialized)
+
+    def test_gateway_result_classes(self):
+        cases = (
+            ('auth', dict(status='MODEL_ERROR', code='HTTP_401'), 4,
+             ('AUTHORIZATION', 'PASS', 'FAIL', 'UNKNOWN')),
+            ('forbidden', dict(status='MODEL_ERROR', code='HTTP_403'), 4,
+             ('AUTHORIZATION', 'PASS', 'FAIL', 'UNKNOWN')),
+            ('policy', dict(status='POLICY_REFUSED', code='DATA_CLASS_NOT_AUTHORIZED'), 5,
+             ('AUTHORIZATION', 'UNKNOWN', 'FAIL', 'UNKNOWN')),
+            ('network', dict(status='MODEL_ERROR', code='NETWORK_TIMEOUT'), 4,
+             ('INFRASTRUCTURE', 'UNKNOWN', 'UNKNOWN', 'FAIL')),
+            ('service', dict(status='MODEL_ERROR', code='HTTP_503'), 4,
+             ('INFRASTRUCTURE', 'PASS', 'UNKNOWN', 'FAIL')),
+            ('model-blocked', dict(status='BLOCKED', code='MODEL_REPORTED_BLOCKED'), 3,
+             ('PASS', 'PASS', 'PASS', 'PASS')),
+            ('no-turn', dict(turns=0), 0, ('UNKNOWN', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN')),
+            ('exit-mismatch', {}, 4, ('UNKNOWN', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN')),
+        )
+        for label, fields, returncode, expected in cases:
+            with self.subTest(case=label):
+                report = gw_agent.classify_probe_result(
+                    self.result('probe', **fields), returncode)
+                self.assertEqual((report['outcome'], report['tcp'], report['auth'],
+                                  report['inference']), expected)
+
+    def test_http_429_reports_rate_limit_and_retry_after(self):
+        report = self.probe(lambda task_id: self.result(
+            task_id, status='MODEL_ERROR', code='HTTP_429', retry_after_seconds=120),
+            returncode=4)
+        self.assertEqual((report['outcome'], report['inference'], report['retry_after_seconds']),
+                         ('RATE_LIMITED', 'FAIL', 120))
+        report = gw_agent.classify_probe_result(
+            self.result('probe', status='MODEL_ERROR', code='HTTP_429'), 4)
+        self.assertEqual((report['outcome'], report['retry_after_seconds']),
+                         ('RATE_LIMITED', None))
+
+    def test_gateway_timeout_or_missing_result_is_infrastructure(self):
+        report = self.probe(lambda _task_id: None,
+                            error=subprocess.TimeoutExpired(['gateway'], 60))
+        self.assertEqual((report['outcome'], report['inference']), ('INFRASTRUCTURE', 'FAIL'))
+        self.assertEqual(self.seen['calls'], 1)
+        report = self.probe(lambda _task_id: None, returncode=1)
+        self.assertEqual(report['outcome'], 'INFRASTRUCTURE')
+
+    def test_untrusted_result_is_unknown(self):
+        report = self.probe(lambda _task_id: self.result('another-task'))
+        self.assertEqual((report['outcome'], report['tcp'], report['auth'], report['inference']),
+                         ('UNKNOWN', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN'))
+
+    def test_invalid_probe_configuration_makes_no_call(self):
+        bad_budgets = dict(self.BUDGETS, max_wall_seconds=0)
+        for route, budgets in ((self.route, bad_budgets), (object(), self.BUDGETS),
+                               (self.route, {'max_turns': 1})):
+            with self.subTest(budgets=sorted(budgets)), self.assertRaises(RouteError) as caught:
+                gw_agent.probe_availability(route, budgets,
+                                            runner=self.runner(lambda _task_id: None))
+            self.assertEqual(caught.exception.code, 'GW_AGENT_PROBE_CONFIG_INVALID')
+        self.assertNotIn('calls', self.seen)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -11,6 +11,18 @@ re-enable a PAUSED worker and never grant dispatch authority: Owner policy is
 always decided first and separately. One success proves only that request: a
 PASS is fresh for the same bounded window as any other observation (30 min; a
 provider reset only shortens it).
+
+#2367 (Owner 2026-11-19): gw-agent failure classes are kept apart in the same
+availability record, one layer each:
+- infrastructure (network, gateway, service): an endpoint-layer FAIL that holds
+  admission until a gw-agent availability probe passes;
+- security or authorization findings: an authentication-layer FAIL that no
+  probe or success clears (no automatic recovery);
+- model capability (the model ran but the work failed its checks): E9 step-down,
+  then a runtime-layer pause after two consecutive failures at the lowest tier,
+  which a probe never clears;
+- UNKNOWN outcomes: nothing is written and nothing is replayed.
+A hold only withholds admission; it never allows what the Owner policy refuses.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -265,10 +277,12 @@ def record_owner_recovery(store, worker, owner_relay_url, *, now=None, github_ge
 
 
 def fresh_quota_fail(store, worker):
-    """Whether the worker's quota layer holds a fresh FAIL.
+    """Whether the worker's quota layer holds a fresh FAIL, or gw-agent is held.
 
-    Expired, absent or unreadable observations read UNKNOWN and never refuse;
-    a store without the observation reader has none.
+    For gw-agent a fresh infrastructure pause, security stop or model-capability
+    pause (hold_reason) also counts, so every existing admission point that
+    reads this refuses it. Expired, absent or unreadable observations read
+    UNKNOWN and never refuse; a store without the observation reader has none.
     """
     if type(worker) is not str or worker in NO_WRITE_WORKERS:
         return False
@@ -277,18 +291,272 @@ def fresh_quota_fail(store, worker):
         return False
     try:
         view = reader()
-        return view[worker][QUOTA_LAYER]['status'] == 'FAIL'
     except Exception:
         return False
+    try:
+        if view[worker][QUOTA_LAYER]['status'] == 'FAIL':
+            return True
+    except Exception:
+        pass
+    return worker == GW_AGENT and _hold_from_view(view) is not None
 
 
 def quota_refusal(store, worker, *, owner_assignment_ref=None, policy_task_id=None):
-    """REFUSAL_CODE on a fresh quota FAIL, else None.
+    """REFUSAL_CODE on a fresh quota FAIL or a gw-agent hold, else None.
 
     Owner policy comes first: when the Owner policy refuses the worker this
-    returns None, so the route's own Owner refusal is the one reported.
+    returns None, so the route's own Owner refusal is the one reported. The
+    hold class itself is read with hold_reason.
     """
     if not fresh_quota_fail(store, worker):
         return None
     decision = worker_dispatch.evaluate(worker, owner_assignment_ref, policy_task_id)
     return REFUSAL_CODE if decision.allowed else None
+
+
+# --- #2367: gw-agent failure classes, holds and the availability probe -----
+
+GW_AGENT = 'gw-agent'
+ENDPOINT_LAYER = 'endpoint'
+AUTHENTICATION_LAYER = 'authentication'
+RUNTIME_LAYER = 'runtime'
+MODEL_CAPABILITY = 'MODEL_CAPABILITY'
+INFRASTRUCTURE = 'INFRASTRUCTURE'
+SECURITY = 'SECURITY'
+OUTCOME_UNKNOWN = 'UNKNOWN'
+HOLD_SECURITY = 'SECURITY_STOP'
+HOLD_INFRASTRUCTURE = 'INFRASTRUCTURE_PAUSE'
+HOLD_MODEL_CAPABILITY = 'MODEL_CAPABILITY_PAUSE'
+# E9: pause after this many consecutive model-capability failures at the
+# lowest tier (the Owner's E9 rule, not a new limit).
+E9_LOWEST_TIER_PAUSE_AFTER = 2
+# A hold is kept for the longest window the store accepts, less one ordinary
+# freshness window so it always stays inside the store bound.
+HOLD_FOR = MAX_RESET_WINDOW - FRESH_FOR
+
+_GW_UNKNOWN_CODES = frozenset(('DEVELOPER_RESULT_UNKNOWN',))
+# HTTP 429 is a quota/rate condition: the quota layer (classify/observe) owns it.
+_GW_RATE_CODES = frozenset(_ROUTE_CODES['gw-agent']) | frozenset((
+    'DEVELOPER_GW_AGENT_MODEL_ERROR_HTTP_429',))
+_GW_SECURITY_CODES = frozenset((
+    'DEVELOPER_GW_AGENT_CREDENTIAL_MISSING', 'DEVELOPER_GW_AGENT_AUDIT_INVALID',
+    'DEVELOPER_GW_AGENT_MODEL_UNVERIFIED', 'DEVELOPER_GW_AGENT_MODEL_ERROR_HTTP_401',
+    'DEVELOPER_GW_AGENT_MODEL_ERROR_HTTP_403',
+))
+_GW_SECURITY_FAMILY = re.compile(
+    r'DEVELOPER_GW_AGENT_(?:POLICY_REFUSED|TASK_ID_MISMATCH)(?:_[A-Z0-9_]+)?\Z')
+_GW_INFRA_CODES = frozenset(('DEVELOPER_GW_AGENT_TIMEOUT', 'DEVELOPER_GW_AGENT_GATEWAY_TIMEOUT'))
+_GW_INFRA_FAMILY = re.compile(r'DEVELOPER_GW_AGENT_MODEL_ERROR(?:_[A-Z0-9_]+)?\Z')
+_GW_CAPABILITY_FAMILY = re.compile(
+    r'DEVELOPER_GW_AGENT_(?:BLOCKED|BUDGET_EXCEEDED)(?:_[A-Z0-9_]+)?\Z')
+
+
+def classify_failure(record):
+    """Return the failure class of one gw-agent Task record, or None.
+
+    MODEL_CAPABILITY, INFRASTRUCTURE, SECURITY or UNKNOWN. None for another
+    route, for no failure and for a quota/rate condition (the quota layer).
+    """
+    profile, developer = _profile(record)
+    if profile != GW_AGENT:
+        return None
+    code, state = developer.get('error_code'), developer.get('state')
+    if state == 'DEVELOPER_OUTCOME_UNKNOWN' or code in _GW_UNKNOWN_CODES:
+        return OUTCOME_UNKNOWN
+    if type(code) is not str:
+        return MODEL_CAPABILITY if state == 'DEVELOPER_OUTPUT_REJECTED' else None
+    if code in _GW_RATE_CODES:
+        return None
+    if code in _GW_SECURITY_CODES or _GW_SECURITY_FAMILY.fullmatch(code):
+        return SECURITY
+    if code in _GW_INFRA_CODES or _GW_INFRA_FAMILY.fullmatch(code):
+        return INFRASTRUCTURE
+    if _GW_CAPABILITY_FAMILY.fullmatch(code) or state == 'DEVELOPER_OUTPUT_REJECTED':
+        return MODEL_CAPABILITY
+    if code.startswith('DEVELOPER_GW_AGENT_'):
+        return OUTCOME_UNKNOWN  # an unlisted gateway code is never guessed
+    return None
+
+
+def _now(now):
+    return (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
+
+
+def _digest(value):
+    return hashlib.sha256(json.dumps(
+        value, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
+
+
+def _record_evidence(record, failure):
+    developer = record.get('developer') if type(record) is dict else None
+    return _digest({
+        'task_id': record.get('task_id') if type(record) is dict else None,
+        'assignment_id': developer.get('assignment_id') if type(developer) is dict else None,
+        'worker_key': GW_AGENT, 'failure_class': failure,
+    })
+
+
+def _streak_marker(streak):
+    """The evidence digest that names a lowest-tier capability streak."""
+    return _digest({'worker_key': GW_AGENT, 'failure_class': MODEL_CAPABILITY,
+                    'lowest_tier_streak': streak})
+
+
+def _write(store, layer, status, observed, fresh_until, evidence, expected=None):
+    kwargs = {}
+    if expected is not None:
+        kwargs['expected'] = expected
+    store.record_worker_observation(
+        worker_key=GW_AGENT, layer=layer, status=status,
+        observed_at=_stamp(observed), fresh_until=_stamp(fresh_until),
+        source='LOCAL_OBSERVATION', evidence_sha256=evidence, **kwargs)
+
+
+def observe_failure_class(store, record, *, now=None):
+    """Record one gw-agent outcome's infrastructure or security class; return the class.
+
+    INFRASTRUCTURE writes an endpoint FAIL and SECURITY an authentication FAIL,
+    each held for HOLD_FOR unless a probe PASS clears the endpoint one first.
+    MODEL_CAPABILITY goes through record_capability_outcome; UNKNOWN and None
+    write nothing.
+    """
+    failure = classify_failure(record)
+    layer = {INFRASTRUCTURE: ENDPOINT_LAYER, SECURITY: AUTHENTICATION_LAYER}.get(failure)
+    if layer is None:
+        return failure
+    observed = _now(now)
+    _write(store, layer, 'FAIL', observed, observed + HOLD_FOR,
+           _record_evidence(record, failure))
+    return failure
+
+
+def _runtime_streak(entry):
+    """The current lowest-tier capability streak named by a runtime FAIL, else 0."""
+    if type(entry) is not dict or entry.get('status') != 'FAIL':
+        return 0
+    for streak in range(1, E9_LOWEST_TIER_PAUSE_AFTER + 1):
+        if entry.get('evidence_sha256') == _streak_marker(streak):
+            return streak
+    return 0
+
+
+def record_capability_outcome(store, record, *, passed, at_lowest_tier, now=None):
+    """E9 for one judged gw-agent result; return CLEAR, STEP_DOWN, LOWEST_TIER_FAILURE or PAUSED.
+
+    A failure above the lowest tier is a step-down and leaves the streak alone.
+    Consecutive failures at the lowest tier count up to the E9 pause; a pass
+    resets a running streak. Once paused, neither a pass nor a probe clears it.
+    Only a model-capability failure may be counted here.
+    """
+    if (type(passed) is not bool or type(at_lowest_tier) is not bool or
+            worker_key(record) != GW_AGENT):
+        raise LLMToolError('WORKER_CAPABILITY_OUTCOME_INVALID')
+    if not passed and classify_failure(record) not in (MODEL_CAPABILITY, None):
+        raise LLMToolError('WORKER_FAILURE_CLASS_MISMATCH')
+    before = store.get_worker_observations()[GW_AGENT][RUNTIME_LAYER]
+    streak = _runtime_streak(before)
+    if streak >= E9_LOWEST_TIER_PAUSE_AFTER:
+        return 'PAUSED'
+    expected = before if before.get('status') in ('PASS', 'FAIL') else None
+    observed = _now(now)
+    if passed:
+        if streak:
+            _write(store, RUNTIME_LAYER, 'PASS', observed, observed + FRESH_FOR,
+                   _record_evidence(record, None), expected)
+        return 'CLEAR'
+    if not at_lowest_tier:
+        return 'STEP_DOWN'
+    streak += 1
+    _write(store, RUNTIME_LAYER, 'FAIL', observed, observed + HOLD_FOR,
+           _streak_marker(streak), expected)
+    return 'PAUSED' if streak >= E9_LOWEST_TIER_PAUSE_AFTER else 'LOWEST_TIER_FAILURE'
+
+
+def _hold_from_view(view):
+    entry = view.get(GW_AGENT) if type(view) is dict else None
+    if type(entry) is not dict:
+        return None
+
+    def status(layer):
+        item = entry.get(layer)
+        return item.get('status') if type(item) is dict else None
+
+    if status(AUTHENTICATION_LAYER) == 'FAIL':
+        return HOLD_SECURITY
+    if _runtime_streak(entry.get(RUNTIME_LAYER)) >= E9_LOWEST_TIER_PAUSE_AFTER:
+        return HOLD_MODEL_CAPABILITY
+    if status(ENDPOINT_LAYER) == 'FAIL':
+        return HOLD_INFRASTRUCTURE
+    return None
+
+
+def hold_reason(store, worker):
+    """SECURITY_STOP, MODEL_CAPABILITY_PAUSE or INFRASTRUCTURE_PAUSE for gw-agent, else None."""
+    if worker != GW_AGENT:
+        return None
+    reader = getattr(store, 'get_worker_observations', None)
+    if not callable(reader):
+        return None
+    try:
+        return _hold_from_view(reader())
+    except Exception:
+        return None
+
+
+def run_gw_agent_probe(store, route, budgets, *, probe=None, now=None):
+    """Run at most one gw-agent availability probe and record its result.
+
+    Refused before any call while a security stop holds (no automatic
+    recovery), while a quota FAIL holds (Retry-After or the quota window) and
+    within FRESH_FOR of the last endpoint observation (the existing backoff), so
+    repeated failures cannot loop. PASS clears only the infrastructure pause.
+    The probe never reads or writes a Task record and never replays a Task.
+    """
+    try:
+        entry = store.get_worker_observations()[GW_AGENT]
+        authentication = dict(entry[AUTHENTICATION_LAYER])
+        quota = dict(entry[QUOTA_LAYER])
+        endpoint = dict(entry[ENDPOINT_LAYER])
+    except Exception:
+        raise LLMToolError('GW_AGENT_PROBE_STATE_UNAVAILABLE') from None
+    if authentication.get('status') == 'FAIL':
+        raise LLMToolError('GW_AGENT_PROBE_SECURITY_STOP')
+    if quota.get('status') == 'FAIL':
+        raise LLMToolError('GW_AGENT_PROBE_RATE_LIMITED')
+    if endpoint.get('status') in ('PASS', 'FAIL'):
+        last = _parse_strict_utc(endpoint.get('observed_at'))
+        if last is None or _now(now) < last + FRESH_FOR:
+            raise LLMToolError('GW_AGENT_PROBE_NOT_DUE')
+    if probe is None:
+        from .developer_routes.gw_agent import probe_availability as probe
+    report = probe(route, budgets)
+    if type(report) is not dict or report.get('outcome') not in (
+            'PASS', 'INFRASTRUCTURE', 'AUTHORIZATION', 'RATE_LIMITED', 'UNKNOWN'):
+        report = {'outcome': 'UNKNOWN', 'tcp': 'UNKNOWN', 'auth': 'UNKNOWN',
+                  'inference': 'UNKNOWN', 'retry_after_seconds': None}
+    outcome = report['outcome']
+    observed = _now(now)
+    evidence = _digest({'worker_key': GW_AGENT, 'probe': {
+        key: report.get(key) for key in ('outcome', 'tcp', 'auth', 'inference', 'checked_at')}})
+    if outcome == 'PASS':
+        layer, status, fresh_until = ENDPOINT_LAYER, 'PASS', observed + FRESH_FOR
+    elif outcome == 'AUTHORIZATION':
+        layer, status, fresh_until = AUTHENTICATION_LAYER, 'FAIL', observed + HOLD_FOR
+    elif outcome == 'RATE_LIMITED':
+        # HTTP 429: honour Retry-After when the gateway reports it, else the
+        # ordinary quota window; the probe is refused until it ends.
+        retry = report.get('retry_after_seconds')
+        window = (min(timedelta(seconds=retry), HOLD_FOR)
+                  if type(retry) is int and retry > 0 else FRESH_FOR)
+        layer, status, fresh_until = QUOTA_LAYER, 'FAIL', observed + window
+    else:
+        # INFRASTRUCTURE, or UNKNOWN: a probe that cannot show the gateway
+        # available never clears the pause, and the backoff still applies.
+        layer, status, fresh_until = ENDPOINT_LAYER, 'FAIL', observed + HOLD_FOR
+    _write(store, layer, status, observed, fresh_until, evidence)
+    result = {key: report.get(key) for key in (
+        'outcome', 'tcp', 'auth', 'inference', 'retry_after_seconds', 'checked_at',
+        'elapsed_ms')}
+    result.update(worker=GW_AGENT, recorded_layer=layer, recorded_status=status,
+                  hold=hold_reason(store, GW_AGENT))
+    return result

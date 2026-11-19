@@ -2956,5 +2956,62 @@ class GwAgentRealStoreTests(unittest.TestCase):
                                      completion['missing_gates'])
 
 
+class GwAgentProbeCliTests(unittest.TestCase):
+    """#2367: `llmtool worker-probe gw-agent` prints one probe report."""
+
+    def test_probe_fails_closed_until_the_task_route_is_wired(self):
+        from llmtool import cli
+        stderr = io.StringIO()
+        with patch.object(task_store, 'TaskStore',
+                          side_effect=AssertionError('store opened')), \
+                patch('llmtool.worker_availability.run_gw_agent_probe',
+                      side_effect=AssertionError('probe ran')), \
+                contextlib.redirect_stderr(stderr):
+            status = cli.main(['worker-probe', 'gw-agent'])
+        self.assertEqual(status, 2)
+        self.assertEqual(stderr.getvalue().strip(), 'GW_AGENT_PROBE_ROUTE_UNAVAILABLE')
+
+    def test_only_gw_agent_can_be_probed(self):
+        from llmtool import cli
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            cli.main(['worker-probe', 'opencode-developer'])
+
+    def test_probe_report_is_printed_and_recorded(self):
+        from llmtool import cli
+        route = object()
+        calls = []
+
+        def probe(probe_route, budgets):
+            calls.append((probe_route, budgets))
+            return {'outcome': 'PASS', 'tcp': 'PASS', 'auth': 'PASS', 'inference': 'PASS',
+                    'retry_after_seconds': None, 'checked_at': '2026-11-19T00:00:00Z',
+                    'elapsed_ms': 3}
+
+        with tempfile.TemporaryDirectory() as temp:
+            store = task_store.TaskStore(Path(temp).resolve() / 'tasks')
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                status = cli.run_worker_probe(
+                    Namespace(command='worker-probe', worker='gw-agent'), store=store,
+                    route_factory=lambda: (route, {'max_turns': 512}), probe=probe)
+            report = json.loads(stdout.getvalue())
+            self.assertEqual(status, 0)
+            self.assertEqual(calls, [(route, {'max_turns': 512})])
+            self.assertEqual((report['worker'], report['outcome'], report['recorded_layer'],
+                              report['recorded_status'], report['hold']),
+                             ('gw-agent', 'PASS', 'endpoint', 'PASS', None))
+            self.assertEqual(store.get_worker_observations()['gw-agent']['endpoint']['status'],
+                             'PASS')
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                status = cli.run_worker_probe(
+                    Namespace(command='worker-probe', worker='gw-agent'), store=store,
+                    route_factory=lambda: (route, {'max_turns': 512}), probe=probe)
+            self.assertEqual(status, 2)
+            self.assertEqual(stderr.getvalue().strip(), 'GW_AGENT_PROBE_NOT_DUE')
+            self.assertEqual(len(calls), 1)
+
+
 if __name__ == '__main__':
     unittest.main()

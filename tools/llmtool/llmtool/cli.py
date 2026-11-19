@@ -194,6 +194,7 @@ def parser_for_cli():
     add_roles_parser(sub)
     add_dispatch_check_parser(sub)
     add_worker_quota_recovered_parser(sub)
+    add_worker_probe_parser(sub)
     add_board_check_parser(sub)
     from .mac_full_due import add_ci_parser
     add_ci_parser(sub)
@@ -602,6 +603,45 @@ def run_worker_quota_recovered(args, store=None):
         return 2
 
 
+def add_worker_probe_parser(subparsers):
+    parser = subparsers.add_parser(
+        'worker-probe',
+        help='Run one minimal gw-agent availability probe; never changes a repo or Task')
+    parser.add_argument('worker', choices=['gw-agent'])
+    return parser
+
+
+def _gw_agent_probe_route():
+    """Return (route, budgets) built exactly as gw-agent Task dispatch builds them.
+
+    #2367: not wired yet. The Task route composition lives in
+    task_submission_cli, outside this change; a second, diverging copy here
+    would not be the same call path, so the probe fails closed until it is.
+    """
+    raise LLMToolError('GW_AGENT_PROBE_ROUTE_UNAVAILABLE')
+
+
+def run_worker_probe(args, store=None, route_factory=None, probe=None):
+    """Print one probe report as JSON: 0 on PASS, 3 on any other outcome, 2 when refused."""
+    from .worker_availability import run_gw_agent_probe
+    factory = _gw_agent_probe_route if route_factory is None else route_factory
+    try:
+        route, budgets = factory()
+        if store is None:
+            store = getattr(args, 'store', None)
+        if store is None:
+            from .task_store import TaskStore
+            store = TaskStore()
+        report = run_gw_agent_probe(store, route, budgets, probe=probe)
+    except LLMToolError as exc:
+        code = getattr(exc, 'code', None) or str(exc)
+        safe = type(code) is str and re.fullmatch(r'[A-Z0-9_]{1,64}', code)
+        print(code if safe else 'GW_AGENT_PROBE_FAILED', file=sys.stderr)
+        return 2
+    print(json.dumps(report, sort_keys=True, separators=(',', ':'), ensure_ascii=True))
+    return 0 if report.get('outcome') == 'PASS' else 3
+
+
 def main(argv=None):
     try:
         args = parser_for_cli().parse_args(argv)
@@ -614,6 +654,8 @@ def main(argv=None):
             return run_dispatch_check(args)
         if args.command == 'worker-quota-recovered':
             return run_worker_quota_recovered(args)
+        if args.command == 'worker-probe':
+            return run_worker_probe(args)
         if args.command == 'board-check':
             return run_board_check(args)
         if args.command == 'ci':
