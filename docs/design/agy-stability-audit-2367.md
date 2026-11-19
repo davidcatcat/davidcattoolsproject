@@ -41,20 +41,17 @@ All six end on the provider's quota error; none carries a code, test or review
 failure code. The changed-file counts differ, but the terminating condition is
 provider capacity.
 
-### Lock, start or environment: 5
+### Lock, start or environment: 2
 
-- `d3345cb1` — `AGY_EXIT_NONZERO`, 0 changed files, no continues. A process
-  exit with no changed file points to failure at start, before work.
-- `66009faf` — `AGY_EXIT_NONZERO`, 0 changed files, continues `361f9d74`. The
-  same start-time exit, with a continuation already recorded.
 - `6bf7cdaa` — `AGY_GIT_STATE_CHANGED_SNAPSHOT`, 0 changed files, no continues.
-  A git-state snapshot guard fired; this is an environment or lock symptom.
+  A git-state snapshot guard fired; the code names a git-state check, so this is
+  an environment or lock symptom, not a code or test failure. Whether the guard
+  fired before work began or after it is UNKNOWN, because the emitter is outside
+  this read scope.
 - `e3fa75be` — `AGY_GIT_STATE_CHANGED_SNAPSHOT`, 0 changed files, no continues.
-- `9808642f` — `AGY_TIMEOUT`, 0 changed files, no continues. A timeout with no
-  changed file means the timeout ended the run before any work.
+  Same code and the same UNKNOWN timing.
 
-None of these five is a defect in the Task's code or tests; each is a guard or
-process outcome around the start of a run.
+Neither run is a defect in the Task's code or tests.
 
 ### Real code or test failure: 0
 
@@ -62,8 +59,21 @@ No run carries a failed review verdict, EC2 receipt or CI failure code. The
 handlers for those cases (`repair_policy.test_failure_action`, and the test
 branch of `review_repair.repair_review`) are not the reported outcome here.
 
-### UNKNOWN: 1
+### UNKNOWN: 4
 
+- `d3345cb1` — `AGY_EXIT_NONZERO`, 0 changed files, no continues. The code says
+  a process exited non-zero; that is neither a provider error nor a failed
+  code/test check. Zero changed files does not prove no work happened: a process
+  can exit after doing work without changing a file. Nothing in this read scope
+  fixes the phase, so start-time and after-work exit are both possible and the
+  group is UNKNOWN.
+- `66009faf` — `AGY_EXIT_NONZERO`, 0 changed files, continues `361f9d74`. Same
+  code and the same UNKNOWN phase; the recorded continuation does not show when
+  in the run the exit happened.
+- `9808642f` — `AGY_TIMEOUT`, 0 changed files, no continues. The code says the
+  run timed out. A timeout may end a run during or after work, and a process can
+  do work without changing a file, so the phase is UNKNOWN rather than
+  established as before work.
 - `45e55c20` — `DEVELOPER_OUTPUT_SENSITIVE`, state `DEVELOPER_OUTPUT_REJECTED`,
   0 changed files, no continues. This is an output-screen refusal after model
   output. It is not a provider quota, not a start error and not a code or test
@@ -72,7 +82,8 @@ branch of `review_repair.repair_review`) are not the reported outcome here.
 
 Emitter caveat: none of the `AGY_*` or screen codes appears in either read
 file. The grouping above uses the code name and the PM-quoted fields; where
-each emitter or first handler sits is outside scope and is UNKNOWN. The only
+each emitter or first handler sits is outside scope and is UNKNOWN, and the
+changed-file count alone cannot establish when a run stopped. The only
 in-scope handling is that `review_repair.repair_review` treats
 `DEVELOPER_OUTPUT_REJECTED` as a Developer state from which a repair may still
 be dispatched.
@@ -91,40 +102,45 @@ Repair policy counts repairs, not Developer runs.
 
 None of these functions takes an AGY, quota, exit, timeout or git-state input,
 and neither read file maps such an error to a refund, a free retry or a
-non-effective repair. No in-scope code says that a provider or start failure
-is not a used repair.
+non-effective repair. The in-scope code therefore gives no rule either way, so
+the effective-repair answer for these codes is UNKNOWN here.
 
-`review_repair.repair_review` commits the repair claim in
-`review_repair_claims` before the provider adapter is called. On an adapter
-exception, `review_repair._update_claim_state` sets the claim to `UNKNOWN` and
-keeps it; when the adapter returns and the run later ends as a failure, the
-claim stays `DISPATCHED`. A re-dispatch of the same packet reuses that claim
-(the `existing` match includes `CLAIMED`, `DISPATCHED` and `UNKNOWN`), but the
-claim is never released.
+The confirmed claim behaviour is in `review_repair.repair_review`: it commits
+the repair claim in `review_repair_claims` before the provider adapter is
+called. On an adapter exception, `review_repair._update_claim_state` sets the
+claim to `UNKNOWN` and keeps it; when the adapter returns and the run later ends
+as a failure, the claim stays `DISPATCHED`. A re-dispatch of the same packet
+reuses that claim (the `existing` match includes `CLAIMED`, `DISPATCHED` and
+`UNKNOWN`), but the claim is never released. A stored claim is not by itself
+proof of an effective repair: the counting rule lives in `lineage_counts`,
+outside this read scope.
 
 Per error code:
 
 - `AGY_QUOTA_EXHAUSTED` — UNKNOWN. If the run was a repair dispatch,
   `review_repair.repair_review` had committed a claim before the provider call,
-  so the claim remains (`UNKNOWN` or `DISPATCHED`) and is part of the Task's
-  stored attempts. `review_repair._review_gate` then passes
-  `repair_count`/`counts` to `repair_policy.admit_repair` and
-  `repair_policy.review_action`; whether `lineage_counts` treats that
-  claim state as effective is outside scope. `review_repair.repair_review` also
-  refuses a new repair when `worker_availability.fresh_quota_fail` is true,
-  before any claim, so a known quota refusal can prevent a later claim instead
-  of spending one. Whether any of the six runs was itself a repair dispatch is
-  also outside scope.
-- `AGY_EXIT_NONZERO` — UNKNOWN. A non-zero exit after the claim commit leaves
-  a claim; a failure before the commit leaves none
+  so the claim remains (`UNKNOWN` or `DISPATCHED`) and stays a stored claim.
+  `review_repair._review_gate` then passes `repair_count`/`counts` to
+  `repair_policy.admit_repair` and `repair_policy.review_action`; whether
+  `lineage_counts` treats that claim state as effective is outside scope, so
+  this note does not conclude that an effective repair was used.
+  `review_repair.repair_review` also refuses a new repair when
+  `worker_availability.fresh_quota_fail` is true, before any claim, so a known
+  quota refusal can prevent a later claim instead of committing one. Whether any
+  of the six runs was itself a repair dispatch is also outside scope.
+- `AGY_EXIT_NONZERO` — UNKNOWN. A non-zero exit raised after the claim commit
+  leaves a claim (adapter exception gives `UNKNOWN` via
+  `review_repair._update_claim_state`; a returned failed run leaves
+  `DISPATCHED`); a failure before the commit leaves none
   (`review_repair._refuse_unclaimed` from `review_repair._record_repair_task`,
   or `REPAIR_HEAD_MOVED` from `review_repair._registered_d6` and
   `review_repair._current_d6_head`). Which side these two runs fall on depends
-  on the AGY runner and the TaskStore, outside scope.
+  on the AGY runner and the TaskStore, outside scope, so an effective repair is
+  not confirmed.
 - `AGY_TIMEOUT` — UNKNOWN. A timeout raised through the adapter follows the
   exception path (`review_repair._update_claim_state` sets `UNKNOWN`, claim
   kept); a timeout enforced before the claim commit leaves none. The split is
-  outside scope.
+  outside scope, so an effective repair is not confirmed.
 - `AGY_GIT_STATE_CHANGED_SNAPSHOT` — UNKNOWN. The snapshot checks visible in
   review_repair (`review_repair._registered_d6` and
   `review_repair._current_d6_head`, both `REPAIR_HEAD_MOVED`) run before the
@@ -136,7 +152,7 @@ Per error code:
   this run held a repair claim (the screen runs after model output, so after
   any claim commit) and whether it counts as used is decided outside scope.
 
-## 3. Code path where a provider or start failure spends a repair
+## 3. Code path where a provider or start failure could spend a repair
 
 In `review_repair.repair_review` (`tools/llmtool/llmtool/review_repair.py`):
 
@@ -155,31 +171,40 @@ In `review_repair.repair_review` (`tools/llmtool/llmtool/review_repair.py`):
    `review_repair._review_gate`; `repair_policy.admit_repair` refuses at
    `repair_max` and `repair_policy.review_action` escalates by kind.
 
-So a quota refusal, non-zero exit, timeout or snapshot abort raised after
-step 2 spends a stored repair claim even though no code was repaired. A
-comparable failure before step 2 (a record refusal surfaced by
-`review_repair._refuse_unclaimed`, a head check, or the policy/quota gate)
-spends none. Whether the failed run is also charged to the run budget depends
-on `run_budget` and `repair_policy.repair_attempts_max`; that part is outside
-this read scope and is UNKNOWN.
+The confirmed effect of a failure after step 2 is that the stored claim is not
+released by this module: an adapter exception leaves it `UNKNOWN`, a returned
+failed run leaves it `DISPATCHED`. Whether that stored claim is then counted as
+an effective repair is not decided in either read file; `lineage_counts` and
+its state filter are outside this read scope, so an effective repair is UNKNOWN
+rather than confirmed. A comparable failure before step 2 (a record refusal
+surfaced by `review_repair._refuse_unclaimed`, a head check, or the
+policy/quota gate) leaves no claim in this path. The only in-scope path where a
+provider or start failure could be counted as a used repair is therefore a
+claim persisted at step 2 that `lineage_counts` later reads as effective; that
+link is UNKNOWN. Whether the failed run is also charged to the run budget
+depends on `run_budget` and `repair_policy.repair_attempts_max`; that part is
+outside this read scope and is UNKNOWN.
 
 ## 4. Summary table
 
 Counted as effective repair is UNKNOWN on every row for two reasons: the
 quoted TaskStore fields do not show which runs were repair dispatches, and the
 state filter that decides "effective" is in `lineage_counts`, outside this
-read scope. Two points are certain from the read code: a run that was not a
-repair dispatch never held a repair claim, so it is not counted on either
-repair count, and a failure raised before the claim commit spends nothing. The
-in-scope code does not classify these errors, and it does not release a
-committed claim, so the per-run answer cannot be narrowed further here.
+read scope. What is confirmed from the read code is claim persistence, not an
+effective-repair count: `review_repair.repair_review` commits the claim before
+calling the provider and never releases it, so a failure after that commit
+leaves a stored claim. A run that was not a repair dispatch held no claim from
+this path, and a failure raised before the claim commit leaves no claim there.
+The in-scope code does not classify these errors and does not turn a stored
+claim into a confirmed used repair, so the per-run answer cannot be narrowed
+further here.
 
 | Task id | Group | Counted as effective repair |
 | --- | --- | --- |
 | 787f13ed | Provider (quota) | UNKNOWN |
-| d3345cb1 | Lock/start/environment | UNKNOWN |
+| d3345cb1 | UNKNOWN (exit timing) | UNKNOWN |
 | 6bf7cdaa | Lock/start/environment | UNKNOWN |
-| 9808642f | Lock/start/environment | UNKNOWN |
+| 9808642f | UNKNOWN (timeout timing) | UNKNOWN |
 | e3fa75be | Lock/start/environment | UNKNOWN |
 | 45e55c20 | UNKNOWN (sensitive output) | UNKNOWN |
 | d62de6f7 | Provider (quota) | UNKNOWN |
@@ -187,4 +212,4 @@ committed claim, so the per-run answer cannot be narrowed further here.
 | da2ac4df | Provider (quota) | UNKNOWN |
 | 8a86c682 | Provider (quota) | UNKNOWN |
 | 1360cf87 | Provider (quota) | UNKNOWN |
-| 66009faf | Lock/start/environment | UNKNOWN |
+| 66009faf | UNKNOWN (exit timing) | UNKNOWN |
