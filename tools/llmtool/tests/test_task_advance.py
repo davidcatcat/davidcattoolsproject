@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import io
 import json
@@ -2752,6 +2753,111 @@ class TaskAdvancePublishTests(unittest.TestCase):
 
         self.assert_refused_unpublished('PUBLISH_BINDING_UNAVAILABLE', head, None)
 
+    # #2367 A-rca: committed content also goes through the Developer-output
+    # sensitive screen before any record or push. Owner #763 A: the screen is
+    # injected and flags a plain marker word, so no credential-shaped text is
+    # used here; other content still goes through the real screen.
+    SCREEN_MARKER = 'screen-flagged-marker'
+
+    @contextlib.contextmanager
+    def injected_screen(self, *, error=None):
+        seen = []
+        real = task_submission_cli.developer_diff_sensitive
+
+        def screen(value, added, patch_paths, sources):
+            seen.append(added)
+            if error is not None:
+                raise error
+            if self.SCREEN_MARKER in added:
+                return True
+            return real(value, added, patch_paths, sources)
+
+        with patch.object(task_submission_cli, 'developer_diff_sensitive', side_effect=screen):
+            yield seen
+
+    def test_committed_sensitive_head_is_refused_before_record_or_push(self):
+        head = self.commit_file('allowed.txt', f'{self.SCREEN_MARKER}\n', 'flagged')
+
+        with self.injected_screen() as seen:
+            self.assert_refused_unpublished('DEVELOPER_OUTPUT_SENSITIVE', head, self.initial_head)
+
+        self.assertEqual(seen, [self.SCREEN_MARKER])
+
+    def test_committed_sensitive_line_later_replaced_is_still_refused(self):
+        """Push sends every commit, so each commit's added content is screened."""
+        self.commit_file('allowed.txt', f'{self.SCREEN_MARKER}\n', 'flagged')
+        head = self.commit_file('allowed.txt', 'published\n', 'replaced')
+
+        with self.injected_screen() as seen:
+            self.assert_refused_unpublished('DEVELOPER_OUTPUT_SENSITIVE', head, self.initial_head)
+
+        self.assertIn(self.SCREEN_MARKER, seen)
+
+    def test_committed_head_content_is_screened_then_published(self):
+        head = self.commit_file('allowed.txt', 'published\n', 'in scope')
+
+        with self.injected_screen() as seen:
+            result = self.publish()
+
+        self.assertEqual(seen, ['published'])
+        self.assertEqual(result, {'pr': 23, 'head': head})
+        self.assertEqual(self.pushed_head(), head)
+        self.assertEqual(len(self.recorded), 1)
+
+    def test_publish_own_commit_is_screened_before_record_or_push(self):
+        self.change_file(f'{self.SCREEN_MARKER}\n')
+        runner, calls = self.recording_git_runner()
+
+        with self.injected_screen() as seen, \
+                self.assertRaises(task_advance._PublishRefusal) as caught:
+            self.publish(git_runner=runner)
+
+        self.assertEqual(caught.exception.code, 'DEVELOPER_OUTPUT_SENSITIVE')
+        self.assertEqual(seen, [self.SCREEN_MARKER])
+        self.assertTrue(any(args[:1] == ['commit'] for args in calls))
+        self.assertFalse(any(args[:1] == ['push'] for args in calls))
+        self.assertEqual(self.recorded, [])
+        self.assertEqual(self.remote_branch_head(), self.initial_head)
+        self.assertFalse(any(args[:2] == ['pr', 'create'] for args in self.gh_calls))
+
+    def test_screen_that_cannot_run_refuses_before_record_or_push(self):
+        head = self.commit_file('allowed.txt', 'published\n', 'in scope')
+
+        with self.injected_screen(error=RuntimeError('screen unavailable')) as seen:
+            self.assert_refused_unpublished('PUBLISH_COMMAND_FAILED', head, self.initial_head)
+
+        self.assertEqual(seen, ['published'])
+
+    def test_merge_does_not_screen_content_taken_unchanged_from_published_main(self):
+        """Published main content is not the Task's own: only what the merge adds is screened."""
+        self.commit_file('allowed.txt', 'published\n', 'in scope')
+        self.move_main('main-file.txt', f'{self.SCREEN_MARKER}\n')
+        self.git(['fetch', '-q', 'origin', 'main'], cwd=self.root)
+        self.git(['merge', '--no-ff', '--no-edit', 'FETCH_HEAD'], cwd=self.root)
+        head = self.head()
+
+        with self.injected_screen() as seen:
+            result = self.publish()
+
+        self.assertEqual(seen, ['published'])
+        self.assertEqual(result, {'pr': 23, 'head': head})
+        self.assertEqual(self.pushed_head(), head)
+
+    def test_merge_adding_sensitive_content_is_refused(self):
+        """A line that differs from every merge parent is the merge's own change."""
+        self.commit_file('allowed.txt', 'published\n', 'in scope')
+        self.merge_published_main(commit=False)
+        self.change_file(f'published\n{self.SCREEN_MARKER}\n')
+        self.git(['add', '--', 'allowed.txt'], cwd=self.root)
+        self.git(['commit', '--no-edit'], cwd=self.root)
+
+        with self.injected_screen() as seen:
+            self.assert_refused_unpublished('DEVELOPER_OUTPUT_SENSITIVE', self.head(),
+                                            self.initial_head)
+
+        self.assertIn(self.SCREEN_MARKER, seen)
+        self.assertFalse(any('main' in added.split('\n') for added in seen))
+
 
 class TaskAdvancePublishLookupTests(unittest.TestCase):
     def setUp(self):
@@ -2926,9 +3032,23 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
                         initial_head, main_head]:
                 return result(args, output=(f'{committed_head} {initial_head}\n'.encode()
                                             if committed_before else b''))
+            if args == ['--no-replace-objects', 'rev-list', '--parents', 'HEAD', '--not',
+                        initial_head]:
+                # The walk over this publish's own commit (#2367 A-rca).
+                return result(args, output=(f'{committed_head} {initial_head}\n'.encode()
+                                            if state['head'] == committed_head else b''))
             if args == ['--no-replace-objects', 'diff', '--no-renames', '--name-only', '-z',
                         initial_head, committed_head]:
                 return result(args, output=b'allowed.txt\0')
+            if args == ['--no-replace-objects', 'diff', *task_advance._PUBLISH_SCREEN_DIFF,
+                        initial_head, committed_head]:
+                return result(args, output=(
+                    b'diff --git a/allowed.txt b/allowed.txt\n'
+                    b'index 1111111..2222222 100644\n'
+                    b'--- a/allowed.txt\n+++ b/allowed.txt\n'
+                    b'@@ -1 +1 @@\n-base\n+published\n'))
+            if args == ['--no-replace-objects', 'cat-file', 'blob', f'{initial_head}:allowed.txt']:
+                return result(args, output=b'base\n')
             if args == ['rev-parse', '--verify', 'HEAD']:
                 return result(args, output=(state['head'] + '\n').encode())
             if args == ['merge-base', '--is-ancestor', initial_head, 'HEAD']:
@@ -3012,6 +3132,15 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
                       if event[0] == 'git' and event[1][:1] == ('commit',))
         self.assertLess(commit, events.index(('record', committed)))
         self.assert_recorded_then_pushed(events, committed)
+        # #2367 A-rca: this publish's own commit is screened before it is recorded.
+        screened = events.index(('git', self.screen_diff_args(committed)))
+        self.assertLess(commit, screened)
+        self.assertLess(screened, events.index(('record', committed)))
+
+    @staticmethod
+    def screen_diff_args(committed):
+        return ('--no-replace-objects', 'diff', *task_advance._PUBLISH_SCREEN_DIFF,
+                'a' * 40, committed)
 
     def test_rerun_on_committed_unrecorded_head_continues_from_it(self):
         """#2376: a re-run records and pushes the head an earlier publish committed."""
@@ -3025,7 +3154,25 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
         screened = events.index(('git', ('--no-replace-objects', 'diff', '--no-renames',
                                          '--name-only', '-z', 'a' * 40, committed)))
         self.assertLess(screened, events.index(('record', committed)))
+        # #2367 A-rca: and its added content goes through the sensitive screen first.
+        content = events.index(('git', self.screen_diff_args(committed)))
+        self.assertLess(content, events.index(('record', committed)))
 
+    def test_committed_head_sensitive_screen_hit_refuses_before_record_or_push(self):
+        """#2367 A-rca: the screen is injected (Owner #763 A) and flags the committed diff."""
+        seen = []
+
+        def screen(value, added, _patch_paths, _sources):
+            seen.append(added)
+            return True
+
+        with patch.object(task_submission_cli, 'developer_diff_sensitive', side_effect=screen):
+            result, events, git_calls, _committed, _merged = self._fake_publish(
+                committed_before=True)
+        self.assertEqual(result, 'DEVELOPER_OUTPUT_SENSITIVE')
+        self.assertEqual(seen, ['published'])
+        self.assertFalse(any(event[0] in ('record', 'push') for event in events))
+        self.assertFalse(any(args[:1] in (['add'], ['commit'], ['push']) for args in git_calls))
 
 
 class RetiredD6MergeClosureTests(unittest.TestCase):

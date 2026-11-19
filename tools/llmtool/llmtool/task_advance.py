@@ -1919,15 +1919,11 @@ def _publish_base_commits(git_runner, root, remote_head):
     return bases
 
 
-def _publish_committed_paths(git_runner, root, bases):
-    """Return every path the commits HEAD adds over bases introduce.
+def _publish_added_commits(git_runner, root, bases):
+    """Return (commit, parents) for every commit HEAD adds over bases.
 
-    Each commit is read on its own, so a path added and later removed still
-    counts. A one-parent commit introduces each path it changes. A merge
-    introduces the paths that differ from every parent; any other path holds
-    one parent's version, and that parent is either one of these commits or
-    already published. A parentless commit introduces its whole tree. Grafts
-    are refused and replace refs ignored, so the walk sees what push sends.
+    Grafts are refused and replace refs ignored, so the walk sees what push
+    sends.
     """
     try:
         # A graft file could rewrite the parents the walk reads.
@@ -1936,26 +1932,101 @@ def _publish_committed_paths(git_runner, root, bases):
         raise _PublishRefusal('PUBLISH_COMMAND_FAILED') from None
     listed = _publish_command(git_runner, root,
         ['--no-replace-objects', 'rev-list', '--parents', 'HEAD', '--not', *bases])
-    paths = set()
+    commits = []
     for line in listed.splitlines():
         shas = line.split()
         if not shas or any(_HEX40.fullmatch(sha) is None for sha in shas):
             raise _PublishRefusal('PUBLISH_COMMAND_FAILED')
-        commit, parents = shas[0], shas[1:]
-        if not parents:
-            raw = _publish_command(git_runner, root,
-                ['--no-replace-objects', 'ls-tree', '-r', '--name-only', '-z', commit])
-            paths.update(path for path in raw.split('\0') if path)
+        commits.append((shas[0], shas[1:]))
+    return commits
+
+
+def _publish_commit_paths(git_runner, root, commit, parents):
+    """Return the paths one commit introduces.
+
+    Each commit is read on its own, so a path added and later removed still
+    counts. A one-parent commit introduces each path it changes. A merge
+    introduces the paths that differ from every parent; any other path holds
+    one parent's version, and that parent is either another added commit or
+    already published. A parentless commit introduces its whole tree.
+    """
+    if not parents:
+        raw = _publish_command(git_runner, root,
+            ['--no-replace-objects', 'ls-tree', '-r', '--name-only', '-z', commit])
+        return {path for path in raw.split('\0') if path}
+    introduced = None
+    for parent in parents:
+        raw = _publish_command(git_runner, root,
+            ['--no-replace-objects', 'diff', '--no-renames', '--name-only', '-z',
+             parent, commit])
+        changed = {path for path in raw.split('\0') if path}
+        introduced = changed if introduced is None else introduced & changed
+    return introduced
+
+
+# Fixed diff options, so local diff config (external drivers, textconv,
+# prefixes, colour) cannot change or hide what the screen reads. --text
+# shows binary content as text; output that is not UTF-8 refuses.
+_PUBLISH_SCREEN_DIFF = ('--no-renames', '--no-ext-diff', '--no-textconv', '--no-color',
+                        '--text', '--src-prefix=a/', '--dst-prefix=b/')
+
+
+def _publish_blob_reader(git_runner, root, revision):
+    """Pre-image reader for the diff screen, like task_submission_cli._revision_sources."""
+    def read(path):
+        if revision is None:
+            raise LLMToolError('PUBLISH_SOURCE_UNAVAILABLE')
+        try:
+            return _publish_command(git_runner, root,
+                ['--no-replace-objects', 'cat-file', 'blob', f'{revision}:{path}'])
+        except _PublishRefusal:
+            raise LLMToolError('PUBLISH_SOURCE_UNAVAILABLE') from None
+    return read
+
+
+def _publish_commit_diff(git_runner, root, commit, parents):
+    """Return (unified diff of what one commit introduces, its pre-image revision)."""
+    if not parents:
+        return _publish_command(git_runner, root,
+            ['--no-replace-objects', 'diff-tree', '-r', '-p', '--root', '--no-commit-id',
+             *_PUBLISH_SCREEN_DIFF, commit]), None
+    if len(parents) == 1:
+        return _publish_command(git_runner, root,
+            ['--no-replace-objects', 'diff', *_PUBLISH_SCREEN_DIFF, parents[0], commit]), parents[0]
+    # A merge: only the paths it introduces, so a file taken unchanged from
+    # one parent (for example published main) is not screened as the Task's
+    # own. An introduced path is diffed against the first parent, so lines it
+    # takes from the other parent are screened too (conservative).
+    introduced = sorted(_publish_commit_paths(git_runner, root, commit, parents))
+    if not introduced:
+        return '', parents[0]
+    return _publish_command(git_runner, root,
+        ['--literal-pathspecs', '--no-replace-objects', 'diff', *_PUBLISH_SCREEN_DIFF,
+         parents[0], commit, '--', *introduced]), parents[0]
+
+
+def _publish_screen_commits(git_runner, root, commits):
+    """#2367 A-rca: screen the added content of each commit before record or push.
+
+    This is the Developer-output sensitive screen task_submission_cli applies
+    to a Developer's uncommitted Task diff (developer_diff_sensitive over the
+    added diff lines). A hit refuses with its code, DEVELOPER_OUTPUT_SENSITIVE;
+    a screen that cannot run refuses too. Only the code is reported, never
+    the matched text.
+    """
+    for commit, parents in commits:
+        diff, revision = _publish_commit_diff(git_runner, root, commit, parents)
+        if not diff:
             continue
-        introduced = None
-        for parent in parents:
-            raw = _publish_command(git_runner, root,
-                ['--no-replace-objects', 'diff', '--no-renames', '--name-only', '-z',
-                 parent, commit])
-            changed = {path for path in raw.split('\0') if path}
-            introduced = changed if introduced is None else introduced & changed
-        paths.update(introduced)
-    return paths
+        try:
+            hit = task_submission_cli.developer_diff_sensitive(
+                diff, task_submission_cli._added_diff_content(diff),
+                task_submission_cli._patch_paths,
+                _publish_blob_reader(git_runner, root, revision))
+        except Exception:
+            raise _PublishRefusal('PUBLISH_COMMAND_FAILED') from None
+        if hit:
+            raise _PublishRefusal('DEVELOPER_OUTPUT_SENSITIVE')
 
 
 def _publish_task(record, d6, executor_task, *, pre_pr_gate, git_runner=None,
@@ -2024,13 +2095,17 @@ def _publish_task(record, d6, executor_task, *, pre_pr_gate, git_runner=None,
         if getattr(ancestor, 'returncode', 1) != 0:
             raise _PublishRefusal('PUBLISH_NON_FAST_FORWARD')
 
-    # #2367 A-sec: commits already on HEAD (an earlier publish or the D6
-    # writer) pass the same write-scope check as uncommitted changes, before
-    # this publish commits, records or pushes anything.
+    # #2367 A-sec/A-rca: commits already on HEAD (an earlier publish or the
+    # D6 writer) pass the same write-scope check and Developer-output
+    # sensitive screen as uncommitted changes, before this publish commits,
+    # records or pushes anything.
     bases = _publish_base_commits(git_runner, root, remote_head)
+    committed = _publish_added_commits(git_runner, root, bases)
     if any(path not in write_paths
-           for path in _publish_committed_paths(git_runner, root, bases)):
+           for commit, parents in committed
+           for path in _publish_commit_paths(git_runner, root, commit, parents)):
         raise _PublishRefusal('PUBLISH_OUT_OF_SCOPE')
+    _publish_screen_commits(git_runner, root, committed)
 
     if changed:
         _publish_command(git_runner, root, ['add', '--', *changed])
@@ -2040,10 +2115,17 @@ def _publish_task(record, d6, executor_task, *, pre_pr_gate, git_runner=None,
         if not staged_paths or any(path not in write_paths for path in staged_paths):
             raise _PublishRefusal('PUBLISH_OUT_OF_SCOPE')
         title, _ = _publication_text(record, executor_task, branch)
+        previous_head = local_head
         _publish_command(git_runner, root,
             ['commit', '-m', title, '-m', f'llmtool Task {task_id}'])
         local_head = _publish_command(git_runner, root,
             ['rev-parse', '--verify', 'HEAD']).strip()
+        # The commit this publish just made gets the same screen before it is
+        # recorded or pushed: it must be the one commit over the old head.
+        own = _publish_added_commits(git_runner, root, [previous_head])
+        if len(own) != 1 or own[0][0] != local_head or own[0][1] != [previous_head]:
+            raise _PublishRefusal('PUBLISH_COMMAND_FAILED')
+        _publish_screen_commits(git_runner, root, own)
     # #2367 (M1, #1317): record the Developer result head as committed and push
     # it as it is. PUBLISH never merges main into the head; a head behind main
     # or conflicting with it is handled at the merge gate (BEHIND/dirty path).
