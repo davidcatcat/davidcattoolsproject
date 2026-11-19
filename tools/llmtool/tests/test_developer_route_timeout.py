@@ -24,6 +24,9 @@ from llmtool.task_store import TaskStoreConflict
 ROUTES_FILE = Path(__file__).resolve().parents[1] / 'developer-routes.json'
 DRIFT_SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'guidance_drift_check.py'
 ROUTE_NAMES = ('agy', 'claude', 'gw-agent', 'opencode')
+# The adapter name of each registry route (DeveloperRoute.name). The registry
+# lookup reads '_' as '-', and error codes are built from the adapter name.
+ADAPTER_NAMES = ('agy', 'claude', 'gw_agent', 'opencode')
 # #2281 (Owner 2026-11-19): every shipped route is long (default 10800 s, 3 hours;
 # max 18000 s, 5 hours). The short-route rule (a registry max_timeout of 600) is
 # still checked: SHORT_ROUTES run against a copy of the shipped registry whose
@@ -374,7 +377,9 @@ class RunRouteTimeoutTests(unittest.TestCase):
         # #2281 (Owner 2026-11-19) regression: a route run with no requested
         # timeout gets 10800 s, a requested 18000 s reaches the runner and a
         # requested 18001 s is refused before the runner with the existing code.
-        for name in ROUTE_NAMES:
+        # Adapter names, not registry keys: the gw-agent adapter is named
+        # gw_agent, so its refusal code is GW_AGENT_REQUEST_INVALID.
+        for name in ADAPTER_NAMES:
             with self.subTest(name=name):
                 self.assertEqual(self.run_with(NamedRoute(name)), 10800)
                 self.assertEqual(self.run_with(NamedRoute(name), timeout=18000), 18000)
