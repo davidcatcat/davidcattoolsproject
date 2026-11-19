@@ -29,8 +29,19 @@ means the pull request number. `T` means the root Task ID.
 | 5 | AI Debug examines `H2` and records `RCA_CONFIRMED`. | One `high_debug` entry exists for family `pr-N` and examined SHA `H2`, with `RCA_CONFIRMED`, a report digest, a rules digest, a D6 name, and a HIGH_DEBUG completion event; the diagnosis workspace is clean. |
 | 6 | Review repair 2 is claimed with the Debug report bound, and the developer reroutes from Claude to AGY. | Exactly two claims exist in family `pr-N`, attempt 2, state `DISPATCHED`; the second claim and packet carry the Debug report digest; family, task ID, lineage and repair task ID are unchanged by the reroute; the developer record names the AGY route; the first claim record is preserved. |
 | 7 | AGY repair publishes `H3`. | `H3` differs from `H2`; still two claims in one family; the AGY developer record is the one bound to the repair; lineage is unchanged. |
-| 8 | Formal review PASS on `H3`. | The verdict is PASS for `H3`; no new repair claim is written; open claims are closed or remain in their terminal dispatched state (exact state label UNKNOWN); the review result names `H3`. |
-| 9 | Merge `H3`. | The merge record names `H3`; the Task is completed; no repair claim is open; the lineage is not restarted or duplicated. |
+| 8 | Formal review PASS on `H3`. | The verdict is PASS for `H3`; no new repair claim is written; the two existing claims stay in state `DISPATCHED` and no claim becomes `FAILED` or `UNKNOWN`; the review result names `H3`. |
+| 9 | Merge `H3`. | The merge record names `H3`; the Task is completed; the two `DISPATCHED` claims are unchanged and no claim is added; the lineage is not restarted or duplicated. |
+
+Claim lifecycle: `tools/llmtool/llmtool/review_repair.py::_LIVE_CLAIM_STATES` lists
+`CLAIMED`, `DISPATCHED` and `UNKNOWN` as live. A successful repair moves its claim from
+`CLAIMED` to `DISPATCHED` through `tools/llmtool/llmtool/review_repair.py::_update_claim_state`
+and leaves it there. `tools/llmtool/llmtool/review_repair.py::repair_review` writes
+`FAILED` only when a retry replaces a dispatched claim, and `UNKNOWN` only when the adapter
+raises. The PASS and merge steps must therefore not assert that no repair claim is open.
+Step 8 asserts no new claim and no state change; step 9 asserts the same persisted
+`DISPATCHED` claims. Whether an advance-side step settles or waives a live `DISPATCHED`
+claim before merge is UNKNOWN (task advance is outside the read scope); the later test
+must assert the observed advance behaviour rather than require a close.
 
 Two admission details must be asserted as part of the path, not bypassed:
 
@@ -263,6 +274,9 @@ Existing module and functions:
   `review_dispatcher` seams.
 - `tools/llmtool/llmtool/review_repair.py::_current_d6_head` decides whether the repair
   is published before a follow-up review.
+- `tools/llmtool/llmtool/review_repair.py::_update_claim_state` and
+  `tools/llmtool/llmtool/review_repair.py::_LIVE_CLAIM_STATES` define the persisted claim
+  state: a successful repair stays `DISPATCHED` and counts as live.
 
 Injectable seams:
 
@@ -282,8 +296,11 @@ Missing seams:
 
 This step is entirely advance-side. The file, function and task-record fields for the
 merge are UNKNOWN. The later test should assert only the stable observable contract:
-the merged SHA is `H3`, the Task is completed, and no repair claim remains open. The test
-PR must not invent a merge implementation.
+the merged SHA is `H3`, the Task is completed, and the two repair claims are still the same
+`DISPATCHED` records with no added claim. It must not assert that the claims are closed,
+because the repair path leaves a successful claim in `DISPATCHED`. How merge treats a live
+`DISPATCHED` claim (settle, waive or ignore it) is advance-side and UNKNOWN; assert what the
+authorized code does and do not invent a merge or a claim-closing step.
 
 ## 3. Fixture set for the later test
 
@@ -354,6 +371,9 @@ constraints so the PM can run it.
 
 - The advance-side reroute function and its file/function name are UNKNOWN.
 - The advance-side merge function and its task-record fields are UNKNOWN.
+- The advance-side treatment of live `DISPATCHED` repair claims at PASS and merge is
+  UNKNOWN; the note asserts only that the claims stay unchanged unless the authorized
+  code visibly settles them.
 - The exact existing task-store and test fixtures are UNKNOWN.
 - The exact patch surfaces of `tools/llmtool/llmtool/repair_policy.py`,
   `tools/llmtool/llmtool/lineage_counts.py`,
