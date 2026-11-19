@@ -12,6 +12,7 @@ which has the registered D6 fixture that path needs.
 """
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -99,6 +100,18 @@ MALFORMED_MODELS = (
     'opencode/example-free#a b',
     'opencode/example-free#x#y',
     'opencode/example-free#toolongvariantname123',
+)
+
+# Malformed values written quoted into the user config, including ones the
+# config resolver refuses before validate_model runs (#2302 F1).
+CONFIG_REFUSED_MODELS = (
+    '',
+    '   ',
+    '\t',
+    'opencode/model\n',
+    'opencode/model\r',
+    'opencode/model\x01',
+    'opencode/model\x00',
 )
 
 
@@ -386,6 +399,28 @@ class OpenCodeDeveloperProfileModelTests(unittest.TestCase):
                         submission_cli._opencode_developer_profile()
                 self.assertEqual(getattr(caught.exception, 'direct_opencode_code', None),
                                  'OPENCODE_MODEL_INVALID')
+
+    def test_configured_empty_or_control_character_models_keep_stable_code(self):
+        # #2302 F1: values the config resolver itself refuses (empty,
+        # whitespace, control characters) keep OPENCODE_MODEL_INVALID. The
+        # model is written as a JSON (YAML double-quoted) scalar so escapes
+        # survive the file.
+        for model in CONFIG_REFUSED_MODELS:
+            with self.subTest(model=model):
+                self._write_opencode_developer_model(json.dumps(model))
+                with patch.dict(os.environ, {'HOME': str(self.home)}):
+                    with self.assertRaises(LLMToolError) as caught:
+                        submission_cli._opencode_developer_profile()
+                self.assertEqual(getattr(caught.exception, 'direct_opencode_code', None),
+                                 'OPENCODE_MODEL_INVALID')
+
+    def test_other_invalid_profile_fields_are_not_labelled_model_invalid(self):
+        # The model-invalid code is not applied to a refusal unrelated to the model.
+        self._write_opencode_developer_model('opencode/paid-model', steps=2)
+        with patch.dict(os.environ, {'HOME': str(self.home)}):
+            with self.assertRaises(LLMToolError) as caught:
+                submission_cli._opencode_developer_profile()
+        self.assertIsNone(getattr(caught.exception, 'direct_opencode_code', None))
 
     def test_no_fallback_model_replaces_a_refused_model(self):
         # A2: a refused model is never swapped for the default or another model.

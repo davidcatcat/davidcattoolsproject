@@ -4534,6 +4534,42 @@ def _print_task_without_masking_interrupt(store, task_id):
         pass
 
 
+_OPENCODE_PROFILE_PROBE_MAX_BYTES = 1024 * 1024
+
+
+def _opencode_profile_model_is_malformed():
+    """Return True when the raw opencode-developer model is set and malformed.
+
+    Used only after the config resolver has already refused the profile
+    (#2302 F1), so an empty, whitespace or control-character model keeps the
+    stable OPENCODE_MODEL_INVALID code. Only the model field is inspected; it
+    is never returned, logged or shown. Any read failure returns False and the
+    original uncoded refusal stands.
+    """
+    try:
+        path = Path.home() / '.config' / 'llmtool' / 'config.yaml'
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _OPENCODE_PROFILE_PROBE_MAX_BYTES:
+            return False
+        data = yaml_module().safe_load(path.read_text(encoding='utf-8'))
+    except Exception:
+        return False
+    providers = data.get('providers') if type(data) is dict else None
+    profile = providers.get('opencode-developer') if type(providers) is dict else None
+    if type(profile) is not dict or profile.get('model') is None:
+        return False
+    return not opencode_direct_developer.is_valid_model(profile['model'])
+
+
+def _opencode_profile_invalid_error():
+    if _opencode_profile_model_is_malformed():
+        error = LLMToolError('opencode-developer profile model is invalid')
+        error.direct_opencode_code = 'OPENCODE_MODEL_INVALID'
+        return error
+    return LLMToolError('opencode-developer profile is invalid in the llmtool '
+                        'user config (~/.config/llmtool/config.yaml)')
+
+
 def _opencode_developer_profile():
     """Return the optional OpenCode model and validated agent step limit."""
     try:
@@ -4550,11 +4586,9 @@ def _opencode_developer_profile():
         if str(exc) == 'requested provider profile is not defined':
             provider = {'model': None, 'provider_options': {}}
         else:
-            raise LLMToolError('opencode-developer profile is invalid in the llmtool '
-                               'user config (~/.config/llmtool/config.yaml)') from None
+            raise _opencode_profile_invalid_error() from None
     except Exception:
-        raise LLMToolError('opencode-developer profile is invalid in the llmtool '
-                           'user config (~/.config/llmtool/config.yaml)') from None
+        raise _opencode_profile_invalid_error() from None
     options = provider.get('provider_options', {})
     if type(options) is not dict:
         raise LLMToolError('opencode-developer profile provider_options must be a mapping')

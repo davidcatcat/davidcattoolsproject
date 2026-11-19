@@ -2522,10 +2522,14 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 self.assertEqual(developer['model'], model)
                 (self.executor_root / 'sample.py').write_text('VALUE = 1\n')
 
-        for model in ('opencode/a/b-free', 'opencode/has space', 'bare-model'):
+        # #2302 F1: the quoted empty, whitespace and control-character values are
+        # refused by the config resolver before validate_model and must keep
+        # the same stable code through the real delegate path.
+        for model in ('opencode/a/b-free', 'opencode/has space', 'bare-model',
+                      '', '   ', '\t', 'opencode/model\n', 'opencode/model\x01'):
             with self.subTest(malformed_model=model):
                 task = self._pm_task_with_opencode_assignment()
-                self._write_opencode_developer_model(model)
+                self._write_opencode_developer_model(json.dumps(model))
                 with patch.dict(os.environ, {'HOME': str(self.home)}), \
                         patch('llmtool.task_submission_cli.opencode_direct_developer.run') as invoke:
                     with self.assertRaises(LLMToolError) as caught:
