@@ -1891,15 +1891,54 @@ def _record_d6_result(*, task_id, canonical_root, root, write_paths=None):
                                  write_paths=write_paths)
 
 
-def _publish_base_commits(git_runner, root, remote_head):
+def _publish_recorded_main_pin(record):
+    """Return the Task's recorded authenticated main sha, or None (#2367 F1).
+
+    Task completion stores this pin in the Task record (outside the D6): the
+    main tip read from the trusted GitHub ref, bound to this Task, run,
+    contract and Developer source. Main is published history, so that commit
+    stays a published base after main moves on. A pin that does not validate
+    is not used.
+    """
+    completion = record.get('completion')
+    evidence = completion.get('evidence') if type(completion) is dict else None
+    pin = evidence.get('trusted_main_pin') if type(evidence) is dict else None
+    developer = record.get('developer')
+    source_sha = developer.get('source_sha') if type(developer) is dict else None
+    binding = record.get('task_binding')
+    if (type(pin) is not dict or type(source_sha) is not str or
+            type(record.get('task_id')) is not str or type(record.get('run_id')) is not str or
+            type(binding) is not dict or type(binding.get('contract_digest')) is not str):
+        return None
+    try:
+        pin = task_submission_cli._validate_trusted_main_pin(pin, record, source_sha)
+    except Exception:
+        return None
+    return pin['sha']
+
+
+def _publish_base_commits(git_runner, root, remote_head, recorded_main=None):
     """Return the published commits that bound what HEAD adds (#2367 A-sec).
 
-    Only the remote's own answer counts: this branch's head from ls-remote and
-    the remote main tip when that commit is present locally. Local refs are
-    never a base, because a D6 writer that can commit can also move them. With
-    no base the added commits are unknown, so publish fails closed.
+    Only published commits count: this branch's head and the main tip from
+    the remote's own ls-remote answer, and the Task's recorded authenticated
+    main pin (#2367 F1: a new branch whose main moved to a tip this D6 does
+    not hold), each when that commit is present locally. Local refs are
+    never a base, because a D6 writer that can commit can also move them.
+    With no base the added commits are unknown, so publish fails closed.
     """
     bases = [remote_head] if remote_head else []
+
+    def add_if_present(sha):
+        if sha in bases:
+            return
+        try:
+            present = git_runner(root, ['cat-file', '-e', f'{sha}^{{commit}}'])
+        except Exception:
+            raise _PublishRefusal('PUBLISH_COMMAND_FAILED') from None
+        if getattr(present, 'returncode', 1) == 0:
+            bases.append(sha)
+
     listed = _publish_command(git_runner, root,
         ['ls-remote', '--heads', 'origin', 'refs/heads/main'])
     for line in listed.splitlines():
@@ -1908,12 +1947,9 @@ def _publish_base_commits(git_runner, root, remote_head):
             raise _PublishRefusal('PUBLISH_REMOTE_UNAVAILABLE')
         if parts[1] != 'refs/heads/main':
             continue
-        try:
-            present = git_runner(root, ['cat-file', '-e', f'{parts[0]}^{{commit}}'])
-        except Exception:
-            raise _PublishRefusal('PUBLISH_COMMAND_FAILED') from None
-        if getattr(present, 'returncode', 1) == 0:
-            bases.append(parts[0])
+        add_if_present(parts[0])
+    if type(recorded_main) is str and _HEX40.fullmatch(recorded_main) is not None:
+        add_if_present(recorded_main)
     if not bases:
         raise _PublishRefusal('PUBLISH_BINDING_UNAVAILABLE')
     return bases
@@ -2099,7 +2135,8 @@ def _publish_task(record, d6, executor_task, *, pre_pr_gate, git_runner=None,
     # D6 writer) pass the same write-scope check and Developer-output
     # sensitive screen as uncommitted changes, before this publish commits,
     # records or pushes anything.
-    bases = _publish_base_commits(git_runner, root, remote_head)
+    bases = _publish_base_commits(git_runner, root, remote_head,
+                                  _publish_recorded_main_pin(record))
     committed = _publish_added_commits(git_runner, root, bases)
     if any(path not in write_paths
            for commit, parents in committed

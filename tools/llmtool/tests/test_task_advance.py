@@ -1998,6 +1998,7 @@ class TaskAdvancePublishTests(unittest.TestCase):
         self.recorded = []
         self.gh_calls = []
         self.pr_exists = False
+        self.record_extra = None
 
     @staticmethod
     def git(args, *, cwd):
@@ -2032,6 +2033,10 @@ class TaskAdvancePublishTests(unittest.TestCase):
     def publish(self, *, write_paths=None, git_runner=None):
         record = {'task_id': self.TASK_ID,
                   'developer': {'write_paths': self.WRITE_PATHS if write_paths is None else write_paths}}
+        if self.record_extra is not None:
+            extra = dict(self.record_extra)
+            record['developer'].update(extra.pop('developer', {}))
+            record.update(extra)
         d6_binding = {'root': self.root, 'common_dir': os.path.join(self.tmp.name, 'canonical', '.git'),
                       'branch': self.BRANCH, 'task_id': self.EXECUTOR_TASK,
                       'recorded_result_head': self.initial_head}
@@ -2746,12 +2751,112 @@ class TaskAdvancePublishTests(unittest.TestCase):
         self.assertEqual(len(self.recorded), 1)
 
     def test_no_published_base_in_the_d6_fails_closed(self):
-        """Unpushed branch and a main tip this D6 does not hold: added commits are unknown."""
+        """Unpushed branch, a main tip this D6 does not hold and no recorded main pin:
+        the added commits are unknown."""
         self.git(['push', '-q', 'origin', '--delete', self.BRANCH], cwd=self.root)
         self.move_main('main-file.txt', 'main\n')
         head = self.commit_file('allowed.txt', 'published\n', 'in scope')
 
         self.assert_refused_unpublished('PUBLISH_BINDING_UNAVAILABLE', head, None)
+
+    # #2367 F1 (codex-reviewer v1 on PR #2389): a new branch whose main moved to
+    # a tip this D6 does not hold is bounded by the Task's recorded
+    # authenticated main pin, kept in the Task record outside the D6.
+    TRUSTED_SLUG = 'example-owner/example-repo'
+    RUN_ID = '2' * 32
+    CONTRACT_DIGEST = '4' * 64
+
+    def pin_record(self, sha, **pin_changes):
+        pin = {'repository': self.TRUSTED_SLUG, 'ref': 'refs/heads/main', 'sha': sha,
+               'provenance': 'AUTHENTICATED_TRUSTED_SLUG_GITHUB_REF',
+               'task_id': self.TASK_ID, 'run_id': self.RUN_ID,
+               'contract_digest': self.CONTRACT_DIGEST, 'source_sha': self.initial_head,
+               'verified_result_heads': []}
+        pin.update(pin_changes)
+        self.record_extra = {
+            'run_id': self.RUN_ID, 'task_binding': {'contract_digest': self.CONTRACT_DIGEST},
+            'developer': {'source_sha': self.initial_head},
+            'completion': {'executor_task_id': self.EXECUTOR_TASK,
+                           'evidence': {'trusted_main_pin': pin}}}
+
+    def trusted_slug(self):
+        return patch.object(task_submission_cli.task_completion, '_trusted_slug',
+                            return_value=self.TRUSTED_SLUG)
+
+    def first_publish_after_main_moved(self):
+        """A new D6 branch (never pushed) whose main moved to a tip absent here."""
+        self.git(['push', '-q', 'origin', '--delete', self.BRANCH], cwd=self.root)
+        moved = self.move_main('main-file.txt', 'main\n')
+        self.assertNotEqual(self.git_runner(
+            self.root, ['cat-file', '-e', f'{moved}^{{commit}}']).returncode, 0)
+        return moved
+
+    def test_first_publish_after_main_moves_records_and_publishes_over_recorded_pin(self):
+        self.first_publish_after_main_moved()
+        self.pin_record(self.initial_head)
+        committed = self.commit_file('allowed.txt', 'published\n', 'in scope')
+        self.change_file('second\n')
+        runner, calls = self.recording_git_runner()
+        real_record = self.record_result
+
+        def record_result(**kwargs):
+            calls.append(['RECORD_RESULT'])
+            return real_record(**kwargs)
+        self.record_result = record_result
+
+        with self.trusted_slug(), self.injected_screen() as seen:
+            result = self.publish(git_runner=runner)
+
+        head = self.head()
+        self.assert_no_main_sync(calls)
+        self.assertEqual(self.parents(), [head, committed])
+        self.assertEqual(result, {'pr': 23, 'head': head})
+        self.assertEqual(self.pushed_head(), head)
+        self.assertEqual([item['task_id'] for item in self.recorded], [self.EXECUTOR_TASK])
+        # The Developer result is recorded before the push.
+        push_at = next(index for index, args in enumerate(calls) if args[:1] == ['push'])
+        self.assertLess(calls.index(['RECORD_RESULT']), push_at)
+        # The committed-content screen still runs on every added commit,
+        # then on the commit this publish made.
+        self.assertEqual(seen, ['published', 'second'])
+        self.assertTrue(any(args[:2] == ['pr', 'create'] for args in self.gh_calls))
+
+    def test_first_publish_after_main_moves_still_checks_committed_content(self):
+        self.first_publish_after_main_moved()
+        self.pin_record(self.initial_head)
+        self.commit_file('allowed.txt', 'published\n', 'in scope')
+        head = self.commit_file('outside.txt', 'outside\n', 'out of scope')
+
+        with self.trusted_slug():
+            self.assert_refused_unpublished('PUBLISH_OUT_OF_SCOPE', head, None)
+
+        self.git(['reset', '-q', '--hard', 'HEAD~1'], cwd=self.root)
+        head = self.commit_file('allowed.txt', f'{self.SCREEN_MARKER}\n', 'flagged')
+        with self.trusted_slug(), self.injected_screen() as seen:
+            self.assert_refused_unpublished('DEVELOPER_OUTPUT_SENSITIVE', head, None)
+        self.assertIn(self.SCREEN_MARKER, seen)
+
+    def test_first_publish_after_main_moves_without_a_valid_pin_fails_closed(self):
+        """A recorded pin that does not validate or is not held here is no base."""
+        moved = self.first_publish_after_main_moved()
+        head = self.commit_file('allowed.txt', 'published\n', 'in scope')
+        cases = {
+            'pin commit not held in the D6': (moved, {}, {}),
+            'other provenance': (self.initial_head, {'provenance': 'LOCAL_REF'}, {}),
+            'other Task': (self.initial_head, {'task_id': '9' * 32}, {}),
+            'other run': (self.initial_head, {'run_id': '9' * 32}, {}),
+            'other contract': (self.initial_head, {'contract_digest': '9' * 64}, {}),
+            'other Developer source': (self.initial_head, {'source_sha': moved}, {}),
+            'other repository': (self.initial_head, {'repository': 'other/repo'}, {}),
+            'other ref': (self.initial_head, {'ref': 'refs/heads/' + self.BRANCH}, {}),
+            'record without a Task binding': (self.initial_head, {}, {'task_binding': None}),
+        }
+        for name, (sha, pin_changes, record_changes) in cases.items():
+            with self.subTest(case=name):
+                self.pin_record(sha, **pin_changes)
+                self.record_extra.update(record_changes)
+                with self.trusted_slug():
+                    self.assert_refused_unpublished('PUBLISH_BINDING_UNAVAILABLE', head, None)
 
     # #2367 A-rca: committed content also goes through the Developer-output
     # sensitive screen before any record or push. Owner #763 A: the screen is
