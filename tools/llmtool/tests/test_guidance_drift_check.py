@@ -310,10 +310,12 @@ class GuidanceDriftCheckTests(unittest.TestCase):
                                             "CLAUDE.md: MODEL_NOT_ALLOWED llama-9-other"])
 
 
-# #2281 L0b: the limit-table keys (rows 2, 15, 16) at their recorded values.
+# #2281 L0b: the limit-table keys (rows 2, 15, 16) at their recorded values;
+# L7 adds row 17, the D6 writer lease length in hours.
 POLICY_LIMIT_KEYS_2281 = {
     "spec_preflight_large_file_lines": 2000, "merge_train_members_max": 6,
     "merge_train_files_per_pr_max": 100, "revert_scope_prs_max": 5,
+    "d6_writer_lease_hours": 24,
 }
 
 

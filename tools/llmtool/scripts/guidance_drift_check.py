@@ -320,11 +320,13 @@ RULE_SCHEMAS: dict[str, Any] = {
     }, {
         "timeout_continuation_max": Int(0, 3),
         # #2281 L0b: same rule as repair_policy.OPTIONAL_POSITIVE_POLICY_KEYS
-        # (>= 1, no upper bound); limit table rows 2, 15 and 16.
+        # (>= 1, no upper bound); limit table rows 2, 15 and 16, and row 17
+        # (#2281 L7, the D6 writer lease length in hours).
         "spec_preflight_large_file_lines": Int(1),
         "merge_train_members_max": Int(1),
         "merge_train_files_per_pr_max": Int(1),
         "revert_scope_prs_max": Int(1),
+        "d6_writer_lease_hours": Int(1),
     }),
     "worker-dispatch.json": Obj({
         "schema_version": Const(1),

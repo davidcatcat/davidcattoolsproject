@@ -37,8 +37,11 @@ OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
 #   row 2:  spec_preflight_large_file_lines (gw-agent edit large-file threshold)
 #   row 15: merge_train_members_max, merge_train_files_per_pr_max
 #   row 16: revert_scope_prs_max
+#   row 17: d6_writer_lease_hours (#2281 L7: D6 writer lease length in hours,
+#           read by scripts/d6_worktree_lifecycle.py, which has no default)
 OPTIONAL_POSITIVE_POLICY_KEYS = ('spec_preflight_large_file_lines', 'merge_train_members_max',
-                                 'merge_train_files_per_pr_max', 'revert_scope_prs_max')
+                                 'merge_train_files_per_pr_max', 'revert_scope_prs_max',
+                                 'd6_writer_lease_hours')
 # #2281 L0a (design rule 3): the bound is a real technical limit, not an
 # arbitrary cap. policy.json is untrusted input, so load_policy reads at most
 # _MAX_BYTES + 1 bytes in one bounded buffer instead of the whole file. The
