@@ -198,7 +198,14 @@ def registry_default_model(entry):
 
 
 def _gw_agent_budgets_ok(budgets, profile=None):
-    """Return True when budgets has valid gw-agent budget keys and ranges (#2281 L9)."""
+    """Return True when budgets has valid gw-agent budget keys and ranges (#2281 L9).
+
+    #2281: max_wall_seconds is no shorter than the route default timeout (1800 s)
+    and bounded by max_timeout (3600 s). Basis: the route default timeout and
+    the two recorded 600 s stops (N3 and N1, AI Debug RCA_CONFIRMED on #2302)
+    where runs were ended by the whole-run wall budget before the route default
+    timeout.
+    """
     if type(budgets) is not dict:
         return False
     keys = set(budgets)

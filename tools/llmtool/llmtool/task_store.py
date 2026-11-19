@@ -26,6 +26,7 @@ from .action_contract import TaskBinding
 from .diagnostics import validate_provider_usage
 from .errors import LLMToolError
 from . import file_ops
+from . import run_budget
 from . import start_failure
 from .opencode_direct_developer import is_free_model, is_valid_model
 from .role_config import _NAME
@@ -153,6 +154,13 @@ _REVIEW_REPAIR_CLAIM_FIELDS = frozenset((
     'comment_id', 'packet_sha256', 'claimed_at'))
 _REVIEW_REPAIR_OPTIONAL_FIELDS = frozenset(('repair_task_id', 'family',
                                              'high_debug_report_sha256'))
+# #2367: the claims one repair family may store, numbered 1..N by 'attempt':
+# the policy repair bound (run_budget.MAX_REPAIR_ATTEMPTS, from policy.json)
+# plus one replaced (FAILED) retry claim. The floor keeps every record written
+# under the earlier bound of 3 readable unchanged, even with an unreadable policy.
+_LEGACY_REPAIR_CLAIMS_PER_FAMILY = 3
+REPAIR_CLAIMS_PER_FAMILY_MAX = max(_LEGACY_REPAIR_CLAIMS_PER_FAMILY,
+                                   run_budget.MAX_REPAIR_ATTEMPTS + 1)
 _V2_REPAIR_BASES = (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
                     *_V2_REMOTE_OUTCOME_SHAPES,
                     *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES,
@@ -2424,13 +2432,13 @@ def _validate(record, *, strict=True):
                     type(item.get('head_sha')) is not str or
                     re.fullmatch(r'[0-9a-f]{40}', item['head_sha']) is None or
                     type(item.get('version')) is not int or not 1 <= item['version'] <= 9999 or
-                    type(item.get('attempt')) is not int or item['attempt'] not in (1, 2, 3) or
+                    type(item.get('attempt')) is not int or
+                    not 1 <= item['attempt'] <= REPAIR_CLAIMS_PER_FAMILY_MAX or
                     ('family' in item and
                      (type(item['family']) is not str or
                       re.fullmatch(r'[a-z0-9._-]{1,64}', item['family']) is None)) or
                     ('high_debug_report_sha256' in item and
-                     (item.get('attempt') not in (2, 3) or
-                      type(item['high_debug_report_sha256']) is not str or
+                     (type(item['high_debug_report_sha256']) is not str or
                       re.fullmatch(r'[0-9a-f]{64}', item['high_debug_report_sha256']) is None)) or
                     item.get('state') not in ('CLAIMED', 'DISPATCHED', 'UNKNOWN', 'FAILED') or
                     (item.get('comment_id') is not None and
@@ -2451,39 +2459,35 @@ def _validate(record, *, strict=True):
             family = item.get('family', f"pr-{item['pr']}")
             families.setdefault(family, []).append(item)
         for family_claims in families.values():
-            if len(family_claims) > 3:
+            if len(family_claims) > REPAIR_CLAIMS_PER_FAMILY_MAX:
                 _fail('REVIEW_REPAIR_CLAIM_INVALID')
             if any(item.get('attempt') != index
                    for index, item in enumerate(family_claims, 1)):
                 _fail('REVIEW_REPAIR_CLAIM_INVALID')
-            # #1502 WP-D (D1): repair #2 may bind the RCA_CONFIRMED Debug on its HEAD.
-            second = family_claims[1] if len(family_claims) >= 2 else None
-            if (second is not None and 'high_debug_report_sha256' in second and
-                    not any(type(entry) is dict and entry.get('family') ==
-                            second.get('family', f"pr-{second['pr']}") and
-                            entry.get('no_pr') is not True and
-                            entry.get('status') == 'RCA_CONFIRMED' and
-                            entry.get('examined_sha') == second['head_sha'] and
-                            entry.get('report_sha256') ==
-                            second['high_debug_report_sha256']
-                            for entry in record.get('high_debug', []))):
-                _fail('REVIEW_REPAIR_CLAIM_INVALID')
-            if len(family_claims) == 3:
-                third = family_claims[2]
-                if third.get('attempt') != 3:
+            # #1502 WP-D (D1): repair #2 may bind the RCA_CONFIRMED Debug on its
+            # HEAD. #2367: one RCA_CONFIRMED of the family covers the family's
+            # later repairs, so a claim that binds a report digest must name an
+            # RCA_CONFIRMED entry of its family examined at its own HEAD or at
+            # the HEAD of an earlier claim of the family. An old record (the
+            # second claim on its HEAD, a third claim with a Debug on its HEAD)
+            # meets this rule unchanged. A review claim (comment_id set, not an
+            # '-ec2' family) from the third on must bind one, as before.
+            seen_heads = set()
+            for position, item in enumerate(family_claims, 1):
+                seen_heads.add(item['head_sha'])
+                if (position >= 3 and item.get('comment_id') is not None and
+                        not item.get('family', f"pr-{item['pr']}").endswith('-ec2') and
+                        'high_debug_report_sha256' not in item):
                     _fail('REVIEW_REPAIR_CLAIM_INVALID')
-                second_claimed_at = max(item['claimed_at'] for item in family_claims[:2])
-                matching = [entry for entry in record.get('high_debug', [])
-                            if type(entry) is dict and entry.get('family') ==
-                            third.get('family', f"pr-{third['pr']}") and
-                            entry.get('no_pr') is not True and
-                            entry.get('status') == 'RCA_CONFIRMED' and
-                            entry.get('examined_sha') == third['head_sha'] and
-                            type(entry.get('recorded_at')) is str and
-                            entry['recorded_at'] > second_claimed_at and
-                            entry.get('report_sha256') ==
-                            third.get('high_debug_report_sha256')]
-                if not matching:
+                if ('high_debug_report_sha256' in item and
+                        not any(type(entry) is dict and entry.get('family') ==
+                                item.get('family', f"pr-{item['pr']}") and
+                                entry.get('no_pr') is not True and
+                                entry.get('status') == 'RCA_CONFIRMED' and
+                                entry.get('examined_sha') in seen_heads and
+                                entry.get('report_sha256') ==
+                                item['high_debug_report_sha256']
+                                for entry in record.get('high_debug', []))):
                     _fail('REVIEW_REPAIR_CLAIM_INVALID')
     if 'remote_test_receipts' in record:
         _validate_remote_test_receipts(record)
@@ -2664,11 +2668,11 @@ def _validate(record, *, strict=True):
                     assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'claude', 'none') or
                     assignment['risk'] not in ('LOW', 'OTHER') or
                     type(assignment['goal']) is not str or not assignment['goal'] or
-                    len(assignment['goal'].encode('utf-8')) > 512 or
+                    len(assignment['goal'].encode('utf-8')) > 64 * 1024 or
                     _emitted_sensitive(assignment['goal']) or
                     type(assignment['acceptance']) is not list or
                     not 1 <= len(assignment['acceptance']) <= 16 or
-                    any(type(item) is not str or not item or len(item.encode('utf-8')) > 512 or
+                    any(type(item) is not str or not item or len(item.encode('utf-8')) > 64 * 1024 or
                         _emitted_sensitive(item) for item in assignment['acceptance'])):
                 _fail()
         if 'pm_provenance' in record:
@@ -3074,7 +3078,7 @@ def _validate(record, *, strict=True):
                 _fail()
             acceptance = developer['acceptance']
             if (type(acceptance) is not list or not 1 <= len(acceptance) <= 16 or
-                    any(type(item) is not str or not item or len(item.encode('utf-8')) > 512
+                    any(type(item) is not str or not item or len(item.encode('utf-8')) > 64 * 1024
                         for item in acceptance)):
                 _fail()
             artifact = developer['artifact']
@@ -5990,7 +5994,7 @@ class TaskStore:
                             re.fullmatch(r'[0-9a-f]{32}', added['repair_task_id']) is None or
                             sum(1 for item in old_claims
                                 if item.get('family', f"pr-{item.get('pr')}") ==
-                                added.get('family')) >= 3 or
+                                added.get('family')) >= REPAIR_CLAIMS_PER_FAMILY_MAX or
                             added.get('attempt') != 1 + sum(
                                 1 for item in old_claims
                                 if item.get('family', f"pr-{item.get('pr')}") ==

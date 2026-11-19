@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "repair_max": 2,
+  "repair_max": 5,
   "parent_debug_max": 1,
-  "group_debug_max": 1,
+  "group_debug_max": 3,
   "child_max": 3,
   "replan_max": 1,
-  "test_fail_max": 2,
-  "review_fail_max": 3,
+  "test_fail_max": 5,
+  "review_fail_max": 6,
   "waiting_notify_after_hours": 24,
   "timeout_continuation_max": 1
 }

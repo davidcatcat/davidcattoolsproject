@@ -315,10 +315,11 @@ def valid_rule_files():
     return {
         "developer-routes.json": fixture_routes(
             roles={"fixture-reviewer": {"allowed_models": ["gpt-6.1-sol"]}}),
+        # #2367 (Owner 2026-11-19): the repository limits.
         "policy.json": {
-            "schema_version": 1, "repair_max": 2, "parent_debug_max": 1,
-            "group_debug_max": 1, "child_max": 3, "replan_max": 1,
-            "test_fail_max": 2, "review_fail_max": 3, "waiting_notify_after_hours": 24,
+            "schema_version": 1, "repair_max": 5, "parent_debug_max": 1,
+            "group_debug_max": 3, "child_max": 3, "replan_max": 1,
+            "test_fail_max": 5, "review_fail_max": 6, "waiting_notify_after_hours": 24,
         },
         "worker-dispatch.json": {
             "schema_version": 1,
@@ -384,6 +385,16 @@ class RuleFileSchemaTests(unittest.TestCase):
     def test_valid_rule_files_pass(self):
         self.assertEqual(guidance_drift_check.check_rule_files(self.repo), [])
 
+    def test_policy_schema_accepts_the_new_and_old_repair_limits(self):
+        # #2367: the schema accepts the 5-repair values and the earlier ones.
+        policy = self.valid["policy.json"]
+        for values in ({"repair_max": 5, "test_fail_max": 5, "review_fail_max": 6,
+                        "group_debug_max": 3},
+                       {"repair_max": 2, "test_fail_max": 2, "review_fail_max": 3,
+                        "group_debug_max": 1}):
+            with self.subTest(values=values):
+                self.assertEqual(self.findings_after("policy.json", {**policy, **values}), [])
+
     def test_max_prompt_bytes_accepted(self):
         routes = fixture_routes()
         routes["routes"]["fixture"]["max_prompt_bytes"] = 65536
@@ -401,7 +412,7 @@ class RuleFileSchemaTests(unittest.TestCase):
             "max_turns": 512,
             "max_input_tokens": 262144,
             "max_output_tokens": 65536,
-            "max_wall_seconds": 600,
+            "max_wall_seconds": 1800,
             "max_tool_result_bytes": 262144,
             "max_sent_bytes": 16777216,
         }
@@ -458,11 +469,11 @@ class RuleFileSchemaTests(unittest.TestCase):
                 **routes["routes"]["fixture"], "budgets": "not-a-dict"}}}, "must be an object"),
             ("developer-routes.json", {**routes, "routes": {"fixture": {
                 **routes["routes"]["fixture"], "budgets": {
-                    "max_turns": 0, "max_wall_seconds": 600, "max_tool_result_bytes": 262144,
+                    "max_turns": 0, "max_wall_seconds": 1800, "max_tool_result_bytes": 262144,
                     "max_sent_bytes": 16777216}}}}, "must be an integer >= 1"),
             ("developer-routes.json", {**routes, "routes": {"fixture": {
                 **routes["routes"]["fixture"], "budgets": {
-                    "max_turns": 1001, "max_wall_seconds": 600, "max_tool_result_bytes": 262144,
+                    "max_turns": 1001, "max_wall_seconds": 1800, "max_tool_result_bytes": 262144,
                     "max_sent_bytes": 16777216}}}}, "must be an integer >= 1 and <= 1000"),
             ("developer-routes.json", {**routes, "routes": {}}, "at least 1"),
             ("sensitive-paths.json", {**self.valid["sensitive-paths.json"], "exact": "x"}, "must be a list"),
@@ -736,36 +747,47 @@ class RuleFileSchemaTests(unittest.TestCase):
         # #2281 L9: developer-routes schema accepts budgets object with direct or multiplier tokens.
         direct_budgets = {
             "max_turns": 512, "max_input_tokens": 262144, "max_output_tokens": 65536,
-            "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216,
+            "max_wall_seconds": 1800, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216,
         }
         multiplier_budgets = {
             "max_turns": 512, "max_input_tokens_multiplier": 8, "max_output_tokens_multiplier": 4,
-            "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216,
+            "max_wall_seconds": 1800, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216,
         }
         self.assertEqual(self.route_findings(budgets=direct_budgets), [])
         self.assertEqual(self.route_findings(budgets=multiplier_budgets), [])
+
+    def test_real_gw_agent_wall_budget_is_1800_and_equals_route_default(self):
+        # #2281: whole-run wall budget is no shorter than the route default timeout.
+        repository = Path(__file__).resolve().parents[3]
+        with (repository / "tools" / "llmtool" / "developer-routes.json").open(encoding="utf-8") as stream:
+            route = json.load(stream)["routes"]["gw-agent"]
+        budgets = route["budgets"]
+        self.assertIs(type(budgets["max_wall_seconds"]), int)
+        self.assertEqual(budgets["max_wall_seconds"], 1800)
+        self.assertEqual(budgets["max_wall_seconds"], route["default_timeout"])
+        self.assertLessEqual(budgets["max_wall_seconds"], route["max_timeout"])
 
     def test_gw_agent_budgets_schema_rejects_invalid_budgets(self):
         prefix = "tools/llmtool/developer-routes.json: RULE_SCHEMA $.routes.fixture.budgets"
         cases = [
             ({"max_turns": 0, "max_input_tokens": 262144, "max_output_tokens": 65536,
-              "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
+              "max_wall_seconds": 1800, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
              f"{prefix}.max_turns must be an integer >= 1 and <= 1000"),
             ({"max_turns": 1001, "max_input_tokens": 262144, "max_output_tokens": 65536,
-              "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
+              "max_wall_seconds": 1800, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
              f"{prefix}.max_turns must be an integer >= 1 and <= 1000"),
             ({"max_turns": 512, "max_input_tokens": 50_000_001, "max_output_tokens": 65536,
-              "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
+              "max_wall_seconds": 1800, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
              f"{prefix}.max_input_tokens must be an integer >= 1 and <= 50000000"),
             ({"max_turns": 512, "max_input_tokens_multiplier": 0, "max_output_tokens": 65536,
-              "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
-             f"{prefix}.max_input_tokens_multiplier must be an integer >= 1"),
+              "max_wall_seconds": 1800, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
+              f"{prefix}.max_input_tokens_multiplier must be an integer >= 1"),
             ({"max_turns": 512, "max_output_tokens": 5_000_001, "max_input_tokens": 262144,
-              "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
+              "max_wall_seconds": 1800, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
              f"{prefix}.max_output_tokens must be an integer >= 1 and <= 5000000"),
             ({"max_turns": 512, "max_output_tokens_multiplier": 0, "max_input_tokens": 262144,
-              "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
-             f"{prefix}.max_output_tokens_multiplier must be an integer >= 1"),
+              "max_wall_seconds": 1800, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
+              f"{prefix}.max_output_tokens_multiplier must be an integer >= 1"),
         ]
         for bad_budgets, expected in cases:
             with self.subTest(budgets=bad_budgets):

@@ -1,6 +1,8 @@
 """A11b.5 run budgets: pure immutable data and predicates, not an executor.
 
-All state is caller-supplied; no filesystem, provider, clock or subprocess is used.
+All state is caller-supplied; no filesystem, provider, clock or subprocess is used
+by the predicates. (#2367: MAX_REPAIR_ATTEMPTS is read once from policy.json at
+import, through repair_policy, so the bound has one source.)
 Nothing here grants, reserves or enforces anything at runtime yet (no executor).
 assess_budget is retrospective: used == limit is still WITHIN. admit_next is
 prospective: it denies one more call once any limit is reached, not only exceeded,
@@ -18,12 +20,15 @@ from enum import Enum
 from functools import wraps
 from typing import Optional
 
+from . import repair_policy
 from .action_contract import (ContractValue, _collection, _hex, _identifier,
                               _integer, _typed, _version)
 from .diagnostics import MAX_TOKEN_COUNT, validate_provider_usage
 from .errors import LLMToolError
 
-MAX_REPAIR_ATTEMPTS = 2
+# #2367: the repair bound follows policy.json (repair_max / test_fail_max); no
+# second copy of the number lives here. An unreadable policy gives 0.
+MAX_REPAIR_ATTEMPTS = repair_policy.repair_attempts_max()
 MAX_PROVIDER_CALLS = 64
 MAX_WALL_CLOCK_MS = 86_400_000
 MAX_TOKENS = MAX_TOKEN_COUNT
