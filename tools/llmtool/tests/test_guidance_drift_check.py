@@ -310,6 +310,13 @@ class GuidanceDriftCheckTests(unittest.TestCase):
                                             "CLAUDE.md: MODEL_NOT_ALLOWED llama-9-other"])
 
 
+# #2281 L0b: the limit-table keys (rows 2, 15, 16) at their recorded values.
+POLICY_LIMIT_KEYS_2281 = {
+    "spec_preflight_large_file_lines": 2000, "merge_train_members_max": 6,
+    "merge_train_files_per_pr_max": 100, "revert_scope_prs_max": 5,
+}
+
+
 def valid_rule_files():
     """Minimal valid documents for each registered rule-file schema."""
     return {
@@ -394,6 +401,22 @@ class RuleFileSchemaTests(unittest.TestCase):
                         "group_debug_max": 1}):
             with self.subTest(values=values):
                 self.assertEqual(self.findings_after("policy.json", {**policy, **values}), [])
+
+    def test_policy_schema_accepts_the_2281_limit_keys(self):
+        # #2281 L0b: rows 2, 15 and 16 of the limit table are optional keys,
+        # each a positive integer with no upper validation bound.
+        policy = self.valid["policy.json"]
+        self.assertEqual(self.findings_after("policy.json", {**policy, **POLICY_LIMIT_KEYS_2281}), [])
+        for key in POLICY_LIMIT_KEYS_2281:
+            for value in (1, 10 ** 9):
+                with self.subTest(key=key, value=value):
+                    self.assertEqual(self.findings_after("policy.json", {**policy, key: value}), [])
+
+    def test_repository_policy_passes_the_rule_schema(self):
+        # The real policy.json, with the #2281 keys, matches the registered schema.
+        repository = Path(__file__).resolve().parents[3]
+        self.assertFalse([item for item in guidance_drift_check.check_rule_files(repository)
+                          if item.startswith("tools/llmtool/policy.json:")])
 
     def test_max_prompt_bytes_accepted(self):
         routes = fixture_routes()
@@ -529,6 +552,15 @@ class RuleFileSchemaTests(unittest.TestCase):
             ("policy.json", {**policy, "waiting_notify_after_hours": 0}, "integer"),
             ("policy.json", policy_missing, 'missing key "repair_max"'),
         ]
+        # #2281 L0b: each limit-table key must be a positive integer when present.
+        for key in POLICY_LIMIT_KEYS_2281:
+            cases += [
+                ("policy.json", {**policy, key: 0}, "integer >= 1"),
+                ("policy.json", {**policy, key: -1}, "integer >= 1"),
+                ("policy.json", {**policy, key: "5"}, "integer >= 1"),
+                ("policy.json", {**policy, key: True}, "integer >= 1"),
+                ("policy.json", {**policy, key: 2.5}, "integer >= 1"),
+            ]
         dispatch = self.valid["worker-dispatch.json"]
         worker = dispatch["workers"]["fixture-worker"]
         worker_missing = {key: value for key, value in worker.items() if key != "evidence"}
