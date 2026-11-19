@@ -1208,13 +1208,18 @@ class AuthoringRunFamilyTests(unittest.TestCase):
             with self.subTest(developer=developer):
                 self.assertIsNone(self.family(developer))
 
-    def test_a_record_without_a_model_keeps_its_cli_family(self):
-        # A record-only Claude run, or a Codex run recovered without its model.
-        self.assertEqual(self.family(self.developer('claude',None)),'claude')
-        self.assertEqual(self.family(self.developer('codex',None)),'codex')
-        for profile in ('agy','opencode','gw-agent','company-gw'):
-            with self.subTest(profile=profile):
-                self.assertIsNone(self.family(self.developer(profile,None)))
+    def test_a_record_without_a_model_is_unknown(self):
+        # Security v91 F2: a record-only Claude run, or a Codex run recovered
+        # without its model, no longer takes its CLI route's family.
+        from llmtool.developer_routes import build_model_run
+        unknown_run=build_model_run(None,'UNKNOWN')
+        for profile in ('claude','codex','agy','opencode','gw-agent','company-gw'):
+            for developer in (self.developer(profile,None),{'provider_profile':profile},
+                              self.developer(profile,None,model_run=unknown_run)):
+                with self.subTest(developer=developer):
+                    self.assertIsNone(self.family(developer))
+                    for reviewer in ('codex-reviewer','claude-reviewer'):
+                        self.assertFalse(self.compatible(developer,reviewer))
 
     def test_model_run_provider_reported_model_decides(self):
         model='claude-sonnet-5-5-medium'
@@ -1238,6 +1243,113 @@ class AuthoringRunFamilyTests(unittest.TestCase):
                 self.assertFalse(self.compatible(developer,'codex-reviewer'))
         self.assertIsNone(self.family(self.developer('claude',None,
                                                      model_run=self.model_run(model))))
+
+
+class ReviewerRunFamilyTests(unittest.TestCase):
+    """Security v91 F1 (CWE-863): the formal PASS gate uses the recorded
+    family of the Reviewer run, bound in the review dispatch claim, never the
+    family its role implies."""
+
+    HEAD='e'*40
+
+    @staticmethod
+    def reviewer_run(model,**changes):
+        from llmtool.developer_routes import build_model_run
+        run=build_model_run(model,'roles',model)
+        run.update(changes)
+        return run
+
+    def task(self,run,**claim_changes):
+        claim={'pr':7,'head_sha':self.HEAD,'reviewer_task':'reviewer-run-task',
+               'version':1,'state':'DISPATCHED','review_kind':'formal'}
+        if run is not None:
+            claim['reviewer_model_run']=run
+        claim.update(claim_changes)
+        return {'developer':{'provider_profile':'agy','model':'claude-sonnet-5-5-medium'},
+                'review_dispatch_claim':[claim]}
+
+    def run_family(self,task,reviewer_task='reviewer-run-task',pr=7,head=None):
+        from llmtool import task_completion
+        return task_completion._formal_reviewer_run_family(
+            task,reviewer_task,pr,self.HEAD if head is None else head)
+
+    def gate(self,developer,role,family):
+        from llmtool import task_completion
+        return task_completion._review_family_compatible(developer,role,family)
+
+    def test_the_recorded_reviewer_model_family_is_read_from_the_claim(self):
+        for model,family in (('gpt-6.1-sol','codex'),('claude-sonnet-5-5','claude'),
+                             ('gemini-3.8-flash-medium','gemini')):
+            with self.subTest(model=model):
+                self.assertEqual(self.run_family(self.task(self.reviewer_run(model))),family)
+
+    def test_a_same_family_reviewer_model_refuses_pass_whatever_its_role(self):
+        # A Codex Reviewer role that ran a Claude model on a Claude-authored run.
+        claude_author={'provider_profile':'agy','model':'claude-sonnet-5-5-medium'}
+        family=self.run_family(self.task(self.reviewer_run('claude-sonnet-5-5')))
+        self.assertEqual(family,'claude')
+        self.assertFalse(self.gate(claude_author,'codex-reviewer',family))
+        # A Claude Reviewer role that ran a Codex model on a Codex-authored run.
+        codex_author={'provider_profile':'agy','model':'gpt-6.1-sol'}
+        self.assertFalse(self.gate(codex_author,'claude-reviewer','codex'))
+        # Cross-family recorded runs stay valid.
+        self.assertTrue(self.gate(claude_author,'codex-reviewer','codex'))
+        self.assertTrue(self.gate(codex_author,'claude-reviewer','claude'))
+
+    def test_an_unknown_reviewer_run_refuses_pass(self):
+        author={'provider_profile':'agy','model':'gemini-3.8-flash-medium'}
+        good=self.reviewer_run('gpt-6.1-sol')
+        two={'developer':author,'review_dispatch_claim':[
+            self.task(good)['review_dispatch_claim'][0],
+            self.task(good,version=2)['review_dispatch_claim'][0]]}
+        cases={
+            'no claim':{'developer':author},
+            'claim without a recorded run':self.task(None),
+            'unrecognised reviewer model':self.task(self.reviewer_run('example-model-b')),
+            'family not from the model':self.task(self.reviewer_run('gpt-6.1-sol',family='claude')),
+            'reported model of another family':self.task(
+                self.reviewer_run('gpt-6.1-sol',provider_reported='claude-sonnet-5-5')),
+            'extra key':self.task(dict(good,note='x')),
+            'security claim':self.task(good,review_kind='security'),
+            'two matching claims':two,
+            'not a record':None,
+        }
+        for label,task in cases.items():
+            with self.subTest(case=label):
+                family=self.run_family(task)
+                self.assertIsNone(family)
+                for role in ('codex-reviewer','claude-reviewer'):
+                    self.assertFalse(self.gate(author,role,family))
+        for label,kwargs in (('other reviewer task',{'reviewer_task':'reviewer-other'}),
+                             ('other PR',{'pr':8}),('other head',{'head':'f'*40})):
+            with self.subTest(case=label):
+                self.assertIsNone(self.run_family(self.task(good),**kwargs))
+
+    def test_a_codex_family_developer_model_refuses_a_codex_reviewer_run(self):
+        # #2302 A4 at the PASS gate: a Codex-family model on a Developer route.
+        for profile in ('agy','claude','opencode','gw-agent'):
+            developer={'provider_profile':profile,'model':'gpt-6.1-sol'}
+            with self.subTest(profile=profile):
+                self.assertFalse(self.gate(developer,'codex-reviewer','codex'))
+                self.assertTrue(self.gate(developer,'claude-reviewer','claude'))
+
+    def test_a_non_reviewer_role_never_passes(self):
+        developer={'provider_profile':'agy','model':'gemini-3.8-flash-medium'}
+        self.assertFalse(self.gate(developer,'gw-agent-reviewer','codex'))
+        self.assertFalse(self.gate(developer,'codex-debug','codex'))
+
+    def test_the_task_store_validates_the_recorded_reviewer_run(self):
+        from llmtool.task_store import valid_reviewer_model_run
+        self.assertTrue(valid_reviewer_model_run(self.reviewer_run('gpt-6.1-sol')))
+        self.assertTrue(valid_reviewer_model_run(self.reviewer_run(
+            'claude-sonnet-5-5',requested=None,source='repo_default')))
+        from llmtool.developer_routes import build_model_run
+        for label,run in (('unknown resolved model',build_model_run(None,'UNKNOWN')),
+                          ('family mismatch',self.reviewer_run('gpt-6.1-sol',family='claude')),
+                          ('extra key',dict(self.reviewer_run('gpt-6.1-sol'),note='x')),
+                          ('not a dict',['gpt-6.1-sol'])):
+            with self.subTest(case=label):
+                self.assertFalse(valid_reviewer_model_run(run))
 
 
 class DeveloperModelRunRecordTests(unittest.TestCase):
@@ -1264,6 +1376,19 @@ class DeveloperModelRunRecordTests(unittest.TestCase):
         unknown={'model':'gw','model_run':{'requested':None,'resolved':'gw',
                  'source':'repo_default','family':'UNKNOWN','provider_reported':None}}
         self.assertTrue(self.valid(unknown))
+        # Security v91 F3: every route records a run; UNKNOWN where evidence is unavailable.
+        from llmtool.developer_routes import build_model_run
+        opencode='opencode/deepseek-v4.1-flash-free#high'
+        for label,model,run in (
+                ('no model',None,build_model_run(None,'UNKNOWN')),
+                ('unknown source, no request','gpt-6.1-sol',build_model_run('gpt-6.1-sol','UNKNOWN')),
+                ('profile source','gpt-6.1-sol',build_model_run('gpt-6.1-sol','profile','gpt-6.1-sol')),
+                ('variant model',opencode,build_model_run(opencode,'roles',opencode))):
+            with self.subTest(case=label):
+                self.assertTrue(self.valid({'model':model,'model_run':run}))
+        self.assertEqual(build_model_run(opencode,'roles',opencode)['family'],'deepseek')
+        self.assertEqual(build_model_run(None,'cli','gpt-6.1-sol')['source'],'UNKNOWN')
+        self.assertEqual(build_model_run('gpt-6.1-sol','profile')['source'],'UNKNOWN')
 
     def test_invalid_records(self):
         cases={
@@ -1282,9 +1407,17 @@ class DeveloperModelRunRecordTests(unittest.TestCase):
                 self.assertFalse(self.valid(self.record(**changes)))
         extra=self.record();extra['model_run']['note']='x'
         missing=self.record();del missing['model_run']['family']
+        unknown_model={'requested':None,'resolved':None,'source':'UNKNOWN',
+                       'family':'UNKNOWN','provider_reported':None}
         for label,developer in (('extra key',extra),('missing key',missing),
                                 ('not a dict',{'model':'gw','model_run':['gw']}),
-                                ('no record',None)):
+                                ('no record',None),
+                                ('unknown model with a family',{'model':None,'model_run':dict(
+                                    unknown_model,family='claude')}),
+                                ('unknown model with a known source',{'model':None,'model_run':dict(
+                                    unknown_model,source='roles')}),
+                                ('unknown run for a recorded model',{'model':'gpt-6.1-sol',
+                                                                    'model_run':unknown_model})):
             with self.subTest(case=label):
                 self.assertFalse(self.valid(developer))
 

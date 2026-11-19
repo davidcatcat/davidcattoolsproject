@@ -111,9 +111,25 @@ class TaskCompletionTests(unittest.TestCase):
                   'executor_session_ref': 'Executor D6 session',
                   'executor_native_session_id': 'native-executor',
                   'reviewer_task_id': 'reviewer-task', 'common_dir': self.common,
-                  'task_record': {'developer': {'provider_profile': 'codex'}}}
+                  'task_record': {
+                      'developer': {'provider_profile': 'codex', 'model': 'gpt-6.1-sol'},
+                      'review_dispatch_claim': [self._reviewer_claim(result_sha)]}}
         kwargs.update(overrides)
         return kwargs
+
+    # A recorded authoring model for each CLI route family in these fixtures.
+    _AUTHOR_MODELS = {'claude': 'claude-opus-5-5', 'codex': 'gpt-6.1-sol'}
+
+    @staticmethod
+    def _reviewer_claim(result_sha, model='claude-sonnet-5-5', *,
+                        reviewer_task='reviewer-task', **claim):
+        """#2302 A3: a formal review claim that binds the Reviewer run's model."""
+        from llmtool.developer_routes import build_model_run
+        value = {'pr': 10, 'head_sha': result_sha, 'reviewer_task': reviewer_task,
+                 'version': 1, 'state': 'DISPATCHED',
+                 'reviewer_model_run': build_model_run(model, 'roles', model)}
+        value.update(claim)
+        return value
 
     def _trusted_main_ref(self):
         def github_get(path):
@@ -2885,6 +2901,7 @@ class TaskCompletionTests(unittest.TestCase):
     def _company_gw_review_fixture(self, reviewer='codex-reviewer'):
         """Same PR, bound APPROVED review and checks as the D6 actor-session test."""
         result_sha, _ = self._make_result()
+        self._company_gw_result_sha = result_sha
         reviewer_root = self.base / 'reviewer'
         self._git('worktree', 'add', '-b', 'review/branch', str(reviewer_root), result_sha)
         pr = {'state': 'open', 'merged': False,
@@ -2899,13 +2916,21 @@ class TaskCompletionTests(unittest.TestCase):
             {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'success'}]}
 
+        registered = []
+
         def register(identity):
+            registered[:] = [identity]
             self._write_registration('reviewer-task', identity, 'Reviewer session',
                 reviewer_root, 'review/branch', result_sha, result_sha,
                 native_session_id='native-reviewer', github_login='reviewer-user',
                 state='REVIEW_PENDING')
 
         def collect(task_record, **overrides):
+            # #2302 A3: the claim records the model the registered Reviewer ran.
+            task_record = dict(task_record)
+            task_record.setdefault('review_dispatch_claim', [self._reviewer_claim(
+                result_sha, 'claude-sonnet-5-5' if registered == ['claude-reviewer']
+                else 'gpt-6.1-sol')])
             kwargs = {'executor_identity': 'company-gw',
                       'executor_native_session_id': None,
                       'task_record': task_record}
@@ -2925,6 +2950,8 @@ class TaskCompletionTests(unittest.TestCase):
                   'pm_session_id': pm_session_id,
                   'developer': {
                       'provider_profile': 'company-gw',
+                      # #2302 A3: a recorded authoring model of another family.
+                      'model': 'qwen3-coder',
                       'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
                       'state': 'DEVELOPER_RESPONDED',
                       'artifact_format': 'unified_diff',
@@ -2953,6 +2980,22 @@ class TaskCompletionTests(unittest.TestCase):
         same_family = collect(self._company_gw_task_record(model='gpt-synthetic'))
         self.assertIn('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED', same_family['missing_gates'])
         self.assertEqual(same_family['evidence']['formal_review_state'], 'UNVERIFIED')
+        # Security v91 F1: a Codex Reviewer role whose recorded run used a
+        # Claude model is same family on a Claude-authored run.
+        claude_run = self._company_gw_task_record(model='claude-sonnet-synthetic')
+        claude_run['review_dispatch_claim'] = [
+            self._reviewer_claim(self._company_gw_result_sha, 'claude-sonnet-5-5')]
+        same_family = collect(claude_run)
+        self.assertIn('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED', same_family['missing_gates'])
+        self.assertEqual(same_family['evidence']['formal_review_state'], 'UNVERIFIED')
+        # Security v91 F2: no recorded authoring model is UNKNOWN.
+        unknown = collect(self._company_gw_task_record(model=None))
+        self.assertIn('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED', unknown['missing_gates'])
+        # No claim binding the Reviewer run is UNKNOWN too.
+        unbound = self._company_gw_task_record()
+        unbound['review_dispatch_claim'] = []
+        unbound = collect(unbound)
+        self.assertIn('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED', unbound['missing_gates'])
         pm_is_reviewer = collect(self._company_gw_task_record(pm_session_id='native-reviewer'))
         self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
                       pm_is_reviewer['missing_gates'])
@@ -3059,13 +3102,13 @@ class TaskCompletionTests(unittest.TestCase):
             current_comment = dict(comment, body=binding_body)
             task = {'task_id': '1' * 32, 'run_id': '2' * 32,
                     'task_binding': {'contract_digest': task_digest},
-                    'developer': {'provider_profile': author},
-                    'review_dispatch_claim': [{
-                        'pr': 10, 'head_sha': result_sha, 'reviewer_task': 'reviewer-task',
-                        'version': 1, 'state': 'COMPLETED',
-                        'review_result': {'task_id': '1' * 32, 'run_id': '2' * 32,
+                    'developer': {'provider_profile': author,
+                                  'model': self._AUTHOR_MODELS[author]},
+                    'review_dispatch_claim': [self._reviewer_claim(
+                        result_sha, 'gpt-6.1-sol', state='COMPLETED',
+                        review_result={'task_id': '1' * 32, 'run_id': '2' * 32,
                             'contract_digest': task_digest, 'head': result_sha,
-                            'verdict': 'PASS', 'review_text': review_text}}]}
+                            'verdict': 'PASS', 'review_text': review_text})]}
             api = self._github_response_sequence(result_sha, pr, [], checks,
                                                  comments=[current_comment])
             with patch('llmtool.task_store.TaskStore') as task_store:
@@ -3122,19 +3165,19 @@ class TaskCompletionTests(unittest.TestCase):
                        'body': comment_body, 'created_at': '2026-10-21T10:00:00Z',
                        'updated_at': '2026-10-21T10:00:00Z'}
             if claims is None:
-                claim = {
-                    'pr': 10, 'head_sha': result_sha, 'reviewer_task': reviewer_task,
-                    'version': version, 'state': 'COMPLETED',
-                    'review_result': {'task_id': '1' * 32, 'run_id': '2' * 32,
+                claim = self._reviewer_claim(
+                    result_sha, 'gpt-6.1-sol', reviewer_task=reviewer_task,
+                    version=version, state='COMPLETED',
+                    review_result={'task_id': '1' * 32, 'run_id': '2' * 32,
                         'contract_digest': '3' * 64, 'head': result_sha,
-                        'verdict': 'PASS', 'review_text': comment_body}
-                }
+                        'verdict': 'PASS', 'review_text': comment_body})
                 if claim_kind != 'omitted':
                     claim['review_kind'] = claim_kind
                 claims = [claim]
             task = {'task_id': '1' * 32, 'run_id': '2' * 32,
                     'task_binding': {'contract_digest': '3' * 64},
-                    'developer': {'provider_profile': 'claude'},
+                    'developer': {'provider_profile': 'claude',
+                                  'model': self._AUTHOR_MODELS['claude']},
                     'review_dispatch_claim': claims}
             api = self._github_response_sequence(result_sha, pr, [], checks,
                                                  comments=[comment])
@@ -3193,16 +3236,18 @@ class TaskCompletionTests(unittest.TestCase):
             'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
             self._review_binding(head=result_sha))
         multi_claims = [
-            {'pr': 10, 'head_sha': result_sha, 'reviewer_task': 'reviewer-formal',
-             'version': 1, 'state': 'COMPLETED', 'review_kind': 'formal',
-             'review_result': {'task_id': '1' * 32, 'run_id': '2' * 32,
-                 'contract_digest': '3' * 64, 'head': result_sha,
-                 'verdict': 'PASS', 'review_text': formal_body}},
-            {'pr': 10, 'head_sha': result_sha, 'reviewer_task': 'reviewer-sec',
-             'version': 91, 'state': 'COMPLETED', 'review_kind': 'security',
-             'review_result': {'task_id': '1' * 32, 'run_id': '2' * 32,
-                 'contract_digest': '3' * 64, 'head': result_sha,
-                 'verdict': 'PASS', 'review_text': sec_body}},
+            self._reviewer_claim(
+                result_sha, 'gpt-6.1-sol', reviewer_task='reviewer-formal',
+                version=1, state='COMPLETED', review_kind='formal',
+                review_result={'task_id': '1' * 32, 'run_id': '2' * 32,
+                    'contract_digest': '3' * 64, 'head': result_sha,
+                    'verdict': 'PASS', 'review_text': formal_body}),
+            self._reviewer_claim(
+                result_sha, 'gpt-6.1-sol', reviewer_task='reviewer-sec',
+                version=91, state='COMPLETED', review_kind='security',
+                review_result={'task_id': '1' * 32, 'run_id': '2' * 32,
+                    'contract_digest': '3' * 64, 'head': result_sha,
+                    'verdict': 'PASS', 'review_text': sec_body}),
         ]
         multi_formal = evaluate(version=1, reviewer_task='reviewer-formal', claims=multi_claims)
         self.assertEqual(multi_formal['evidence']['formal_review_state'], 'ACCEPTED')
@@ -3257,13 +3302,13 @@ class TaskCompletionTests(unittest.TestCase):
                        'updated_at': '2026-10-21T10:00:00Z'}
             task = {'task_id': '1' * 32, 'run_id': '2' * 32,
                     'task_binding': {'contract_digest': '3' * 64},
-                    'developer': {'provider_profile': 'claude'},
-                    'review_dispatch_claim': [{
-                        'pr': 10, 'head_sha': result_sha, 'reviewer_task': 'reviewer-task',
-                        'version': 1, 'state': 'COMPLETED',
-                        'review_result': {'task_id': '1' * 32, 'run_id': '2' * 32,
+                    'developer': {'provider_profile': 'claude',
+                                  'model': self._AUTHOR_MODELS['claude']},
+                    'review_dispatch_claim': [self._reviewer_claim(
+                        result_sha, 'gpt-6.1-sol', state='COMPLETED',
+                        review_result={'task_id': '1' * 32, 'run_id': '2' * 32,
                             'contract_digest': '3' * 64, 'head': result_sha,
-                            'verdict': 'PASS', 'review_text': review_text}}]}
+                            'verdict': 'PASS', 'review_text': review_text})]}
             api = self._github_response_sequence(result_sha, pr, [], checks,
                                                  comments=[comment])
             with patch('llmtool.task_store.TaskStore') as task_store:
@@ -3317,40 +3362,69 @@ class TaskCompletionTests(unittest.TestCase):
         checks = {'total_count': 1, 'check_runs': [
             {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'success'}]}
-        profiles = ('claude', 'codex', 'agy', 'opencode', 'company-gw', 'gw-agent',
-                    'company-gw-agent', None, 'unrecognized')
         reviewers = ('claude-reviewer', 'codex-reviewer', 'other-reviewer')
-        for profile in profiles:
+        for profile, model, author_family in self._FAMILY_MATRIX_AUTHORS:
             for reviewer in reviewers:
-                with self.subTest(profile=profile, reviewer=reviewer):
-                    self._write_registration(
-                        'reviewer-task', reviewer, 'native-reviewer-session',
-                        reviewer_root, 'review/family-matrix', result_sha, result_sha,
-                        native_session_id='native-reviewer-session',
-                        github_login='reviewer-user', state='REVIEW_PENDING')
-                    review = [{'state': 'APPROVED', 'commit_id': result_sha,
-                               'user': {'login': 'reviewer-user'},
-                               'submitted_at': '2026-10-21T10:00:00Z',
-                               'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
-                                       self._review_binding(head=result_sha)}]
-                    developer = {'provider_profile': profile}
-                    if profile == 'agy':
-                        developer['model'] = 'gemini-2.5-pro'
-                    task = ({} if profile is None else {'developer': developer})
-                    api = self._github_response_sequence(result_sha, pr, review, checks)
-                    with patch('llmtool.task_completion._github_get', side_effect=api):
-                        evidence = task_completion.collect_github_evidence(
-                            **self._github_kwargs(result_sha, task_record=task))
-                    expected = (profile in ('agy', 'opencode', 'company-gw', 'gw-agent',
-                                             'company-gw-agent') and
-                                reviewer in ('claude-reviewer', 'codex-reviewer')) or (
-                                profile == 'claude' and reviewer == 'codex-reviewer') or (
-                                profile == 'codex' and reviewer == 'claude-reviewer')
-                    self.assertEqual(evidence['evidence']['formal_review_state'],
-                                     'ACCEPTED' if expected else 'UNVERIFIED')
-                    if not expected:
-                        self.assertIn('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED',
-                                      evidence['missing_gates'])
+                # #2302 A3 (security v91 F1): the claim records the model the
+                # Reviewer run used; either role may run either family.
+                for reviewer_model in ('claude-sonnet-5-5', 'gpt-6.1-sol', 'example-model-b'):
+                    with self.subTest(profile=profile, model=model, reviewer=reviewer,
+                                      reviewer_model=reviewer_model):
+                        self._write_registration(
+                            'reviewer-task', reviewer, 'native-reviewer-session',
+                            reviewer_root, 'review/family-matrix', result_sha, result_sha,
+                            native_session_id='native-reviewer-session',
+                            github_login='reviewer-user', state='REVIEW_PENDING')
+                        review = [{'state': 'APPROVED', 'commit_id': result_sha,
+                                   'user': {'login': 'reviewer-user'},
+                                   'submitted_at': '2026-10-21T10:00:00Z',
+                                   'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
+                                           self._review_binding(head=result_sha)}]
+                        task = {'review_dispatch_claim': [
+                            self._reviewer_claim(result_sha, reviewer_model)]}
+                        if profile is not None:
+                            task['developer'] = {'provider_profile': profile}
+                            if model is not None:
+                                task['developer']['model'] = model
+                        api = self._github_response_sequence(result_sha, pr, review, checks)
+                        with patch('llmtool.task_completion._github_get', side_effect=api):
+                            evidence = task_completion.collect_github_evidence(
+                                **self._github_kwargs(result_sha, task_record=task))
+                        expected = self._family_matrix_expected(
+                            author_family, reviewer, reviewer_model)
+                        self.assertEqual(evidence['evidence']['formal_review_state'],
+                                         'ACCEPTED' if expected else 'UNVERIFIED')
+                        if not expected:
+                            self.assertIn('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED',
+                                          evidence['missing_gates'])
+
+    # (profile, recorded model, authoring family or None for UNKNOWN).
+    _FAMILY_MATRIX_AUTHORS = (
+        ('claude', 'claude-opus-5-5', 'claude'),
+        ('codex', 'gpt-6.1-sol', 'codex'),
+        ('agy', 'gemini-2.5-pro', 'gemini'),
+        ('agy', 'claude-sonnet-5-5-medium', 'claude'),
+        ('opencode', 'opencode/deepseek-v4.1-flash-free#high', 'deepseek'),
+        ('company-gw', 'qwen3-coder', 'qwen'),
+        ('gw-agent', 'qwen3-coder', 'qwen'),
+        # A stored record with the retired id reads as gw-agent (#1502 WP-E).
+        ('company-gw-agent', 'gpt-6.1-sol', 'codex'),
+        # Security v91 F2: no recorded model is UNKNOWN on every route.
+        ('claude', None, None),
+        ('codex', None, None),
+        ('opencode', None, None),
+        (None, None, None),
+        ('unrecognized', 'gemini-2.5-pro', None),
+    )
+
+    @staticmethod
+    def _family_matrix_expected(author_family, reviewer, reviewer_model):
+        from llmtool.developer_routes import MODEL_FAMILY_UNKNOWN, model_family
+        reviewer_family = model_family(reviewer_model)
+        return (author_family is not None and
+                reviewer in ('claude-reviewer', 'codex-reviewer') and
+                reviewer_family != MODEL_FAMILY_UNKNOWN and
+                reviewer_family != author_family)
 
     def test_pr_comment_family_matrix_matches_formal_verdict_classifier(self):
         result_sha, _ = self._make_result()
@@ -3363,11 +3437,11 @@ class TaskCompletionTests(unittest.TestCase):
         checks = {'total_count': 1, 'check_runs': [
             {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'success'}]}
-        profiles = ('claude', 'codex', 'agy', 'opencode', 'company-gw', 'gw-agent',
-                    'company-gw-agent', None, 'unrecognized')
-        for profile in profiles:
+        for profile, model, author_family in self._FAMILY_MATRIX_AUTHORS:
             for reviewer in ('claude-reviewer', 'codex-reviewer', 'other-reviewer'):
-                with self.subTest(profile=profile, reviewer=reviewer):
+                reviewer_model = ('claude-sonnet-5-5' if reviewer == 'claude-reviewer'
+                                  else 'gpt-6.1-sol')
+                with self.subTest(profile=profile, model=model, reviewer=reviewer):
                     self._write_registration(
                         'reviewer-task', reviewer, 'native-reviewer-session',
                         reviewer_root, 'review/comment-family-matrix', result_sha,
@@ -3382,17 +3456,18 @@ class TaskCompletionTests(unittest.TestCase):
                             'task_binding': {'contract_digest': '3' * 64}}
                     if profile is not None:
                         developer = {'provider_profile': profile}
-                        if profile == 'agy':
-                            developer['model'] = 'gemini-2.5-pro'
+                        if model is not None:
+                            developer['model'] = model
                         task['developer'] = developer
                     if reviewer == 'codex-reviewer':
-                        task['review_dispatch_claim'] = [{
-                            'pr': 10, 'head_sha': result_sha,
-                            'reviewer_task': 'reviewer-task', 'version': 1,
-                            'state': 'COMPLETED', 'review_result': {
+                        task['review_dispatch_claim'] = [self._reviewer_claim(
+                            result_sha, reviewer_model, state='COMPLETED', review_result={
                                 'task_id': task['task_id'], 'run_id': task['run_id'],
                                 'contract_digest': '3' * 64, 'head': result_sha,
-                                'verdict': 'PASS', 'review_text': body}}]
+                                'verdict': 'PASS', 'review_text': body})]
+                    else:
+                        task['review_dispatch_claim'] = [
+                            self._reviewer_claim(result_sha, reviewer_model)]
                     api = self._github_response_sequence(
                         result_sha, pr, [], checks, comments=[{
                             'id': 51, 'user': {'login': 'reviewer-user'}, 'body': body,
@@ -3401,11 +3476,8 @@ class TaskCompletionTests(unittest.TestCase):
                     with patch('llmtool.task_completion._github_get', side_effect=api):
                         evidence = task_completion.collect_github_evidence(
                             **self._github_kwargs(result_sha, task_record=task))
-                    expected = (profile in ('agy', 'opencode', 'company-gw', 'gw-agent',
-                                             'company-gw-agent') and
-                                reviewer in ('claude-reviewer', 'codex-reviewer') or
-                                profile == 'claude' and reviewer == 'codex-reviewer' or
-                                profile == 'codex' and reviewer == 'claude-reviewer')
+                    expected = self._family_matrix_expected(
+                        author_family, reviewer, reviewer_model)
                     self.assertEqual(evidence['evidence']['formal_review_state'],
                                      'ACCEPTED' if expected else 'UNVERIFIED')
                     if not expected:
@@ -3429,63 +3501,34 @@ class TaskCompletionTests(unittest.TestCase):
                         developer, reviewer))
 
     def test_review_family_uses_recorded_run_model_and_conflicts_fail_closed(self):
+        # #2302 A3: the family is the recorded model's on every reviewable
+        # route, never the route's; security v91 F2: no model is UNKNOWN.
         missing = object()
         deepseek = 'opencode/deepseek-v4.1-flash-free#high'
+        by_model = (
+            (deepseek, 'deepseek'),
+            ('anthropic/claude-opus-5-5', 'claude'),
+            ('claude-opus-5-5', 'claude'),
+            ('Anthropic/Claude-Sonnet-5-5#high', 'claude'),
+            ('openai/gpt-6-luna', 'codex'),
+            ('gpt-6-luna', 'codex'),
+            ('openai/codex-mini#high', 'codex'),
+            ('o4-mini', 'codex'),
+            ('o3', 'codex'),
+            ('gemini-2.5-pro', 'gemini'),
+            ('other-model', None),
+            ('claude-gpt-6', None),
+            (None, None),
+            (123, None),
+            (missing, None))
         cases = []
         # company-gw-agent: a stored record with the retired id reads as gw-agent (#1502 WP-E).
-        for profile in ('opencode', 'company-gw', 'company-gw-agent', 'gw-agent'):
-            cases.extend((profile, model, family) for model, family in (
-                (deepseek, 'other'),
-                ('anthropic/claude-opus-5-5', 'claude'),
-                ('claude-opus-5-5', 'claude'),
-                ('Anthropic/Claude-Sonnet-5-5#high', 'claude'),
-                ('openai/gpt-6-luna', 'codex'),
-                ('gpt-6-luna', 'codex'),
-                ('openai/codex-mini#high', 'codex'),
-                ('o4-mini', 'codex'),
-                ('o3', 'codex'),
-                ('other-model', 'other'),
-                ('opus-5', 'other'),
-                (None, 'other'),
-                (123, 'other'),
-                (missing, 'other')))
-        cases.extend(('codex', model, family) for model, family in (
-            ('gpt-6-luna', 'codex'),
-            ('openai/gpt-6-luna', 'codex'),
-            ('o4-mini', 'codex'),
-            (deepseek, 'codex'),
-            ('claude-opus-5-5', None),
-            ('anthropic/claude-opus-5-5', None),
-            (None, 'codex'),
-            (missing, 'codex')))
-        cases.extend(('claude', model, family) for model, family in (
-            ('claude-opus-5-5', 'claude'),
-            ('anthropic/claude-opus-5-5', 'claude'),
-            (deepseek, 'claude'),
-            ('gpt-6-luna', None),
-            ('openai/gpt-6-luna', None),
-            ('codex-mini', None),
-            ('o4-mini', None),
-            (None, 'claude'),
-            (missing, 'claude')))
-        cases.extend(('agy', model, family) for model, family in (
-            ('claude-sonnet-5-5-medium', 'claude'),
-            ('gemini-2.5-pro', 'other'),
-            ('anthropic/claude-opus-5-5', None),
-            ('gpt-6-luna', 'codex'),
-            ('gpt-oss-120b-medium', 'codex'),
-            ('o4-mini', None),
-            (deepseek, None),
-            (None, None),
-            (missing, None)))
+        for profile in ('claude', 'codex', 'agy', 'opencode', 'company-gw',
+                        'company-gw-agent', 'gw-agent'):
+            cases.extend((profile, model, family) for model, family in by_model)
         cases.extend(('unknown-route', model, None) for model in (
             'claude-opus-5-5', 'gpt-6-luna', deepseek, missing))
-        compatible = {
-            'claude': ('codex-reviewer',),
-            'codex': ('claude-reviewer',),
-            'other': ('claude-reviewer', 'codex-reviewer'),
-            None: (),
-        }
+        role_families = {'claude-reviewer': 'claude', 'codex-reviewer': 'codex'}
         for profile, model, family in cases:
             developer = {'provider_profile': profile}
             if model is not missing:
@@ -3493,9 +3536,15 @@ class TaskCompletionTests(unittest.TestCase):
             with self.subTest(developer=developer):
                 self.assertEqual(
                     task_completion._reviewer_author_family(developer), family)
-                for reviewer in ('claude-reviewer', 'codex-reviewer'):
+                for reviewer, role_family in role_families.items():
                     self.assertEqual(task_completion._review_family_compatible(
-                        developer, reviewer), reviewer in compatible[family])
+                        developer, reviewer), family is not None and family != role_family)
+                    # The PASS gate passes the recorded Reviewer run family.
+                    for run_family in ('claude', 'codex', 'gemini', None):
+                        self.assertEqual(task_completion._review_family_compatible(
+                            developer, reviewer, run_family),
+                            family is not None and run_family is not None and
+                            family != run_family)
         for developer in (None, 'opencode', ['claude-opus-5-5']):
             with self.subTest(developer=developer):
                 self.assertIsNone(task_completion._reviewer_author_family(developer))
@@ -3599,9 +3648,7 @@ class TaskCompletionTests(unittest.TestCase):
                 'full_name': 'davidcatcat/davidcattoolsproject'}
         with patch('llmtool.task_completion._github_get', side_effect=api):
             evidence = task_completion.collect_github_evidence(
-                **self._github_kwargs(
-                    result_sha,
-                    task_record={'developer': {'provider_profile': 'codex'}}))
+                **self._github_kwargs(result_sha))
         self.assertEqual(evidence['missing_gates'], [])
         self.assertEqual(evidence['evidence']['pr_state'], 'MERGED')
         self.assertEqual(evidence['evidence']['merge_commit_sha'], 'b' * 40)
@@ -3878,7 +3925,7 @@ class TaskCompletionTests(unittest.TestCase):
                                              runs=runs, jobs=jobs)
         with patch('llmtool.task_completion._github_get', side_effect=api) as github_get:
             evidence = task_completion.collect_github_evidence(**self._github_kwargs(
-                result_sha, task_record={'developer': {'provider_profile': 'codex'}}))
+                result_sha))
         self.assertEqual(evidence['evidence']['ci_run_id'], 101)
         self.assertEqual(evidence['evidence']['ci_run_attempt'], 2)
         self.assertEqual(evidence['evidence']['ci_check_ids'],

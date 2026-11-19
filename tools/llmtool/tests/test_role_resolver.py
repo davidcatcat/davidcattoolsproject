@@ -11,7 +11,7 @@ from unittest import mock
 
 import yaml
 
-from llmtool import cli, role_config, roles_cli, task_submission_cli
+from llmtool import cli, developer_routes, role_config, roles_cli, task_submission_cli
 from llmtool.config import user_config_path
 from llmtool.developer_routes import load_route_config
 from llmtool.errors import LLMToolError
@@ -556,6 +556,42 @@ class DispatchPathTests(AccountBase):
             with self.subTest(served=served):
                 self.assertEqual(task_submission_cli._gw_agent_developer_profile(
                     route, served_model=served), (served, route['default_effort']))
+
+    def test_gw_agent_profile_records_model_run(self):
+        # Security v91 F3: the gw-agent run records its model provenance too.
+        self.isolated_resolver()
+        route = dict(self.routes()['gw-agent'])
+        run = {'stale': True}
+        task_submission_cli._gw_agent_developer_profile(
+            route, served_model='qwen3-coder', model_run=run)
+        self.assertEqual(run, {'requested': 'qwen3-coder', 'resolved': 'qwen3-coder',
+                               'source': 'profile', 'family': 'qwen',
+                               'provider_reported': None})
+        run = {}
+        task_submission_cli._gw_agent_developer_profile(route, model_run=run)
+        self.assertEqual((run['requested'], run['resolved'], run['source']),
+                         (None, route['default_model'], 'repo_default'))
+        self.env = {'LLMTOOL_ROLE_GW_AGENT_DEVELOPER_MODEL': 'deepseek-coder-v4'}
+        run = {}
+        task_submission_cli._gw_agent_developer_profile(route, model_run=run)
+        self.assertEqual((run['requested'], run['source'], run['family']),
+                         ('deepseek-coder-v4', 'env', 'deepseek'))
+
+    def test_dispatch_model_run_keeps_valid_provenance_else_records_unknown(self):
+        # Security v91 F3: a dispatch always records a run, UNKNOWN when its
+        # profile gave no provenance for the launched model.
+        valid = developer_routes.build_model_run('gpt-6.1-sol', 'profile', 'gpt-6.1-sol')
+        self.assertEqual(task_submission_cli._dispatch_model_run(valid, 'gpt-6.1-sol'), valid)
+        for label, run in (('none', None), ('other model', valid),
+                           ('family mismatch', dict(valid, family='claude'))):
+            with self.subTest(case=label):
+                model = 'gpt-6.2-sol' if label == 'other model' else 'gpt-6.1-sol'
+                self.assertEqual(task_submission_cli._dispatch_model_run(run, model), {
+                    'requested': None, 'resolved': model, 'source': 'UNKNOWN',
+                    'family': 'codex', 'provider_reported': None})
+        self.assertEqual(task_submission_cli._dispatch_model_run(None, None)['family'],
+                         'UNKNOWN')
+        self.assertIsNone(task_submission_cli._dispatch_model_run(None, 'has space'))
 
     def test_gw_agent_malformed_served_model_is_refused(self):
         self.isolated_resolver()

@@ -149,6 +149,18 @@ def _admit_review_model(reviewer_key, model):
         _refuse('ROLE_MODEL_NOT_ALLOWED')
 
 
+def _reviewer_model_run(reviewer_role, model):
+    """#2302 A2/A3: the model_run of the Reviewer run that launches model.
+
+    The source is the resolver's model source for a model the role set;
+    a model the role did not set (the module fallback) is repo_default.
+    """
+    role = reviewer_role if type(reviewer_role) is dict else {}
+    if role.get('model') != model:
+        return developer_routes.build_model_run(model, 'repo_default')
+    return developer_routes.role_model_run(role, model)
+
+
 def _resolve_reviewer_role(reviewer_key):
     """#2027: resolve the role config for reviewer_key; tag review_dispatch_code on LLMToolError."""
     try:
@@ -1367,6 +1379,20 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             'roles': 'ROLES', 'env': 'EXPLICIT', 'cli': 'EXPLICIT',
             'pm_runtime': 'LEGACY', 'builtin': 'BUILTIN_DEFAULT',
         }.get(reviewer_role['source'], 'BUILTIN_DEFAULT')
+    # #2302 A3 (security v91 F1, CWE-863): the Reviewer role admits any
+    # well-formed model, so the run's own model family decides independence.
+    # It is checked here, before the claim, and bound into the claim; the
+    # formal PASS gate reads only this recorded family
+    # (task_completion._formal_reviewer_run_family).
+    # An UNKNOWN authoring family was already refused by _preflight
+    # (_select_reviewer); the PASS gate checks both families again.
+    reviewer_model_run = _reviewer_model_run(
+        reviewer_role, codex_model if reviewer_key == 'codex-reviewer' else claude_model)
+    if reviewer_model_run['family'] == developer_routes.MODEL_FAMILY_UNKNOWN:
+        _refuse('REVIEWER_FAMILY_UNSUPPORTED')
+    if reviewer_model_run['family'] == task_completion._reviewer_author_family(
+            task.get('developer') if type(task) is dict else None):
+        _refuse('REVIEWER_SAME_FAMILY')
     repo_root = str(Path(executor.common_dir).parent)
     # #1502 WP-F: the rule prefix is built from authenticated main before the
     # claim, so a refusal records no claim, creates no D6 and starts no session.
@@ -1376,7 +1402,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
              'version': version, 'state': 'CLAIMED', 'reviewer_task': reviewer_task,
              'native_session_id': None, 'account_mode': account_mode,
              'claimed_at': _now(), 'updated_at': _now(),
-             'rules_sha256': rules_sha256, 'review_kind': kind}
+             'rules_sha256': rules_sha256, 'review_kind': kind,
+             'reviewer_model_run': reviewer_model_run}
     if reviewer_role.get('account') is not None:
         claim['account'] = reviewer_role['account']
     try:

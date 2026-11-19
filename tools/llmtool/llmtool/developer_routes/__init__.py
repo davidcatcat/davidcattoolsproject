@@ -26,6 +26,8 @@ __all__ = [
     'check_route_model', 'check_route_model_family', 'check_registry_role_model',
     'route_has_family_check', 'REGISTRY_ROLES', 'registry_default_model',
     'model_id_ok', 'model_family', 'MODEL_FAMILY_UNKNOWN',
+    'MODEL_RUN_KEYS', 'MODEL_RUN_SOURCES', 'run_model_id_ok', 'build_model_run',
+    'role_model_run', 'with_provider_reported', 'model_run_family',
     'resolve_route_timeout', 'resolve_route_max_diff_bytes', 'resolve_route_max_prompt_bytes',
     'resolve_route_max_task_paths', 'resolve_route_max_source_file_bytes',
     'resolve_route_max_source_total_bytes', 'max_prompt_bytes_ok',
@@ -135,6 +137,101 @@ def model_family(model):
     return family
 
 
+# #2302 A2: the model provenance every Developer and formal Reviewer run
+# records (developer.model_run, review_dispatch_claim reviewer_model_run).
+MODEL_RUN_KEYS = frozenset(('requested', 'resolved', 'source', 'family', 'provider_reported'))
+# cli, env, roles: the role_config resolver layer that set the model; profile:
+# the model of a user-config provider profile; repo_default: the repository
+# default; UNKNOWN: the run's model source is not known.
+MODEL_RUN_SOURCES = frozenset(('cli', 'env', 'roles', 'profile', 'repo_default', 'UNKNOWN'))
+_RESOLVER_MODEL_SOURCES = frozenset(('cli', 'env', 'roles', 'repo_default'))
+_MODEL_VARIANT_PATTERN = r'[A-Za-z0-9][A-Za-z0-9._-]{0,31}'
+
+
+def run_model_id_ok(value):
+    """Return True for a well-formed model id with an optional '#<variant>' suffix.
+
+    A run may launch a model with a variant suffix (an OpenCode model such as
+    opencode/<name>-free#high); the part before '#' must pass model_id_ok.
+    """
+    import re
+
+    if type(value) is not str:
+        return False
+    name, sep, variant = value.partition('#')
+    return model_id_ok(name) and (
+        not sep or re.fullmatch(_MODEL_VARIANT_PATTERN, variant) is not None)
+
+
+def build_model_run(model, source, requested=None):
+    """Return the #2302 A2 model_run record of one run.
+
+    model is the model the run launches (None when it is not known); source is
+    one of MODEL_RUN_SOURCES (any other value is recorded as UNKNOWN);
+    requested is the configured model that asked for it (always None for
+    repo_default). The family is model_family of model, MODEL_FAMILY_UNKNOWN
+    for an unknown model. provider_reported stays None until the provider
+    reports a model (with_provider_reported).
+    """
+    if type(source) is not str or source not in MODEL_RUN_SOURCES:
+        source = 'UNKNOWN'
+    if not run_model_id_ok(model):
+        model = None
+    if source == 'repo_default' or not run_model_id_ok(requested):
+        requested = None
+    if model is None or (requested is None and source != 'repo_default'):
+        # No known model, or a configured source without a recordable request.
+        source = 'UNKNOWN'
+    return {'requested': requested, 'resolved': model, 'source': source,
+            'family': MODEL_FAMILY_UNKNOWN if model is None else model_family(model),
+            'provider_reported': None}
+
+
+def role_model_run(role, model):
+    """Return build_model_run for a model resolved by role_config.resolve_role.
+
+    The source is the resolver's model_source; a role that set a model but
+    reported no source is UNKNOWN, a role with no model is repo_default.
+    """
+    source = role.get('model_source') if type(role) is dict else None
+    if type(source) is not str or source not in _RESOLVER_MODEL_SOURCES:
+        source = ('UNKNOWN' if type(role) is dict and role.get('model') is not None
+                  else 'repo_default')
+    return build_model_run(model, source, None if source == 'repo_default' else model)
+
+
+def with_provider_reported(model_run, reported):
+    """Return a copy of model_run with the provider-reported model, if any.
+
+    A reported model that is not a well-formed model id is not recorded; the
+    family then stays that of the resolved model.
+    """
+    run = dict(model_run)
+    if run_model_id_ok(reported):
+        run['provider_reported'] = reported
+        run['family'] = model_family(reported)
+    return run
+
+
+def model_run_family(run, model):
+    """Return the family a recorded model_run proves for model, else MODEL_FAMILY_UNKNOWN.
+
+    #2302 A3: run must be a model_run dict with exactly MODEL_RUN_KEYS whose
+    resolved model is model (a well-formed run model id) and whose family is
+    model_family of the provider-reported model when there is one, else of the
+    resolved model. Any other value proves no family.
+    """
+    if (type(run) is not dict or set(run) != MODEL_RUN_KEYS or
+            not run_model_id_ok(model) or run.get('resolved') != model or
+            type(run.get('source')) is not str or run['source'] not in MODEL_RUN_SOURCES):
+        return MODEL_FAMILY_UNKNOWN
+    reported = run.get('provider_reported')
+    if reported is not None and not run_model_id_ok(reported):
+        return MODEL_FAMILY_UNKNOWN
+    family = model_family(reported if reported is not None else model)
+    return family if run.get('family') == family else MODEL_FAMILY_UNKNOWN
+
+
 # Owner #2302 (decision 11-17): no route has a model family or membership
 # gate. Every route admits any well-formed model id (model_id_ok); a model the
 # provider cannot serve fails from the provider path with no fallback.
@@ -148,6 +245,11 @@ _ROUTE_MODEL_CHECKS = {
 # #1502 WP-E, Owner #2302: each review and AI Debug role admits any
 # well-formed model id; its registry entry names only the default model
 # (default_model, else the first allowed_models item of an older file).
+# Because the role id no longer implies a model family, formal review
+# independence never infers the Reviewer's family from its role: the review
+# dispatch claim records the Reviewer run's model_run (reviewer_model_run) and
+# the formal PASS gate compares that recorded family with the authoring run's
+# (task_completion._formal_reviewer_run_family).
 _ROLE_MODEL_CHECKS = {
     'codex-reviewer': model_id_ok,
     'claude-reviewer': model_id_ok,
@@ -387,7 +489,9 @@ def check_registry_role_model(config, role, model):
     Owner #2302 (decision 11-17): any well-formed model id of any family is
     admitted; the role's allowed_models is not a membership list. Review
     independence is decided from the recorded model family of the authoring
-    run (task_completion._reviewer_author_family), not here.
+    run (task_completion._reviewer_author_family) and of the Reviewer run the
+    review dispatch claim binds (task_completion._formal_reviewer_run_family),
+    not here and never from the role.
     """
     if config is None:
         try:

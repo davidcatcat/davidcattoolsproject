@@ -392,46 +392,72 @@ CLAUDE_CLI_SUBTYPES = frozenset((
 CLAUDE_FAILURE_MAX_TURNS = _NO_CHANGES_MAX_TURNS
 CLAUDE_FAILURE_MAX_DURATION_MS = 86_400_000
 CLAUDE_FAILURE_EXIT_CODE_RANGE = (-255, 255)
-# #2302 A2: the model a Developer run used. Optional on every developer shape;
-# legacy records omit it. Checked strictly by valid_developer_model_run.
+# #2302 A2: the model a Developer run used. Optional on every developer shape
+# so legacy records still load; every current dispatch route records it.
+# Checked strictly by valid_developer_model_run.
 _DEVELOPER_MODEL_RUN_FIELDS = frozenset(('model_run',))
 MODEL_RUN_KEYS = frozenset(('requested', 'resolved', 'source', 'family', 'provider_reported'))
-MODEL_RUN_SOURCES = frozenset(('cli', 'env', 'roles', 'repo_default', 'UNKNOWN'))
+MODEL_RUN_SOURCES = frozenset(('cli', 'env', 'roles', 'profile', 'repo_default', 'UNKNOWN'))
 _DEVELOPER_OPTIONAL_FIELDS = (_DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS |
                               _DEVELOPER_CLAUDE_FAILURE_EVIDENCE_FIELDS |
                               _DEVELOPER_MODEL_RUN_FIELDS)
 
 
-def valid_developer_model_run(developer):
-    """#2302 A2: strict value of developer.model_run.
+def valid_model_run(run, model):
+    """#2302 A2: strict value of one run's model_run record for model.
 
-    model_run records the requested model (the user-config, env or CLI value,
-    else None for the repo default), the resolved model (always equal to the
-    record's model), the model source, the provider-reported model (None when
-    the provider reported none) and the model family. The family must be
+    model_run records the requested model (the user-config, env or CLI value;
+    None for the repo default or an unknown request), the resolved model (the
+    model the run launched, equal to model; None only when it is not known),
+    the model source, the provider-reported model (None when the provider
+    reported none) and the model family. The family must be
     developer_routes.model_family of the provider-reported model when there is
-    one, else of the resolved model ('UNKNOWN' when not recognised).
+    one, else of the resolved model; an unknown resolved model has source and
+    family 'UNKNOWN' and no reported model.
     """
-    from .developer_routes import model_family, model_id_ok
+    from .developer_routes import MODEL_FAMILY_UNKNOWN, model_family, run_model_id_ok
 
-    if type(developer) is not dict:
-        return False
-    run = developer.get('model_run')
     if type(run) is not dict or set(run) != MODEL_RUN_KEYS:
         return False
     resolved = run['resolved']
+    requested = run['requested']
     reported = run['provider_reported']
-    if (type(resolved) is not str or not model_id_ok(resolved) or
-            developer.get('model') != resolved or
-            (run['requested'] is not None and
-             (type(run['requested']) is not str or not model_id_ok(run['requested']))) or
-            type(run['source']) is not str or run['source'] not in MODEL_RUN_SOURCES or
-            (run['source'] == 'repo_default') != (run['requested'] is None) or
+    source = run['source']
+    if (resolved != model or
+            (resolved is not None and not run_model_id_ok(resolved)) or
+            (requested is not None and not run_model_id_ok(requested)) or
+            type(source) is not str or source not in MODEL_RUN_SOURCES or
+            (source == 'repo_default' and requested is not None) or
+            (requested is None and source not in ('repo_default', 'UNKNOWN')) or
             (reported is not None and
-             (type(reported) is not str or _SERVED_MODEL.fullmatch(reported) is None)) or
+             (not run_model_id_ok(reported) or _SERVED_MODEL.fullmatch(
+                 reported.split('#', 1)[0]) is None)) or
             type(run['family']) is not str):
         return False
+    if resolved is None:
+        return (source == 'UNKNOWN' and reported is None and
+                run['family'] == MODEL_FAMILY_UNKNOWN)
     return run['family'] == model_family(reported if reported is not None else resolved)
+
+
+def valid_developer_model_run(developer):
+    """#2302 A2: strict value of developer.model_run (see valid_model_run).
+
+    The resolved model always equals the record's model.
+    """
+    if type(developer) is not dict:
+        return False
+    return valid_model_run(developer.get('model_run'), developer.get('model'))
+
+
+def valid_reviewer_model_run(run):
+    """#2302 A3: strict value of a review claim's reviewer_model_run.
+
+    The Reviewer run always names the model it launched, so resolved is a
+    well-formed model id; otherwise as valid_model_run.
+    """
+    return (type(run) is dict and type(run.get('resolved')) is str and
+            valid_model_run(run, run['resolved']))
 
 
 def valid_claude_failure_evidence(evidence):
@@ -2382,7 +2408,7 @@ def _validate(record, *, strict=True):
             if (type(item) is not dict or
                     set(item) - frozenset(('failure_reason', 'binding_mismatch_keys',
                                            'rules_sha256', 'bind_failure_reason',
-                                           'review_kind')) not in (
+                                           'review_kind', 'reviewer_model_run')) not in (
                         _REVIEW_DISPATCH_CLAIM_FIELDS,
                         _REVIEW_DISPATCH_CLAIM_FIELDS | frozenset(('review_result',)),
                         _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS,
@@ -2404,6 +2430,9 @@ def _validate(record, *, strict=True):
                     ('review_kind' in item and
                      (type(item['review_kind']) is not str or
                       item['review_kind'] not in ('formal', 'security'))) or
+                    # #2302 A3: the model the Reviewer run launched, bound at claim time.
+                    ('reviewer_model_run' in item and
+                     not valid_reviewer_model_run(item['reviewer_model_run'])) or
                     ('account' in item and
                      (type(item['account']) is not str or
                       _NAME.fullmatch(item['account']) is None)) or
@@ -5973,7 +6002,8 @@ class TaskStore:
                                 all(before.get(key) == after.get(key) for key in (
                                     'executor_task', 'pr', 'head_sha', 'version',
                                     'account_mode', 'account', 'claimed_at',
-                                    'reviewer_task', 'rules_sha256', 'review_kind')) and
+                                    'reviewer_task', 'rules_sha256', 'review_kind',
+                                    'reviewer_model_run')) and
                                 (before.get('state') == 'CLAIMED' and
                                  (after.get('state') == 'COMPLETED' or
                                   ('review_result' not in after))) and
