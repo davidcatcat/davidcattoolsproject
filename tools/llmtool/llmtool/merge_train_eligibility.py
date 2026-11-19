@@ -13,6 +13,8 @@ need no receipt, every other PR needs an exact-head PASS receipt.
 #2281 row 15b: the per-PR file maximum comes from policy.json's
 ``merge_train_files_per_pr_max`` through the repair_policy loader; an absent key
 keeps ``MAX_PR_FILES`` and a policy the loader refuses refuses ``POLICY_INVALID``.
+The whole page sequence is read, so a configured value above the 100-entry page
+size is the effective limit end to end.
 """
 
 import re
@@ -44,9 +46,10 @@ READY_STATE = 'PM_EVIDENCE_READY'
 LINUX_CHECK = 'check (Linux 3.14)'
 MACOS_CHECK = 'check (macOS 3.13)'
 MAX_PR_FILES = 100
-# The PR file list is read as one page of 100 entries, so a list showing 100
-# entries may be truncated and is always unreadable, whatever the configured
-# maximum (#2281 limit table row 15: "merge train, 100 files per PR").
+# GitHub returns a PR's file list in pages of at most 100 entries. This is the
+# page size used while reading the complete list; it is not itself a file
+# limit. The only file limit is the configured `merge_train_files_per_pr_max`
+# (#2281 limit table row 15: "merge train, 100 files per PR").
 FILES_PAGE = 100
 # One bounded wait before the single PR re-read when mergeable is not yet known.
 MERGEABLE_WAIT_SECONDS = 5.0
@@ -178,10 +181,37 @@ def _max_pr_files(policy_path=None):
     return policy.get('merge_train_files_per_pr_max', MAX_PR_FILES)
 
 
+def _read_pr_files(pr, max_files, get):
+    """Read the complete PR file list, or None when a page cannot be read.
+
+    Pages of ``FILES_PAGE`` entries are read until a short page ends the list.
+    Reading also stops once more than ``max_files`` entries are known, which is
+    already a refusal; that bounds the reads by the configured maximum, so no
+    fixed page count becomes a hidden limit. A configured maximum above the page
+    size therefore reads every page the list has.
+    """
+    files = []
+    page = 1
+    while len(files) <= max_files:
+        path = f'pulls/{pr}/files?per_page={FILES_PAGE}'
+        if page > 1:
+            path += f'&page={page}'
+        try:
+            items = get(path)
+        except Exception:
+            return None
+        if type(items) is not list:
+            return None
+        files.extend(items)
+        if len(items) < FILES_PAGE:
+            break
+        page += 1
+    return files
+
+
 def _rule_file_code(files, max_files=MAX_PR_FILES):
-    """Refuse a PR whose file list is unreadable, over the maximum, or a rule file."""
-    if (type(files) is not list or len(files) >= FILES_PAGE or
-            len(files) > max_files):
+    """Refuse a PR whose complete file list is unreadable, over the maximum, or a rule file."""
+    if type(files) is not list or len(files) > max_files:
         return TRAIN_MEMBER_PR_UNAVAILABLE
     for item in files:
         filename = item.get('filename') if type(item) is dict else None
@@ -330,13 +360,14 @@ def member_check(store, task_id, pr, github_get, train_root=None, sleep=None,
 
     # 8. Rule files never ride a train. The per-PR file maximum is the
     # configurable #2281 row 15 limit; an invalid policy refuses the member
-    # rather than falling back to the default (fail closed).
+    # rather than falling back to the default (fail closed). The complete page
+    # sequence is read before the configured maximum is applied, so a value
+    # above the 100-entry page size is the effective limit.
     max_files = _max_pr_files(policy_path)
     if max_files is None:
         return _refused(POLICY_INVALID)
-    try:
-        files = get(f'pulls/{pr}/files?per_page={FILES_PAGE}')
-    except Exception:
+    files = _read_pr_files(pr, max_files, get)
+    if files is None:
         return _refused(TRAIN_MEMBER_PR_UNAVAILABLE)
     code = _rule_file_code(files, max_files)
     if code is not None:

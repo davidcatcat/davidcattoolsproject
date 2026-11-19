@@ -1,7 +1,8 @@
 """#2281 row 15b: the merge-train per-PR file maximum comes from policy.json.
 
 A1: member_check reads merge_train_files_per_pr_max through the one policy
-    loader; at its current value (100) train eligibility is unchanged.
+    loader and reads the complete file list, so a configured value above the
+    100-entry page size is the effective limit; at 100 the boundary is 100.
 A2: an absent key keeps the previous default (MAX_PR_FILES = 100); an invalid
     or unreadable policy refuses POLICY_INVALID, with no silent fallback.
 A3: a member PR over the configured maximum is refused exactly as before, with
@@ -80,14 +81,34 @@ def _record():
     }
 
 
+def _file_routes(files):
+    """Route each full page separately so the complete list can be read."""
+    if type(files) is not list:
+        return {FILES: files}
+    routes = {}
+    page = 1
+    while True:
+        start = (page - 1) * eligibility.FILES_PAGE
+        chunk = files[start:start + eligibility.FILES_PAGE]
+        routes[FILES if page == 1 else f'{FILES}&page={page}'] = chunk
+        if page > 1:
+            # Answer the other common query order too, so a paginating reader
+            # sees the same page whichever order it builds.
+            routes[f'pulls/{PR}/files?page={page}&per_page={eligibility.FILES_PAGE}'] = chunk
+        if len(chunk) < eligibility.FILES_PAGE:
+            return routes
+        page += 1
+
+
 def _routes(files):
-    return {
+    routes = {
         PULL: {'number': PR, 'state': 'open', 'merged': False, 'mergeable': True,
                'head': {'sha': HEAD}, 'labels': []},
         CHECKS: {'total_count': 2, 'check_runs': [_run(101, LINUX), _run(120, MACOS)]},
-        FILES: files,
         COMMENTS: [],
     }
+    routes.update(_file_routes(files))
+    return routes
 
 
 class FakeGitHub:
@@ -151,24 +172,23 @@ class _Base(unittest.TestCase):
 
 
 class CurrentValueTests(_Base):
-    """A1: with the key at its current value, eligibility is unchanged."""
+    """A1: at its current value the boundary is the configured maximum."""
 
     def test_repository_policy_holds_the_table_value(self):
         self.assertEqual(repair_policy.load_policy()['merge_train_files_per_pr_max'], 100)
         self.assertEqual(eligibility.MAX_PR_FILES, 100)
         self.assertEqual(eligibility.FILES_PAGE, 100)
 
-    def test_current_value_boundary_is_unchanged(self):
+    def test_current_value_boundary_is_the_configured_maximum(self):
         self.assertTrue(self.check(_files(99))['eligible'])
-        # The CI gate reads the same one page of at most 100 entries first and
-        # treats a full page as possibly truncated, so a 100-entry PR is refused
-        # there. The outcome (refused) is what stays unchanged; the exact
-        # file-limit code is asserted on _rule_file_code below.
-        self.assertFalse(self.check(_files(100))['eligible'])
+        # The complete list is read, so 100 files is at the configured maximum
+        # (100), not over it; 101 is over the maximum and refused.
+        self.assertTrue(self.check(_files(100))['eligible'])
+        self.assertRefused(self.check(_files(101)), 'TRAIN_MEMBER_PR_UNAVAILABLE')
 
     def test_rule_file_helper_keeps_the_same_boundary(self):
-        self.assertIsNone(eligibility._rule_file_code(_files(99)))
-        self.assertEqual(eligibility._rule_file_code(_files(100)),
+        self.assertIsNone(eligibility._rule_file_code(_files(100)))
+        self.assertEqual(eligibility._rule_file_code(_files(101)),
                          'TRAIN_MEMBER_PR_UNAVAILABLE')
 
 
@@ -179,9 +199,11 @@ class AbsentAndInvalidPolicyTests(_Base):
         path = self.policy(BASE)
         self.assertEqual(eligibility._max_pr_files(path), 100)
         self.assertTrue(self.check(_files(5), policy_path=path)['eligible'])
-        # As at the current value, a 100-entry page is refused by the CI gate
-        # before the file maximum is consulted, so only refusal is asserted.
-        self.assertFalse(self.check(_files(100), policy_path=path)['eligible'])
+        # An absent key keeps MAX_PR_FILES (100): 100 files is at the maximum
+        # and 101 is over it, exactly as when the key carries 100.
+        self.assertTrue(self.check(_files(100), policy_path=path)['eligible'])
+        self.assertRefused(self.check(_files(101), policy_path=path),
+                           'TRAIN_MEMBER_PR_UNAVAILABLE')
 
     def test_missing_policy_file_refuses_policy_invalid(self):
         missing = str(self.home / 'absent.json')
@@ -226,10 +248,22 @@ class ConfiguredMaximumTests(_Base):
         files = _files(1) + [{'filename': RULE_FILE}]
         self.assertRefused(self.check(files, policy_path=path), 'TRAIN_MEMBER_RULE_FILE')
 
-    def test_truncated_file_page_still_refuses(self):
-        # A 100-entry page may be truncated whatever the configured maximum.
+    def test_configured_maximum_above_the_page_size_is_effective(self):
+        # F1: the 100-entry first page is not a hidden cap. With a configured
+        # maximum of 1000, a 100-file PR is below it and eligible because the
+        # complete page sequence is read.
         path = self.policy(dict(BASE, merge_train_files_per_pr_max=1000))
-        self.assertEqual(eligibility._rule_file_code(_files(100), 1000),
+        result = self.check(_files(100), policy_path=path)
+        self.assertTrue(result['eligible'], result)
+        self.assertIn(f'{FILES}&page=2', self.github.calls)
+
+    def test_file_count_spans_pages_under_the_configured_maximum(self):
+        # Two pages are counted against the configured maximum, not just the
+        # first page, so a 150-file PR stays eligible under a maximum of 1000.
+        path = self.policy(dict(BASE, merge_train_files_per_pr_max=1000))
+        self.assertTrue(self.check(_files(150), policy_path=path)['eligible'])
+        self.assertIn(f'{FILES}&page=2', self.github.calls)
+        self.assertEqual(eligibility._rule_file_code(_files(1001), 1000),
                          'TRAIN_MEMBER_PR_UNAVAILABLE')
 
 
