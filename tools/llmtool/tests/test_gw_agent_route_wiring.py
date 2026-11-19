@@ -209,10 +209,12 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(config['profile']['allowed_data_classes'], ['synthetic', 'public_repo'])
         self.assertEqual(config['profile']['data_class_map'],
                          {'SYNTHETIC': 'synthetic', 'PUBLIC_REPO': 'public_repo'})
-        self.assertEqual(config['profile']['timeout_seconds'], 1800)
+        # #2281 (Owner 2026-11-19): 3-hour default, 5-hour maximum.
+        self.assertEqual((config['default_timeout'], config['max_timeout']), (10800, 18000))
+        self.assertEqual(config['profile']['timeout_seconds'], 10800)
         self.assertEqual(config['profile']['timeout_seconds'], config['default_timeout'])
         self.assertEqual(config['budgets']['max_turns'], 512)
-        self.assertEqual(config['budgets']['max_wall_seconds'], 1800)
+        self.assertEqual(config['budgets']['max_wall_seconds'], 10800)
         self.assertEqual(config['budgets']['max_wall_seconds'], config['default_timeout'])
         self.assertLessEqual(config['budgets']['max_wall_seconds'], config['max_timeout'])
         self.assertEqual(config['authorization_ref'],
@@ -1083,8 +1085,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(seen['post_path'], '/v1/chat/completions')
         self.assertEqual(seen['prepared_profile']['http_allow_hosts'], ['10.20.30.40'])
         # #1817: the configured per-call timeout reaches the gateway profile.
-        self.assertEqual(seen['profile']['timeout_seconds'], 1800)
-        self.assertEqual(seen['prepared_profile']['timeout_seconds'], 1800)
+        self.assertEqual(seen['profile']['timeout_seconds'], 10800)
+        self.assertEqual(seen['prepared_profile']['timeout_seconds'], 10800)
         self.assertEqual(set(seen['task']['budgets']), {
             'max_turns', 'max_input_tokens', 'max_output_tokens', 'max_wall_seconds',
             'max_tool_result_bytes', 'max_sent_bytes'})
@@ -1093,7 +1095,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(seen['task']['budgets']['max_input_tokens'], 262144)
         self.assertEqual(seen['task']['budgets']['max_output_tokens'], 65536)
         self.assertEqual(seen['task']['budgets']['max_turns'], 512)
-        self.assertEqual(seen['task']['budgets']['max_wall_seconds'], 1800)
+        # #2281 (PR #2390 F1): the wall budget is the resolved run timeout
+        # (route default 10800 s), not the fixture's route budget of 1800 s.
+        self.assertEqual(seen['task']['budgets']['max_wall_seconds'], 10800)
+        self.assertEqual(seen['prepared_task']['budgets']['max_wall_seconds'], 10800)
         self.assertEqual(developer['usage']['prompt_tokens'], 1)
         self.assertEqual(developer['usage']['completion_tokens'], 2)
         self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
@@ -1249,7 +1254,9 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(seen_requests[0]['task']['budgets']['max_input_tokens'], 262144)
         self.assertEqual(seen_requests[0]['task']['budgets']['max_output_tokens'], 65536)
         self.assertEqual(seen_requests[0]['task']['budgets']['max_turns'], 512)
-        self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], 1800)
+        # #2281 (PR #2390 F1): the wall budget is the resolved run timeout
+        # (route default 10800 s), not the fixture's route budget of 1800 s.
+        self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], 10800)
 
     def test_old_audit_copies_are_removed_and_recent_copies_retained(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1297,10 +1304,10 @@ class GwAgentProfileTimeoutTests(unittest.TestCase):
         profile['base_url'] = 'http://127.0.0.1:9/v1'
         return profile
 
-    def test_shipped_profile_serializes_timeout_seconds_1800(self):
+    def test_shipped_profile_serializes_timeout_seconds_10800(self):
         serialized = self._serialized_profile(self._shipped_profile())
         self.assertIs(type(serialized['timeout_seconds']), int)
-        self.assertEqual(serialized['timeout_seconds'], 1800)
+        self.assertEqual(serialized['timeout_seconds'], 10800)
         self.assertEqual(serialized['timeout_seconds'],
                          load_route_config()['routes']['gw-agent']['default_timeout'])
 
@@ -1314,6 +1321,50 @@ class GwAgentProfileTimeoutTests(unittest.TestCase):
         expected = dict(with_timeout)
         del expected['timeout_seconds']
         self.assertEqual(without_timeout, expected)
+
+    def _gateway_parse(self, profile):
+        """Parse a serialized profile with the real gateway contract parser."""
+        gateway_path = str(Path(__file__).resolve().parents[2] / 'api-agent-gateway')
+        sys.path.insert(0, gateway_path)
+        try:
+            from api_agent_gateway.contract import parse_profile
+            return parse_profile({'schema_version': 1, 'profiles': {'llmtool-direct': profile}},
+                                 'llmtool-direct')
+        finally:
+            sys.path.remove(gateway_path)
+
+    def _gateway_refusal(self):
+        gateway_path = str(Path(__file__).resolve().parents[2] / 'api-agent-gateway')
+        sys.path.insert(0, gateway_path)
+        try:
+            from api_agent_gateway.contract import POLICY_REFUSED, Refusal
+            return Refusal, POLICY_REFUSED
+        finally:
+            sys.path.remove(gateway_path)
+
+    def test_gateway_accepts_serialized_profile_at_owner_bounds(self):
+        # #2281 (Owner 2026-11-19): the gateway accepts the route profile it is
+        # given: the 3 h default (10800 s) and the 5 h maximum (18000 s).
+        shipped = self._serialized_profile(self._shipped_profile())
+        self.assertEqual(self._gateway_parse(shipped).timeout_seconds, 10800)
+        route = load_route_config()['routes']['gw-agent']
+        for timeout in (1, route['default_timeout'], route['max_timeout'], 18000):
+            with self.subTest(timeout=timeout):
+                profile = self._shipped_profile()
+                profile['timeout_seconds'] = timeout
+                parsed = self._gateway_parse(self._serialized_profile(profile))
+                self.assertEqual(parsed.timeout_seconds, timeout)
+
+    def test_gateway_refuses_profile_timeout_above_five_hours(self):
+        refusal, policy_refused = self._gateway_refusal()
+        for timeout in (18001, 86400, 0, True, 10800.0):
+            with self.subTest(timeout=timeout):
+                profile = self._serialized_profile(self._shipped_profile())
+                profile['timeout_seconds'] = timeout
+                with self.assertRaises(refusal) as raised:
+                    self._gateway_parse(profile)
+                self.assertEqual(raised.exception.status, policy_refused)
+                self.assertEqual(raised.exception.code, 'PROFILE_INVALID')
 
 
 class GwAgentShippedServedModelTests(unittest.TestCase):
@@ -2079,26 +2130,20 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertEqual(seen_requests[0]['task']['budgets']['max_input_tokens'], 262144)
         self.assertEqual(seen_requests[0]['task']['budgets']['max_output_tokens'], 65536)
         self.assertEqual(seen_requests[0]['task']['budgets']['max_turns'], 512)
-        self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], 1800)
+        # #2281 (PR #2390 F1): the wall budget is the resolved run timeout
+        # (route default 10800 s), not the fixture's route budget of 1800 s.
+        self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], 10800)
 
-    def test_delegate_passes_configured_wall_seconds_budget(self):
-        # #2281: the whole-run wall budget passed to the gateway equals the configured value.
-        target = 'gw-agent-wall-budget.txt'
+    def _wall_budget_delegate(self, target, requested_timeout, route_runner):
         task_id = self.task_id = self._active_pm_task(target)
         args = Namespace(task_id=task_id, mode='direct', context_stdin=False,
             data_class='SYNTHETIC', egress_basis='Synthetic test context.',
             acceptance=[f'Only {target} is created.'], selection_source='PM',
             executor_task='executor-d6', read_path=[target], write_path=[target],
-            cwd=str(self.root))
+            cwd=str(self.root), timeout=requested_timeout)
         real_config = load_route_config()
         real_config['routes']['gw-agent']['package_path'] = str(
             Path(__file__).resolve().parents[2] / 'api-agent-gateway')
-        seen_requests = []
-        def fake_runner(_route, request, *, gate, on_launch, **_kwargs):
-            seen_requests.append(copy.deepcopy(request))
-            on_launch()
-            raise RouteError('GW_AGENT_TIMEOUT')
-
         decision = worker_dispatch.PolicyDecision('gw-agent', True,
                                                   'OWNER_POLICY_ALLOWED', 'f' * 64)
         with patch.object(task_submission_cli, 'load_route_config',
@@ -2108,14 +2153,51 @@ class GwAgentRealStoreTests(unittest.TestCase):
              patch.object(worker_dispatch, 'authorize_dispatch'), \
              patch.object(worker_dispatch, 'evaluate', return_value=decision), \
              redirect_stdout(io.StringIO()):
-            task_submission_cli.run_task_gw_agent_delegate(
-                args, store=self.store, route_runner=fake_runner)
+            return task_submission_cli.run_task_gw_agent_delegate(
+                args, store=self.store, route_runner=route_runner)
 
-        self.assertEqual(len(seen_requests), 1)
-        configured_budget = load_route_config()['routes']['gw-agent']['budgets']['max_wall_seconds']
-        self.assertEqual(configured_budget, 1800)
-        self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], 1800)
-        self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], configured_budget)
+    def test_delegate_wall_budget_follows_the_resolved_run_timeout(self):
+        # #2281 (PR #2390 F1): the gateway ends the whole run at max_wall_seconds,
+        # so the budget it receives is the resolved run timeout: the route
+        # default (3 h) without --timeout, and a requested 5 h run gets 5 h.
+        route = load_route_config()['routes']['gw-agent']
+        self.assertEqual((route['default_timeout'], route['max_timeout']), (10800, 18000))
+        for requested, expected in ((None, 10800), (18000, 18000)):
+            with self.subTest(requested=requested):
+                self._fresh_store()
+                seen_requests = []
+
+                def fake_runner(_route, request, *, gate, on_launch, **_kwargs):
+                    seen_requests.append(copy.deepcopy(request))
+                    on_launch()
+                    raise RouteError('GW_AGENT_TIMEOUT')
+
+                self._wall_budget_delegate(f'gw-agent-wall-budget-{expected}.txt',
+                                           requested, fake_runner)
+                self.assertEqual(len(seen_requests), 1)
+                self.assertEqual(seen_requests[0]['timeout'], expected)
+                self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'],
+                                 expected)
+                self.assertEqual(self._reloaded()['developer']['timeout_seconds'], expected)
+                # The gateway contract itself accepts the 5-hour wall budget.
+                gateway_path = str(Path(__file__).resolve().parents[2] / 'api-agent-gateway')
+                sys.path.insert(0, gateway_path)
+                try:
+                    from api_agent_gateway.contract import BUDGET_LIMITS
+                finally:
+                    sys.path.remove(gateway_path)
+                low, high = BUDGET_LIMITS['max_wall_seconds']
+                self.assertTrue(low <= expected <= high)
+
+    def test_delegate_above_five_hours_is_refused_before_the_gateway(self):
+        # #2281: a run above 18000 s is still refused before any Task mutation.
+        self._fresh_store()
+        with self.assertRaisesRegex(LLMToolError, 'TIMEOUT_OVER_HARD_CAP'):
+            self._wall_budget_delegate('gw-agent-wall-budget-over.txt', 18001,
+                                       self._unused_runner)
+        reloaded = self._reloaded()
+        self.assertEqual(reloaded['state'], 'PM_RESPONDED')
+        self.assertIsNone(reloaded.get('developer'))
 
     def test_gateway_profile_model_outside_allowed_models_is_refused(self):
         # #1773 (CWE-863): the real repo route lists only its default model; a

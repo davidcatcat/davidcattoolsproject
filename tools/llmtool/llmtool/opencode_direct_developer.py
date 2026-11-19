@@ -30,8 +30,10 @@ from .test_output_excerpts import _emitted_sensitive
 MODEL = 'opencode/deepseek-v4.1-flash-free#high'
 AGENT = 'llmtool-direct-developer'
 # #1815: each run's bound is resolve_route_timeout('opencode', requested) from
-# developer-routes.json; this is only the absolute ceiling no run may exceed.
-MAX_WALL_CLOCK_SECONDS = 3600
+# developer-routes.json; MAX_WALL_CLOCK_SECONDS is only the absolute ceiling no
+# run may exceed. #2281: it is developer_routes.HARD_TIMEOUT_CAP_SECONDS, read
+# on access (module __getattr__ below) so there is no second hard-coded copy
+# and this module keeps importing developer_routes lazily.
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 MAX_STDERR_BYTES = 64 * 1024
 # #2281: default bound from developer-routes.json (resolved_max_prompt_bytes).
@@ -153,6 +155,18 @@ def step_usage_evidence(events):
     return None
 
 
+def _max_wall_clock_seconds():
+    """Return the absolute run ceiling, developer_routes.HARD_TIMEOUT_CAP_SECONDS."""
+    from .developer_routes import HARD_TIMEOUT_CAP_SECONDS
+    return HARD_TIMEOUT_CAP_SECONDS
+
+
+def __getattr__(name):
+    if name == 'MAX_WALL_CLOCK_SECONDS':
+        return _max_wall_clock_seconds()
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+
+
 def resolved_timeout(requested=None):
     """Return the OpenCode run bound from developer-routes.json (#1815).
 
@@ -165,7 +179,7 @@ def resolved_timeout(requested=None):
         value = resolve_route_timeout('opencode', requested)
     except RouteError as exc:
         raise DirectOpenCodeError(exc.code) from None
-    if type(value) is not int or not 1 <= value <= MAX_WALL_CLOCK_SECONDS:
+    if type(value) is not int or not 1 <= value <= _max_wall_clock_seconds():
         _reject('OPENCODE_BUDGET_INVALID')
     return value
 
@@ -867,7 +881,7 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
     """Invoke one bounded OpenCode run in the existing D6 task worktree.
 
     timeout_seconds None uses the opencode route default_timeout; a given value
-    must pass resolve_route_timeout (route max_timeout, hard cap 3600). A
+    must pass resolve_route_timeout (route max_timeout, hard cap 18000). A
     refusal raises the resolver code before any provider process starts.
 
     delivered_callback (optional, no arguments) is called once at the delivery

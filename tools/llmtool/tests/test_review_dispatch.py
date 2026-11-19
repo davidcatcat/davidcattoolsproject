@@ -1075,7 +1075,10 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertIn('model_reasoning_effort=high', argv)
         self.assertEqual(argv[argv.index('--cd') + 1], '/repo/reviewer-d6')
         self.assertEqual(run.call_args.kwargs['cwd'], '/repo/reviewer-d6')
-        self.assertEqual(run.call_args.kwargs['timeout'], 1800)
+        # #2281 (Owner 2026-11-19): the Codex Reviewer run uses the 3 h role default.
+        self.assertEqual(run.call_args.kwargs['timeout'],
+                         review_dispatch.developer_routes.role_timeout('codex-reviewer'))
+        self.assertEqual(run.call_args.kwargs['timeout'], 10800)
         self.assertEqual(review_result, {'thread_id': '0123456789abcdef',
                                          'review_text': review_text,
                                          'verdict': 'PASS'})

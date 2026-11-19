@@ -17,9 +17,11 @@ GOOD = {'schema_version': 1, 'repair_max': 2, 'parent_debug_max': 1,
 # EC2/CI test repairs per work item; review_fail_max is the FAIL after the
 # last repair; each split child owns one Debug within the group limit.
 OWNER = dict(GOOD, repair_max=5, test_fail_max=5, review_fail_max=6, group_debug_max=3)
-# #2281 L0b: the optional limit-table keys (rows 2, 15, 16) in the repository policy.
+# #2281 L0b: the optional limit-table keys (rows 2, 15, 16) in the repository
+# policy; L7 adds row 17, the D6 writer lease length in hours.
 LIMIT_TABLE_2281 = {'spec_preflight_large_file_lines': 2000, 'merge_train_members_max': 6,
-                    'merge_train_files_per_pr_max': 100, 'revert_scope_prs_max': 5}
+                    'merge_train_files_per_pr_max': 100, 'revert_scope_prs_max': 5,
+                    'd6_writer_lease_hours': 24}
 
 
 class PolicyFileTests(unittest.TestCase):
