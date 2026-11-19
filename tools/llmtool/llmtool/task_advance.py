@@ -743,6 +743,7 @@ def _review_ci_gate(number, head, github_get, latest_out=None):
     failed = None
     pending = False
     all_required = list(required_checks)
+    requires_macos = _mac_ci_runs(paths + old_paths)
     if requires_macos:
         all_required.append('check (macOS 3.13)')
     # #2337: CI repair path needs to cover all required checks
