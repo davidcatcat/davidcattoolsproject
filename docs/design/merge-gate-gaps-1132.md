@@ -65,7 +65,11 @@ may add only clean merges of main after the reviewed head.
 
 `_advance_step` repeats the same check in its `READY_FOR_INTEGRATION` path.
 When the delta is not verified it emits `INTEGRATION_DELTA_UNVERIFIED` and
-does not close the Task; the result stays `WAITING_INTEGRATION`.
+does not close the Task; the step stays `READY_FOR_INTEGRATION`. The
+`WAITING_INTEGRATION` code is added only in the separate else branch, when the
+merged result is not issued (not merged, compare not `ahead` or `identical`,
+or no valid merge commit SHA); that branch also leaves the step at
+`READY_FOR_INTEGRATION`.
 
 ## Item 3: TUI PRs and the merge route
 
