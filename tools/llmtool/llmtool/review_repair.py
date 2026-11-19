@@ -13,6 +13,7 @@ from .errors import LLMToolError
 from .task_store import REVIEW_DISPUTE_DEFERRABLE, REVIEW_DISPUTE_SEVERITIES, _json_bytes, new_id
 
 # This same-class repair cap is separate from worker_dispatch's per-dispatch limit of 1.
+# #2367: it follows policy.json through run_budget (repair_policy.repair_attempts_max).
 MAX_REPAIR_ATTEMPTS = run_budget.MAX_REPAIR_ATTEMPTS
 MAX_EXCERPT_CHARS = 2000
 
@@ -524,6 +525,8 @@ def _review_gate(task, attempts, packet, family, policy, counts=None, *, body=No
     current FAIL adds its own HEAD, so a re-review of one HEAD never counts twice.
     A FAIL whose IDs show no blocking finding is not valid. The second repair needs
     an RCA_CONFIRMED Debug of this family on the failed HEAD; that entry is returned.
+    #2367 A2: repairs 3 to repair_max need no new Debug; the family's newest
+    Debug (RCA_CONFIRMED) covers them and is returned and bound the same way.
 
     D14 (spec section 7): the policy decides before the repair limit. A Task whose
     repair_max repairs are used escalates by kind at its next valid FAIL (ROOT
@@ -568,10 +571,21 @@ def _review_gate(task, attempts, packet, family, policy, counts=None, *, body=No
         fail_count = max(fail_count, policy['review_fail_max'])
     entries = [entry for entry in task.get('high_debug') or []
                if type(entry) is dict and entry.get('family') == family and
-               entry.get('examined_sha') == packet['failed_head'] and
                entry.get('no_pr') is not True and
                entry.get('status') in ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED')]
-    entry = entries[-1] if entries else None
+    on_head = [entry for entry in entries
+               if entry.get('examined_sha') == packet['failed_head']]
+    entry = on_head[-1] if on_head else None
+    if entry is None and used >= 2:
+        # #2367 A2: from repair #3 on, the family's newest Debug on a HEAD of
+        # its earlier claims covers the repair (the same HEADs the TaskStore
+        # accepts for the bound digest): an RCA_CONFIRMED needs no new Debug;
+        # a newer Debug that did not confirm a cause escalates. Repair #2
+        # keeps D1 (a Debug on its own failed HEAD).
+        claim_heads = {claim.get('head_sha') for claim in attempts if type(claim) is dict}
+        covering = [item for item in entries if item.get('examined_sha') in claim_heads]
+        if covering:
+            entry = covering[-1]
     lineage = task.get('lineage')
     try:
         action = repair_policy.review_action(

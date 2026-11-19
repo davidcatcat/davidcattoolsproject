@@ -130,9 +130,9 @@ class ReservationCase(unittest.TestCase):
             ids.append(self.task(continues=ids[-1]))
         return ids
 
-    def split(self):
+    def split(self, count=2):
         root, op = self.task(), new_id()
-        children = [self.task(), self.task()]
+        children = [self.task() for _ in range(count)]
 
         def line(kind, state, **extra):
             return dict({'lineage_id': root, 'kind': kind,
@@ -236,10 +236,15 @@ class AtomicAdmissionTests(ReservationCase):
         for task_id in (first, third):
             self.eq(self.refused(task_id), PARENT)
             self.eq(self.entries(task_id), [])
-        one, two = self.split()
-        self.eq(self.reserve(one), 0)
-        self.eq(self.refused(two), 'HIGH_DEBUG_DEBUG_GROUP_USED')
-        self.eq(self.entries(two), [])
+        # #2367: each split child is its own work item with one Debug
+        # (parent_debug_max 1); the children share group_debug_max (3).
+        *within, over = self.split(4)
+        for child in within:
+            self.eq(self.reserve(child), 0)
+        self.eq(self.refused(within[0]), 'HIGH_DEBUG_DEBUG_GROUP_USED')
+        self.eq(self.statuses(within[0]), ['RESERVED'])
+        self.eq(self.refused(over), 'HIGH_DEBUG_DEBUG_GROUP_USED')
+        self.eq(self.entries(over), [])
 
     def test_c_used_chain_refuses(self):
         first, second = self.chain(2)

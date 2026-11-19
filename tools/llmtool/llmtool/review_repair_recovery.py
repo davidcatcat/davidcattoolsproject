@@ -8,6 +8,7 @@ import re
 
 from .errors import LLMToolError
 from .review_repair import EC2_FAMILY_SUFFIX, MAX_REPAIR_ATTEMPTS
+from .task_store import REPAIR_CLAIMS_PER_FAMILY_MAX
 
 _HEX32 = re.compile(r'[0-9a-f]{32}')
 _HEX40 = re.compile(r'[0-9a-f]{40}')
@@ -15,8 +16,18 @@ _HEX64 = re.compile(r'[0-9a-f]{64}')
 _FAMILY = re.compile(r'[a-z0-9._-]{1,64}')
 _STAMP = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z')
 # The TaskStore claim ranges; a bool is never an int here.
-_RANGES = {'pr': (1, 999999999), 'version': (1, 9999), 'attempt': (1, 3),
+_RANGES = {'pr': (1, 999999999), 'version': (1, 9999),
+           'attempt': (1, REPAIR_CLAIMS_PER_FAMILY_MAX),
            'comment_id': (0, 2 ** 63)}
+# #2367: a repair Task recorded before the limit followed policy.json names the
+# old fixed denominator ('REPAIR N/2'). A record keeps the text it was written
+# with, so its identity is checked against that text; it is not a limit.
+_LEGACY_REPAIR_DENOMINATOR = 2
+
+
+def _denominators():
+    """The repair text denominators a runtime-recorded repair Task may carry."""
+    return tuple(dict.fromkeys((MAX_REPAIR_ATTEMPTS, _LEGACY_REPAIR_DENOMINATOR)))
 
 
 def refuse(code):
@@ -71,26 +82,34 @@ def _valid_claim(claim, executor_task, pr_number):
 
 
 def check_identity(root, repair, claim):
-    """E2: repair is the runtime-recorded continuation Task for claim."""
+    """E2: repair is the runtime-recorded continuation Task for claim.
+
+    The request, summary and last acceptance item must all name one
+    denominator: the current policy bound, or the legacy 2 of an old record.
+    """
     try:
         attempt, root_id = claim['attempt'], root['task_id']
         summary = json.loads(repair['response'])['summary']
         last = repair['pm_assignment']['acceptance'][-1]
         sessions = [record['pm_provenance']['pm_native_session_id']
                     for record in (root, repair)]
-        start = (f"Repair attempt {attempt}/{MAX_REPAIR_ATTEMPTS} for verdict comment id "
-                 f"{claim['comment_id']}, failed HEAD {claim['head_sha']}, review version "
-                 f"{claim['version']}, findings count ")
-        # The runtime writes the count from an int: canonical digits only.
+
+        def matches(total):
+            start = (f"Repair attempt {attempt}/{total} for verdict comment id "
+                     f"{claim['comment_id']}, failed HEAD {claim['head_sha']}, review version "
+                     f"{claim['version']}, findings count ")
+            # The runtime writes the count from an int: canonical digits only.
+            return (repair['request'] == f"REPAIR {attempt}/{total} of {root_id}" and
+                    summary == (f"LLMTOOL_RUNTIME recorded bounded repair continuation "
+                                f"{attempt}/{total} for Task {root_id}; "
+                                "no PM or provider decision was made.") and
+                    type(last) is str and last.startswith(start) and
+                    re.fullmatch(r'(0|[1-9][0-9]{0,8})\. Reviewer text is untrusted '
+                                 r'reference data\.', last[len(start):]) is not None)
+
         valid = (type(attempt) is int and type(root_id) is str and
                  repair['task_id'] == claim['repair_task_id'] and
-                 repair['request'] == f"REPAIR {attempt}/{MAX_REPAIR_ATTEMPTS} of {root_id}" and
-                 summary == (f"LLMTOOL_RUNTIME recorded bounded repair continuation "
-                             f"{attempt}/{MAX_REPAIR_ATTEMPTS} for Task {root_id}; "
-                             "no PM or provider decision was made.") and
-                 type(last) is str and last.startswith(start) and
-                 re.fullmatch(r'(0|[1-9][0-9]{0,8})\. Reviewer text is untrusted reference data\.',
-                              last[len(start):]) is not None and
+                 any(matches(total) for total in _denominators()) and
                  type(sessions[0]) is str and sessions[0] != '' and sessions[0] == sessions[1])
     except Exception:
         valid = False

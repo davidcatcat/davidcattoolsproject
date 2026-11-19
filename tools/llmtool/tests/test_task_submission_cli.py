@@ -25,6 +25,7 @@ from llmtool.providers.codex_cli import CodexCLIProvider, OUTPUT_LIMIT
 from llmtool.task_store import MAX_RECORD_BYTES, TaskStore, TaskStoreConflict, new_id
 from llmtool.task_submission_cli import TEXT_DEVELOPER_CONTEXT_SEPARATOR
 from llmtool import remote_test
+from llmtool import repair_policy
 from llmtool import active_pm_inbox
 from llmtool import task_submission_cli as submission_cli
 from llmtool import trust as trust_module
@@ -5165,6 +5166,11 @@ class DispatcherPreflightRefusalTests(unittest.TestCase):
 
 
 class DelegateRepairCapTests(unittest.TestCase):
+    # #2367: a D6 takes 1 + repair_max review runs (the original run and 5
+    # effective repairs); this many prior runs refuse the next one. Below it,
+    # repair #2 needs a High Debug and its RCA_CONFIRMED covers later repairs.
+    REVIEW_LIMIT = 1 + repair_policy.load_policy()['repair_max']
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -5260,7 +5266,9 @@ class DelegateRepairCapTests(unittest.TestCase):
                 developer=developer_record, completion=completion)
         return task
 
-    def _prior_assignments(self, count=3, *, executor='executor-task-1'):
+    def _prior_assignments(self, count=None, *, executor='executor-task-1'):
+        if count is None:
+            count = self.REVIEW_LIMIT
         for _ in range(count):
             self._task(executor=executor, developer=True)
 
@@ -5276,7 +5284,9 @@ class DelegateRepairCapTests(unittest.TestCase):
         values.update(changes)
         return Namespace(**values)
 
-    def test_three_prior_assignments_refuse_all_routes_before_route_call(self):
+    def test_limit_prior_assignments_refuse_all_routes_before_route_call(self):
+        # #2367: 1 + repair_max prior runs used up the 5 effective repairs.
+        self.assertEqual(self.REVIEW_LIMIT, 6)
         self._prior_assignments()
         routes = {
             'codex': 'run_task_codex_delegate',
@@ -5295,7 +5305,7 @@ class DelegateRepairCapTests(unittest.TestCase):
 
     def test_one_prior_assignment_allows_repair_one_and_other_d6_is_unaffected(self):
         self._prior_assignments(1)
-        self._prior_assignments(3, executor='executor-task-other')
+        self._prior_assignments(executor='executor-task-other')
         task = self._task()
         args = self._args(task, 'opencode')
         with patch.object(submission_cli, 'run_task_opencode_delegate', return_value=7) as route:
@@ -5346,7 +5356,8 @@ class DelegateRepairCapTests(unittest.TestCase):
 
     def _assert_prelaunch_evidence_counts(
             self, route, state, code, **changes):
-        self._prior_assignments(2)
+        # The prior record under test is the run that reaches the limit.
+        self._prior_assignments(self.REVIEW_LIMIT - 1)
         prior = self._task(
             developer=True, route=route,
             developer_state=state, artifact=None, error_code=code)
@@ -5429,7 +5440,7 @@ class DelegateRepairCapTests(unittest.TestCase):
             with self.subTest(error_code=code):
                 self.store = TaskStore(
                     Path(self.temp.name).resolve() / f'tasks-{index}')
-                self._prior_assignments(2)
+                self._prior_assignments(self.REVIEW_LIMIT - 1)
                 self._task(
                     developer=True, route='gw-agent',
                     developer_state=('DEVELOPER_PENDING' if code is None
@@ -5443,6 +5454,8 @@ class DelegateRepairCapTests(unittest.TestCase):
                         self._args(task, 'opencode'), self.store)
 
     def test_responded_artifact_and_changed_files_count(self):
+        # The three records below are the last runs up to the limit.
+        self._prior_assignments(self.REVIEW_LIMIT - 3)
         self._task(developer=True, developer_state='DEVELOPER_RESPONDED')
         self._task(developer=True, developer_state='DEVELOPER_RESPONDED',
                    artifact='diff',
@@ -5463,7 +5476,7 @@ class DelegateRepairCapTests(unittest.TestCase):
                 self._args(task, 'opencode'), self.store)
 
     def test_codex_blocked_execution_counts(self):
-        self._prior_assignments(2)
+        self._prior_assignments(self.REVIEW_LIMIT - 1)
         self._task(
             developer=True, route='codex',
             developer_state='DEVELOPER_OUTCOME_UNKNOWN', artifact=None,
@@ -5487,6 +5500,7 @@ class DelegateRepairCapTests(unittest.TestCase):
                 self._args(task, 'opencode'), self.store)
 
     def test_pending_prior_record_is_ambiguous_and_counts(self):
+        self._prior_assignments(self.REVIEW_LIMIT - 3)
         self._task(developer=True, developer_state='DEVELOPER_PENDING', artifact=None)
         self._task(developer=True, developer_state='DEVELOPER_RESPONDED')
         self._task(developer=True, developer_state='DEVELOPER_RESPONDED')
@@ -5496,6 +5510,7 @@ class DelegateRepairCapTests(unittest.TestCase):
                 self._args(task, 'opencode'), self.store)
 
     def test_partial_prior_developer_record_counts(self):
+        self._prior_assignments(self.REVIEW_LIMIT - 3)
         prior = self._task(
             developer=True, developer_state='DEVELOPER_OUTCOME_UNKNOWN',
             artifact=None, error_code='CODEX_RESULT_EVIDENCE_UNKNOWN')
@@ -5624,8 +5639,23 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertEqual({task_id: self.store.get(task_id)['record_sha256']
                           for task_id in self.store.task_ids()}, before)
 
+    def test_valid_high_debug_covers_repairs_three_to_the_limit(self):
+        # #2367: the RCA_CONFIRMED taken before repair #2 covers repairs 3 to
+        # repair_max; no new High Debug is needed and nothing is recorded.
+        for prior in range(3, self.REVIEW_LIMIT):
+            with self.subTest(prior=prior):
+                self.store = TaskStore(
+                    Path(self.temp.name).resolve() / f'tasks-covered-{prior}')
+                task, args = self._high_debug_args(prior)
+                before = {task_id: self.store.get(task_id)['record_sha256']
+                          for task_id in self.store.task_ids()}
+                self.assertIsNone(self._check_with_high_debug(args))
+                self.assertNotIn('repair_cap_override', self.store.get(task['task_id']))
+                self.assertEqual({task_id: self.store.get(task_id)['record_sha256']
+                                  for task_id in self.store.task_ids()}, before)
+
     def test_valid_high_debug_never_passes_the_limit(self):
-        task, args = self._high_debug_args(3)
+        task, args = self._high_debug_args(self.REVIEW_LIMIT)
         with self.assertRaisesRegex(LLMToolError, '^DELEGATE_REPAIR_LIMIT_REACHED$'):
             self._check_with_high_debug(args)
         self.assertNotIn('repair_cap_override', self.store.get(task['task_id']))

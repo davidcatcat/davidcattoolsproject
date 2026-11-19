@@ -1327,7 +1327,12 @@ def _debug_entry_used(entry):
 
 
 def _admit_debug(task, entries):
-    """O2, D3: one AI Debug per ROOT or REPLAN Task; children share one per lineage."""
+    """O2, D3: one AI Debug per ROOT or REPLAN Task; one per child within the lineage group.
+
+    #2367: policy group_debug_max is shared by the children of a lineage and
+    each child owns parent_debug_max of it; this first check sees the Task's
+    own entries only, the group is counted under the lock (_reserve_debug).
+    """
     from . import repair_policy
     try:
         policy = repair_policy.load_policy()
@@ -1364,29 +1369,62 @@ def _read_task(store, task_id):
     return task if type(task) is dict and task.get('task_id') == task_id else None
 
 
+def _group_children(records, root_id, line):
+    """Every child ID of the ROOT root_id, or None when the group is in doubt.
+
+    Codex security v91 on PR #2381 (CWE-841): a ROOT's 'splits' lists only the
+    children committed since Owner B, and a child written before Owner B has no
+    entry there (task_store keeps that legacy shape). So the group is every
+    child the splits list plus every stored Task whose lineage is a child of
+    root_id, in any state, as the split COMMIT counts them. A malformed split
+    entry, child ID or Task lineage is doubt.
+    """
+    children = set()
+    for split in line.get('splits', []):
+        listed = split.get('children') if type(split) is dict else None
+        if type(listed) is not list or any(type(child) is not str for child in listed):
+            return None
+        children.update(listed)
+    for other_id, other in records.items():
+        other_line = other.get('lineage')
+        if other_line is None:
+            continue
+        if type(other_line) is not dict:
+            return None
+        if other_line.get('kind') == 'child' and other_line.get('lineage_id') == root_id:
+            children.add(other_id)
+    return children
+
+
 def _group_debug_used(store, task, entries):
-    """Debugs used by the child and every child in its ROOT's splits; doubt is UNKNOWN."""
+    """Debugs used by the child and every other child of its ROOT; doubt is UNKNOWN.
+
+    The other children are found by a store scan, so a legacy child that its
+    ROOT's 'splits' does not list still counts; a scan in doubt is UNKNOWN,
+    which the policy treats as the limit. Run it under the ROOT lock.
+    """
+    from . import lineage_counts
     from .repair_policy import UNKNOWN
-    root = _read_task(store, task['lineage'].get('lineage_id'))
+    root_id = task['lineage'].get('lineage_id')
+    root = _read_task(store, root_id)
     line = root.get('lineage') if root else None
     if (type(line) is not dict or type(line.get('splits', [])) is not list or
             type(entries) is not list):
         return UNKNOWN
+    records = lineage_counts.store_records(store)
+    children = _group_children(records, root_id, line) if records is not None else None
+    if children is None:
+        return UNKNOWN
+    children.discard(task.get('task_id'))
     used = sum(1 for entry in entries if _debug_entry_used(entry))
-    seen = {task.get('task_id')}
-    for split in line.get('splits', []):
-        children = split.get('children') if type(split) is dict else None
-        if type(children) is not list:
+    for child_id in sorted(children):
+        child = records.get(child_id)
+        if type(child) is not dict or child.get('task_id') != child_id:
             return UNKNOWN
-        for child_id in children:
-            if child_id in seen:
-                continue
-            seen.add(child_id)
-            child = _read_task(store, child_id)
-            other = child.get('high_debug', []) if child else None
-            if type(other) is not list:
-                return UNKNOWN
-            used += sum(1 for entry in other if _debug_entry_used(entry))
+        other = child.get('high_debug', [])
+        if type(other) is not list:
+            return UNKNOWN
+        used += sum(1 for entry in other if _debug_entry_used(entry))
     return used
 
 
@@ -1413,8 +1451,12 @@ def _reserve_debug(store, task_id, entries, reservation):
         kind = _debug_kind_and_key(store, current)[0]
         used = (_group_debug_used(store, current, entries) if kind == 'child' else
                 lineage_counts.chain_debug_used(store, current, entries, _debug_entry_used)[0])
+        # #2367: a split child is its own work item; it owns one Debug
+        # (its own entries) within the lineage's shared group limit.
+        own = (sum(1 for entry in entries if _debug_entry_used(entry))
+               if kind == 'child' else used)
         try:
-            code = repair_policy.admit_debug(kind=kind, parent_debug_used=used,
+            code = repair_policy.admit_debug(kind=kind, parent_debug_used=own,
                                              group_debug_used=used, policy=policy)
         except LLMToolError:
             _refuse('HIGH_DEBUG_LINEAGE_INVALID')

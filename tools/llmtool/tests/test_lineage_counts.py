@@ -764,9 +764,36 @@ class ReviewRepairChainTests(unittest.TestCase):
         self.assertEqual(self.calls[0]['packet']['high_debug_report_sha256'],
                          self.rca()[0]['report_sha256'])
 
+    def used_on_new_heads(self, count, *, ec2=False):
+        """count claims of one predecessor family, each on its own earlier HEAD."""
+        make = ec2_claim if ec2 else claim
+        family = 'pr-5-ec2' if ec2 else 'pr-5'
+        return [make(family, f'{n:040x}', pr=5, attempt=n) for n in range(1, count + 1)]
+
     def test_repairs_used_up_across_the_chain_escalate(self):
-        used = [claim('pr-5', OLD_HEAD, pr=5), claim('pr-6', OTHER_HEAD, pr=6, attempt=2)]
+        used = self.used_on_new_heads(self.policy['repair_max'])
         self.refused(self.store(used, high_debug=self.rca()), 'REPAIR_SPLIT_REQUIRED')
+        # #2367: two used by a predecessor is no longer the end of the work item.
+        used = [claim('pr-5', OLD_HEAD, pr=5), claim('pr-6', OTHER_HEAD, pr=6, attempt=2)]
+        result = self.dispatch(self.store(used, high_debug=self.rca()))
+        self.assertEqual(result['claim']['attempt'], 1)   # numbered within this Task
+
+    def test_a_continuation_does_not_reset_used_repairs(self):
+        # #2367 A3: a new Task of the same work continues the count. Four
+        # repairs used before: this Task's first repair is repair #5, the last.
+        used = self.used_on_new_heads(self.policy['repair_max'] - 1)
+        store = self.store(used, high_debug=self.rca())
+        counts = lineage_counts.lineage_counts(store, store.get(TASK), base_family=f'pr-{PR}',
+                                               include_successors=True)
+        self.assertEqual(counts['review_repairs'], self.policy['repair_max'] - 1)
+        result = self.dispatch(store)
+        self.assertEqual(result['claim']['attempt'], 1)
+        self.assertEqual(self.calls[0]['packet']['high_debug_report_sha256'],
+                         self.rca()[0]['report_sha256'])
+        # The chain's test repairs carry over the same way.
+        store = self.store(self.used_on_new_heads(self.policy['test_fail_max'], ec2=True))
+        self.calls.clear()
+        self.refused(store, 'REPAIR_LIMIT_REACHED', remote_test_receipt=_receipt())
 
     def test_unknown_chain_counts_as_the_limit(self):
         # The predecessor record is missing: never 0, so no repair starts.
@@ -787,7 +814,8 @@ class ReviewRepairChainTests(unittest.TestCase):
         # F1: this Task's own review repair on PR 5 uses the chain's first repair.
         own = [claim('pr-5', OLD_HEAD, pr=5)]
         self.refused(self.store([], review_repair_claims=own), 'REPAIR_DEBUG_REQUIRED')
-        own_ec2 = [ec2_claim('pr-5-ec2', OLD_HEAD, pr=5)]
+        # One test repair left: this Task's own on PR 5 use the rest.
+        own_ec2 = self.used_on_new_heads(self.policy['test_fail_max'] - 1, ec2=True)
         store = self.store([], review_repair_claims=own_ec2)
         result = self.dispatch(store, remote_test_receipt=_receipt())
         self.assertEqual(result['claim']['family'], f'pr-{PR}-ec2')
@@ -796,7 +824,7 @@ class ReviewRepairChainTests(unittest.TestCase):
         self.refused(store, 'REPAIR_LIMIT_REACHED', remote_test_receipt=_receipt())
 
     def test_test_failures_are_counted_across_the_chain(self):
-        store = self.store([ec2_claim('pr-5-ec2', OLD_HEAD, pr=5)])
+        store = self.store(self.used_on_new_heads(self.policy['test_fail_max'] - 1, ec2=True))
         result = self.dispatch(store, remote_test_receipt=_receipt())
         self.assertEqual(result['claim']['family'], f'pr-{PR}-ec2')
         store.records[TASK]['review_repair_claims'][-1]['state'] = 'FAILED'
@@ -1143,9 +1171,15 @@ class AdvanceChainTests(unittest.TestCase):
         return DictStore(*records)
 
     def test_fail_count_reaches_stopped_across_a_continuation(self):
+        # #2367: test_fail_max is 5. The Task's own repair plus the
+        # predecessor's 4 use up the chain; own 1 plus 1 still repairs.
         own = [ec2_claim('pr-17-ec2', OLD_HEAD)]
-        cases = (('predecessor used one', [ec2_claim('pr-9-ec2', OTHER_HEAD, pr=9)], True,
+        predecessor_four = [ec2_claim('pr-9-ec2', f'{n:040x}', pr=9, attempt=n)
+                            for n in range(1, 5)]
+        cases = (('predecessor used four', predecessor_four, True,
                   ('STOPPED', ['TEST_FAIL_LIMIT_REACHED'])),
+                 ('predecessor used one', [ec2_claim('pr-9-ec2', OTHER_HEAD, pr=9)], True,
+                  ('CI_FAILED', [])),
                  ('broken link', None, True, ('STOPPED', ['TEST_FAIL_LIMIT_REACHED'])),
                  ('fresh predecessor', [], True, ('CI_FAILED', [])),
                  ('legacy task', None, False, ('CI_FAILED', [])))
@@ -1164,7 +1198,8 @@ class AdvanceChainTests(unittest.TestCase):
                 self.assertEqual((result['step'], result['codes']), expected)
                 self.assertEqual(len(repaired), 0 if expected[0] == 'STOPPED' else 1)
                 count = task_advance._test_fail_count(record, 17, store)
-                self.assertEqual(count, {'predecessor used one': 2, 'broken link': UNKNOWN,
+                self.assertEqual(count, {'predecessor used four': 5,
+                                         'predecessor used one': 2, 'broken link': UNKNOWN,
                                          'fresh predecessor': 1, 'legacy task': 1}[name])
 
     def test_an_ancestor_fork_stops_the_test_repair_from_every_member(self):
@@ -1617,6 +1652,117 @@ class AutoReviewRepairTests(unittest.TestCase):
             result = self.direct(store, CHAIN_B, auto=True,
                                  remote_test_receipt=_receipt(task_id=CHAIN_B))
         self.assertEqual(result['claim']['family'], f'pr-{PR}-ec2')
+
+
+GROUP_ROOT = tid(500)
+
+
+def _group_lineage(task_id, kind='child', root=GROUP_ROOT, **extra):
+    line = {'lineage_id': root, 'kind': kind,
+            'parent': None if kind == 'root' else root, 'replaces': [],
+            'state': 'PARKED' if kind == 'root' else 'OPEN', 'reason': None,
+            'base_sha': None, 'recorded_at': AT}
+    line.update(extra)
+    return {'task_id': task_id, 'lineage': line}
+
+
+def _group_child(number, *, debugs=0, root=GROUP_ROOT):
+    record = _group_lineage(tid(number), root=root)
+    record['high_debug'] = [{'status': 'RCA_CONFIRMED'} for _ in range(debugs)]
+    return record
+
+
+class DebugGroupStore(DictStore):
+    """In-memory store for the High Debug reservation path."""
+
+    def append_high_debug(self, task_id, entry):
+        self.records[task_id].setdefault('high_debug', []).append(
+            json.loads(json.dumps(entry)))
+
+
+class LegacyChildDebugGroupTests(unittest.TestCase):
+    """Codex security v91 on PR #2381 (CWE-841): legacy split children share the group.
+
+    A ROOT written before Owner B has no 'splits'; its children are found by
+    their lineage, so each one cannot reserve a Debug as if it were alone.
+    """
+
+    def setUp(self):
+        from llmtool import high_debug
+        self.high_debug = high_debug
+        policy = dict(repair_policy.load_policy(), parent_debug_max=1, group_debug_max=3)
+        patcher = patch.object(repair_policy, 'load_policy', return_value=policy)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def used(self, store, child_id):
+        task = store.get(child_id)
+        return self.high_debug._group_debug_used(store, task, task.get('high_debug', []))
+
+    def reserve(self, store, child_id):
+        entries = store.get(child_id).get('high_debug', [])
+        return self.high_debug._reserve_debug(store, child_id, entries,
+                                              {'status': 'RESERVED'})
+
+    def assert_refused(self, call, code):
+        with self.assertRaises(LLMToolError) as caught:
+            call()
+        self.assertEqual(getattr(caught.exception, 'high_debug_code', None), code)
+
+    def test_legacy_siblings_without_splits_count_in_the_group(self):
+        store = DebugGroupStore(_group_lineage(GROUP_ROOT, kind='root'),
+                                _group_child(501, debugs=1), _group_child(502, debugs=1),
+                                _group_child(503))
+        self.assertEqual(self.used(store, tid(503)), 2)
+
+    def test_three_legacy_debugs_refuse_a_fourth_legacy_child(self):
+        store = DebugGroupStore(_group_lineage(GROUP_ROOT, kind='root'),
+                                _group_child(501, debugs=1), _group_child(502, debugs=1),
+                                _group_child(503, debugs=1), _group_child(504))
+        self.assert_refused(lambda: self.reserve(store, tid(504)),
+                            'HIGH_DEBUG_DEBUG_GROUP_USED')
+        self.assertEqual(store.get(tid(504)).get('high_debug'), [])
+
+    def test_legacy_child_within_the_group_still_reserves(self):
+        store = DebugGroupStore(_group_lineage(GROUP_ROOT, kind='root'),
+                                _group_child(501, debugs=1), _group_child(502))
+        self.assertEqual(self.reserve(store, tid(502)), 0)
+        self.assertEqual(store.get(tid(502))['high_debug'], [{'status': 'RESERVED'}])
+
+    def test_listed_and_legacy_children_both_count_once(self):
+        root = _group_lineage(GROUP_ROOT, kind='root',
+                              splits=[{'op_id': tid(599), 'children': [tid(501), tid(503)]}])
+        store = DebugGroupStore(root, _group_child(501, debugs=1),
+                                _group_child(502, debugs=1), _group_child(503))
+        self.assertEqual(self.used(store, tid(503)), 2)
+
+    def test_other_lineages_and_unstarted_runs_do_not_count(self):
+        other = _group_child(510, debugs=1, root=tid(509))
+        unstarted = _group_child(502)
+        unstarted['high_debug'] = [{'status': 'RUN_FAILED',
+                                    'report': 'HIGH_DEBUG_QUOTA_EXHAUSTED'}]
+        store = DebugGroupStore(_group_lineage(GROUP_ROOT, kind='root'),
+                                _group_lineage(tid(509), kind='root', root=tid(509)),
+                                other, _group_child(501), unstarted)
+        self.assertEqual(self.used(store, tid(501)), 0)
+
+    def test_a_store_scan_in_doubt_is_unknown_and_refuses(self):
+        store = DebugGroupStore(_group_lineage(GROUP_ROOT, kind='root'), _group_child(501))
+        with patch.object(DebugGroupStore, 'task_ids', side_effect=OSError('scan')):
+            self.assertEqual(self.used(store, tid(501)), UNKNOWN)
+            self.assert_refused(lambda: self.reserve(store, tid(501)),
+                                'HIGH_DEBUG_DEBUG_GROUP_USED')
+        self.assertEqual(store.get(tid(501)).get('high_debug'), [])
+
+    def test_a_malformed_lineage_or_missing_listed_child_is_unknown(self):
+        broken = {'task_id': tid(502), 'lineage': 'child'}
+        store = DebugGroupStore(_group_lineage(GROUP_ROOT, kind='root'),
+                                _group_child(501), broken)
+        self.assertEqual(self.used(store, tid(501)), UNKNOWN)
+        root = _group_lineage(GROUP_ROOT, kind='root',
+                              splits=[{'op_id': tid(599), 'children': [tid(501), tid(508)]}])
+        store = DebugGroupStore(root, _group_child(501))
+        self.assertEqual(self.used(store, tid(501)), UNKNOWN)
 
 
 if __name__ == '__main__':
