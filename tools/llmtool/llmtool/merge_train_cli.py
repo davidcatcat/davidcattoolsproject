@@ -16,7 +16,8 @@ A stale-source stop before build, merge or close prints the same one refusal.
 Malformed input refuses TRAIN_INPUT_INVALID while the command line is parsed,
 before the fresh-source check or any call: unknown options at the train or
 sub-command level, help flags (the train parsers have no help option), missing
-values, and malformed members or train_id.
+values, and malformed members or train_id. A policy that the loader refuses
+does the same with its own code (POLICY_INVALID), before any other read.
 
 Every command prints exactly one JSON object with ``train_id`` when known,
 ``step``, ``codes`` and ``result``. A refusal is ``pm_caller.refusal``-shaped
@@ -174,19 +175,27 @@ class _PolicyRefused(Exception):
         self.code = code
 
 
+def _policy_code(error):
+    """The loader's own code when it is well formed, else POLICY_INVALID."""
+    code = str(error)
+    return code if _CODE.fullmatch(code) else POLICY_INVALID
+
+
 def _max_members():
     """The configured member maximum, else the previous default.
 
-    A configured value above the fixed candidate and record cap cannot be
-    built, so it is refused fail closed here rather than silently capped.
+    The key is read through the one policy loader, exactly as the train build
+    path reads it, so the two cannot disagree. An unreadable policy refuses
+    fail closed through the loader's code; a configured value above the fixed
+    candidate and record cap cannot be built, so it is refused here rather
+    than silently capped.
     """
     from . import repair_policy
     from .errors import LLMToolError
     try:
         maximum = repair_policy.load_policy().get(MEMBERS_MAX_KEY, MAX_MEMBERS)
     except LLMToolError as error:
-        code = str(error)
-        raise _PolicyRefused(code if _CODE.fullmatch(code) else POLICY_INVALID) from None
+        raise _PolicyRefused(_policy_code(error)) from None
     if maximum > TECHNICAL_MEMBERS_MAX:
         raise _PolicyRefused(POLICY_INVALID)
     return maximum
