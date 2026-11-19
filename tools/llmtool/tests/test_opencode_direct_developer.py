@@ -1193,18 +1193,18 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
 
     def test_run_bound_defaults_to_route_default(self):
         bound = self.run_bound_seconds()
-        self.assertGreater(bound, 1790)
-        self.assertLessEqual(bound, 1800)
+        self.assertGreater(bound, 10790)
+        self.assertLessEqual(bound, 10800)
 
     def test_run_accepts_long_resolved_bound(self):
-        for requested in (1200, 1800, 3600):
+        for requested in (1200, 1800, 3600, 18000):
             with self.subTest(requested=requested):
                 bound = self.run_bound_seconds(timeout_seconds=requested)
                 self.assertGreater(bound, requested - 10)
                 self.assertLessEqual(bound, requested)
 
     def test_run_refuses_bad_timeout_before_provider(self):
-        cases = ((3601, 'TIMEOUT_OVER_HARD_CAP'), (7200, 'TIMEOUT_OVER_HARD_CAP'),
+        cases = ((18001, 'TIMEOUT_OVER_HARD_CAP'), (36000, 'TIMEOUT_OVER_HARD_CAP'),
                  (0, 'TIMEOUT_INVALID'), (-1, 'TIMEOUT_INVALID'),
                  (True, 'TIMEOUT_INVALID'), (600.0, 'TIMEOUT_INVALID'),
                  ('600', 'TIMEOUT_INVALID'))
@@ -1222,14 +1222,18 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
                 self.assertFalse(marker.exists())
 
     def test_resolved_timeout_matches_route_limits(self):
+        from llmtool import developer_routes
         from llmtool import opencode_direct_developer as adapter
-        self.assertEqual(adapter.MAX_WALL_CLOCK_SECONDS, 3600)
-        self.assertEqual(adapter.resolved_timeout(), 1800)
-        for requested in (1, 600, 1200, 1800, 3600):
+        # #2281: the ceiling is the shared route hard cap, not a second copy.
+        self.assertEqual(adapter.MAX_WALL_CLOCK_SECONDS, 18000)
+        self.assertEqual(adapter.MAX_WALL_CLOCK_SECONDS,
+                         developer_routes.HARD_TIMEOUT_CAP_SECONDS)
+        self.assertEqual(adapter.resolved_timeout(), 10800)
+        for requested in (1, 600, 1200, 1800, 3600, 10800, 18000):
             with self.subTest(requested=requested):
                 self.assertEqual(adapter.resolved_timeout(requested), requested)
         with self.assertRaises(DirectOpenCodeError) as caught:
-            adapter.resolved_timeout(3601)
+            adapter.resolved_timeout(18001)
         self.assertEqual(caught.exception.direct_opencode_code, 'TIMEOUT_OVER_HARD_CAP')
         with patch('llmtool.developer_routes.load_route_config',
                    return_value={'routes': {'opencode': {'default_timeout': 600,

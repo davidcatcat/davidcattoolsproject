@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import io
 import json
@@ -1997,6 +1998,7 @@ class TaskAdvancePublishTests(unittest.TestCase):
         self.recorded = []
         self.gh_calls = []
         self.pr_exists = False
+        self.record_extra = None
 
     @staticmethod
     def git(args, *, cwd):
@@ -2028,16 +2030,36 @@ class TaskAdvancePublishTests(unittest.TestCase):
             return subprocess.CompletedProcess(['gh', *args], 0, b'', b'')
         raise AssertionError('unexpected fake gh command')
 
-    def publish(self, *, write_paths=None):
+    def publish(self, *, write_paths=None, git_runner=None):
         record = {'task_id': self.TASK_ID,
                   'developer': {'write_paths': self.WRITE_PATHS if write_paths is None else write_paths}}
+        if self.record_extra is not None:
+            extra = dict(self.record_extra)
+            record['developer'].update(extra.pop('developer', {}))
+            record.update(extra)
         d6_binding = {'root': self.root, 'common_dir': os.path.join(self.tmp.name, 'canonical', '.git'),
                       'branch': self.BRANCH, 'task_id': self.EXECUTOR_TASK,
                       'recorded_result_head': self.initial_head}
         return task_advance._publish_task(record, d6_binding, self.EXECUTOR_TASK,
             pre_pr_gate=lambda _head, _branch: None,
-            git_runner=self.git_runner, gh_runner=self.gh,
+            git_runner=self.git_runner if git_runner is None else git_runner, gh_runner=self.gh,
             record_result_call=self.record_result)
+
+    def recording_git_runner(self):
+        calls = []
+
+        def runner(root, args):
+            calls.append(list(args))
+            return self.git_runner(root, args)
+        return runner, calls
+
+    def assert_no_main_sync(self, git_calls):
+        """#2367 (M1): PUBLISH never fetches or merges main into the head."""
+        self.assertFalse(any(args[:1] in (['fetch'], ['merge']) or 'origin/main' in args
+                             for args in git_calls), git_calls)
+
+    def parents(self):
+        return self.git(['rev-list', '--parents', '-n', '1', 'HEAD'], cwd=self.root).split()
 
     def head(self):
         return self.git(['rev-parse', 'HEAD'], cwd=self.root).strip()
@@ -2459,6 +2481,8 @@ class TaskAdvancePublishTests(unittest.TestCase):
             stream.write('value = 1\n')
         self.git(['add', '--', 'outside/source.py'], cwd=self.root)
         self.git(['commit', '-m', 'add outside source'], cwd=self.root)
+        # Published, so only the staged rename (not this commit) is under test.
+        self.git(['push', 'origin', f'HEAD:refs/heads/{self.BRANCH}'], cwd=self.root)
         self.initial_head = self.git(['rev-parse', 'HEAD'], cwd=self.root).strip()
         os.mkdir(os.path.join(self.root, 'inside'))
         self.git(['mv', 'outside/source.py', 'inside/source.py'], cwd=self.root)
@@ -2549,34 +2573,395 @@ class TaskAdvancePublishTests(unittest.TestCase):
         self.git(['push', 'origin', 'HEAD:refs/heads/main'], cwd=peer)
         return self.git(['rev-parse', 'HEAD'], cwd=peer).strip()
 
-    def test_real_moved_main_is_merged_and_the_merge_is_pushed(self):
-        main_head = self.move_main('main-file.txt', 'main\n')
+    def test_real_moved_main_is_not_merged_and_the_head_is_pushed_as_is(self):
+        self.move_main('main-file.txt', 'main\n')
         self.change_file()
+        runner, calls = self.recording_git_runner()
 
-        result = self.publish()
+        result = self.publish(git_runner=runner)
 
         head = self.head()
+        self.assert_no_main_sync(calls)
         self.assertEqual(result, {'pr': 23, 'head': head})
+        self.assertEqual(self.parents(), [head, self.initial_head])
         self.assertEqual(self.pushed_head(), head)
-        self.assertEqual(self.git(['rev-parse', 'HEAD^2'], cwd=self.root).strip(), main_head)
-        self.assertEqual(self.git(['show', 'HEAD^1:allowed.txt'], cwd=self.root), 'published\n')
-        self.assertEqual(self.git(['show', 'HEAD:main-file.txt'], cwd=self.root), 'main\n')
+        self.assertNotEqual(self.git_runner(
+            self.root, ['cat-file', '-e', 'HEAD:main-file.txt']).returncode, 0)
         self.assertEqual(len(self.recorded), 1)
 
-    def test_real_merge_conflict_aborts_and_pushes_nothing(self):
+    def test_behind_main_with_conflicting_file_records_pushes_and_opens_pr(self):
+        """#2367/#2376 shape: main changed the same file; publish no longer merges or aborts."""
         self.move_main('allowed.txt', 'main\n')
         self.change_file()
+        runner, calls = self.recording_git_runner()
 
-        with self.assertRaises(task_advance._PublishRefusal) as caught:
-            self.publish()
+        result = self.publish(git_runner=runner)
 
-        self.assertEqual(caught.exception.code, 'PUBLISH_MERGE_CONFLICT')
+        head = self.head()
+        self.assert_no_main_sync(calls)
+        self.assertEqual(result, {'pr': 23, 'head': head})
+        self.assertEqual(self.parents(), [head, self.initial_head])
+        self.assertEqual(self.git(['show', 'HEAD:allowed.txt'], cwd=self.root), 'published\n')
         self.assertNotEqual(self.git_runner(
             self.root, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']).returncode, 0)
         self.assertEqual(self.git(['status', '--porcelain'], cwd=self.root), '')
-        self.assertEqual(self.pushed_head(), self.initial_head)
+        self.assertEqual(self.pushed_head(), head)
+        self.assertEqual([item['task_id'] for item in self.recorded], [self.EXECUTOR_TASK])
+        self.assertTrue(any(args[:2] == ['pr', 'create'] for args in self.gh_calls))
+
+    def test_behind_main_with_conflicting_file_updates_open_pr(self):
+        self.pr_exists = True
+        self.move_main('allowed.txt', 'main\n')
+        self.change_file()
+        runner, calls = self.recording_git_runner()
+
+        result = self.publish(git_runner=runner)
+
+        head = self.head()
+        self.assert_no_main_sync(calls)
+        self.assertEqual(result, {'pr': 23, 'head': head})
+        self.assertEqual(self.pushed_head(), head)
+        self.assertEqual(len(self.recorded), 1)
+        self.assertFalse(any(args[:2] == ['pr', 'create'] for args in self.gh_calls))
+
+    def test_rerun_records_committed_but_unrecorded_head_behind_main(self):
+        """#2376: an earlier publish committed the result, then stopped before recording it."""
+        self.change_file()
+        self.git(['commit', '-am', 'earlier publish'], cwd=self.root)
+        committed = self.head()
+        self.move_main('allowed.txt', 'main\n')
+        runner, calls = self.recording_git_runner()
+
+        result = self.publish(git_runner=runner)
+
+        self.assert_no_main_sync(calls)
+        self.assertFalse(any(args[:1] == ['commit'] for args in calls))
+        self.assertEqual(result, {'pr': 23, 'head': committed})
+        self.assertEqual(self.head(), committed)
+        self.assertEqual(self.pushed_head(), committed)
+        self.assertEqual([item['task_id'] for item in self.recorded], [self.EXECUTOR_TASK])
+
+    def test_head_up_to_date_with_main_publishes_unchanged(self):
+        self.change_file()
+        runner, calls = self.recording_git_runner()
+
+        result = self.publish(git_runner=runner)
+
+        head = self.head()
+        self.assert_no_main_sync(calls)
+        self.assertEqual(result, {'pr': 23, 'head': head})
+        self.assertEqual(self.parents(), [head, self.initial_head])
+        self.assertEqual(self.pushed_head(), head)
+        self.assertEqual(len(self.recorded), 1)
+
+    # #2367 A-sec (Codex security v91 on PR #2389): commits already on HEAD get
+    # the same write-scope check as uncommitted changes before any record or push.
+
+    def commit_file(self, path, text, message):
+        with open(os.path.join(self.root, path), 'w', encoding='utf-8') as stream:
+            stream.write(text)
+        self.git(['add', '--', path], cwd=self.root)
+        self.git(['commit', '-m', message], cwd=self.root)
+        return self.head()
+
+    def remote_branch_head(self):
+        listed = self.git(['ls-remote', 'origin', f'refs/heads/{self.BRANCH}'],
+                          cwd=self.root).split()
+        return listed[0] if listed else None
+
+    def merge_published_main(self, *, commit=True):
+        """Merge a moved origin/main into a head that has its own commit."""
+        self.move_main('main-file.txt', 'main\n')
+        self.git(['fetch', '-q', 'origin', 'main'], cwd=self.root)
+        self.git(['merge', '--no-ff', '--no-edit' if commit else '--no-commit', 'FETCH_HEAD'],
+                 cwd=self.root)
+
+    def assert_refused_unpublished(self, code, head, remote_head):
+        runner, calls = self.recording_git_runner()
+        with self.assertRaises(task_advance._PublishRefusal) as caught:
+            self.publish(git_runner=runner)
+        self.assertEqual(caught.exception.code, code)
+        self.assertEqual(self.head(), head)
+        self.assertEqual(self.remote_branch_head(), remote_head)
         self.assertEqual(self.recorded, [])
-        self.assertEqual(self.gh_calls, [])
+        self.assertFalse(any(args[:1] in (['add'], ['commit'], ['push']) for args in calls))
+        self.assertFalse(any(args[:2] == ['pr', 'create'] for args in self.gh_calls))
+
+    def test_committed_out_of_scope_head_is_refused_before_record_or_push(self):
+        self.commit_file('allowed.txt', 'published\n', 'in scope')
+        head = self.commit_file('outside.txt', 'outside\n', 'out of scope')
+
+        self.assert_refused_unpublished('PUBLISH_OUT_OF_SCOPE', head, self.initial_head)
+
+    def test_committed_out_of_scope_path_later_removed_is_still_refused(self):
+        """Push sends every commit, so each one is checked, not only the net diff."""
+        self.commit_file('outside.txt', 'outside\n', 'add outside')
+        self.git(['rm', '-q', '--', 'outside.txt'], cwd=self.root)
+        self.git(['commit', '-m', 'remove outside'], cwd=self.root)
+        head = self.commit_file('allowed.txt', 'published\n', 'in scope')
+
+        self.assert_refused_unpublished('PUBLISH_OUT_OF_SCOPE', head, self.initial_head)
+
+    def test_committed_out_of_scope_head_refuses_before_publish_commits_new_changes(self):
+        head = self.commit_file('outside.txt', 'outside\n', 'out of scope')
+        self.change_file()
+
+        self.assert_refused_unpublished('PUBLISH_OUT_OF_SCOPE', head, self.initial_head)
+        self.assertEqual(self.git(['status', '--porcelain'], cwd=self.root), ' M allowed.txt\n')
+
+    def test_committed_head_merging_published_main_publishes(self):
+        """Paths a merge takes unchanged from published main are not the Task's changes."""
+        self.commit_file('allowed.txt', 'published\n', 'in scope')
+        self.merge_published_main()
+        head = self.head()
+        runner, calls = self.recording_git_runner()
+
+        result = self.publish(git_runner=runner)
+
+        self.assert_no_main_sync(calls)
+        self.assertEqual(result, {'pr': 23, 'head': head})
+        self.assertEqual(self.pushed_head(), head)
+        self.assertEqual(len(self.recorded), 1)
+
+    def test_committed_merge_adding_out_of_scope_path_is_refused(self):
+        """A path that differs from every merge parent is the merge's own change."""
+        self.commit_file('allowed.txt', 'published\n', 'in scope')
+        self.merge_published_main(commit=False)
+        with open(os.path.join(self.root, 'outside.txt'), 'w', encoding='utf-8') as stream:
+            stream.write('outside\n')
+        self.git(['add', '--', 'outside.txt'], cwd=self.root)
+        self.git(['commit', '--no-edit'], cwd=self.root)
+
+        self.assert_refused_unpublished('PUBLISH_OUT_OF_SCOPE', self.head(), self.initial_head)
+
+    def test_unpushed_branch_is_checked_over_published_main(self):
+        self.git(['push', '-q', 'origin', '--delete', self.BRANCH], cwd=self.root)
+        head = self.commit_file('outside.txt', 'outside\n', 'out of scope')
+
+        self.assert_refused_unpublished('PUBLISH_OUT_OF_SCOPE', head, None)
+
+    def test_unpushed_in_scope_head_publishes_over_published_main(self):
+        self.git(['push', '-q', 'origin', '--delete', self.BRANCH], cwd=self.root)
+        head = self.commit_file('allowed.txt', 'published\n', 'in scope')
+
+        result = self.publish()
+
+        self.assertEqual(result, {'pr': 23, 'head': head})
+        self.assertEqual(self.pushed_head(), head)
+        self.assertEqual(len(self.recorded), 1)
+
+    def test_no_published_base_in_the_d6_fails_closed(self):
+        """Unpushed branch, a main tip this D6 does not hold and no recorded main pin:
+        the added commits are unknown."""
+        self.git(['push', '-q', 'origin', '--delete', self.BRANCH], cwd=self.root)
+        self.move_main('main-file.txt', 'main\n')
+        head = self.commit_file('allowed.txt', 'published\n', 'in scope')
+
+        self.assert_refused_unpublished('PUBLISH_BINDING_UNAVAILABLE', head, None)
+
+    # #2367 F1 (codex-reviewer v1 on PR #2389): a new branch whose main moved to
+    # a tip this D6 does not hold is bounded by the Task's recorded
+    # authenticated main pin, kept in the Task record outside the D6.
+    TRUSTED_SLUG = 'example-owner/example-repo'
+    RUN_ID = '2' * 32
+    CONTRACT_DIGEST = '4' * 64
+
+    def pin_record(self, sha, **pin_changes):
+        pin = {'repository': self.TRUSTED_SLUG, 'ref': 'refs/heads/main', 'sha': sha,
+               'provenance': 'AUTHENTICATED_TRUSTED_SLUG_GITHUB_REF',
+               'task_id': self.TASK_ID, 'run_id': self.RUN_ID,
+               'contract_digest': self.CONTRACT_DIGEST, 'source_sha': self.initial_head,
+               'verified_result_heads': []}
+        pin.update(pin_changes)
+        self.record_extra = {
+            'run_id': self.RUN_ID, 'task_binding': {'contract_digest': self.CONTRACT_DIGEST},
+            'developer': {'source_sha': self.initial_head},
+            'completion': {'executor_task_id': self.EXECUTOR_TASK,
+                           'evidence': {'trusted_main_pin': pin}}}
+
+    def trusted_slug(self):
+        return patch.object(task_submission_cli.task_completion, '_trusted_slug',
+                            return_value=self.TRUSTED_SLUG)
+
+    def first_publish_after_main_moved(self):
+        """A new D6 branch (never pushed) whose main moved to a tip absent here."""
+        self.git(['push', '-q', 'origin', '--delete', self.BRANCH], cwd=self.root)
+        moved = self.move_main('main-file.txt', 'main\n')
+        self.assertNotEqual(self.git_runner(
+            self.root, ['cat-file', '-e', f'{moved}^{{commit}}']).returncode, 0)
+        return moved
+
+    def test_first_publish_after_main_moves_records_and_publishes_over_recorded_pin(self):
+        self.first_publish_after_main_moved()
+        self.pin_record(self.initial_head)
+        committed = self.commit_file('allowed.txt', 'published\n', 'in scope')
+        self.change_file('second\n')
+        runner, calls = self.recording_git_runner()
+        real_record = self.record_result
+
+        def record_result(**kwargs):
+            calls.append(['RECORD_RESULT'])
+            return real_record(**kwargs)
+        self.record_result = record_result
+
+        with self.trusted_slug(), self.injected_screen() as seen:
+            result = self.publish(git_runner=runner)
+
+        head = self.head()
+        self.assert_no_main_sync(calls)
+        self.assertEqual(self.parents(), [head, committed])
+        self.assertEqual(result, {'pr': 23, 'head': head})
+        self.assertEqual(self.pushed_head(), head)
+        self.assertEqual([item['task_id'] for item in self.recorded], [self.EXECUTOR_TASK])
+        # The Developer result is recorded before the push.
+        push_at = next(index for index, args in enumerate(calls) if args[:1] == ['push'])
+        self.assertLess(calls.index(['RECORD_RESULT']), push_at)
+        # The committed-content screen still runs on every added commit,
+        # then on the commit this publish made.
+        self.assertEqual(seen, ['published', 'second'])
+        self.assertTrue(any(args[:2] == ['pr', 'create'] for args in self.gh_calls))
+
+    def test_first_publish_after_main_moves_still_checks_committed_content(self):
+        self.first_publish_after_main_moved()
+        self.pin_record(self.initial_head)
+        self.commit_file('allowed.txt', 'published\n', 'in scope')
+        head = self.commit_file('outside.txt', 'outside\n', 'out of scope')
+
+        with self.trusted_slug():
+            self.assert_refused_unpublished('PUBLISH_OUT_OF_SCOPE', head, None)
+
+        self.git(['reset', '-q', '--hard', 'HEAD~1'], cwd=self.root)
+        head = self.commit_file('allowed.txt', f'{self.SCREEN_MARKER}\n', 'flagged')
+        with self.trusted_slug(), self.injected_screen() as seen:
+            self.assert_refused_unpublished('DEVELOPER_OUTPUT_SENSITIVE', head, None)
+        self.assertIn(self.SCREEN_MARKER, seen)
+
+    def test_first_publish_after_main_moves_without_a_valid_pin_fails_closed(self):
+        """A recorded pin that does not validate or is not held here is no base."""
+        moved = self.first_publish_after_main_moved()
+        head = self.commit_file('allowed.txt', 'published\n', 'in scope')
+        cases = {
+            'pin commit not held in the D6': (moved, {}, {}),
+            'other provenance': (self.initial_head, {'provenance': 'LOCAL_REF'}, {}),
+            'other Task': (self.initial_head, {'task_id': '9' * 32}, {}),
+            'other run': (self.initial_head, {'run_id': '9' * 32}, {}),
+            'other contract': (self.initial_head, {'contract_digest': '9' * 64}, {}),
+            'other Developer source': (self.initial_head, {'source_sha': moved}, {}),
+            'other repository': (self.initial_head, {'repository': 'other/repo'}, {}),
+            'other ref': (self.initial_head, {'ref': 'refs/heads/' + self.BRANCH}, {}),
+            'record without a Task binding': (self.initial_head, {}, {'task_binding': None}),
+        }
+        for name, (sha, pin_changes, record_changes) in cases.items():
+            with self.subTest(case=name):
+                self.pin_record(sha, **pin_changes)
+                self.record_extra.update(record_changes)
+                with self.trusted_slug():
+                    self.assert_refused_unpublished('PUBLISH_BINDING_UNAVAILABLE', head, None)
+
+    # #2367 A-rca: committed content also goes through the Developer-output
+    # sensitive screen before any record or push. Owner #763 A: the screen is
+    # injected and flags a plain marker word, so no credential-shaped text is
+    # used here; other content still goes through the real screen.
+    SCREEN_MARKER = 'screen-flagged-marker'
+
+    @contextlib.contextmanager
+    def injected_screen(self, *, error=None):
+        seen = []
+        real = task_submission_cli.developer_diff_sensitive
+
+        def screen(value, added, patch_paths, sources):
+            seen.append(added)
+            if error is not None:
+                raise error
+            if self.SCREEN_MARKER in added:
+                return True
+            return real(value, added, patch_paths, sources)
+
+        with patch.object(task_submission_cli, 'developer_diff_sensitive', side_effect=screen):
+            yield seen
+
+    def test_committed_sensitive_head_is_refused_before_record_or_push(self):
+        head = self.commit_file('allowed.txt', f'{self.SCREEN_MARKER}\n', 'flagged')
+
+        with self.injected_screen() as seen:
+            self.assert_refused_unpublished('DEVELOPER_OUTPUT_SENSITIVE', head, self.initial_head)
+
+        self.assertEqual(seen, [self.SCREEN_MARKER])
+
+    def test_committed_sensitive_line_later_replaced_is_still_refused(self):
+        """Push sends every commit, so each commit's added content is screened."""
+        self.commit_file('allowed.txt', f'{self.SCREEN_MARKER}\n', 'flagged')
+        head = self.commit_file('allowed.txt', 'published\n', 'replaced')
+
+        with self.injected_screen() as seen:
+            self.assert_refused_unpublished('DEVELOPER_OUTPUT_SENSITIVE', head, self.initial_head)
+
+        self.assertIn(self.SCREEN_MARKER, seen)
+
+    def test_committed_head_content_is_screened_then_published(self):
+        head = self.commit_file('allowed.txt', 'published\n', 'in scope')
+
+        with self.injected_screen() as seen:
+            result = self.publish()
+
+        self.assertEqual(seen, ['published'])
+        self.assertEqual(result, {'pr': 23, 'head': head})
+        self.assertEqual(self.pushed_head(), head)
+        self.assertEqual(len(self.recorded), 1)
+
+    def test_publish_own_commit_is_screened_before_record_or_push(self):
+        self.change_file(f'{self.SCREEN_MARKER}\n')
+        runner, calls = self.recording_git_runner()
+
+        with self.injected_screen() as seen, \
+                self.assertRaises(task_advance._PublishRefusal) as caught:
+            self.publish(git_runner=runner)
+
+        self.assertEqual(caught.exception.code, 'DEVELOPER_OUTPUT_SENSITIVE')
+        self.assertEqual(seen, [self.SCREEN_MARKER])
+        self.assertTrue(any(args[:1] == ['commit'] for args in calls))
+        self.assertFalse(any(args[:1] == ['push'] for args in calls))
+        self.assertEqual(self.recorded, [])
+        self.assertEqual(self.remote_branch_head(), self.initial_head)
+        self.assertFalse(any(args[:2] == ['pr', 'create'] for args in self.gh_calls))
+
+    def test_screen_that_cannot_run_refuses_before_record_or_push(self):
+        head = self.commit_file('allowed.txt', 'published\n', 'in scope')
+
+        with self.injected_screen(error=RuntimeError('screen unavailable')) as seen:
+            self.assert_refused_unpublished('PUBLISH_COMMAND_FAILED', head, self.initial_head)
+
+        self.assertEqual(seen, ['published'])
+
+    def test_merge_does_not_screen_content_taken_unchanged_from_published_main(self):
+        """Published main content is not the Task's own: only what the merge adds is screened."""
+        self.commit_file('allowed.txt', 'published\n', 'in scope')
+        self.move_main('main-file.txt', f'{self.SCREEN_MARKER}\n')
+        self.git(['fetch', '-q', 'origin', 'main'], cwd=self.root)
+        self.git(['merge', '--no-ff', '--no-edit', 'FETCH_HEAD'], cwd=self.root)
+        head = self.head()
+
+        with self.injected_screen() as seen:
+            result = self.publish()
+
+        self.assertEqual(seen, ['published'])
+        self.assertEqual(result, {'pr': 23, 'head': head})
+        self.assertEqual(self.pushed_head(), head)
+
+    def test_merge_adding_sensitive_content_is_refused(self):
+        """A line that differs from every merge parent is the merge's own change."""
+        self.commit_file('allowed.txt', 'published\n', 'in scope')
+        self.merge_published_main(commit=False)
+        self.change_file(f'published\n{self.SCREEN_MARKER}\n')
+        self.git(['add', '--', 'allowed.txt'], cwd=self.root)
+        self.git(['commit', '--no-edit'], cwd=self.root)
+
+        with self.injected_screen() as seen:
+            self.assert_refused_unpublished('DEVELOPER_OUTPUT_SENSITIVE', self.head(),
+                                            self.initial_head)
+
+        self.assertIn(self.SCREEN_MARKER, seen)
+        self.assertFalse(any('main' in added.split('\n') for added in seen))
 
 
 class TaskAdvancePublishLookupTests(unittest.TestCase):
@@ -2717,9 +3102,12 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
         self.assertEqual(len(self.gh_calls), 4)
         self.assertEqual(pause.call_args_list, [call(2)] * 3)
 
-    def _fake_publish(self, *, main_state='contained', fetch_failed=False):
+    def _fake_publish(self, *, main_state='contained', committed_before=False):
+        """Fake-git publish. main_state is what a main sync would see; the fake still
+        answers fetch and merge so a reintroduced sync shows up in git_calls."""
         initial_head, committed_head, merged_head = 'a' * 40, 'b' * 40, 'c' * 40
-        state = {'head': initial_head}
+        main_head = 'd' * 40
+        state = {'head': committed_head if committed_before else initial_head}
         events = []
         git_calls = []
 
@@ -2738,9 +3126,34 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
                         ['ls-files', '--others', '--exclude-standard', '-z']):
                 return result(args)
             if args == ['diff', '--no-renames', '--name-only', '-z', 'HEAD']:
-                return result(args, output=b'allowed.txt\0')
+                return result(args, output=b'' if committed_before else b'allowed.txt\0')
             if args == ['ls-remote', '--heads', 'origin', 'refs/heads/feature/task']:
                 return result(args, output=f'{initial_head}\trefs/heads/feature/task\n'.encode())
+            if args == ['ls-remote', '--heads', 'origin', 'refs/heads/main']:
+                return result(args, output=f'{main_head}\trefs/heads/main\n'.encode())
+            if args == ['cat-file', '-e', f'{main_head}^{{commit}}']:
+                return result(args)
+            if args == ['--no-replace-objects', 'rev-list', '--parents', 'HEAD', '--not',
+                        initial_head, main_head]:
+                return result(args, output=(f'{committed_head} {initial_head}\n'.encode()
+                                            if committed_before else b''))
+            if args == ['--no-replace-objects', 'rev-list', '--parents', 'HEAD', '--not',
+                        initial_head]:
+                # The walk over this publish's own commit (#2367 A-rca).
+                return result(args, output=(f'{committed_head} {initial_head}\n'.encode()
+                                            if state['head'] == committed_head else b''))
+            if args == ['--no-replace-objects', 'diff', '--no-renames', '--name-only', '-z',
+                        initial_head, committed_head]:
+                return result(args, output=b'allowed.txt\0')
+            if args == ['--no-replace-objects', 'diff', *task_advance._PUBLISH_SCREEN_DIFF,
+                        initial_head, committed_head]:
+                return result(args, output=(
+                    b'diff --git a/allowed.txt b/allowed.txt\n'
+                    b'index 1111111..2222222 100644\n'
+                    b'--- a/allowed.txt\n+++ b/allowed.txt\n'
+                    b'@@ -1 +1 @@\n-base\n+published\n'))
+            if args == ['--no-replace-objects', 'cat-file', 'blob', f'{initial_head}:allowed.txt']:
+                return result(args, output=b'base\n')
             if args == ['rev-parse', '--verify', 'HEAD']:
                 return result(args, output=(state['head'] + '\n').encode())
             if args == ['merge-base', '--is-ancestor', initial_head, 'HEAD']:
@@ -2755,7 +3168,7 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
                 state['head'] = committed_head
                 return result(args)
             if args == ['fetch', 'origin', 'main']:
-                return result(args, 1 if fetch_failed else 0)
+                return result(args)
             if args == ['merge', '--no-edit', 'origin/main']:
                 if main_state == 'conflict':
                     return result(args, 1)
@@ -2786,39 +3199,85 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
                    'branch': 'feature/task', 'task_id': '3' * 32,
                    'recorded_result_head': initial_head}
         try:
-            value = task_advance._publish_task(record, binding, '3' * 32,
-                pre_pr_gate=lambda _head, _branch: None,
-                git_runner=git, gh_runner=gh, record_result_call=record_result)
+            # The fake D6 root is not a directory; the graft check reads a real one.
+            with patch.object(task_advance.task_completion, '_reject_legacy_grafts'):
+                value = task_advance._publish_task(record, binding, '3' * 32,
+                    pre_pr_gate=lambda _head, _branch: None,
+                    git_runner=git, gh_runner=gh, record_result_call=record_result)
         except task_advance._PublishRefusal as exc:
             value = exc.code
         return value, events, git_calls, committed_head, merged_head
 
-    def test_main_already_contained_does_not_merge(self):
-        result, events, git_calls, committed, _merged = self._fake_publish()
-        self.assertEqual(result['head'], committed)
-        self.assertIn(['merge-base', '--is-ancestor', 'origin/main', 'HEAD'], git_calls)
-        self.assertNotIn(['merge', '--no-edit', 'origin/main'], git_calls)
+    def assert_no_main_sync(self, git_calls):
+        self.assertFalse(any(args[:1] in (['fetch'], ['merge']) or 'origin/main' in args
+                             for args in git_calls), git_calls)
 
-    def test_moved_main_merges_then_records_then_pushes_new_head(self):
-        result, events, _git_calls, _committed, merged = self._fake_publish(main_state='moved')
-        self.assertEqual(result['head'], merged)
-        merge = events.index(('git', ('merge', '--no-edit', 'origin/main')))
-        record = events.index(('record', merged))
-        push = events.index(('push', merged))
-        self.assertLess(merge, record)
-        self.assertLess(record, push)
+    def assert_recorded_then_pushed(self, events, head):
+        self.assertEqual([event for event in events if event[0] == 'record'], [('record', head)])
+        self.assertEqual([event for event in events if event[0] == 'push'], [('push', head)])
+        self.assertLess(events.index(('record', head)), events.index(('push', head)))
 
-    def test_merge_conflict_aborts_and_never_pushes(self):
-        result, events, _git_calls, _committed, _merged = self._fake_publish(main_state='conflict')
-        self.assertEqual(result, 'PUBLISH_MERGE_CONFLICT')
-        self.assertIn(('abort', ('merge', '--abort')), events)
-        self.assertFalse(any(event[0] == 'push' for event in events))
+    def test_publish_never_syncs_main_whatever_main_holds(self):
+        for main_state in ('contained', 'moved', 'conflict'):
+            with self.subTest(main_state=main_state):
+                result, events, git_calls, committed, _merged = self._fake_publish(
+                    main_state=main_state)
+                self.assertEqual(result, {'pr': 23, 'head': committed})
+                self.assert_no_main_sync(git_calls)
+                self.assert_recorded_then_pushed(events, committed)
 
-    def test_fetch_failure_refuses_without_push(self):
-        result, events, _git_calls, _committed, _merged = self._fake_publish(fetch_failed=True)
-        self.assertEqual(result, 'PUBLISH_COMMAND_FAILED')
-        self.assertFalse(any(event[0] == 'push' for event in events))
+    def test_conflicting_main_records_the_developer_result_before_push(self):
+        """#2376 shape: the committed result is recorded; no merge, no abort, no refusal."""
+        result, events, git_calls, committed, merged = self._fake_publish(main_state='conflict')
+        self.assertEqual(result, {'pr': 23, 'head': committed})
+        self.assert_no_main_sync(git_calls)
+        self.assertNotIn(('abort', ('merge', '--abort')), events)
+        self.assertNotIn(('record', merged), events)
+        commit = next(index for index, event in enumerate(events)
+                      if event[0] == 'git' and event[1][:1] == ('commit',))
+        self.assertLess(commit, events.index(('record', committed)))
+        self.assert_recorded_then_pushed(events, committed)
+        # #2367 A-rca: this publish's own commit is screened before it is recorded.
+        screened = events.index(('git', self.screen_diff_args(committed)))
+        self.assertLess(commit, screened)
+        self.assertLess(screened, events.index(('record', committed)))
 
+    @staticmethod
+    def screen_diff_args(committed):
+        return ('--no-replace-objects', 'diff', *task_advance._PUBLISH_SCREEN_DIFF,
+                'a' * 40, committed)
+
+    def test_rerun_on_committed_unrecorded_head_continues_from_it(self):
+        """#2376: a re-run records and pushes the head an earlier publish committed."""
+        result, events, git_calls, committed, _merged = self._fake_publish(
+            main_state='conflict', committed_before=True)
+        self.assertEqual(result, {'pr': 23, 'head': committed})
+        self.assertFalse(any(args[:1] in (['add'], ['commit']) for args in git_calls))
+        self.assert_no_main_sync(git_calls)
+        self.assert_recorded_then_pushed(events, committed)
+        # #2367 A-sec: the committed head's own diff is scope-checked before it is recorded.
+        screened = events.index(('git', ('--no-replace-objects', 'diff', '--no-renames',
+                                         '--name-only', '-z', 'a' * 40, committed)))
+        self.assertLess(screened, events.index(('record', committed)))
+        # #2367 A-rca: and its added content goes through the sensitive screen first.
+        content = events.index(('git', self.screen_diff_args(committed)))
+        self.assertLess(content, events.index(('record', committed)))
+
+    def test_committed_head_sensitive_screen_hit_refuses_before_record_or_push(self):
+        """#2367 A-rca: the screen is injected (Owner #763 A) and flags the committed diff."""
+        seen = []
+
+        def screen(value, added, _patch_paths, _sources):
+            seen.append(added)
+            return True
+
+        with patch.object(task_submission_cli, 'developer_diff_sensitive', side_effect=screen):
+            result, events, git_calls, _committed, _merged = self._fake_publish(
+                committed_before=True)
+        self.assertEqual(result, 'DEVELOPER_OUTPUT_SENSITIVE')
+        self.assertEqual(seen, ['published'])
+        self.assertFalse(any(event[0] in ('record', 'push') for event in events))
+        self.assertFalse(any(args[:1] in (['add'], ['commit'], ['push']) for args in git_calls))
 
 
 class RetiredD6MergeClosureTests(unittest.TestCase):

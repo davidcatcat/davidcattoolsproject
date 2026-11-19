@@ -221,8 +221,9 @@ class RouteOpenCodeCapsTests(unittest.TestCase):
             "default_model": "opencode/deepseek-v4.1-flash-free",
             "allowed_models": ["opencode/deepseek-v4.1-flash-free"],
             "default_effort": "high",
-            "default_timeout": 1800,
-            "max_timeout": 3600,
+            # #2281 (Owner 2026-11-19): the shipped opencode limits.
+            "default_timeout": 10800,
+            "max_timeout": 18000,
             "max_prompt_bytes": 65536,
             "max_source_file_bytes": 1048576,
             "max_source_total_bytes": 2097152,

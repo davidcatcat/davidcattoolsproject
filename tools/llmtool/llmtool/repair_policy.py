@@ -30,13 +30,25 @@ POLICY_KEYS = ('repair_max', 'parent_debug_max', 'group_debug_max', 'child_max',
                'waiting_notify_after_hours')
 # #1815 T3: optional limits as key -> (min, max); an absent key keeps its caller default.
 OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
+# #2281 L0b: optional AI-set limits from the #2281 limit table, each a positive
+# integer (>= 1) with no upper validation bound. An absent key keeps its caller
+# default; a present key of the wrong type, zero or negative refuses
+# POLICY_INVALID. Callers are wired in later pieces.
+#   row 2:  spec_preflight_large_file_lines (gw-agent edit large-file threshold)
+#   row 15: merge_train_members_max, merge_train_files_per_pr_max
+#   row 16: revert_scope_prs_max
+#   row 17: d6_writer_lease_hours (#2281 L7: D6 writer lease length in hours,
+#           read by scripts/d6_worktree_lifecycle.py, which has no default)
+OPTIONAL_POSITIVE_POLICY_KEYS = ('spec_preflight_large_file_lines', 'merge_train_members_max',
+                                 'merge_train_files_per_pr_max', 'revert_scope_prs_max',
+                                 'd6_writer_lease_hours')
 # #2281 L0a (design rule 3): the bound is a real technical limit, not an
 # arbitrary cap. policy.json is untrusted input, so load_policy reads at most
 # _MAX_BYTES + 1 bytes in one bounded buffer instead of the whole file. The
 # bound must stay above the largest possible valid policy.json (schema_version,
-# the POLICY_KEYS as small ints and the planned #2281 keys: a few hundred
-# bytes), so it can never refuse a valid policy; 16 KiB keeps the read buffer
-# bounded while leaving room for those keys.
+# the POLICY_KEYS and the optional keys as ints: a few hundred bytes), so it
+# can never refuse a valid policy; 16 KiB keeps the read buffer bounded while
+# leaving room for those keys.
 _MAX_BYTES = 16 * 1024
 
 
@@ -65,10 +77,13 @@ def load_policy(path=None):
         data = json.loads(raw.decode('utf-8'))
     except (OSError, ValueError, UnicodeError):
         _refuse('POLICY_INVALID')
-    allowed = {'schema_version', *POLICY_KEYS, *OPTIONAL_POLICY_LIMITS}
+    allowed = {'schema_version', *POLICY_KEYS, *OPTIONAL_POLICY_LIMITS,
+               *OPTIONAL_POSITIVE_POLICY_KEYS}
     if (type(data) is not dict or not {'schema_version', *POLICY_KEYS} <= set(data) <= allowed or
             any(key in data and (type(data[key]) is not int or not low <= data[key] <= high)
                 for key, (low, high) in OPTIONAL_POLICY_LIMITS.items()) or
+            any(key in data and (type(data[key]) is not int or data[key] < 1)
+                for key in OPTIONAL_POSITIVE_POLICY_KEYS) or
             type(data['schema_version']) is not int or data['schema_version'] != 1 or
             any(type(data[key]) is not int or not 0 <= data[key] <= 1000
                 for key in POLICY_KEYS)):

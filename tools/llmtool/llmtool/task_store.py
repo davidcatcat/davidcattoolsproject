@@ -367,7 +367,18 @@ _DEVELOPER_GW_AUDIT_FIELDS = frozenset((
     'audit_sha256', 'audit_copy_path_sha256', 'changed_files'))
 # #1815: resolved Developer run timeout, optional on every developer shape.
 _DEVELOPER_TIMEOUT_FIELDS = frozenset(('timeout_seconds',))
-_DEVELOPER_TIMEOUT_MAX_SECONDS = 3600
+
+
+def _developer_timeout_max_seconds():
+    """#2281: the persisted Developer timeout ceiling is the route hard cap.
+
+    The value is developer_routes.HARD_TIMEOUT_CAP_SECONDS (18000 s), read on
+    use so there is no second hard-coded copy and this module keeps importing
+    developer_routes lazily.
+    """
+    from .developer_routes import HARD_TIMEOUT_CAP_SECONDS
+    return HARD_TIMEOUT_CAP_SECONDS
+
 # The data class a gw-agent delegate validated at dispatch, optional on every
 # developer shape so a review repair can reuse it (legacy records omit it).
 _DEVELOPER_DATA_CLASS_FIELDS = frozenset(('data_class',))
@@ -2751,7 +2762,7 @@ def _validate(record, *, strict=True):
                 _fail()
             if ('timeout_seconds' in developer and
                     (type(developer['timeout_seconds']) is not int or
-                     not 1 <= developer['timeout_seconds'] <= _DEVELOPER_TIMEOUT_MAX_SECONDS)):
+                     not 1 <= developer['timeout_seconds'] <= _developer_timeout_max_seconds())):
                 _fail()
             if ('account' in developer and
                     (type(developer['account']) is not str or
