@@ -36,12 +36,17 @@ __all__ = [
     'for_platform',
 ]
 
-DEFAULT_ROLE_TIMEOUT_SECONDS = 1800
+# #2281 (Owner 2026-11-19): Reviewer and AI Debug runs default to 3 hours;
+# a role entry's timeout may be at most HARD_TIMEOUT_CAP_SECONDS (5 hours).
+DEFAULT_ROLE_TIMEOUT_SECONDS = 10800
+# The EC2 remote test timeout is not an AI run: its default and its former
+# 3600 s ceiling stay as they were before the AI run cap was raised.
 DEFAULT_REMOTE_TEST_TIMEOUT_SECONDS = 1800
+_REMOTE_TEST_TIMEOUT_CAP_SECONDS = 3600
 
 
-def _timeout_value_ok(v):
-    return type(v) is int and 1 <= v <= HARD_TIMEOUT_CAP_SECONDS
+def _timeout_value_ok(v, cap=HARD_TIMEOUT_CAP_SECONDS):
+    return type(v) is int and 1 <= v <= cap
 
 _MAX_ALLOWED_MODELS = 16
 _GENERIC_MODEL_PATTERN = r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}'
@@ -197,8 +202,8 @@ def registry_default_model(entry):
 def _gw_agent_budgets_ok(budgets, profile=None):
     """Return True when budgets has valid gw-agent budget keys and ranges (#2281 L9).
 
-    #2281: max_wall_seconds is no shorter than the route default timeout (1800 s)
-    and bounded by max_timeout (3600 s). Basis: the route default timeout and
+    #2281: max_wall_seconds is no shorter than the route default timeout (10800 s)
+    and bounded by max_timeout (18000 s). Basis: the route default timeout and
     the two recorded 600 s stops (N3 and N1, AI Debug RCA_CONFIRMED on #2302)
     where runs were ended by the whole-run wall budget before the route default
     timeout.
@@ -425,7 +430,8 @@ def load_route_config(path=None):
             type(value.get('routes')) is not dict):
         raise RouteError('ROUTE_CONFIG_INVALID')
     if 'remote_test_timeout' in value:
-        if not _timeout_value_ok(value['remote_test_timeout']):
+        if not _timeout_value_ok(value['remote_test_timeout'],
+                                 _REMOTE_TEST_TIMEOUT_CAP_SECONDS):
             raise RouteError('ROUTE_CONFIG_INVALID')
     routes = value['routes']
     if ('agy' not in routes or set(routes) - {'agy', 'claude', 'gw-agent', 'opencode'} or

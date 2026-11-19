@@ -27,8 +27,9 @@ DEFAULTS = {
     "generation": {"temperature": 0, "max_tokens": 2000},
     "active_provider": "default",
 }
-CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS = 600
-CODEX_DIRECT_MAX_TIMEOUT_SECONDS = 1800
+# #2281 (Owner 2026-11-19): a direct Codex run defaults to 3 hours, at most 5.
+CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS = 10800
+CODEX_DIRECT_MAX_TIMEOUT_SECONDS = 18000
 REPOSITORY_ERROR = "user repository: invalid configuration"
 # Paths beginning with 'provider' apply only to the explicitly selected profile.
 ENV_OPTIONS = {
@@ -53,7 +54,8 @@ INSPECTION_ENV_NAMES = frozenset(ENV_OPTIONS) | {
     'NoDefaultCurrentDirectoryInExePath',
 }
 CONFIG_LIMIT = 64 * 1024
-MAX_TIMEOUT_SECONDS = 3600.0
+# #2281 (Owner 2026-11-19): a provider timeout_seconds may be at most 5 hours.
+MAX_TIMEOUT_SECONDS = 18000.0
 
 
 def yaml_module():
@@ -285,14 +287,16 @@ def _number(value, field, integer=False):
 def _timeout_seconds(value):
     result = _number(value, "timeout_seconds")
     if not 0 < result <= MAX_TIMEOUT_SECONDS:
-        raise LLMToolError("timeout_seconds must be greater than 0 and at most 3600")
+        raise LLMToolError("timeout_seconds must be greater than 0 and at most %d"
+                           % MAX_TIMEOUT_SECONDS)
     return result
 
 
 def validate_codex_direct_timeout(value):
     """Validate the configured direct Codex wall clock limit."""
     if type(value) is not int or not 1 <= value <= CODEX_DIRECT_MAX_TIMEOUT_SECONDS:
-        raise LLMToolError("codex_direct.timeout_seconds must be an integer from 1 through 1800")
+        raise LLMToolError("codex_direct.timeout_seconds must be an integer from 1 through %d"
+                           % CODEX_DIRECT_MAX_TIMEOUT_SECONDS)
     return value
 
 

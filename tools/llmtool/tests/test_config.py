@@ -135,10 +135,17 @@ class ConfigTests(unittest.TestCase):
         self.user.write_text("codex_direct:\n  timeout_seconds: 900\n", encoding="utf-8")
         self.assertEqual(self.resolve(), DEFAULTS)
         self.assertEqual(codex_direct_timeout(self.cwd, self.home), 900)
-        for value in (1801, 0, -1, 1.5, "900", True):
+        # #2281 (Owner 2026-11-19): default 10800 s, accepted up to 18000 s.
+        self.user.write_text("codex_direct: {}\n", encoding="utf-8")
+        self.assertEqual(codex_direct_timeout(self.cwd, self.home), 10800)
+        for value in (1801, 3600, 10800, 18000):
             with self.subTest(value=value):
                 self.user.write_text(yaml.safe_dump({"codex_direct": {"timeout_seconds": value}}))
-                with self.assertRaises(LLMToolError):
+                self.assertEqual(codex_direct_timeout(self.cwd, self.home), value)
+        for value in (18001, 0, -1, 1.5, "900", True):
+            with self.subTest(value=value):
+                self.user.write_text(yaml.safe_dump({"codex_direct": {"timeout_seconds": value}}))
+                with self.assertRaisesRegex(LLMToolError, "from 1 through 18000"):
                     codex_direct_timeout(self.cwd, self.home)
 
     def test_pm_claude_config_dir_is_trusted_user_config_only(self):
@@ -283,12 +290,14 @@ active_provider: openai-main
 
     def test_timeout_seconds_finite_upper_bound(self):
         from llmtool.config import MAX_TIMEOUT_SECONDS
-        for value in (0, -1, float("nan"), float("inf"), 1e10, MAX_TIMEOUT_SECONDS + 1):
+        # #2281 (Owner 2026-11-19): user timeout_seconds accepted up to 18000 s.
+        self.assertEqual(MAX_TIMEOUT_SECONDS, 18000)
+        for value in (0, -1, float("nan"), float("inf"), 1e10, MAX_TIMEOUT_SECONDS + 1, 18001):
             with self.subTest(value=value):
                 self.project.write_text(yaml.safe_dump({"providers": {"default": {"timeout_seconds": value}}}))
                 with self.assertRaises(LLMToolError):
                     self.resolve()
-        for value in (120, MAX_TIMEOUT_SECONDS):
+        for value in (120, 3601, 10800, MAX_TIMEOUT_SECONDS):
             self.project.write_text(yaml.safe_dump({"providers": {"default": {"timeout_seconds": value}}}))
             self.assertEqual(self.resolve()["providers"]["default"]["timeout_seconds"], value)
 

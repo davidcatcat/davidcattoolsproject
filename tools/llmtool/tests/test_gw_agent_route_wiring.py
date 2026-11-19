@@ -209,10 +209,12 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(config['profile']['allowed_data_classes'], ['synthetic', 'public_repo'])
         self.assertEqual(config['profile']['data_class_map'],
                          {'SYNTHETIC': 'synthetic', 'PUBLIC_REPO': 'public_repo'})
-        self.assertEqual(config['profile']['timeout_seconds'], 1800)
+        # #2281 (Owner 2026-11-19): 3-hour default, 5-hour maximum.
+        self.assertEqual((config['default_timeout'], config['max_timeout']), (10800, 18000))
+        self.assertEqual(config['profile']['timeout_seconds'], 10800)
         self.assertEqual(config['profile']['timeout_seconds'], config['default_timeout'])
         self.assertEqual(config['budgets']['max_turns'], 512)
-        self.assertEqual(config['budgets']['max_wall_seconds'], 1800)
+        self.assertEqual(config['budgets']['max_wall_seconds'], 10800)
         self.assertEqual(config['budgets']['max_wall_seconds'], config['default_timeout'])
         self.assertLessEqual(config['budgets']['max_wall_seconds'], config['max_timeout'])
         self.assertEqual(config['authorization_ref'],
@@ -1083,8 +1085,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(seen['post_path'], '/v1/chat/completions')
         self.assertEqual(seen['prepared_profile']['http_allow_hosts'], ['10.20.30.40'])
         # #1817: the configured per-call timeout reaches the gateway profile.
-        self.assertEqual(seen['profile']['timeout_seconds'], 1800)
-        self.assertEqual(seen['prepared_profile']['timeout_seconds'], 1800)
+        self.assertEqual(seen['profile']['timeout_seconds'], 10800)
+        self.assertEqual(seen['prepared_profile']['timeout_seconds'], 10800)
         self.assertEqual(set(seen['task']['budgets']), {
             'max_turns', 'max_input_tokens', 'max_output_tokens', 'max_wall_seconds',
             'max_tool_result_bytes', 'max_sent_bytes'})
@@ -1297,10 +1299,10 @@ class GwAgentProfileTimeoutTests(unittest.TestCase):
         profile['base_url'] = 'http://127.0.0.1:9/v1'
         return profile
 
-    def test_shipped_profile_serializes_timeout_seconds_1800(self):
+    def test_shipped_profile_serializes_timeout_seconds_10800(self):
         serialized = self._serialized_profile(self._shipped_profile())
         self.assertIs(type(serialized['timeout_seconds']), int)
-        self.assertEqual(serialized['timeout_seconds'], 1800)
+        self.assertEqual(serialized['timeout_seconds'], 10800)
         self.assertEqual(serialized['timeout_seconds'],
                          load_route_config()['routes']['gw-agent']['default_timeout'])
 
@@ -2113,8 +2115,8 @@ class GwAgentRealStoreTests(unittest.TestCase):
 
         self.assertEqual(len(seen_requests), 1)
         configured_budget = load_route_config()['routes']['gw-agent']['budgets']['max_wall_seconds']
-        self.assertEqual(configured_budget, 1800)
-        self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], 1800)
+        self.assertEqual(configured_budget, 10800)
+        self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], 10800)
         self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], configured_budget)
 
     def test_gateway_profile_model_outside_allowed_models_is_refused(self):
