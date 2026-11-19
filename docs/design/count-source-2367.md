@@ -128,28 +128,49 @@ resolver in `tools/llmtool/llmtool/lineage_counts.py`, proposed as
 `work_item_repair_counts(store, work_item)`. `repair_policy.py` remains the only
 source of limits and decisions. No caller keeps a parallel tally.
 
-A ledger entry describes one **effective repair attempt**, not a Developer run
-and not a review verdict:
+A ledger entry describes one repair attempt or its pre-call reservation, not a
+Developer run and not a review verdict:
 
 - `work_item`: the work-item key the 5-repair policy applies to.
 - `seq`: the next per-work-item, per-kind sequence number.
 - `kind`: `review` or `test`.
-- `state`: `DISPATCHED`, `UNKNOWN`, `COMPLETED`, or `FAILED`.
+- `state`: `RESERVED`, `DISPATCHED`, `COMPLETED`, `FAILED`, `START_FAILED`, or
+  `UNKNOWN`.
 - `task_id` and `executor_task`: where the attempt ran.
 - `claim_ref`, `head_sha`, and `family`: the claim binding, when one exists.
 - `recorded_at`: the append time.
 
-The initial Developer run of a work item is not an entry. A start retry is not
-an entry. A recorded start failure that never reached the provider is not an
-entry. An attempt that is not provably one of those is an entry; the ledger is
-therefore conservative.
+The initial Developer run of a work item is not an entry, and a start retry is
+not a charged entry (`tools/llmtool/llmtool/task_submission_cli.py` keeps that
+cap in `_start_retry_count`). Every provider call of an effective repair
+attempt first appends one `RESERVED` entry. That
+entry is **charged** once the launch is confirmed, or once reconciliation
+cannot prove the call never started. It is never charged when the existing
+start-failure proof shows the provider was not reached: the reservation then
+moves to `START_FAILED`, which is terminal. A recorded start failure is
+therefore still a ledger entry, but not a counted repair. An attempt that is
+not provably a start failure is charged; the ledger is conservative.
+
+The proof for `START_FAILED` is the one the delegate cap already uses: a
+recorded start failure, a known prelaunch refusal, or a launched run proven by
+`tools/llmtool/llmtool/task_submission_cli.py`, `_launched_run_did_no_work` to
+have done no work. Any weaker or missing evidence leaves the reservation
+counted.
 
 ### 3.2 Counts and thresholds
 
-- `review_repairs` is the number of `review` entries in the work-item ledger.
-- `test_fails` is the number of `test` entries in the work-item ledger.
+- `review_repairs` is the number of charged `review` entries in the work-item
+  ledger: entries in `DISPATCHED`, `COMPLETED`, `FAILED` or `UNKNOWN`, and no
+  `START_FAILED` entry.
+- `test_fails` is the number of charged `test` entries in the work-item ledger.
 - Both are compared directly with `repair_max` and `test_fail_max`. The
   `1 + repair_max` offset disappears because the original run is not an entry.
+- A `RESERVED` entry is not yet charged, but it is counted as used for
+  admission so that two concurrent dispatches cannot both spend the last
+  repair: admission compares charged entries plus in-flight reservations with
+  the limit. Releasing a reservation to `START_FAILED` frees only that
+  in-flight slot and does not reduce the charged count. A reservation that
+  reconciliation can neither confirm nor disprove is charged as `UNKNOWN`.
 - The per-D6 check and the chain check are two **views** over the same
   entries, not two counters. The work-item view is the policy boundary and
   carries inheritance. The D6 view is a lookup over entries that ran on that
@@ -161,22 +182,30 @@ therefore conservative.
 
 ### 3.3 Invariants
 
-1. **Monotonic.** Entries are appended, never removed or renumbered. A state
-   transition may change an entry from `DISPATCHED` to `COMPLETED` or
-   `FAILED`, but it never reduces the number of entries. There is no reset,
-   garbage collection, or replacement-time copy that drops entries.
+1. **Monotonic.** Entries are appended, never removed or renumbered, and the
+   charged count (entries in `DISPATCHED`, `COMPLETED`, `FAILED` or `UNKNOWN`)
+   never decreases. A `RESERVED` entry becomes charged when the launch is
+   confirmed or the outcome is `UNKNOWN`; a `START_FAILED` entry can never
+   become charged later. The entry count, the sequence numbers and the charged
+   count are all monotone. An in-flight reservation is outside the charged
+   count; it is counted as used for admission only and is never a recorded
+   repair.
 2. **UNKNOWN is used.** A missing, malformed, unreadable, cyclic, forked, or
    ambiguous work-item link or ledger makes the affected count `UNKNOWN`.
    `repair_policy._used` maps it to the limit, so the dispatch refuses. A
-   count is never zero by doubt.
-3. **One attempt, one entry.** Exactly one entry is written before the
-   provider call for each effective repair attempt. A repair claim binds to
-   exactly one entry. A duplicate claim, a claim with no entry, or an entry
-   with two claims is `UNKNOWN`.
+   reservation that reconciliation can neither confirm nor disprove is also
+   charged as `UNKNOWN`. A count is never zero by doubt.
+3. **One attempt, one entry.** Exactly one `RESERVED` entry is appended before
+   the provider call of each effective repair attempt. A repair claim binds to
+   exactly one charged entry; a `START_FAILED` entry, for a call that never
+   reached the provider, carries no claim. A duplicate claim, a claim with no
+   charged entry, a charged entry with two claims, or a claim bound to a
+   `START_FAILED` entry is `UNKNOWN`.
 4. **Same source everywhere.** `_check_delegate_repair_cap`,
-   `_check_chain_repair_count`, `_delegate_chain_gate`, and the policy
-   decisions all read the same resolver. There is no run tally, claim tally,
-   or per-D6 tally that can disagree with it.
+   `_check_chain_repair_count` and `_delegate_chain_gate` in
+   `tools/llmtool/llmtool/task_submission_cli.py`, and the policy decisions,
+   all read the same resolver. There is no run tally, claim tally, or per-D6
+   tally that can disagree with it.
 5. **No incidental counts.** Start retries, debug counts, split child counts,
    replan counts, and review FAIL heads remain separate counts with their own
    limits. They must not be written into, or read from, the repair ledger.
@@ -216,7 +245,7 @@ All changes below are design targets only. No code is changed by this note.
 | --- | --- | --- |
 | `tools/llmtool/llmtool/lineage_counts.py` | Add the work-item ledger resolver and the work-item closure, and make the existing chain counts views over it. Keep the fail-closed chain and lock helpers. | Read scope. |
 | `tools/llmtool/llmtool/repair_policy.py` | Keep `repair_max`, `test_fail_max`, `review_fail_max`, and the decision functions. Remove the need for caller-supplied repair counts, and retire `repair_attempts_max` if the ledger makes it redundant. | Read scope. |
-| `tools/llmtool/llmtool/task_submission_cli.py` | Replace the counting in `_check_delegate_repair_cap`, `_check_repair_limits`, `_check_chain_repair_count`, `_delegate_chain_gate`, `_repair_run_stamp`, and `_collect_ec2_repair_task_ids` with the resolver. Append the ledger entry at the dispatch claim and bind the existing start-failure exemption. | Read scope. |
+| `tools/llmtool/llmtool/task_submission_cli.py` | Replace the counting in `_check_delegate_repair_cap`, `_check_repair_limits`, `_check_chain_repair_count`, `_delegate_chain_gate`, `_repair_run_stamp`, and `_collect_ec2_repair_task_ids` with the resolver. Append the `RESERVED` entry before the provider call, charge it on a confirmed launch or `UNKNOWN`, and bind the existing start-failure proof to `START_FAILED`. | Read scope. |
 | `tools/llmtool/llmtool/review_repair.py` | Bind review and EC2 claims to ledger entries and stop supplying an independent repair count. | UNKNOWN: outside the read scope. |
 | `tools/llmtool/llmtool/task_store.py` | Persist and validate the ledger and the `continues`/`replaces` work-item links. | UNKNOWN: outside the read scope. |
 | `tools/llmtool/llmtool/task_advance.py` | Move the test-failure count named in the `lineage_counts` docstring onto the resolver. | UNKNOWN: outside the read scope. |
