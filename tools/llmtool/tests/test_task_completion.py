@@ -1809,6 +1809,102 @@ class TaskCompletionTests(unittest.TestCase):
             trusted, segment[0], 'DEVELOPER_ARTIFACT_CHAIN_INVALID',
             [self.source_path, 'extra.txt'], artifact_segments=[segment])
 
+    # -- #1886 F1: Claude record-only repair segments ----------------------
+    # A record-only repair binds its recorded result HEAD, not an artifact:
+    # its segment is (None, None, start, end, recorded_head).
+
+    def _recorded_chain_collect(self, trusted, segments, *, claude_head=None):
+        """Collect a chain on the executor route, or with claude_head the Claude route."""
+        kwargs = self._segment_collector_kwargs(
+            {'segment_start': self.source_sha, 'trusted_base': trusted}, [self.source_path])
+        if claude_head is not None:
+            return task_completion.collect_claude_result(
+                **kwargs, claude_result={'executor_task_id': self.task_id,
+                                         'head_sha': claude_head},
+                artifact_segments=segments)
+        artifact, digest = segments[0][:2]
+        return task_completion.collect_executor_result(
+            **kwargs, artifact=artifact, artifact_sha256=digest, artifact_segments=segments)
+
+    def _own_segment(self, route, first):
+        return (self._artifact_segment(self.source_sha, first, first) if route == 'executor'
+                else (None, None, self.source_sha, first))
+
+    def test_record_only_repair_segment_binds_its_recorded_head(self):
+        first = self._developer_commit()
+        head = self._register_head(self._developer_commit(text='# repair change\n'))
+        for route in ('executor', 'claude'):
+            with self.subTest(route=route):
+                result = self._recorded_chain_collect(
+                    self.source_sha,
+                    [self._own_segment(route, first), (None, None, first, head, head)],
+                    claude_head=first if route == 'claude' else None)
+                self.assertEqual(result['result_head'], head)
+                self.assertEqual(result['developer_changed_paths'], [self.source_path])
+
+    def test_record_only_repair_segment_ending_in_a_clean_main_merge_passes(self):
+        first = self._developer_commit()
+        recorded = self._developer_commit(text='# repair change\n')
+        trusted = self._move_main('README.md', 'Main moved.\n')
+        head = self._merge_main()
+        for route in ('executor', 'claude'):
+            with self.subTest(route=route):
+                result = self._recorded_chain_collect(
+                    trusted,
+                    [self._own_segment(route, first), (None, None, first, head, recorded)],
+                    claude_head=first if route == 'claude' else None)
+                self.assertEqual(result['result_head'], head)
+                self.assertEqual(result['developer_changed_paths'], [self.source_path])
+
+    def _assert_recorded_chain_refused(self, route, first, segments):
+        with self.assertRaises(LLMToolError) as raised:
+            self._recorded_chain_collect(
+                self.source_sha, segments,
+                claude_head=first if route == 'claude' else None)
+        self.assertEqual(raised.exception.completion_code,
+                         'DEVELOPER_ARTIFACT_CHAIN_INVALID')
+
+    def test_record_only_repair_segment_refusals(self):
+        first = self._developer_commit()
+        head = self._register_head(self._developer_commit(text='# repair change\n'))
+        side = self._git('commit-tree', self._git('rev-parse', head + '^{tree}'),
+                         '-p', first, '-m', 'side line')
+        artifact = self._artifact(first, head)
+        digest = hashlib.sha256(artifact.encode()).hexdigest()
+        for route in ('executor', 'claude'):
+            own = self._own_segment(route, first)
+            cases = {
+                'no recorded binding': [own, (None, None, first, head)],
+                'recorded HEAD is the start': [own, (None, None, first, head, first)],
+                'recorded HEAD on another line': [own, (None, None, first, head, side)],
+                'recorded HEAD that is not hex': [own, (None, None, first, head, 'x' * 40)],
+                'artifact beside a recorded HEAD': [own, (artifact, digest, first, head, head)],
+                'discontinuous start': [own, (None, None, self.source_sha, head, head)],
+                'chain not ending at the D6 head': [own, (None, None, first, side, side)],
+                'original segment made record-only': [
+                    own[:4] + (first,), (None, None, first, head, head)],
+            }
+            for name, segments in cases.items():
+                with self.subTest(route=route, case=name):
+                    self._assert_recorded_chain_refused(route, first, segments)
+
+    def test_unrecorded_commit_after_a_record_only_repair_is_refused(self):
+        first = self._developer_commit()
+        recorded = self._developer_commit(text='# repair change\n')
+        bare = self._register_head(self._developer_commit(text='# bare change\n'))
+        for route in ('executor', 'claude'):
+            with self.subTest(route=route):
+                self._assert_recorded_chain_refused(route, first, [
+                    self._own_segment(route, first), (None, None, first, bare, recorded)])
+
+    def test_record_only_repair_segment_outside_write_paths_is_refused(self):
+        first = self._developer_commit()
+        head = self._register_head(self._developer_commit('outside.txt', 'outside\n'))
+        for route in ('executor', 'claude'):
+            with self.subTest(route=route):
+                self._assert_recorded_chain_refused(route, first, [
+                    self._own_segment(route, first), (None, None, first, head, head)])
+
     def test_change_around_a_main_merge_is_refused_with_its_existing_code(self):
         cases = (('outside.txt', [self.source_path], 'RESULT_SCOPE_MISMATCH'),
                  ('extra.txt', [self.source_path, 'extra.txt'],
