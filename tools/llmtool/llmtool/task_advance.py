@@ -739,11 +739,13 @@ def _review_ci_gate(number, head, github_get, latest_out=None):
     required_checks = _required_linux_checks(paths, old_paths)
     if required_checks is None:
         return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
-    # Every required check must pass (a docs + ai-loop PR needs both). A
-    # malformed run beats a failure, and a failure beats a pending check.
+    # Any required check failure routes to CI_FAILED
     failed = None
     pending = False
-    for required_name in required_checks:
+    all_required = list(required_checks)
+    if requires_macos:
+        all_required.append('check (macOS 3.13)')
+    for required_name in all_required:
         candidates = [item for item in runs if item.get('head_sha') == head and
                       item.get('name') == required_name]
         for item in candidates:
@@ -780,6 +782,7 @@ _CI_ENV_CONCLUSIONS = ('cancelled', 'startup_failure')
 
 def _ci_excerpt(run):
     """Bounded untrusted excerpt from the check run output title and summary only."""
+    from . import task_submission_cli
     output = run.get('output')
     parts = []
     if type(output) is dict:
@@ -789,7 +792,8 @@ def _ci_excerpt(run):
                 parts.append(value)
     lines = '\n'.join(parts).splitlines()[:review_repair.CI_EXCERPT_MAX_LINES]
     raw = '\n'.join(lines).encode('utf-8', errors='replace')
-    return raw[:review_repair.CI_EXCERPT_MAX_BYTES].decode('utf-8', errors='ignore')
+    excerpt = raw[:review_repair.CI_EXCERPT_MAX_BYTES].decode('utf-8', errors='ignore')
+    return task_submission_cli._screen_text(excerpt, review_repair.CI_EXCERPT_MAX_BYTES + 1024)
 
 
 def _read_check_run(head, name, run_id, github_get):
