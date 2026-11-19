@@ -7,7 +7,9 @@ candidate to ``llmtool/train-<train_id>`` without force and opens one train PR.
 
 Order and refusals:
 
-1. Member list shape (no reads): ``TRAIN_MEMBERS_INVALID``.
+1. Member list shape, against the configured member maximum (no Task or
+   GitHub reads): ``TRAIN_MEMBERS_INVALID``; an invalid policy refuses
+   ``POLICY_INVALID``.
 2. Caller owns every member, before any other read: the pm_caller code.
 3. Authenticated main: ``TRAIN_MAIN_UNAVAILABLE``.
 4. Eligibility: an ineligible member is excluded with its code; an
@@ -30,7 +32,8 @@ import secrets
 from datetime import datetime, timezone
 
 from . import (merge_train, merge_train_eligibility, merge_train_store, pm_caller,
-               task_completion)
+               repair_policy, task_completion)
+from .errors import LLMToolError
 
 STEP_BUILT = 'BUILT'
 STEP_REFUSED = 'REFUSED'
@@ -43,7 +46,10 @@ TRAIN_PUSH_FAILED = 'TRAIN_PUSH_FAILED'
 TRAIN_PR_CREATE_FAILED = 'TRAIN_PR_CREATE_FAILED'
 
 MIN_MEMBERS = 2
+# #2281 limit 15a: the default when policy.json has no merge_train_members_max.
 MAX_MEMBERS = 6
+MEMBERS_MAX_KEY = 'merge_train_members_max'
+POLICY_INVALID = 'POLICY_INVALID'
 BRANCH_PREFIX = 'llmtool/train-'
 
 _TASK_ID = re.compile(r'[0-9a-f]{32}\Z')
@@ -53,6 +59,16 @@ _CODE = re.compile(r'[A-Z][A-Z0-9_]{0,63}\Z')
 
 def _refused(code, result=None):
     return {'step': STEP_REFUSED, 'codes': [code], 'result': result}
+
+
+def _max_members():
+    """The configured member maximum, else the previous default."""
+    return repair_policy.load_policy().get(MEMBERS_MAX_KEY, MAX_MEMBERS)
+
+
+def _policy_code(error):
+    code = str(error)
+    return code if _code(code) else POLICY_INVALID
 
 
 def _sha40(value):
@@ -67,9 +83,9 @@ def _pr(value):
     return type(value) is int and 1 <= value <= merge_train_store.MAX_PR
 
 
-def _member_pairs(members):
+def _member_pairs(members, max_members=MAX_MEMBERS):
     """Return [(task_id, pr), ...] for a valid member list, else None."""
-    if type(members) not in (list, tuple) or not MIN_MEMBERS <= len(members) <= MAX_MEMBERS:
+    if type(members) not in (list, tuple) or not MIN_MEMBERS <= len(members) <= max_members:
         return None
     pairs = []
     for member in members:
@@ -175,10 +191,15 @@ def build_train(members, *, store, caller_key, github_get, git_runner, gh_runner
                 train_root=None, now=None):
     """Build, record, push and open one merge train for ``members``.
 
-    ``members`` is 2 to 6 ``(task_id, pr)`` pairs in merge order. Returns
+    ``members`` is 2 to the configured maximum ``(task_id, pr)`` pairs in
+    merge order. Returns
     ``{'step': 'BUILT' | 'REFUSED', 'codes': [...], 'result': ...}``.
     """
-    pairs = _member_pairs(members)
+    try:
+        max_members = _max_members()
+    except LLMToolError as error:
+        return _refused(_policy_code(error))
+    pairs = _member_pairs(members, max_members)
     if pairs is None:
         return _refused(TRAIN_MEMBERS_INVALID)
     moment = _utc_moment(now)
