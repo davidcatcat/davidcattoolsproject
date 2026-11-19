@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from llmtool import (
+    developer_routes,
     gw_agent_sessions,
     review_dispatch,
     task_advance,
@@ -55,21 +56,9 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             'base_url': 'https://authorized.example'}, {'max_tokens': 49152}))
         endpoint.start()
         self.addCleanup(endpoint.stop)
-        # #1773: dispatch checks the gateway-served model against allowed_models,
-        # so the default route config lists the served model the fake endpoint
-        # names. A test that patches load_route_config itself overrides this.
-        real_load = task_submission_cli.load_route_config
-
-        def listed_route_config(*args, **kwargs):
-            config = real_load(*args, **kwargs)
-            entry = config['routes']['gw-agent']
-            entry['allowed_models'] = list(entry['allowed_models']) + ['authorized-model']
-            return config
-
-        routes = patch.object(task_submission_cli, 'load_route_config',
-                              side_effect=listed_route_config)
-        routes.start()
-        self.addCleanup(routes.stop)
+        # #1773, Owner #2302: dispatch checks the gateway-served model the fake
+        # endpoint names only as a well-formed model id; the shipped route
+        # config is used as is and lists no served model.
         # #1502 WP-F: these cases do not isolate HOME, so the per-run
         # NOT_DELIVERED event never reaches the user's real skill ledger.
         not_delivered = patch.object(task_submission_cli.skill_ledger, 'record_not_delivered')
@@ -429,11 +418,13 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         # (#289 c6922657359 paused claude-reviewer there; see
         # RealPolicyReviewerFallbackTests).
         worker_policy_fixture.install(self)
+        # #2302 A3 (security v91 F2): the authoring family comes from the
+        # recorded served model, never the gw-agent route name.
         task = {'task_id': 'a' * 32, 'run_id': 'b' * 32,
             'task_binding': {'contract_digest': 'c' * 64},
             'completion': {'executor_task_id': 'executor-d6',
                            'evidence': {'common_dir': '/repo/.git'}},
-            'developer': {'provider_profile': 'gw-agent'}}
+            'developer': {'provider_profile': 'gw-agent', 'model': 'qwen3.8-27b'}}
         executor = SimpleNamespace(root='/repo/worktree', common_dir='/repo/.git',
                                     branch='task-branch', result_sha='d' * 40)
         snapshot = SimpleNamespace(clean=True, head='d' * 40, root='/repo/worktree',
@@ -445,6 +436,14 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_completion, '_github_get', return_value=pull):
             result = review_dispatch._preflight(None, 'a' * 32, 'executor-d6', 7, 1, task=task)
         self.assertEqual(result[-1], 'claude-reviewer')
+        # A gw-agent record without a served model has no known family, so it
+        # is still refused before any Reviewer is chosen.
+        del task['developer']['model']
+        with patch.object(task_completion, 'read_d6_registration') as read_d6:
+            with self.assertRaises(LLMToolError) as caught:
+                review_dispatch._preflight(None, 'a' * 32, 'executor-d6', 7, 1, task=task)
+        self.assertEqual(caught.exception.review_dispatch_code, 'REVIEWER_FAMILY_UNSUPPORTED')
+        read_d6.assert_not_called()
 
     def test_paused_dispatch_claims_once_without_running_provider(self):
         task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
@@ -551,9 +550,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         # Refused before launch: no run, so no NOT_DELIVERED event.
         self.record_not_delivered.assert_not_called()
 
-    def test_unlisted_gateway_profile_model_is_refused_before_task_mutation(self):
-        # #1773 (CWE-863): the role model is listed, but the gateway profile
-        # serves a model allowed_models does not list; dispatch must refuse it.
+    def test_malformed_gateway_profile_model_is_refused_before_task_mutation(self):
+        # #1773 (CWE-863), Owner #2302: the model the gateway profile serves is
+        # checked too. Any well-formed id is admitted with no allowed_models
+        # list; a malformed one is refused before the Task is mutated.
         task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
             'state': 'PM_RESPONDED', 'response': 'PM response', 'request': 'bounded task',
             'task_binding': {'contract_digest': 'c' * 64},
@@ -566,7 +566,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                 return copy.deepcopy(task)
 
             def _mutate(self, *_args, **_kwargs):
-                raise AssertionError('an unlisted served model must not mutate the Task')
+                raise AssertionError('a malformed served model must not mutate the Task')
 
             compare_and_update = d6_bind_compare_and_update = update = _mutate
 
@@ -599,7 +599,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, 'load_route_config',
                           return_value={'routes': {'gw-agent': route_config}}), \
              patch.object(task_submission_cli, '_gw_agent_endpoint', return_value=({
-                 'type': 'openai-compatible', 'model': 'unlisted-model',
+                 'type': 'openai-compatible', 'model': 'unlisted model',
                  'base_url': 'https://authorized.example'}, {'max_tokens': 4096})), \
              patch.object(task_submission_cli, 'GwAgentRoute') as constructor, \
              patch.object(task_submission_cli, 'run_route') as runner:
@@ -1317,10 +1317,13 @@ class GwAgentProfileTimeoutTests(unittest.TestCase):
 
 
 class GwAgentShippedServedModelTests(unittest.TestCase):
-    """#1502 WP-E: the shipped route accepts today's served model 'gw' only.
+    """#1502 WP-E, Owner #2302: the shipped route's served-model check.
 
-    Uses the real developer-routes.json and the real served-model check
-    (#1773, CWE-863); only HOME is isolated so no user config is read.
+    The shipped route defaults to the served model 'gw'. Its one-item
+    allowed_models is a load-time shape rule (PR #1759 F1) and is never
+    consulted: any well-formed served model id is admitted, a malformed one is
+    refused. Uses the real developer-routes.json and the real served-model
+    check (#1773, CWE-863); only HOME is isolated so no user config is read.
     """
 
     def setUp(self):
@@ -1342,8 +1345,21 @@ class GwAgentShippedServedModelTests(unittest.TestCase):
         self.assertEqual(model, 'gw')
         self.assertEqual(effort, self.route_config['default_effort'])
 
-    def test_unlisted_served_model_is_still_refused(self):
-        for served in ('example-model-b', 'gw-agent-default', 'GW', 'gw-b'):
+    def test_unlisted_well_formed_served_model_is_admitted_with_its_provenance(self):
+        for served in ('example-model-b', 'gw-agent-default', 'GW', 'gw-b',
+                       'qwen3.8-27b', 'claude-sonnet-5-5-medium'):
+            with self.subTest(served=served):
+                model_run = {}
+                model, effort = task_submission_cli._gw_agent_developer_profile(
+                    self.route_config, served_model=served, model_run=model_run)
+                self.assertEqual(model, served)
+                self.assertEqual(effort, self.route_config['default_effort'])
+                self.assertEqual(model_run, developer_routes.build_model_run(
+                    served, 'profile', served))
+                self.assertTrue(task_store.valid_model_run(model_run, served))
+
+    def test_malformed_served_model_is_refused(self):
+        for served in ('example model', 'https://example.invalid/model', '-gw', ''):
             with self.subTest(served=served):
                 with self.assertRaises(LLMToolError) as caught:
                     task_submission_cli._gw_agent_developer_profile(
@@ -1378,7 +1394,8 @@ class RealPolicyReviewerFallbackTests(unittest.TestCase):
         return {'task_id': 'a' * 32, 'run_id': 'b' * 32, 'developer': developer}
 
     def test_gw_agent_author_review_falls_back_to_codex_reviewer(self):
-        task = self._task({'provider_profile': 'gw-agent'})
+        # #2302 A3: the author family is that of the recorded served model.
+        task = self._task({'provider_profile': 'gw-agent', 'model': 'qwen3.8-27b'})
         # An explicit claude-reviewer request is refused by the real row.
         with self.assertRaises(LLMToolError) as explicit:
             review_dispatch._select_reviewer(task, 'claude-reviewer')
@@ -1552,8 +1569,9 @@ class GwAgentRealStoreTests(unittest.TestCase):
                   list_provider_model=True):
         # #1072: without ``bind`` the D6 session step keeps today's unbound
         # result; with it the real step runs against that fake lifecycle helper.
-        # #1773: the gateway profile model must be in allowed_models, so the
-        # fixture lists it unless list_provider_model is False.
+        # #1773: the fixture lists the gateway profile model in allowed_models
+        # unless list_provider_model is False. Owner #2302: the list is never
+        # consulted (see test_gateway_profile_model_outside_allowed_models_is_admitted).
         task_id = self.task_id = self._active_pm_task(target)
         if provider_model != 'gw':
             config = self.base / '.config' / 'llmtool' / 'config.yaml'
@@ -1661,6 +1679,11 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertIsNone(developer['error_code'])
         self.assertEqual(developer['changed_files'], [target])
         self.assertEqual(developer['model'], 'qwen3.8-27b')
+        # #2302 A2: the run was sent the routing alias 'gw' from the gateway
+        # profile; its provenance names the served model the record keeps.
+        self.assertEqual(developer['model_run'], {
+            'requested': 'gw', 'resolved': 'qwen3.8-27b', 'source': 'profile',
+            'family': 'qwen', 'provider_reported': 'qwen3.8-27b'})
         self.assertEqual(developer['usage'], {
             'prompt_tokens': 2052, 'completion_tokens': 98, 'total_tokens': 2150,
             'served_model': 'qwen3.8-27b'})
@@ -2117,17 +2140,24 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], 1800)
         self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], configured_budget)
 
-    def test_gateway_profile_model_outside_allowed_models_is_refused(self):
-        # #1773 (CWE-863): the real repo route lists only its default model; a
-        # gateway profile serving another model is refused before any claim.
-        with self.assertRaises(LLMToolError) as caught:
-            self._delegate('gw-agent-unlisted-model.md', provider_model='unlisted-model',
-                           list_provider_model=False, route_runner=self._unused_runner)
-        self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
-        task = self._reloaded()
-        self.assertIsNone(task.get('developer'))
-        self.assertEqual(task['state'], 'PM_RESPONDED')
-        self.assertFalse((self.root / 'gw-agent-unlisted-model.md').exists())
+    def test_gateway_profile_model_outside_allowed_models_is_admitted(self):
+        # Owner #2302 (decision 11-17): the real repo route's allowed_models
+        # (['gw']) is never consulted, so a gateway profile set in user config
+        # to another well-formed model runs with no repository change.
+        target = 'gw-agent-unlisted-model.md'
+        code, task = self._delegate(target, provider_model='example-model-b',
+                                    served_model='example-model-b',
+                                    list_provider_model=False)
+        self.assertEqual(load_route_config()['routes']['gw-agent']['allowed_models'], ['gw'])
+        developer = task['developer']
+        self.assertEqual(code, 0)
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(developer['model'], 'example-model-b')
+        self.assertEqual(developer['model_run'], {
+            'requested': 'example-model-b', 'resolved': 'example-model-b',
+            'source': 'profile', 'family': 'UNKNOWN',
+            'provider_reported': 'example-model-b'})
+        self.assertEqual((self.root / target).read_text(), 'hello synthetic\n')
 
     def test_untestable_file_persists_but_waits_with_a_named_gate(self):
         target = 'gw-agent-synthetic.txt'

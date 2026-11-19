@@ -15,17 +15,17 @@ import yaml
 
 from llmtool import cli, review_dispatch, review_result, task_store, task_submission_cli
 from llmtool.config import user_config_path
-from llmtool.developer_routes import load_route_config
+from llmtool.developer_routes import load_route_config, registry_default_model
 from llmtool.errors import LLMToolError
 
 
 TASK = 'a' * 32
 HEAD = 'b' * 40
-# #1502 WP-E R1: the roles registry's listed Reviewer models (the only ones
-# the shared check admits).
+# #1502 WP-E R1, Owner #2302: the roles registry's default Reviewer models
+# (each entry names only its default model; any well-formed id is admitted).
 _ROLES = load_route_config()['roles']
-CODEX_REVIEW_MODEL = _ROLES['codex-reviewer']['allowed_models'][0]
-CLAUDE_REVIEW_MODEL = _ROLES['claude-reviewer']['allowed_models'][0]
+CODEX_REVIEW_MODEL = registry_default_model(_ROLES['codex-reviewer'])
+CLAUDE_REVIEW_MODEL = registry_default_model(_ROLES['claude-reviewer'])
 # What the fake screen returns in refusal-flow tests.
 SCREENED_EXCERPT = 'screened reply excerpt'
 # #2302 A3: a recorded authoring model for each CLI route family.

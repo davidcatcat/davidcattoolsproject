@@ -4698,6 +4698,28 @@ def _dispatch_model_run(model_run, model):
     return developer_routes.build_model_run(model, 'UNKNOWN')
 
 
+def _served_model_run(model_run, served_model):
+    """#2302 A2: the model_run of a gateway run whose result names served_model.
+
+    A gw-agent result records the model the gateway reported serving as
+    developer.model, which may differ from the routing alias the run was sent
+    (for example 'gw'). The record's model_run must name that same model, so
+    resolved and provider_reported become served_model and the family is
+    model_family of served_model; requested and source keep what the dispatch
+    recorded. Without a valid dispatch record, served_model is recorded with
+    source UNKNOWN (as _dispatch_model_run does); a served model that is not a
+    well-formed run model id leaves no model_run (UNKNOWN family).
+    """
+    if not developer_routes.run_model_id_ok(served_model):
+        return None
+    if type(model_run) is dict and set(model_run) == developer_routes.MODEL_RUN_KEYS:
+        run = developer_routes.with_provider_reported(
+            dict(model_run, resolved=served_model), served_model)
+        if valid_model_run(run, served_model):
+            return run
+    return _dispatch_model_run(None, served_model)
+
+
 def _with_model_run(developer, model_run):
     """Set developer['model_run'] to model_run, or drop a stale one when None."""
     if model_run is None:
@@ -6784,6 +6806,9 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None},
                 getattr(result, 'provider_evidence', None), 'gw-agent'))
+        # #2302 A2: the recorded model is the served model, so its provenance
+        # names that model too (the dispatch record named the routing alias).
+        _with_model_run(developer, _served_model_run(gw_model_run, served_model))
         site.after_result(result.session_id, task_input)
         # #1535: a D6 keeps the first gw-agent session it took. A later PM Task
         # (fresh session, #1509) or repair round there keeps that session; a D6

@@ -11,17 +11,18 @@ from unittest.mock import patch
 import yaml
 
 from llmtool.config import resolve_config
-from llmtool.developer_routes import load_route_config
+from llmtool.developer_routes import load_route_config, registry_default_model
 from llmtool.errors import LLMToolError
 from llmtool.providers import PROVIDER_REGISTRY, get_provider_capabilities
 from llmtool.providers.claude_cli import ClaudeCLIProvider
 from llmtool.providers.cli_lifecycle import background_cli_invocation, tui_cli_signal_scope
 
 
-# #1502 WP-E R1: the only model a review job may launch, and the other family's.
+# #1502 WP-E R1, Owner #2302: the registry default models of the Claude and
+# Codex Reviewer roles (each entry names only its default model).
 _ROLES = load_route_config()["roles"]
-REVIEW_MODEL = _ROLES["claude-reviewer"]["allowed_models"][0]
-CROSS_FAMILY_MODEL = _ROLES["codex-reviewer"]["allowed_models"][0]
+REVIEW_MODEL = registry_default_model(_ROLES["claude-reviewer"])
+CROSS_FAMILY_MODEL = registry_default_model(_ROLES["codex-reviewer"])
 
 CAPABILITIES = {
     "chat": True, "large_context": False, "reasoning_control": False,
@@ -453,14 +454,14 @@ class WorkerEnvelopeTests(unittest.TestCase):
             self.assertLess(time.monotonic()-started,1.5)
             self.assertIsNone(provider.pending_job)
 
-    def test_review_job_refuses_other_family_and_malformed_model_before_spawn(self):
-        # #1502 WP-E R1, Owner #2302 P2: the review job admits only a model of
-        # the claude-reviewer family.
+    def test_review_job_refuses_a_malformed_or_missing_model_before_spawn(self):
+        # #1502 WP-E R1, Owner #2302 (decision 11-17): the shared check refuses
+        # only a malformed or missing model id; no model family is required.
         import time
         with tempfile.TemporaryDirectory() as tmp:
             exe=Path(tmp)/'fake-unused';exe.write_text('#!'+sys.executable+' -IB\n');exe.chmod(0o700)
-            for model in ('gemini-unlisted-model', CROSS_FAMILY_MODEL,
-                          'anthropic/'+REVIEW_MODEL, REVIEW_MODEL.upper(), None):
+            for model in ('-'+REVIEW_MODEL, 'example model',
+                          'https://example.invalid/model', None):
                 with self.subTest(model=model):
                     provider=ClaudeCLIProvider({'model':model},None)
                     with patch('subprocess.Popen',side_effect=AssertionError('spawn')) as spawn, \
@@ -473,9 +474,12 @@ class WorkerEnvelopeTests(unittest.TestCase):
                     self.assertIsNone(getattr(provider,'pending_job',None))
 
     def test_review_job_launches_the_admitted_model_explicitly(self):
-        # The listed model and (Owner #2302 P2) another Claude-family model.
+        # The registry default and (Owner #2302) any other well-formed model id
+        # of any family, with any provider prefix or case; review independence
+        # is decided from the recorded run family, not here.
         import time
-        for model in (REVIEW_MODEL,'claude-fable-5-2'):
+        for model in (REVIEW_MODEL,'claude-fable-5-2','gemini-unlisted-model',
+                      CROSS_FAMILY_MODEL,'anthropic/'+REVIEW_MODEL,REVIEW_MODEL.upper()):
             with self.subTest(model=model),tempfile.TemporaryDirectory() as tmp:
                 exe=Path(tmp)/'fake-unused';exe.write_text('#!'+sys.executable+' -IB\n');exe.chmod(0o700)
                 provider=ClaudeCLIProvider({'model':model},None)

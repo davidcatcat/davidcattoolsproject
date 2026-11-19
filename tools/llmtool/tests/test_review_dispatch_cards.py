@@ -13,7 +13,7 @@ import review_trust_fixture
 import test_review_dispatch as dispatch_fixtures
 
 from llmtool import review_dispatch, skill_manifest
-from llmtool.developer_routes import load_route_config
+from llmtool.developer_routes import load_route_config, registry_default_model
 from llmtool.errors import LLMToolError
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -32,8 +32,8 @@ TASK = 'a' * 32
 HEAD = 'b' * 40
 RENDERED = 'Rendered review prompt for the test.\n'
 _ROLES = load_route_config()['roles']
-CODEX_REVIEW_MODEL = _ROLES['codex-reviewer']['allowed_models'][0]
-CLAUDE_REVIEW_MODEL = _ROLES['claude-reviewer']['allowed_models'][0]
+CODEX_REVIEW_MODEL = registry_default_model(_ROLES['codex-reviewer'])
+CLAUDE_REVIEW_MODEL = registry_default_model(_ROLES['claude-reviewer'])
 
 
 def setUpModule():

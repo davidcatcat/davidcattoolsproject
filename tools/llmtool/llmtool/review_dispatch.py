@@ -25,6 +25,9 @@ from . import developer_routes, github_identity, role_config, skill_manifest, ta
 _CODEX_REVIEW_MODEL = 'gpt-6.1-sol'
 _CLAUDE_REVIEW_MODEL = 'claude-sonnet-5-5'
 _CODEX_REVIEW_EFFORT = 'high'
+# The recorded model of the synthetic author the Codex verdict shape check
+# classifies against (_parse_codex_review_inner); never a launched model.
+_CLASSIFIER_AUTHOR_MODEL = 'claude-opus-5-5'
 _CODEX_REVIEW_TIMEOUT = 1800
 _CODEX_REVIEW_MAX_OUTPUT = 1024 * 1024
 # #2212: larger hard ceiling for Codex JSONL output streams; intermediate
@@ -432,6 +435,10 @@ def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, ve
         _refuse('REVIEW_NOT_POSTED', reason='REVIEW_BINDING_LINE_MISSING')
     # Use the persisted-result classifier as the authority for the body shape.
     # This keeps direct Codex results and later comment classification in parity.
+    # #2302 A3: the shape check needs a cross-family author for the Codex
+    # verdict, and a family comes only from a recorded model (security v91 F2),
+    # never from the route name; so the synthetic author names a Claude model.
+    # Real independence is checked at claim time and by the formal PASS gate.
     from . import review_result
     classified = review_result._comment_verdict(
         {'id': 0, 'body': verdict['review'],
@@ -440,7 +447,8 @@ def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, ve
         head=head, version=version,
         task={'task_id': task_id, 'run_id': run_id,
               'task_binding': {'contract_digest': contract_digest},
-              'developer': {'provider_profile': 'claude'}})
+              'developer': {'provider_profile': 'claude',
+                            'model': _CLASSIFIER_AUTHOR_MODEL}})
     expected_outcome = 'REVIEW_PASS' if status == 'PASS' else 'REVIEW_FAIL'
     if classified is None or classified[2] != expected_outcome:
         _refuse('REVIEW_NOT_POSTED', reason='REVIEW_CLASSIFIER_REJECTED')

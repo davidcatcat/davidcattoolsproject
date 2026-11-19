@@ -25,15 +25,18 @@ _spec = importlib.util.spec_from_file_location('claude_bg_dispatch_under_test', 
 dispatch_tool = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dispatch_tool)
 REAL_RESOLVE_ROLE = dispatch_tool.role_config.resolve_role
-# #1502 WP-E R1: the Claude Reviewer's registry-listed model and the other family's.
-from llmtool.developer_routes import load_route_config  # noqa: E402
+# #1502 WP-E R1, Owner #2302: the registry default models of the Claude and
+# Codex Reviewer roles (each entry names only its default model).
+from llmtool.developer_routes import load_route_config, registry_default_model  # noqa: E402
 _REGISTRY = load_route_config()['roles']
-REVIEW_MODEL = _REGISTRY['claude-reviewer']['allowed_models'][0]
-CROSS_FAMILY_MODEL = _REGISTRY['codex-reviewer']['allowed_models'][0]
-# Owner #2302 P2: a Claude-family model that is not the listed one is admitted.
+REVIEW_MODEL = registry_default_model(_REGISTRY['claude-reviewer'])
+CROSS_FAMILY_MODEL = registry_default_model(_REGISTRY['codex-reviewer'])
+# Owner #2302 (decision 11-17): any well-formed model id of any family is
+# admitted for the Claude Reviewer; independence follows the recorded run family.
 SAME_FAMILY_MODEL = 'claude-fable-5-2'
-# Neither Claude nor Codex family: refused for the Claude Reviewer.
 OTHER_FAMILY_MODEL = 'gemini-unlisted-model'
+# Not well-formed model ids: the only models the shared check refuses.
+MALFORMED_MODELS = ('example model', 'https://example.invalid/model')
 
 TARGET = '2b128608-8b94-4c12-96b9-e6cdf9a388c7'
 COPY = '95c9758e-1111-4222-8333-944455556666'
@@ -482,10 +485,9 @@ class ClaudeBgDispatchTests(unittest.TestCase):
             args += ['--model', model]
         return self.run_tool(*args)
 
-    def test_reviewer_other_family_and_malformed_models_are_refused_before_cli(self):
+    def test_reviewer_malformed_models_are_refused_before_cli(self):
         for new in (True, False):
-            for model in (OTHER_FAMILY_MODEL, CROSS_FAMILY_MODEL,
-                          'anthropic/' + REVIEW_MODEL, REVIEW_MODEL.upper()):
+            for model in MALFORMED_MODELS:
                 for layer in ('cli', 'resolved'):
                     with self.subTest(new=new, model=model, layer=layer):
                         self.reset()
@@ -513,8 +515,8 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         user_home = self.home / 'user-home'
         config_path = user_config_path(str(user_home))
         config_path.parent.mkdir(parents=True)
-        config_path.write_text('roles:\n  reviewer:\n    model: %s\n' % CROSS_FAMILY_MODEL)
-        for model in (None, 'anthropic/' + REVIEW_MODEL):
+        config_path.write_text('roles:\n  reviewer:\n    model: %s\n' % MALFORMED_MODELS[0])
+        for model in (None, MALFORMED_MODELS[1]):
             with self.subTest(model=model):
                 self.reset()
                 with patch.object(dispatch_tool.role_config, 'resolve_role',
@@ -525,8 +527,10 @@ class ClaudeBgDispatchTests(unittest.TestCase):
                 self.assertEqual(self.calls(), [])
 
     def test_reviewer_admitted_model_is_explicit_for_new_and_resumed_sessions(self):
-        # The listed model and (Owner #2302 P2) any other Claude-family model.
-        for model in (REVIEW_MODEL, SAME_FAMILY_MODEL):
+        # The registry default and (Owner #2302) any other well-formed model id
+        # of any family, with any provider prefix or case.
+        for model in (REVIEW_MODEL, SAME_FAMILY_MODEL, OTHER_FAMILY_MODEL, CROSS_FAMILY_MODEL,
+                      'anthropic/' + REVIEW_MODEL, REVIEW_MODEL.upper()):
             for new in (True, False):
                 for layer in ('cli', 'resolved'):
                     with self.subTest(model=model, new=new, layer=layer):
