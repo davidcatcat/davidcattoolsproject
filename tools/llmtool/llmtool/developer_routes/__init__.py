@@ -51,9 +51,9 @@ def _timeout_value_ok(v, cap=HARD_TIMEOUT_CAP_SECONDS):
 _MAX_ALLOWED_MODELS = 16
 _GENERIC_MODEL_PATTERN = r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}'
 _CLAUDE_MODEL_PATTERN = r'claude-[a-z0-9][a-z0-9.-]{0,120}'
-# Only OpenCode-hosted free models; the variant (for example high) is the
-# route's default_effort, never part of the model name.
-_OPENCODE_MODEL_PATTERN = r'opencode/[A-Za-z0-9][A-Za-z0-9._-]{0,94}-free'
+# Owner #289: any well-formed OpenCode model id (free or paid, any provider
+# prefix OpenCode supports, with or without a #variant).
+_OPENCODE_MODEL_PATTERN = r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}/[A-Za-z0-9][A-Za-z0-9._-]{0,94}(?:#[a-z]{1,16})?'
 
 
 def _generic_model_ok(value):
@@ -72,7 +72,10 @@ def _claude_model_ok(value):
 def _opencode_model_ok(value):
     import re
 
-    return type(value) is str and re.fullmatch(_OPENCODE_MODEL_PATTERN, value) is not None
+    return (type(value) is str and 1 <= len(value) <= 128 and
+            '://' not in value and '..' not in value and
+            '\n' not in value and '\r' not in value and
+            re.fullmatch(_OPENCODE_MODEL_PATTERN, value) is not None)
 
 
 # Security repair (PR #1782 CWE-693): each review/debug role accepts only
@@ -118,11 +121,11 @@ def _agy_model_ok(value):
                             _CLAUDE_FAMILY_MARKERS + _CODEX_FAMILY_MARKERS)
 
 
-# Owner #2302 P2: a route accepts any model of its own provider family in a
-# valid provider format; allowed_models is not a membership list for these
+# Owner #2302 P2, Owner #289: a route accepts any model of its own provider family
+# in a valid provider format; allowed_models is not a membership list for these
 # routes. gw-agent is not listed: it has no provider family and keeps its
 # allowed_models gate on the gateway-served model (#1773) unchanged.
-# OpenCode stays free-only: its format admits only opencode/<name>-free.
+# OpenCode accepts any well-formed model id (free or paid, any provider prefix).
 _ROUTE_MODEL_CHECKS = {
     'agy': _agy_model_ok,
     'claude': _claude_role_model_ok,
@@ -326,7 +329,9 @@ def check_route_model(config, route, model):
     own provider family in a valid format (_ROUTE_MODEL_CHECKS) and refuse a
     wrong-family or malformed one; allowed_models is not consulted. gw-agent
     keeps its allowed_models membership gate, but a malformed identifier is
-    refused here too, before membership (Repair 2).
+    refused here too, before membership (Repair 2). A config that is not a
+    load_route_config() mapping (including None) admits no model: this check
+    never loads the repository file itself.
     """
     routes = config.get('routes') if type(config) is dict else None
     entry = (routes.get(route) if type(routes) is dict and type(route) is str
