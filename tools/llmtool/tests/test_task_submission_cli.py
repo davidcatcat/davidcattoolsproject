@@ -2117,7 +2117,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 ('elapsed-str', set_(elapsed_ms='32')),
                 ('elapsed-float', set_(elapsed_ms=32.0)),
                 ('source-bytes-negative', set_(source_bytes=-1)),
-                ('source-bytes-too-large', set_(source_bytes=2 * 1024 * 1024 + 1)),
+                # #2281: the store source-byte bound is 5 MiB (5242880 bytes).
+                ('source-bytes-too-large', set_(source_bytes=5 * 1024 * 1024 + 1)),
                 ('source-bytes-bool', set_(source_bytes=True)),
                 ('source-files-zero', set_(source_file_count=0)),
                 ('source-files-too-many', set_(source_file_count=33)),
@@ -2147,7 +2148,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 ('elapsed-max', set_(elapsed_ms=86_400_000)),
                 ('elapsed-none', set_(elapsed_ms=None)),
                 ('source-bytes-zero', set_(source_bytes=0)),
-                ('source-bytes-max', set_(source_bytes=2 * 1024 * 1024)),
+                ('source-bytes-max', set_(source_bytes=5 * 1024 * 1024)),
                 ('source-files-max', set_(source_file_count=32))):
             with self.subTest(field=name):
                 run = self._opencode_bind_run(self._opencode_result(), mutate=mutate)
