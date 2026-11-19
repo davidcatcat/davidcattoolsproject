@@ -1337,6 +1337,25 @@ _DEBUG_NOT_STARTED = ('HIGH_DEBUG_QUOTA_EXHAUSTED', 'HIGH_DEBUG_AUTH_FAILED',
 # _launch_settings refusal, before any provider process started. Such an entry
 # frees its slot only when it also observed nothing (model, effort and usage
 # all UNKNOWN) and its report digest matches; anything else stays used.
+#
+# #2367 A1 finding (PR #2407 F1): does ROLE_MODEL_NOT_ALLOWED in a PR
+# #2405-shaped entry (RUN_FAILED, model_observed/effort_observed/usage
+# UNKNOWN) happen before the Debug model is launched? Conclusion: yes. Call
+# path, all in tools/llmtool/llmtool/high_debug.py:
+#   1. run_high_debug builds actual_runner as functools.partial(_run_codex,
+#      ...) or functools.partial(_run_claude, ...) and calls it.
+#   2. The first statement of _run_codex and of _run_claude is
+#      _launch_settings(role, model), which calls _admit_debug_model ->
+#      role_config.check_registry_model. A refusal there raises
+#      _refuse('ROLE_MODEL_NOT_ALLOWED'), re-raised as _LaunchRefused.
+#   3. Only after _launch_settings returns does the launcher build its argv
+#      and call subprocess.run (the provider process: codex exec / claude -p).
+#   4. run_high_debug's `except _LaunchRefused` handler is the only place
+#      that records failure='ROLE_MODEL_NOT_ALLOWED'; failed(...) then writes
+#      it with observed/effort/usage still at their 'UNKNOWN' defaults.
+# The same code raised any other way (not as _LaunchRefused, for example by
+# _refuse inside a runner) is recorded as HIGH_DEBUG_RUN_FAILED and stays used. Tests: test_high_debug_not_started_2367
+# (LaunchOrderTests, NotStartedRunTests).
 _DEBUG_PRELAUNCH_REFUSED = ('ROLE_MODEL_NOT_ALLOWED',)
 
 

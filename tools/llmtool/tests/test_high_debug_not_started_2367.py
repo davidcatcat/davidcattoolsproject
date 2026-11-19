@@ -3,6 +3,14 @@
 Only trusted evidence in the entry frees it: the launcher's pre-launch
 refusal code with nothing observed. RUN_FAILED alone, a missing report,
 UNKNOWN usage or no output keep the conservative rule (the slot is used).
+
+A1 (PR #2407 F1): ROLE_MODEL_NOT_ALLOWED in a PR #2405-shaped entry is raised
+before the Debug model is launched. In llmtool/high_debug.py, _run_codex and
+_run_claude call _launch_settings (-> _admit_debug_model ->
+role_config.check_registry_model) before they call subprocess.run, and
+run_high_debug records that code only from its `except _LaunchRefused`
+handler. LaunchOrderTests checks the order; NotStartedRunTests checks that
+the real path writes an entry with the PR #2405 evidence fields.
 """
 import io
 import subprocess
@@ -23,6 +31,9 @@ tearDownModule = review_trust_fixture.stop_module
 MODEL = 'ROLE_MODEL_NOT_ALLOWED'
 PARENT, RUN = reservation.PARENT, reservation.RUN
 USAGE = {'input': 1, 'cached': 0, 'output': 1, 'reasoning': 0}
+# The entry fields that decide whether a RUN_FAILED Debug started.
+EVIDENCE = ('status', 'report', 'report_sha256', 'model_observed', 'effort_observed',
+            'usage')
 
 
 def pr2405(**changes):
@@ -94,6 +105,58 @@ class EntryClassificationTests(unittest.TestCase):
         self.assertNotIn(MODEL, high_debug.DEBUG_FALLBACK_CODES)
 
 
+class LaunchOrderTests(unittest.TestCase):
+    """A1 (PR #2407 F1): each launcher admits its model before any provider process."""
+
+    LAUNCHERS = ((high_debug._run_codex, 'codex-debug', 'codex', {}),
+                 (high_debug._run_claude, 'claude-debug', 'claude',
+                  {'config_dir': '/safe/claude'}))
+
+    def launch(self, launcher, extra, refuse):
+        """Run launcher with recorded steps; return (steps, refusal code or None)."""
+        steps = []
+
+        def check(role, model):
+            steps.append(('admit', role))
+            if refuse:
+                raise LLMToolError('synthetic registry refusal')
+            return model
+
+        def timeout(role):
+            steps.append(('timeout', role))
+            return 60
+
+        def run(argv, *_args, **_kwargs):
+            steps.append(('launch', list(argv)[0]))
+            return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+        fake = SimpleNamespace(run=run, DEVNULL=subprocess.DEVNULL, PIPE=subprocess.PIPE)
+        with patch.object(high_debug.role_config, 'check_registry_model', side_effect=check), \
+             patch.object(high_debug, '_debug_timeout', side_effect=timeout), \
+             patch.object(high_debug, 'subprocess', fake), \
+             patch('llmtool.codex_direct_developer._command_path', return_value='/usr/bin'), \
+             patch('llmtool.codex_direct_developer._environment', return_value={}), \
+             patch('llmtool.developer_routes.claude.ClaudeRoute') as route:
+            route.return_value.build_env.return_value = {}
+            try:
+                launcher(prompt='p', cwd='/safe/d6', output_path='/safe/d6/out', **extra)
+            except high_debug._LaunchRefused as error:
+                return steps, error.high_debug_code
+        return steps, None
+
+    def test_admitted_model_is_checked_before_the_provider_process(self):
+        for launcher, role, executable, extra in self.LAUNCHERS:
+            with self.subTest(launcher=launcher.__name__):
+                self.assertEqual(self.launch(launcher, extra, refuse=False),
+                                 ([('admit', role), ('timeout', role),
+                                   ('launch', executable)], None))
+
+    def test_refused_model_stops_before_the_provider_process(self):
+        for launcher, role, _executable, extra in self.LAUNCHERS:
+            with self.subTest(launcher=launcher.__name__):
+                self.assertEqual(self.launch(launcher, extra, refuse=True),
+                                 ([('admit', role)], MODEL))
+
+
 class NotStartedRunTests(reservation.ReservationCase):
     def refuse_after_reservation(self, task_id):
         """Registry check that admits until this Task holds an entry, then refuses."""
@@ -157,6 +220,9 @@ class NotStartedRunTests(reservation.ReservationCase):
         stored = self.entries(task_id)[0]
         self.eq((stored['model_observed'], stored['effort_observed'], stored['usage']),
                 ('UNKNOWN', 'UNKNOWN', 'UNKNOWN'))
+        # A1: the real path writes the PR #2405 entry's evidence fields exactly.
+        self.eq({key: stored[key] for key in EVIDENCE},
+                {key: pr2405()[key] for key in EVIDENCE})
         self.assertFalse(high_debug._debug_entry_used(stored))
         # The retry the PR #2405 chain was refused (HIGH_DEBUG_DEBUG_PARENT_USED).
         self.eq(self.debug(task_id, reservation.succeeds),
