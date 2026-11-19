@@ -1171,9 +1171,15 @@ class AdvanceChainTests(unittest.TestCase):
         return DictStore(*records)
 
     def test_fail_count_reaches_stopped_across_a_continuation(self):
+        # #2367: test_fail_max is 5. The Task's own repair plus the
+        # predecessor's 4 use up the chain; own 1 plus 1 still repairs.
         own = [ec2_claim('pr-17-ec2', OLD_HEAD)]
-        cases = (('predecessor used one', [ec2_claim('pr-9-ec2', OTHER_HEAD, pr=9)], True,
+        predecessor_four = [ec2_claim('pr-9-ec2', f'{n:040x}', pr=9, attempt=n)
+                            for n in range(1, 5)]
+        cases = (('predecessor used four', predecessor_four, True,
                   ('STOPPED', ['TEST_FAIL_LIMIT_REACHED'])),
+                 ('predecessor used one', [ec2_claim('pr-9-ec2', OTHER_HEAD, pr=9)], True,
+                  ('CI_FAILED', [])),
                  ('broken link', None, True, ('STOPPED', ['TEST_FAIL_LIMIT_REACHED'])),
                  ('fresh predecessor', [], True, ('CI_FAILED', [])),
                  ('legacy task', None, False, ('CI_FAILED', [])))
@@ -1192,7 +1198,8 @@ class AdvanceChainTests(unittest.TestCase):
                 self.assertEqual((result['step'], result['codes']), expected)
                 self.assertEqual(len(repaired), 0 if expected[0] == 'STOPPED' else 1)
                 count = task_advance._test_fail_count(record, 17, store)
-                self.assertEqual(count, {'predecessor used one': 2, 'broken link': UNKNOWN,
+                self.assertEqual(count, {'predecessor used four': 5,
+                                         'predecessor used one': 2, 'broken link': UNKNOWN,
                                          'fresh predecessor': 1, 'legacy task': 1}[name])
 
     def test_an_ancestor_fork_stops_the_test_repair_from_every_member(self):
