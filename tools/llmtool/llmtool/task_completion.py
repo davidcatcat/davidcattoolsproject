@@ -1514,6 +1514,41 @@ def _collect_registered_result_diff(*, task_id, expected_common_dir, expected_ro
     return registration, snapshot, paths, developer_paths, patch
 
 
+def _verify_artifact_segments(root, segments, start, write_paths, trusted_base_sha):
+    """Verify consecutive (artifact, digest, start, end) segments from start.
+
+    Each segment must start where the previous one ended, descend from its
+    start, change only write paths, and its artifact must be exactly what its
+    Developer commits apply. Any failure is DEVELOPER_ARTIFACT_CHAIN_INVALID.
+    """
+    previous_end = start
+    for segment in segments:
+        segment_artifact, segment_digest, start_sha, end_sha = segment
+        if (start_sha != previous_end or
+                type(start_sha) is not str or _HEX40.fullmatch(start_sha) is None or
+                type(end_sha) is not str or _HEX40.fullmatch(end_sha) is None):
+            _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
+        try:
+            _git(root, ('merge-base', '--is-ancestor', start_sha, end_sha), limit=4096)
+        except LLMToolError:
+            _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
+        segment_paths = _diff_paths(root, start_sha, end_sha)
+        segment_developer_paths = _developer_changed_paths(
+            root, start_sha, end_sha, trusted_base_sha)
+        if (not segment_paths or not segment_developer_paths or
+                not set(segment_developer_paths).issubset(set(write_paths))):
+            _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
+        segment_tip = _developer_tip(root, start_sha, end_sha, trusted_base_sha)
+        try:
+            verify_artifact_applied(root, segment_artifact,
+                segment_digest, start_sha, segment_tip,
+                _diff_paths(root, start_sha, segment_tip), write_paths,
+                scope_paths=segment_developer_paths)
+        except LLMToolError:
+            _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
+        previous_end = end_sha
+
+
 def collect_executor_result(*, task_id, expected_common_dir, expected_root,
                            expected_branch, source_sha, task_binding,
                            expected_agent, expected_session_ref,
@@ -1544,34 +1579,8 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
         if (artifact_segments[0][2] != source_sha or
                 artifact_segments[-1][3] != snapshot.head):
             _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
-        previous_end = source_sha
-        for segment in artifact_segments:
-            segment_artifact, segment_digest, start_sha, end_sha = segment
-            if (start_sha != previous_end or
-                    type(start_sha) is not str or _HEX40.fullmatch(start_sha) is None or
-                    type(end_sha) is not str or _HEX40.fullmatch(end_sha) is None):
-                _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
-            try:
-                _git(registration.root, ('merge-base', '--is-ancestor', start_sha, end_sha),
-                     limit=4096)
-            except LLMToolError:
-                _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
-            segment_paths = _diff_paths(registration.root, start_sha, end_sha)
-            segment_developer_paths = _developer_changed_paths(
-                registration.root, start_sha, end_sha, trusted_base_sha)
-            if (not segment_paths or not segment_developer_paths or
-                    not set(segment_developer_paths).issubset(set(write_paths))):
-                _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
-            segment_tip = _developer_tip(registration.root, start_sha, end_sha,
-                                         trusted_base_sha)
-            try:
-                verify_artifact_applied(registration.root, segment_artifact,
-                    segment_digest, start_sha, segment_tip,
-                    _diff_paths(registration.root, start_sha, segment_tip), write_paths,
-                    scope_paths=segment_developer_paths)
-            except LLMToolError:
-                _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
-            previous_end = end_sha
+        _verify_artifact_segments(registration.root, artifact_segments, source_sha,
+                                  write_paths, trusted_base_sha)
     _reject_legacy_grafts(registration.root, registration.common_dir)
     return {
         'task_id': task_binding.get('task_id'), 'run_id': task_binding.get('run_id'),
@@ -1593,20 +1602,51 @@ def collect_claude_result(*, task_id, expected_common_dir, expected_root,
                           expected_branch, source_sha, task_binding,
                           expected_agent, expected_session_ref,
                           expected_native_session_id, write_paths, claude_result,
-                          trusted_base_sha=None):
-    """Verify a bound Claude result using D6 evidence, without an artifact claim."""
+                          artifact_segments=None, trusted_base_sha=None):
+    """Verify a bound Claude result using D6 evidence, without an artifact claim.
+
+    #1886: with artifact_segments, the D6 head is the Claude result plus
+    verified repairs. The first segment is the Claude result's own and carries
+    no artifact: it must run from source_sha to the recorded Claude head (or
+    that head plus clean trusted-main merges). Every later segment must carry
+    an artifact that matches its commits, ending at the D6 head.
+    """
     registration, snapshot, paths, developer_paths, patch = _collect_registered_result_diff(
         task_id=task_id, expected_common_dir=expected_common_dir,
         expected_root=expected_root, expected_branch=expected_branch,
         source_sha=source_sha, task_binding=task_binding,
         expected_agent=expected_agent, expected_session_ref=expected_session_ref,
         expected_native_session_id=expected_native_session_id,
-        write_paths=write_paths, trusted_base_sha=trusted_base_sha)
+        write_paths=write_paths, artifact_segments=artifact_segments,
+        trusted_base_sha=trusted_base_sha)
     if (type(claude_result) is not dict or
             claude_result.get('executor_task_id') != registration.task_id):
         _stop('CLAUDE_RESULT_BINDING_INVALID')
     claimed_head = claude_result.get('head_sha')
-    if claimed_head != registration.result_sha:
+    if artifact_segments is not None:
+        if (type(artifact_segments) is not list or len(artifact_segments) < 2 or
+                any(type(segment) is not tuple or len(segment) != 4
+                    for segment in artifact_segments)):
+            _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
+        own_artifact, own_digest, own_start, own_end = artifact_segments[0]
+        if (own_artifact is not None or own_digest is not None or
+                own_start != source_sha or artifact_segments[-1][3] != snapshot.head or
+                type(own_end) is not str or _HEX40.fullmatch(own_end) is None):
+            _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
+        if (type(claimed_head) is not str or _HEX40.fullmatch(claimed_head) is None or
+                claimed_head == source_sha or
+                not _is_ancestor(registration.root, source_sha, claimed_head) or
+                (claimed_head != own_end and
+                 _developer_tip(registration.root, claimed_head, own_end,
+                                trusted_base_sha) != claimed_head)):
+            _stop('CLAUDE_RESULT_BINDING_INVALID')
+        own_paths = _developer_changed_paths(registration.root, source_sha, own_end,
+                                             trusted_base_sha)
+        if not own_paths or not set(own_paths).issubset(set(write_paths)):
+            _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
+        _verify_artifact_segments(registration.root, artifact_segments[1:], own_end,
+                                  write_paths, trusted_base_sha)
+    elif claimed_head != registration.result_sha:
         # The bound result stays valid when the head only adds clean main merges.
         if (type(claimed_head) is not str or _HEX40.fullmatch(claimed_head) is None or
                 _developer_tip(registration.root, claimed_head, snapshot.head,

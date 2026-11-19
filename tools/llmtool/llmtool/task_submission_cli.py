@@ -9026,13 +9026,22 @@ def _continuation_repair_members(task, store, executor_task):
     return [members[depth] for depth in sorted(members)]
 
 
-def _continuation_dispatch_authorized(record, developer, registration):
+def _audit_worker_id(value):
+    """An audit entry's worker key read as current (retired aliases mapped)."""
+    try:
+        return worker_dispatch.stored_worker_id(value)
+    except Exception:
+        return None
+
+
+def _continuation_dispatch_authorized(record, developer):
     """#1886 A3: an ALLOWED dispatch audit binds this exact repair run.
 
     The entry must name the repair's assignment, its D6 start HEAD and its
-    contract digest, and the worker must be the D6's registered agent or the
-    worker key of the repair's route. Adapter routes also need the adapter
-    authorization of that transition, as #1928 E3 requires.
+    contract digest, and its worker must be the worker key of the repair's
+    own provider route. An authorization for another worker (the D6's
+    registered agent included) never admits the repair. Adapter routes also
+    need the adapter authorization of that transition, as #1928 E3 requires.
     """
     audit = record.get('dispatch_audit')
     binding = record.get('task_binding')
@@ -9042,21 +9051,18 @@ def _continuation_dispatch_authorized(record, developer, registration):
                 binding.get('contract_digest'))
     if any(type(value) is not str or not value for value in expected):
         return False
-    workers = set()
-    agent = getattr(registration, 'trusted_agent_id', None)
-    if type(agent) is str and agent:
-        workers.add(agent)
     profile = developer.get('provider_profile')
     try:
         route_worker = worker_dispatch.worker_key_for(profile)
     except Exception:
         route_worker = None
-    if type(route_worker) is str and route_worker:
-        workers.add(route_worker)
+    if type(route_worker) is not str or not route_worker:
+        return False
     allowed = [entry for entry in audit if type(entry) is dict and
                entry.get('action') in _CONTINUATION_DISPATCH_ACTIONS and
                entry.get('decision') == 'ALLOWED' and
-               entry.get('worker_key') in workers and
+               type(entry.get('worker_key')) is str and
+               _audit_worker_id(entry['worker_key']) == route_worker and
                (entry.get('assignment_id'), entry.get('source_sha'),
                 entry.get('contract_digest')) == expected]
     transitions = {entry['attempt_id'] for entry in allowed
@@ -9071,7 +9077,7 @@ def _continuation_dispatch_authorized(record, developer, registration):
     return True
 
 
-def _continuation_repair_entries(members, *, executor_task, registration):
+def _continuation_repair_entries(members, *, executor_task):
     """#1886: (head, responded developer or None) for each lineage member.
 
     A member with no Developer never ran in the D6 and is left out. A member
@@ -9096,7 +9102,7 @@ def _continuation_repair_entries(members, *, executor_task, registration):
             continue
         if (type(binding) is not dict or binding.get('task_id') != record.get('task_id') or
                 binding.get('run_id') != record.get('run_id') or
-                not _continuation_dispatch_authorized(record, developer, registration)):
+                not _continuation_dispatch_authorized(record, developer)):
             _artifact_chain_invalid()
         entries.append((head, developer))
     return entries
@@ -9146,12 +9152,15 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
 
     Repairs are the root Task's review and EC2 repair claims and, since #1886,
     the PM continuation repairs of its lineage on the same D6. The Claude
-    route binds no artifact, so it reads the claims only. Every segment is
-    still verified against the D6 tree by collect_executor_result.
+    record-only route binds no artifact: its own segment is (None, None,
+    source, end), bound to its recorded Claude head by collect_claude_result.
+    Every repair segment must carry an artifact. Every segment is still
+    verified against the D6 tree by collect_executor_result or
+    collect_claude_result.
     """
     claims = task.get('review_repair_claims')
-    members = ([] if _binds_no_artifact(task)
-               else _continuation_repair_members(task, store, executor_task))
+    record_only = _binds_no_artifact(task)
+    members = _continuation_repair_members(task, store, executor_task)
     if claims is None and not members:
         return None
     invalid = _artifact_chain_invalid
@@ -9187,6 +9196,15 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
         write_paths = original.get('write_paths')
         if type(write_paths) is not list:
             invalid()
+        if record_only:
+            # #1886: the Claude result itself must be recorded for this D6.
+            own = original.get('claude_result')
+            if (original.get('state') != 'DEVELOPER_RESPONDED' or
+                    original.get('artifact') is not None or type(own) is not dict or
+                    own.get('executor_task_id') != executor_task or
+                    type(own.get('head_sha')) is not str or
+                    re.fullmatch(r'[0-9a-f]{40}', own['head_sha']) is None):
+                invalid()
         registration = task_completion.read_d6_registration(
             executor_task, common_dir, allowed_states=task_completion._D6_EVIDENCE_STATES)
         if (registration.root != root or registration.branch != branch or
@@ -9225,7 +9243,7 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
             # the chain where their start HEAD falls.
             entries = _merge_repair_entries(
                 claim_entries, _continuation_repair_entries(
-                    members, executor_task=executor_task, registration=registration),
+                    members, executor_task=executor_task),
                 registration.root)
         dispatched = []
         for index, (head, developer) in enumerate(entries):
@@ -9237,15 +9255,19 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
             if (type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None or
                     head != next_head):
                 invalid()
-        artifacts = [(original.get('artifact'), original.get('artifact_sha256'),
-                      source_sha,
+        artifacts = [((None, None) if record_only else
+                      (original.get('artifact'), original.get('artifact_sha256'))) +
+                     (source_sha,
                       dispatched[0][0] if dispatched else registration.result_sha)]
         for index, (head, developer) in enumerate(dispatched):
             next_head = (dispatched[index + 1][0]
                          if index + 1 < len(dispatched) else registration.result_sha)
             artifacts.append((developer.get('artifact'), developer.get('artifact_sha256'),
                               head, next_head))
-        for segment_artifact, segment_digest, _, _ in artifacts:
+        for index, (segment_artifact, segment_digest, _, _) in enumerate(artifacts):
+            if index == 0 and record_only:
+                # The Claude result's own segment; collect_claude_result binds it.
+                continue
             if (type(segment_artifact) is not str or not segment_artifact or
                     type(segment_digest) is not str or
                     hashlib.sha256(segment_artifact.encode('utf-8')).hexdigest() !=
@@ -9279,8 +9301,7 @@ def _repair_head_admitted(task, store, evidence, *, executor_task, head):
     if not task.get('review_repair_claims'):
         # #1886: a PM continuation repair of this lineage can end the chain too.
         try:
-            if (_binds_no_artifact(task) or
-                    not _continuation_repair_members(task, store, executor_task)):
+            if not _continuation_repair_members(task, store, executor_task):
                 return False
         except Exception:
             return False
@@ -9296,16 +9317,23 @@ def _repair_head_admitted(task, store, evidence, *, executor_task, head):
             branch=evidence.get('branch'), source_sha=developer['source_sha'])
         if segments is None:
             return False
-        result = task_completion.collect_executor_result(
+        common = dict(
             task_id=executor_task, expected_common_dir=evidence.get('common_dir'),
             expected_root=root, expected_branch=evidence.get('branch'),
             source_sha=developer['source_sha'], task_binding=task['task_binding'],
             expected_agent=evidence.get('executor_identity'),
             expected_session_ref=evidence.get('executor_session_ref'),
             expected_native_session_id=evidence.get('executor_native_session_id'),
-            write_paths=developer['write_paths'], artifact=developer.get('artifact'),
-            artifact_sha256=developer.get('artifact_sha256'),
+            write_paths=developer['write_paths'],
             artifact_segments=segments, trusted_base_sha=main_sha)
+        if _binds_no_artifact(task):
+            # #1886: the Claude result plus its verified continuation repairs.
+            result = task_completion.collect_claude_result(
+                claude_result=developer.get('claude_result'), **common)
+        else:
+            result = task_completion.collect_executor_result(
+                artifact=developer.get('artifact'),
+                artifact_sha256=developer.get('artifact_sha256'), **common)
     except Exception:
         return False
     return result.get('result_head') == head
@@ -9497,7 +9525,10 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
                 expected_session_ref=initial.get('executor_session_ref'),
                 expected_native_session_id=initial.get('executor_native_session_id'),
                 write_paths=developer['write_paths'], claude_result=claude_result,
-                trusted_base_sha=main_pin['sha'])
+                trusted_base_sha=main_pin['sha'],
+                # #1886: PM continuation repairs on this D6 extend the Claude result.
+                **({'artifact_segments': artifact_segments}
+                   if artifact_segments is not None else {}))
         else:
             git_evidence = task_completion.collect_executor_result(
                 task_id=args.executor_task, expected_common_dir=initial.get('common_dir'),

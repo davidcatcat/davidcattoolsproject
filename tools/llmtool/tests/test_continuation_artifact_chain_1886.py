@@ -5,9 +5,12 @@ into the PR Task's D6. Completion used to build the artifact chain from the
 root Task's review repair claims only, so the continuation's artifact was
 missing: PR #2407 (no claims) refused DEVELOPER_ARTIFACT_RESULT_TREE_MISMATCH
 and PR #2402 (a later claim, the earlier continuation unrecorded) refused
-DEVELOPER_ARTIFACT_CHAIN_INVALID. These tests run the real chain builder and
-the real D6 artifact check on a real Git D6. The Task store is an in-memory
-double with the two reads completion uses; it has no write method.
+DEVELOPER_ARTIFACT_CHAIN_INVALID. A Claude record-only root ignored its
+continuations, so its result stayed bound to the earlier HEAD and refused
+CLAUDE_RESULT_BINDING_INVALID. A continuation is admitted only on an ALLOWED
+dispatch for its own provider route. These tests run the real chain builder
+and the real D6 artifact check on a real Git D6. The Task store is an
+in-memory double with the two reads completion uses; it has no write method.
 """
 import copy
 import hashlib
@@ -35,7 +38,12 @@ def tearDownModule(): review_trust_fixture.stop_module()
 
 CHAIN_INVALID = 'DEVELOPER_ARTIFACT_CHAIN_INVALID'
 TREE_MISMATCH = 'DEVELOPER_ARTIFACT_RESULT_TREE_MISMATCH'
+CLAUDE_BINDING = 'CLAUDE_RESULT_BINDING_INVALID'
 AGENT = 'executor-agent'
+# The worker key of each provider route. worker-dispatch.json differs between
+# hosts, so the route lookup is injected; the dispatch check itself is real.
+ROUTE_WORKERS = {'codex': 'route-codex', 'opencode': 'route-opencode',
+                 'agy': 'route-agy', 'claude': 'route-claude'}
 
 # Task id prefixes follow the Tasks named in the #1886 evidence.
 ROOT_2407 = '9f546b44' + '0' * 24
@@ -77,6 +85,10 @@ class _Store:
 class ContinuationArtifactChainTests(unittest.TestCase):
     def setUp(self):
         review_trust_fixture.install_for_case(self)
+        route_lookup = patch.object(cli.worker_dispatch, 'worker_key_for',
+                                    side_effect=ROUTE_WORKERS.get)
+        route_lookup.start()
+        self.addCleanup(route_lookup.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve()
@@ -164,14 +176,24 @@ class ContinuationArtifactChainTests(unittest.TestCase):
                           'artifact': artifact, 'artifact_sha256': _digest(artifact)},
             'completion': {'executor_task_id': self.d6},
         }
-        if profile == 'claude':
-            record['developer']['backend_session_semantics'] = 'NO_NATIVE_SESSION_ID_EXPOSED'
         if claims is not None:
             record['review_repair_claims'] = claims
         return record
 
-    def _audit(self, assignment, head, contract, *, worker=AGENT, decision='ALLOWED',
-               action='DISPATCH', label='transition', authorization=None):
+    def _claude_root(self, task_id, claude_head, *, executor=None):
+        """A Claude record-only root: no artifact, a recorded Claude result head."""
+        record = self._root(task_id, '', profile='claude')
+        record['developer'].update(
+            artifact=None, artifact_sha256=None,
+            backend_session_semantics='NO_NATIVE_SESSION_ID_EXPOSED',
+            claude_result={'executor_task_id': executor or self.d6,
+                           'head_sha': claude_head,
+                           'recorded_at': '2026-11-20T00:00:00Z'})
+        return record
+
+    def _audit(self, assignment, head, contract, *, worker=ROUTE_WORKERS['codex'],
+               decision='ALLOWED', action='DISPATCH', label='transition',
+               authorization=None):
         entry = {'attempt_id': _hex32(label + assignment), 'worker_key': worker,
                  'action': action, 'decision': decision, 'reason_code': 'ALLOWED',
                  'policy_sha256': None, 'at': '2026-11-20T00:00:00Z',
@@ -199,7 +221,8 @@ class ContinuationArtifactChainTests(unittest.TestCase):
                                         'contract_digest': contract},
             'developer': developer,
             'completion': {'executor_task_id': executor or self.d6},
-            'dispatch_audit': ([self._audit(assignment, head, contract)]
+            'dispatch_audit': ([self._audit(assignment, head, contract,
+                                            worker=ROUTE_WORKERS[profile])]
                                if audit is None else audit),
         }
         if continues is not None:
@@ -401,6 +424,10 @@ class ContinuationArtifactChainTests(unittest.TestCase):
             'none': [],
             'blocked': [self._audit(assignment, first, contract, decision='BLOCKED')],
             'other worker': [self._audit(assignment, first, contract, worker='other-agent')],
+            # F2: the D6's registered agent is not the continuation's route.
+            'D6 registered agent': [self._audit(assignment, first, contract, worker=AGENT)],
+            'another route': [self._audit(assignment, first, contract,
+                                          worker=ROUTE_WORKERS['agy'])],
             'other assignment': [self._audit(_hex32('other'), first, contract)],
             'other head': [self._audit(assignment, self.source_sha, contract)],
             'other contract': [self._audit(assignment, first, _digest('other'))],
@@ -416,7 +443,8 @@ class ContinuationArtifactChainTests(unittest.TestCase):
         assignment = _hex32('assignment ' + task_id)
         contract = _digest('contract ' + task_id)
         root, store, (_, first, head) = self._pr_2407()
-        transition = self._audit(assignment, first, contract)
+        opencode = ROUTE_WORKERS['opencode']
+        transition = self._audit(assignment, first, contract, worker=opencode)
         records = store.snapshot()
         artifact = records[task_id]['developer']['artifact']
         only_transition = self._continuation(task_id, CONT_2407_FIRST, first, artifact,
@@ -424,8 +452,48 @@ class ContinuationArtifactChainTests(unittest.TestCase):
         records[task_id] = only_transition
         self.assertEqual(self._refusal(root, _Store(*records.values())), CHAIN_INVALID)
 
-        adapted = self._audit(assignment, first, contract, label='adapter',
-                              authorization=transition['attempt_id'])
+        adapted = self._audit(assignment, first, contract, worker=opencode,
+                              label='adapter', authorization=transition['attempt_id'])
+        records[task_id] = self._continuation(task_id, CONT_2407_FIRST, first, artifact,
+                                              profile='opencode',
+                                              audit=[transition, adapted])
+        self.assertEqual(self._complete(root, _Store(*records.values()))['result_head'],
+                         head)
+
+    def test_continuation_needs_the_authorization_of_its_own_route(self):
+        """F2: an ALLOWED audit for another worker never admits the repair.
+
+        The continuation is recorded as opencode. An agy (or D6 agent)
+        transition with a matching adapter entry, assignment, start HEAD and
+        contract is still not an opencode-developer authorization.
+        """
+        task_id = CONT_2407_SECOND
+        assignment = _hex32('assignment ' + task_id)
+        contract = _digest('contract ' + task_id)
+        root, store, (_, first, head) = self._pr_2407()
+        records = store.snapshot()
+        artifact = records[task_id]['developer']['artifact']
+        for name, worker in (('agy route', ROUTE_WORKERS['agy']), ('D6 agent', AGENT),
+                             ('codex route', ROUTE_WORKERS['codex'])):
+            with self.subTest(worker=name):
+                transition = self._audit(assignment, first, contract, worker=worker)
+                adapted = self._audit(assignment, first, contract, worker=worker,
+                                      label='adapter',
+                                      authorization=transition['attempt_id'])
+                changed = dict(records)
+                changed[task_id] = self._continuation(
+                    task_id, CONT_2407_FIRST, first, artifact, profile='opencode',
+                    audit=[transition, adapted])
+                self.assertEqual(self._refusal(root, _Store(*changed.values())),
+                                 CHAIN_INVALID)
+        # A route with no worker key has no authorization at all.
+        with patch.object(cli.worker_dispatch, 'worker_key_for', return_value=None):
+            self.assertEqual(self._refusal(root, store), CHAIN_INVALID)
+        # Control: the same entries for the opencode worker complete.
+        opencode = ROUTE_WORKERS['opencode']
+        transition = self._audit(assignment, first, contract, worker=opencode)
+        adapted = self._audit(assignment, first, contract, worker=opencode,
+                              label='adapter', authorization=transition['attempt_id'])
         records[task_id] = self._continuation(task_id, CONT_2407_FIRST, first, artifact,
                                               profile='opencode',
                                               audit=[transition, adapted])
@@ -585,17 +653,102 @@ class ContinuationArtifactChainTests(unittest.TestCase):
         bare = self._register_head(self._commit('# bare change with no record\n'))
         self.assertFalse(self._head_admitted(root, store, original, bare))
 
-    def test_claude_route_reads_the_claims_only(self):
-        root, store, _ = self._pr_2407()
-        claude_root = self._root(ROOT_2407, root['developer']['artifact'], profile='claude')
+    # -- F1: a Claude-authored root with PM continuation repairs ---------
+
+    def _claude_2407(self):
+        """The PR #2407 shape under a Claude record-only root Task."""
+        original = self._commit('# original change\n')
+        first = self._commit('# continuation repair one\n')
+        head = self._register_head(self._commit('# continuation repair two\n'))
+        root = self._claude_root(ROOT_2407, original)
+        store = _Store(
+            root,
+            self._continuation(CONT_2407_FIRST, ROOT_2407, original,
+                               self._artifact(original, first)),
+            self._continuation(CONT_2407_SECOND, CONT_2407_FIRST, first,
+                               self._artifact(first, head)))
+        return root, store, (original, first, head)
+
+    def _collect_claude(self, root_record, segments):
+        developer = root_record['developer']
+        kwargs = dict(
+            task_id=self.d6, expected_common_dir=self.common, expected_root=str(self.root),
+            expected_branch='feat/executor', source_sha=self.source_sha,
+            task_binding=root_record['task_binding'], expected_agent=AGENT,
+            expected_session_ref='Executor D6 session',
+            expected_native_session_id='native-executor',
+            write_paths=developer['write_paths'],
+            claude_result=developer['claude_result'], trusted_base_sha=self.source_sha)
+        if segments is not None:
+            kwargs['artifact_segments'] = segments
+        return task_completion.collect_claude_result(**kwargs)
+
+    def _claude_refusal(self, root_record, store):
+        with self.assertRaises(LLMToolError) as raised:
+            self._collect_claude(root_record, self._segments(root_record, store))
+        return getattr(raised.exception, 'completion_code', None)
+
+    def test_claude_root_continuation_refused_before_and_completes_at_its_later_head(self):
+        root, store, (original, first, head) = self._claude_2407()
+        # Before #1886 F1: the continuations were not read, so the Claude result
+        # bound to the earlier HEAD refused the later D6 head.
+        self.assertIsNone(self._segments(root, self._claims_only(store)))
+        self.assertEqual(self._claude_refusal(root, self._claims_only(store)),
+                         CLAUDE_BINDING)
+
+        segments = self._segments(root, store)
+        self.assertEqual(segments[0], (None, None, self.source_sha, original))
+        self.assertEqual([segment[2:] for segment in segments],
+                         [(self.source_sha, original), (original, first), (first, head)])
+        result = self._collect_claude(root, segments)
+        self.assertEqual(result['result_head'], head)
+        self.assertEqual(result['task_id'], root['task_binding']['task_id'])
+        self.assertEqual(result['run_id'], root['task_binding']['run_id'])
+        self.assertEqual(result['source_sha'], self.source_sha)
+
+    def test_claude_root_later_head_admits_review_and_test_evidence_only_with_its_chain(self):
+        root, store, (original, _, head) = self._claude_2407()
+        self.assertTrue(self._head_admitted(root, store, original, head))
+        self.assertFalse(self._head_admitted(root, self._claims_only(store), original, head))
+        bare = self._register_head(self._commit('# bare change with no record\n'))
+        self.assertFalse(self._head_admitted(root, store, original, bare))
+
+    def test_claude_root_chain_keeps_every_check(self):
+        root, store, (original, first, head) = self._claude_2407()
         records = store.snapshot()
-        records[ROOT_2407] = claude_root
-        changed = _Store(*records.values())
-        self.assertIsNone(self._segments(claude_root, changed))
-        with self._main_is(self.source_sha):
-            self.assertFalse(cli._repair_head_admitted(
-                claude_root, changed, {'root': str(self.root)}, executor_task=self.d6,
-                head=self._git('rev-parse', 'HEAD')))
+        # The Claude result must be the head the first continuation started on.
+        moved = self._claude_root(ROOT_2407, first)
+        moved_store = _Store(*{**records, ROOT_2407: moved}.values())
+        self.assertEqual(self._claude_refusal(moved, moved_store), CLAUDE_BINDING)
+        # A Claude result recorded for another D6 is not this chain's start.
+        other = self._claude_root(ROOT_2407, original, executor='other-d6-task')
+        with self.assertRaises(LLMToolError) as raised:
+            self._segments(other, _Store(*{**records, ROOT_2407: other}.values()))
+        self.assertEqual(raised.exception.completion_code, CHAIN_INVALID)
+        # A continuation artifact that differs from its commits (A2).
+        forged_records = store.snapshot()
+        second = forged_records[CONT_2407_SECOND]
+        forged = second['developer']['artifact'].replace(
+            '+# continuation repair two', '+# something the commit does not hold')
+        second['developer'].update(artifact=forged, artifact_sha256=_digest(forged))
+        self.assertEqual(self._claude_refusal(root, _Store(*forged_records.values())),
+                         CHAIN_INVALID)
+        # A continuation authorized for another route (A3, F2).
+        assignment = _hex32('assignment ' + CONT_2407_SECOND)
+        contract = _digest('contract ' + CONT_2407_SECOND)
+        wrong_route = self._with_second(store, first, audit=[
+            self._audit(assignment, first, contract, worker=ROUTE_WORKERS['claude'])])
+        self.assertEqual(self._claude_refusal(root, wrong_route), CHAIN_INVALID)
+        # The chain segments are never accepted by the artifact-bound collector.
+        with self.assertRaises(LLMToolError) as raised:
+            self._collect(dict(root, developer=dict(
+                root['developer'], artifact='', artifact_sha256=_digest(''))),
+                self._segments(root, store))
+        self.assertEqual(raised.exception.completion_code, CHAIN_INVALID)
+        # An unrecorded commit after the last continuation (A2).
+        self._register_head(self._commit('# bare change with no record\n'))
+        self.assertEqual(self._claude_refusal(root, store), CHAIN_INVALID)
+        self.assertEqual(store.snapshot(), records)
 
 
 if __name__ == '__main__':
