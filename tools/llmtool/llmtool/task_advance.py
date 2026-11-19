@@ -1891,6 +1891,73 @@ def _record_d6_result(*, task_id, canonical_root, root, write_paths=None):
                                  write_paths=write_paths)
 
 
+def _publish_base_commits(git_runner, root, remote_head):
+    """Return the published commits that bound what HEAD adds (#2367 A-sec).
+
+    Only the remote's own answer counts: this branch's head from ls-remote and
+    the remote main tip when that commit is present locally. Local refs are
+    never a base, because a D6 writer that can commit can also move them. With
+    no base the added commits are unknown, so publish fails closed.
+    """
+    bases = [remote_head] if remote_head else []
+    listed = _publish_command(git_runner, root,
+        ['ls-remote', '--heads', 'origin', 'refs/heads/main'])
+    for line in listed.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or _HEX40.fullmatch(parts[0]) is None:
+            raise _PublishRefusal('PUBLISH_REMOTE_UNAVAILABLE')
+        if parts[1] != 'refs/heads/main':
+            continue
+        try:
+            present = git_runner(root, ['cat-file', '-e', f'{parts[0]}^{{commit}}'])
+        except Exception:
+            raise _PublishRefusal('PUBLISH_COMMAND_FAILED') from None
+        if getattr(present, 'returncode', 1) == 0:
+            bases.append(parts[0])
+    if not bases:
+        raise _PublishRefusal('PUBLISH_BINDING_UNAVAILABLE')
+    return bases
+
+
+def _publish_committed_paths(git_runner, root, bases):
+    """Return every path the commits HEAD adds over bases introduce.
+
+    Each commit is read on its own, so a path added and later removed still
+    counts. A one-parent commit introduces each path it changes. A merge
+    introduces the paths that differ from every parent; any other path holds
+    one parent's version, and that parent is either one of these commits or
+    already published. A parentless commit introduces its whole tree. Grafts
+    are refused and replace refs ignored, so the walk sees what push sends.
+    """
+    try:
+        # A graft file could rewrite the parents the walk reads.
+        task_completion._reject_legacy_grafts(root)
+    except Exception:
+        raise _PublishRefusal('PUBLISH_COMMAND_FAILED') from None
+    listed = _publish_command(git_runner, root,
+        ['--no-replace-objects', 'rev-list', '--parents', 'HEAD', '--not', *bases])
+    paths = set()
+    for line in listed.splitlines():
+        shas = line.split()
+        if not shas or any(_HEX40.fullmatch(sha) is None for sha in shas):
+            raise _PublishRefusal('PUBLISH_COMMAND_FAILED')
+        commit, parents = shas[0], shas[1:]
+        if not parents:
+            raw = _publish_command(git_runner, root,
+                ['--no-replace-objects', 'ls-tree', '-r', '--name-only', '-z', commit])
+            paths.update(path for path in raw.split('\0') if path)
+            continue
+        introduced = None
+        for parent in parents:
+            raw = _publish_command(git_runner, root,
+                ['--no-replace-objects', 'diff', '--no-renames', '--name-only', '-z',
+                 parent, commit])
+            changed = {path for path in raw.split('\0') if path}
+            introduced = changed if introduced is None else introduced & changed
+        paths.update(introduced)
+    return paths
+
+
 def _publish_task(record, d6, executor_task, *, pre_pr_gate, git_runner=None,
                   gh_runner=None, record_result_call=None):
     """Commit scoped D6 changes, record the result and push the branch.
@@ -1956,6 +2023,14 @@ def _publish_task(record, d6, executor_task, *, pre_pr_gate, git_runner=None,
             raise _PublishRefusal('PUBLISH_COMMAND_FAILED') from None
         if getattr(ancestor, 'returncode', 1) != 0:
             raise _PublishRefusal('PUBLISH_NON_FAST_FORWARD')
+
+    # #2367 A-sec: commits already on HEAD (an earlier publish or the D6
+    # writer) pass the same write-scope check as uncommitted changes, before
+    # this publish commits, records or pushes anything.
+    bases = _publish_base_commits(git_runner, root, remote_head)
+    if any(path not in write_paths
+           for path in _publish_committed_paths(git_runner, root, bases)):
+        raise _PublishRefusal('PUBLISH_OUT_OF_SCOPE')
 
     if changed:
         _publish_command(git_runner, root, ['add', '--', *changed])

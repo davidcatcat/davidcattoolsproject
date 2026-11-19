@@ -2475,6 +2475,8 @@ class TaskAdvancePublishTests(unittest.TestCase):
             stream.write('value = 1\n')
         self.git(['add', '--', 'outside/source.py'], cwd=self.root)
         self.git(['commit', '-m', 'add outside source'], cwd=self.root)
+        # Published, so only the staged rename (not this commit) is under test.
+        self.git(['push', 'origin', f'HEAD:refs/heads/{self.BRANCH}'], cwd=self.root)
         self.initial_head = self.git(['rev-parse', 'HEAD'], cwd=self.root).strip()
         os.mkdir(os.path.join(self.root, 'inside'))
         self.git(['mv', 'outside/source.py', 'inside/source.py'], cwd=self.root)
@@ -2646,6 +2648,110 @@ class TaskAdvancePublishTests(unittest.TestCase):
         self.assertEqual(self.pushed_head(), head)
         self.assertEqual(len(self.recorded), 1)
 
+    # #2367 A-sec (Codex security v91 on PR #2389): commits already on HEAD get
+    # the same write-scope check as uncommitted changes before any record or push.
+
+    def commit_file(self, path, text, message):
+        with open(os.path.join(self.root, path), 'w', encoding='utf-8') as stream:
+            stream.write(text)
+        self.git(['add', '--', path], cwd=self.root)
+        self.git(['commit', '-m', message], cwd=self.root)
+        return self.head()
+
+    def remote_branch_head(self):
+        listed = self.git(['ls-remote', 'origin', f'refs/heads/{self.BRANCH}'],
+                          cwd=self.root).split()
+        return listed[0] if listed else None
+
+    def merge_published_main(self, *, commit=True):
+        """Merge a moved origin/main into a head that has its own commit."""
+        self.move_main('main-file.txt', 'main\n')
+        self.git(['fetch', '-q', 'origin', 'main'], cwd=self.root)
+        self.git(['merge', '--no-ff', '--no-edit' if commit else '--no-commit', 'FETCH_HEAD'],
+                 cwd=self.root)
+
+    def assert_refused_unpublished(self, code, head, remote_head):
+        runner, calls = self.recording_git_runner()
+        with self.assertRaises(task_advance._PublishRefusal) as caught:
+            self.publish(git_runner=runner)
+        self.assertEqual(caught.exception.code, code)
+        self.assertEqual(self.head(), head)
+        self.assertEqual(self.remote_branch_head(), remote_head)
+        self.assertEqual(self.recorded, [])
+        self.assertFalse(any(args[:1] in (['add'], ['commit'], ['push']) for args in calls))
+        self.assertFalse(any(args[:2] == ['pr', 'create'] for args in self.gh_calls))
+
+    def test_committed_out_of_scope_head_is_refused_before_record_or_push(self):
+        self.commit_file('allowed.txt', 'published\n', 'in scope')
+        head = self.commit_file('outside.txt', 'outside\n', 'out of scope')
+
+        self.assert_refused_unpublished('PUBLISH_OUT_OF_SCOPE', head, self.initial_head)
+
+    def test_committed_out_of_scope_path_later_removed_is_still_refused(self):
+        """Push sends every commit, so each one is checked, not only the net diff."""
+        self.commit_file('outside.txt', 'outside\n', 'add outside')
+        self.git(['rm', '-q', '--', 'outside.txt'], cwd=self.root)
+        self.git(['commit', '-m', 'remove outside'], cwd=self.root)
+        head = self.commit_file('allowed.txt', 'published\n', 'in scope')
+
+        self.assert_refused_unpublished('PUBLISH_OUT_OF_SCOPE', head, self.initial_head)
+
+    def test_committed_out_of_scope_head_refuses_before_publish_commits_new_changes(self):
+        head = self.commit_file('outside.txt', 'outside\n', 'out of scope')
+        self.change_file()
+
+        self.assert_refused_unpublished('PUBLISH_OUT_OF_SCOPE', head, self.initial_head)
+        self.assertEqual(self.git(['status', '--porcelain'], cwd=self.root), ' M allowed.txt\n')
+
+    def test_committed_head_merging_published_main_publishes(self):
+        """Paths a merge takes unchanged from published main are not the Task's changes."""
+        self.commit_file('allowed.txt', 'published\n', 'in scope')
+        self.merge_published_main()
+        head = self.head()
+        runner, calls = self.recording_git_runner()
+
+        result = self.publish(git_runner=runner)
+
+        self.assert_no_main_sync(calls)
+        self.assertEqual(result, {'pr': 23, 'head': head})
+        self.assertEqual(self.pushed_head(), head)
+        self.assertEqual(len(self.recorded), 1)
+
+    def test_committed_merge_adding_out_of_scope_path_is_refused(self):
+        """A path that differs from every merge parent is the merge's own change."""
+        self.commit_file('allowed.txt', 'published\n', 'in scope')
+        self.merge_published_main(commit=False)
+        with open(os.path.join(self.root, 'outside.txt'), 'w', encoding='utf-8') as stream:
+            stream.write('outside\n')
+        self.git(['add', '--', 'outside.txt'], cwd=self.root)
+        self.git(['commit', '--no-edit'], cwd=self.root)
+
+        self.assert_refused_unpublished('PUBLISH_OUT_OF_SCOPE', self.head(), self.initial_head)
+
+    def test_unpushed_branch_is_checked_over_published_main(self):
+        self.git(['push', '-q', 'origin', '--delete', self.BRANCH], cwd=self.root)
+        head = self.commit_file('outside.txt', 'outside\n', 'out of scope')
+
+        self.assert_refused_unpublished('PUBLISH_OUT_OF_SCOPE', head, None)
+
+    def test_unpushed_in_scope_head_publishes_over_published_main(self):
+        self.git(['push', '-q', 'origin', '--delete', self.BRANCH], cwd=self.root)
+        head = self.commit_file('allowed.txt', 'published\n', 'in scope')
+
+        result = self.publish()
+
+        self.assertEqual(result, {'pr': 23, 'head': head})
+        self.assertEqual(self.pushed_head(), head)
+        self.assertEqual(len(self.recorded), 1)
+
+    def test_no_published_base_in_the_d6_fails_closed(self):
+        """Unpushed branch and a main tip this D6 does not hold: added commits are unknown."""
+        self.git(['push', '-q', 'origin', '--delete', self.BRANCH], cwd=self.root)
+        self.move_main('main-file.txt', 'main\n')
+        head = self.commit_file('allowed.txt', 'published\n', 'in scope')
+
+        self.assert_refused_unpublished('PUBLISH_BINDING_UNAVAILABLE', head, None)
+
 
 class TaskAdvancePublishLookupTests(unittest.TestCase):
     def setUp(self):
@@ -2789,6 +2895,7 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
         """Fake-git publish. main_state is what a main sync would see; the fake still
         answers fetch and merge so a reintroduced sync shows up in git_calls."""
         initial_head, committed_head, merged_head = 'a' * 40, 'b' * 40, 'c' * 40
+        main_head = 'd' * 40
         state = {'head': committed_head if committed_before else initial_head}
         events = []
         git_calls = []
@@ -2811,6 +2918,17 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
                 return result(args, output=b'' if committed_before else b'allowed.txt\0')
             if args == ['ls-remote', '--heads', 'origin', 'refs/heads/feature/task']:
                 return result(args, output=f'{initial_head}\trefs/heads/feature/task\n'.encode())
+            if args == ['ls-remote', '--heads', 'origin', 'refs/heads/main']:
+                return result(args, output=f'{main_head}\trefs/heads/main\n'.encode())
+            if args == ['cat-file', '-e', f'{main_head}^{{commit}}']:
+                return result(args)
+            if args == ['--no-replace-objects', 'rev-list', '--parents', 'HEAD', '--not',
+                        initial_head, main_head]:
+                return result(args, output=(f'{committed_head} {initial_head}\n'.encode()
+                                            if committed_before else b''))
+            if args == ['--no-replace-objects', 'diff', '--no-renames', '--name-only', '-z',
+                        initial_head, committed_head]:
+                return result(args, output=b'allowed.txt\0')
             if args == ['rev-parse', '--verify', 'HEAD']:
                 return result(args, output=(state['head'] + '\n').encode())
             if args == ['merge-base', '--is-ancestor', initial_head, 'HEAD']:
@@ -2856,9 +2974,11 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
                    'branch': 'feature/task', 'task_id': '3' * 32,
                    'recorded_result_head': initial_head}
         try:
-            value = task_advance._publish_task(record, binding, '3' * 32,
-                pre_pr_gate=lambda _head, _branch: None,
-                git_runner=git, gh_runner=gh, record_result_call=record_result)
+            # The fake D6 root is not a directory; the graft check reads a real one.
+            with patch.object(task_advance.task_completion, '_reject_legacy_grafts'):
+                value = task_advance._publish_task(record, binding, '3' * 32,
+                    pre_pr_gate=lambda _head, _branch: None,
+                    git_runner=git, gh_runner=gh, record_result_call=record_result)
         except task_advance._PublishRefusal as exc:
             value = exc.code
         return value, events, git_calls, committed_head, merged_head
@@ -2901,6 +3021,10 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
         self.assertFalse(any(args[:1] in (['add'], ['commit']) for args in git_calls))
         self.assert_no_main_sync(git_calls)
         self.assert_recorded_then_pushed(events, committed)
+        # #2367 A-sec: the committed head's own diff is scope-checked before it is recorded.
+        screened = events.index(('git', ('--no-replace-objects', 'diff', '--no-renames',
+                                         '--name-only', '-z', 'a' * 40, committed)))
+        self.assertLess(screened, events.index(('record', committed)))
 
 
 
