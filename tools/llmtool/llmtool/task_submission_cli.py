@@ -7555,6 +7555,108 @@ def _launched_run_did_no_work(developer, d6_unchanged=None):
         return False
 
 
+# #2367 P0-B (Owner #2383 B): progress keys that name changed work. A present
+# one must be empty for a stop to prove no work.
+_PROGRESS_WORK_MARKERS = ('changed', 'diff', 'files', 'artifact')
+
+
+def _empty_value(value):
+    return (value is None or (type(value) in (list, dict, str) and not value) or
+            (type(value) is int and value == 0))
+
+
+def _no_recorded_change(developer, record):
+    """True only when a stopped run's record shows no change to its D6 (#2367 P0-B).
+
+    Required: artifact and artifact_sha256 present and None; changed_files
+    absent or an empty list; a 40-hex source_sha; any progress a dict whose
+    head, when set, is the source_sha and whose changed-work keys are empty;
+    and no result head in the Task completion or the run's result callback
+    (lineage_counts.recorded_result_heads, any non-None head included). A
+    missing record, any other shape or any doubt is False: the run counts.
+    """
+    from . import lineage_counts
+    if type(developer) is not dict or type(record) is not dict:
+        return False
+    if not all(key in developer and developer[key] is None
+               for key in ('artifact', 'artifact_sha256')):
+        return False
+    if 'changed_files' in developer:
+        changed_files = developer['changed_files']
+        if type(changed_files) is not list or changed_files:
+            return False
+    source_sha = developer.get('source_sha')
+    if type(source_sha) is not str or re.fullmatch(r'[0-9a-f]{40}', source_sha) is None:
+        return False
+    if 'progress' in developer:
+        progress = developer['progress']
+        if type(progress) is not dict:
+            return False
+        for key, value in progress.items():
+            if type(key) is not str:
+                return False
+            if key == 'head' and value is not None and value != source_sha:
+                return False
+            if (any(marker in key.lower() for marker in _PROGRESS_WORK_MARKERS) and
+                    not _empty_value(value)):
+                return False
+    holders = [record]
+    if 'direct_result_callback' in developer:
+        holders.append({'completion': developer['direct_result_callback']})
+    for holder in holders:
+        if lineage_counts.recorded_result_heads(holder) != set():
+            return False
+        completion = holder.get('completion')
+        evidence = completion.get('evidence') if type(completion) is dict else None
+        if type(evidence) is dict:
+            result = evidence.get('result')
+            if (evidence.get('result_head') is not None or
+                    (type(result) is dict and result.get('result_head') is not None)):
+                return False
+    return True
+
+
+def _evidenced_no_work_stop(developer, record):
+    """True only when a stopped run's execution evidence proves no effective work.
+
+    #2367 P0-B (Owner #2383 B): a provider quota stop or a Claude NO_CHANGES
+    run is not an effective repair when its record proves it changed nothing.
+    The record must be BLOCKED with a known (non-UNKNOWN) error code and
+    execution status, show no change (_no_recorded_change), and either:
+
+    - carry route-returned provider evidence condition QUOTA_EXHAUSTED; or
+    - be a Claude CLAUDE_NO_CHANGES whose returned result shows the process
+      exited 0 with cleanup CONFIRMED (the delegate raises CLAUDE_NO_CHANGES
+      only after it found the D6 head unmoved and no worktree diff). The error
+      code alone never proves it.
+
+    Anything else, UNKNOWN or malformed, is False, so the run still counts.
+    This reads the record as stored and never changes it.
+    """
+    if type(developer) is not dict or developer.get('state') != 'BLOCKED':
+        return False
+    error_code = developer.get('error_code')
+    if type(error_code) is not str or not error_code or 'UNKNOWN' in error_code:
+        return False
+    execution = developer.get('execution')
+    if type(execution) is not dict:
+        return False
+    status = execution.get('status')
+    if type(status) is not str or 'UNKNOWN' in status:
+        return False
+    if not _no_recorded_change(developer, record):
+        return False
+    provider_evidence = execution.get('provider_evidence')
+    if (type(provider_evidence) is dict and
+            provider_evidence.get('condition') == 'QUOTA_EXHAUSTED'):
+        return True
+    exit_code = execution.get('process_exit_code')
+    return (developer.get('provider_profile') == 'claude' and
+            error_code == 'CLAUDE_NO_CHANGES' and status == 'BLOCKED' and
+            type(exit_code) is int and exit_code == 0 and
+            execution.get('cleanup_status') == 'CONFIRMED')
+
+
 def _collect_ec2_repair_task_ids(record, new_ids, legacy_ids):
     """Add the repair Task ids of a record's EC2 repair claims to the two sets.
 
@@ -7713,7 +7815,10 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
     policy.json) needs a confirmed root cause, bound by the High Debug
     arguments or by the repair packet; from repair #3 on the one taken before
     repair #2 covers it (#2367). A recorded start failure is not a run
-    (#2367 A4). This check never changes a Task.
+    (#2367 A4), nor is a quota or Claude NO_CHANGES stop whose execution
+    evidence proves no effective work (#2367 P0-B, _evidenced_no_work_stop);
+    an UNKNOWN or possibly side-effecting run still counts. This check never
+    changes a Task.
     """
     executor_task = getattr(args, 'executor_task', None)
     current_task_id = getattr(args, 'task_id', None)
@@ -7752,7 +7857,7 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
             _check_developer_screen_disposition(store, task_id, developer)
             if _recorded_start_failure(record):
                 continue
-            stamp = _repair_run_stamp(task_id, developer, d6_unchanged)
+            stamp = _repair_run_stamp(task_id, developer, d6_unchanged, record=record)
             if stamp is None:
                 continue
             counted.append(task_id)
@@ -7807,12 +7912,14 @@ def _d6_unchanged_probe(args, d6_binding):
     return d6_unchanged
 
 
-def _repair_run_stamp(task_id, developer, d6_unchanged):
+def _repair_run_stamp(task_id, developer, d6_unchanged, record=None):
     """The assignment time of a counted Developer run, or None for a skipped one.
 
-    Skipped: no Developer, a known prelaunch refusal, or a launched run whose
-    record proves it did no work. A malformed record or assignment time
-    refuses DELEGATE_REPAIR_COUNT_UNAVAILABLE.
+    Skipped: no Developer, a known prelaunch refusal, a launched run whose
+    record proves it did no work, or (#2367 P0-B, with the Task record) a
+    quota or Claude NO_CHANGES stop whose execution evidence proves no
+    effective work. A malformed record or assignment time refuses
+    DELEGATE_REPAIR_COUNT_UNAVAILABLE.
     """
     if developer is None:
         return None
@@ -7841,6 +7948,8 @@ def _repair_run_stamp(task_id, developer, d6_unchanged):
             changed_files_empty and 'progress' not in developer):
         return None
     if _launched_run_did_no_work(developer, d6_unchanged):
+        return None
+    if _evidenced_no_work_stop(developer, record):
         return None
     created_at = developer.get('created_at')
     try:
@@ -8049,7 +8158,12 @@ def _delegate_chain_view(store, task_id, executor_task):
 
 
 def _check_chain_repair_count(args, store, d6_binding, policy, view):
-    """The chain-wide Developer repair cap over every view member but the Task."""
+    """The chain-wide Developer repair cap over every view member but the Task.
+
+    #2367 P0-B: every chain member is read as stored, on any Task, D6, PR or
+    route; the count never resets. The first effective run is the original
+    run; a run is skipped only on the _repair_run_stamp evidence.
+    """
     task_id = getattr(args, 'task_id', None)
     executor_task = getattr(args, 'executor_task', None)
     same_d6 = _d6_unchanged_probe(args, d6_binding)
@@ -8069,7 +8183,8 @@ def _check_chain_repair_count(args, store, d6_binding, policy, view):
                  completion.get('executor_task_id') == executor_task)
         # A run on another D6 is never proved unchanged by this D6's tree.
         stamp = _repair_run_stamp(member_id, record.get('developer'),
-                                  same_d6 if on_d6 else (lambda _source_sha: False))
+                                  same_d6 if on_d6 else (lambda _source_sha: False),
+                                  record=record)
         if stamp is None:
             continue
         counted.append(member_id)

@@ -1166,6 +1166,112 @@ class LaunchedNoWorkRepairCountTests(unittest.TestCase):
         self._assert_counted(_no_work())
 
 
+_EARLIER_HEAD = 'b' * 40
+
+
+def _quota_stop(**overrides):
+    # #2367 P0-B: a Claude quota stop as stored (PR #2383 round 30f92678 shape).
+    developer = _no_work(
+        state='BLOCKED', provider_profile='claude', error_code='CLAUDE_QUOTA_EXHAUSTED',
+        source_sha=_EARLIER_HEAD, progress={'head': _EARLIER_HEAD},
+        execution={'status': 'BLOCKED', 'process_exit_code': 1,
+                   'cleanup_status': 'UNKNOWN', 'usage_source': 'UNKNOWN',
+                   'provider_evidence': {'condition': 'QUOTA_EXHAUSTED'}})
+    developer.update(overrides)
+    return developer
+
+
+def _no_changes_stop(**overrides):
+    # #2367 P0-B: a Claude NO_CHANGES run as stored (PR #2383 round 198e4ead shape).
+    developer = _no_work(
+        state='BLOCKED', provider_profile='claude', error_code='CLAUDE_NO_CHANGES',
+        source_sha=_EARLIER_HEAD,
+        execution={'status': 'BLOCKED', 'process_exit_code': 0,
+                   'cleanup_status': 'CONFIRMED', 'usage_source': 'CLI_REPORTED',
+                   'provider_evidence': {'accepted': True, 'basis': 'CLI_USAGE'}})
+    developer.update(overrides)
+    return developer
+
+
+class EvidencedNoWorkStopRepairCountTests(unittest.TestCase):
+    """#2367 P0-B: on one D6, a proved quota or NO_CHANGES stop is not a repair.
+
+    Each stop ran on an earlier D6 head, so the live D6 probe cannot prove it
+    unchanged; before P0-B it counted. Its own execution evidence now decides.
+    """
+
+    _NEWEST = '00000000000000000000000000000000'
+
+    def setUp(self):
+        _patch_trust_and_binding(
+            self, binding=(SimpleNamespace(root='/d6'), SimpleNamespace(head=_HEAD)))
+        for target, kwargs in (
+                ((task_submission_cli.task_completion, '_worktree_diff'),
+                 {'return_value': ([], b'')}),
+                ((task_submission_cli, '_git_status_paths'), {'return_value': ()}),
+                ((task_submission_cli.start_failure, 'record_checks'),
+                 {'return_value': SimpleNamespace(start_failure=False)})):
+            started = patch.object(*target, **kwargs)
+            started.start()
+            self.addCleanup(started.stop)
+
+    def _store(self, developer):
+        # At the review limit: a skip leaves repair #5, which the High Debug covers.
+        store = _Store(count=_REVIEW_LIMIT, diagnosis=_diagnosis([_entry()]))
+        store.records[self._NEWEST]['developer'] = developer
+        return store
+
+    def _assert_skipped(self, developer):
+        store = self._store(developer)
+        before = copy.deepcopy(store.records)
+        self.assertIsNone(task_submission_cli._check_delegate_repair_cap(_args(), store))
+        self.assertEqual(store.writes, [])
+        self.assertEqual(store.records, before)
+
+    def _assert_counted(self, developer):
+        store = self._store(developer)
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_REPAIR_LIMIT_REACHED$'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.writes, [])
+
+    def test_quota_stop_without_change_is_skipped(self):
+        self._assert_skipped(_quota_stop())
+
+    def test_no_changes_run_with_returned_result_is_skipped(self):
+        self._assert_skipped(_no_changes_stop())
+
+    def test_quota_stop_that_changed_files_counts(self):
+        for developer in (_quota_stop(changed_files=['src/main.py']),
+                          _quota_stop(progress={'head': _EARLIER_HEAD,
+                                                'changed_files': ['src/main.py']}),
+                          _quota_stop(progress={'head': 'c' * 40}),
+                          _quota_stop(artifact_sha256='0' * 64)):
+            with self.subTest(developer=developer):
+                self._assert_counted(developer)
+
+    def test_unknown_or_unproved_stops_count(self):
+        for developer in (
+                _quota_stop(state='DEVELOPER_OUTCOME_UNKNOWN'),
+                _quota_stop(error_code='CLAUDE_RESULT_UNKNOWN'),
+                _no_changes_stop(execution=None),
+                _no_changes_stop(execution={'status': 'BLOCKED', 'process_exit_code': 0,
+                                            'cleanup_status': 'UNKNOWN'}),
+                _no_changes_stop(execution={'status': 'UNKNOWN', 'process_exit_code': 0,
+                                            'cleanup_status': 'CONFIRMED'}),
+                _no_changes_stop(provider_profile='codex')):
+            with self.subTest(developer=developer):
+                self._assert_counted(developer)
+
+    def test_stop_with_a_result_head_counts(self):
+        store = self._store(_no_changes_stop())
+        store.records[self._NEWEST]['completion'] = {
+            'executor_task_id': _EXECUTOR_TASK,
+            'evidence': {'source_sha': _EARLIER_HEAD, 'result_head': 'c' * 40}}
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_REPAIR_LIMIT_REACHED$'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.writes, [])
+
+
 class HighDebugRunBindingTests(unittest.TestCase):
     """#914: at repair #2 the entry must be bound to its Task, run and report."""
 
