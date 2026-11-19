@@ -853,7 +853,8 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertIn('"allowed_write_paths":["src.py"]', prompt)
         self.assertIn('"acceptance":["expected behavior"]', prompt)
         self.assertIn('"test_commands":[["python3","-m","unittest"]]', prompt)
-        self.assertIn('"wall_clock_seconds":600', prompt)
+        # #2281 (Owner 2026-11-19): Codex direct defaults to 10800 s.
+        self.assertIn('"wall_clock_seconds":10800', prompt)
 
     def test_prompt_rules_and_static_text_budget(self):
         task = {

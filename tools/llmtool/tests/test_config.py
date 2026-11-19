@@ -49,7 +49,8 @@ class ConfigTests(unittest.TestCase):
     def test_defaults_and_independent_instances(self):
         config = self.resolve()
         self.assertEqual(config, DEFAULTS)
-        self.assertEqual(codex_direct_timeout(self.cwd, self.home), 600)
+        # #2281 (Owner 2026-11-19): AI runs default to 10800 s.
+        self.assertEqual(codex_direct_timeout(self.cwd, self.home), 10800)
         self.assertIsNone(config["providers"]["default"]["base_url"])
         self.assertIsNone(config["providers"]["default"]["model"])
         self.assertEqual(config["providers"]["default"]["provider_options"], {})
