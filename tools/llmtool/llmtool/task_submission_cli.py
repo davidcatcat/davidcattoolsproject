@@ -389,8 +389,9 @@ def _pm_assignment(response):
                 not 1 <= len(assignment['acceptance']) <= 16):
             return None
         result = {'schema_version': 1, **assignment}
-        _screen_text(result['goal'], 512)
-        result['acceptance'] = [_screen_text(item, 512) for item in result['acceptance']]
+        # #2281 limit row 8: goal and items have no own byte cap; the response bound holds.
+        _screen_text(result['goal'], RESPONSE_LIMIT)
+        result['acceptance'] = [_screen_text(item, RESPONSE_LIMIT) for item in result['acceptance']]
         return result
     except (ValueError, TypeError, LLMToolError, UnicodeError):
         return None
@@ -413,15 +414,6 @@ def _pm_assignment_limit_error(response):
         count = len(assignment['acceptance'])
         if not 1 <= count <= 16:
             return f'PM_RESPONSE_ACCEPTANCE_COUNT: {count} items (allowed 1-16)'
-        goal_bytes = len(assignment['goal'].encode('utf-8'))
-        if goal_bytes > 512:
-            return f'PM_RESPONSE_GOAL_TOO_LONG: goal is {goal_bytes} bytes (max 512)'
-        for index, item in enumerate(assignment['acceptance']):
-            if type(item) is str:
-                item_bytes = len(item.encode('utf-8'))
-                if item_bytes > 512:
-                    return (f'PM_RESPONSE_ACCEPTANCE_ITEM_TOO_LONG: acceptance[{index}] is '
-                            f'{item_bytes} bytes (max 512)')
     except (ValueError, TypeError, UnicodeError):
         return None
     return None
@@ -434,19 +426,8 @@ def _validate_acceptance_scope(acceptance):
     if not 1 <= count <= 16:
         raise LLMToolError(
             f'PM_RESPONSE_ACCEPTANCE_COUNT: {count} items (allowed 1-16)')
-    result = []
-    for index, item in enumerate(acceptance):
-        if type(item) is str:
-            try:
-                item_bytes = len(item.encode('utf-8'))
-            except UnicodeError:
-                item_bytes = None
-            if item_bytes is not None and item_bytes > 512:
-                raise LLMToolError(
-                    f'PM_RESPONSE_ACCEPTANCE_ITEM_TOO_LONG: acceptance[{index}] is '
-                    f'{item_bytes} bytes (max 512)')
-        result.append(_screen_text(item, 512))
-    return result
+    # #2281 limit row 8: no per-item byte cap; the response bound holds.
+    return [_screen_text(item, RESPONSE_LIMIT) for item in acceptance]
 
 
 def _strict_json_object(raw):
@@ -1878,9 +1859,9 @@ def run_task_review_prompt(args, *, store=None):
                 not 1 <= len(pm_assignment['acceptance']) <= 16):
             refuse('REVIEW_PROMPT_CONTRACT_MISSING')
         try:
-            _screen_text(pm_assignment['goal'], 512)
+            _screen_text(pm_assignment['goal'], RESPONSE_LIMIT)
             for item in pm_assignment['acceptance']:
-                _screen_text(item, 512)
+                _screen_text(item, RESPONSE_LIMIT)
         except LLMToolError:
             refuse('REVIEW_PROMPT_CONTRACT_MISSING')
         return pm_assignment
@@ -4968,7 +4949,7 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
-    acceptance = [_screen_text(item, 512) for item in args.acceptance]
+    acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
     egress_basis = _screen_text(args.egress_basis, 512)
     _screen_text(task['request'], REQUEST_LIMIT)
     _screen_text(task['response'], RESPONSE_LIMIT)
@@ -5441,7 +5422,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
-    acceptance = [_screen_text(item, 512) for item in args.acceptance]
+    acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
     egress_basis = _screen_text(args.egress_basis, 512)
     request = _screen_text(task['request'], REQUEST_LIMIT)
     _screen_text(task['response'], RESPONSE_LIMIT)
@@ -6088,7 +6069,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
-    acceptance = [_screen_text(item, 512) for item in args.acceptance]
+    acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
     egress_basis = _screen_text(args.egress_basis, 512)
     request = _screen_text(task['request'], REQUEST_LIMIT)
     _screen_text(task['response'], RESPONSE_LIMIT)
@@ -6422,7 +6403,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
-    acceptance = [_screen_text(item, 512) for item in args.acceptance]
+    acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
     request = _screen_text(task['request'], REQUEST_LIMIT)
     _screen_text(task['response'], RESPONSE_LIMIT)
     route_config = load_route_config()['routes'].get('gw-agent')
@@ -7050,7 +7031,7 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
-    acceptance = [_screen_text(item, 512) for item in args.acceptance]
+    acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
     egress_basis = _screen_text(args.egress_basis, 512)
     recovering_timeout = previous_developer is not None
     task_source_sha = (previous_developer.get('source_sha')
@@ -7699,7 +7680,11 @@ def _check_repair_packet_rca(packet, store, executor_task):
     review_repair adds high_debug_report_sha256 to the packet of repair #2.
     The packet's Task, on this D6, must hold an RCA_CONFIRMED High Debug
     entry examined at the packet's failed HEAD whose report digest is the
-    packet's digest. Anything else refuses DELEGATE_HIGH_DEBUG_TASK_INVALID.
+    packet's digest. #2367: from repair #3 on, review_repair binds the
+    family's covering RCA_CONFIRMED, examined at an earlier HEAD; it is then
+    accepted when a stored review repair claim of that Task at the packet's
+    failed HEAD binds the same digest (the store checks that binding).
+    Anything else refuses DELEGATE_HIGH_DEBUG_TASK_INVALID.
     """
     try:
         report_sha256 = packet.get('high_debug_report_sha256')
@@ -7715,13 +7700,22 @@ def _check_repair_packet_rca(packet, store, executor_task):
         record = store.get(task_id)
         completion = record.get('completion') if type(record) is dict else None
         entries = record.get('high_debug') if type(record) is dict else None
+        claims = record.get('review_repair_claims', []) if type(record) is dict else None
+        bound_heads = {failed_head}
+        if (type(claims) is list and
+                any(type(claim) is dict and claim.get('head_sha') == failed_head and
+                    claim.get('high_debug_report_sha256') == report_sha256
+                    for claim in claims)):
+            bound_heads.update(claim.get('head_sha') for claim in claims
+                               if type(claim) is dict and
+                               type(claim.get('head_sha')) is str)
         if (record.get('task_id') != task_id or type(completion) is not dict or
                 completion.get('executor_task_id') != executor_task or
                 type(entries) is not list or
                 not any(type(entry) is dict and
                         entry.get('no_pr') is not True and
                         entry.get('status') == 'RCA_CONFIRMED' and
-                        entry.get('examined_sha') == failed_head and
+                        entry.get('examined_sha') in bound_heads and
                         entry.get('report_sha256') == report_sha256
                         for entry in entries)):
             raise ValueError
@@ -7739,7 +7733,9 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
     test_fail_max EC2 repair runs per D6. At or over a limit the delegate
     always refuses. Every review repair after the first (repair #2 under
     policy.json) needs a confirmed root cause, bound by the High Debug
-    arguments or by the repair packet. This check never changes a Task.
+    arguments or by the repair packet; from repair #3 on the one taken before
+    repair #2 covers it (#2367). A recorded start failure is not a run
+    (#2367 A4). This check never changes a Task.
     """
     executor_task = getattr(args, 'executor_task', None)
     current_task_id = getattr(args, 'task_id', None)
@@ -7754,6 +7750,7 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
         raise LLMToolError(
             f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
     counted = []
+    stamps = {}
     new_ec2_ids = set()
     legacy_ec2_ids = set()
     newest_assignment = None
@@ -7775,13 +7772,34 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
             # A sensitive output refusal on this D6 blocks every new dispatch
             # until its rules and lines carry a stored disposition (#981).
             _check_developer_screen_disposition(store, task_id, developer)
+            if _recorded_start_failure(record):
+                continue
             stamp = _repair_run_stamp(task_id, developer, d6_unchanged)
             if stamp is None:
                 continue
             counted.append(task_id)
+            stamps[task_id] = stamp
             newest_assignment = max(newest_assignment, stamp) if newest_assignment else stamp
     _check_repair_limits(args, store, d6_binding, policy, current_task_id, counted,
-                         new_ec2_ids, legacy_ec2_ids, newest_assignment)
+                         new_ec2_ids, legacy_ec2_ids, newest_assignment, stamps=stamps)
+
+
+def _recorded_start_failure(record):
+    """True only when the record is a recorded Developer start failure (#2188).
+
+    #2367 A4: a delegate that stopped before its provider process started did
+    no work and is not a repair. The proof is the existing record-only start
+    failure check (start_failure.record_checks, as task advance's
+    START_FAILED uses it); nothing new is recorded. Anything else, an error
+    included, counts the run.
+    """
+    developer = record.get('developer') if type(record) is dict else None
+    if type(developer) is not dict or developer.get('state') != 'BLOCKED':
+        return False
+    try:
+        return start_failure.record_checks(record).start_failure is True
+    except Exception:
+        return False
 
 
 def _d6_unchanged_probe(args, d6_binding):
@@ -7858,8 +7876,14 @@ def _repair_run_stamp(task_id, developer, d6_unchanged):
 
 
 def _check_repair_limits(args, store, d6_binding, policy, current_task_id, counted,
-                         new_ec2_ids, legacy_ec2_ids, newest_assignment):
-    """Apply the review and EC2 limits to counted runs, then repair #2's root cause."""
+                         new_ec2_ids, legacy_ec2_ids, newest_assignment, stamps=None):
+    """Apply the review and EC2 limits to counted runs, then the root cause.
+
+    #2367: repair #2 needs a High Debug taken after the newest run on the
+    current head, as before. Repairs 3 to repair_max need no new Debug: the
+    RCA_CONFIRMED taken before repair #2 (recorded after the run whose FAIL
+    asked for it, the second review run) covers them.
+    """
     if current_task_id in new_ec2_ids or current_task_id in legacy_ec2_ids:
         # Prior EC2 repair runs, new and legacy. EC2 repairs never take the
         # High Debug path.
@@ -7871,17 +7895,32 @@ def _check_repair_limits(args, store, d6_binding, policy, current_task_id, count
     # Review rounds: every counted run except new EC2 repair runs; a
     # legacy EC2 run still counts here. The first run is the original
     # Developer run, so a prior count of N makes this repair #N.
-    count = sum(1 for task_id in counted if task_id not in new_ec2_ids)
+    review_runs = [task_id for task_id in counted if task_id not in new_ec2_ids]
+    count = len(review_runs)
     if count >= 1 + policy['repair_max']:
         raise LLMToolError('DELEGATE_REPAIR_LIMIT_REACHED')
     if count < 2:
         # The original run and repair #1 need no root cause (D1).
         return
-    _check_repair_rca(args, store, d6_binding, newest_assignment)
+    if count == 2:
+        _check_repair_rca(args, store, d6_binding, newest_assignment)
+        return
+    # A run without a known assignment time leaves the cover in doubt: refuse.
+    times = sorted(stamps[task_id] for task_id in review_runs
+                   if type(stamps) is dict and task_id in stamps)
+    if len(times) != count:
+        raise LLMToolError(
+            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
+    _check_repair_rca(args, store, d6_binding, times[1], covered=True)
 
 
-def _check_repair_rca(args, store, d6_binding, newest_assignment):
-    """Repair #2 and later need a confirmed root cause (packet or High Debug Task)."""
+def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=False):
+    """Repair #2 and later need a confirmed root cause (packet or High Debug Task).
+
+    covered (#2367, repairs 3 to repair_max): the High Debug was taken before
+    repair #2, so it must be newer than newest_assignment (the run whose FAIL
+    asked for it) but need not be on the current D6 head.
+    """
     executor_task = getattr(args, 'executor_task', None)
     high_debug_task = getattr(args, 'high_debug_task', None)
     packet = getattr(args, 'repair_packet', None)
@@ -7997,6 +8036,9 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment):
             predecessor_executors=predecessor_executors)
     except Exception:
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
+    if covered:
+        # #2367 A2: the covering RCA was taken on an earlier head.
+        return
     if d6_binding is None:
         try:
             d6_binding = _delegate_d6_binding(args)
@@ -8034,6 +8076,7 @@ def _check_chain_repair_count(args, store, d6_binding, policy, view):
     executor_task = getattr(args, 'executor_task', None)
     same_d6 = _d6_unchanged_probe(args, d6_binding)
     counted, new_ec2_ids, legacy_ec2_ids, newest_assignment = [], set(), set(), None
+    stamps = {}
     for member_id in sorted(view['members']):
         if member_id == task_id:
             continue
@@ -8041,6 +8084,8 @@ def _check_chain_repair_count(args, store, d6_binding, policy, view):
         if type(record) is not dict:
             raise LLMToolError(f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {member_id}')
         _collect_ec2_repair_task_ids(record, new_ec2_ids, legacy_ec2_ids)
+        if _recorded_start_failure(record):
+            continue
         completion = record.get('completion')
         on_d6 = (type(completion) is dict and
                  completion.get('executor_task_id') == executor_task)
@@ -8050,9 +8095,10 @@ def _check_chain_repair_count(args, store, d6_binding, policy, view):
         if stamp is None:
             continue
         counted.append(member_id)
+        stamps[member_id] = stamp
         newest_assignment = max(newest_assignment, stamp) if newest_assignment else stamp
     _check_repair_limits(args, store, d6_binding, policy, task_id, counted,
-                         new_ec2_ids, legacy_ec2_ids, newest_assignment)
+                         new_ec2_ids, legacy_ec2_ids, newest_assignment, stamps=stamps)
 
 
 def _delegate_chain_gate(args, store, d6_binding, claim):
@@ -8253,7 +8299,7 @@ def run_task_delegate(args, *, store=None):
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
-    acceptance = [_screen_text(item, 512) for item in args.acceptance]
+    acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
     context = _screen_text(args.context if hasattr(args, 'context') else
                            sys.stdin.read(48 * 1024 + 1), 48 * 1024)
     egress_basis = _screen_text(args.egress_basis, 512)

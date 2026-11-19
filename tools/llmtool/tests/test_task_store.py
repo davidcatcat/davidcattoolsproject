@@ -333,6 +333,119 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(updated['review_repair_claims'][1]['high_debug_report_sha256'],
                          entry['report_sha256'])
 
+    def test_review_repair_claims_three_to_five_bind_the_covering_debug(self):
+        # #2367: claims follow the policy bound (5 repairs plus one retry claim);
+        # one RCA_CONFIRMED of the family covers the later claims.
+        from llmtool import high_debug, run_budget
+        from llmtool.task_store import REPAIR_CLAIMS_PER_FAMILY_MAX
+        self.assertEqual(REPAIR_CLAIMS_PER_FAMILY_MAX, run_budget.MAX_REPAIR_ATTEMPTS + 1)
+        self.assertEqual(REPAIR_CLAIMS_PER_FAMILY_MAX, 6)
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        entry = dict(high_debug._failed_entry(
+            family='pr-17', head='a' * 40, d6='executor-1-hd1-aaaaaaa',
+            code='HIGH_DEBUG_RUN_FAILED', observed='UNKNOWN', effort='UNKNOWN',
+            usage={'input': 1, 'cached': 0, 'output': 1, 'reasoning': 0},
+            recorded_at='2026-10-27T00:00:30Z', failed_corrections=None,
+            early_reason='review FAIL 2'), status='RCA_CONFIRMED')
+        self.store.append_high_debug(task['task_id'], entry)
+        digest = entry['report_sha256']
+        heads = ['b' * 40, 'a' * 40, 'c' * 40, 'd' * 40, 'e' * 40, 'f' * 40, '1' * 40]
+
+        def claim(attempt, **extra):
+            item = {'executor_task': 'executor-1', 'pr': 17, 'head_sha': heads[attempt - 1],
+                    'version': attempt, 'attempt': attempt, 'family': 'pr-17',
+                    'state': 'CLAIMED', 'repair_task_id': new_id(), 'comment_id': 9,
+                    'packet_sha256': 'b' * 64,
+                    'claimed_at': f'2026-10-27T00:0{attempt}:00Z'}
+            item.update(extra)
+            return item
+
+        def write(claims):
+            saved = self.store.get(task['task_id'])
+            return self.store.compare_and_update(
+                task['task_id'], expected={'record_sha256': saved['record_sha256']},
+                review_repair_claims=claims)
+
+        def refused(claims, code):
+            before = self.store.get(task['task_id'])
+            with self.assertRaises(LLMToolError) as caught:
+                write(claims)
+            self.assertEqual(caught.exception.task_store_error_code, code)
+            self.assertEqual(self.store.get(task['task_id']), before)
+
+        claims = [claim(1)]
+        write(claims)
+        claims.append(claim(2, high_debug_report_sha256=digest))
+        write(claims)
+        for attempt in (3, 4, 5, 6):
+            # A later review claim must bind a Debug (no new one is needed) ...
+            refused(claims + [claim(attempt)], 'REVIEW_REPAIR_CLAIM_INVALID')
+            refused(claims + [claim(attempt, high_debug_report_sha256='0' * 64)],
+                    'REVIEW_REPAIR_CLAIM_INVALID')
+            # ... and the family's RCA_CONFIRMED on an earlier HEAD covers it.
+            claims.append(claim(attempt, high_debug_report_sha256=digest))
+            saved = write(claims)
+        self.assertEqual([item['attempt'] for item in saved['review_repair_claims']],
+                         [1, 2, 3, 4, 5, 6])
+        refused(claims + [claim(7, high_debug_report_sha256=digest)],
+                'REVIEW_REPAIR_CLAIM_LIMIT_REACHED')
+
+    def test_ec2_claims_three_to_five_need_no_debug(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        ec2 = [{'executor_task': 'executor-1', 'pr': 17, 'head_sha': str(n) * 40,
+                'version': 1, 'attempt': n, 'family': 'pr-17-ec2', 'state': 'CLAIMED',
+                'repair_task_id': new_id(), 'comment_id': None, 'packet_sha256': 'b' * 64,
+                'claimed_at': '2026-10-27T00:00:00Z'} for n in range(1, 6)]
+        for count in range(1, 6):
+            saved = self.store.get(task['task_id'])
+            saved = self.store.compare_and_update(
+                task['task_id'], expected={'record_sha256': saved['record_sha256']},
+                review_repair_claims=ec2[:count])
+        self.assertEqual(len(saved['review_repair_claims']), 5)
+
+    def test_old_three_claim_record_with_a_fresh_debug_stays_valid(self):
+        # A family written under the old bound: the third claim bound a new
+        # Debug on its own HEAD, recorded after the second claim. #2367 reads
+        # it unchanged.
+        from llmtool import high_debug
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+
+        def debug(head, recorded_at):
+            return dict(high_debug._failed_entry(
+                family='pr-17', head=head, d6='executor-1-hd1-' + head[:7],
+                code='HIGH_DEBUG_RUN_FAILED', observed='UNKNOWN', effort='UNKNOWN',
+                usage={'input': 1, 'cached': 0, 'output': 1, 'reasoning': 0},
+                recorded_at=recorded_at, failed_corrections=None,
+                early_reason='review FAIL ' + head[:1]), status='RCA_CONFIRMED',
+                report='Synthetic report ' + head[:1] + '.',
+                report_sha256=hashlib.sha256(
+                    ('Synthetic report ' + head[:1] + '.').encode()).hexdigest())
+        second_debug = debug('a' * 40, '2026-10-27T00:00:30Z')
+        third_debug = debug('c' * 40, '2026-10-27T00:02:30Z')
+        self.store.append_high_debug(task['task_id'], second_debug)
+        self.store.append_high_debug(task['task_id'], third_debug)
+        base = {'executor_task': 'executor-1', 'pr': 17, 'family': 'pr-17',
+                'state': 'CLAIMED', 'comment_id': 9, 'packet_sha256': 'b' * 64}
+        claims = [
+            dict(base, head_sha='b' * 40, version=1, attempt=1, repair_task_id=new_id(),
+                 claimed_at='2026-10-27T00:00:00Z'),
+            dict(base, head_sha='a' * 40, version=2, attempt=2, repair_task_id=new_id(),
+                 claimed_at='2026-10-27T00:01:00Z',
+                 high_debug_report_sha256=second_debug['report_sha256']),
+            dict(base, head_sha='c' * 40, version=3, attempt=3, repair_task_id=new_id(),
+                 claimed_at='2026-10-27T00:03:00Z',
+                 high_debug_report_sha256=third_debug['report_sha256'])]
+        for count in (1, 2, 3):
+            saved = self.store.get(task['task_id'])
+            saved = self.store.compare_and_update(
+                task['task_id'], expected={'record_sha256': saved['record_sha256']},
+                review_repair_claims=claims[:count])
+        self.assertEqual(saved['review_repair_claims'], claims)
+        self.assertEqual(self.store.get(task['task_id'])['review_repair_claims'], claims)
+
     def test_lineage_is_optional_and_strictly_validated(self):
         # #1502 WP-D (spec 3-2, 7): an old Task has no lineage and is its own ROOT.
         root = self._codex_dispatch_task()
@@ -1475,6 +1588,54 @@ class TaskStoreTests(unittest.TestCase):
                     self.store.compare_and_update(
                         task['task_id'], expected={'developer': None},
                         developer=developer)
+
+    def test_goal_and_acceptance_items_over_512_bytes_are_stored(self):
+        # #2281 limit row 8: no own byte cap on the PM goal, a PM acceptance item
+        # or a Developer acceptance item.
+        goal = 'Keep the whole goal in plain prose. ' * 40
+        item = 'The focused regression test passes. ' * 40
+        self.assertGreater(len(goal.encode('utf-8')), 1024)
+        self.assertGreater(len(item.encode('utf-8')), 1024)
+        task = self._codex_dispatch_task()
+        self.assertEqual(task['schema_version'], 2)
+        task['pm_assignment'] = dict(task['pm_assignment'], goal=goal,
+                                     acceptance=[item, 'A short item.'])
+        created = self.store.create(task)
+        self.assertEqual(created['pm_assignment']['goal'], goal)
+        self.assertEqual(created['pm_assignment']['acceptance'], [item, 'A short item.'])
+        developer = dict(self._developer_assignment(), acceptance=[item])
+        saved = self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=developer)
+        self.assertEqual(saved['developer']['acceptance'], [item])
+        self.assertEqual(self.store.get(task['task_id']), saved)
+
+    def test_long_goal_and_items_still_screened_and_bounded(self):
+        # #2281 limit row 8: the sensitive screen still runs on the goal and each
+        # item (screen mocked, per the test data rule); the 64 KiB bound stays.
+        long_goal = 'Keep the whole goal in plain prose. ' * 40
+        flagged = 'Text the mocked screen is told to flag.'
+        cases = (
+            ('goal_screen', {'goal': long_goal + flagged}),
+            ('item_screen', {'acceptance': [long_goal + flagged]}),
+            ('goal_bound', {'goal': 'a' * (64 * 1024 + 1)}),
+            ('item_bound', {'acceptance': ['a' * (64 * 1024 + 1)]}),
+        )
+        for name, change in cases:
+            with self.subTest(case=name):
+                task = self._codex_dispatch_task()
+                task['pm_assignment'] = dict(task['pm_assignment'], **change)
+                with patch.object(task_store_module, '_emitted_sensitive',
+                                  side_effect=lambda text: (isinstance(text, str) and
+                                                            flagged in text)), \
+                        self.assertRaises(LLMToolError):
+                    self.store.create(task)
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        developer = dict(self._developer_assignment(),
+                         acceptance=['a' * (64 * 1024 + 1)])
+        with self.assertRaises(LLMToolError):
+            self.store.compare_and_update(
+                task['task_id'], expected={'developer': None}, developer=developer)
 
     def test_developer_timeout_seconds_is_optional_and_bounded(self):
         # #1815: legacy records without the field stay valid.

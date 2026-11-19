@@ -315,10 +315,11 @@ def valid_rule_files():
     return {
         "developer-routes.json": fixture_routes(
             roles={"fixture-reviewer": {"allowed_models": ["gpt-6.1-sol"]}}),
+        # #2367 (Owner 2026-11-19): the repository limits.
         "policy.json": {
-            "schema_version": 1, "repair_max": 2, "parent_debug_max": 1,
-            "group_debug_max": 1, "child_max": 3, "replan_max": 1,
-            "test_fail_max": 2, "review_fail_max": 3, "waiting_notify_after_hours": 24,
+            "schema_version": 1, "repair_max": 5, "parent_debug_max": 1,
+            "group_debug_max": 3, "child_max": 3, "replan_max": 1,
+            "test_fail_max": 5, "review_fail_max": 6, "waiting_notify_after_hours": 24,
         },
         "worker-dispatch.json": {
             "schema_version": 1,
@@ -383,6 +384,16 @@ class RuleFileSchemaTests(unittest.TestCase):
 
     def test_valid_rule_files_pass(self):
         self.assertEqual(guidance_drift_check.check_rule_files(self.repo), [])
+
+    def test_policy_schema_accepts_the_new_and_old_repair_limits(self):
+        # #2367: the schema accepts the 5-repair values and the earlier ones.
+        policy = self.valid["policy.json"]
+        for values in ({"repair_max": 5, "test_fail_max": 5, "review_fail_max": 6,
+                        "group_debug_max": 3},
+                       {"repair_max": 2, "test_fail_max": 2, "review_fail_max": 3,
+                        "group_debug_max": 1}):
+            with self.subTest(values=values):
+                self.assertEqual(self.findings_after("policy.json", {**policy, **values}), [])
 
     def test_max_prompt_bytes_accepted(self):
         routes = fixture_routes()

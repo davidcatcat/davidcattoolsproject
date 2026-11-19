@@ -15,9 +15,11 @@ import unittest
 from llmtool import repair_policy as rp
 from llmtool.errors import LLMToolError
 
-GOOD = {'schema_version': 1, 'repair_max': 2, 'parent_debug_max': 1,
-        'group_debug_max': 1, 'child_max': 3, 'replan_max': 1,
-        'test_fail_max': 2, 'review_fail_max': 3,
+# #2367 (Owner 2026-11-19): 5 review repairs and 5 test repairs per work item;
+# review_fail_max is the FAIL after the last repair; one Debug per split child.
+GOOD = {'schema_version': 1, 'repair_max': 5, 'parent_debug_max': 1,
+        'group_debug_max': 3, 'child_max': 3, 'replan_max': 1,
+        'test_fail_max': 5, 'review_fail_max': 6,
         'waiting_notify_after_hours': 24}
 
 

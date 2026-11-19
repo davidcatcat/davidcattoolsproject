@@ -4,6 +4,17 @@ The numbers live only in tools/llmtool/policy.json (spec section 5); no caller
 overrides them. The functions here are pure: callers pass counts derived from
 their own Task records. A count that cannot be derived is UNKNOWN, and UNKNOWN
 counts as used up (spec section 7).
+
+#2367 (Owner 2026-11-19): a work item has repair_max effective review repairs
+and test_fail_max effective EC2/CI test repairs (5 each). AI Debug is still
+required once, before the review repair that follows the 2nd valid FAIL; one
+RCA_CONFIRMED of a family then covers that family's later repairs, so FAILs 3
+to repair_max are repaired without a new Debug. review_fail_max is the FAIL
+after the last repair (repair_max + 1), where the Task escalates by its kind.
+Each split child is its own work item with one Debug (parent_debug_max); the
+children of a lineage share group_debug_max (one per child up to child_max).
+Every other module takes these numbers from here (repair_attempts_max for the
+stored claim and run budget bounds); none keeps its own copy.
 """
 
 import json
@@ -65,6 +76,20 @@ def load_policy(path=None):
     return dict(data)
 
 
+def repair_attempts_max(path=None):
+    """The most effective repairs (review or test) one work item may use.
+
+    #2367: the single source for the stored repair-claim attempt range and the
+    run budget repair bound, read from policy.json like every other limit. A
+    policy that cannot be read gives 0, which admits no repair (fail closed).
+    """
+    try:
+        policy = load_policy(path)
+    except LLMToolError:
+        return 0
+    return max(policy['repair_max'], policy['test_fail_max'])
+
+
 KINDS = ('root', 'child', 'replan')
 # Where a Task goes when its review route is used up (spec section 3-2).
 _ESCALATION = {'root': 'SPLIT', 'child': 'PM_DECIDE', 'replan': 'FAILED_FINAL'}
@@ -96,9 +121,12 @@ def review_action(*, kind, fail_count, debug_status=None, group_debug_used=0, po
     """The next step after a valid review FAIL: REPAIR, DEBUG or the escalation.
 
     FAIL #1 is repaired. FAIL #2 needs AI Debug first (O2); RCA_CONFIRMED allows
-    the second repair (D1), any other Debug outcome escalates. From FAIL
-    review_fail_max on, ROOT splits, a child goes to PM_DECIDE and a REPLAN
-    ends FAILED_FINAL. A child whose lineage used its group Debug escalates.
+    the second repair (D1), any other Debug outcome escalates. #2367: a later
+    FAIL below review_fail_max is decided the same way by the Debug that covers
+    it (the caller passes the family's RCA_CONFIRMED), so no new Debug is run.
+    From FAIL review_fail_max on, ROOT splits, a child goes to PM_DECIDE and a
+    REPLAN ends FAILED_FINAL. A child whose lineage used its group Debug
+    escalates.
     """
     if kind not in KINDS:
         _refuse('LINEAGE_KIND_INVALID')
@@ -122,7 +150,8 @@ def admit_repair(*, repair_count, rca_confirmed, policy):
     """None admits one more review repair; else the refusal code.
 
     At most repair_max repairs; every repair after the first needs an
-    RCA_CONFIRMED Debug bound to the failed HEAD (D1).
+    RCA_CONFIRMED Debug: repair #2 one bound to its failed HEAD (D1), a later
+    repair the family's RCA_CONFIRMED that covers it (#2367).
     """
     done = _used(repair_count, policy['repair_max'])
     if done >= policy['repair_max']:
@@ -133,10 +162,18 @@ def admit_repair(*, repair_count, rca_confirmed, policy):
 
 
 def admit_debug(*, kind, parent_debug_used=0, group_debug_used=0, policy):
-    """None admits one AI Debug; ROOT and REPLAN own one each, children share one."""
+    """None admits one AI Debug.
+
+    ROOT and REPLAN own parent_debug_max each. #2367: a split child is a work
+    item too, so it owns parent_debug_max (parent_debug_used is the child's
+    own count), and the children of one lineage share group_debug_max. Both
+    child refusals use DEBUG_GROUP_USED.
+    """
     if kind not in KINDS:
         _refuse('LINEAGE_KIND_INVALID')
     if kind == 'child':
+        if _used(parent_debug_used, policy['parent_debug_max']) >= policy['parent_debug_max']:
+            return 'DEBUG_GROUP_USED'
         used, limit, code = group_debug_used, policy['group_debug_max'], 'DEBUG_GROUP_USED'
     else:
         used, limit, code = parent_debug_used, policy['parent_debug_max'], 'DEBUG_PARENT_USED'
@@ -213,6 +250,7 @@ def root_outcome(tasks):
             continue
         return 'FAILED'
     return 'CLOSED'
+
 
 def waiting_notice_due(*, reason, waiting_since, now, policy):
     """E5: AUTH notifies at once; any other WAITING after waiting_notify_after_hours.
