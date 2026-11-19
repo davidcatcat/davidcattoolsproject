@@ -963,15 +963,25 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
             }}}
         })
 
-    def test_non_free_or_malformed_model_is_rejected_before_any_cli_launch(self):
+    def test_paid_and_other_provider_models_are_admitted(self):
+        for model in ('opencode/paid-model', 'other/name-free',
+                      'opencode/example-paid#high', 'opencode-go/deepseek-v4.1-flash#high'):
+            with self.subTest(model=model):
+                cli = self.fake_cli(self.event('step_start') + '\n', model=model)
+                result = self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                    write_paths=['source.py'], prompt='bounded task prompt',
+                    timeout_seconds=5, executable=cli, model=model)
+                self.assertEqual(result.exit_code, 0)
+
+    def test_malformed_model_is_rejected_before_any_cli_launch(self):
         marker = self.root / 'invoked'
         cli = self.fake_cli(self.event('step_start') + '\n', invocation_marker=marker)
-        for model in ('opencode/paid-model', 'other/name-free', 'opencode/a/b-free',
-                      'opencode/-free', 'opencode/x-free\n', None,
-                      'opencode/example-paid#high', 'opencode/example-free#',
-                      'opencode/example-free#HIGH', 'opencode/example-free#a b',
-                      'opencode/example-free#x#y',
-                      'opencode/example-free#abcdefghijklmnopq'):
+        for model in ('opencode/a/b-free', 'opencode/-free', 'opencode/x-free\n', None,
+                      'opencode/example-free#', 'opencode/example-free#HIGH',
+                      'opencode/example-free#a b', 'opencode/example-free#x#y',
+                      'opencode/example-free#abcdefghijklmnopq',
+                      'example-model-b-free', 'opencode/..', 'https://example.invalid/m',
+                      '', '   ', 'opencode/' + 'a' * 125):
             with self.subTest(model=model):
                 with self.assertRaises(DirectOpenCodeError) as caught:
                     self.run_with_valid_binding(root=self.root, read_paths=['source.py'],

@@ -3352,6 +3352,110 @@ class TaskStoreTests(unittest.TestCase):
                 task['task_id'], assignment_id=pending['assignment_id'], pid=124,
                 start_time='123457', pgid=124)
 
+    def test_opencode_models_persisted_across_states_and_malformed_refused(self):
+        # Owner #289 / #2302: OpenCode models (paid, other provider, free) persist
+        # across all developer states; malformed model strings stay refused.
+        artifact = ('diff --git a/src.py b/src.py\n'
+                    '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')
+        opencode_execution = {
+            'status': 'SUCCEEDED', 'native_session_id': 'ses_abcdefgh12345678',
+            'process_exit_code': 0, 'stdout_sha256': 'c' * 64,
+            'elapsed_ms': 12, 'cleanup_status': 'CONFIRMED',
+            'usage_source': 'UNKNOWN', 'source_bytes': 10,
+            'source_file_count': 1, 'source_manifest_sha256': 'd' * 64,
+        }
+        admitted_models = (
+            'opencode/paid-model',
+            'opencode/paid-model#high',
+            'opencode-go/deepseek-v4.1-flash#high',
+            'other/name-free',
+            'opencode/deepseek-v4.1-flash-free',
+        )
+        for model in admitted_models:
+            with self.subTest(admitted_model=model):
+                task = self._codex_dispatch_task()
+                task['pm_assignment']['route'] = 'opencode'
+                self.store.create(task)
+                pending = self._developer_assignment(provider='opencode', max_tokens=128)
+                pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+                pending['execution'] = None
+                self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None}, developer=pending)
+
+                # DEVELOPER_DISPATCHING
+                dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                               'provider_type': 'opencode-cli', 'model': model}
+                self.store.update(task['task_id'], developer=dispatching)
+                self.assertEqual(self.store.get(task['task_id'])['developer']['model'], model)
+                self.assertEqual(self.store.get(task['task_id'])['developer']['state'],
+                                 'DEVELOPER_DISPATCHING')
+
+                # DEVELOPER_RESPONDED
+                responded = {
+                    **dispatching, 'state': 'DEVELOPER_RESPONDED', 'artifact': artifact,
+                    'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
+                    'execution': opencode_execution,
+                }
+                self.store.update(task['task_id'], developer=responded)
+                self.assertEqual(self.store.get(task['task_id'])['developer']['model'], model)
+                self.assertEqual(self.store.get(task['task_id'])['developer']['state'],
+                                 'DEVELOPER_RESPONDED')
+
+                # DEVELOPER_OUTCOME_UNKNOWN (on another task)
+                task2 = self._codex_dispatch_task()
+                task2['pm_assignment']['route'] = 'opencode'
+                self.store.create(task2)
+                self.store.compare_and_update(
+                    task2['task_id'], expected={'developer': None}, developer=pending)
+                self.store.update(task2['task_id'], developer=dispatching)
+                unknown_execution = {
+                    'status': 'UNKNOWN', 'native_session_id': 'ses_unknown12345678',
+                    'process_exit_code': 1, 'stdout_sha256': 'c' * 64,
+                    'elapsed_ms': 12, 'cleanup_status': 'CONFIRMED',
+                    'usage_source': 'UNKNOWN', 'source_bytes': 10,
+                    'source_file_count': 1, 'source_manifest_sha256': 'd' * 64,
+                }
+                unknown = {
+                    **dispatching, 'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                    'error_code': 'OPENCODE_EXECUTION_FAILED',
+                    'execution': unknown_execution,
+                }
+                self.store.update(task2['task_id'], developer=unknown)
+                self.assertEqual(self.store.get(task2['task_id'])['developer']['model'], model)
+                self.assertEqual(self.store.get(task2['task_id'])['developer']['state'],
+                                 'DEVELOPER_OUTCOME_UNKNOWN')
+
+        # Malformed models stay refused in store validation
+        malformed_models = (
+            'opencode/a/b-free',
+            'opencode/-free',
+            'bare-model',
+            'opencode/..',
+            'https://example.invalid/m',
+            '',
+            '   ',
+            'opencode/' + 'a' * 125,
+            'opencode/example-free#HIGH',
+            'opencode/example-free#x#y',
+            'opencode/model\n',
+        )
+        task = self._codex_dispatch_task()
+        task['pm_assignment']['route'] = 'opencode'
+        self.store.create(task)
+        pending = self._developer_assignment(provider='opencode', max_tokens=128)
+        pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        pending['execution'] = None
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+
+        for malformed in malformed_models:
+            with self.subTest(malformed_model=malformed):
+                invalid_dispatch = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                                    'provider_type': 'opencode-cli', 'model': malformed}
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.update(task['task_id'], developer=invalid_dispatch)
+                self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_INVALID')
+
     def test_codex_direct_success_persists_native_thread_and_usage(self):
         task = self._codex_dispatch_task()
         self.store.create(task)

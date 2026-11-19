@@ -56,9 +56,13 @@ _SESSION = re.compile(r'ses_[A-Za-z0-9]{1,100}\Z')
 # strict JSON event parser rather than by pinning one CLI version.
 _VERSION = re.compile(r'opencode v[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}'
                       r'(?:-[0-9A-Za-z.-]{1,64})?(?:\+[0-9A-Za-z.-]{1,64})?\Z')
-# Only OpenCode-hosted free models; a paid model is never selected or a fallback.
+# OpenCode-hosted free models.
 _FREE_MODEL = re.compile(
     r'opencode/[A-Za-z0-9][A-Za-z0-9._-]{0,94}-free(?:#[a-z]{1,16})?\Z')
+# Owner #289: any well-formed OpenCode model id (free or paid, any provider
+# prefix OpenCode supports, with or without a #variant).
+_OPENCODE_MODEL = re.compile(
+    r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}/[A-Za-z0-9][A-Za-z0-9._-]{0,94}(?:#[a-z]{1,16})?\Z')
 
 
 class DirectOpenCodeError(LLMToolError):
@@ -199,8 +203,15 @@ def is_free_model(model):
     return type(model) is str and _FREE_MODEL.match(model) is not None
 
 
+def is_valid_model(model):
+    return (type(model) is str and 1 <= len(model) <= 128 and
+            '://' not in model and '..' not in model and
+            '\n' not in model and '\r' not in model and
+            _OPENCODE_MODEL.match(model) is not None)
+
+
 def validate_model(model):
-    if not is_free_model(model):
+    if not is_valid_model(model):
         _reject('OPENCODE_MODEL_INVALID')
     return model
 
@@ -552,6 +563,17 @@ def configuration(*, read_paths, write_paths, model=MODEL,
                  for path in write_paths)
     provider, model = selected.split('/', 1)
     model = model.split('#', 1)[0]
+    policies = [
+        {'action': 'provider.use', 'resource': '*', 'effect': 'deny'},
+        {'action': 'provider.use', 'resource': 'opencode', 'effect': 'allow'},
+    ]
+    if provider != 'opencode':
+        policies.append({'action': 'provider.use', 'resource': provider, 'effect': 'allow'})
+    policies.append({'action': 'integration.use', 'resource': '*', 'effect': 'deny'})
+    # #1605 Owner A: OpenCode 2.2.6+ routes the free model via this one.
+    policies.append({'action': 'integration.use', 'resource': 'opencode#*', 'effect': 'allow'})
+    if provider != 'opencode':
+        policies.append({'action': 'integration.use', 'resource': f'{provider}#*', 'effect': 'allow'})
     return {
         'model': selected,
         'default_agent': AGENT,
@@ -568,13 +590,7 @@ def configuration(*, read_paths, write_paths, model=MODEL,
         'instructions': [],
         'mcp': {'servers': {}},
         'permissions': rules,
-        'policies': [
-            {'action': 'provider.use', 'resource': '*', 'effect': 'deny'},
-            {'action': 'provider.use', 'resource': 'opencode', 'effect': 'allow'},
-            {'action': 'integration.use', 'resource': '*', 'effect': 'deny'},
-            # #1605 Owner A: OpenCode 2.2.6+ routes the free model via this one.
-            {'action': 'integration.use', 'resource': 'opencode#*', 'effect': 'allow'},
-        ],
+        'policies': policies,
         'agents': {
             # Read then edit need two tool-capable rounds before the final summary.
             AGENT: {'mode': 'primary', 'model': selected, 'steps': steps,
