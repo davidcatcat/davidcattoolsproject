@@ -588,6 +588,126 @@ class GwAgentAvailabilityProbeTests(unittest.TestCase):
                         self.store.get_worker_observations()[worker][layer]['status'],
                         'UNKNOWN')
 
+    def hours_ago(self, hours):
+        return datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    def fresh_store(self, name):
+        self.store = TaskStore(Path(self.temp.name).resolve() / name)
+        self.calls = []
+
+    def test_real_outcome_observation_records_infrastructure_and_security(self):
+        """F2: observe(), which real delegation calls, now sets these holds."""
+        cases = (('DEVELOPER_GW_AGENT_TIMEOUT', 'endpoint', 'INFRASTRUCTURE_PAUSE'),
+                 ('DEVELOPER_GW_AGENT_MODEL_ERROR_NETWORK_TIMEOUT', 'endpoint',
+                  'INFRASTRUCTURE_PAUSE'),
+                 ('DEVELOPER_GW_AGENT_AUDIT_INVALID', 'authentication', 'SECURITY_STOP'))
+        for index, (code, layer, hold) in enumerate(cases):
+            with self.subTest(code=code):
+                self.fresh_store('observe-%d' % index)
+                self.assertIsNone(worker_availability.observe(
+                    self.store, gw_record(error_code=code)))
+                self.assertEqual(self.gw_view()[layer]['status'], 'FAIL')
+                self.assertEqual(self.gw_view()['quota']['status'], 'UNKNOWN')
+                self.assertEqual(worker_availability.hold_reason(self.store, 'gw-agent'), hold)
+                self.assertEqual(self.refused(), worker_availability.REFUSAL_CODE)
+
+    def test_real_outcome_observation_keeps_unknown_quota_and_other_routes_apart(self):
+        self.fresh_store('observe-unknown')
+        unknown = gw_record(state='DEVELOPER_OUTCOME_UNKNOWN',
+                            error_code='DEVELOPER_RESULT_UNKNOWN')
+        self.assertIsNone(worker_availability.observe(self.store, unknown))
+        other = gw_record(error_code='DEVELOPER_GW_AGENT_TIMEOUT', profile='opencode')
+        self.assertIsNone(worker_availability.observe(self.store, other))
+        for layer in ('endpoint', 'authentication', 'runtime', 'quota'):
+            self.assertEqual(self.gw_view()[layer]['status'], 'UNKNOWN')
+        self.assertIsNone(worker_availability.hold_reason(self.store, 'gw-agent'))
+
+        rate = gw_record(error_code='DEVELOPER_GW_AGENT_QUOTA_EXHAUSTED_HTTP_429')
+        self.assertEqual(worker_availability.observe(self.store, rate), 'QUOTA_EXHAUSTED')
+        view = self.gw_view()
+        self.assertEqual(view['quota']['status'], 'FAIL')
+        for layer in ('endpoint', 'authentication', 'runtime'):
+            self.assertEqual(view[layer]['status'], 'UNKNOWN')
+        self.assertIsNone(worker_availability.hold_reason(self.store, 'gw-agent'))
+
+    def test_expired_infrastructure_pause_still_holds_until_a_probe_passes(self):
+        """F3: expiry reads UNKNOWN but is not recovery."""
+        for source in ('outcome', 'probe'):
+            with self.subTest(source=source):
+                self.fresh_store('infra-' + source)
+                with patch.object(worker_availability, 'HOLD_FOR', timedelta(hours=1)):
+                    if source == 'outcome':
+                        worker_availability.observe_failure_class(
+                            self.store, gw_record(error_code='DEVELOPER_GW_AGENT_TIMEOUT'),
+                            now=self.hours_ago(2))
+                    else:
+                        worker_availability.run_gw_agent_probe(
+                            self.store, self.ROUTE, self.BUDGETS,
+                            probe=self.probe('INFRASTRUCTURE'), now=self.hours_ago(2))
+                self.assertEqual(self.gw_view()['endpoint']['status'], 'UNKNOWN')
+                self.assertEqual(worker_availability.hold_reason(self.store, 'gw-agent'),
+                                 'INFRASTRUCTURE_PAUSE')
+                self.assertTrue(worker_availability.fresh_quota_fail(self.store, 'gw-agent'))
+                self.assertEqual(self.refused(), worker_availability.REFUSAL_CODE)
+
+                self.calls = []
+                report = self.run_probe('PASS')
+                self.assertEqual(len(self.calls), 1)
+                self.assertIsNone(report['hold'])
+                self.assertIsNone(self.refused())
+
+    def test_expired_security_stop_is_still_not_auto_recovered(self):
+        for source in ('outcome', 'probe'):
+            with self.subTest(source=source):
+                self.fresh_store('security-expired-' + source)
+                with patch.object(worker_availability, 'HOLD_FOR', timedelta(hours=1)):
+                    if source == 'outcome':
+                        worker_availability.observe_failure_class(
+                            self.store,
+                            gw_record(error_code='DEVELOPER_GW_AGENT_MODEL_ERROR_HTTP_403'),
+                            now=self.hours_ago(2))
+                    else:
+                        worker_availability.run_gw_agent_probe(
+                            self.store, self.ROUTE, self.BUDGETS,
+                            probe=self.probe('AUTHORIZATION', tcp='PASS', auth='FAIL',
+                                             inference='UNKNOWN'),
+                            now=self.hours_ago(2))
+                self.assertEqual(self.gw_view()['authentication']['status'], 'UNKNOWN')
+                self.assertEqual(worker_availability.hold_reason(self.store, 'gw-agent'),
+                                 'SECURITY_STOP')
+                self.assertEqual(self.refused(), worker_availability.REFUSAL_CODE)
+                self.calls = []
+                with self.assertRaises(LLMToolError) as caught:
+                    self.run_probe('PASS')
+                self.assertEqual(str(caught.exception), 'GW_AGENT_PROBE_SECURITY_STOP')
+                self.assertEqual(self.calls, [])
+                self.assertEqual(self.refused(), worker_availability.REFUSAL_CODE)
+
+    def test_expired_capability_streak_still_counts_and_pauses(self):
+        failed = gw_record(state='DEVELOPER_OUTPUT_REJECTED')
+        record = worker_availability.record_capability_outcome
+        with patch.object(worker_availability, 'HOLD_FOR', timedelta(hours=1)):
+            self.assertEqual(record(self.store, failed, passed=False, at_lowest_tier=True,
+                                    now=self.hours_ago(3)), 'LOWEST_TIER_FAILURE')
+            # The first failure has expired: it still counts towards the E9 pause.
+            self.assertEqual(self.gw_view()['runtime']['status'], 'UNKNOWN')
+            self.assertEqual(record(self.store, failed, passed=False, at_lowest_tier=True,
+                                    now=self.hours_ago(2)), 'PAUSED')
+        self.assertEqual(self.gw_view()['runtime']['status'], 'UNKNOWN')
+        self.assertEqual(worker_availability.hold_reason(self.store, 'gw-agent'),
+                         'MODEL_CAPABILITY_PAUSE')
+        self.assertEqual(self.refused(), worker_availability.REFUSAL_CODE)
+        self.assertEqual(self.run_probe('PASS')['hold'], 'MODEL_CAPABILITY_PAUSE')
+        self.assertEqual(self.refused(), worker_availability.REFUSAL_CODE)
+
+    def test_expired_probe_pass_is_not_a_hold(self):
+        worker_availability.run_gw_agent_probe(
+            self.store, self.ROUTE, self.BUDGETS, probe=self.probe('PASS'),
+            now=self.hours_ago(2))
+        self.assertEqual(self.gw_view()['endpoint']['status'], 'UNKNOWN')
+        self.assertIsNone(worker_availability.hold_reason(self.store, 'gw-agent'))
+        self.assertIsNone(self.refused())
+
     def test_unreadable_state_refuses_the_probe_before_any_call(self):
         class Unreadable:
             def get_worker_observations(self):
