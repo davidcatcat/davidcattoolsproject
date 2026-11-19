@@ -57,7 +57,12 @@ SCHEMA_VERSION = 2
 MAX_RECORD_BYTES = 1024 * 1024
 # #1815: a Developer diff is stored whole; the 1 MiB record limit is the ceiling, so artifacts stay at or below half of it. Same value as developer_routes.base.HARD_MAX_DIFF_BYTES.
 MAX_ARTIFACT_BYTES = 512 * 1024
-TASK_ID = re.compile(r'[0-9a-f]{32}')
+# #2281 (Owner 2026-11-19): a Developer Task lists at most this many read paths
+# and this many write paths; a direct run's source_file_count (one entry per
+# read path) has the same bound. Same value as
+# task_submission_cli.DEVELOPER_TASK_MAX_PATHS.
+DEVELOPER_TASK_MAX_PATHS = 1024
+TASK_ID =re.compile(r'[0-9a-f]{32}')
 D6_TASK_ID = re.compile(r'[a-z0-9][a-z0-9-]{0,95}')
 SESSION_ID = re.compile(r'pm-[a-z0-9-]{1,60}')
 DEV_SESSION_ID = re.compile(r'dev-[a-z0-9-]{1,60}')
@@ -3011,7 +3016,8 @@ def _validate(record, *, strict=True):
                               not 0 <= execution['source_bytes'] <= 2 * 1024 * 1024)) or
                             (execution['source_file_count'] is not None and
                              (type(execution['source_file_count']) is not int or
-                              not 1 <= execution['source_file_count'] <= 32)) or
+                              not 1 <= execution['source_file_count'] <=
+                              DEVELOPER_TASK_MAX_PATHS)) or
                             (execution['source_manifest_sha256'] is not None and
                              (type(execution['source_manifest_sha256']) is not str or
                               re.fullmatch(r'[0-9a-f]{64}',
@@ -3067,7 +3073,8 @@ def _validate(record, *, strict=True):
                 _fail()
             for field in ('read_paths', 'write_paths'):
                 values = developer[field]
-                if (type(values) is not list or not values or len(values) > 32 or
+                if (type(values) is not list or not values or
+                        len(values) > DEVELOPER_TASK_MAX_PATHS or
                         any(type(item) is not str or not item or len(item) > 512 or
                             item.startswith('/') or '\\' in item or
                             any(part in ('', '.', '..') for part in item.split('/')) or

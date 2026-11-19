@@ -1577,6 +1577,34 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(saved['developer']['account'], 'codex-developer')
         self.assertNotIn('/private', repr(saved['developer']))
 
+    def test_developer_scope_of_33_and_1024_paths_is_stored_and_1025_refused_2281(self):
+        # #2281 (Owner 2026-11-19): a Developer Task lists up to 1024 read and
+        # 1024 write paths; the store bound matches the delegate check.
+        self.assertEqual(task_store_module.DEVELOPER_TASK_MAX_PATHS, 1024)
+        names = [f'src/file{i:04d}.py' for i in range(1025)]
+        for count in (33, 1024):
+            with self.subTest(count=count):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                developer = self._developer_assignment()
+                developer['read_paths'] = names[:count]
+                developer['write_paths'] = names[:count]
+                saved = self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None}, developer=developer)
+                self.assertEqual(saved['developer']['read_paths'], names[:count])
+                self.assertEqual(saved['developer']['write_paths'], names[:count])
+        for reads, writes in ((1025, 1), (1025, 1025)):
+            with self.subTest(reads=reads, writes=writes):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                developer = self._developer_assignment()
+                developer['read_paths'] = names[:reads]
+                developer['write_paths'] = names[:writes]
+                with self.assertRaises(LLMToolError):
+                    self.store.compare_and_update(
+                        task['task_id'], expected={'developer': None}, developer=developer)
+                self.assertIsNone(self.store.get(task['task_id'])['developer'])
+
     def test_developer_account_rejects_path_like_and_invalid_names(self):
         task = self._codex_dispatch_task()
         self.store.create(task)

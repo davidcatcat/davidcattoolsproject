@@ -2120,7 +2120,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 ('source-bytes-too-large', set_(source_bytes=2 * 1024 * 1024 + 1)),
                 ('source-bytes-bool', set_(source_bytes=True)),
                 ('source-files-zero', set_(source_file_count=0)),
-                ('source-files-too-many', set_(source_file_count=33)),
+                # #2281: one source entry per read path, at most 1024 paths.
+                ('source-files-too-many', set_(source_file_count=1025)),
                 ('source-files-bool', set_(source_file_count=True)),
                 ('manifest-uppercase', set_(source_manifest_sha256='B' * 64)),
                 ('manifest-short', set_(source_manifest_sha256='b' * 63)),
@@ -2148,7 +2149,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 ('elapsed-none', set_(elapsed_ms=None)),
                 ('source-bytes-zero', set_(source_bytes=0)),
                 ('source-bytes-max', set_(source_bytes=2 * 1024 * 1024)),
-                ('source-files-max', set_(source_file_count=32))):
+                ('source-files-33', set_(source_file_count=33)),
+                ('source-files-max', set_(source_file_count=1024))):
             with self.subTest(field=name):
                 run = self._opencode_bind_run(self._opencode_result(), mutate=mutate)
                 self.assertEqual(run['calls'], ['ses_Abc123'])
@@ -5796,6 +5798,9 @@ class DeveloperTaskPathLimitTests(unittest.TestCase):
         self.assertEqual(submission_cli.DEVELOPER_TASK_MAX_PATHS, 1024)
         self.assertEqual(opencode_direct_developer.MAX_TASK_PATHS, 1024)
         self.assertEqual(submission_cli.task_completion._TASK_PATH_LIMIT, 1024)
+        # The Task store scope and the direct run's source_file_count use it too.
+        from llmtool import task_store
+        self.assertEqual(task_store.DEVELOPER_TASK_MAX_PATHS, 1024)
 
     def test_scope_of_32_33_and_1024_paths_is_accepted(self):
         for count in (32, 33, 1024):

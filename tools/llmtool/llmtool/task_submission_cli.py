@@ -4385,7 +4385,7 @@ def _store_accepts_direct_execution(developer):
             type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None or
             not _bounded_int(execution['elapsed_ms'], 0, 86_400_000) or
             not _bounded_int(execution['source_bytes'], 0, 2 * 1024 * 1024) or
-            not _bounded_int(execution['source_file_count'], 1, 32) or
+            not _bounded_int(execution['source_file_count'], 1, DEVELOPER_TASK_MAX_PATHS) or
             (manifest is not None and
              (type(manifest) is not str or
               re.fullmatch(r'[0-9a-f]{64}', manifest) is None)) or
