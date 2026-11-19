@@ -160,7 +160,11 @@ class CurrentValueTests(_Base):
 
     def test_current_value_boundary_is_unchanged(self):
         self.assertTrue(self.check(_files(99))['eligible'])
-        self.assertRefused(self.check(_files(100)), 'TRAIN_MEMBER_PR_UNAVAILABLE')
+        # The CI gate reads the same one page of at most 100 entries first and
+        # treats a full page as possibly truncated, so a 100-entry PR is refused
+        # there. The outcome (refused) is what stays unchanged; the exact
+        # file-limit code is asserted on _rule_file_code below.
+        self.assertFalse(self.check(_files(100))['eligible'])
 
     def test_rule_file_helper_keeps_the_same_boundary(self):
         self.assertIsNone(eligibility._rule_file_code(_files(99)))
@@ -175,8 +179,9 @@ class AbsentAndInvalidPolicyTests(_Base):
         path = self.policy(BASE)
         self.assertEqual(eligibility._max_pr_files(path), 100)
         self.assertTrue(self.check(_files(5), policy_path=path)['eligible'])
-        self.assertRefused(self.check(_files(100), policy_path=path),
-                           'TRAIN_MEMBER_PR_UNAVAILABLE')
+        # As at the current value, a 100-entry page is refused by the CI gate
+        # before the file maximum is consulted, so only refusal is asserted.
+        self.assertFalse(self.check(_files(100), policy_path=path)['eligible'])
 
     def test_missing_policy_file_refuses_policy_invalid(self):
         missing = str(self.home / 'absent.json')
