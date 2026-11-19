@@ -1349,7 +1349,9 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertIs(store, self.store)
         self.assertEqual(args.pm_session_id, task['pm_provenance']['pm_native_session_id'])
         self.assertEqual(args.pm_cwd, task['pm_provenance']['pm_cwd'])
-        self.assertEqual(envelope['request'], f'REPAIR 1/2 of {TASK}')
+        # #2367: the denominator is the policy repair bound (5), not a fixed 2.
+        self.assertEqual(envelope['request'], f'REPAIR 1/{MAX} of {TASK}')
+        self.assertEqual(MAX, 5)
         response = json.loads(envelope['response'])
         self.assertEqual(set(response), {'schema_version', 'summary', 'developer_assignment'})
         self.assertTrue(response['summary'].startswith('LLMTOOL_RUNTIME recorded bounded'))
