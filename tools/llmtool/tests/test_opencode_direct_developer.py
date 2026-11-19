@@ -10,7 +10,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from llmtool.opencode_direct_developer import (
-    AGENT, MAX_OUTPUT_BYTES, MAX_OUTPUT_TOKENS, MAX_SOURCE_FILE_BYTES, MODEL,
+    AGENT, MAX_OUTPUT_BYTES, MAX_OUTPUT_TOKENS, MAX_SOURCE_FILE_BYTES, MAX_TASK_PATHS,
+    MODEL,
     DirectOpenCodeError, _classify_provider_error, _classify_provider_events,
     _recovered_transport_indices, configuration, parse_json_events, run,
     summarize_events,
@@ -812,6 +813,40 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertEqual((result.task_id, result.run_id), ('a' * 32, 'b' * 32))
         self.assertLessEqual(datetime.fromisoformat(result.started_at.replace('Z', '+00:00')),
                              datetime.fromisoformat(result.ended_at.replace('Z', '+00:00')))
+
+    def test_scope_accepts_up_to_1024_read_and_write_paths_2281(self):
+        # #2281: a scope of 33 and of 1024 paths runs end to end; 1025 read or
+        # write paths is refused before any CLI launch with the existing code.
+        self.assertEqual(MAX_TASK_PATHS, 1024)
+
+        def scope(count):
+            # Listed but absent paths are recorded in the manifest as missing.
+            return sorted([f'n{i:04d}.md' for i in range(count - 1)] + ['source.py'])
+
+        for count in (33, 1024):
+            paths = scope(count)
+            for write_paths in (['source.py'], paths):
+                with self.subTest(count=count, writes=len(write_paths)):
+                    result = self.run_with_valid_binding(
+                        root=self.root, read_paths=paths, write_paths=write_paths,
+                        prompt='bounded task prompt', timeout_seconds=30,
+                        executable=self.fake_cli(self.event('step_start') + '\n'))
+                    self.assertEqual(result.exit_code, 0)
+                    self.assertEqual(result.source_file_count, count)
+                    self.assertEqual(result.source_bytes, len(b'VALUE = 1\n'))
+        marker = self.root / 'run-invoked'
+        over = scope(1025)
+        for read_paths, write_paths in ((over, ['source.py']), (over, over)):
+            with self.subTest(reads=len(read_paths), writes=len(write_paths)):
+                cli = self.fake_cli(self.event('step_start') + '\n',
+                                    run_invocation_marker=marker)
+                with self.assertRaises(DirectOpenCodeError) as caught:
+                    self.run_with_valid_binding(
+                        root=self.root, read_paths=read_paths, write_paths=write_paths,
+                        prompt='bounded task prompt', timeout_seconds=5, executable=cli)
+                self.assertEqual(caught.exception.direct_opencode_code,
+                                 'OPENCODE_SCOPE_INVALID')
+                self.assertFalse(marker.exists())
 
     def test_credential_shaped_read_path_source_is_allowed(self):
         source_text = 'OPENAI_' + 'API_' + 'KEY=' + 'sk-' + 'A' * 24 + '\n'

@@ -50,6 +50,8 @@ _REGISTRY_LIMIT = 64 * 1024
 _GIT_LIMIT = 2 * 1024 * 1024
 _PROPOSAL_FILE_LIMIT = 128
 _PROPOSAL_TREE_LIMIT = 8 * 1024 * 1024
+# #2281 (Owner 2026-11-19): read and write path counts of a Developer Task scope.
+_TASK_PATH_LIMIT = 1024
 _TIMEOUT = 10
 # seconds per registered test module. #1703: test_task_completion alone needs about
 # 310 s on the Mac (300 s caused TEST_RUNNER_TIMEOUT); the gw-agent wiring module ~240 s.
@@ -1659,7 +1661,7 @@ def _worktree_snapshot(*, root, source_sha, read_paths, write_paths, expected_he
         _stop('WORKTREE_SCOPE_MISMATCH')
 
     paths = sorted(set(read_paths) | set(write_paths))
-    if not paths or len(paths) > 32:
+    if not paths or len(paths) > _TASK_PATH_LIMIT:
         _stop('WORKTREE_SCOPE_INVALID')
     file_records = []
     total = 0

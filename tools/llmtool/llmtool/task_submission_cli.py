@@ -2301,7 +2301,7 @@ def run_task_claude_bind(args, *, store=None, stdout=None):
         registration.source_sha, registration.result_sha, '--'), limit=1024 * 1024)
     changed_paths = sorted(set(path for path in
         changed_raw.decode('utf-8', 'strict').split('\x00') if path))
-    if not changed_paths or len(changed_paths) > 32:
+    if not changed_paths or len(changed_paths) > DEVELOPER_TASK_MAX_PATHS:
         raise LLMToolError('Claude D6 binding requires a bounded committed result diff')
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if not set(changed_paths).issubset(write_paths):
@@ -2954,6 +2954,12 @@ class _DeveloperSourceFiles(dict):
         self.regular_paths = set()
 
 
+# #2281 (Owner 2026-11-19): a Developer Task scope may list at most this many
+# read paths and this many write paths. The CI workflow-grant path list
+# (authorization_workflow_grant.MAX_PATHS_PER_GRANT) is a separate rule.
+DEVELOPER_TASK_MAX_PATHS = 1024
+
+
 def _assignment_paths(read_paths, write_paths):
     def valid(path):
         return (type(path) is str and 0 < len(path) <= 512 and
@@ -2967,7 +2973,8 @@ def _assignment_paths(read_paths, write_paths):
         invalid('PATH_LIST_INVALID')
     if not read_paths or not write_paths:
         invalid('PATH_LIST_EMPTY')
-    if len(read_paths) > 32 or len(write_paths) > 32:
+    if (len(read_paths) > DEVELOPER_TASK_MAX_PATHS or
+            len(write_paths) > DEVELOPER_TASK_MAX_PATHS):
         invalid('PATH_LIMIT_EXCEEDED')
     for path in read_paths + write_paths:
         if type(path) is str and (path.startswith('/') or '..' in path.split('/') or

@@ -2341,6 +2341,69 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 subprocess.run(['/usr/bin/git', 'checkout', '--', 'README.md', 'sample.py'],
                                cwd=self.executor_root, check=True, capture_output=True)
 
+    def test_opencode_task_with_33_and_1024_paths_runs_end_to_end_2281(self):
+        # #2281 (Owner 2026-11-19): a Developer Task lists up to 1024 read and
+        # 1024 write paths. Delegate records the scope, the direct result is
+        # checked against it, and completion accepts it.
+        for count in (33, 1024):
+            with self.subTest(count=count):
+                task = self._pm_task_with_opencode_assignment()
+                output = io.StringIO()
+                paths = sorted(['README.md'] +
+                               [f'notes-{i:04d}.md' for i in range(count - 1)])
+
+                def execute(**kwargs):
+                    self.assertEqual(kwargs['read_paths'], paths)
+                    self.assertEqual(kwargs['write_paths'], paths)
+                    (self.executor_root / 'README.md').write_text(
+                        'Updated executor documentation.\n')
+                    # The adapter reports one source entry per read path.
+                    return DirectResult(0, 'ses_Abc123', 'Updated documentation.', None,
+                        'UNKNOWN', 'a' * 64, 32, 'CONFIRMED', 'opencode v2.0.32',
+                        10, len(paths), 'b' * 64)
+
+                args = self._opencode_delegate_args(
+                    task, read_path=list(reversed(paths)), write_path=list(paths))
+                with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                        patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                              side_effect=execute), redirect_stdout(output):
+                    run_task_delegate(args)
+                developer = json.loads(output.getvalue())['developer']
+                callback = developer['direct_result_callback']
+                self.assertEqual(callback['evidence']['verification_state'], 'READY',
+                                 output.getvalue()[-2000:])
+                self.assertEqual(callback['evidence']['tests'][0]['changed_paths'],
+                                 ['README.md'])
+                store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+                saved = store.get(task['task_id'])['developer']
+                self.assertEqual(saved['read_paths'], paths)
+                self.assertEqual(saved['write_paths'], paths)
+                complete = Namespace(task_id=task['task_id'],
+                    executor_task='executor-task-1', reviewer_task=None, pr=None)
+                with patch('llmtool.task_submission_cli.run_task_direct_result_event',
+                           return_value=0) as resume:
+                    self.assertEqual(run_task_complete(complete, store=store), 0)
+                resume.assert_called_once()
+                subprocess.run(['/usr/bin/git', 'checkout', '--', 'README.md'],
+                               cwd=self.executor_root, check=True, capture_output=True)
+
+    def test_opencode_task_with_1025_paths_is_refused_before_any_run_2281(self):
+        for reads, writes in ((1025, 1), (1024, 1025)):
+            with self.subTest(reads=reads, writes=writes):
+                task = self._pm_task_with_opencode_assignment()
+                names = sorted(['README.md'] +
+                               [f'notes-{i:04d}.md' for i in range(1024)])
+                args = self._opencode_delegate_args(
+                    task, read_path=names[:reads], write_path=names[:writes])
+                with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                        patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                              side_effect=AssertionError('OpenCode run')), \
+                        self.assertRaisesRegex(LLMToolError, 'PATH_LIMIT_EXCEEDED'):
+                    run_task_delegate(args)
+                saved = TaskStore(self.home / '.local' / 'state' / 'llmtool' / 'tasks').get(
+                    task['task_id'])
+                self.assertIsNone(saved['developer'])
+
     def _write_opencode_developer_model(self, model, *, steps=None):
         config = self.home / '.config/llmtool/config.yaml'
         config.parent.mkdir(parents=True, exist_ok=True)
@@ -5715,6 +5778,57 @@ class DelegateRepairCapTests(unittest.TestCase):
         task = self._task()
         self.assertIsNone(submission_cli._check_delegate_repair_cap(
             self._args(task, 'opencode'), self.store))
+
+
+class DeveloperTaskPathLimitTests(unittest.TestCase):
+    """#2281 (Owner 2026-11-19): a Developer Task lists up to 1024 read and write paths."""
+
+    @staticmethod
+    def names(count):
+        return [f'src/file{i:04d}.py' for i in range(count)]
+
+    def refused(self, read_paths, write_paths):
+        with self.assertRaises(LLMToolError) as caught:
+            submission_cli._assignment_paths(read_paths, write_paths)
+        return str(caught.exception)
+
+    def test_every_developer_scope_check_uses_1024(self):
+        self.assertEqual(submission_cli.DEVELOPER_TASK_MAX_PATHS, 1024)
+        self.assertEqual(opencode_direct_developer.MAX_TASK_PATHS, 1024)
+        self.assertEqual(submission_cli.task_completion._TASK_PATH_LIMIT, 1024)
+
+    def test_scope_of_32_33_and_1024_paths_is_accepted(self):
+        for count in (32, 33, 1024):
+            paths = self.names(count)
+            for writes in (paths[:1], paths):
+                with self.subTest(count=count, writes=len(writes)):
+                    read, write = submission_cli._assignment_paths(
+                        list(reversed(paths)), list(reversed(writes)))
+                    self.assertEqual(read, paths)
+                    self.assertEqual(write, writes)
+
+    def test_1025_read_or_write_paths_keep_the_existing_code(self):
+        paths = self.names(1025)
+        for reads, writes in ((paths, paths[:1]), (paths[:1024], paths), (paths, paths)):
+            with self.subTest(reads=len(reads), writes=len(writes)):
+                self.assertIn('PATH_LIMIT_EXCEEDED', self.refused(reads, writes))
+
+    def test_other_path_rules_are_unchanged_at_1024_paths(self):
+        base = self.names(1023)
+        cases = (
+            (base + ['../outside.py'], ['src/file0000.py'], 'PATH_OUTSIDE_REPO'),
+            (base + ['/abs.py'], ['src/file0000.py'], 'PATH_OUTSIDE_REPO'),
+            (base + ['a' * 513], ['src/file0000.py'], 'PATH_INVALID'),
+            (base + ['src//double.py'], ['src/file0000.py'], 'PATH_INVALID'),
+            (base + ['src/café.py'], ['src/file0000.py'], 'PATH_INVALID'),
+            (base + ['src/file0000.py'], ['src/file0000.py'], 'DUPLICATE_PATH'),
+            (base + ['src/extra.py'], ['src/not-read.py'], 'WRITE_PATH_NOT_IN_READ_PATHS'),
+            ([], ['src/file0000.py'], 'PATH_LIST_EMPTY'),
+            (tuple(base), ['src/file0000.py'], 'PATH_LIST_INVALID'),
+        )
+        for reads, writes, code in cases:
+            with self.subTest(code=code, path=reads[-1] if reads else None):
+                self.assertIn(code, self.refused(reads, writes))
 
 
 if __name__ == '__main__':
