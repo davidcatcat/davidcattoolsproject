@@ -51,10 +51,12 @@ RETENTION_PATHS = [
     sys.implementation.cache_tag + ".pyc",
     "tools/llmtool/build/",
 ]
-# Writer lease (#1019 A11 row 43): a registration's lease runs this long from
-# the writer's last recorded activity (creation or a recorded result). An
-# expired lease is only reported; a PM releases it explicitly.
-LEASE_SECONDS = 24 * 60 * 60
+# Writer lease (#1019 A11 row 43): a registration's lease runs from the
+# writer's last recorded activity (creation or a recorded result). An expired
+# lease is only reported; a PM releases it explicitly. #2281 L7 (limit row 17):
+# the length is policy.json d6_writer_lease_hours, read by _lease_seconds()
+# through llmtool.repair_policy.load_policy; this script keeps no copy of it.
+LEASE_POLICY_KEY = "d6_writer_lease_hours"
 LEASE_TIME_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
 LEASE_RELEASED_STATE = "LEASE_RELEASED"
 LEASE_RELEASE_STATES = frozenset(("ACTIVE", "REPAIR"))
@@ -754,6 +756,9 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
              (not native_session_id or len(native_session_id) > 256 or
               any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in native_session_id)))):
         _stop("D6_TASK_INPUT_INVALID")
+    # #2281 L7: read the lease length before any Git or registry change, so a
+    # bad policy refuses without leaving a worktree behind.
+    lease_seconds = _lease_seconds()
     canonical_root = Path(canonical_root).resolve(strict=True)
     if workspace_root != Path(trust["tasks_root"]) and not os.environ.get("LLMTOOL_D6_TESTING"):
         _stop("D6_WORKSPACE_ROOT_INVALID")
@@ -824,7 +829,7 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
                 "head_sha": head,
                 "state": "REPAIR",
                 "last_verified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "lease_expires_at": _lease_expiry(),
+                "lease_expires_at": _lease_expiry(seconds=lease_seconds),
                 "evidence_refs": ["Created by d6_worktree_lifecycle.py; ENV-2 bootstrap required before Worker start"],
                 "retention_paths": RETENTION_PATHS,
                 "lock_state": "UNLOCKED",
@@ -847,7 +852,7 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
             record["lock_state"] = "LOCKED"
             record["last_verified_at"] = time.strftime(
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            record["lease_expires_at"] = _lease_expiry()
+            record["lease_expires_at"] = _lease_expiry(seconds=lease_seconds)
             _replace_record(record_path, record)
             active_record = dict(record)
             # Bootstrap updates the D6 record with its ENV-2 pass marker under
@@ -937,6 +942,8 @@ def record_result(*, task_id, canonical_root, root=None, workspace_root=None,
         _stop("D6_RECORD_RESULT_TASK_INVALID")
     if workspace_root != Path(trust["tasks_root"]) and not os.environ.get("LLMTOOL_D6_TESTING"):
         _stop("D6_RECORD_RESULT_WORKSPACE_INVALID")
+    # #2281 L7: read the lease length before the registry lock and any change.
+    lease_seconds = _lease_seconds()
     try:
         canonical_root = Path(canonical_root).resolve(strict=True)
         workspace_root = Path(os.path.realpath(workspace_root))
@@ -1096,7 +1103,7 @@ def record_result(*, task_id, canonical_root, root=None, workspace_root=None,
             if "lease_expires_at" in current:
                 # Recording a result is writer activity: the lease runs again
                 # from now. A legacy record without a lease stays unchanged.
-                current["lease_expires_at"] = _lease_expiry()
+                current["lease_expires_at"] = _lease_expiry(seconds=lease_seconds)
             _replace_record(record_path, current)
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -1223,10 +1230,67 @@ def _now():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def _lease_expiry(now=None):
-    """UTC lease expiry LEASE_SECONDS after ``now`` (epoch seconds, default now)."""
+def _repair_policy():
+    """The llmtool policy loader module (#2281 L7).
+
+    An installed llmtool is used first. Otherwise the package beside this
+    script (``tools/llmtool``) is appended to the end of ``sys.path``, so it
+    never shadows an installed module. If neither is importable the lease
+    length is unknown and the lifecycle refuses POLICY_INVALID.
+    """
+    try:
+        from llmtool import repair_policy
+        from llmtool.errors import LLMToolError
+    except ImportError:
+        package_root = str(Path(__file__).resolve().parents[1])
+        if package_root not in sys.path:
+            sys.path.append(package_root)
+        try:
+            from llmtool import repair_policy
+            from llmtool.errors import LLMToolError
+        except ImportError:
+            _stop("POLICY_INVALID")
+    return repair_policy, LLMToolError
+
+
+def _lease_seconds(policy_path=None):
+    """Writer lease length in seconds from policy.json d6_writer_lease_hours.
+
+    #2281 L7: one policy key, in hours like waiting_notify_after_hours, read
+    and validated by the existing loader (an integer >= 1). An unreadable or
+    invalid policy, a missing key, or a length whose expiry cannot be written
+    as a lease time refuses POLICY_INVALID; there is no fallback length.
+    """
+    repair_policy, policy_error = _repair_policy()
+    try:
+        policy = repair_policy.load_policy(policy_path)
+    except policy_error:
+        _stop("POLICY_INVALID")
+    hours = policy.get(LEASE_POLICY_KEY)
+    if type(hours) is not int or hours < 1:
+        _stop("POLICY_INVALID")
+    seconds = hours * 60 * 60
+    # The loader sets no upper bound; the real limit is the lease time
+    # format itself. A length whose expiry gmtime or LEASE_TIME_RE cannot
+    # hold would write an unreadable lease, so it refuses instead.
+    probe = int(time.time()) + seconds
+    try:
+        readable = _parse_utc(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(probe))) == probe
+    except (OverflowError, OSError, ValueError):
+        readable = False
+    if not readable:
+        _stop("POLICY_INVALID")
+    return seconds
+
+
+def _lease_expiry(now=None, seconds=None):
+    """UTC lease expiry ``seconds`` after ``now`` (epoch seconds, default now).
+
+    ``seconds`` defaults to the policy lease length (_lease_seconds).
+    """
+    seconds = _lease_seconds() if seconds is None else seconds
     now = time.time() if now is None else now
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(now) + LEASE_SECONDS))
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(now) + seconds))
 
 
 def _parse_utc(text):

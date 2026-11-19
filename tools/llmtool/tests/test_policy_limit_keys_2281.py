@@ -25,6 +25,9 @@ BASE = {'schema_version': 1, 'repair_max': 5, 'parent_debug_max': 1,
 # row 16 (5 PRs). Config home policy.json for all three.
 LIMITS = {'spec_preflight_large_file_lines': 2000, 'merge_train_members_max': 6,
           'merge_train_files_per_pr_max': 100, 'revert_scope_prs_max': 5}
+# #2281 L7: row 17 (D6 writer lease, 24 hours) joins the same optional positive
+# keys; its own behaviour is pinned in test_policy_d6_lease_2281.
+LATER_LIMITS = {'d6_writer_lease_hours': 24}
 
 
 class PolicyLimitKeysTests(unittest.TestCase):
@@ -42,7 +45,7 @@ class PolicyLimitKeysTests(unittest.TestCase):
 
     # A1
     def test_keys_are_the_optional_positive_keys(self):
-        self.assertEqual(set(rp.OPTIONAL_POSITIVE_POLICY_KEYS), set(LIMITS))
+        self.assertEqual(set(rp.OPTIONAL_POSITIVE_POLICY_KEYS), {*LIMITS, *LATER_LIMITS})
         # Optional: none of them is required by the loader.
         self.assertFalse(set(LIMITS) & set(rp.POLICY_KEYS))
         self.assertFalse(set(LIMITS) & set(rp.OPTIONAL_POLICY_LIMITS))
@@ -101,7 +104,11 @@ class PolicyLimitKeysTests(unittest.TestCase):
         policy = rp.load_policy()
         self.assertEqual({key: policy[key] for key in BASE}, BASE)
         self.assertEqual(policy['timeout_continuation_max'], 1)
-        self.assertEqual(set(policy), {*BASE, 'timeout_continuation_max', *LIMITS})
+        self.assertEqual(set(policy), {*BASE, 'timeout_continuation_max', *LIMITS,
+                                       *LATER_LIMITS})
+        for key, value in LATER_LIMITS.items():
+            with self.subTest(key=key):
+                self.assertEqual(policy[key], value)
         self.assertEqual(rp.repair_attempts_max(), 5)
         # The existing refusals still hold with the new keys present.
         for bad in (dict(BASE, repair_max=-1), dict(BASE, timeout_continuation_max=4),
