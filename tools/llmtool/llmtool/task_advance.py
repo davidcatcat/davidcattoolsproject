@@ -745,6 +745,7 @@ def _review_ci_gate(number, head, github_get, latest_out=None):
     all_required = list(required_checks)
     if requires_macos:
         all_required.append('check (macOS 3.13)')
+    # #2337: CI repair path needs to cover all required checks
     for required_name in all_required:
         candidates = [item for item in runs if item.get('head_sha') == head and
                       item.get('name') == required_name]
@@ -761,8 +762,10 @@ def _review_ci_gate(number, head, github_get, latest_out=None):
             continue
         if type(latest.get('conclusion')) is not str:
             return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
-        if latest['conclusion'] != 'success' and failed is None:
+        # #2337: CI repair path handles any failed required check
+        if latest['conclusion'] != 'success':
             failed = latest
+            break
     if failed is not None:
         if type(latest_out) is dict:
             latest_out.update(failed)
