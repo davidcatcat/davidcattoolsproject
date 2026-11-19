@@ -240,9 +240,10 @@ def lineage_counts(store, task, *, base_family, include_successors=False):
             if type(family) is not str:
                 return _unknown()
             if local and prepr:
-                # #2190: no PR yet; every EC2 claim of the Task counts.
+                # #2190: no PR yet; every EC2 claim of the Task counts, but
+                # exclude any claim that is already accounted for by a later PR.
                 is_review = family == base_family
-                is_test = family.endswith(_EC2_SUFFIX) or legacy
+                is_test = (family.endswith(_EC2_SUFFIX) or legacy) and claim.get('pr') is None
             elif local:
                 pr = claim.get('pr')
                 if pr is not None and type(pr) is not int:

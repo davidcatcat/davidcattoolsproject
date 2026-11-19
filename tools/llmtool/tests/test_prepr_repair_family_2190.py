@@ -175,6 +175,8 @@ class PrePrRepairTests(_Base):
         # The Developer delegate accepts the pre-PR packet as it is.
         self.assertEqual(task_submission_cli._validate_repair_packet(packet), packet)
         record = self.store.get(TASK)
+        # #2190: The pre-PR repair count is carried over.
+        self.assertEqual(lineage_counts.lineage_counts(self.store, record, base_family=lineage_counts.PREPR_BASE_FAMILY)['test_fails'], 1)
         self.assertEqual(task_advance._test_fail_count(record, None, self.store), 1)
         # A replay of the same FAIL reuses the claim: no second count.
         replay = self.repair(None, HEADS[0])
