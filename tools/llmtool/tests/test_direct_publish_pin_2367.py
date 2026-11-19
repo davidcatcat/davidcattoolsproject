@@ -91,6 +91,7 @@ def direct_record():
     developer = {
         'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'opencode',
         'model': 'opencode-model', 'session_id': 'dev-' + '5' * 32,
+        'source_sha': SOURCE_SHA,
         'artifact': 'diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n'
                     '@@ -0,0 +1 @@\n+x\n',
         'artifact_sha256': 'f' * 64,
