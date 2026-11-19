@@ -719,6 +719,43 @@ class GwAgentAvailabilityProbeTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), 'GW_AGENT_PROBE_STATE_UNAVAILABLE')
         self.assertEqual(self.calls, [])
 
+    def test_holds_do_not_depend_on_the_module_level_store_name(self):
+        """#2367 repair 3: a rebound ``task_store.TaskStore`` never stands in.
+
+        The CLI probe path test replaces the module-level name with a factory
+        stand-in. The availability lock, the expiry parse and the root absence
+        check must still run on the real class: the stand-in here has no
+        attributes, so any lookup through the name fails loudly.
+        """
+        from llmtool import task_store as task_store_module
+        failure = {'task_id': '1' * 32, 'developer': {
+            'assignment_id': '2' * 32, 'provider_profile': 'gw-agent',
+            'state': 'DEVELOPER_UNAVAILABLE',
+            'error_code': 'DEVELOPER_GW_AGENT_GATEWAY_TIMEOUT'}}
+        absent = TaskStore(Path(self.temp.name).resolve() / 'absent' / 'tasks')
+        with patch.object(task_store_module, 'TaskStore', object()):
+            # An absent root still reads as empty through the real absence check.
+            self.assertEqual(absent.get_worker_observations()['gw-agent']['endpoint']['status'],
+                             'UNKNOWN')
+            # A fresh hold: written under the real lock, read back as a FAIL.
+            worker_availability.observe_failure_class(self.store, failure, now=self.long_ago())
+            self.assertEqual(self.gw_view()['endpoint']['status'], 'FAIL')
+            self.assertTrue((self.root / task_store_module.WORKER_AVAILABILITY_LOCK_NAME).is_file())
+            self.assertEqual(worker_availability.hold_reason(self.store, 'gw-agent'),
+                             'INFRASTRUCTURE_PAUSE')
+            # A hold past its window reads UNKNOWN and still holds until a probe passes.
+            worker_availability.observe_failure_class(
+                self.store, failure,
+                now=datetime.now(timezone.utc) - worker_availability.HOLD_FOR -
+                timedelta(hours=1))
+            self.assertEqual(self.gw_view()['endpoint']['status'], 'UNKNOWN')
+            self.assertEqual(worker_availability.hold_reason(self.store, 'gw-agent'),
+                             'INFRASTRUCTURE_PAUSE')
+            self.assertEqual(self.refused(), worker_availability.REFUSAL_CODE)
+            self.assertEqual(self.run_probe('PASS')['hold'], None)
+        self.assertIsNone(worker_availability.hold_reason(self.store, 'gw-agent'))
+        self.assertIsNone(self.refused())
+
 
 if __name__ == '__main__':
     unittest.main()
