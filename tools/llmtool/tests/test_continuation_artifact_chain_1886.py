@@ -7,7 +7,10 @@ missing: PR #2407 (no claims) refused DEVELOPER_ARTIFACT_RESULT_TREE_MISMATCH
 and PR #2402 (a later claim, the earlier continuation unrecorded) refused
 DEVELOPER_ARTIFACT_CHAIN_INVALID. A Claude record-only root ignored its
 continuations, so its result stayed bound to the earlier HEAD and refused
-CLAUDE_RESULT_BINDING_INVALID. A continuation is admitted only on an ALLOWED
+CLAUDE_RESULT_BINDING_INVALID. A Claude record-only continuation has no
+artifact, only a recorded result HEAD, and refused DEVELOPER_ARTIFACT_CHAIN_INVALID
+under either root route (review v2 F1); it now binds that recorded HEAD. A
+continuation is admitted only on an ALLOWED
 dispatch for its own provider route. These tests run the real chain builder
 and the real D6 artifact check on a real Git D6. The Task store is an
 in-memory double with the two reads completion uses; it has no write method.
@@ -248,7 +251,7 @@ class ContinuationArtifactChainTests(unittest.TestCase):
             root_record, store, executor_task=self.d6, common_dir=self.common,
             root=str(self.root), branch='feat/executor', source_sha=self.source_sha)
 
-    def _collect(self, root_record, segments):
+    def _collect(self, root_record, segments, trusted=None):
         developer = root_record['developer']
         kwargs = dict(
             task_id=self.d6, expected_common_dir=self.common, expected_root=str(self.root),
@@ -257,7 +260,8 @@ class ContinuationArtifactChainTests(unittest.TestCase):
             expected_session_ref='Executor D6 session',
             expected_native_session_id='native-executor',
             write_paths=developer['write_paths'], artifact=developer['artifact'],
-            artifact_sha256=developer['artifact_sha256'], trusted_base_sha=self.source_sha)
+            artifact_sha256=developer['artifact_sha256'],
+            trusted_base_sha=trusted or self.source_sha)
         if segments is not None:
             kwargs['artifact_segments'] = segments
         return task_completion.collect_executor_result(**kwargs)
@@ -669,7 +673,7 @@ class ContinuationArtifactChainTests(unittest.TestCase):
                                self._artifact(first, head)))
         return root, store, (original, first, head)
 
-    def _collect_claude(self, root_record, segments):
+    def _collect_claude(self, root_record, segments, trusted=None):
         developer = root_record['developer']
         kwargs = dict(
             task_id=self.d6, expected_common_dir=self.common, expected_root=str(self.root),
@@ -678,7 +682,8 @@ class ContinuationArtifactChainTests(unittest.TestCase):
             expected_session_ref='Executor D6 session',
             expected_native_session_id='native-executor',
             write_paths=developer['write_paths'],
-            claude_result=developer['claude_result'], trusted_base_sha=self.source_sha)
+            claude_result=developer['claude_result'],
+            trusted_base_sha=trusted or self.source_sha)
         if segments is not None:
             kwargs['artifact_segments'] = segments
         return task_completion.collect_claude_result(**kwargs)
@@ -748,6 +753,209 @@ class ContinuationArtifactChainTests(unittest.TestCase):
         # An unrecorded commit after the last continuation (A2).
         self._register_head(self._commit('# bare change with no record\n'))
         self.assertEqual(self._claude_refusal(root, store), CHAIN_INVALID)
+        self.assertEqual(store.snapshot(), records)
+
+    # -- F1 (review v2): Claude record-only continuation repairs ---------
+    #
+    # A Claude record-only Developer records its result HEAD and keeps
+    # artifact=None (TaskStore.record_claude_result). As a continuation repair
+    # its segment used to carry artifact=None and refused CHAIN_INVALID under
+    # either root route. It now binds its recorded result HEAD instead.
+
+    def _claude_continuation(self, task_id, continues, head, recorded, *,
+                             result_executor=None, **options):
+        """A Claude record-only continuation: no artifact, a recorded result HEAD."""
+        record = self._continuation(task_id, continues, head, None, profile='claude',
+                                    **options)
+        record['developer'].update(
+            artifact=None, artifact_sha256=None,
+            backend_session_semantics='NO_NATIVE_SESSION_ID_EXPOSED',
+            claude_result={'executor_task_id': result_executor or self.d6,
+                           'head_sha': recorded,
+                           'recorded_at': '2026-11-20T00:00:00Z'})
+        return record
+
+    def _record_only_chain(self, root_route, routes):
+        """The PR #2407 shape: a root, then two continuations of the given routes."""
+        self._git('reset', '--hard', self.source_sha)
+        original = self._commit('# original change\n')
+        first = self._commit('# continuation repair one\n')
+        head = self._register_head(self._commit('# continuation repair two\n'))
+        root = (self._claude_root(ROOT_2407, original) if root_route == 'claude' else
+                self._root(ROOT_2407, self._artifact(self.source_sha, original)))
+        records = [root]
+        links = ((CONT_2407_FIRST, ROOT_2407, original, first),
+                 (CONT_2407_SECOND, CONT_2407_FIRST, first, head))
+        for route, (task_id, continues, start, end) in zip(routes, links):
+            records.append(
+                self._claude_continuation(task_id, continues, start, end)
+                if route == 'claude' else
+                self._continuation(task_id, continues, start, self._artifact(start, end)))
+        return root, _Store(*records), (original, first, head)
+
+    def _route_collect(self, root_record, segments, trusted=None):
+        if cli._binds_no_artifact(root_record):
+            return self._collect_claude(root_record, segments, trusted)
+        return self._collect(root_record, segments, trusted)
+
+    def _route_refusal(self, root_record, store):
+        with self.assertRaises(LLMToolError) as raised:
+            self._route_collect(root_record, self._segments(root_record, store))
+        return getattr(raised.exception, 'completion_code', None)
+
+    def test_record_only_continuation_completes_under_both_root_routes(self):
+        for root_route in ('codex', 'claude'):
+            for routes in (('claude', 'claude'), ('artifact', 'claude'),
+                           ('claude', 'artifact')):
+                with self.subTest(root=root_route, continuations=routes):
+                    root, store, (original, first, head) = self._record_only_chain(
+                        root_route, routes)
+                    before = store.snapshot()
+                    segments = self._segments(root, store)
+                    self.assertEqual([segment[2:4] for segment in segments],
+                                     [(self.source_sha, original), (original, first),
+                                      (first, head)])
+                    for segment, route, end in zip(segments[1:], routes, (first, head)):
+                        if route == 'claude':
+                            # Bound to the HEAD its Task recorded, not to an artifact.
+                            self.assertEqual(segment[:2] + segment[4:], (None, None, end))
+                        else:
+                            self.assertEqual(len(segment), 4)
+                    result = self._route_collect(root, segments)
+                    self.assertEqual(result['result_head'], head)
+                    self.assertEqual(result['task_id'], root['task_binding']['task_id'])
+                    self.assertEqual(result['run_id'], root['task_binding']['run_id'])
+                    self.assertEqual(result['source_sha'], self.source_sha)
+                    # A4: nothing is written; two effective repairs.
+                    self.assertEqual(store.snapshot(), before)
+                    self.assertEqual(len(segments) - 1, 2)
+
+    def test_record_only_continuation_later_head_admits_evidence_only_with_its_chain(self):
+        for root_route in ('codex', 'claude'):
+            with self.subTest(root=root_route):
+                root, store, (original, _, head) = self._record_only_chain(
+                    root_route, ('claude', 'claude'))
+                self.assertTrue(self._head_admitted(root, store, original, head))
+                self.assertFalse(self._head_admitted(root, self._claims_only(store),
+                                                     original, head))
+                bare = self._register_head(self._commit('# bare change with no record\n'))
+                self.assertFalse(self._head_admitted(root, store, original, bare))
+
+    def test_record_only_review_repair_claim_joins_a_mixed_chain(self):
+        original = self._commit('# original change\n')
+        continued = self._commit('# continuation repair\n')
+        head = self._register_head(self._commit('# review repair\n'))
+        root = self._root(ROOT_2402, self._artifact(self.source_sha, original), claims=[
+            self._claim('pr-2402', 1, continued, CLAIM_REPAIR_2402)])
+        repair = self._claim_repair(CLAIM_REPAIR_2402, continued, '')
+        repair['developer'].update(
+            provider_profile='claude', artifact=None, artifact_sha256=None,
+            backend_session_semantics='NO_NATIVE_SESSION_ID_EXPOSED',
+            executor_task_id=self.d6,
+            claude_result={'executor_task_id': self.d6, 'head_sha': head,
+                           'recorded_at': '2026-11-20T00:00:00Z'})
+        store = _Store(root, self._continuation(CONT_2402, ROOT_2402, original,
+                                                self._artifact(original, continued)),
+                       repair)
+        segments = self._segments(root, store)
+        self.assertEqual([segment[2:4] for segment in segments],
+                         [(self.source_sha, original), (original, continued),
+                          (continued, head)])
+        self.assertEqual(segments[-1], (None, None, continued, head, head))
+        self.assertEqual(self._collect(root, segments)['result_head'], head)
+
+    def test_record_only_continuation_ending_in_a_clean_main_merge_completes(self):
+        original = self._commit('# original change\n')
+        recorded = self._commit('# continuation repair\n')
+        self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        (self.root / 'README.md').write_text('Main moved.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'trusted main change')
+        trusted = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        self._git('merge', '--no-ff', '-m', 'merge main', 'main')
+        head = self._register_head(self._git('rev-parse', 'HEAD'))
+        for root_route in ('codex', 'claude'):
+            with self.subTest(root=root_route):
+                root = (self._claude_root(ROOT_2407, original) if root_route == 'claude'
+                        else self._root(ROOT_2407,
+                                        self._artifact(self.source_sha, original)))
+                store = _Store(root, self._claude_continuation(
+                    CONT_2407_FIRST, ROOT_2407, original, recorded))
+                segments = self._segments(root, store)
+                self.assertEqual(segments[-1], (None, None, original, head, recorded))
+                result = self._route_collect(root, segments, trusted)
+                self.assertEqual(result['result_head'], head)
+                self.assertEqual(result['developer_changed_paths'], [self.path])
+
+    def test_record_only_continuation_keeps_every_check(self):
+        for root_route in ('codex', 'claude'):
+            with self.subTest(root=root_route):
+                self._assert_record_only_checks(root_route)
+
+    def _assert_record_only_checks(self, root_route):
+        root, store, (original, first, head) = self._record_only_chain(
+            root_route, ('artifact', 'claude'))
+        records = store.snapshot()
+        side = self._git('commit-tree', self._git('rev-parse', head + '^{tree}'),
+                         '-p', first, '-m', 'side line')
+        assignment = _hex32('assignment ' + CONT_2407_SECOND)
+        contract = _digest('contract ' + CONT_2407_SECOND)
+
+        def second(recorded=head, **options):
+            return self._claude_continuation(CONT_2407_SECOND, CONT_2407_FIRST, first,
+                                             recorded, **options)
+
+        no_result = second()
+        del no_result['developer']['claude_result']
+        with_artifact = second()
+        artifact = self._artifact(first, head)
+        with_artifact['developer'].update(artifact=artifact,
+                                          artifact_sha256=_digest(artifact))
+        absent_artifact = self._continuation(CONT_2407_SECOND, CONT_2407_FIRST, first, None)
+        absent_artifact['developer'].update(artifact=None, artifact_sha256=None)
+        cases = {
+            'no recorded result': no_result,
+            'result recorded for another D6': second(result_executor='other-d6-task'),
+            'developer bound to another D6': second(developer_executor='other-d6-task'),
+            'recorded HEAD is the start (no commit)': second(recorded=first),
+            'recorded HEAD on another line': second(recorded=side),
+            'recorded HEAD that is not hex': second(recorded='not-a-head'),
+            'record-only result that also carries an artifact': with_artifact,
+            # An absent artifact alone never admits a repair of another route.
+            'codex repair with no artifact': absent_artifact,
+            # A3 / F2: an ALLOWED dispatch for another route never admits it.
+            'authorized for another route': second(audit=[self._audit(
+                assignment, first, contract, worker=ROUTE_WORKERS['codex'])]),
+            'no allowed dispatch': second(audit=[]),
+            'wrong Task binding': second(binding={
+                'task_id': _hex32('other task'), 'run_id': _hex32('run ' + CONT_2407_SECOND),
+                'contract_digest': contract}),
+        }
+        for name, record in cases.items():
+            with self.subTest(case=name):
+                changed = _Store(*{**records, CONT_2407_SECOND: record}.values())
+                self.assertEqual(self._route_refusal(root, changed), CHAIN_INVALID)
+                self.assertEqual(changed.snapshot()[CONT_2407_SECOND], record)
+
+        segments = self._segments(root, store)
+        forged = {
+            # Without its recorded HEAD the segment is an artifact segment and refuses.
+            'binding dropped': segments[:-1] + [segments[-1][:4]],
+            'artifact added to a recorded segment': segments[:-1] + [
+                (artifact, _digest(artifact)) + segments[-1][2:]],
+            'recorded HEAD replaced': segments[:-1] + [segments[-1][:4] + (side,)],
+            'root segment made record-only': [segments[0] + (original,)] + segments[1:],
+        }
+        for name, changed in forged.items():
+            with self.subTest(segments=name), self.assertRaises(LLMToolError) as raised:
+                self._route_collect(root, changed)
+            self.assertEqual(raised.exception.completion_code, CHAIN_INVALID)
+
+        # A2: an unrecorded commit after the recorded HEAD.
+        self._register_head(self._commit('# bare change with no record\n'))
+        self.assertEqual(self._route_refusal(root, store), CHAIN_INVALID)
         self.assertEqual(store.snapshot(), records)
 
 

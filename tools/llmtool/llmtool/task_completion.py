@@ -1514,16 +1514,52 @@ def _collect_registered_result_diff(*, task_id, expected_common_dir, expected_ro
     return registration, snapshot, paths, developer_paths, patch
 
 
+def _segment_shape_valid(segment):
+    """An artifact segment (artifact, digest, start, end) or a recorded one.
+
+    #1886 F1: a Claude record-only repair binds its recorded result HEAD, not
+    an artifact (TaskStore.record_claude_result), so its segment is
+    (None, None, start, end, recorded_head). Only that exact shape carries no
+    artifact; an absent artifact alone never makes a segment.
+    """
+    return type(segment) is tuple and (len(segment) == 4 or (
+        len(segment) == 5 and segment[0] is None and segment[1] is None and
+        type(segment[4]) is str and _HEX40.fullmatch(segment[4]) is not None))
+
+
+def _verify_recorded_segment(root, start_sha, end_sha, recorded_head, trusted_base_sha):
+    """#1886 F1: a record-only repair segment ends at its recorded result HEAD.
+
+    The recorded HEAD must be a new commit descending from the segment start,
+    and the segment end must be that HEAD or that HEAD plus only clean
+    trusted-main merges, as for the Claude root segment. A Developer commit
+    after the recorded HEAD is unrecorded and refuses.
+    """
+    try:
+        if (type(recorded_head) is not str or _HEX40.fullmatch(recorded_head) is None or
+                recorded_head == start_sha or
+                not _is_ancestor(root, start_sha, recorded_head) or
+                _developer_tip(root, recorded_head, end_sha,
+                               trusted_base_sha) != recorded_head):
+            _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
+    except LLMToolError:
+        _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
+
+
 def _verify_artifact_segments(root, segments, start, write_paths, trusted_base_sha):
     """Verify consecutive (artifact, digest, start, end) segments from start.
 
     Each segment must start where the previous one ended, descend from its
     start, change only write paths, and its artifact must be exactly what its
-    Developer commits apply. Any failure is DEVELOPER_ARTIFACT_CHAIN_INVALID.
+    Developer commits apply. A record-only repair segment (see
+    _segment_shape_valid) must instead end at its recorded result HEAD. Any
+    failure is DEVELOPER_ARTIFACT_CHAIN_INVALID.
     """
     previous_end = start
     for segment in segments:
-        segment_artifact, segment_digest, start_sha, end_sha = segment
+        if not _segment_shape_valid(segment):
+            _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
+        segment_artifact, segment_digest, start_sha, end_sha = segment[:4]
         if (start_sha != previous_end or
                 type(start_sha) is not str or _HEX40.fullmatch(start_sha) is None or
                 type(end_sha) is not str or _HEX40.fullmatch(end_sha) is None):
@@ -1538,6 +1574,11 @@ def _verify_artifact_segments(root, segments, start, write_paths, trusted_base_s
         if (not segment_paths or not segment_developer_paths or
                 not set(segment_developer_paths).issubset(set(write_paths))):
             _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
+        if len(segment) == 5:
+            _verify_recorded_segment(root, start_sha, end_sha, segment[4],
+                                     trusted_base_sha)
+            previous_end = end_sha
+            continue
         segment_tip = _developer_tip(root, start_sha, end_sha, trusted_base_sha)
         try:
             verify_artifact_applied(root, segment_artifact,
@@ -1572,9 +1613,11 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
                                 _diff_paths(registration.root, source_sha, tip),
                                 write_paths, scope_paths=developer_paths)
     else:
+        # The original proposal's own segment carries its artifact; a later
+        # repair segment may be a record-only one bound to its result HEAD.
         if (type(artifact_segments) is not list or not artifact_segments or
-                any(type(segment) is not tuple or len(segment) != 4
-                    for segment in artifact_segments)):
+                any(not _segment_shape_valid(segment) for segment in artifact_segments) or
+                len(artifact_segments[0]) != 4):
             _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
         if (artifact_segments[0][2] != source_sha or
                 artifact_segments[-1][3] != snapshot.head):
@@ -1609,7 +1652,8 @@ def collect_claude_result(*, task_id, expected_common_dir, expected_root,
     verified repairs. The first segment is the Claude result's own and carries
     no artifact: it must run from source_sha to the recorded Claude head (or
     that head plus clean trusted-main merges). Every later segment must carry
-    an artifact that matches its commits, ending at the D6 head.
+    an artifact that matches its commits or, for a record-only repair, end at
+    its own recorded result HEAD; the last one ends at the D6 head.
     """
     registration, snapshot, paths, developer_paths, patch = _collect_registered_result_diff(
         task_id=task_id, expected_common_dir=expected_common_dir,
@@ -1625,8 +1669,8 @@ def collect_claude_result(*, task_id, expected_common_dir, expected_root,
     claimed_head = claude_result.get('head_sha')
     if artifact_segments is not None:
         if (type(artifact_segments) is not list or len(artifact_segments) < 2 or
-                any(type(segment) is not tuple or len(segment) != 4
-                    for segment in artifact_segments)):
+                any(not _segment_shape_valid(segment) for segment in artifact_segments) or
+                len(artifact_segments[0]) != 4):
             _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
         own_artifact, own_digest, own_start, own_end = artifact_segments[0]
         if (own_artifact is not None or own_digest is not None or

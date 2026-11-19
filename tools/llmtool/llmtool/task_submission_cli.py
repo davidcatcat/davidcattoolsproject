@@ -9146,6 +9146,29 @@ def _binds_no_artifact(task):
             developer.get('backend_session_semantics') == 'NO_NATIVE_SESSION_ID_EXPOSED')
 
 
+def _recorded_repair_head(developer, *, executor_task):
+    """#1886 F1: the recorded result HEAD of a Claude record-only repair.
+
+    That route binds its result, not an artifact: TaskStore.record_claude_result
+    records the result HEAD for the repair's own D6 and the Developer keeps
+    artifact=None. Only a responded Developer of that route, with no artifact
+    and a result recorded for this D6 on a new HEAD, gives a HEAD here; any
+    other shape is doubt. An absent artifact alone never admits a repair.
+    """
+    result = developer.get('claude_result')
+    if (not _binds_no_artifact({'developer': developer}) or
+            developer.get('state') != 'DEVELOPER_RESPONDED' or
+            developer.get('artifact') is not None or
+            developer.get('executor_task_id') != executor_task or
+            type(result) is not dict or
+            result.get('executor_task_id') != executor_task or
+            type(result.get('head_sha')) is not str or
+            re.fullmatch(r'[0-9a-f]{40}', result['head_sha']) is None or
+            result['head_sha'] == developer.get('source_sha')):
+        _artifact_chain_invalid()
+    return result['head_sha']
+
+
 def _completion_repair_artifact_segments(task, store, *, executor_task, common_dir,
                                          root, branch, source_sha):
     """Bind the original and repair proposals to consecutive D6 heads.
@@ -9154,9 +9177,11 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
     the PM continuation repairs of its lineage on the same D6. The Claude
     record-only route binds no artifact: its own segment is (None, None,
     source, end), bound to its recorded Claude head by collect_claude_result.
-    Every repair segment must carry an artifact. Every segment is still
-    verified against the D6 tree by collect_executor_result or
-    collect_claude_result.
+    A repair segment carries its artifact, or (#1886 F1) a Claude record-only
+    repair's segment is (None, None, start, end, recorded_head), bound to the
+    result HEAD its Task recorded for this D6 (_recorded_repair_head). Every
+    segment is still verified against the D6 tree by collect_executor_result
+    or collect_claude_result.
     """
     claims = task.get('review_repair_claims')
     record_only = _binds_no_artifact(task)
@@ -9262,11 +9287,18 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
         for index, (head, developer) in enumerate(dispatched):
             next_head = (dispatched[index + 1][0]
                          if index + 1 < len(dispatched) else registration.result_sha)
+            if _binds_no_artifact({'developer': developer}):
+                # #1886 F1: a Claude record-only repair binds its recorded
+                # result HEAD; the collector checks the segment ends there.
+                artifacts.append((None, None, head, next_head, _recorded_repair_head(
+                    developer, executor_task=executor_task)))
+                continue
             artifacts.append((developer.get('artifact'), developer.get('artifact_sha256'),
                               head, next_head))
-        for index, (segment_artifact, segment_digest, _, _) in enumerate(artifacts):
-            if index == 0 and record_only:
-                # The Claude result's own segment; collect_claude_result binds it.
+        for index, segment in enumerate(artifacts):
+            segment_artifact, segment_digest = segment[:2]
+            if (index == 0 and record_only) or len(segment) == 5:
+                # A Claude result's own segment; the collector binds its head.
                 continue
             if (type(segment_artifact) is not str or not segment_artifact or
                     type(segment_digest) is not str or
