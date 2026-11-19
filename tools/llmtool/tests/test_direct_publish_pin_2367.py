@@ -274,6 +274,18 @@ class DirectPublishPinTests(unittest.TestCase):
             task_advance._publish_base_commits(runner, '/repo/task', None, 'z' * 40)
         self.assertEqual(caught.exception.code, 'PUBLISH_BINDING_UNAVAILABLE')
 
+    def test_remote_branch_head_absent_locally_is_not_a_base(self):
+        def runner(_root, args):
+            if args[:2] == ['ls-remote', '--heads']:
+                return _Result(0, f'{MOVED_MAIN}\trefs/heads/main\n'.encode())
+            if args[:1] == ['cat-file'] and args[1] == '-e':
+                return _Result(1)
+            raise AssertionError('unexpected git call: ' + repr(args))
+
+        with self.assertRaises(task_advance._PublishRefusal) as caught:
+            task_advance._publish_base_commits(runner, '/repo/task', MOVED_MAIN)
+        self.assertEqual(caught.exception.code, 'PUBLISH_BINDING_UNAVAILABLE')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1931,7 +1931,7 @@ def _publish_base_commits(git_runner, root, remote_head, recorded_main=None, *,
     the unauthenticated remote tip. With no base the added commits are
     unknown, so publish fails closed.
     """
-    bases = [remote_head] if remote_head else []
+    bases = []
 
     def present(sha):
         try:
@@ -1952,6 +1952,9 @@ def _publish_base_commits(git_runner, root, remote_head, recorded_main=None, *,
             is_present = present(sha)
         if is_present:
             bases.append(sha)
+
+    if remote_head:
+        add_if_present(remote_head)
 
     listed = _publish_command(git_runner, root,
         ['ls-remote', '--heads', 'origin', 'refs/heads/main'])
