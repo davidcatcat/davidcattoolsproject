@@ -16,6 +16,7 @@ LLMTOOL_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(LLMTOOL_ROOT))
 
 from llmtool.errors import LLMToolError  # noqa: E402
+from llmtool.repair_policy import load_policy  # noqa: E402
 from llmtool.task_submission_cli import (  # noqa: E402
     REQUEST_LIMIT,
     RESPONSE_LIMIT,
@@ -152,7 +153,17 @@ def check(spec: dict[str, Any]) -> list[str]:
 # #1570: a home LLM that must find an anchor in a long file reads it in large
 # chunks and can exhaust its context (Task 1e61753d), so a gw-agent spec that
 # writes a long file is refused. The 'edits' line hints are gone with #1502 WP-G.
-LARGE_FILE_LINES = 2000
+DEFAULT_LARGE_FILE_LINES = 2000
+# #2281 limit table row 2: the threshold is configurable. It comes from the
+# trusted checkout's policy.json through the same loader as every other limit.
+# An absent key keeps the #1570 default; an invalid policy is refused instead of
+# falling back silently.
+LARGE_FILE_LINES_KEY = "spec_preflight_large_file_lines"
+
+
+def large_file_lines() -> int:
+    """The gw-agent large-file line threshold from the trusted policy.json."""
+    return load_policy().get(LARGE_FILE_LINES_KEY, DEFAULT_LARGE_FILE_LINES)
 
 
 # WP-120L (#120): the home LLM ladder runs from T1 to T6 (T6: Owner decision A, #763).
@@ -382,11 +393,19 @@ def main(argv: list[str] | None = None) -> int:
     if len(spec["acceptance"]) > REPAIR_ROOM_MAX_ACCEPTANCE:
         print("SPEC_PREFLIGHT_WARN:ACCEPTANCE_NO_REPAIR_ROOM", file=sys.stderr)
 
+    # #2281 limit row 2: an unreadable or invalid policy refuses fail closed;
+    # there is no silent fallback to the default threshold.
+    try:
+        large_file_limit = large_file_lines()
+    except LLMToolError:
+        print("SPEC_PREFLIGHT_INVALID")
+        return 2
+
     if spec.get("provider") == "gw-agent":
         for path in spec.get("write") or []:
             target = repo_dir / path if isinstance(path, str) else None
             if (target is not None and target.is_file() and
-                    target.read_bytes().count(b"\n") >= LARGE_FILE_LINES):
+                    target.read_bytes().count(b"\n") >= large_file_limit):
                 print("SPEC_PREFLIGHT_INVALID:EDIT_LINE_HINT_MISSING:-1")
                 return 2
 
