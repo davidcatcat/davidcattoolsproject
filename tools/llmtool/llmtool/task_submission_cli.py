@@ -192,7 +192,7 @@ def _store_implements(store, name):
 GW_AGENT_AVAILABILITY_UNRECORDED = 'GW_AGENT_AVAILABILITY_UNRECORDED'
 
 
-def _with_quota_observation(store, task_id, call):
+def _with_quota_observation(store, task_id, call, *, fail_closed=False):
     """#1816: run one delegate, then record its outcome in the quota layer.
 
     Only a Developer record this run changed is observed. Recording is evidence
@@ -205,6 +205,12 @@ def _with_quota_observation(store, task_id, call):
     the delegate's result is replaced by GW_AGENT_AVAILABILITY_UNRECORDED (the
     delegate's own exception stays chained), never silently dropped. An
     interruption still reaches the caller unchanged.
+
+    With fail_closed (the gw-agent route) an observation that cannot be read
+    fails closed too, since its outcome may be a hold: a failed read before
+    the run refuses the delegation before the delegate is called (no gateway
+    call), and a failed read of the outcome after the run is reported as
+    GW_AGENT_AVAILABILITY_UNRECORDED, never suppressed.
 
     It adds no Task read, so the route's own validations (a supplied owner ref
     first) still come before any store read. A TaskStore reports in memory the
@@ -220,7 +226,10 @@ def _with_quota_observation(store, task_id, call):
                   else _developer_of(store, task_id))
         observable = True
     except Exception:
+        before = _UNREAD
         observable = False
+    if fail_closed and (not observable or before is _UNREAD):
+        raise LLMToolError(GW_AGENT_AVAILABILITY_UNRECORDED)
 
     def observe_outcome():
         if not observable:
@@ -229,15 +238,19 @@ def _with_quota_observation(store, task_id, call):
         try:
             if counted:
                 count, record = store.developer_write(task_id)
-                if count == before or type(record) is not dict:
+                if count == before:
                     return
             else:
                 record = store.get(task_id)
-                if type(record) is not dict or record.get('developer') == before:
+                if type(record) is dict and record.get('developer') == before:
                     return
+            if type(record) is not dict:
+                raise LLMToolError('Developer outcome is unreadable')
             worker_availability.observe(store, record)
         except Exception:
-            if worker_availability.holds_admission(record):
+            # An unreadable outcome may be a hold: the gw-agent route fails closed.
+            if ((fail_closed and type(record) is not dict) or
+                    worker_availability.holds_admission(record)):
                 raise LLMToolError(GW_AGENT_AVAILABILITY_UNRECORDED) from None
 
     try:
@@ -6487,11 +6500,13 @@ def gw_agent_probe_route():
     gateway authentication and call path and adds no credential reading,
     header building or passing of its own. The probe sends synthetic text
     only, so the route must allow that data class. The Owner policy is read
-    first: a worker the Owner paused, or a policy that cannot be read, is
-    never probed. Nothing here writes a Task, a D6 or the repository.
+    first: only a worker the Owner policy ALLOWS is probed. A paused worker,
+    an OWNER_ASSIGNMENT_ONLY worker (a probe carries no Owner assignment
+    reference) and an unreadable policy are never probed; run_gw_agent_probe
+    reads the policy again at the call. Nothing here writes a Task, a D6 or
+    the repository.
     """
-    decision = worker_dispatch.evaluate('gw-agent')
-    if decision.reason_code not in ('OWNER_POLICY_ALLOWED', 'OWNER_ASSIGNMENT_REQUIRED'):
+    if not worker_availability.probe_policy_allows():
         raise LLMToolError('GW_AGENT_PROBE_DISPATCH_DENIED')
     try:
         route_config = load_route_config()['routes'].get('gw-agent')
@@ -8319,7 +8334,8 @@ def run_task_delegate(args, *, store=None):
             raise LLMToolError('--provider gw-agent requires --mode direct')
         _check_delegate_repair_cap(args, store)
         return _with_quota_observation(
-            store, args.task_id, lambda: run_task_gw_agent_delegate(args, store=store))
+            store, args.task_id, lambda: run_task_gw_agent_delegate(args, store=store),
+            fail_closed=True)
     _validate_acceptance_scope(getattr(args, 'acceptance', None))
     if getattr(args, 'mode', 'proposal') == 'direct':
         if provider != 'codex':

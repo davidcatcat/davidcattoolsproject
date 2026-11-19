@@ -3121,9 +3121,77 @@ class GwAgentProbeCommandPathTests(unittest.TestCase):
         self.assertEqual((status, stdout, stderr), (2, '', 'GW_AGENT_PROBE_CONFIG_INVALID'))
         self.assertEqual(self.seen, {})
 
+    def test_command_never_probes_without_an_owner_allowed_policy(self):
+        """#2367 Codex v93 F1: OWNER_ASSIGNMENT_ONLY has no assignment for a probe."""
+        from llmtool import worker_availability
+        self.hold('DEVELOPER_GW_AGENT_GATEWAY_TIMEOUT')
+        for policy in ('OWNER_ASSIGNMENT_REQUIRED', 'OWNER_PAUSED', 'WORKER_POLICY_INVALID'):
+            with self.subTest(policy=policy):
+                self.policy = policy
+                self.seen.clear()
+                status, stdout, stderr = self.command()
+                self.assertEqual((status, stdout, stderr),
+                                 (2, '', 'GW_AGENT_PROBE_DISPATCH_DENIED'))
+                self.assertEqual(self.seen, {})
+                self.assertEqual(worker_availability.hold_reason(self.store, 'gw-agent'),
+                                 'INFRASTRUCTURE_PAUSE')
+
+    def test_policy_is_read_again_at_the_probe_call(self):
+        """A policy changed after the route was built still stops the gateway call."""
+        from llmtool import cli, worker_availability
+        self.hold('DEVELOPER_GW_AGENT_GATEWAY_TIMEOUT')
+
+        def factory():
+            built = task_submission_cli.gw_agent_probe_route()
+            self.policy = 'OWNER_ASSIGNMENT_REQUIRED'
+            return built
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            status = cli.run_worker_probe(
+                Namespace(command='worker-probe', worker='gw-agent'), store=self.store,
+                route_factory=factory)
+        self.assertEqual((status, stdout.getvalue(), stderr.getvalue().strip()),
+                         (2, '', 'GW_AGENT_PROBE_DISPATCH_DENIED'))
+        self.assertIn('role_check', self.seen)  # the route was built under ALLOWED
+        self.assertNotIn('route', self.seen)
+        self.assertNotIn('calls', self.seen)
+        self.assertEqual(worker_availability.hold_reason(self.store, 'gw-agent'),
+                         'INFRASTRUCTURE_PAUSE')
+
 
 class GwAgentProbeCliTests(unittest.TestCase):
-    """#2367: `llmtool worker-probe gw-agent` prints one probe report."""
+    """#2367: `llmtool worker-probe gw-agent` prints one probe report.
+
+    The Owner policy decision is injected (ALLOWED unless a test says
+    otherwise); run_gw_agent_probe reads it at the call.
+    """
+
+    def setUp(self):
+        self.policy = 'OWNER_POLICY_ALLOWED'
+        allowed = patch.object(
+            worker_dispatch, 'evaluate',
+            side_effect=lambda worker, *_args, **_kwargs: worker_dispatch.PolicyDecision(
+                worker, self.policy == 'OWNER_POLICY_ALLOWED', self.policy, 'f' * 64))
+        allowed.start()
+        self.addCleanup(allowed.stop)
+
+    def test_owner_assignment_only_policy_is_refused_before_the_probe(self):
+        from llmtool import cli
+        self.policy = 'OWNER_ASSIGNMENT_REQUIRED'
+        calls = []
+        with tempfile.TemporaryDirectory() as temp:
+            store = task_store.TaskStore(Path(temp).resolve() / 'tasks')
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                status = cli.run_worker_probe(
+                    Namespace(command='worker-probe', worker='gw-agent'), store=store,
+                    route_factory=lambda: (object(), {'max_turns': 512}),
+                    probe=lambda *probe_args: calls.append(probe_args))
+            self.assertEqual((status, stdout.getvalue(), stderr.getvalue().strip()),
+                             (2, '', 'GW_AGENT_PROBE_DISPATCH_DENIED'))
+            self.assertEqual(calls, [])
+            self.assertEqual(store.get_worker_observations()['gw-agent']['endpoint']['status'],
+                             'UNKNOWN')
 
     def test_only_gw_agent_can_be_probed(self):
         from llmtool import cli

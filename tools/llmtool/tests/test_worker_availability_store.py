@@ -407,6 +407,110 @@ class GwAgentAvailabilityProbeTests(unittest.TestCase):
         self.assertIsNone(worker_availability.classify_failure(
             gw_record(error_code='DEVELOPER_GW_AGENT_TIMEOUT', profile='opencode')))
 
+    def test_every_gw_agent_route_code_has_its_failure_class(self):
+        """#2367 Codex v93 F2: no route code silently falls through to "no hold"."""
+        holding = ('SECURITY', 'INFRASTRUCTURE', 'MODEL_CAPABILITY')
+        cases = (
+            # Security, scope and binding findings: no automatic recovery.
+            ('DEVELOPER_GW_AGENT_WRITE_SCOPE_VIOLATION', 'SECURITY'),
+            ('DEVELOPER_GW_AGENT_D6_BINDING_CHANGED', 'SECURITY'),
+            ('DEVELOPER_GW_AGENT_SESSION_HOME_UNSAFE', 'SECURITY'),
+            ('DEVELOPER_GW_AGENT_SESSION_BINDING_FAILED', 'SECURITY'),
+            ('DEVELOPER_GW_AGENT_CREDENTIAL_MISSING', 'SECURITY'),
+            ('DEVELOPER_GW_AGENT_AUDIT_INVALID', 'SECURITY'),
+            ('DEVELOPER_GW_AGENT_MODEL_UNVERIFIED', 'SECURITY'),
+            ('DEVELOPER_GW_AGENT_MODEL_UNVERIFIED_MODEL_REPORTED_BLOCKED', 'SECURITY'),
+            ('DEVELOPER_GW_AGENT_TASK_ID_MISMATCH', 'SECURITY'),
+            ('DEVELOPER_GW_AGENT_TASK_ID_MISMATCH_TASK_INVALID', 'SECURITY'),
+            ('DEVELOPER_GW_AGENT_POLICY_REFUSED_PATH_DENIED', 'SECURITY'),
+            # Infrastructure: held until a probe passes.
+            ('DEVELOPER_GW_AGENT_TIMEOUT', 'INFRASTRUCTURE'),
+            ('DEVELOPER_GW_AGENT_GATEWAY_TIMEOUT', 'INFRASTRUCTURE'),
+            ('DEVELOPER_GW_AGENT_MODEL_ERROR_HTTP_502', 'INFRASTRUCTURE'),
+            # Model capability: E9.
+            ('DEVELOPER_GW_AGENT_OUTPUT_TOO_LARGE', 'MODEL_CAPABILITY'),
+            ('DEVELOPER_GW_AGENT_BLOCKED_MODEL_REPORTED_BLOCKED', 'MODEL_CAPABILITY'),
+            ('DEVELOPER_GW_AGENT_BUDGET_EXCEEDED_MAX_TURNS', 'MODEL_CAPABILITY'),
+            # The result could not be read: UNKNOWN, nothing written or replayed.
+            ('DEVELOPER_GW_AGENT_OUTPUT_INVALID_HTTP_500', 'UNKNOWN'),
+            ('DEVELOPER_GW_AGENT_SESSION_PERSIST_FAILED', 'UNKNOWN'),
+            # Quota/rate: the quota layer owns it.
+            ('DEVELOPER_GW_AGENT_QUOTA_EXHAUSTED_HTTP_429', None),
+            # Local refusals before any gateway call: not a Worker outcome.
+            ('DEVELOPER_GW_AGENT_CONFIG_INVALID', None),
+            ('DEVELOPER_GW_AGENT_PROFILE_INVALID', None),
+            ('DEVELOPER_GW_AGENT_REQUEST_INVALID', None),
+            ('DEVELOPER_GW_AGENT_SESSION_UNAVAILABLE', None),
+            ('DEVELOPER_GW_AGENT_SESSION_LOCKED', None),
+            ('DEVELOPER_GW_AGENT_DISPATCH_DENIED', None),
+            ('DEVELOPER_GW_AGENT_TASK_GOAL_INVALID', None),
+            ('DEVELOPER_GW_AGENT_TASK_ACCEPTANCE_MISSING', None),
+            ('DEVELOPER_GW_AGENT_TASK_BUDGET_MAX_TURNS_INVALID', None),
+            # A code no table names fails closed; it is never guessed harmless.
+            ('DEVELOPER_GW_AGENT_FIXTURE_UNLISTED_CODE', 'SECURITY'),
+        )
+        for code, expected in cases:
+            with self.subTest(code=code):
+                record = gw_record(error_code=code)
+                self.assertEqual(worker_availability.classify_failure(record), expected)
+                self.assertEqual(worker_availability.holds_admission(record),
+                                 expected in holding or code.endswith('_HTTP_429'))
+        for code in ('DEVELOPER_GW_AGENT_D6_SESSION_REFUSED',
+                     'DEVELOPER_GW_AGENT_D6_BIND_NATIVE_SESSION_HELPER_UNAVAILABLE'):
+            with self.subTest(code=code):
+                for state in ('DEVELOPER_OUTCOME_UNKNOWN', 'DEVELOPER_UNAVAILABLE'):
+                    self.assertEqual(worker_availability.classify_failure(
+                        gw_record(state=state, error_code=code)), 'UNKNOWN')
+
+    def test_out_of_scope_write_outcome_sets_a_security_stop(self):
+        """#2367 Codex v93 F2: a write-scope finding holds admission, never UNKNOWN."""
+        record = gw_record(error_code='DEVELOPER_GW_AGENT_WRITE_SCOPE_VIOLATION')
+        self.assertTrue(worker_availability.holds_admission(record))
+        self.assertIsNone(worker_availability.observe(self.store, record))
+        view = self.gw_view()
+        self.assertEqual(view['authentication']['status'], 'FAIL')
+        for layer in ('endpoint', 'runtime', 'quota'):
+            self.assertEqual(view[layer]['status'], 'UNKNOWN')
+        self.assertEqual(worker_availability.hold_reason(self.store, 'gw-agent'),
+                         'SECURITY_STOP')
+        self.assertEqual(self.refused(), worker_availability.REFUSAL_CODE)
+        with self.assertRaises(LLMToolError) as caught:
+            self.run_probe('PASS')
+        self.assertEqual(str(caught.exception), 'GW_AGENT_PROBE_SECURITY_STOP')
+        self.assertEqual(self.calls, [])
+        self.assertEqual(worker_availability.hold_reason(self.store, 'gw-agent'),
+                         'SECURITY_STOP')
+
+    def test_probe_is_refused_unless_the_owner_policy_allows_gw_agent(self):
+        """#2367 Codex v93 F1: OWNER_ASSIGNMENT_ONLY never allows a probe.
+
+        The probe carries no Owner assignment reference, so only an ALLOWED
+        policy permits the gateway call; it is read again at the call itself.
+        """
+        worker_availability.observe_failure_class(
+            self.store, gw_record(error_code='DEVELOPER_GW_AGENT_TIMEOUT'), now=self.long_ago())
+        decisions = ((False, 'OWNER_ASSIGNMENT_REQUIRED'), (False, 'OWNER_PAUSED'),
+                     (False, 'WORKER_POLICY_INVALID'), (True, 'OWNER_ASSIGNMENT_MATCHED'))
+        for allowed, reason in decisions:
+            with self.subTest(reason=reason):
+                decision = worker_dispatch.PolicyDecision('gw-agent', allowed, reason, 'f' * 64)
+                with patch.object(worker_dispatch, 'evaluate', return_value=decision):
+                    with self.assertRaises(LLMToolError) as caught:
+                        self.run_probe('PASS')
+                self.assertEqual(str(caught.exception), 'GW_AGENT_PROBE_DISPATCH_DENIED')
+        with patch.object(worker_dispatch, 'evaluate',
+                          side_effect=RuntimeError('fixture policy failure')):
+            with self.assertRaises(LLMToolError) as caught:
+                self.run_probe('PASS')
+        self.assertEqual(str(caught.exception), 'GW_AGENT_PROBE_DISPATCH_DENIED')
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.gw_view()['endpoint']['status'], 'FAIL')
+        self.assertEqual(worker_availability.hold_reason(self.store, 'gw-agent'),
+                         'INFRASTRUCTURE_PAUSE')
+        # The Owner policy allows gw-agent (setUp): the same probe now runs.
+        self.assertIsNone(self.run_probe('PASS')['hold'])
+        self.assertEqual(len(self.calls), 1)
+
     def test_gateway_down_then_probe_pass_then_dispatch_allowed(self):
         failure = worker_availability.observe_failure_class(
             self.store, gw_record(error_code='DEVELOPER_GW_AGENT_TIMEOUT'), now=self.long_ago())

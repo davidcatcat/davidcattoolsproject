@@ -5934,6 +5934,88 @@ class GwAgentDelegateOutcomeObservationTests(unittest.TestCase):
             self.assertFalse(worker_availability.fresh_quota_fail(
                 self.store, 'opencode-developer'))
 
+    def test_an_out_of_scope_write_outcome_sets_a_security_stop(self):
+        """#2367 Codex v93 F2: the route's write-scope code holds admission."""
+        from llmtool import worker_availability
+        self.assertEqual(self.delegate(self.outcome(
+            'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_WRITE_SCOPE_VIOLATION')), 1)
+        self.assertEqual(self.hold(), 'SECURITY_STOP')
+        self.assertEqual(self.refusal(), worker_availability.REFUSAL_CODE)
+        self.assertEqual(self.runtime(), 'UNKNOWN')
+
+    def test_a_failed_scope_violation_write_fails_closed(self):
+        with patch.object(self.store, 'record_worker_observation',
+                          side_effect=LLMToolError('WORKER_AVAILABILITY_BUSY')):
+            with self.assertRaises(LLMToolError) as caught:
+                self.delegate(self.outcome(
+                    'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_WRITE_SCOPE_VIOLATION'))
+        self.assertEqual(str(caught.exception), 'GW_AGENT_AVAILABILITY_UNRECORDED')
+
+    def test_an_unreadable_observation_before_the_run_refuses_the_delegation(self):
+        """#2367 Codex v93 F3: no gateway run whose outcome could not be recorded."""
+        with patch.object(self.store, 'developer_write',
+                          side_effect=LLMToolError('TASK_STORE_UNAVAILABLE')):
+            with self.assertRaises(LLMToolError) as caught:
+                self.delegate(self.outcome(
+                    'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_GATEWAY_TIMEOUT'))
+        self.assertEqual(str(caught.exception), 'GW_AGENT_AVAILABILITY_UNRECORDED')
+        self.assertEqual(self.store.landed, [])  # the delegate never ran
+
+    def test_an_unreadable_outcome_after_the_run_fails_closed(self):
+        """#2367 Codex v93 F3: a later read failure is never suppressed."""
+        cases = (
+            ('read fails, result', [(0, None), LLMToolError('TASK_STORE_UNAVAILABLE')], 1),
+            ('read fails, exception', [(0, None), LLMToolError('TASK_STORE_UNAVAILABLE')],
+             RuntimeError('fixture delegate failure')),
+            ('changed but no record', [(0, None), (1, None)], 1),
+        )
+        for name, reads, result in cases:
+            with self.subTest(case=name):
+                with patch.object(self.store, 'developer_write', side_effect=reads):
+                    with self.assertRaises(LLMToolError) as caught:
+                        self.delegate(self.outcome(
+                            'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_AUDIT_INVALID'),
+                            result=result)
+                self.assertEqual(str(caught.exception), 'GW_AGENT_AVAILABILITY_UNRECORDED')
+                if isinstance(result, BaseException):
+                    self.assertIsInstance(caught.exception.__cause__, RuntimeError)
+        # Nothing was recorded, so no hold is assumed recorded either.
+        self.assertIsNone(self.hold())
+
+    def test_an_unreadable_observation_fails_closed_only_for_gw_agent(self):
+        calls = []
+
+        def call():
+            calls.append('run')
+            return 7
+        with patch.object(self.store, 'developer_write',
+                          side_effect=LLMToolError('TASK_STORE_UNAVAILABLE')):
+            # Other routes: evidence only, the delegate's result is unchanged.
+            self.assertEqual(submission_cli._with_quota_observation(
+                self.store, self.TASK, call), 7)
+            with self.assertRaises(LLMToolError) as caught:
+                submission_cli._with_quota_observation(
+                    self.store, self.TASK, call, fail_closed=True)
+        self.assertEqual(str(caught.exception), 'GW_AGENT_AVAILABILITY_UNRECORDED')
+        self.assertEqual(calls, ['run'])
+
+    def test_an_uncounted_store_that_cannot_read_the_task_fails_closed(self):
+        class UncountedStore:
+            """Records observations but cannot report its writes; get() fails."""
+
+            def record_worker_observation(self, **_kwargs):
+                raise AssertionError('no observation is reached')
+
+            def get(self, _task_id):
+                raise LLMToolError('TASK_STORE_UNAVAILABLE')
+
+        calls = []
+        with self.assertRaises(LLMToolError) as caught:
+            submission_cli._with_quota_observation(
+                UncountedStore(), self.TASK, lambda: calls.append('run'), fail_closed=True)
+        self.assertEqual(str(caught.exception), 'GW_AGENT_AVAILABILITY_UNRECORDED')
+        self.assertEqual(calls, [])
+
 
 if __name__ == '__main__':
     unittest.main()

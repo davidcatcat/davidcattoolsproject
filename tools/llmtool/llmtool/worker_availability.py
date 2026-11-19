@@ -22,6 +22,8 @@ availability record, one layer each:
   then a runtime-layer pause after two consecutive failures at the lowest tier,
   which a probe never clears;
 - UNKNOWN outcomes: nothing is written and nothing is replayed.
+Every gw-agent route code is named in one class table; a code no table names
+fails closed as a security finding, never as "no hold".
 observe() records the infrastructure or security class and the E9 capability
 result of every gw-agent outcome it is given, so the real delegation path sets
 these holds and advances the streak; a failed hold write fails closed there
@@ -354,34 +356,66 @@ E9_LOWEST_TIER_PAUSE_AFTER = 2
 # freshness window so it always stays inside the store bound.
 HOLD_FOR = MAX_RESET_WINDOW - FRESH_FOR
 
-_GW_UNKNOWN_CODES = frozenset(('DEVELOPER_RESULT_UNKNOWN',))
+# Every DEVELOPER_GW_AGENT_* code the gw-agent delegate path persists
+# (run_task_gw_agent_delegate in task_submission_cli and the GwAgentRoute
+# RouteError codes, each possibly followed by _<gateway code>) has exactly
+# one entry below. A code no entry names is never treated as harmless: it
+# fails closed as SECURITY (no automatic recovery), so a new route code can
+# never silently fall through to "no hold" (#2367, Codex security v93).
+_GW_UNKNOWN_CODES = frozenset((
+    'DEVELOPER_RESULT_UNKNOWN', 'DEVELOPER_GW_AGENT_SESSION_PERSIST_FAILED',
+    # Persisted only as DEVELOPER_OUTCOME_UNKNOWN; named so the table is total.
+    'DEVELOPER_GW_AGENT_D6_SESSION_REFUSED',
+    'DEVELOPER_GW_AGENT_D6_BIND_NATIVE_SESSION_HELPER_UNAVAILABLE',
+))
+# The gateway ran but its result could not be read: an UNKNOWN outcome.
+_GW_UNKNOWN_FAMILY = re.compile(r'DEVELOPER_GW_AGENT_OUTPUT_INVALID(?:_[A-Z0-9_]+)?\Z')
 # HTTP 429 is a quota/rate condition: the quota layer (classify/observe) owns it.
 _GW_RATE_CODES = frozenset(_ROUTE_CODES['gw-agent']) | frozenset((
     'DEVELOPER_GW_AGENT_MODEL_ERROR_HTTP_429',))
 _GW_SECURITY_CODES = frozenset((
-    'DEVELOPER_GW_AGENT_CREDENTIAL_MISSING', 'DEVELOPER_GW_AGENT_AUDIT_INVALID',
-    'DEVELOPER_GW_AGENT_MODEL_UNVERIFIED', 'DEVELOPER_GW_AGENT_MODEL_ERROR_HTTP_401',
+    'DEVELOPER_GW_AGENT_CREDENTIAL_MISSING', 'DEVELOPER_GW_AGENT_MODEL_ERROR_HTTP_401',
     'DEVELOPER_GW_AGENT_MODEL_ERROR_HTTP_403',
+    # Scope and binding integrity findings: an out-of-scope write, a D6 that
+    # changed under the run, an unsafe session home or a session binding
+    # that does not match the Task.
+    'DEVELOPER_GW_AGENT_D6_BINDING_CHANGED', 'DEVELOPER_GW_AGENT_SESSION_HOME_UNSAFE',
+    'DEVELOPER_GW_AGENT_SESSION_BINDING_FAILED',
 ))
 _GW_SECURITY_FAMILY = re.compile(
-    r'DEVELOPER_GW_AGENT_(?:POLICY_REFUSED|TASK_ID_MISMATCH)(?:_[A-Z0-9_]+)?\Z')
+    r'DEVELOPER_GW_AGENT_(?:POLICY_REFUSED|TASK_ID_MISMATCH|AUDIT_INVALID|'
+    r'MODEL_UNVERIFIED|WRITE_SCOPE_VIOLATION)(?:_[A-Z0-9_]+)?\Z')
 _GW_INFRA_CODES = frozenset(('DEVELOPER_GW_AGENT_TIMEOUT', 'DEVELOPER_GW_AGENT_GATEWAY_TIMEOUT'))
 _GW_INFRA_FAMILY = re.compile(r'DEVELOPER_GW_AGENT_MODEL_ERROR(?:_[A-Z0-9_]+)?\Z')
+_GW_CAPABILITY_CODES = frozenset(('DEVELOPER_GW_AGENT_OUTPUT_TOO_LARGE',))
 _GW_CAPABILITY_FAMILY = re.compile(
     r'DEVELOPER_GW_AGENT_(?:BLOCKED|BUDGET_EXCEEDED)(?:_[A-Z0-9_]+)?\Z')
+# Local refusals before any gateway call (configuration, Task request
+# validation, a held session lock, the Owner gate): not a Worker outcome, so
+# they set no hold. TASK_ID_MISMATCH is matched as SECURITY first.
+_GW_PRELAUNCH_CODES = frozenset((
+    'DEVELOPER_GW_AGENT_CONFIG_INVALID', 'DEVELOPER_GW_AGENT_PROFILE_INVALID',
+    'DEVELOPER_GW_AGENT_REQUEST_INVALID', 'DEVELOPER_GW_AGENT_SESSION_UNAVAILABLE',
+    'DEVELOPER_GW_AGENT_SESSION_LOCKED', 'DEVELOPER_GW_AGENT_DISPATCH_DENIED',
+))
+_GW_PRELAUNCH_FAMILY = re.compile(r'DEVELOPER_GW_AGENT_TASK_[A-Z0-9_]+\Z')
+_GW_CODE_PREFIX = 'DEVELOPER_GW_AGENT_'
 
 
 def classify_failure(record):
     """Return the failure class of one gw-agent Task record, or None.
 
     MODEL_CAPABILITY, INFRASTRUCTURE, SECURITY or UNKNOWN. None for another
-    route, for no failure and for a quota/rate condition (the quota layer).
+    route, for no failure, for a quota/rate condition (the quota layer) and for
+    a local refusal before any gateway call. A DEVELOPER_GW_AGENT_* code that
+    no table names fails closed as SECURITY: it is never guessed harmless.
     """
     profile, developer = _profile(record)
     if profile != GW_AGENT:
         return None
     code, state = developer.get('error_code'), developer.get('state')
-    if state == 'DEVELOPER_OUTCOME_UNKNOWN' or code in _GW_UNKNOWN_CODES:
+    if (state == 'DEVELOPER_OUTCOME_UNKNOWN' or code in _GW_UNKNOWN_CODES or
+            (type(code) is str and _GW_UNKNOWN_FAMILY.fullmatch(code))):
         return OUTCOME_UNKNOWN
     if type(code) is not str:
         return MODEL_CAPABILITY if state == 'DEVELOPER_OUTPUT_REJECTED' else None
@@ -391,10 +425,13 @@ def classify_failure(record):
         return SECURITY
     if code in _GW_INFRA_CODES or _GW_INFRA_FAMILY.fullmatch(code):
         return INFRASTRUCTURE
-    if _GW_CAPABILITY_FAMILY.fullmatch(code) or state == 'DEVELOPER_OUTPUT_REJECTED':
+    if (code in _GW_CAPABILITY_CODES or _GW_CAPABILITY_FAMILY.fullmatch(code) or
+            state == 'DEVELOPER_OUTPUT_REJECTED'):
         return MODEL_CAPABILITY
-    if code.startswith('DEVELOPER_GW_AGENT_'):
-        return OUTCOME_UNKNOWN  # an unlisted gateway code is never guessed
+    if code in _GW_PRELAUNCH_CODES or _GW_PRELAUNCH_FAMILY.fullmatch(code):
+        return None
+    if code.startswith(_GW_CODE_PREFIX):
+        return SECURITY  # an unlisted route code fails closed, never silently
     return None
 
 
@@ -593,15 +630,34 @@ def hold_reason(store, worker):
         return None
 
 
+def probe_policy_allows():
+    """Whether the Owner dispatch policy allows a gw-agent probe right now.
+
+    Only an ALLOWED worker (OWNER_POLICY_ALLOWED) may be probed. A probe has
+    no Task and no Owner assignment reference, so OWNER_ASSIGNMENT_ONLY
+    (OWNER_ASSIGNMENT_REQUIRED) never allows one; nor does PAUSED or an
+    unreadable policy. The policy is read on every call, never cached.
+    """
+    try:
+        decision = worker_dispatch.evaluate(GW_AGENT)
+    except Exception:
+        return False
+    return decision.allowed is True and decision.reason_code == 'OWNER_POLICY_ALLOWED'
+
+
 def run_gw_agent_probe(store, route, budgets, *, probe=None, now=None):
     """Run at most one gw-agent availability probe and record its result.
 
-    Refused before any call while a security stop holds (no automatic
-    recovery), while a quota FAIL holds (Retry-After or the quota window) and
-    within FRESH_FOR of the last endpoint observation (the existing backoff), so
-    repeated failures cannot loop. PASS clears only the infrastructure pause.
+    Refused before any call unless the Owner policy allows gw-agent dispatch
+    outright (probe_policy_allows; checked here, at the call, whoever built
+    the route), while a security stop holds (no automatic recovery), while a
+    quota FAIL holds (Retry-After or the quota window) and within FRESH_FOR of
+    the last endpoint observation (the existing backoff), so repeated failures
+    cannot loop. PASS clears only the infrastructure pause.
     The probe never reads or writes a Task record and never replays a Task.
     """
+    if not probe_policy_allows():
+        raise LLMToolError('GW_AGENT_PROBE_DISPATCH_DENIED')
     try:
         entry = store.get_worker_observations()[GW_AGENT]
         authentication = dict(entry[AUTHENTICATION_LAYER])
