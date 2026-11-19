@@ -3,11 +3,13 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from llmtool.errors import LLMToolError
+from llmtool.worker_dispatch import PolicyDecision
 from llmtool.spec_template import (
     AUTHOR_ROUTES,
     FIELDS_BY_KIND,
@@ -52,6 +54,11 @@ WRITE = 'tools/llmtool/llmtool/spec_template.py'
 TEST = 'tools/llmtool/tests/test_spec_template.py'
 
 
+def gate_decision(worker='claude-developer', allowed=True,
+                  reason='OWNER_POLICY_ALLOWED'):
+    return PolicyDecision(worker, allowed, reason, None)
+
+
 def make_facts(**overrides):
     values = {
         'task_id': TASK,
@@ -88,6 +95,7 @@ def facts_for(kind, **overrides):
             predecessor_spec={'task_id': PREDECESSOR_TASK,
                               'contract_digest': PREDECESSOR_CONTRACT},
             continued_lineage=[PREDECESSOR_TASK],
+            predecessor_audit={'repairs': 1, 'test_failures': 0, 'attempts': 1},
             carried_counts={'repairs': 1, 'test_failures': 0, 'attempts': 2},
         )
     elif kind == 'developer':
@@ -112,9 +120,11 @@ def repaired_facts(**overrides):
         'base': BASE,
         'result_head': FAILED,
         'failed_head': FAILED,
+        'verified_merge_base': BASE,
         'predecessor_spec': {'task_id': PREDECESSOR_TASK,
                              'contract_digest': PREDECESSOR_CONTRACT},
         'continued_lineage': [PREDECESSOR_TASK],
+        'predecessor_audit': {'repairs': 0, 'test_failures': 0, 'attempts': 1},
         'carried_counts': {'repairs': 1, 'test_failures': 0, 'attempts': 2},
     }
     values.update(overrides)
@@ -122,6 +132,15 @@ def repaired_facts(**overrides):
 
 
 class TemplateTestBase(unittest.TestCase):
+    def setUp(self):
+        self.decisions = {}
+        patcher = mock.patch('llmtool.spec_template._evaluate', self.fake_evaluate)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def fake_evaluate(self, worker, owner_ref, task_id):
+        return self.decisions.get(worker, gate_decision(worker))
+
     def assert_refusal(self, code, function, *args):
         with self.assertRaises(SpecTemplateError) as caught:
             function(*args)
@@ -201,10 +220,19 @@ class AutoFillTests(TemplateTestBase):
             predecessor_spec={'task_id': PREDECESSOR_TASK,
                               'contract_digest': PREDECESSOR_CONTRACT},
             continued_lineage=[PREDECESSOR_TASK],
+            predecessor_audit={'repairs': 1, 'test_failures': 0, 'attempts': 1},
             carried_counts={'repairs': 1, 'test_failures': 0, 'attempts': 2},
         ))
         self.assertEqual(spec['continued_lineage'], [PREDECESSOR_TASK])
         self.assertEqual(spec['carried_counts']['repairs'], 1)
+
+    def test_repair_counts_are_derived_from_the_predecessor_audit(self):
+        spec = build('developer', repaired_facts(
+            predecessor_audit={'repairs': 3, 'test_failures': 2, 'attempts': 5},
+            carried_counts={'repairs': 4, 'test_failures': 2, 'attempts': 6},
+        ))
+        self.assertEqual(spec['carried_counts'],
+                         {'repairs': 4, 'test_failures': 2, 'attempts': 6})
 
     def test_read_scope_covers_every_write_path(self):
         for kind in ('developer', 'sub_pm'):
@@ -226,6 +254,18 @@ class AutoFillTests(TemplateTestBase):
         self.assertIn(cited, spec['read_paths'])
         self.assertEqual(len(spec['read_paths']), len(set(spec['read_paths'])))
 
+    def test_read_scope_covers_root_rule_files_and_other_repository_paths(self):
+        spec = build_spec(
+            'developer',
+            'Add a bounded dispatch helper.',
+            'Build one dispatch spec from source facts.',
+            ['Apply CLAUDE.md, AGENTS.md and app/main.py to the change.'],
+            facts_for('developer'),
+        )
+        for path in ('CLAUDE.md', 'AGENTS.md', 'app/main.py'):
+            with self.subTest(path=path):
+                self.assertIn(path, spec['read_paths'])
+
     def test_acceptance_cited_test_module_is_admitted(self):
         spec = build_spec(
             'developer',
@@ -237,24 +277,40 @@ class AutoFillTests(TemplateTestBase):
         )
         self.assertIn(TEST, spec['read_paths'])
 
-    def test_author_route_and_owner_ref_are_filled_from_the_gate(self):
+    def test_author_route_is_derived_from_the_dispatch_gate(self):
         self.assertEqual(set(AUTHOR_ROUTES),
                          {'ALLOWED', 'OWNER_ASSIGNMENT_ONLY', 'TEMPLATE_ONLY'})
         cases = (
-            ('ALLOWED', None),
-            ('OWNER_ASSIGNMENT_ONLY', 'owner-ref'),
-            ('TEMPLATE_ONLY', None),
+            ('claude-developer', 'ALLOWED', gate_decision(), None),
+            ('claude-developer', 'OWNER_ASSIGNMENT_ONLY',
+             gate_decision(reason='OWNER_ASSIGNMENT_MATCHED'), 'owner-ref'),
+            ('claude-subpm', 'TEMPLATE_ONLY',
+             gate_decision('claude-subpm', False, 'WORKER_UNKNOWN'), None),
         )
-        for route, owner_ref in cases:
+        for worker, route, decision, owner_ref in cases:
             with self.subTest(route=route):
+                self.decisions[worker] = decision
                 spec = build('developer', facts_for(
-                    'developer', author_route=route, owner_ref=owner_ref))
+                    'developer', author_worker=worker,
+                    author_route=route, owner_ref=owner_ref))
                 self.assertEqual(spec['author'], {
                     'role': 'pm',
-                    'worker': 'claude-developer',
+                    'worker': worker,
                     'route': route,
                     'owner_ref': owner_ref,
                 })
+
+    def test_missing_carried_counts_are_derived_from_the_audit(self):
+        spec = build('developer', repaired_facts(carried_counts=None))
+        self.assertEqual(spec['carried_counts'],
+                         {'repairs': 1, 'test_failures': 0, 'attempts': 2})
+
+    def test_author_route_is_filled_when_no_route_is_supplied(self):
+        self.decisions['claude-developer'] = gate_decision(
+            reason='OWNER_ASSIGNMENT_MATCHED')
+        spec = build('developer', facts_for(
+            'developer', author_route=None, owner_ref='owner-ref'))
+        self.assertEqual(spec['author']['route'], 'OWNER_ASSIGNMENT_ONLY')
 
     def test_digests_and_check_receipt_are_copied(self):
         receipt = {'preflight_status': 'SPEC_PREFLIGHT_OK',
@@ -318,7 +374,19 @@ class RefusalTests(TemplateTestBase):
     def test_repair_with_equal_base_and_head_is_refused(self):
         self.assert_refusal(
             SPEC_BASE_STALE, build, 'developer',
-            repaired_facts(base=FAILED, result_head=FAILED, failed_head=FAILED))
+            repaired_facts(base=FAILED, result_head=FAILED, failed_head=FAILED,
+                           verified_merge_base=FAILED))
+
+    def test_repair_base_must_match_the_verified_merge_base(self):
+        self.assert_refusal(
+            SPEC_BASE_STALE, build, 'developer',
+            repaired_facts(base=HEAD, verified_merge_base=BASE))
+
+    def test_repair_requires_verified_merge_base_evidence(self):
+        error = self.assert_refusal(
+            SPEC_BASE_STALE, build, 'developer',
+            repaired_facts(verified_merge_base=None))
+        self.assertEqual(error.spec_field, 'verified_merge_base')
 
     def test_repair_result_head_must_match_the_failed_head(self):
         self.assert_refusal(
@@ -421,7 +489,6 @@ class RefusalTests(TemplateTestBase):
         cases = (
             {'carried_counts': {'repairs': 0, 'test_failures': 0, 'attempts': 2}},
             {'carried_counts': {'repairs': 1, 'test_failures': 0, 'attempts': 1}},
-            {'carried_counts': None},
             {'carried_counts': {'repairs': 1, 'test_failures': 0}},
             {'carried_counts': {'repairs': True, 'test_failures': 0, 'attempts': 2}},
         )
@@ -430,6 +497,28 @@ class RefusalTests(TemplateTestBase):
                 self.assert_refusal(
                     SPEC_CARRIED_COUNTS_INVALID, build, 'developer',
                     repaired_facts(**overrides))
+
+    def test_repair_counts_must_match_the_predecessor_audit(self):
+        cases = (
+            repaired_facts(
+                predecessor_audit={'repairs': 0, 'test_failures': 4,
+                                   'attempts': 1},
+                carried_counts={'repairs': 1, 'test_failures': 0, 'attempts': 2}),
+            repaired_facts(
+                predecessor_audit={'repairs': 2, 'test_failures': 0,
+                                   'attempts': 4},
+                carried_counts={'repairs': 3, 'test_failures': 0, 'attempts': 2}),
+        )
+        for facts in cases:
+            with self.subTest(facts=facts):
+                self.assert_refusal(
+                    SPEC_CARRIED_COUNTS_INVALID, build, 'developer', facts)
+
+    def test_repair_requires_the_predecessor_audit(self):
+        error = self.assert_refusal(
+            SPEC_CARRIED_COUNTS_INVALID, build, 'developer',
+            repaired_facts(predecessor_audit=None))
+        self.assertEqual(error.spec_field, 'predecessor_audit')
 
     def test_fresh_counts_must_match_the_design_values(self):
         self.assert_refusal(
@@ -455,9 +544,8 @@ class RefusalTests(TemplateTestBase):
             SPEC_FRESHNESS_INVALID, build, 'debug',
             facts_for('debug', fresh=True))
 
-    def test_dispatch_author_route_is_required_and_consistent(self):
+    def test_dispatch_author_route_must_agree_with_the_gate(self):
         cases = (
-            {'author_route': None},
             {'author_route': 'MAYBE'},
             {'author_worker': None},
             {'author_role': None},
@@ -469,6 +557,25 @@ class RefusalTests(TemplateTestBase):
                 self.assert_refusal(
                     SPEC_DISPATCH_UNAUTHORIZED, build, 'developer',
                     facts_for('developer', **overrides))
+
+    def test_paused_or_unknown_worker_cannot_claim_an_allowed_route(self):
+        self.decisions['claude-developer'] = gate_decision(
+            allowed=False, reason='OWNER_PAUSED')
+        self.assert_refusal(
+            SPEC_DISPATCH_UNAUTHORIZED, build, 'developer',
+            facts_for('developer', author_route='ALLOWED'))
+        self.decisions['claude-subpm'] = gate_decision(
+            'claude-subpm', False, 'WORKER_UNKNOWN')
+        self.assert_refusal(
+            SPEC_DISPATCH_UNAUTHORIZED, build, 'developer',
+            facts_for('developer', author_worker='claude-subpm',
+                      author_route='ALLOWED'))
+
+    def test_gate_decision_for_another_worker_is_refused(self):
+        self.decisions['claude-developer'] = gate_decision('codex-developer')
+        self.assert_refusal(
+            SPEC_DISPATCH_UNAUTHORIZED, build, 'developer',
+            facts_for('developer'))
 
     def test_digests_must_be_sha256_values(self):
         for overrides in ({'role_card_digest': 'short'},

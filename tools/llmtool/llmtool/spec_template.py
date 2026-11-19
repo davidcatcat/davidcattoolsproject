@@ -17,9 +17,16 @@ Source-fact model
 - ``fresh`` is required for ``developer`` and ``reviewer`` so a fresh dispatch
   and a continuation can never be confused by an absent flag.
 - Repair and debug source facts must name the predecessor and lineage; a repair
-  must also name the predecessor's verified failed HEAD.
-- Read scope derives paths cited in acceptance and, when code is written, needs
-  an admitted test module (design section 2.2).
+  must also name the predecessor's verified failed HEAD and the verified
+  ancestor merge-base, and its revisions must match that evidence.
+- Carried counts are derived from the predecessor audit record; a caller value
+  that contradicts the audit is refused.
+- The author route comes from the authoritative dispatch gate
+  (``worker_dispatch.evaluate``); a caller route that contradicts the decision
+  is refused.
+- Read scope derives paths cited in acceptance, including repository paths
+  outside the tool/document directories, and, when code is written, needs an
+  admitted test module (design section 2.2).
 - Base/result-head rules follow design section 2.2, including the three-dot
   ``review_range`` for reviewers.
 """
@@ -29,6 +36,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
+from . import worker_dispatch
 from .errors import LLMToolError
 
 KINDS = ('developer', 'investigation', 'debug', 'reviewer', 'sub_pm')
@@ -80,10 +88,16 @@ _HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 _COUNT_FIELDS = ('repairs', 'test_failures', 'attempts')
 _ACCEPTANCE_PATH = re.compile(
     r'(?<![a-zA-Z0-9_./-])'
-    r'((?:tools|scripts|docs|\.claude)/[a-zA-Z0-9_/-]+'
-    r'(?:\.[a-zA-Z0-9_/-]+)*\.(?:py|md|json))'
+    r'('
+    r'(?:[a-zA-Z0-9_.-]+/)+[a-zA-Z0-9_.-]+\.[a-zA-Z0-9]+'
+    r'|(?:AGENTS|CLAUDE|README)\.md'
+    r')'
     r'(?![a-zA-Z0-9_/-]|\.[a-zA-Z0-9])'
 )
+# Design section 3.1: unlisted workers are non-dispatchable templates only.
+_TEMPLATE_ONLY_REASONS = frozenset((
+    'WORKER_UNKNOWN', 'WORKER_POLICY_ENTRY_MISSING',
+))
 
 
 class SpecTemplateError(LLMToolError):
@@ -106,11 +120,13 @@ class DispatchSourceFacts:
     canonical_main: str | None = None
     fresh: bool | None = None
     failed_head: str | None = None
+    verified_merge_base: str | None = None
     review_range: str | None = None
     read_paths: tuple[str, ...] | list[str] | None = None
     write_paths: tuple[str, ...] | list[str] | None = None
     predecessor_spec: dict | None = None
     continued_lineage: tuple[str, ...] | list[str] | None = None
+    predecessor_audit: dict | None = None
     carried_counts: dict | None = None
     author_role: str | None = None
     author_worker: str | None = None
@@ -223,6 +239,16 @@ def _counts(value, *, require_failure, require_increment):
     return {key: value[key] for key in _COUNT_FIELDS}
 
 
+def _audit_counts(value):
+    """The predecessor's recorded audit counts, the source of carried values."""
+    if type(value) is not dict or set(value) != set(_COUNT_FIELDS):
+        _refuse(SPEC_CARRIED_COUNTS_INVALID, 'predecessor_audit')
+    for key in _COUNT_FIELDS:
+        if type(value[key]) is not int or value[key] < 0:
+            _refuse(SPEC_CARRIED_COUNTS_INVALID, 'predecessor_audit')
+    return {key: value[key] for key in _COUNT_FIELDS}
+
+
 def _fresh_lineage(facts, carried=None):
     """Return the design's fresh lineage and counts, refusing contradictions."""
     if facts.predecessor_spec is not None:
@@ -246,16 +272,44 @@ def _continued_lineage(facts, carried, *, require_failure, require_increment):
         _refuse(SPEC_PREDECESSOR_MISSING, 'continued_lineage')
     if predecessor['task_id'] not in lineage:
         _refuse(SPEC_LINEAGE_INVALID, 'continued_lineage')
-    counts = _counts(carried, require_failure=require_failure,
+    audit = _audit_counts(facts.predecessor_audit)
+    expected = {
+        'repairs': audit['repairs'] + (1 if require_failure else 0),
+        'test_failures': audit['test_failures'],
+        'attempts': audit['attempts'] + 1,
+    }
+    counts = _counts(expected, require_failure=require_failure,
                      require_increment=require_increment)
+    if carried is not None:
+        supplied = _counts(carried, require_failure=require_failure,
+                           require_increment=require_increment)
+        if supplied != counts:
+            _refuse(SPEC_CARRIED_COUNTS_INVALID, 'carried_counts')
     return predecessor, lineage, counts
 
 
-def _author(facts):
+def _evaluate(worker, owner_ref, task_id):
+    """Evaluate the authoritative dispatch gate for one author binding."""
+    return worker_dispatch.evaluate(worker, owner_ref, task_id)
+
+
+def _author(facts, task_id):
     role = _text(facts.author_role, SPEC_DISPATCH_UNAUTHORIZED, 'author.role')
     worker = _text(facts.author_worker, SPEC_DISPATCH_UNAUTHORIZED, 'author.worker')
-    route = facts.author_route
-    if type(route) is not str or route not in AUTHOR_ROUTES:
+    decision = _evaluate(worker, facts.owner_ref, task_id)
+    if getattr(decision, 'worker_key', None) != worker:
+        _refuse(SPEC_DISPATCH_UNAUTHORIZED, 'author.worker')
+    reason = getattr(decision, 'reason_code', None)
+    allowed = getattr(decision, 'allowed', None)
+    if allowed is True and reason == 'OWNER_POLICY_ALLOWED':
+        route = 'ALLOWED'
+    elif allowed is True and reason == 'OWNER_ASSIGNMENT_MATCHED':
+        route = 'OWNER_ASSIGNMENT_ONLY'
+    elif allowed is False and reason in _TEMPLATE_ONLY_REASONS:
+        route = 'TEMPLATE_ONLY'
+    else:
+        _refuse(SPEC_DISPATCH_UNAUTHORIZED, 'author.route')
+    if facts.author_route is not None and facts.author_route != route:
         _refuse(SPEC_DISPATCH_UNAUTHORIZED, 'author.route')
     owner_ref = facts.owner_ref
     if route == 'OWNER_ASSIGNMENT_ONLY':
@@ -286,9 +340,10 @@ def _scopes(kind, facts, acceptance):
     seen = {_norm_path(path) for path in reads}
     # Design section 2.2: read scope covers every path cited in acceptance.
     for path in _cited_paths(acceptance):
-        if path not in seen:
-            reads.append(path)
-            seen.add(path)
+        normalized = _norm_path(path)
+        if normalized not in seen:
+            reads.append(normalized)
+            seen.add(normalized)
     if kind in READ_ONLY_KINDS:
         if facts.write_paths not in (None, [], ()):
             writes = _path_list(facts.write_paths, 'write_paths')
@@ -324,7 +379,11 @@ def _fresh_heads(facts):
 
 
 def _repair_heads(facts):
+    merge_base = _hex(facts.verified_merge_base, 40, SPEC_BASE_STALE,
+                      'verified_merge_base')
     base = _hex(facts.base, 40, SPEC_BASE_STALE, 'base')
+    if base != merge_base:
+        _refuse(SPEC_BASE_STALE, 'base')
     if facts.failed_head is None:
         _refuse(SPEC_BASE_STALE, 'failed_head')
     failed = _hex(facts.failed_head, 40, SPEC_BASE_STALE, 'failed_head')
@@ -380,7 +439,7 @@ def build_spec(kind, problem, goal, acceptance, facts):
     task_id = _hex(facts.task_id, 32, SPEC_ID_INVALID, 'task_id')
     run_id = _hex(facts.run_id, 32, SPEC_ID_INVALID, 'run_id')
     reads, writes = _scopes(kind, facts, acceptance)
-    author = _author(facts)
+    author = _author(facts, task_id)
     role_card_digest = _digest(facts.role_card_digest, 'role_card_digest')
     contract_digest = _digest(facts.contract_digest, 'contract_digest')
     check_results = _check_results(facts.check_results)
