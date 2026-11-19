@@ -317,7 +317,15 @@ RULE_SCHEMAS: dict[str, Any] = {
         "test_fail_max": Int(0),
         "review_fail_max": Int(0),
         "waiting_notify_after_hours": Int(1),
-    }, {"timeout_continuation_max": Int(0, 3)}),
+    }, {
+        "timeout_continuation_max": Int(0, 3),
+        # #2281 L0b: same rule as repair_policy.OPTIONAL_POSITIVE_POLICY_KEYS
+        # (>= 1, no upper bound); limit table rows 2, 15 and 16.
+        "spec_preflight_large_file_lines": Int(1),
+        "merge_train_members_max": Int(1),
+        "merge_train_files_per_pr_max": Int(1),
+        "revert_scope_prs_max": Int(1),
+    }),
     "worker-dispatch.json": Obj({
         "schema_version": Const(1),
         "workers": MapOf(WORKER_DISPATCH_ENTRY, min_items=1),
