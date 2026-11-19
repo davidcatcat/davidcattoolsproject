@@ -8,10 +8,15 @@ import unittest
 from llmtool import repair_policy as rp
 from llmtool.errors import LLMToolError
 
+# A small valid policy (the limits before #2367) for the pure decision tests.
 GOOD = {'schema_version': 1, 'repair_max': 2, 'parent_debug_max': 1,
         'group_debug_max': 1, 'child_max': 3, 'replan_max': 1,
         'test_fail_max': 2, 'review_fail_max': 3,
         'waiting_notify_after_hours': 24}
+# #2367 (Owner 2026-11-19): the repository policy. 5 review repairs and 5
+# EC2/CI test repairs per work item; review_fail_max is the FAIL after the
+# last repair; each split child owns one Debug within the group limit.
+OWNER = dict(GOOD, repair_max=5, test_fail_max=5, review_fail_max=6, group_debug_max=3)
 
 
 class PolicyFileTests(unittest.TestCase):
@@ -23,8 +28,20 @@ class PolicyFileTests(unittest.TestCase):
         return path
 
     def test_repository_policy_has_the_owner_limits(self):
-        self.assertEqual(rp.load_policy(), dict(GOOD, timeout_continuation_max=1))
+        self.assertEqual(rp.load_policy(), dict(OWNER, timeout_continuation_max=1))
         self.assertEqual(rp.policy_path().name, 'policy.json')
+
+    def test_repair_attempts_max_is_read_from_the_policy(self):
+        # #2367: one source for the stored claim range and the run budget bound.
+        self.assertEqual(rp.repair_attempts_max(), 5)
+        self.assertEqual(rp.repair_attempts_max(self._write(GOOD)), 2)
+        self.assertEqual(rp.repair_attempts_max(self._write(dict(GOOD, test_fail_max=4))), 4)
+        # Unreadable: no repair is admitted (fail closed), never a default.
+        self.assertEqual(rp.repair_attempts_max(self._write('not json')), 0)
+
+    def test_review_fail_max_is_the_fail_after_the_last_repair(self):
+        policy = rp.load_policy()
+        self.assertEqual(policy['review_fail_max'], policy['repair_max'] + 1)
 
     def test_valid_file_loads(self):
         self.assertEqual(rp.load_policy(self._write(GOOD)), GOOD)
@@ -107,7 +124,9 @@ class AdmissionTests(unittest.TestCase):
         self.assertIsNone(debug('root'))
         self.assertEqual(debug('root', parent=1), 'DEBUG_PARENT_USED')
         self.assertEqual(debug('replan', parent=rp.UNKNOWN), 'DEBUG_PARENT_USED')
-        self.assertIsNone(debug('child', parent=1))
+        # #2367: a child's own Debug (parent_debug_used) is its one share.
+        self.assertEqual(debug('child', parent=1), 'DEBUG_GROUP_USED')
+        self.assertEqual(debug('child', parent=rp.UNKNOWN), 'DEBUG_GROUP_USED')
         self.assertEqual(debug('child', group=1), 'DEBUG_GROUP_USED')
 
     def test_test_failures_repair_twice_then_stop(self):
@@ -187,33 +206,33 @@ class LineageBoundTests(unittest.TestCase):
 
     P = GOOD
 
-    def test_lineage_worst_case_is_bounded(self):
+    def _worst_case(self, policy):
         # Every review FAILs, every Debug confirms a cause, every test repair is used.
         runs = {'review': 0, 'test': 0, 'debug': 0}
         lineage = {'group_debug': 0}
 
         def task(kind):
-            fails, debug_status, parent_debug = 0, None, 0
+            fails, debug_status, own_debug = 0, None, 0
             runs['review'] += 1
             while True:
                 fails += 1
                 action = rp.review_action(kind=kind, fail_count=fails, debug_status=debug_status,
-                                          group_debug_used=lineage['group_debug'], policy=self.P)
+                                          group_debug_used=lineage['group_debug'], policy=policy)
                 if action == 'DEBUG':
-                    self.assertIsNone(rp.admit_debug(kind=kind, parent_debug_used=parent_debug,
+                    self.assertIsNone(rp.admit_debug(kind=kind, parent_debug_used=own_debug,
                                                      group_debug_used=lineage['group_debug'],
-                                                     policy=self.P))
+                                                     policy=policy))
                     runs['debug'] += 1
-                    parent_debug += kind != 'child'
+                    own_debug += 1
                     lineage['group_debug'] += kind == 'child'
                     debug_status = 'RCA_CONFIRMED'
                     action = rp.review_action(kind=kind, fail_count=fails, debug_status=debug_status,
-                                              group_debug_used=lineage['group_debug'], policy=self.P)
+                                              group_debug_used=lineage['group_debug'], policy=policy)
                 if action != 'REPAIR':
                     break
                 runs['review'] += 1
-            for done in range(3):
-                if rp.test_failure_action(test_fail_count=done, policy=self.P) == 'REPAIR':
+            for done in range(policy['test_fail_max'] + 1):
+                if rp.test_failure_action(test_fail_count=done, policy=policy) == 'REPAIR':
                     runs['test'] += 1
             return action
 
@@ -221,9 +240,81 @@ class LineageBoundTests(unittest.TestCase):
         for _child in range(3):
             self.assertEqual(task('child'), 'PM_DECIDE')
         self.assertEqual(task('replan'), 'FAILED_FINAL')
+        return runs
+
+    def test_lineage_worst_case_is_bounded(self):
+        runs = self._worst_case(self.P)
         self.assertEqual(runs['review'], 13)
         self.assertEqual(runs['review'] + runs['test'], 23)
         self.assertEqual(runs['debug'], 3)
+
+    def test_owner_lineage_worst_case_is_bounded(self):
+        # #2367: 5 Tasks (ROOT, 3 children, REPLAN), each 1 run + 5 review
+        # repairs, 5 test repairs and one Debug: still a fixed bound.
+        runs = self._worst_case(OWNER)
+        self.assertEqual(runs['review'], 30)
+        self.assertEqual(runs['review'] + runs['test'], 55)
+        self.assertEqual(runs['debug'], 5)
+
+
+class OwnerRepairLimitTests(unittest.TestCase):
+    """#2367 (Owner 2026-11-19): 5 effective repairs; Debug once, after FAIL 2."""
+
+    P = OWNER
+
+    def test_review_repairs_three_to_five_need_no_new_debug_and_the_sixth_escalates(self):
+        action = lambda count, status=None: rp.review_action(
+            kind='root', fail_count=count, debug_status=status, policy=self.P)
+        self.assertEqual(action(1), 'REPAIR')
+        self.assertEqual(action(2), 'DEBUG')
+        self.assertEqual(action(2, 'RCA_UNCONFIRMED'), 'SPLIT')
+        # The RCA_CONFIRMED before repair #2 covers FAILs 2 to 5 of the family.
+        for count in (2, 3, 4, 5):
+            with self.subTest(count=count):
+                self.assertEqual(action(count, 'RCA_CONFIRMED'), 'REPAIR')
+        # A FAIL 3 with no covering Debug still needs one.
+        self.assertEqual(action(3), 'DEBUG')
+        self.assertEqual(action(6, 'RCA_CONFIRMED'), 'SPLIT')
+        self.assertEqual(action(rp.UNKNOWN, 'RCA_CONFIRMED'), 'SPLIT')
+
+    def test_admit_repair_allows_five_with_a_root_cause_after_the_first(self):
+        admit = lambda done, rca=False: rp.admit_repair(
+            repair_count=done, rca_confirmed=rca, policy=self.P)
+        self.assertIsNone(admit(0))
+        for done in (1, 2, 3, 4):
+            with self.subTest(done=done):
+                self.assertEqual(admit(done), 'REPAIR_DEBUG_REQUIRED')
+                self.assertIsNone(admit(done, True))
+        self.assertEqual(admit(5, True), 'REPAIR_LIMIT_REACHED')
+        self.assertEqual(admit(rp.UNKNOWN, True), 'REPAIR_LIMIT_REACHED')
+
+    def test_test_failures_repair_five_times_then_stop(self):
+        action = lambda done: rp.test_failure_action(test_fail_count=done, policy=self.P)
+        self.assertEqual([action(done) for done in range(6)],
+                         ['REPAIR'] * 5 + ['STOPPED'])
+        self.assertEqual(action(rp.UNKNOWN), 'STOPPED')
+
+    def test_split_child_three_gets_its_own_debug_and_repairs_to_five(self):
+        # Evidence shape #2302 split child 3: two sibling children used their
+        # Debugs; before #2367 child 3 got DEBUG_GROUP_USED before repair 2.
+        siblings = 2
+        self.assertIsNone(rp.admit_debug(kind='child', parent_debug_used=0,
+                                         group_debug_used=siblings, policy=self.P))
+        child = lambda count, status=None: rp.review_action(
+            kind='child', fail_count=count, debug_status=status,
+            group_debug_used=siblings, policy=self.P)
+        self.assertEqual(child(2), 'DEBUG')
+        for count in (2, 3, 4, 5):
+            with self.subTest(count=count):
+                self.assertEqual(child(count, 'RCA_CONFIRMED'), 'REPAIR')
+        self.assertEqual(child(6, 'RCA_CONFIRMED'), 'PM_DECIDE')
+        # Its one Debug used, or the group full, refuses a second Debug.
+        self.assertEqual(rp.admit_debug(kind='child', parent_debug_used=1,
+                                        group_debug_used=siblings + 1, policy=self.P),
+                         'DEBUG_GROUP_USED')
+        self.assertEqual(rp.admit_debug(kind='child', parent_debug_used=0,
+                                        group_debug_used=3, policy=self.P),
+                         'DEBUG_GROUP_USED')
 
 
 if __name__ == '__main__':

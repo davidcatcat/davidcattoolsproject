@@ -76,14 +76,32 @@ class SpecPreflightTests(unittest.TestCase):
                 self.assertEqual(output, f"SPEC_PREFLIGHT_FAIL:{label}\n")
                 self.assertNotIn(sensitive_value, output)
 
-    def test_goal_and_acceptance_byte_limits(self):
-        for size, expected in ((512, []), (513, ["goal"])):
+    def test_goal_and_acceptance_have_no_512_byte_cap(self):
+        # #2281 limit row 8: only the response bound limits the goal and items.
+        limit = spec_preflight.RESPONSE_LIMIT
+        for size, expected in ((512, []), (513, []), (4096, []), (limit + 1, ["goal"])):
             with self.subTest(goal_bytes=size):
                 spec = dict(self.spec, goal="a" * size)
                 self.assertEqual(check(spec), expected)
-        for size, expected in ((512, []), (513, ["acceptance[0]"])):
+        for size, expected in ((512, []), (513, []), (4096, []),
+                               (limit + 1, ["acceptance[0]"])):
             with self.subTest(acceptance_bytes=size):
                 self.assertEqual(check(dict(self.spec, acceptance=["a" * size])), expected)
+
+    def test_total_response_bound_still_refuses_fitting_fields(self):
+        # Each field fits on its own; together the response exceeds its bound.
+        limit = spec_preflight.RESPONSE_LIMIT
+        self.assertEqual(check(dict(self.spec, goal="a" * limit)), ["response"])
+        half = "a" * (limit // 2)
+        self.assertEqual(check(dict(self.spec, goal=half, acceptance=[half])), ["response"])
+
+    def test_long_goal_and_item_pass_main_end_to_end(self):
+        goal = "Keep the whole goal in plain prose. " * 40
+        item = "The focused regression test passes. " * 40
+        self.assertGreater(len(goal.encode("utf-8")), 1024)
+        self.assertGreater(len(item.encode("utf-8")), 1024)
+        status, output = self.run_main(dict(self.spec, goal=goal, acceptance=[item]))
+        self.assertEqual((status, output), (0, "SPEC_PREFLIGHT_OK\n"))
 
     def test_summary_and_request_byte_boundaries(self):
         for size, expected in ((2048, []), (2049, ["summary"])):
@@ -95,9 +113,11 @@ class SpecPreflightTests(unittest.TestCase):
                 self.assertEqual(check(dict(self.spec, request="a" * size)), expected)
 
     def test_multibyte_text_is_counted_as_utf8_bytes(self):
-        self.assertEqual(check(dict(self.spec, goal="é" * 256)), [])
-        self.assertEqual(check(dict(self.spec, goal="é" * 257)), ["goal"])
-        self.assertEqual(check(dict(self.spec, acceptance=["é" * 257])), ["acceptance[0]"])
+        half = spec_preflight.RESPONSE_LIMIT // 2
+        self.assertEqual(check(dict(self.spec, goal="é" * 257)), [])
+        self.assertEqual(check(dict(self.spec, goal="é" * (half + 1))), ["goal"])
+        self.assertEqual(check(dict(self.spec, acceptance=["é" * (half + 1)])),
+                         ["acceptance[0]"])
 
     def test_goal_allows_tab_lf_and_cr(self):
         self.assertEqual(check(dict(self.spec, goal="a\tb\nc\rd")), [])

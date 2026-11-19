@@ -18,6 +18,7 @@ sys.path.insert(0, str(LLMTOOL_ROOT))
 from llmtool.errors import LLMToolError  # noqa: E402
 from llmtool.task_submission_cli import (  # noqa: E402
     REQUEST_LIMIT,
+    RESPONSE_LIMIT,
     _read_pm_record_input,
     _screen_text,
     _strict_json_object,
@@ -106,10 +107,12 @@ def check_open_bracket_ends(spec: dict[str, Any]) -> list[str]:
 def check(spec: dict[str, Any]) -> list[str]:
     """Return fixed failure labels; never include untrusted field values."""
     failures: list[str] = []
+    # #2281 limit row 8: goal and acceptance items have no own byte cap; the
+    # response bound holds, and the record-pm check below screens the whole response.
     for label, value, limit in (
         ("request", spec["request"], REQUEST_LIMIT),
         ("summary", spec["summary"], 2048),
-        ("goal", spec["goal"], 512),
+        ("goal", spec["goal"], RESPONSE_LIMIT),
     ):
         try:
             _screen_text(value, limit)
@@ -121,7 +124,7 @@ def check(spec: dict[str, Any]) -> list[str]:
         failures.append("acceptance_count")
     for index, item in enumerate(acceptance):
         try:
-            _screen_text(item, 512)
+            _screen_text(item, RESPONSE_LIMIT)
         except LLMToolError:
             failures.append(f"acceptance[{index}]")
 

@@ -124,7 +124,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         route_config = {
             'allowed_data_classes': ['synthetic', 'public_repo'],
             'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
-                        'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                        'max_output_tokens': 65536, 'max_wall_seconds': 1800,
                         'max_tool_result_bytes': 262144,
                         'max_sent_bytes': 16777216},
             'profile': {
@@ -212,6 +212,9 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(config['profile']['timeout_seconds'], 1800)
         self.assertEqual(config['profile']['timeout_seconds'], config['default_timeout'])
         self.assertEqual(config['budgets']['max_turns'], 512)
+        self.assertEqual(config['budgets']['max_wall_seconds'], 1800)
+        self.assertEqual(config['budgets']['max_wall_seconds'], config['default_timeout'])
+        self.assertLessEqual(config['budgets']['max_wall_seconds'], config['max_timeout'])
         self.assertEqual(config['authorization_ref'],
             'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6760670167')
         with tempfile.TemporaryDirectory() as temp:
@@ -506,7 +509,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                           return_value={'routes': {'gw-agent': {
                               'allowed_data_classes': ['synthetic', 'public_repo'],
                               'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
-                                          'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                                          'max_output_tokens': 65536, 'max_wall_seconds': 1800,
                                           'max_tool_result_bytes': 262144,
                                           'max_sent_bytes': 16777216},
                               'profile': {'adapter': 'openai-chat-tools',
@@ -578,7 +581,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         route_config = {
             'allowed_data_classes': ['synthetic', 'public_repo'],
             'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
-                        'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                        'max_output_tokens': 65536, 'max_wall_seconds': 1800,
                         'max_tool_result_bytes': 262144,
                         'max_sent_bytes': 16777216},
             'profile': {'adapter': 'openai-chat-tools', 'model': 'gw-agent-default',
@@ -777,7 +780,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                           return_value={'routes': {'gw-agent': {
                               'allowed_data_classes': ['synthetic', 'public_repo'],
                               'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
-                                          'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                                          'max_output_tokens': 65536, 'max_wall_seconds': 1800,
                                           'max_tool_result_bytes': 262144,
                                           'max_sent_bytes': 16777216},
                               'profile': {'adapter': 'openai-chat-tools',
@@ -1036,7 +1039,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                               'allowed_models': ['gw-agent-default', 'authorized-model'],
                               'default_effort': 'low',
                               'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
-                                          'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                                          'max_output_tokens': 65536, 'max_wall_seconds': 1800,
                                           'max_tool_result_bytes': 262144,
                                           'max_sent_bytes': 16777216}}}}), \
              patch.dict(os.environ, {'HOME': str(config_home)}), \
@@ -1090,6 +1093,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(seen['task']['budgets']['max_input_tokens'], 262144)
         self.assertEqual(seen['task']['budgets']['max_output_tokens'], 65536)
         self.assertEqual(seen['task']['budgets']['max_turns'], 512)
+        self.assertEqual(seen['task']['budgets']['max_wall_seconds'], 1800)
         self.assertEqual(developer['usage']['prompt_tokens'], 1)
         self.assertEqual(developer['usage']['completion_tokens'], 2)
         self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
@@ -1132,10 +1136,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             {'budgets': 'not-a-dict'},
             {'budgets': {'max_turns': 0}},  # invalid value
             {'budgets': {'max_turns': 512, 'max_input_tokens_multiplier': 2000,
-                         'max_output_tokens_multiplier': 4, 'max_wall_seconds': 600,
+                         'max_output_tokens_multiplier': 4, 'max_wall_seconds': 1800,
                          'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216}},
             {'budgets': {'max_turns': 512, 'max_input_tokens_multiplier': 8,
-                         'max_output_tokens_multiplier': 400, 'max_wall_seconds': 600,
+                         'max_output_tokens_multiplier': 400, 'max_wall_seconds': 1800,
                          'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216}},
         )
         for extra in cases:
@@ -1208,7 +1212,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             'allowed_models': ['authorized-model'],
             'default_effort': 'low',
             'budgets': {'max_turns': 512, 'max_input_tokens_multiplier': 8,
-                        'max_output_tokens_multiplier': 4, 'max_wall_seconds': 600,
+                        'max_output_tokens_multiplier': 4, 'max_wall_seconds': 1800,
                         'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
         }
         seen_requests = []
@@ -1245,6 +1249,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(seen_requests[0]['task']['budgets']['max_input_tokens'], 262144)
         self.assertEqual(seen_requests[0]['task']['budgets']['max_output_tokens'], 65536)
         self.assertEqual(seen_requests[0]['task']['budgets']['max_turns'], 512)
+        self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], 1800)
 
     def test_old_audit_copies_are_removed_and_recent_copies_retained(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -2006,10 +2011,10 @@ class GwAgentRealStoreTests(unittest.TestCase):
             {'budgets': 'not-a-dict'},
             {'budgets': {'max_turns': 0}},  # invalid value
             {'budgets': {'max_turns': 512, 'max_input_tokens_multiplier': 2000,
-                         'max_output_tokens_multiplier': 4, 'max_wall_seconds': 600,
+                         'max_output_tokens_multiplier': 4, 'max_wall_seconds': 1800,
                          'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216}},
             {'budgets': {'max_turns': 512, 'max_input_tokens_multiplier': 8,
-                         'max_output_tokens_multiplier': 400, 'max_wall_seconds': 600,
+                         'max_output_tokens_multiplier': 400, 'max_wall_seconds': 1800,
                          'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216}},
         )
         for extra in cases:
@@ -2047,7 +2052,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
             'max_turns': 512,
             'max_input_tokens_multiplier': 8,
             'max_output_tokens_multiplier': 4,
-            'max_wall_seconds': 600,
+            'max_wall_seconds': 1800,
             'max_tool_result_bytes': 262144,
             'max_sent_bytes': 16777216,
         }
@@ -2074,6 +2079,43 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertEqual(seen_requests[0]['task']['budgets']['max_input_tokens'], 262144)
         self.assertEqual(seen_requests[0]['task']['budgets']['max_output_tokens'], 65536)
         self.assertEqual(seen_requests[0]['task']['budgets']['max_turns'], 512)
+        self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], 1800)
+
+    def test_delegate_passes_configured_wall_seconds_budget(self):
+        # #2281: the whole-run wall budget passed to the gateway equals the configured value.
+        target = 'gw-agent-wall-budget.txt'
+        task_id = self.task_id = self._active_pm_task(target)
+        args = Namespace(task_id=task_id, mode='direct', context_stdin=False,
+            data_class='SYNTHETIC', egress_basis='Synthetic test context.',
+            acceptance=[f'Only {target} is created.'], selection_source='PM',
+            executor_task='executor-d6', read_path=[target], write_path=[target],
+            cwd=str(self.root))
+        real_config = load_route_config()
+        real_config['routes']['gw-agent']['package_path'] = str(
+            Path(__file__).resolve().parents[2] / 'api-agent-gateway')
+        seen_requests = []
+        def fake_runner(_route, request, *, gate, on_launch, **_kwargs):
+            seen_requests.append(copy.deepcopy(request))
+            on_launch()
+            raise RouteError('GW_AGENT_TIMEOUT')
+
+        decision = worker_dispatch.PolicyDecision('gw-agent', True,
+                                                  'OWNER_POLICY_ALLOWED', 'f' * 64)
+        with patch.object(task_submission_cli, 'load_route_config',
+                          return_value=real_config), \
+             patch.object(task_submission_cli, 'for_platform',
+                          return_value=_NoSandboxBoundary()), \
+             patch.object(worker_dispatch, 'authorize_dispatch'), \
+             patch.object(worker_dispatch, 'evaluate', return_value=decision), \
+             redirect_stdout(io.StringIO()):
+            task_submission_cli.run_task_gw_agent_delegate(
+                args, store=self.store, route_runner=fake_runner)
+
+        self.assertEqual(len(seen_requests), 1)
+        configured_budget = load_route_config()['routes']['gw-agent']['budgets']['max_wall_seconds']
+        self.assertEqual(configured_budget, 1800)
+        self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], 1800)
+        self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], configured_budget)
 
     def test_gateway_profile_model_outside_allowed_models_is_refused(self):
         # #1773 (CWE-863): the real repo route lists only its default model; a

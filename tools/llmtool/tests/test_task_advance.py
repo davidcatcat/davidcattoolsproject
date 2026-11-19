@@ -1949,18 +1949,33 @@ class TaskAdvanceCiFailRepairTests(unittest.TestCase):
             'conclusion': 'failure', 'excerpt': CI_EXCERPT})
         self.assertIn('check-runs/5', calls)
 
-    def test_used_up_test_count_stops_without_repair(self):
-        used = [{'executor_task': 'executor-1', 'pr': 17, 'head_sha': 'b' * 40,
+    @staticmethod
+    def used_test_claims(count):
+        return [{'executor_task': 'executor-1', 'pr': 17, 'head_sha': 'b' * 40,
                  'version': n, 'attempt': n, 'family': 'pr-17-ec2', 'state': 'FAILED',
                  'repair_task_id': f'{n:032x}', 'comment_id': None,
                  'packet_sha256': 'f' * 64, 'claimed_at': f'2026-11-13T0{n}:00:00Z'}
-                for n in (1, 2)]
+                for n in range(1, count + 1)]
+
+    def test_used_up_test_count_stops_without_repair(self):
+        # #2367: test_fail_max is 5 effective EC2/CI repairs.
         result, dispatched, _, repaired, _ = self.linux(
-            'failure', record=base_record(review_repair_claims=used))
+            'failure', record=base_record(review_repair_claims=self.used_test_claims(5)))
         self.assertEqual((result['step'], result['codes']),
                          ('STOPPED', ['TEST_FAIL_LIMIT_REACHED']))
         self.assertEqual(repaired, [])
         self.assertEqual(dispatched, [])
+
+    def test_test_count_below_the_limit_still_repairs(self):
+        # #2367: the 2nd to 4th used test repair no longer stops the Task.
+        for count in (2, 4):
+            with self.subTest(used=count):
+                result, dispatched, _, repaired, _ = self.linux(
+                    'failure',
+                    record=base_record(review_repair_claims=self.used_test_claims(count)))
+                self.assertEqual((result['step'], result['codes']), ('CI_FAILED', []))
+                self.assertEqual(len(repaired), 1)
+                self.assertEqual(dispatched, [])
 
     def test_env_conclusions_wait_without_repair_or_ci_rerun(self):
         for conclusion in ('cancelled', 'startup_failure'):

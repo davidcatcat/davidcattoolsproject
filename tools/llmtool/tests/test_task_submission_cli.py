@@ -25,6 +25,7 @@ from llmtool.providers.codex_cli import CodexCLIProvider, OUTPUT_LIMIT
 from llmtool.task_store import MAX_RECORD_BYTES, TaskStore, TaskStoreConflict, new_id
 from llmtool.task_submission_cli import TEXT_DEVELOPER_CONTEXT_SEPARATOR
 from llmtool import remote_test
+from llmtool import repair_policy
 from llmtool import active_pm_inbox
 from llmtool import task_submission_cli as submission_cli
 from llmtool import trust as trust_module
@@ -998,13 +999,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(parser.parse_args(['task', 'show', 'a' * 32]).action, 'show')
 
     def test_record_pm_reports_safe_assignment_limit_diagnostics(self):
+        # #2281 limit row 8: the goal and item byte caps are gone; the count stays.
         cases = (
-            ({'route': 'codex', 'risk': 'LOW', 'goal': 'g' * 515,
-              'acceptance': ['A test passes.']},
-             'PM_RESPONSE_GOAL_TOO_LONG: goal is 515 bytes (max 512)'),
-            ({'route': 'codex', 'risk': 'LOW', 'goal': 'Do one task.',
-              'acceptance': ['x' * 539]},
-             'PM_RESPONSE_ACCEPTANCE_ITEM_TOO_LONG: acceptance[0] is 539 bytes (max 512)'),
             ({'route': 'codex', 'risk': 'LOW', 'goal': 'Do one task.',
               'acceptance': ['ok'] * 22},
              'PM_RESPONSE_ACCEPTANCE_COUNT: 22 items (allowed 1-16)'),
@@ -1023,15 +1019,104 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 self.assertEqual(str(raised.exception), expected)
                 self.assertFalse(store.root.exists())
 
-    def test_task_delegate_reports_acceptance_item_size_without_echoing_text(self):
-        secretish = 'x' * 513
-        args = Namespace(provider='codex', acceptance=[secretish])
+    def test_record_pm_accepts_goal_and_item_over_512_bytes(self):
+        # #2281 limit row 8: no own byte cap on the goal or an acceptance item.
+        goal = 'Keep the whole goal in plain prose. ' * 40
+        item = 'The focused regression test passes. ' * 40
+        self.assertGreater(len(goal.encode('utf-8')), 1024)
+        self.assertGreater(len(item.encode('utf-8')), 1024)
+        response = json.dumps({
+            'schema_version': 1, 'summary': 'Bounded.',
+            'developer_assignment': {'route': 'codex', 'risk': 'LOW', 'goal': goal,
+                                     'acceptance': [item, 'A short item.']},
+        })
+        envelope = json.dumps({'request': 'Build feature', 'response': response})
+        store = TaskStore(Path(self.temp.name).resolve() / 'long-goal')
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(run_task_record_pm(Namespace(stdin_json=True), store=store,
+                                                input_stream=io.StringIO(envelope)), 0)
+        record_path = next(store.root.glob('*.json'))
+        assignment = store.get(record_path.stem)['pm_assignment']
+        self.assertEqual(assignment['goal'], goal)
+        self.assertEqual(assignment['acceptance'], [item, 'A short item.'])
+
+    def test_goal_and_item_still_screened_and_response_bound_kept(self):
+        # #2281 limit row 8: the sensitive screen still runs on the goal and on
+        # each item (screen mocked here, per the test data rule), and the total
+        # response bound still refuses.
+        long_goal = 'Keep the whole goal in plain prose. ' * 40
+        long_item = 'The focused regression test passes. ' * 40
+        flagged = 'Text the mocked screen is told to flag.'
+
+        def response_with(goal, acceptance):
+            return json.dumps({'schema_version': 1, 'summary': 'Bounded.',
+                               'developer_assignment': {
+                                   'route': 'codex', 'risk': 'LOW', 'goal': goal,
+                                   'acceptance': acceptance}})
+
+        screen = patch.object(submission_cli, '_emitted_sensitive',
+                              side_effect=lambda text: (isinstance(text, str) and
+                                                        flagged in text))
+        with screen as mocked:
+            clean = submission_cli._pm_assignment(response_with(long_goal, [long_item]))
+            self.assertEqual((clean['goal'], clean['acceptance']), (long_goal, [long_item]))
+            screened = [call.args[0] for call in mocked.call_args_list]
+            self.assertIn(long_goal, screened)
+            self.assertIn(long_item, screened)
+            self.assertIsNone(submission_cli._pm_assignment(
+                response_with(long_goal + flagged, [long_item])))
+            self.assertIsNone(submission_cli._pm_assignment(
+                response_with(long_goal, [long_item + flagged])))
+            self.assertEqual(submission_cli._validate_acceptance_scope([long_item]),
+                             [long_item])
+            with self.assertRaises(LLMToolError) as raised:
+                submission_cli._validate_acceptance_scope([long_item + flagged])
+            self.assertEqual(str(raised.exception), 'request or response contains '
+                             'recognizable credential material; redact it first')
         with self.assertRaises(LLMToolError) as raised:
-            run_task_delegate(args, store=object())
-        self.assertEqual(str(raised.exception),
-                         'PM_RESPONSE_ACCEPTANCE_ITEM_TOO_LONG: acceptance[0] is '
-                         '513 bytes (max 512)')
-        self.assertNotIn(secretish, str(raised.exception))
+            submission_cli._validate_acceptance_scope(['a' * (RESPONSE_LIMIT + 1)])
+        self.assertEqual(str(raised.exception), 'request or response exceeds the supported size')
+
+    def test_long_goal_and_item_pass_codex_delegate_end_to_end(self):
+        # #2281 limit row 8 regression: a goal and an item each well over 512 bytes
+        # pass PM submit, codex delegate and the Task store validation.
+        goal = 'Keep the whole goal in plain prose. ' * 40
+        item = 'The focused regression test passes. ' * 40
+        self.assertGreater(len(goal.encode('utf-8')), 1024)
+        self.assertGreater(len(item.encode('utf-8')), 1024)
+        response = json.dumps({
+            'schema_version': 1, 'summary': 'Bounded low-risk task.',
+            'developer_assignment': {'route': 'codex', 'risk': 'LOW', 'goal': goal,
+                                     'acceptance': [item]},
+        })
+        code, task, _, _ = self.invoke(client=FakeClient(Reply(response, {
+            'prompt_tokens': 12, 'completion_tokens': 18, 'total_tokens': 30,
+        })))
+        self.assertEqual(code, 0)
+        patch_text = ('diff --git a/sample.py b/sample.py\n'
+                      '--- a/sample.py\n+++ b/sample.py\n@@ -1 +1 @@\n'
+                      '-VALUE = 1\n+VALUE = 2\n')
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=codex_developer_config()), \
+                patch.object(CodexCLIProvider, 'complete', autospec=True,
+                             return_value=Reply(patch_text, {'elapsed_seconds': 0.25,
+                                                             'model': 'gpt-6-luna'})) as complete, \
+                redirect_stdout(output):
+            code = run_task_delegate(self._codex_delegate_args(task, acceptance=[item]))
+        self.assertEqual(code, 0, output.getvalue())
+        complete.assert_called_once()
+        # Plain ASCII prose without quotes or backslashes survives JSON nesting unchanged.
+        prompt_text = json.dumps(complete.call_args.args[1])
+        self.assertIn(goal.strip(), prompt_text)
+        self.assertIn(item.strip(), prompt_text)
+        store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+        saved = store.get(task['task_id'])
+        self.assertEqual(saved['pm_assignment']['goal'], goal)
+        self.assertEqual(saved['pm_assignment']['acceptance'], [item])
+        self.assertEqual(saved['developer']['acceptance'], [item])
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
 
     def test_background_rejects_codex_proposal_before_fork(self):
         args = Namespace(task_id='a' * 32, provider='codex', mode='proposal',
@@ -2334,17 +2419,43 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertIsNone(stored['developer'])
 
     def test_opencode_developer_role_non_free_model_is_refused_before_claim(self):
+        # Owner decision #289: paid role model is admitted; malformed role model is refused before claim.
         task = self._pm_task_with_opencode_assignment()
         role = {'model': 'opencode/paid-model', 'effort': 'high', 'account': None}
+        output = io.StringIO()
+
+        def execute(**kwargs):
+            self.assertEqual(kwargs['model'], 'opencode/paid-model#high')
+            (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+            return DirectResult(0, 'ses_Abc123', 'Updated fixture.', None,
+                'UNKNOWN', 'a' * 64, 1234, 'CONFIRMED', 'opencode v2.1.4',
+                10, 1, 'b' * 64)
+
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch.object(submission_cli.role_config, 'resolve_role',
                              return_value=role), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      side_effect=execute) as invoke, \
+                redirect_stdout(output):
+            run_task_delegate(self._opencode_delegate_args(task))
+        self.assertEqual(invoke.call_count, 1)
+        developer = json.loads(output.getvalue())['developer']
+        self.assertEqual(developer['model'], 'opencode/paid-model#high')
+        (self.executor_root / 'sample.py').write_text('VALUE = 1\n')
+
+        malformed_task = self._pm_task_with_opencode_assignment()
+        malformed_role = {'model': 'opencode/a/b', 'effort': 'high', 'account': None}
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch.object(submission_cli.role_config, 'resolve_role',
+                             return_value=malformed_role), \
                 patch('llmtool.task_submission_cli.opencode_direct_developer.run') as invoke:
-            with self.assertRaisesRegex(LLMToolError, 'opencode/<name>-free'):
-                run_task_delegate(self._opencode_delegate_args(task))
+            with self.assertRaises(LLMToolError) as caught:
+                run_task_delegate(self._opencode_delegate_args(malformed_task))
+            self.assertEqual(getattr(caught.exception, 'direct_opencode_code', None),
+                             'OPENCODE_MODEL_INVALID')
         invoke.assert_not_called()
         stored = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(
-            task['task_id'])
+            malformed_task['task_id'])
         self.assertIsNone(stored['developer'])
 
     def test_agy_developer_role_model_effort_validation_and_account_refusal(self):
@@ -2381,14 +2492,50 @@ class TaskSubmissionCLITests(unittest.TestCase):
                          'AGY_ROLE_PROFILE_INVALID')
 
     def test_opencode_developer_profile_non_free_model_is_refused_before_claim(self):
-        task = self._pm_task_with_opencode_assignment()
-        for model in ('opencode/paid-model', 'other/name-free', 'opencode/a/b-free'):
-            with self.subTest(model=model):
-                self._write_opencode_developer_model(model)
+        # Owner decision #289: paid models and other providers are admitted; malformed models are refused before claim.
+        # A1: the Owner's configured model (opencode-go/deepseek-v4.1-flash#high)
+        # and the shipped free default run end to end through the real delegate path.
+        for model in ('opencode/paid-model', 'other/name-free',
+                      'opencode-go/deepseek-v4.1-flash',
+                      'opencode-go/deepseek-v4.1-flash#high',
+                      'opencode/deepseek-v4.1-flash-free'):
+            with self.subTest(admitted_model=model):
+                task = self._pm_task_with_opencode_assignment()
+                self._write_opencode_developer_model(model, steps=24)
+                output = io.StringIO()
+
+                def execute(**kwargs):
+                    self.assertEqual(kwargs['model'], model)
+                    self.assertEqual(kwargs['steps'], 24)
+                    (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+                    return DirectResult(0, 'ses_Abc123', 'Updated fixture.', None,
+                        'UNKNOWN', 'a' * 64, 1234, 'CONFIRMED', 'opencode v2.1.4',
+                        10, 1, 'b' * 64)
+
                 with patch.dict(os.environ, {'HOME': str(self.home)}), \
-                        patch('llmtool.task_submission_cli.opencode_direct_developer.run') as invoke, \
-                        self.assertRaisesRegex(LLMToolError, 'opencode/<name>-free'):
+                        patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                              side_effect=execute) as invoke, \
+                        redirect_stdout(output):
                     run_task_delegate(self._opencode_delegate_args(task))
+                self.assertEqual(invoke.call_count, 1)
+                developer = json.loads(output.getvalue())['developer']
+                self.assertEqual(developer['model'], model)
+                (self.executor_root / 'sample.py').write_text('VALUE = 1\n')
+
+        # #2302 F1: the quoted empty, whitespace and control-character values are
+        # refused by the config resolver before validate_model and must keep
+        # the same stable code through the real delegate path.
+        for model in ('opencode/a/b-free', 'opencode/has space', 'bare-model',
+                      '', '   ', '\t', 'opencode/model\n', 'opencode/model\x01'):
+            with self.subTest(malformed_model=model):
+                task = self._pm_task_with_opencode_assignment()
+                self._write_opencode_developer_model(json.dumps(model))
+                with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                        patch('llmtool.task_submission_cli.opencode_direct_developer.run') as invoke:
+                    with self.assertRaises(LLMToolError) as caught:
+                        run_task_delegate(self._opencode_delegate_args(task))
+                    self.assertEqual(getattr(caught.exception, 'direct_opencode_code', None),
+                                     'OPENCODE_MODEL_INVALID')
                 invoke.assert_not_called()
                 stored = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(
                     task['task_id'])
@@ -5081,6 +5228,11 @@ class DispatcherPreflightRefusalTests(unittest.TestCase):
 
 
 class DelegateRepairCapTests(unittest.TestCase):
+    # #2367: a D6 takes 1 + repair_max review runs (the original run and 5
+    # effective repairs); this many prior runs refuse the next one. Below it,
+    # repair #2 needs a High Debug and its RCA_CONFIRMED covers later repairs.
+    REVIEW_LIMIT = 1 + repair_policy.load_policy()['repair_max']
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -5176,7 +5328,9 @@ class DelegateRepairCapTests(unittest.TestCase):
                 developer=developer_record, completion=completion)
         return task
 
-    def _prior_assignments(self, count=3, *, executor='executor-task-1'):
+    def _prior_assignments(self, count=None, *, executor='executor-task-1'):
+        if count is None:
+            count = self.REVIEW_LIMIT
         for _ in range(count):
             self._task(executor=executor, developer=True)
 
@@ -5192,7 +5346,9 @@ class DelegateRepairCapTests(unittest.TestCase):
         values.update(changes)
         return Namespace(**values)
 
-    def test_three_prior_assignments_refuse_all_routes_before_route_call(self):
+    def test_limit_prior_assignments_refuse_all_routes_before_route_call(self):
+        # #2367: 1 + repair_max prior runs used up the 5 effective repairs.
+        self.assertEqual(self.REVIEW_LIMIT, 6)
         self._prior_assignments()
         routes = {
             'codex': 'run_task_codex_delegate',
@@ -5211,7 +5367,7 @@ class DelegateRepairCapTests(unittest.TestCase):
 
     def test_one_prior_assignment_allows_repair_one_and_other_d6_is_unaffected(self):
         self._prior_assignments(1)
-        self._prior_assignments(3, executor='executor-task-other')
+        self._prior_assignments(executor='executor-task-other')
         task = self._task()
         args = self._args(task, 'opencode')
         with patch.object(submission_cli, 'run_task_opencode_delegate', return_value=7) as route:
@@ -5262,7 +5418,8 @@ class DelegateRepairCapTests(unittest.TestCase):
 
     def _assert_prelaunch_evidence_counts(
             self, route, state, code, **changes):
-        self._prior_assignments(2)
+        # The prior record under test is the run that reaches the limit.
+        self._prior_assignments(self.REVIEW_LIMIT - 1)
         prior = self._task(
             developer=True, route=route,
             developer_state=state, artifact=None, error_code=code)
@@ -5345,7 +5502,7 @@ class DelegateRepairCapTests(unittest.TestCase):
             with self.subTest(error_code=code):
                 self.store = TaskStore(
                     Path(self.temp.name).resolve() / f'tasks-{index}')
-                self._prior_assignments(2)
+                self._prior_assignments(self.REVIEW_LIMIT - 1)
                 self._task(
                     developer=True, route='gw-agent',
                     developer_state=('DEVELOPER_PENDING' if code is None
@@ -5359,6 +5516,8 @@ class DelegateRepairCapTests(unittest.TestCase):
                         self._args(task, 'opencode'), self.store)
 
     def test_responded_artifact_and_changed_files_count(self):
+        # The three records below are the last runs up to the limit.
+        self._prior_assignments(self.REVIEW_LIMIT - 3)
         self._task(developer=True, developer_state='DEVELOPER_RESPONDED')
         self._task(developer=True, developer_state='DEVELOPER_RESPONDED',
                    artifact='diff',
@@ -5379,7 +5538,7 @@ class DelegateRepairCapTests(unittest.TestCase):
                 self._args(task, 'opencode'), self.store)
 
     def test_codex_blocked_execution_counts(self):
-        self._prior_assignments(2)
+        self._prior_assignments(self.REVIEW_LIMIT - 1)
         self._task(
             developer=True, route='codex',
             developer_state='DEVELOPER_OUTCOME_UNKNOWN', artifact=None,
@@ -5403,6 +5562,7 @@ class DelegateRepairCapTests(unittest.TestCase):
                 self._args(task, 'opencode'), self.store)
 
     def test_pending_prior_record_is_ambiguous_and_counts(self):
+        self._prior_assignments(self.REVIEW_LIMIT - 3)
         self._task(developer=True, developer_state='DEVELOPER_PENDING', artifact=None)
         self._task(developer=True, developer_state='DEVELOPER_RESPONDED')
         self._task(developer=True, developer_state='DEVELOPER_RESPONDED')
@@ -5412,6 +5572,7 @@ class DelegateRepairCapTests(unittest.TestCase):
                 self._args(task, 'opencode'), self.store)
 
     def test_partial_prior_developer_record_counts(self):
+        self._prior_assignments(self.REVIEW_LIMIT - 3)
         prior = self._task(
             developer=True, developer_state='DEVELOPER_OUTCOME_UNKNOWN',
             artifact=None, error_code='CODEX_RESULT_EVIDENCE_UNKNOWN')
@@ -5540,8 +5701,23 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertEqual({task_id: self.store.get(task_id)['record_sha256']
                           for task_id in self.store.task_ids()}, before)
 
+    def test_valid_high_debug_covers_repairs_three_to_the_limit(self):
+        # #2367: the RCA_CONFIRMED taken before repair #2 covers repairs 3 to
+        # repair_max; no new High Debug is needed and nothing is recorded.
+        for prior in range(3, self.REVIEW_LIMIT):
+            with self.subTest(prior=prior):
+                self.store = TaskStore(
+                    Path(self.temp.name).resolve() / f'tasks-covered-{prior}')
+                task, args = self._high_debug_args(prior)
+                before = {task_id: self.store.get(task_id)['record_sha256']
+                          for task_id in self.store.task_ids()}
+                self.assertIsNone(self._check_with_high_debug(args))
+                self.assertNotIn('repair_cap_override', self.store.get(task['task_id']))
+                self.assertEqual({task_id: self.store.get(task_id)['record_sha256']
+                                  for task_id in self.store.task_ids()}, before)
+
     def test_valid_high_debug_never_passes_the_limit(self):
-        task, args = self._high_debug_args(3)
+        task, args = self._high_debug_args(self.REVIEW_LIMIT)
         with self.assertRaisesRegex(LLMToolError, '^DELEGATE_REPAIR_LIMIT_REACHED$'):
             self._check_with_high_debug(args)
         self.assertNotIn('repair_cap_override', self.store.get(task['task_id']))
