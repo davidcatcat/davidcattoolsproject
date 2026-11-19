@@ -29,6 +29,7 @@ from llmtool.spec_template import (
     SPEC_REVIEW_HEAD_INVALID,
     SPEC_REVIEW_RANGE_INVALID,
     SPEC_SCOPE_INVALID,
+    SPEC_SCOPE_TEST_MODULE_MISSING,
     SPEC_SOURCE_FACTS_INVALID,
     SPEC_UNKNOWN_KIND,
     SPEC_WRITE_PATHS_EMPTY,
@@ -59,7 +60,7 @@ def make_facts(**overrides):
         'result_head': MAIN,
         'canonical_main': MAIN,
         'fresh': True,
-        'read_paths': ['tools/llmtool/WORKFLOW.md'],
+        'read_paths': ['tools/llmtool/WORKFLOW.md', TEST],
         'write_paths': [WRITE],
         'author_role': 'pm',
         'author_worker': 'claude-developer',
@@ -212,6 +213,30 @@ class AutoFillTests(TemplateTestBase):
                 self.assertEqual(spec['read_paths'],
                                  ['tools/llmtool/WORKFLOW.md', TEST, WRITE])
 
+    def test_read_scope_includes_paths_cited_in_acceptance(self):
+        cited = 'docs/design/dispatch-spec-template.md'
+        spec = build_spec(
+            'developer',
+            'Add a bounded dispatch helper.',
+            'Build one dispatch spec from source facts.',
+            [f'Update {WRITE} as {cited} defines.'],
+            facts_for('developer'),
+        )
+        self.assertIn(WRITE, spec['read_paths'])
+        self.assertIn(cited, spec['read_paths'])
+        self.assertEqual(len(spec['read_paths']), len(set(spec['read_paths'])))
+
+    def test_acceptance_cited_test_module_is_admitted(self):
+        spec = build_spec(
+            'developer',
+            'Add a bounded dispatch helper.',
+            'Build one dispatch spec from source facts.',
+            [f'Add regression coverage in {TEST}.'],
+            facts_for('developer', read_paths=['tools/llmtool/WORKFLOW.md'],
+                      write_paths=[WRITE]),
+        )
+        self.assertIn(TEST, spec['read_paths'])
+
     def test_author_route_and_owner_ref_are_filled_from_the_gate(self):
         self.assertEqual(set(AUTHOR_ROUTES),
                          {'ALLOWED', 'OWNER_ASSIGNMENT_ONLY', 'TEMPLATE_ONLY'})
@@ -299,6 +324,21 @@ class RefusalTests(TemplateTestBase):
         self.assert_refusal(
             SPEC_BASE_STALE, build, 'developer',
             repaired_facts(result_head=HEAD, failed_head=FAILED))
+
+    def test_repair_requires_the_predecessor_failed_head(self):
+        error = self.assert_refusal(
+            SPEC_BASE_STALE, build, 'developer',
+            repaired_facts(failed_head=None))
+        self.assertEqual(error.spec_field, 'failed_head')
+
+    def test_code_write_requires_an_admitted_test_module(self):
+        for kind in ('developer', 'sub_pm'):
+            with self.subTest(kind=kind):
+                error = self.assert_refusal(
+                    SPEC_SCOPE_TEST_MODULE_MISSING, build, kind,
+                    facts_for(kind, read_paths=['tools/llmtool/WORKFLOW.md'],
+                              write_paths=[WRITE]))
+                self.assertEqual(error.spec_field, 'read_paths')
 
     def test_reviewer_head_is_checked(self):
         for overrides in ({'result_head': None}, {'result_head': BASE}):
@@ -439,7 +479,8 @@ class RefusalTests(TemplateTestBase):
                     facts_for('developer', **overrides))
 
     def test_check_receipt_is_required(self):
-        for value in (None, [], 'ok'):
+        for value in (None, [], 'ok', {}, {'d6_worktree_registered': True},
+                      {'preflight_status': ''}, {'preflight_status': None}):
             with self.subTest(value=value):
                 self.assert_refusal(
                     SPEC_CHECK_RESULTS_INVALID, build, 'developer',

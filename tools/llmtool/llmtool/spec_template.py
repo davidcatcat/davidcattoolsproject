@@ -16,7 +16,10 @@ Source-fact model
 -----------------
 - ``fresh`` is required for ``developer`` and ``reviewer`` so a fresh dispatch
   and a continuation can never be confused by an absent flag.
-- Repair and debug source facts must name the predecessor and lineage.
+- Repair and debug source facts must name the predecessor and lineage; a repair
+  must also name the predecessor's verified failed HEAD.
+- Read scope derives paths cited in acceptance and, when code is written, needs
+  an admitted test module (design section 2.2).
 - Base/result-head rules follow design section 2.2, including the three-dot
   ``review_range`` for reviewers.
 """
@@ -56,6 +59,7 @@ SPEC_FRESHNESS_INVALID = 'SPEC_FRESHNESS_INVALID'
 SPEC_DISPATCH_UNAUTHORIZED = 'SPEC_DISPATCH_UNAUTHORIZED'
 SPEC_DIGEST_INVALID = 'SPEC_DIGEST_INVALID'
 SPEC_CHECK_RESULTS_INVALID = 'SPEC_CHECK_RESULTS_INVALID'
+SPEC_SCOPE_TEST_MODULE_MISSING = 'SPEC_SCOPE_TEST_MODULE_MISSING'
 
 # Design section 2.1: every kind carries the same tool-owned fields; a reviewer
 # additionally carries the explicit three-dot review range.
@@ -74,6 +78,12 @@ _HEX32 = re.compile(r'[0-9a-f]{32}\Z')
 _HEX40 = re.compile(r'[0-9a-f]{40}\Z')
 _HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 _COUNT_FIELDS = ('repairs', 'test_failures', 'attempts')
+_ACCEPTANCE_PATH = re.compile(
+    r'(?<![a-zA-Z0-9_./-])'
+    r'((?:tools|scripts|docs|\.claude)/[a-zA-Z0-9_/-]+'
+    r'(?:\.[a-zA-Z0-9_/-]+)*\.(?:py|md|json))'
+    r'(?![a-zA-Z0-9_/-]|\.[a-zA-Z0-9])'
+)
 
 
 class SpecTemplateError(LLMToolError):
@@ -138,6 +148,41 @@ def _path_list(value, field):
         if item not in paths:
             paths.append(item)
     return paths
+
+
+def _norm_path(path):
+    return path.replace('\\', '/').removeprefix('./')
+
+
+def _cited_paths(acceptance):
+    """Repository paths cited in acceptance, in first-seen order."""
+    cited = []
+    for item in acceptance:
+        for path in _ACCEPTANCE_PATH.findall(item):
+            if path not in cited:
+                cited.append(path)
+    return cited
+
+
+def _code_writes(writes):
+    return [
+        path for path in writes
+        if path.endswith('.py')
+        and (path.startswith('tools/') or path.startswith('scripts/'))
+        and not path.startswith('tools/llmtool/tests/')
+    ]
+
+
+def _has_test_module(reads, code_writes):
+    test_dirs = ['tools/llmtool/tests/']
+    if all(path.startswith('scripts/') for path in code_writes):
+        test_dirs.append('scripts/')
+    for path in reads:
+        for test_dir in test_dirs:
+            name = path[len(test_dir):] if path.startswith(test_dir) else ''
+            if name.startswith('test_') and name.endswith('.py') and '/' not in name:
+                return True
+    return False
 
 
 def _predecessor(value):
@@ -236,8 +281,14 @@ def _pm_fields(problem, goal, acceptance):
     return problem, goal, items
 
 
-def _scopes(kind, facts):
+def _scopes(kind, facts, acceptance):
     reads = _path_list(facts.read_paths, 'read_paths')
+    seen = {_norm_path(path) for path in reads}
+    # Design section 2.2: read scope covers every path cited in acceptance.
+    for path in _cited_paths(acceptance):
+        if path not in seen:
+            reads.append(path)
+            seen.add(path)
     if kind in READ_ONLY_KINDS:
         if facts.write_paths not in (None, [], ()):
             writes = _path_list(facts.write_paths, 'write_paths')
@@ -250,8 +301,14 @@ def _scopes(kind, facts):
         writes = _path_list(facts.write_paths, 'write_paths')
     # Design section 2.2: read scope covers every write path.
     for path in writes:
-        if path not in reads:
+        normalized = _norm_path(path)
+        if normalized not in seen:
             reads.append(path)
+            seen.add(normalized)
+    code_writes = _code_writes([_norm_path(path) for path in writes])
+    if code_writes and not _has_test_module(
+            [_norm_path(path) for path in reads], code_writes):
+        _refuse(SPEC_SCOPE_TEST_MODULE_MISSING, 'read_paths')
     return reads, writes
 
 
@@ -268,11 +325,12 @@ def _fresh_heads(facts):
 
 def _repair_heads(facts):
     base = _hex(facts.base, 40, SPEC_BASE_STALE, 'base')
+    if facts.failed_head is None:
+        _refuse(SPEC_BASE_STALE, 'failed_head')
+    failed = _hex(facts.failed_head, 40, SPEC_BASE_STALE, 'failed_head')
     head = _hex(facts.result_head, 40, SPEC_BASE_STALE, 'result_head')
-    if facts.failed_head is not None:
-        failed = _hex(facts.failed_head, 40, SPEC_BASE_STALE, 'failed_head')
-        if head != failed:
-            _refuse(SPEC_BASE_STALE, 'result_head')
+    if head != failed:
+        _refuse(SPEC_BASE_STALE, 'result_head')
     if base == head:
         _refuse(SPEC_BASE_STALE, 'result_head')
     return base, head
@@ -298,6 +356,15 @@ def _digest(value, field):
     return _hex(value, 64, SPEC_DIGEST_INVALID, field)
 
 
+def _check_results(value):
+    if type(value) is not dict or not value:
+        _refuse(SPEC_CHECK_RESULTS_INVALID, 'check_results')
+    status = value.get('preflight_status')
+    if type(status) is not str or not status.strip():
+        _refuse(SPEC_CHECK_RESULTS_INVALID, 'check_results')
+    return dict(value)
+
+
 def build_spec(kind, problem, goal, acceptance, facts):
     """Build one dispatch spec from PM text plus tool-owned source facts.
 
@@ -312,13 +379,11 @@ def build_spec(kind, problem, goal, acceptance, facts):
     problem, goal, acceptance = _pm_fields(problem, goal, acceptance)
     task_id = _hex(facts.task_id, 32, SPEC_ID_INVALID, 'task_id')
     run_id = _hex(facts.run_id, 32, SPEC_ID_INVALID, 'run_id')
-    reads, writes = _scopes(kind, facts)
+    reads, writes = _scopes(kind, facts, acceptance)
     author = _author(facts)
     role_card_digest = _digest(facts.role_card_digest, 'role_card_digest')
     contract_digest = _digest(facts.contract_digest, 'contract_digest')
-    if type(facts.check_results) is not dict:
-        _refuse(SPEC_CHECK_RESULTS_INVALID, 'check_results')
-    check_results = dict(facts.check_results)
+    check_results = _check_results(facts.check_results)
     review_range = None
 
     if kind == 'developer':
