@@ -1645,7 +1645,8 @@ class TaskStoreTests(unittest.TestCase):
             task['task_id'], expected={'developer': None},
             developer=self._developer_assignment())
         self.assertNotIn('timeout_seconds', saved['developer'])
-        for timeout in (1, 600, 1200, 1800, 3600):
+        # #2281: up to the 18000 s route hard cap, including the 10800 s default.
+        for timeout in (1, 600, 1200, 1800, 3600, 3601, 10800, 18000):
             with self.subTest(timeout=timeout):
                 task = self._codex_dispatch_task()
                 self.store.create(task)
@@ -1672,13 +1673,55 @@ class TaskStoreTests(unittest.TestCase):
     def test_developer_timeout_seconds_rejects_invalid_values(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
-        for timeout in (0, -1, 3601, True, 600.0, '600', None):
+        for timeout in (0, -1, 18001, True, 600.0, '600', '10800', 10800.0, None):
             with self.subTest(timeout=timeout):
                 developer = dict(self._developer_assignment(), timeout_seconds=timeout)
                 with self.assertRaises(LLMToolError):
                     self.store.compare_and_update(
                         task['task_id'], expected={'developer': None},
                         developer=developer)
+        self.assertIsNone(self.store.get(task['task_id'])['developer'])
+
+    def test_developer_timeout_ceiling_is_the_route_hard_cap(self):
+        # #2281: one source; the store reads developer_routes, no second copy.
+        from llmtool import developer_routes
+        self.assertEqual(developer_routes.HARD_TIMEOUT_CAP_SECONDS, 18000)
+        self.assertEqual(task_store_module._developer_timeout_max_seconds(),
+                         developer_routes.HARD_TIMEOUT_CAP_SECONDS)
+        self.assertFalse(hasattr(task_store_module, '_DEVELOPER_TIMEOUT_MAX_SECONDS'))
+
+    def test_route_resolved_developer_timeouts_persist_in_real_store(self):
+        # #2281 (Codex security v91 on PR #2385): a route's resolved timeout is
+        # recorded before launch, so the real store must admit the 10800 s
+        # default and a requested 18000 s; 18001 s is refused by the resolver
+        # with its existing code and by the store.
+        from llmtool.developer_routes import RouteError, resolve_route_timeout
+        for route in ('agy', 'claude', 'gw-agent', 'opencode'):
+            for requested, expected in ((None, 10800), (18000, 18000)):
+                with self.subTest(route=route, requested=requested):
+                    resolved = resolve_route_timeout(route, requested)
+                    self.assertEqual(resolved, expected)
+                    task = self._codex_dispatch_task()
+                    self.store.create(task)
+                    developer = dict(self._developer_assignment(),
+                                     timeout_seconds=resolved)
+                    saved = self.store.compare_and_update(
+                        task['task_id'], expected={'developer': None},
+                        developer=developer)
+                    self.assertEqual(saved['developer']['timeout_seconds'], expected)
+                    self.assertEqual(
+                        self.store.get(task['task_id'])['developer']['timeout_seconds'],
+                        expected)
+            with self.subTest(route=route, requested=18001):
+                with self.assertRaises(RouteError) as caught:
+                    resolve_route_timeout(route, 18001)
+                self.assertEqual(caught.exception.code, 'TIMEOUT_OVER_HARD_CAP')
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        developer = dict(self._developer_assignment(), timeout_seconds=18001)
+        with self.assertRaises(LLMToolError):
+            self.store.compare_and_update(
+                task['task_id'], expected={'developer': None}, developer=developer)
         self.assertIsNone(self.store.get(task['task_id'])['developer'])
 
     def _gw_agent_dispatch_task(self):
