@@ -210,8 +210,9 @@ DEVELOPER_ROUTE = TimeoutPair(Obj(
         "max_timeout": Int(1, ROUTE_TIMEOUT_CAP_SECONDS),
     },
     {
-        # #2302: optional and deprecated; the route model is not limited to
-        # one listed entry. When present it must still be a non-empty list.
+        # #2302: optional and deprecated; never a model permit list (any
+        # well-formed model id is admitted). When present it must still be a
+        # non-empty list; the shipped file keeps it only on the gw-agent entry.
         "allowed_models": ListOf(Str(), min_items=1),
         "executable": Str(r"[A-Za-z0-9._-]+"),
         "package_path": Str(),
@@ -249,7 +250,8 @@ DEVELOPER_ROUTE = TimeoutPair(Obj(
 ))
 # Review/AI Debug role model registry (#1502 WP-E). The route loader checks
 # the exact role names; this schema checks shape only. #2302: a role names
-# its model by default_model, by the deprecated allowed_models list, or both.
+# its default model by default_model, by the deprecated allowed_models list,
+# or both; neither limits the model a user config or CLI may set.
 ROLE_MODELS = NeedsModel(Obj(
     {},
     {

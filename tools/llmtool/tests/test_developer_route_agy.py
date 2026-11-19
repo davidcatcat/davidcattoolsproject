@@ -112,11 +112,28 @@ class AgyRouteTests(unittest.TestCase):
                     self.route.validate_profile(model, effort)
                 self.assertEqual(caught.exception.code, 'AGY_PROFILE_INVALID')
         self.assertEqual(self.route.validate_profile(MODEL, 'low'), (MODEL, 'low'))
+        with self.subTest(model='url'):
+            with self.assertRaises(RouteError) as caught:
+                self.route.validate_profile('https://example.invalid/m', 'medium')
+            self.assertEqual(caught.exception.code, 'AGY_PROFILE_INVALID')
         for config in ({}, {'executable': None}, {'executable': ['agy']}):
             with self.subTest(config=config):
                 with self.assertRaises(RouteError) as caught:
                     AgyRoute(config).validate_request(self.request())
                 self.assertEqual(caught.exception.code, 'AGY_CONFIG_INVALID')
+
+    def test_profile_accepts_a_model_of_any_family_2302(self):
+        # #2302 A1/A4: agy-developer may run a Claude model and switch back to
+        # Gemini by user config only; AGY itself decides whether it can serve it.
+        for model in ('claude-sonnet-5-5-medium', MODEL, 'gpt-6.1-sol',
+                      'gemini-3.8-flash-medium'):
+            with self.subTest(model=model):
+                self.assertEqual(self.route.validate_profile(model, 'medium'),
+                                 (model, 'medium'))
+        request = self.request()
+        request['model'] = 'claude-sonnet-5-5-medium'
+        argv = self.route.build_argv('/usr/bin/agy', dict(request, log_path='/tmp/x.log'))
+        self.assertEqual(argv[argv.index('--model') + 1], 'claude-sonnet-5-5-medium')
 
     def test_owner_gate_and_unverified_boundary_start_nothing(self):
         for boundary, gate in ((Boundary(), False), (Boundary(False), True)):

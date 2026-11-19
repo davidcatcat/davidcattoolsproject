@@ -32,11 +32,15 @@ class AgyRoute(DeveloperRoute):
     @property
     def family(self):
         # Route identity is not the model family; review separation uses the
-        # actual model recorded on the Developer Task.
+        # family of the actual model recorded on the Developer Task
+        # (developer_routes.model_family, #2302).
         return 'agy'
 
     def validate_profile(self, model, effort):
-        if (type(model) is not str or _MODEL.fullmatch(model) is None or
+        # Owner #2302 (decision 11-17): any well-formed model id of any family
+        # (for example a Claude or Gemini id); a model AGY cannot serve fails
+        # from the provider path, with no fallback to another model.
+        if (type(model) is not str or _MODEL.fullmatch(model) is None or '://' in model or
                 type(effort) is not str or _EFFORT.fullmatch(effort) is None):
             raise RouteError('AGY_PROFILE_INVALID')
         return model, effort

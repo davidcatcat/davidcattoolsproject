@@ -36,7 +36,11 @@ def admit_reviewer_model(model):
     """#1502 WP-E R1: both claude-cli reviewer roles run as claude-reviewer.
 
     Returns model only when the shared registry check admits it; otherwise
-    rejects with ROLE_MODEL_NOT_ALLOWED (no retry or fallback route).
+    rejects with ROLE_MODEL_NOT_ALLOWED (no retry or fallback route). Owner
+    #2302: the check admits any well-formed model id and refuses a malformed
+    id or an unavailable registry; a model the claude-cli provider cannot
+    serve fails from the provider call. Read-only review and independence
+    rules are unchanged.
     """
     from . import role_config
     from .errors import LLMToolError

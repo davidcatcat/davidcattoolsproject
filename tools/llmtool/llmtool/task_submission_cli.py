@@ -31,7 +31,8 @@ from .task_store import (TaskStore, TaskStoreConflict, new_id, _json_bytes,
                          _DIRECT_EXECUTION_FIELDS, _NO_CHANGES_MAX_TURNS,
                          _NO_CHANGES_REASON_MAX_CHARS, valid_provider_evidence,
                          CLAUDE_FAILURE_EXIT_CODE_RANGE, valid_claude_failure_evidence,
-                         valid_claude_failure_evidence_record, _valid_reported_text)
+                         valid_claude_failure_evidence_record, _valid_reported_text,
+                         valid_model_run)
 from . import active_pm_inbox
 from . import remote_test
 from . import task_completion
@@ -48,6 +49,7 @@ from . import skill_manifest
 from . import source_freshness
 from . import start_failure
 from . import trust
+from . import developer_routes
 from .developer_routes import (AgyRoute, ClaudeRoute, GwAgentRoute, RouteError, capture_snapshot,
                                UnsupportedBoundary, check_route_model, for_platform,
                                load_route_config, resolve_route_max_diff_bytes,
@@ -4534,8 +4536,14 @@ def _print_task_without_masking_interrupt(store, task_id):
         pass
 
 
-def _opencode_developer_profile():
-    """Return the optional OpenCode model and validated agent step limit."""
+def _opencode_developer_profile(model_run=None):
+    """Return the optional OpenCode model and validated agent step limit.
+
+    #2302 A2: a dict passed as model_run is filled with the run's model
+    provenance: the role model (resolver source cli, env or roles), else the
+    opencode-developer profile model (source profile), else the route default
+    (repo_default). The effort variant suffix is part of the resolved model.
+    """
     try:
         yaml_module()
     except LLMToolError:
@@ -4562,6 +4570,7 @@ def _opencode_developer_profile():
         raise LLMToolError('opencode-developer profile steps must be an integer from 3 to 1000') \
             from None
     model = provider['model']
+    source, requested = ('profile', model) if model is not None else ('repo_default', None)
     if model is None:
         model = opencode_direct_developer.MODEL
     try:
@@ -4574,13 +4583,21 @@ def _opencode_developer_profile():
         raise error
     if role.get('model') is not None:
         model = role['model']
+        source = role.get('model_source')
+        if source not in ('cli', 'env', 'roles'):
+            source = 'UNKNOWN'
+        requested = model
     if role.get('effort') is not None:
         model = model.split('#', 1)[0] + '#' + role['effort']
     try:
-        return opencode_direct_developer.validate_model(model), steps
+        model = opencode_direct_developer.validate_model(model)
     except opencode_direct_developer.DirectOpenCodeError:
         raise LLMToolError('opencode-developer profile model must be an '
                            'opencode/<name>-free model') from None
+    if type(model_run) is dict:
+        model_run.clear()
+        model_run.update(developer_routes.build_model_run(model, source, requested))
+    return model, steps
 
 
 def _resolve_developer_role(role_name, *, owner_override=None, repository=None,
@@ -4588,8 +4605,10 @@ def _resolve_developer_role(role_name, *, owner_override=None, repository=None,
     """Resolve a Developer role through the single role_config resolver (#1502 WP-E).
 
     The resolver applies CLI > env > user config > developer-routes.json
-    precedence and refuses a model outside allowed_models at resolve time.
-    Override arguments are passed only when an owner override is supplied.
+    precedence and refuses only a malformed model id at resolve time (Owner
+    #2302: any well-formed model id of any family is admitted). Override
+    arguments are passed only when an owner override is supplied; no model
+    needs one.
     """
     kwargs = {}
     if owner_override is not None:
@@ -4624,22 +4643,76 @@ def _developer_role_value(role, key, route_config):
 
 
 def _require_developer_model(role_name, route, route_config, model, role):
-    """Dispatch-time allowed_models check; a verified override must match exactly."""
+    """Dispatch-time model check: any well-formed model id (Owner #2302).
+
+    developer_routes.check_route_model admits any well-formed model id of any
+    family and never consults allowed_models; a malformed id is refused with
+    ROLE_MODEL_NOT_ALLOWED. role is kept for existing callers; no owner
+    override is needed or read.
+    """
     try:
         check_route_model({'routes': {route: route_config}}, route, model)
-        return
     except RouteError:
-        pass
-    verified = role.get('owner_override') if type(role) is dict else None
-    if (type(verified) is dict and verified.get('route') == route and
-            type(model) is str and verified.get('model') == model):
+        _refuse_developer_model(role_name)
+
+
+def _fill_model_run(model_run, role, model):
+    """#2302 A2: fill model_run (when a dict) with this run's model provenance.
+
+    requested is the model the user config, env or one-shot CLI set (None for
+    the repo default), resolved is the model this run launches, source is the
+    resolver's model source (UNKNOWN when the resolver reported none for a set
+    model), family is developer_routes.model_family of the resolved model and
+    provider_reported stays None until the provider reports a model
+    (developer_routes.role_model_run).
+    """
+    if type(model_run) is not dict:
         return
-    _refuse_developer_model(role_name)
+    model_run.clear()
+    model_run.update(developer_routes.role_model_run(role, model))
+
+
+def _model_run_with_reported(model_run, reported):
+    """#2302 A2: a copy of model_run with the provider-reported model, if any.
+
+    A reported model that is not a well-formed model id is not recorded; the
+    family then stays that of the resolved model.
+    """
+    return developer_routes.with_provider_reported(model_run, reported)
+
+
+def _dispatch_model_run(model_run, model):
+    """#2302 A2 (security v91 F3): the model_run a dispatch records for model.
+
+    A run whose profile reported valid provenance for exactly this model keeps
+    it; any other run records model with source UNKNOWN (no requested model),
+    so every dispatched run carries requested, resolved, source and family.
+    A model that is not a well-formed run model id cannot be recorded as
+    resolved; None is returned and the record keeps no model_run, which the
+    formal review gate reads as UNKNOWN (task_completion._reviewer_author_family).
+    """
+    if model is not None and valid_model_run(model_run, model):
+        return dict(model_run)
+    if model is not None and not developer_routes.run_model_id_ok(model):
+        return None
+    return developer_routes.build_model_run(model, 'UNKNOWN')
+
+
+def _with_model_run(developer, model_run):
+    """Set developer['model_run'] to model_run, or drop a stale one when None."""
+    if model_run is None:
+        developer.pop('model_run', None)
+    else:
+        developer['model_run'] = model_run
 
 
 def _agy_developer_profile(route_config, *, owner_override=None, repository=None,
-                           fetch_comment=None):
-    """Apply the AGY role model and effort before the route's normal validation."""
+                           fetch_comment=None, model_run=None):
+    """Apply the AGY role model and effort before the route's normal validation.
+
+    #2302 A2: a dict passed as model_run is filled with the run's model
+    provenance (see _fill_model_run).
+    """
     role = _resolve_developer_role('agy-developer', owner_override=owner_override,
                                    repository=repository, fetch_comment=fetch_comment)
     if role.get('account') is not None:
@@ -4648,7 +4721,7 @@ def _agy_developer_profile(route_config, *, owner_override=None, repository=None
         raise error
     model = _developer_role_value(role, 'model', route_config)
     effort = _developer_role_value(role, 'effort', route_config)
-    # The allowlist check runs after the route's own profile validation, so a
+    # The model check runs after the route's own profile validation, so a
     # malformed model or effort keeps its AGY_ROLE_PROFILE_INVALID refusal.
     try:
         model, effort = AgyRoute(route_config).validate_profile(model, effort)
@@ -4657,12 +4730,17 @@ def _agy_developer_profile(route_config, *, owner_override=None, repository=None
         error.role_config_code = 'AGY_ROLE_PROFILE_INVALID'
         raise error from None
     _require_developer_model('agy-developer', 'agy', route_config, model, role)
+    _fill_model_run(model_run, role, model)
     return model, effort
 
 
 def _claude_developer_profile(route_config, *, owner_override=None, repository=None,
-                              fetch_comment=None):
-    """Apply the configured Claude role model, effort, and config directory."""
+                              fetch_comment=None, model_run=None):
+    """Apply the configured Claude role model, effort, and config directory.
+
+    #2302 A2: a dict passed as model_run is filled with the run's model
+    provenance (see _fill_model_run).
+    """
     role = _resolve_developer_role('claude-developer', owner_override=owner_override,
                                    repository=repository, fetch_comment=fetch_comment)
     if type(role) is not dict:
@@ -4678,6 +4756,7 @@ def _claude_developer_profile(route_config, *, owner_override=None, repository=N
     except RouteError:
         raise LLMToolError('claude-developer role model or effort is invalid') from None
     _require_developer_model('claude-developer', 'claude', route_config, model, role)
+    _fill_model_run(model_run, role, model)
     return model, effort, config_dir
 
 
@@ -4685,15 +4764,19 @@ _GW_AGENT_EFFORTS = ('minimal', 'low', 'medium', 'high')
 
 
 def _gw_agent_developer_profile(route_config, *, served_model=None, owner_override=None,
-                                repository=None, fetch_comment=None):
+                                repository=None, fetch_comment=None, model_run=None):
     """Resolve the gw-agent role model and effort through the single resolver.
 
-    The role model is checked against allowed_models. The gateway profile, not
+    The role model must be a well-formed model id. The gateway profile, not
     the role, decides the model the gateway actually serves, so dispatch passes
-    it as served_model: that model is checked too (allowed_models or a verified
-    owner override naming route gw-agent and that exact model) and is the model
-    returned (#1773, CWE-863). Without served_model the checked role model is
-    returned.
+    it as served_model: that model is checked too and is the model returned
+    (#1773). Owner #2302: both checks admit any well-formed model id and never
+    consult allowed_models or an owner override. Without served_model the
+    checked role model is returned.
+
+    #2302 A2: a dict passed as model_run is filled with the run's model
+    provenance: the served model from the gateway profile (source profile),
+    else the role model with the resolver's source.
     """
     role = _resolve_developer_role('gw-agent-developer', owner_override=owner_override,
                                    repository=repository, fetch_comment=fetch_comment)
@@ -4714,28 +4797,28 @@ def _gw_agent_developer_profile(route_config, *, served_model=None, owner_overri
         model = _require_gw_agent_served_model(
             route_config, served_model, role, owner_override=owner_override,
             repository=repository, fetch_comment=fetch_comment)
+        run = developer_routes.build_model_run(model, 'profile', model)
+    else:
+        run = developer_routes.role_model_run(role, model)
+    if type(model_run) is dict:
+        model_run.clear()
+        model_run.update(run)
     return model, effort
 
 
 def _require_gw_agent_served_model(route_config, served_model, role, *, owner_override=None,
                                    repository=None, fetch_comment=None):
-    """Return the gateway-served model once it passes the allowed_models check.
+    """Return the gateway-served model once it is a well-formed model id.
 
-    An override the resolver already verified for this same route and model
-    is reused; otherwise role_config.check_role_model verifies the supplied
-    override against served_model itself. Anything else is refused with
-    ROLE_MODEL_NOT_ALLOWED.
+    Owner #2302: role_config.check_role_model admits any well-formed model id;
+    a missing or malformed served model is refused with ROLE_MODEL_NOT_ALLOWED.
+    role and the override arguments are kept for existing callers and are not
+    read.
     """
     if type(served_model) is not str or not served_model:
         _refuse_developer_model('gw-agent-developer')
-    verified = role.get('owner_override') if type(role) is dict else None
-    if (type(verified) is dict and verified.get('route') == 'gw-agent' and
-            verified.get('model') == served_model):
-        return served_model
     try:
-        role_config.check_role_model('gw-agent', route_config, served_model,
-                                     owner_override=owner_override,
-                                     repository=repository, fetch_comment=fetch_comment)
+        role_config.check_role_model('gw-agent', route_config, served_model)
     except LLMToolError as exc:
         if getattr(exc, 'role_config_code', None) == role_config.ROLE_MODEL_NOT_ALLOWED:
             _refuse_developer_model('gw-agent-developer',
@@ -4918,7 +5001,9 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
     if prompt_size > REQUEST_LIMIT:
         raise LLMToolError('OpenCode task prompt exceeds the supported size')
     _screen_text(prompt, REQUEST_LIMIT)
-    model, steps = _opencode_developer_profile()
+    opencode_model_run = {}
+    model, steps = _opencode_developer_profile(model_run=opencode_model_run)
+    opencode_model_run = _dispatch_model_run(opencode_model_run, model)
     # #1502 WP-F: pin main and read the role cards before any Task write or
     # provider call; any pin or card failure refuses here (fail closed).
     card_prefix, card_prefix_sha256 = _developer_card_prefix(task, registration, 'opencode')
@@ -4980,6 +5065,8 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         developer.update(state='DEVELOPER_DISPATCHING', provider_type='opencode-cli',
                          model=model,
                          max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS)
+        # #2302 A2 (security v91 F3): the OpenCode run records its model provenance.
+        _with_model_run(developer, opencode_model_run)
         dispatching_record = store.update(task['task_id'], developer=developer)
         expected_developer = copy.deepcopy(dispatching_record['developer'])
 
@@ -5319,6 +5406,13 @@ def _codex_developer_profile():
         codex_direct_developer.validate_profile(provider['model'], effort)
     except LLMToolError:
         raise LLMToolError('codex-developer profile model or reasoning_effort is invalid') from None
+    # #2302 A2 (security v91 F3): the role model with the resolver's source,
+    # else the codex-developer profile model (source profile).
+    if role.get('model'):
+        provider['model_run'] = developer_routes.role_model_run(role, provider['model'])
+    else:
+        provider['model_run'] = developer_routes.build_model_run(
+            provider['model'], 'profile', provider['model'])
     return provider, effort
 
 
@@ -5382,7 +5476,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     _screen_text(task['response'], RESPONSE_LIMIT)
     config = load_route_config()
     route_config = dict(config['routes']['agy'])
-    model, effort = _agy_developer_profile(route_config)
+    model_run = {}
+    model, effort = _agy_developer_profile(route_config, model_run=model_run)
     executable = shutil.which(route_config['executable'])
     if executable is None:
         raise LLMToolError('AGY executable is unavailable')
@@ -5464,6 +5559,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     owner_gate_denied = False
     try:
         developer.update(state='DEVELOPER_DISPATCHING', provider_type='agy-cli', model=model)
+        if model_run:
+            developer['model_run'] = dict(model_run)
         store.update(task['task_id'], developer=developer)
         def validate_binding():
             current = store.get(task['task_id'])
@@ -5545,6 +5642,10 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None},
                 getattr(result, 'provider_evidence', None), 'agy'), usage=usage)
+        if model_run:
+            # #2302 A2: the model run_route verified from the AGY log.
+            developer['model_run'] = _model_run_with_reported(
+                model_run, getattr(result, 'model', None))
         if (type(result.session_id) is str and
                 AGY_CONVERSATION.fullmatch(result.session_id)):
             binding = _bind_codex_native_session(registration, result.session_id)
@@ -6026,7 +6127,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
     if type(route_value) is not dict:
         raise LLMToolError('Claude route configuration is unavailable')
     route_config = dict(route_value)
-    model, effort, config_dir = _claude_developer_profile(route_config)
+    model_run = {}
+    model, effort, config_dir = _claude_developer_profile(route_config, model_run=model_run)
     executable = shutil.which('claude')
     if executable is None:
         raise LLMToolError('Claude executable is unavailable')
@@ -6143,6 +6245,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
     result = None
     try:
         developer.update(state='DEVELOPER_DISPATCHING', provider_type='claude-cli', model=model)
+        if model_run:
+            developer['model_run'] = dict(model_run)
         store.update(task['task_id'], developer=developer)
         def validate_binding():
             current = store.get(task['task_id'])
@@ -6225,6 +6329,10 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None},
                 getattr(result, 'provider_evidence', None), 'claude'), usage=usage)
+        if model_run:
+            # #2302 A2: the model run_route verified from the CLI modelUsage.
+            developer['model_run'] = _model_run_with_reported(
+                model_run, getattr(result, 'model', None))
     except _ClaudeCommittedCarry:
         return run_task_direct_result_event(task['task_id'], registration.task_id, store=store)
     except RouteError as exc:
@@ -6435,9 +6543,12 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         raise LLMToolError('gateway profile is unavailable or invalid') from None
     # #1502 WP-E, #1773 (CWE-863): after the gateway validation, the role
     # resolver checks the role model and supplies the effort, and the model the
-    # gateway profile will actually serve is checked against allowed_models (or
-    # a verified owner override). Only that checked model is bound below.
-    model, effort = _gw_agent_developer_profile(role_route_config, served_model=model)
+    # gateway profile will actually serve is checked as a well-formed model id
+    # (Owner #2302: no allowed_models list). Only that checked model is bound below.
+    gw_model_run = {}
+    model, effort = _gw_agent_developer_profile(role_route_config, served_model=model,
+                                                model_run=gw_model_run)
+    gw_model_run = _dispatch_model_run(gw_model_run, model)
     route_config['default_model'] = model
     route_config['expected_served_model'] = model
     route_config['profile']['model'] = model
@@ -6571,6 +6682,8 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
 
     developer.update(state='DEVELOPER_DISPATCHING', provider_type='gw-agent-cli',
                      model=model)
+    # #2302 A2 (security v91 F3): the gw-agent run records its model provenance.
+    _with_model_run(developer, gw_model_run)
     try:
         dispatching = store.compare_and_update(
             task['task_id'], expected={'developer': expected_developer},
@@ -6995,6 +7108,8 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
     _screen_text(task['request'], REQUEST_LIMIT)
     _screen_text(task['response'], RESPONSE_LIMIT)
     provider, reasoning_effort = _codex_developer_profile()
+    codex_model_run = _dispatch_model_run(
+        provider.get('model_run') if type(provider) is dict else None, provider['model'])
     effective_timeout = codex_direct_timeout(cwd=registration.root)
     prompt = _codex_direct_prompt(task, source_sha=task_source_sha,
         read_paths=read_paths, write_paths=write_paths, acceptance=acceptance,
@@ -7034,6 +7149,9 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
             result_head=(snapshot.head if recovering_timeout else None),
             test_policy=test_policy),
     }
+    if recovering_timeout:
+        # #2302 A2: a continuation is dispatched at once with its model.
+        _with_model_run(developer, codex_model_run)
     completion = {
         'state': 'WAITING_EXECUTOR', 'executor_task_id': registration.task_id,
         'reviewer_task_id': None,
@@ -7068,6 +7186,8 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
         if not recovering_timeout:
             developer.update(state='DEVELOPER_DISPATCHING', provider_type='codex-cli',
                              model=provider['model'])
+            # #2302 A2 (security v91 F3): the Codex run records its model provenance.
+            _with_model_run(developer, codex_model_run)
             store.update(task['task_id'], developer=developer)
         def validate_binding():
             current_registration, current_snapshot = task_completion.bind_executor_task(
@@ -8334,6 +8454,11 @@ def run_task_delegate(args, *, store=None):
     developer['provider_type'] = provider.get('type')
     developer['model'] = provider.get('model')
     developer['max_tokens'] = max_tokens
+    # #2302 A2 (security v91 F3): the codex-developer profile model (source
+    # profile); an absent model is recorded as UNKNOWN.
+    _with_model_run(developer, _dispatch_model_run(
+        developer_routes.build_model_run(developer['model'], 'profile', developer['model']),
+        developer['model']))
     try:
         store.update(task['task_id'], developer=developer)
     except worker_dispatch.WorkerDispatchDenied as exc:

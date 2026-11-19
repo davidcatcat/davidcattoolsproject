@@ -28,6 +28,9 @@ CODEX_REVIEW_MODEL = _ROLES['codex-reviewer']['allowed_models'][0]
 CLAUDE_REVIEW_MODEL = _ROLES['claude-reviewer']['allowed_models'][0]
 # What the fake screen returns in refusal-flow tests.
 SCREENED_EXCERPT = 'screened reply excerpt'
+# #2302 A3: a recorded authoring model for each CLI route family.
+_AUTHOR_MODELS = {'claude': 'claude-opus-5-5', 'codex': 'gpt-6.1-sol',
+                  'agy': 'gemini-2.5-pro'}
 
 
 def _runtime_parts(*pieces):
@@ -127,14 +130,15 @@ class ReviewDispatchTests(unittest.TestCase):
     def test_reviewer_family_and_policy_matrix(self):
         # company-gw-agent: a stored record with the retired id reads as
         # gw-agent (#1502 WP-E).
+        # #2302 A3: the family is the recorded model's (security v91 F2: a
+        # record without a model is UNKNOWN, see the missing-family test).
         families = ('codex', 'claude', 'opencode', 'agy', 'company-gw',
                     'company-gw-agent', 'gw-agent')
         for family in families:
             for reviewer in ('claude-reviewer', 'codex-reviewer'):
                 with self.subTest(family=family, reviewer=reviewer):
-                    developer = {'provider_profile': family}
-                    if family == 'agy':
-                        developer['model'] = 'gemini-2.5-pro'
+                    developer = {'provider_profile': family,
+                                 'model': _AUTHOR_MODELS.get(family, 'qwen3-coder')}
                     task = {'task_id': TASK, 'developer': developer}
                     reviewer_family = reviewer.removesuffix('-reviewer')
                     if reviewer_family == family:
@@ -212,7 +216,8 @@ class ReviewDispatchTests(unittest.TestCase):
 
     def test_unknown_reviewer_key_is_refused_before_the_gate(self):
         # #785 D6-WP1: only claude-reviewer or codex-reviewer may be requested.
-        task = {'task_id': TASK, 'developer': {'provider_profile': 'gw-agent'}}
+        task = {'task_id': TASK, 'developer': {'provider_profile': 'gw-agent',
+                                               'model': 'qwen3-coder'}}
         for reviewer in ('gemini-reviewer', 'Claude-Reviewer', ''):
             with self.subTest(reviewer=reviewer), patch.object(
                     review_dispatch.worker_dispatch, 'evaluate') as evaluate:
@@ -654,11 +659,10 @@ class ReviewDispatchTests(unittest.TestCase):
     CODEX_PREFLIGHT = (TASK, SimpleNamespace(root='/repo/worktree', common_dir='/repo/.git'),
                        HEAD, 'd' * 40, 'codex-reviewer')
 
-    # Owner #2302 P2: an unlisted model of the Reviewer's own family is admitted,
-    # so the refused models are of another family or malformed.
-    def test_registry_refuses_other_family_and_cross_family_claude_reviewer_model(self):
-        for model in ('gemini-unlisted-model', CODEX_REVIEW_MODEL,
-                      'anthropic/' + CLAUDE_REVIEW_MODEL):
+    # Owner #2302 A1: a Reviewer role admits any well-formed model id; only a
+    # malformed id is refused by the registry check.
+    def test_registry_refuses_a_malformed_claude_reviewer_model(self):
+        for model in ('has space', 'https://example.invalid/model'):
             with self.subTest(model=model):
                 with self.assertRaises(LLMToolError) as raised:
                     self.invoke(reviewer_role={
@@ -668,10 +672,9 @@ class ReviewDispatchTests(unittest.TestCase):
                                  'ROLE_MODEL_NOT_ALLOWED')
                 self.assert_refused_without_side_effects()
 
-    def test_registry_refuses_other_family_and_cross_family_codex_reviewer_model(self):
+    def test_registry_refuses_a_malformed_codex_reviewer_model(self):
         calls = []
-        for model in ('gemini-unlisted-model', CLAUDE_REVIEW_MODEL,
-                      'openai/' + CODEX_REVIEW_MODEL):
+        for model in ('has space', 'https://example.invalid/model'):
             with self.subTest(model=model):
                 with self.assertRaises(LLMToolError) as raised:
                     self.invoke(
@@ -684,6 +687,51 @@ class ReviewDispatchTests(unittest.TestCase):
                 self.assert_refused_without_side_effects()
         self.assertEqual(calls, [])
 
+    def test_claim_records_the_reviewer_run_model_and_its_family(self):
+        # #2302 A2/A3 (security v91 F1): any well-formed model is admitted and
+        # the claim binds the model the Reviewer run launched, with its family.
+        for model, family in (('gemini-unlisted-model', 'gemini'),
+                              (CLAUDE_REVIEW_MODEL, 'claude')):
+            with self.subTest(model=model):
+                self.store = DurableFakeStore(Path(self.temp.name) / (family + '.json'))
+                self.sent.clear()
+                result = self.invoke(reviewer_role={
+                    'config_dir': '/private/test-reviewer-account', 'source': 'roles',
+                    'model': model, 'model_source': 'roles'})
+                self.assertEqual(result['state'], 'DISPATCHED')
+                self.assertEqual(len(self.sent), 1)
+                claim = self.store.get(TASK)['review_dispatch_claim'][0]
+                self.assertEqual(claim['reviewer_model_run'], {
+                    'requested': model, 'resolved': model, 'source': 'roles',
+                    'family': family, 'provider_reported': None})
+                self.assertTrue(task_store.valid_reviewer_model_run(
+                    claim['reviewer_model_run']))
+        # The module fallback (no role model) is recorded as the repo default.
+        self.store = DurableFakeStore(Path(self.temp.name) / 'fallback.json')
+        self.invoke()
+        run = self.store.get(TASK)['review_dispatch_claim'][0]['reviewer_model_run']
+        self.assertEqual((run['requested'], run['resolved'], run['source'], run['family']),
+                         (None, review_dispatch._CLAUDE_REVIEW_MODEL, 'repo_default',
+                          'claude'))
+
+    def test_a_same_family_or_unknown_reviewer_run_is_refused_before_any_claim(self):
+        # Security v91 F1: a Claude Reviewer role running a Codex-family model
+        # on a Codex-authored run is same family; an unrecognised model is UNKNOWN.
+        for author, model, code in (
+                ('gpt-6.1-sol', CODEX_REVIEW_MODEL, 'REVIEWER_SAME_FAMILY'),
+                ('claude-opus-5-5', CLAUDE_REVIEW_MODEL, 'REVIEWER_SAME_FAMILY'),
+                ('gemini-2.5-pro', 'example-model-b', 'REVIEWER_FAMILY_UNSUPPORTED')):
+            with self.subTest(author=author, model=model):
+                self.store = DurableFakeStore(Path(self.temp.name) / 'same.json')
+                self.store.data = {'record_sha256': 'c' * 64,
+                                   'developer': {'provider_profile': 'agy', 'model': author}}
+                with self.assertRaises(LLMToolError) as raised:
+                    self.invoke(reviewer_role={
+                        'config_dir': '/private/test-reviewer-account', 'source': 'roles',
+                        'model': model})
+                self.assertEqual(raised.exception.review_dispatch_code, code)
+                self.assert_refused_without_side_effects()
+
     def test_registry_admits_the_listed_claude_reviewer_model(self):
         result = self.invoke(reviewer_role={
             'config_dir': '/private/test-reviewer-account', 'source': 'roles',
@@ -692,16 +740,18 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(len(self.sent), 1)
 
     def test_resolver_refusal_carries_the_dispatch_code_before_any_claim(self):
-        # The real resolver on a temporary home: a cross-family model in the
-        # user config is refused after precedence, for either Reviewer.
+        # The real resolver on a temporary home: a malformed model id in the
+        # user config is refused after precedence, for either Reviewer (Owner
+        # #2302 A1: a well-formed model of any family is admitted).
         root = Path(self.temp.name)
         home = root / 'home'
         config = user_config_path(home)
         config.parent.mkdir(parents=True)
         real = self.real_resolve_role
+        malformed = 'https://example.invalid/model'
         for name, model, preflight in (
-                ('reviewer', CODEX_REVIEW_MODEL, self.preflight),
-                ('codex-reviewer', CLAUDE_REVIEW_MODEL, self.CODEX_PREFLIGHT)):
+                ('reviewer', malformed, self.preflight),
+                ('codex-reviewer', malformed, self.CODEX_PREFLIGHT)):
             with self.subTest(role=name):
                 config.write_text(yaml.safe_dump({'roles': {name: {'model': model}}}),
                                   encoding='utf-8')
@@ -728,11 +778,12 @@ class ReviewDispatchTests(unittest.TestCase):
                                  'ROLE_MODEL_NOT_ALLOWED')
                 self.assert_refused_without_side_effects()
 
-    def test_launch_helpers_refuse_other_family_and_cross_family_models(self):
+    def test_launch_helpers_refuse_malformed_models(self):
+        # Owner #2302 A1: only a malformed id is refused at launch; a model the
+        # provider cannot serve fails from the provider path.
         task = {'task_id': TASK, 'run_id': 'c' * 32,
                 'task_binding': {'contract_digest': 'd' * 64}}
-        for model in ('gemini-unlisted-model', CLAUDE_REVIEW_MODEL,
-                      'OPENAI/' + CODEX_REVIEW_MODEL):
+        for model in ('has space', 'https://example.invalid/model'):
             with self.subTest(launch='codex', model=model), \
                     patch.object(review_dispatch.shutil, 'which') as which, \
                     patch.object(review_dispatch.subprocess, 'run') as run:
@@ -748,8 +799,7 @@ class ReviewDispatchTests(unittest.TestCase):
                                      'ROLE_MODEL_NOT_ALLOWED')
                 which.assert_not_called()
                 run.assert_not_called()
-        for model in ('gemini-unlisted-model', CODEX_REVIEW_MODEL,
-                      'anthropic/' + CLAUDE_REVIEW_MODEL, None):
+        for model in ('has space', 'https://example.invalid/model', None):
             with self.subTest(launch='claude', model=model), \
                     patch.object(review_dispatch.subprocess, 'run') as run:
                 with self.assertRaises(LLMToolError) as raised:
@@ -1458,15 +1508,15 @@ class ReviewDispatchTests(unittest.TestCase):
                              return_value=snapshot), \
                 patch.object(review_dispatch.task_completion, '_github_get',
                              return_value=pull):
+            task['developer']['model'] = _AUTHOR_MODELS['claude']
             self.assertEqual(review_dispatch._preflight(
                 self.store, TASK, 'executor-d6', 42, 1, task=task)[4], 'codex-reviewer')
-            task['developer']['provider_profile'] = 'codex'
+            task['developer'].update(provider_profile='codex', model=_AUTHOR_MODELS['codex'])
             self.assertEqual(review_dispatch._preflight(
                 self.store, TASK, 'executor-d6', 42, 1, task=task)[4], 'claude-reviewer')
             for family in ('opencode', 'company-gw', 'agy'):
                 task['developer']['provider_profile'] = family
-                if family == 'agy':
-                    task['developer']['model'] = 'gemini-2.5-pro'
+                task['developer']['model'] = _AUTHOR_MODELS.get(family, 'qwen3-coder')
                 self.assertEqual(review_dispatch._preflight(
                     self.store, TASK, 'executor-d6', 42, 1, task=task)[4],
                     'claude-reviewer')
@@ -1483,7 +1533,11 @@ class ReviewDispatchTests(unittest.TestCase):
             'completion': {'executor_task_id': 'executor-d6',
                            'evidence': {'common_dir': '/repo/.git'}},
         }
-        for developer in (None, {}, {'owner_assignment_ref': 'owner-assignment'}):
+        # Security v91 F2: a Claude or Codex record without a model no longer
+        # takes its CLI route's family.
+        for developer in (None, {}, {'owner_assignment_ref': 'owner-assignment'},
+                          {'provider_profile': 'claude'},
+                          {'provider_profile': 'codex', 'model': None}):
             task['developer'] = developer
             for reviewer in (None, 'codex-reviewer'):
                 with self.subTest(developer=developer, reviewer=reviewer), \

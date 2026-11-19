@@ -2233,48 +2233,105 @@ def _recorded_model_family(model):
     return None
 
 
-def _reviewer_author_family(developer):
-    """Return the known family relevant to formal Reviewer separation.
+# Developer routes whose authoring run can give a formal review PASS.
+_REVIEWABLE_DEVELOPER_PROFILES = frozenset((
+    'claude', 'codex', 'agy', 'opencode', 'company-gw', 'gw-agent'))
 
-    The route profile and the recorded run model both count: a multi-model
-    route takes the family of its recorded model, and a single-family route
-    whose recorded model belongs to the other Reviewer family fails closed.
+
+def _reviewer_author_family(developer):
+    """Return the recorded model family of the authoring run, else None.
+
+    #2302 A3 (Owner decision 11-17): formal review independence uses the
+    family of the model the run actually used, never the route identity. The
+    family comes from developer_routes.model_family of the run's model: the
+    provider-reported model in developer.model_run when recorded, else the
+    recorded developer.model. None stands for UNKNOWN, which can never give a
+    formal PASS: an unknown or ambiguous model id, a model_run that does not
+    match the recorded model or its own stated family, an unknown route, or
+    (security v91 F2) a record with no model at all. The CLI route never
+    stands in for the authoring model: a record-only run or a run recovered
+    without its model is UNKNOWN. A legacy record written before model_run
+    keeps the family of its recorded developer.model.
     """
+    from .developer_routes import MODEL_FAMILY_UNKNOWN, model_family, model_run_family
+
     if type(developer) is not dict:
         return None
     # A stored record may still carry the retired gw Agent id (#1502 WP-E).
     profile = worker_dispatch.stored_worker_id(developer.get('provider_profile'))
-    if profile == 'claude':
-        if _recorded_model_family(developer.get('model')) == 'codex':
-            return None
-        return 'claude'
-    elif profile == 'codex':
-        if _recorded_model_family(developer.get('model')) == 'claude':
-            return None
-        return 'codex'
-    elif profile == 'agy':
-        model = developer.get('model')
-        if type(model) is str and model.startswith('claude-'):
-            return 'claude'
-        if type(model) is str and model.startswith('gemini-'):
-            return 'other'
-        if type(model) is str and model.startswith('gpt-'):
-            return 'codex'  # #1604: OpenAI models (gpt-oss-*) share the codex family
+    if profile not in _REVIEWABLE_DEVELOPER_PROFILES:
         return None
-    elif profile in ('opencode', 'company-gw', 'gw-agent'):
-        return _recorded_model_family(developer.get('model')) or 'other'
+    model = developer.get('model')
+    if type(model) is not str:
+        return None
+    if 'model_run' in developer:
+        family = model_run_family(developer['model_run'], model)
     else:
+        family = model_family(model)
+    return None if family == MODEL_FAMILY_UNKNOWN else family
+
+
+# Reviewer roles whose verdict can be a formal review.
+_FORMAL_REVIEWER_ROLES = frozenset(('claude-reviewer', 'codex-reviewer'))
+# The role family a pre-dispatch check assumes before a Reviewer run exists.
+_REVIEWER_ROLE_FAMILIES = {'claude-reviewer': 'claude', 'codex-reviewer': 'codex'}
+_ROLE_FAMILY = object()
+
+
+def _formal_reviewer_run_family(task_record, reviewer_task_id, pr_number, result_sha):
+    """Return the recorded model family of the formal Reviewer run, else None.
+
+    #2302 A3 (security v91 F1, CWE-863): a Reviewer role may run any
+    well-formed model, so its family is never inferred from the role. The
+    family is the one the review dispatch claim bound at claim time
+    (reviewer_model_run, see review_dispatch.dispatch_review): exactly one
+    formal claim on the Task for this Reviewer task, PR and head, whose
+    reviewer_model_run is valid for the model it names. None stands for
+    UNKNOWN: no such claim, more than one, or no valid recorded run.
+    """
+    from . import review_result
+    from .developer_routes import MODEL_FAMILY_UNKNOWN, model_run_family
+
+    if type(task_record) is not dict:
         return None
+    claims = task_record.get('review_dispatch_claim')
+    if type(claims) is dict:
+        claims = [claims]
+    if type(claims) is not list:
+        return None
+    matching = [claim for claim in claims
+                if type(claim) is dict and
+                claim.get('reviewer_task') == reviewer_task_id and
+                claim.get('pr') == pr_number and
+                claim.get('head_sha') == result_sha and
+                review_result.review_kind(claim) == 'formal']
+    if len(matching) != 1:
+        return None
+    run = matching[0].get('reviewer_model_run')
+    model = run.get('resolved') if type(run) is dict else None
+    family = model_run_family(run, model)
+    return None if family == MODEL_FAMILY_UNKNOWN else family
 
 
-def _review_family_compatible(developer, reviewer_identity):
-    """Require a known Developer family and the matching formal Reviewer family."""
+def _review_family_compatible(developer, reviewer_identity, reviewer_family=_ROLE_FAMILY):
+    """Require a known authoring-run model family and a Reviewer of another family.
+
+    #2302 A3: a same-family or UNKNOWN authoring run gives no formal PASS; a
+    Codex reviewer on a Claude-, Gemini- or other-family run stays valid.
+
+    reviewer_family is the recorded family of the Reviewer run
+    (_formal_reviewer_run_family; None for UNKNOWN). The formal PASS gate
+    (collect_github_evidence) always passes it, so a same-family or UNKNOWN
+    Reviewer run refuses PASS whatever its role. Without it (a check made
+    before any Reviewer run exists) the family the role assumes is used; that
+    is never enough for a formal PASS.
+    """
+    if reviewer_identity not in _FORMAL_REVIEWER_ROLES:
+        return False
+    if reviewer_family is _ROLE_FAMILY:
+        reviewer_family = _REVIEWER_ROLE_FAMILIES[reviewer_identity]
     developer_family = _reviewer_author_family(developer)
-    reviewer_family = {
-        'claude-reviewer': 'claude',
-        'codex-reviewer': 'codex',
-    }.get(reviewer_identity)
-    if developer_family is None or reviewer_family is None:
+    if developer_family is None or type(reviewer_family) is not str:
         return False
     return reviewer_family != developer_family
 
@@ -2761,6 +2818,19 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
             codex_task_record_loaded = True
         return codex_task_record
 
+    reviewer_run_families = []
+
+    def formal_family_compatible(task_record_value):
+        # #2302 A3 (security v91 F1): the recorded Reviewer run family, never
+        # the family its role implies; same or UNKNOWN refuses PASS.
+        if not reviewer_run_families:
+            reviewer_run_families.append(_formal_reviewer_run_family(
+                load_completion_task_record(), reviewer_task_id, pr_number, result_sha))
+        developer = (task_record_value.get('developer')
+                     if type(task_record_value) is dict else None)
+        return _review_family_compatible(developer, reviewer.trusted_agent_id,
+                                         reviewer_run_families[0])
+
     for comment in comments:
         login = (comment.get('user') or {}).get('login')
         body = comment.get('body')
@@ -2780,9 +2850,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                     status.group(1) == marker.group(2) and status.group(2) == result_sha)
         if standard and marker.group(2) == 'PASS':
             pass_task = load_completion_task_record()
-            if (type(pass_task) is not dict or
-                    not _review_family_compatible(
-                        pass_task.get('developer'), reviewer.trusted_agent_id)):
+            if type(pass_task) is not dict or not formal_family_compatible(pass_task):
                 unsupported_family_comment = True
         if standard and marker.group(1) == 'Codex' and marker.group(2) == 'PASS':
             accepted_codex = False
@@ -2833,8 +2901,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                         codex_task_record.get('run_id') == run_id and
                         type(classified) is tuple and len(classified) >= 3 and
                         classified[2] == 'REVIEW_PASS' and
-                        _review_family_compatible(
-                            codex_task_record.get('developer'), reviewer.trusted_agent_id) and
+                        formal_family_compatible(codex_task_record) and
                         len(matching_claims) == 1 and bool(claim_body) and
                         claim_body == comment_body)
                 except (LLMToolError, KeyError, TypeError, ValueError, IndexError):
@@ -2856,8 +2923,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
             claude_family_compatible = (
                 reviewer.trusted_agent_id == 'claude-reviewer' and
                 type(claude_task_record) is dict and
-                _review_family_compatible(claude_task_record.get('developer'),
-                                          reviewer.trusted_agent_id))
+                formal_family_compatible(claude_task_record))
         else:
             claude_family_compatible = False
         accepted = (standard and (
@@ -2906,9 +2972,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
     if ('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED' not in missing and review is not None and
             (review.get('state') in accepting_states or review_source == 'PR_COMMENT')):
         completion_task = load_completion_task_record()
-        developer = (completion_task.get('developer')
-                     if type(completion_task) is dict else None)
-        if not _review_family_compatible(developer, reviewer.trusted_agent_id):
+        if not formal_family_compatible(completion_task):
             missing.append('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED')
     if review is None:
         missing.append('FORMAL_REVIEW_MISSING')
