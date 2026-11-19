@@ -8,6 +8,10 @@ A2: both paths refuse the same over-limit train at the configured value with
     TRAIN_INPUT_INVALID).
 A3: an absent key keeps the previous default (6); an invalid policy refuses
     POLICY_INVALID fail closed, with no silent fallback.
+A4: the fixed 64-member cap in merge_train.build_candidate and
+    merge_train_store is a real technical limit; a configured maximum above it
+    is stated next to the bound and refused at load time (POLICY_INVALID), not
+    silently capped to 64.
 """
 
 import contextlib
@@ -100,6 +104,33 @@ class MergeTrainMembersPolicyTests(unittest.TestCase):
             self.assertEqual(merge_train_cli._max_members(), 8)
             self.assertIsNotNone(merge_train_cli._members(_raw(8)))
             self.assertIsNone(merge_train_cli._members(_raw(9)))
+
+    # A4 (F1 repair): the fixed 64-member candidate/record cap is a real
+    # technical limit, so it is enforced at load time and never hides behind a
+    # larger configured maximum.
+    def test_the_technical_cap_value_is_accepted(self):
+        with mock.patch.object(repair_policy, 'load_policy',
+                               return_value=dict(BASE, **{KEY: 64})):
+            self.assertEqual(merge_train_build._max_members(), 64)
+            self.assertEqual(merge_train_cli._max_members(), 64)
+            self.assertIsNotNone(merge_train_cli._members(_raw(64)))
+            self.assertIsNone(merge_train_cli._members(_raw(65)))
+
+    def test_a_configured_limit_above_the_technical_cap_is_refused_at_load(self):
+        configured = dict(BASE, **{KEY: 65})
+        with mock.patch.object(repair_policy, 'load_policy', return_value=configured):
+            with self.assertRaises(LLMToolError) as loader:
+                merge_train_build._max_members()
+            with self.assertRaises(merge_train_cli._PolicyRefused) as caught:
+                merge_train_cli._members(_raw(2))
+            result = _build(_pairs(2))
+            code, value = _cli(_raw(2))
+        self.assertEqual(str(loader.exception), 'POLICY_INVALID')
+        self.assertEqual(caught.exception.code, 'POLICY_INVALID')
+        self.assertEqual(result, {'step': 'REFUSED', 'codes': ['POLICY_INVALID'],
+                                  'result': None})
+        self.assertEqual(code, 1)
+        self.assertEqual(value['codes'], ['POLICY_INVALID'])
 
     # A3
     def test_absent_key_keeps_the_default(self):

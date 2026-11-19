@@ -45,6 +45,12 @@ SOURCE_UNKNOWN = 'LLMTOOL_SOURCE_UNKNOWN'
 MIN_MEMBERS = 2
 # #2281 limit 15a: the default when policy.json has no merge_train_members_max.
 MAX_MEMBERS = 6
+# #2281 limit 15a (design rule 3): merge_train.build_candidate and
+# merge_train_store accept at most 64 members per train (their fixed candidate
+# and record cap). That is a real technical limit, so a configured maximum
+# above it is refused at load time as POLICY_INVALID instead of being silently
+# capped to 64.
+TECHNICAL_MEMBERS_MAX = 64
 MEMBERS_MAX_KEY = 'merge_train_members_max'
 POLICY_INVALID = 'POLICY_INVALID'
 STATUS_STEP = 'STATUS'
@@ -169,14 +175,21 @@ class _PolicyRefused(Exception):
 
 
 def _max_members():
-    """The configured member maximum, else the previous default."""
+    """The configured member maximum, else the previous default.
+
+    A configured value above the fixed candidate and record cap cannot be
+    built, so it is refused fail closed here rather than silently capped.
+    """
     from . import repair_policy
     from .errors import LLMToolError
     try:
-        return repair_policy.load_policy().get(MEMBERS_MAX_KEY, MAX_MEMBERS)
+        maximum = repair_policy.load_policy().get(MEMBERS_MAX_KEY, MAX_MEMBERS)
     except LLMToolError as error:
         code = str(error)
         raise _PolicyRefused(code if _CODE.fullmatch(code) else POLICY_INVALID) from None
+    if maximum > TECHNICAL_MEMBERS_MAX:
+        raise _PolicyRefused(POLICY_INVALID)
+    return maximum
 
 
 def _members(raw):
