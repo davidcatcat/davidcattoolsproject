@@ -614,11 +614,12 @@ def add_worker_probe_parser(subparsers):
 def _gw_agent_probe_route():
     """Return (route, budgets) built exactly as gw-agent Task dispatch builds them.
 
-    #2367: not wired yet. The Task route composition lives in
-    task_submission_cli, outside this change; a second, diverging copy here
-    would not be the same call path, so the probe fails closed until it is.
+    #2367: task_submission_cli.gw_agent_probe_route uses the one gw-agent route
+    composition Task dispatch uses (gateway profile, role model check,
+    budgets and GwAgentRoute), so the probe reuses the existing gateway
+    authentication and call path and adds no credential handling of its own.
     """
-    raise LLMToolError('GW_AGENT_PROBE_ROUTE_UNAVAILABLE')
+    return task_submission_cli.gw_agent_probe_route()
 
 
 def run_worker_probe(args, store=None, route_factory=None, probe=None):

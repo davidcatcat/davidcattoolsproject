@@ -5779,5 +5779,161 @@ class DelegateRepairCapTests(unittest.TestCase):
             self._args(task, 'opencode'), self.store))
 
 
+class _GwOutcomeStore(TaskStore):
+    """A real TaskStore (real availability record) that reports injected outcomes.
+
+    developer_write reports the last landed Developer record exactly as
+    TaskStore.developer_write reports its own committed writes.
+    """
+
+    def __init__(self, root):
+        super().__init__(root)
+        self.landed = []
+
+    def land(self, record):
+        self.landed.append(record)
+
+    def developer_write(self, task_id):
+        return len(self.landed), (dict(self.landed[-1]) if self.landed else None)
+
+
+class GwAgentDelegateOutcomeObservationTests(unittest.TestCase):
+    """#2367 A1/A2: real gw-agent delegate outcomes feed E9 and the holds.
+
+    run_task_delegate, the observation wrapper, worker_availability and the
+    TaskStore availability record are real; only the gw-agent route run is
+    injected (it lands one Developer outcome) and the Owner policy allows.
+    """
+
+    TASK = '1' * 32
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.store = _GwOutcomeStore(Path(temp.name).resolve() / 'tasks')
+        allowed = patch.object(
+            worker_dispatch, 'evaluate',
+            side_effect=lambda worker, *_args, **_kwargs: worker_dispatch.PolicyDecision(
+                worker, True, 'OWNER_POLICY_ALLOWED', 'f' * 64))
+        allowed.start()
+        self.addCleanup(allowed.stop)
+
+    def outcome(self, state, error_code=None, execution=None):
+        developer = {'assignment_id': new_id(), 'provider_profile': 'gw-agent',
+                     'state': state, 'error_code': error_code}
+        if execution is not None:
+            developer['execution'] = execution
+        return {'task_id': self.TASK, 'developer': developer}
+
+    def delegate(self, record, result=1):
+        args = SimpleNamespace(task_id=self.TASK, provider='gw-agent', mode='direct',
+                               background=False, timeout=None)
+
+        def run(args, *, store):
+            store.land(record)
+            if isinstance(result, BaseException):
+                raise result
+            return result
+        with patch.object(submission_cli, '_delegate_timeout'), \
+                patch.object(submission_cli, '_check_delegate_repair_cap'), \
+                patch.object(submission_cli, 'run_task_gw_agent_delegate', side_effect=run):
+            return run_task_delegate(args, store=self.store)
+
+    def hold(self):
+        from llmtool import worker_availability
+        return worker_availability.hold_reason(self.store, 'gw-agent')
+
+    def refusal(self):
+        from llmtool import worker_availability
+        return worker_availability.quota_refusal(self.store, 'gw-agent')
+
+    def runtime(self):
+        return self.store.get_worker_observations()['gw-agent']['runtime']['status']
+
+    def test_two_capability_failures_from_real_outcomes_pause_gw_agent(self):
+        from llmtool import worker_availability
+        self.assertEqual(self.delegate(self.outcome(
+            'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_BLOCKED_APPLY_EDIT_DENIED')), 1)
+        self.assertEqual(self.runtime(), 'FAIL')
+        self.assertIsNone(self.hold())
+        self.assertIsNone(self.refusal())
+        self.assertEqual(self.delegate(self.outcome('DEVELOPER_OUTPUT_REJECTED')), 1)
+        self.assertEqual(self.hold(), 'MODEL_CAPABILITY_PAUSE')
+        self.assertEqual(self.refusal(), worker_availability.REFUSAL_CODE)
+        # Neither a passing probe nor a later responded outcome lifts the E9 pause.
+        report = worker_availability.run_gw_agent_probe(
+            self.store, object(), {'max_turns': 512},
+            probe=lambda _route, _budgets: {
+                'outcome': 'PASS', 'tcp': 'PASS', 'auth': 'PASS', 'inference': 'PASS',
+                'retry_after_seconds': None, 'checked_at': None, 'elapsed_ms': 1})
+        self.assertEqual(report['hold'], 'MODEL_CAPABILITY_PAUSE')
+        self.assertEqual(self.delegate(self.outcome('DEVELOPER_RESPONDED'), result=0), 0)
+        self.assertEqual(self.hold(), 'MODEL_CAPABILITY_PAUSE')
+        self.assertEqual(self.refusal(), worker_availability.REFUSAL_CODE)
+
+    def test_a_responded_outcome_resets_the_streak(self):
+        self.delegate(self.outcome('DEVELOPER_OUTPUT_REJECTED'))
+        self.assertEqual(self.runtime(), 'FAIL')
+        self.assertEqual(self.delegate(self.outcome('DEVELOPER_RESPONDED'), result=0), 0)
+        self.assertEqual(self.runtime(), 'PASS')
+        self.delegate(self.outcome('DEVELOPER_OUTPUT_REJECTED'))
+        self.assertIsNone(self.hold())
+        self.assertIsNone(self.refusal())
+
+    def test_infrastructure_and_unknown_outcomes_never_count_as_capability(self):
+        for state, code in (('DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_GATEWAY_TIMEOUT'),
+                            ('DEVELOPER_OUTCOME_UNKNOWN', 'DEVELOPER_RESULT_UNKNOWN')):
+            with self.subTest(code=code):
+                self.delegate(self.outcome(state, code))
+                self.assertEqual(self.runtime(), 'UNKNOWN')
+        self.assertEqual(self.hold(), 'INFRASTRUCTURE_PAUSE')
+
+    def test_a_failed_security_observation_write_fails_closed(self):
+        failing = patch.object(self.store, 'record_worker_observation',
+                               side_effect=LLMToolError('WORKER_AVAILABILITY_BUSY'))
+        record = self.outcome('DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_AUDIT_INVALID')
+        with failing:
+            with self.assertRaises(LLMToolError) as caught:
+                self.delegate(record, result=1)
+        self.assertEqual(str(caught.exception), 'GW_AGENT_AVAILABILITY_UNRECORDED')
+        with failing:
+            with self.assertRaises(LLMToolError) as caught:
+                self.delegate(record, result=RuntimeError('fixture delegate failure'))
+        self.assertEqual(str(caught.exception), 'GW_AGENT_AVAILABILITY_UNRECORDED')
+        self.assertIsInstance(caught.exception.__cause__, RuntimeError)
+
+    def test_a_failed_capability_observation_write_fails_closed(self):
+        with patch.object(self.store, 'record_worker_observation',
+                          side_effect=LLMToolError('WORKER_AVAILABILITY_BUSY')):
+            with self.assertRaises(LLMToolError) as caught:
+                self.delegate(self.outcome('DEVELOPER_OUTPUT_REJECTED'))
+        self.assertEqual(str(caught.exception), 'GW_AGENT_AVAILABILITY_UNRECORDED')
+
+    def test_a_failed_write_that_sets_no_hold_keeps_the_result(self):
+        passed = self.outcome('DEVELOPER_RESPONDED', execution={
+            'provider_evidence': {'basis': 'GATEWAY_USAGE', 'accepted': True}})
+        with patch.object(self.store, 'record_worker_observation',
+                          side_effect=LLMToolError('WORKER_AVAILABILITY_BUSY')) as write:
+            self.assertEqual(self.delegate(passed, result=0), 0)
+        write.assert_called_once()
+
+    def test_an_interruption_still_reaches_the_caller(self):
+        with patch.object(self.store, 'record_worker_observation',
+                          side_effect=LLMToolError('WORKER_AVAILABILITY_BUSY')):
+            with self.assertRaises(KeyboardInterrupt):
+                self.delegate(self.outcome(
+                    'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_AUDIT_INVALID'),
+                    result=KeyboardInterrupt())
+
+    def test_unreadable_availability_refuses_gw_agent_only(self):
+        from llmtool import worker_availability
+        with patch.object(self.store, 'get_worker_observations',
+                          side_effect=LLMToolError('WORKER_AVAILABILITY_INVALID')):
+            self.assertTrue(worker_availability.fresh_quota_fail(self.store, 'gw-agent'))
+            self.assertEqual(self.refusal(), worker_availability.REFUSAL_CODE)
+            self.assertFalse(worker_availability.fresh_quota_fail(
+                self.store, 'opencode-developer'))
+
+
 if __name__ == '__main__':
     unittest.main()

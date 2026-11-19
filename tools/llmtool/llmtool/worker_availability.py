@@ -22,8 +22,10 @@ availability record, one layer each:
   then a runtime-layer pause after two consecutive failures at the lowest tier,
   which a probe never clears;
 - UNKNOWN outcomes: nothing is written and nothing is replayed.
-observe() records the infrastructure or security class of every gw-agent
-outcome it is given, so the real delegation path sets these holds. A hold is
+observe() records the infrastructure or security class and the E9 capability
+result of every gw-agent outcome it is given, so the real delegation path sets
+these holds and advances the streak; a failed hold write fails closed there
+(holds_admission). An unreadable gw-agent record refuses admission. A hold is
 named by a fixed evidence marker and still holds after its observation expires
 and reads UNKNOWN: only a passing probe (infrastructure) clears one.
 A hold only withholds admission; it never allows what the Owner policy refuses.
@@ -141,14 +143,18 @@ def observe(store, record, *, now=None, reset_at=None):
     retired company-gw are never written.
 
     #2367: for gw-agent the same outcome also records its infrastructure or
-    security class (observe_failure_class). A quota/rate outcome has no failure
-    class, so at most one of the two writes applies to one outcome. A store
-    without the availability record holds nothing, as fresh_quota_fail reads it.
+    security class (observe_failure_class) and its E9 capability result
+    (observe_capability). A quota/rate outcome has no failure class, so at
+    most one hold-setting write applies to one outcome. A store without the
+    availability record holds nothing, as fresh_quota_fail reads it. A write
+    error is raised, never swallowed here: the caller decides (fail closed for
+    gw-agent, see holds_admission).
     """
     worker = worker_key(record)
     result = classify(record)
     if worker == GW_AGENT and callable(getattr(store, 'record_worker_observation', None)):
         observe_failure_class(store, record, now=now)
+        observe_capability(store, record, now=now)
     if worker is None or worker in NO_WRITE_WORKERS or result is None:
         return None
     observed = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(
@@ -293,8 +299,10 @@ def fresh_quota_fail(store, worker):
     For gw-agent an infrastructure pause, security stop or model-capability
     pause (hold_reason) also counts, so every existing admission point that
     reads this refuses it; a hold still counts after its observation expires.
-    Other expired, absent or unreadable observations read UNKNOWN and never
-    refuse; a store without the observation reader has none.
+    A gw-agent availability record that cannot be read refuses too (fail
+    closed): a hold it may hold is never assumed away. For other workers,
+    expired, absent or unreadable observations read UNKNOWN and never refuse;
+    a store without the observation reader has none.
     """
     if type(worker) is not str or worker in NO_WRITE_WORKERS:
         return False
@@ -304,7 +312,7 @@ def fresh_quota_fail(store, worker):
     try:
         view = reader()
     except Exception:
-        return False
+        return worker == GW_AGENT
     try:
         if view[worker][QUOTA_LAYER]['status'] == 'FAIL':
             return True
@@ -504,6 +512,59 @@ def record_capability_outcome(store, record, *, passed, at_lowest_tier, now=None
     _write(store, RUNTIME_LAYER, 'FAIL', observed, observed + HOLD_FOR,
            _streak_marker(streak), expected)
     return 'PAUSED' if streak >= E9_LOWEST_TIER_PAUSE_AFTER else 'LOWEST_TIER_FAILURE'
+
+
+# The gw-agent route serves exactly one model, the one its gateway profile
+# names (expected_served_model): there is no lower gw-agent model to step down
+# to, so every judged gw-agent result is a result at its lowest tier.
+GW_AGENT_AT_LOWEST_TIER = True
+
+
+def capability_result(record):
+    """True (passed), False (model-capability failure) or None for one gw-agent outcome.
+
+    A failure is only the MODEL_CAPABILITY class. A pass is a
+    DEVELOPER_RESPONDED record with no error code and no failure class. Any
+    other outcome (another route, infrastructure, security, quota/rate,
+    UNKNOWN, still running) is not a judged result and returns None.
+    """
+    profile, developer = _profile(record)
+    if profile != GW_AGENT:
+        return None
+    failure = classify_failure(record)
+    if failure == MODEL_CAPABILITY:
+        return False
+    if (failure is None and developer.get('state') == 'DEVELOPER_RESPONDED' and
+            developer.get('error_code') is None):
+        return True
+    return None
+
+
+def observe_capability(store, record, *, now=None):
+    """E9 for one real gw-agent delegate outcome; return the E9 result or None.
+
+    observe() calls this for every gw-agent outcome the delegate path
+    records, so real outcomes advance (or reset) the lowest-tier streak.
+    """
+    passed = capability_result(record)
+    if passed is None:
+        return None
+    return record_capability_outcome(store, record, passed=passed,
+                                     at_lowest_tier=GW_AGENT_AT_LOWEST_TIER, now=now)
+
+
+def holds_admission(record):
+    """Whether recording this gw-agent outcome would set or advance a hold.
+
+    True for a security, infrastructure or model-capability failure and for a
+    quota/rate condition. When such a write fails, the delegate path fails
+    closed (it never treats the hold as recorded). A pass or an UNKNOWN
+    outcome only removes or adds nothing, so its write is not one of these.
+    """
+    if worker_key(record) != GW_AGENT:
+        return False
+    return (classify_failure(record) in (SECURITY, INFRASTRUCTURE, MODEL_CAPABILITY) or
+            classify(record) in _CONDITIONS)
 
 
 def _hold_from_view(view):

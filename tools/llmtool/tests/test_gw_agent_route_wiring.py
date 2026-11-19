@@ -2956,20 +2956,174 @@ class GwAgentRealStoreTests(unittest.TestCase):
                                      completion['missing_gates'])
 
 
+class GwAgentProbeCommandPathTests(unittest.TestCase):
+    """#2367 A1/A2: `llmtool worker-probe gw-agent` probes through the Task route.
+
+    Real: the CLI command, task_submission_cli.gw_agent_probe_route (the same
+    _gw_agent_route_parts composition Task dispatch uses), GwAgentRoute and its
+    prepare_files/build_argv/build_env, probe_availability, run_gw_agent_probe
+    and a TaskStore availability record. Injected: the gateway profile values,
+    the role resolver, the Owner policy decision, the gateway process (a runner
+    that writes result.json) and the route's credential loader, which yields
+    no credential, so no credential value exists anywhere in these tests.
+    """
+
+    BUDGETS = {'max_turns': 512, 'max_input_tokens': 10000, 'max_output_tokens': 1000,
+               'max_wall_seconds': 60, 'max_tool_result_bytes': 4096,
+               'max_sent_bytes': 100000}
+
+    def setUp(self):
+        from llmtool.developer_routes import gw_agent as gw_agent_module
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.temp = Path(temp.name).resolve()
+        home = patch.dict(os.environ, {'HOME': str(self.temp)})
+        home.start()
+        self.addCleanup(home.stop)
+        package = self.temp / 'gateway'
+        (package / 'api_agent_gateway').mkdir(parents=True)
+        os.chmod(package, 0o755)
+        os.chmod(package / 'api_agent_gateway', 0o755)
+        self.route_config = {
+            'package_path': str(package), 'profile_name': 'fake',
+            'authorization_ref': 'pm-task-ref', 'default_effort': 'low',
+            'allowed_data_classes': ['synthetic'], 'allowed_models': ['fake-model'],
+            'budgets': dict(self.BUDGETS),
+            'profile': {'adapter': 'openai-chat-tools',
+                        'base_url': 'http://placeholder.invalid/v1',
+                        'model': 'fake-model', 'auth_env': None,
+                        'context_cap_tokens': 10000, 'max_output_tokens': 1000,
+                        'allowed_data_classes': ['synthetic']},
+        }
+        self.store = task_store.TaskStore(self.temp / 'tasks')
+        self.seen = {}
+        self.policy = 'OWNER_POLICY_ALLOWED'
+        self.real_probe = gw_agent_module.probe_availability
+        patches = (
+            patch.object(task_submission_cli, 'load_route_config',
+                         side_effect=lambda: {'routes': {
+                             'gw-agent': copy.deepcopy(self.route_config)}}),
+            patch.object(task_submission_cli, '_gw_agent_endpoint', return_value=(
+                {'type': 'openai-compatible', 'model': 'fake-model',
+                 'base_url': 'http://127.0.0.1:9'}, {'max_tokens': 1000})),
+            patch.object(task_submission_cli, '_gw_agent_developer_profile',
+                         side_effect=self.developer_profile),
+            patch.object(worker_dispatch, 'evaluate',
+                         side_effect=lambda worker, *_args, **_kwargs:
+                         worker_dispatch.PolicyDecision(
+                             worker, self.policy == 'OWNER_POLICY_ALLOWED', self.policy,
+                             'f' * 64)),
+            patch.object(GwAgentRoute, '_load_credential', return_value=None),
+            patch.object(task_store, 'TaskStore', return_value=self.store),
+            patch.object(gw_agent_module, 'probe_availability', side_effect=self.probe),
+        )
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+
+    def developer_profile(self, route_config, *, served_model=None, **_kwargs):
+        self.seen['role_check'] = (route_config['profile']['base_url'], served_model)
+        return served_model, 'low'
+
+    def probe(self, route, budgets):
+        self.seen.update(route=route, budgets=budgets)
+        return self.real_probe(route, budgets, runner=self.runner)
+
+    def runner(self, argv, *, env, cwd, stdin, stdout, stderr, timeout):
+        flag = lambda name: argv[argv.index(name) + 1]
+        read = lambda name: json.loads(Path(flag(name)).read_text(encoding='utf-8'))
+        task = read('--task-file')
+        self.seen.update(argv=list(argv), env_keys=sorted(env), task=task,
+                         authorization=read('--authorization-file'),
+                         profiles=read('--profiles-file'))
+        self.seen['calls'] = self.seen.get('calls', 0) + 1
+        result = {'schema_version': 1, 'status': 'DONE', 'code': None, 'run_id': 'a' * 24,
+                  'session_id': None, 'task_id': task['task_id'], 'changed_paths': [],
+                  'summary': 'ok', 'served_model': 'fake-model', 'usage': {}, 'turns': 1,
+                  'budget_used': None, 'audit_sha256': 'b' * 64}
+        fd = os.open(flag('--result-file'), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            json.dump(result, stream)
+        return subprocess.CompletedProcess(argv, 0)
+
+    def hold(self, code):
+        from datetime import datetime, timedelta, timezone
+        from llmtool import worker_availability
+        record = {'task_id': '1' * 32, 'developer': {
+            'assignment_id': '2' * 32, 'provider_profile': 'gw-agent',
+            'state': 'DEVELOPER_UNAVAILABLE', 'error_code': code}}
+        worker_availability.observe_failure_class(
+            self.store, record,
+            now=datetime.now(timezone.utc) - worker_availability.FRESH_FOR - timedelta(minutes=1))
+
+    def command(self):
+        from llmtool import cli
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            status = cli.main(['worker-probe', 'gw-agent'])
+        return status, stdout.getvalue(), stderr.getvalue().strip()
+
+    def test_command_probes_through_the_task_route_and_clears_the_pause(self):
+        from llmtool import worker_availability
+        self.hold('DEVELOPER_GW_AGENT_GATEWAY_TIMEOUT')
+        self.assertEqual(worker_availability.hold_reason(self.store, 'gw-agent'),
+                         'INFRASTRUCTURE_PAUSE')
+        self.assertEqual(worker_availability.quota_refusal(self.store, 'gw-agent'),
+                         worker_availability.REFUSAL_CODE)
+
+        status, stdout, stderr = self.command()
+        self.assertEqual((status, stderr), (0, ''))
+        report = json.loads(stdout)
+        self.assertEqual((report['worker'], report['outcome'], report['recorded_layer'],
+                          report['recorded_status'], report['hold']),
+                         ('gw-agent', 'PASS', 'endpoint', 'PASS', None))
+        # The Task dispatch composition built the route: gateway URL, checked
+        # served model and the route's own per-Task budgets.
+        route = self.seen['route']
+        self.assertIsInstance(route, GwAgentRoute)
+        self.assertEqual(route.profile['base_url'], 'http://127.0.0.1:9/v1')
+        self.assertEqual(route.expected_served_model, 'fake-model')
+        self.assertEqual(self.seen['budgets'], self.BUDGETS)
+        self.assertEqual(self.seen['role_check'], ('http://placeholder.invalid/v1', 'fake-model'))
+        # One gateway run through the route's own authorization file and env.
+        self.assertEqual(self.seen['calls'], 1)
+        self.assertIn('run', self.seen['argv'])
+        self.assertNotIn('resume', self.seen['argv'])
+        self.assertEqual(self.seen['authorization']['authorization_ref'], 'pm-task-ref')
+        self.assertIsNone(self.seen['profiles']['profiles']['fake']['auth_env'])
+        self.assertNotIn('GW_AGENT_API_KEY', self.seen['env_keys'])
+        self.assertEqual(self.seen['task']['budgets']['max_turns'], 1)
+        self.assertEqual(self.seen['task']['data_class'], 'synthetic')
+        # The pause stayed until this recovery action; now dispatch may resume.
+        self.assertIsNone(worker_availability.hold_reason(self.store, 'gw-agent'))
+        self.assertIsNone(worker_availability.quota_refusal(self.store, 'gw-agent'))
+
+    def test_command_refuses_a_security_stop_before_any_gateway_run(self):
+        from llmtool import worker_availability
+        self.hold('DEVELOPER_GW_AGENT_AUDIT_INVALID')
+        status, stdout, stderr = self.command()
+        self.assertEqual((status, stdout, stderr), (2, '', 'GW_AGENT_PROBE_SECURITY_STOP'))
+        self.assertNotIn('route', self.seen)
+        self.assertEqual(worker_availability.hold_reason(self.store, 'gw-agent'),
+                         'SECURITY_STOP')
+
+    def test_command_never_probes_a_worker_the_owner_paused(self):
+        self.policy = 'OWNER_PAUSED'
+        status, stdout, stderr = self.command()
+        self.assertEqual((status, stdout, stderr), (2, '', 'GW_AGENT_PROBE_DISPATCH_DENIED'))
+        self.assertEqual(self.seen, {})
+        self.assertEqual(self.store.get_worker_observations()['gw-agent']['endpoint']['status'],
+                         'UNKNOWN')
+
+    def test_command_refuses_a_route_that_does_not_allow_synthetic_data(self):
+        self.route_config['allowed_data_classes'] = ['public_repo']
+        status, stdout, stderr = self.command()
+        self.assertEqual((status, stdout, stderr), (2, '', 'GW_AGENT_PROBE_CONFIG_INVALID'))
+        self.assertEqual(self.seen, {})
+
+
 class GwAgentProbeCliTests(unittest.TestCase):
     """#2367: `llmtool worker-probe gw-agent` prints one probe report."""
-
-    def test_probe_fails_closed_until_the_task_route_is_wired(self):
-        from llmtool import cli
-        stderr = io.StringIO()
-        with patch.object(task_store, 'TaskStore',
-                          side_effect=AssertionError('store opened')), \
-                patch('llmtool.worker_availability.run_gw_agent_probe',
-                      side_effect=AssertionError('probe ran')), \
-                contextlib.redirect_stderr(stderr):
-            status = cli.main(['worker-probe', 'gw-agent'])
-        self.assertEqual(status, 2)
-        self.assertEqual(stderr.getvalue().strip(), 'GW_AGENT_PROBE_ROUTE_UNAVAILABLE')
 
     def test_only_gw_agent_can_be_probed(self):
         from llmtool import cli
