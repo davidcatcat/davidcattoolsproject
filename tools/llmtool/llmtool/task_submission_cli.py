@@ -4534,6 +4534,42 @@ def _print_task_without_masking_interrupt(store, task_id):
         pass
 
 
+_OPENCODE_PROFILE_PROBE_MAX_BYTES = 1024 * 1024
+
+
+def _opencode_profile_model_is_malformed():
+    """Return True when the raw opencode-developer model is set and malformed.
+
+    Used only after the config resolver has already refused the profile
+    (#2302 F1), so an empty, whitespace or control-character model keeps the
+    stable OPENCODE_MODEL_INVALID code. Only the model field is inspected; it
+    is never returned, logged or shown. Any read failure returns False and the
+    original uncoded refusal stands.
+    """
+    try:
+        path = Path.home() / '.config' / 'llmtool' / 'config.yaml'
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _OPENCODE_PROFILE_PROBE_MAX_BYTES:
+            return False
+        data = yaml_module().safe_load(path.read_text(encoding='utf-8'))
+    except Exception:
+        return False
+    providers = data.get('providers') if type(data) is dict else None
+    profile = providers.get('opencode-developer') if type(providers) is dict else None
+    if type(profile) is not dict or profile.get('model') is None:
+        return False
+    return not opencode_direct_developer.is_valid_model(profile['model'])
+
+
+def _opencode_profile_invalid_error():
+    if _opencode_profile_model_is_malformed():
+        error = LLMToolError('opencode-developer profile model is invalid')
+        error.direct_opencode_code = 'OPENCODE_MODEL_INVALID'
+        return error
+    return LLMToolError('opencode-developer profile is invalid in the llmtool '
+                        'user config (~/.config/llmtool/config.yaml)')
+
+
 def _opencode_developer_profile():
     """Return the optional OpenCode model and validated agent step limit."""
     try:
@@ -4544,14 +4580,15 @@ def _opencode_developer_profile():
             'run llmtool with its virtualenv (tools/llmtool/.venv/bin/python)') from None
     try:
         profile = resolve_profile_config('opencode-developer', require_configured=False)
+        provider = (selected_provider(profile) if profile is not None else
+                    {'model': None, 'provider_options': {}})
     except LLMToolError as exc:
         if str(exc) == 'requested provider profile is not defined':
-            profile = None
+            provider = {'model': None, 'provider_options': {}}
         else:
-            raise LLMToolError('opencode-developer profile is invalid in the llmtool '
-                               'user config (~/.config/llmtool/config.yaml)') from None
-    provider = (selected_provider(profile) if profile is not None else
-                {'model': None, 'provider_options': {}})
+            raise _opencode_profile_invalid_error() from None
+    except Exception:
+        raise _opencode_profile_invalid_error() from None
     options = provider.get('provider_options', {})
     if type(options) is not dict:
         raise LLMToolError('opencode-developer profile provider_options must be a mapping')
@@ -4561,7 +4598,7 @@ def _opencode_developer_profile():
     except opencode_direct_developer.DirectOpenCodeError:
         raise LLMToolError('opencode-developer profile steps must be an integer from 3 to 1000') \
             from None
-    model = provider['model']
+    model = provider.get('model')
     if model is None:
         model = opencode_direct_developer.MODEL
     try:
@@ -4572,15 +4609,16 @@ def _opencode_developer_profile():
         error = LLMToolError('opencode-developer role accounts are not supported')
         error.role_config_code = 'OPENCODE_ROLE_ACCOUNT_UNSUPPORTED'
         raise error
-    if role.get('model') is not None:
+    if role.get('model') is not None and role.get('model_source') != 'repo_default':
         model = role['model']
-    if role.get('effort') is not None:
+    if role.get('effort') is not None and role.get('effort_source') != 'repo_default':
         model = model.split('#', 1)[0] + '#' + role['effort']
     try:
         return opencode_direct_developer.validate_model(model), steps
     except opencode_direct_developer.DirectOpenCodeError:
-        raise LLMToolError('opencode-developer profile model must be an '
-                           'opencode/<name>-free model') from None
+        error = LLMToolError('opencode-developer profile model is invalid')
+        error.direct_opencode_code = 'OPENCODE_MODEL_INVALID'
+        raise error from None
 
 
 def _resolve_developer_role(role_name, *, owner_override=None, repository=None,
@@ -8171,7 +8209,8 @@ def run_task_delegate(args, *, store=None):
         return _run_background_delegate(
             args, provider=provider, store=store,
             d6_binding=(registration, _snapshot))
-    if args.provider == 'agy':
+    provider = getattr(args, 'provider', None)
+    if provider == 'agy':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider agy requires --mode direct')
         # #785 M18: no owner-ref check here. The repair cap and High Debug
@@ -8181,7 +8220,7 @@ def run_task_delegate(args, *, store=None):
         _check_delegate_repair_cap(args, store)
         return _with_quota_observation(
             store, args.task_id, lambda: run_task_agy_delegate(args, store=store))
-    if args.provider == 'claude':
+    if provider == 'claude':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider claude requires --mode direct')
         if getattr(args, 'background', False):
@@ -8190,23 +8229,23 @@ def run_task_delegate(args, *, store=None):
         _check_delegate_repair_cap(args, store)
         return _with_quota_observation(
             store, args.task_id, lambda: run_task_claude_delegate(args, store=store))
-    if args.provider == 'gw-agent':
+    if provider == 'gw-agent':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider gw-agent requires --mode direct')
         _check_delegate_repair_cap(args, store)
         return _with_quota_observation(
             store, args.task_id, lambda: run_task_gw_agent_delegate(args, store=store))
-    _validate_acceptance_scope(args.acceptance)
+    _validate_acceptance_scope(getattr(args, 'acceptance', None))
     if getattr(args, 'mode', 'proposal') == 'direct':
-        if args.provider != 'codex':
+        if provider != 'codex':
             raise LLMToolError('--mode direct is supported only for the Codex Developer route')
         _check_delegate_repair_cap(args, store)
         return run_task_codex_delegate(args, store=store)
-    if args.provider == 'opencode':
+    if provider == 'opencode':
         _check_delegate_repair_cap(args, store)
         return _with_quota_observation(
             store, args.task_id, lambda: run_task_opencode_delegate(args, store=store))
-    if args.provider != 'codex':
+    if provider != 'codex':
         raise LLMToolError('unsupported Developer route')
     if not getattr(args, 'context_stdin', False) and not hasattr(args, 'context'):
         raise LLMToolError('text Developer delegation requires explicit --context-stdin')

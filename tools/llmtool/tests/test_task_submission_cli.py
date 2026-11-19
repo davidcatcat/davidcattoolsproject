@@ -2419,17 +2419,43 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertIsNone(stored['developer'])
 
     def test_opencode_developer_role_non_free_model_is_refused_before_claim(self):
+        # Owner decision #289: paid role model is admitted; malformed role model is refused before claim.
         task = self._pm_task_with_opencode_assignment()
         role = {'model': 'opencode/paid-model', 'effort': 'high', 'account': None}
+        output = io.StringIO()
+
+        def execute(**kwargs):
+            self.assertEqual(kwargs['model'], 'opencode/paid-model#high')
+            (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+            return DirectResult(0, 'ses_Abc123', 'Updated fixture.', None,
+                'UNKNOWN', 'a' * 64, 1234, 'CONFIRMED', 'opencode v2.1.4',
+                10, 1, 'b' * 64)
+
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch.object(submission_cli.role_config, 'resolve_role',
                              return_value=role), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      side_effect=execute) as invoke, \
+                redirect_stdout(output):
+            run_task_delegate(self._opencode_delegate_args(task))
+        self.assertEqual(invoke.call_count, 1)
+        developer = json.loads(output.getvalue())['developer']
+        self.assertEqual(developer['model'], 'opencode/paid-model#high')
+        (self.executor_root / 'sample.py').write_text('VALUE = 1\n')
+
+        malformed_task = self._pm_task_with_opencode_assignment()
+        malformed_role = {'model': 'opencode/a/b', 'effort': 'high', 'account': None}
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch.object(submission_cli.role_config, 'resolve_role',
+                             return_value=malformed_role), \
                 patch('llmtool.task_submission_cli.opencode_direct_developer.run') as invoke:
-            with self.assertRaisesRegex(LLMToolError, 'opencode/<name>-free'):
-                run_task_delegate(self._opencode_delegate_args(task))
+            with self.assertRaises(LLMToolError) as caught:
+                run_task_delegate(self._opencode_delegate_args(malformed_task))
+            self.assertEqual(getattr(caught.exception, 'direct_opencode_code', None),
+                             'OPENCODE_MODEL_INVALID')
         invoke.assert_not_called()
         stored = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(
-            task['task_id'])
+            malformed_task['task_id'])
         self.assertIsNone(stored['developer'])
 
     def test_agy_developer_role_model_effort_validation_and_account_refusal(self):
@@ -2466,14 +2492,50 @@ class TaskSubmissionCLITests(unittest.TestCase):
                          'AGY_ROLE_PROFILE_INVALID')
 
     def test_opencode_developer_profile_non_free_model_is_refused_before_claim(self):
-        task = self._pm_task_with_opencode_assignment()
-        for model in ('opencode/paid-model', 'other/name-free', 'opencode/a/b-free'):
-            with self.subTest(model=model):
-                self._write_opencode_developer_model(model)
+        # Owner decision #289: paid models and other providers are admitted; malformed models are refused before claim.
+        # A1: the Owner's configured model (opencode-go/deepseek-v4.1-flash#high)
+        # and the shipped free default run end to end through the real delegate path.
+        for model in ('opencode/paid-model', 'other/name-free',
+                      'opencode-go/deepseek-v4.1-flash',
+                      'opencode-go/deepseek-v4.1-flash#high',
+                      'opencode/deepseek-v4.1-flash-free'):
+            with self.subTest(admitted_model=model):
+                task = self._pm_task_with_opencode_assignment()
+                self._write_opencode_developer_model(model, steps=24)
+                output = io.StringIO()
+
+                def execute(**kwargs):
+                    self.assertEqual(kwargs['model'], model)
+                    self.assertEqual(kwargs['steps'], 24)
+                    (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+                    return DirectResult(0, 'ses_Abc123', 'Updated fixture.', None,
+                        'UNKNOWN', 'a' * 64, 1234, 'CONFIRMED', 'opencode v2.1.4',
+                        10, 1, 'b' * 64)
+
                 with patch.dict(os.environ, {'HOME': str(self.home)}), \
-                        patch('llmtool.task_submission_cli.opencode_direct_developer.run') as invoke, \
-                        self.assertRaisesRegex(LLMToolError, 'opencode/<name>-free'):
+                        patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                              side_effect=execute) as invoke, \
+                        redirect_stdout(output):
                     run_task_delegate(self._opencode_delegate_args(task))
+                self.assertEqual(invoke.call_count, 1)
+                developer = json.loads(output.getvalue())['developer']
+                self.assertEqual(developer['model'], model)
+                (self.executor_root / 'sample.py').write_text('VALUE = 1\n')
+
+        # #2302 F1: the quoted empty, whitespace and control-character values are
+        # refused by the config resolver before validate_model and must keep
+        # the same stable code through the real delegate path.
+        for model in ('opencode/a/b-free', 'opencode/has space', 'bare-model',
+                      '', '   ', '\t', 'opencode/model\n', 'opencode/model\x01'):
+            with self.subTest(malformed_model=model):
+                task = self._pm_task_with_opencode_assignment()
+                self._write_opencode_developer_model(json.dumps(model))
+                with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                        patch('llmtool.task_submission_cli.opencode_direct_developer.run') as invoke:
+                    with self.assertRaises(LLMToolError) as caught:
+                        run_task_delegate(self._opencode_delegate_args(task))
+                    self.assertEqual(getattr(caught.exception, 'direct_opencode_code', None),
+                                     'OPENCODE_MODEL_INVALID')
                 invoke.assert_not_called()
                 stored = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(
                     task['task_id'])
