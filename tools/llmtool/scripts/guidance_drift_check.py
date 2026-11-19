@@ -221,8 +221,9 @@ DEVELOPER_ROUTE = TimeoutPair(Obj(
         "profile": ROUTE_PROFILE,
         "authorization_ref": Str(r"https://\S+"),
         "allowed_data_classes": ListOf(Str(r"[a-z_]+"), min_items=1),
-        # #1815: same bounds as developer_routes.base max_diff_bytes_ok.
-        "max_diff_bytes": Int(1024, 512 * 1024),
+        # #1815: same bounds as developer_routes.base max_diff_bytes_ok
+        # (#2281: hard maximum 5 MiB).
+        "max_diff_bytes": Int(1024, 5 * 1024 * 1024),
         # #2281: same rule as developer_routes.base max_prompt_bytes_ok (>= 1, no hard ceiling).
         "max_prompt_bytes": Int(1),
         "max_source_file_bytes": Int(1),

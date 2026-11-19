@@ -406,6 +406,18 @@ class RuleFileSchemaTests(unittest.TestCase):
         routes["routes"]["fixture"]["max_source_total_bytes"] = 2097152
         self.assertEqual(self.findings_after("developer-routes.json", routes), [])
 
+    def test_5_mib_byte_bounds_accepted_and_diff_over_5_mib_refused(self):
+        # #2281 (Owner 2026-11-19): every Developer route byte bound may be 5 MiB.
+        routes = fixture_routes()
+        for key in ("max_diff_bytes", "max_prompt_bytes",
+                    "max_source_file_bytes", "max_source_total_bytes"):
+            routes["routes"]["fixture"][key] = 5 * 1024 * 1024
+        self.assertEqual(self.findings_after("developer-routes.json", routes), [])
+        routes["routes"]["fixture"]["max_diff_bytes"] = 5 * 1024 * 1024 + 1
+        findings = self.findings_after("developer-routes.json", routes)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("max_diff_bytes", findings[0])
+
     def test_budgets_accepted(self):
         routes = fixture_routes()
         routes["routes"]["fixture"]["budgets"] = {

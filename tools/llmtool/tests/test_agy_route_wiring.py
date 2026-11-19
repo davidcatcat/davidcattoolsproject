@@ -1012,6 +1012,19 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(task['developer']['state'], 'DEVELOPER_RESPONDED')
 
+    def test_agy_diff_just_over_old_512_kib_is_accepted_and_stored(self):
+        # #2281: over the old 256 KiB route value and the old 512 KiB hard cap.
+        header = b'diff --git a/src.py b/src.py\n'
+        line = b'+y = 1\n'
+        repeats = ((512 * 1024 - len(header)) // len(line)) + 2
+        diff = header + line * repeats
+        self.assertGreater(len(diff), 512 * 1024)
+        self.assertLess(len(diff), resolve_route_max_diff_bytes('agy'))
+        status, task, _events, _prompts = self._run_agy_delegate(diff_bytes=diff)
+        self.assertEqual(status, 0)
+        self.assertEqual(task['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(task['developer']['artifact'].encode('utf-8'), diff)
+
     def test_agy_diff_cap_follows_route_config(self):
         with patch.object(task_submission_cli, 'resolve_route_max_diff_bytes',
                           return_value=1024) as mock_resolver:

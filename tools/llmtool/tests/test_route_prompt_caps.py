@@ -48,7 +48,8 @@ class RoutePromptCapsTests(unittest.TestCase):
     def test_loader_accepts_repository_keys(self):
         config = load_route_config()
         self.assertEqual(config["routes"]["claude"]["max_prompt_bytes"], 65536)
-        self.assertEqual(config["routes"]["agy"]["max_prompt_bytes"], 524288)
+        # #2281 (Owner 2026-11-19): AGY is 5 MiB; Claude is unchanged.
+        self.assertEqual(config["routes"]["agy"]["max_prompt_bytes"], 5242880)
 
     def test_loader_refuses_bad_max_prompt_bytes_values(self):
         base_config = load_route_config()
@@ -211,7 +212,7 @@ class RoutePromptCapsTests(unittest.TestCase):
             "loaded = developer_routes.load_route_config()\n"
             "assert 'agy' in loaded['routes']\n"
             "assert 'claude' not in loaded['routes']\n"
-            "assert developer_routes.resolve_route_max_prompt_bytes('agy') == 524288\n"
+            "assert developer_routes.resolve_route_max_prompt_bytes('agy') == 5242880\n"
             "try:\n"
             "    developer_routes.resolve_route_max_prompt_bytes('claude')\n"
             "    sys.exit(201)\n"

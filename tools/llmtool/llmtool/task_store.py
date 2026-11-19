@@ -54,9 +54,15 @@ def _added_diff_content(value):
     return '\n'.join(added)
 
 SCHEMA_VERSION = 2
-MAX_RECORD_BYTES = 1024 * 1024
-# #1815: a Developer diff is stored whole; the 1 MiB record limit is the ceiling, so artifacts stay at or below half of it. Same value as developer_routes.base.HARD_MAX_DIFF_BYTES.
-MAX_ARTIFACT_BYTES = 512 * 1024
+# #1815: a Developer diff is stored whole; the record limit is the ceiling, so
+# artifacts stay at or below half of it. #2281 (Owner 2026-11-19): the artifact
+# limit is 5 MiB, so the record limit is 10 MiB to keep that ratio. The artifact
+# limit is the same value as developer_routes.base.HARD_MAX_DIFF_BYTES.
+MAX_RECORD_BYTES = 10 * 1024 * 1024
+MAX_ARTIFACT_BYTES = 5 * 1024 * 1024
+# #2281: an OpenCode run records the source bytes it screened. That total is at
+# most the route max_source_total_bytes, which may be up to 5 MiB.
+MAX_EXECUTION_SOURCE_BYTES = 5 * 1024 * 1024
 TASK_ID = re.compile(r'[0-9a-f]{32}')
 D6_TASK_ID = re.compile(r'[a-z0-9][a-z0-9-]{0,95}')
 SESSION_ID = re.compile(r'pm-[a-z0-9-]{1,60}')
@@ -3008,7 +3014,7 @@ def _validate(record, *, strict=True):
                               not 0 <= execution['elapsed_ms'] <= 86_400_000)) or
                             (execution['source_bytes'] is not None and
                              (type(execution['source_bytes']) is not int or
-                              not 0 <= execution['source_bytes'] <= 2 * 1024 * 1024)) or
+                              not 0 <= execution['source_bytes'] <= MAX_EXECUTION_SOURCE_BYTES)) or
                             (execution['source_file_count'] is not None and
                              (type(execution['source_file_count']) is not int or
                               not 1 <= execution['source_file_count'] <= 32)) or

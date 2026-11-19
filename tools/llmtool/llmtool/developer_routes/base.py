@@ -37,24 +37,26 @@ TIMEOUT_KEYS = frozenset({'default_timeout', 'max_timeout'})
 DEFAULT_MAX_DIFF_BYTES = 64 * 1024
 MIN_MAX_DIFF_BYTES = 1024
 # #1815: the TaskStore artifact limit (task_store.MAX_ARTIFACT_BYTES).
-HARD_MAX_DIFF_BYTES = 512 * 1024
+# #2281 (Owner 2026-11-19): 5 MiB.
+HARD_MAX_DIFF_BYTES = 5 * 1024 * 1024
 # #2157: Developer read and write path caps per route. TaskStore stores at most
 # 32 of each per Developer record, so a route may lower the cap but not raise it.
 DEFAULT_MAX_TASK_PATHS = 32
 HARD_MAX_TASK_PATHS = 32
 DEFAULT_CLAUDE_MAX_PROMPT_BYTES = 65536
-DEFAULT_AGY_MAX_PROMPT_BYTES = 512 * 1024
-DEFAULT_OPENCODE_MAX_PROMPT_BYTES = 65536
+# #2281 (Owner 2026-11-19): AGY and OpenCode byte bounds are 5 MiB.
+DEFAULT_AGY_MAX_PROMPT_BYTES = 5 * 1024 * 1024
+DEFAULT_OPENCODE_MAX_PROMPT_BYTES = 5 * 1024 * 1024
 DEFAULT_ROUTE_MAX_PROMPT_BYTES = {
     'claude': DEFAULT_CLAUDE_MAX_PROMPT_BYTES,
     'agy': DEFAULT_AGY_MAX_PROMPT_BYTES,
     'opencode': DEFAULT_OPENCODE_MAX_PROMPT_BYTES,
 }
-DEFAULT_OPENCODE_MAX_SOURCE_FILE_BYTES = 1024 * 1024
+DEFAULT_OPENCODE_MAX_SOURCE_FILE_BYTES = 5 * 1024 * 1024
 DEFAULT_ROUTE_MAX_SOURCE_FILE_BYTES = {
     'opencode': DEFAULT_OPENCODE_MAX_SOURCE_FILE_BYTES,
 }
-DEFAULT_OPENCODE_MAX_SOURCE_TOTAL_BYTES = 2 * 1024 * 1024
+DEFAULT_OPENCODE_MAX_SOURCE_TOTAL_BYTES = 5 * 1024 * 1024
 DEFAULT_ROUTE_MAX_SOURCE_TOTAL_BYTES = {
     'opencode': DEFAULT_OPENCODE_MAX_SOURCE_TOTAL_BYTES,
 }
@@ -437,7 +439,7 @@ def resolve_route_max_prompt_bytes(route: Any, *,
     route is a registered route name or a DeveloperRoute; config is a
     load_route_config() result (None loads the repository file). A route
     without max_prompt_bytes returns today's default for that route
-    (65536 for claude and opencode, 524288 for agy). An invalid value, unknown str route
+    (65536 for claude, 5242880 for agy and opencode). An invalid value, unknown str route
     or bad config raises RouteError('ROUTE_CONFIG_INVALID').
     """
     if isinstance(route, DeveloperRoute):
@@ -484,7 +486,7 @@ def resolve_route_max_source_file_bytes(route: Any, *,
     route is a registered route name or a DeveloperRoute; config is a
     load_route_config() result (None loads the repository file). A route
     without max_source_file_bytes returns today's default for that route
-    (1048576 for opencode). An invalid value, unknown str route or bad config
+    (5242880 for opencode). An invalid value, unknown str route or bad config
     raises RouteError('ROUTE_CONFIG_INVALID').
     """
     if isinstance(route, DeveloperRoute):
@@ -531,7 +533,7 @@ def resolve_route_max_source_total_bytes(route: Any, *,
     route is a registered route name or a DeveloperRoute; config is a
     load_route_config() result (None loads the repository file). A route
     without max_source_total_bytes returns today's default for that route
-    (2097152 for opencode). An invalid value, unknown str route or bad config
+    (5242880 for opencode). An invalid value, unknown str route or bad config
     raises RouteError('ROUTE_CONFIG_INVALID').
     """
     if isinstance(route, DeveloperRoute):

@@ -64,9 +64,10 @@ class RouteOpenCodeCapsTests(unittest.TestCase):
     def test_loader_accepts_repository_keys(self):
         config = load_route_config()
         opencode = config["routes"]["opencode"]
-        self.assertEqual(opencode["max_prompt_bytes"], 65536)
-        self.assertEqual(opencode["max_source_file_bytes"], 1048576)
-        self.assertEqual(opencode["max_source_total_bytes"], 2097152)
+        # #2281 (Owner 2026-11-19): 5 MiB each.
+        self.assertEqual(opencode["max_prompt_bytes"], 5242880)
+        self.assertEqual(opencode["max_source_file_bytes"], 5242880)
+        self.assertEqual(opencode["max_source_total_bytes"], 5242880)
 
     def test_loader_refuses_bad_source_and_prompt_bytes_values(self):
         base_config = load_route_config()
@@ -256,9 +257,9 @@ class RouteOpenCodeCapsTests(unittest.TestCase):
             "developer_routes.load_route_config = lambda path=None: orig_load(substitute_path if path is None else path)\n"
             "assert 'llmtool.opencode_direct_developer' not in sys.modules\n"
             "from llmtool import opencode_direct_developer\n"
-            "assert opencode_direct_developer.DEFAULT_MAX_PROMPT_BYTES == 65536\n"
-            "assert opencode_direct_developer.DEFAULT_MAX_SOURCE_FILE_BYTES == 1048576\n"
-            "assert opencode_direct_developer.DEFAULT_MAX_SOURCE_TOTAL_BYTES == 2097152\n"
+            "assert opencode_direct_developer.DEFAULT_MAX_PROMPT_BYTES == 5242880\n"
+            "assert opencode_direct_developer.DEFAULT_MAX_SOURCE_FILE_BYTES == 5242880\n"
+            "assert opencode_direct_developer.DEFAULT_MAX_SOURCE_TOTAL_BYTES == 5242880\n"
             "try:\n"
             "    opencode_direct_developer.resolved_max_prompt_bytes()\n"
             "    sys.exit(101)\n"
