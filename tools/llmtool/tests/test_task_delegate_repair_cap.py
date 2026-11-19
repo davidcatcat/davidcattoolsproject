@@ -1173,7 +1173,7 @@ def _quota_stop(**overrides):
     # #2367 P0-B: a Claude quota stop as stored (PR #2383 round 30f92678 shape).
     developer = _no_work(
         state='BLOCKED', provider_profile='claude', error_code='CLAUDE_QUOTA_EXHAUSTED',
-        source_sha=_EARLIER_HEAD, progress={'head': _EARLIER_HEAD},
+        source_sha=_EARLIER_HEAD, progress={'head_sha': _EARLIER_HEAD},
         execution={'status': 'BLOCKED', 'process_exit_code': 1,
                    'cleanup_status': 'UNKNOWN', 'usage_source': 'UNKNOWN',
                    'provider_evidence': {'condition': 'QUOTA_EXHAUSTED'}})
@@ -1242,12 +1242,36 @@ class EvidencedNoWorkStopRepairCountTests(unittest.TestCase):
 
     def test_quota_stop_that_changed_files_counts(self):
         for developer in (_quota_stop(changed_files=['src/main.py']),
-                          _quota_stop(progress={'head': _EARLIER_HEAD,
+                          _quota_stop(progress={'head_sha': _EARLIER_HEAD,
                                                 'changed_files': ['src/main.py']}),
-                          _quota_stop(progress={'head': 'c' * 40}),
+                          _quota_stop(progress={'head_sha': 'c' * 40}),
                           _quota_stop(artifact_sha256='0' * 64)):
             with self.subTest(developer=developer):
                 self._assert_counted(developer)
+
+    def test_quota_stop_without_consistent_progress_counts(self):
+        # Codex security v91 (CWE-863): missing, partial or contradictory
+        # route evidence never excludes a quota stop.
+        developer = _quota_stop()
+        del developer['progress']
+        for developer in (developer,
+                          _quota_stop(progress=None),
+                          _quota_stop(progress={}),
+                          _quota_stop(progress={'head': _EARLIER_HEAD}),
+                          _quota_stop(progress={'head_sha': _EARLIER_HEAD,
+                                                'head': 'c' * 40}),
+                          _quota_stop(error_code='CLAUDE_NO_CHANGES'),
+                          _quota_stop(source_sha='c' * 40,
+                                      progress={'head_sha': 'c' * 40})):
+            with self.subTest(developer=developer):
+                store = self._store(developer)
+                store.records[self._NEWEST]['completion'] = {
+                    'executor_task_id': _EXECUTOR_TASK,
+                    'evidence': {'source_sha': _EARLIER_HEAD, 'result_head': None}}
+                with self.assertRaisesRegex(LLMToolError,
+                                            '^DELEGATE_REPAIR_LIMIT_REACHED$'):
+                    task_submission_cli._check_delegate_repair_cap(_args(), store)
+                self.assertEqual(store.writes, [])
 
     def test_unknown_or_unproved_stops_count(self):
         for developer in (

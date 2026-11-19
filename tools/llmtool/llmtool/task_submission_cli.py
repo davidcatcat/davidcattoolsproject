@@ -7565,13 +7565,40 @@ def _empty_value(value):
             (type(value) is int and value == 0))
 
 
+def _progress_shows_no_change(progress, source_sha):
+    """True only when a route-recorded progress dict affirms an unmoved D6 (#2367 P0-B).
+
+    The route records the D6 head at the stop as ``head_sha``. Required: a
+    40-hex source_sha and a dict with str keys whose ``head_sha`` is exactly it;
+    every other head-named key (``head`` included) None or that same SHA, so
+    contradictory heads fail; and every changed-work key empty. Anything
+    missing, partial or malformed is False: the run counts.
+    """
+    if (type(source_sha) is not str or
+            re.fullmatch(r'[0-9a-f]{40}', source_sha) is None or
+            type(progress) is not dict or progress.get('head_sha') != source_sha):
+        return False
+    for key, value in progress.items():
+        if type(key) is not str:
+            return False
+        lowered = key.lower()
+        if 'head' in lowered and value is not None and value != source_sha:
+            return False
+        if (any(marker in lowered for marker in _PROGRESS_WORK_MARKERS) and
+                not _empty_value(value)):
+            return False
+    return True
+
+
 def _no_recorded_change(developer, record):
     """True only when a stopped run's record shows no change to its D6 (#2367 P0-B).
 
     Required: artifact and artifact_sha256 present and None; changed_files
-    absent or an empty list; a 40-hex source_sha; any progress a dict whose
-    head, when set, is the source_sha and whose changed-work keys are empty;
-    and no result head in the Task completion or the run's result callback
+    absent or an empty list; a 40-hex source_sha; any progress complete and
+    consistent (_progress_shows_no_change: route ``head_sha`` equal to the
+    source_sha, no contradictory head, empty changed-work keys); every
+    source_sha recorded in the Task completion or the run's result callback
+    equal to the run's source_sha; and no result head in either
     (lineage_counts.recorded_result_heads, any non-None head included). A
     missing record, any other shape or any doubt is False: the run counts.
     """
@@ -7588,18 +7615,9 @@ def _no_recorded_change(developer, record):
     source_sha = developer.get('source_sha')
     if type(source_sha) is not str or re.fullmatch(r'[0-9a-f]{40}', source_sha) is None:
         return False
-    if 'progress' in developer:
-        progress = developer['progress']
-        if type(progress) is not dict:
-            return False
-        for key, value in progress.items():
-            if type(key) is not str:
-                return False
-            if key == 'head' and value is not None and value != source_sha:
-                return False
-            if (any(marker in key.lower() for marker in _PROGRESS_WORK_MARKERS) and
-                    not _empty_value(value)):
-                return False
+    if ('progress' in developer and
+            not _progress_shows_no_change(developer['progress'], source_sha)):
+        return False
     holders = [record]
     if 'direct_result_callback' in developer:
         holders.append({'completion': developer['direct_result_callback']})
@@ -7613,6 +7631,9 @@ def _no_recorded_change(developer, record):
             if (evidence.get('result_head') is not None or
                     (type(result) is dict and result.get('result_head') is not None)):
                 return False
+            # A recorded source that differs from the run's is contradictory.
+            if 'source_sha' in evidence and evidence['source_sha'] != source_sha:
+                return False
     return True
 
 
@@ -7624,14 +7645,19 @@ def _evidenced_no_work_stop(developer, record):
     The record must be BLOCKED with a known (non-UNKNOWN) error code and
     execution status, show no change (_no_recorded_change), and either:
 
-    - carry route-returned provider evidence condition QUOTA_EXHAUSTED; or
+    - be a quota stop whose evidence agrees throughout: route-returned provider
+      evidence condition QUOTA_EXHAUSTED, a *_QUOTA_EXHAUSTED error code,
+      execution status BLOCKED, and route-recorded progress whose ``head_sha``
+      is the run's source_sha (affirmative no-change evidence; a quota stop
+      without progress, or with partial or contradictory progress, counts); or
     - be a Claude CLAUDE_NO_CHANGES whose returned result shows the process
       exited 0 with cleanup CONFIRMED (the delegate raises CLAUDE_NO_CHANGES
       only after it found the D6 head unmoved and no worktree diff). The error
       code alone never proves it.
 
-    Anything else, UNKNOWN or malformed, is False, so the run still counts.
-    This reads the record as stored and never changes it.
+    Anything else, UNKNOWN, malformed or contradictory, is False, so the run
+    still counts (fail closed). This reads the record as stored and never
+    changes it.
     """
     if type(developer) is not dict or developer.get('state') != 'BLOCKED':
         return False
@@ -7649,7 +7675,11 @@ def _evidenced_no_work_stop(developer, record):
     provider_evidence = execution.get('provider_evidence')
     if (type(provider_evidence) is dict and
             provider_evidence.get('condition') == 'QUOTA_EXHAUSTED'):
-        return True
+        # Every part of the quota evidence must agree; any gap counts the run.
+        return (error_code.endswith('_QUOTA_EXHAUSTED') and status == 'BLOCKED' and
+                'progress' in developer and
+                _progress_shows_no_change(developer['progress'],
+                                          developer.get('source_sha')))
     exit_code = execution.get('process_exit_code')
     return (developer.get('provider_profile') == 'claude' and
             error_code == 'CLAUDE_NO_CHANGES' and status == 'BLOCKED' and
@@ -8183,7 +8213,7 @@ def _check_chain_repair_count(args, store, d6_binding, policy, view):
                  completion.get('executor_task_id') == executor_task)
         # A run on another D6 is never proved unchanged by this D6's tree.
         stamp = _repair_run_stamp(member_id, record.get('developer'),
-                                  same_d6 if on_d6 else (lambda _source_sha: False),
+                                  same_d6 if on_d6 else (lambda *_args, **_kwargs: False),
                                   record=record)
         if stamp is None:
             continue

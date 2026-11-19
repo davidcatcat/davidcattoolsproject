@@ -38,7 +38,7 @@ ARTIFACT = ('diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.m
             '@@ -1 +1 @@\n-Synthetic source.\n+Synthetic result.\n')
 
 # The six PR #2383 rounds, oldest first: (task prefix, kind, created_at, source).
-# A quota round's source is its recorded progress head.
+# A quota round's source is its route-recorded progress head_sha.
 PR_2383_ROUNDS = (
     ('983dcdb1', 'responded', '2026-11-19T02:58:00Z', _sha('983dcdb1')),
     ('30f92678', 'quota', '2026-11-19T03:19:00Z', _sha('dc8562f1')),
@@ -69,7 +69,7 @@ def _developer(kind, created_at, source, profile='claude'):
     elif kind == 'quota':
         developer.update(
             state='BLOCKED', error_code='CLAUDE_QUOTA_EXHAUSTED', artifact=None,
-            artifact_sha256=None, usage=None, progress={'head': source}, execution={
+            artifact_sha256=None, usage=None, progress={'head_sha': source}, execution={
                 'status': 'BLOCKED', 'native_session_id': None, 'process_exit_code': 1,
                 'stdout_sha256': None, 'elapsed_ms': 1, 'cleanup_status': 'UNKNOWN',
                 'usage_source': 'UNKNOWN',
@@ -291,7 +291,7 @@ class EffectiveRepairCountTests(unittest.TestCase):
                 changed_files=['README.md']),
             'progress diff': lambda record, dev: dev['progress'].update(diff_bytes=12),
             'progress head moved': lambda record, dev: dev['progress'].update(
-                head=other_head),
+                head_sha=other_head),
             'malformed progress': lambda record, dev: dev.update(progress='moved'),
             'artifact': lambda record, dev: dev.update(artifact=ARTIFACT),
             'artifact digest': lambda record, dev: dev.update(
@@ -333,14 +333,67 @@ class EffectiveRepairCountTests(unittest.TestCase):
         changes = {
             'changed files': lambda record, dev: dev.update(changed_files=['README.md']),
             'progress head moved': lambda record, dev: dev.update(
-                progress={'head': _sha('feed')}),
+                progress={'head_sha': _sha('feed')}),
+            'progress without head_sha': lambda record, dev: dev.update(
+                progress={'head': dev['source_sha']}),
+            'empty progress': lambda record, dev: dev.update(progress={}),
             'completion result head': lambda record, dev: record['completion'][
                 'evidence'].update(result_head=_sha('feed')),
             'artifact': lambda record, dev: dev.update(artifact=ARTIFACT),
+            'quota condition on a NO_CHANGES code': lambda record, dev: dev[
+                'execution'].update(provider_evidence={'condition': 'QUOTA_EXHAUSTED'}),
         }
         for name, change in changes.items():
             with self.subTest(name=name):
                 self._assert_round_counts(no_changes, change)
+
+    def test_quota_stop_without_affirmative_progress_still_counts(self):
+        # Codex security v91 (CWE-863): a quota stop is excluded only on
+        # complete, consistent route-recorded no-change evidence.
+        quota = 1
+        changes = {
+            'missing progress':lambda record, dev: dev.pop('progress'),
+            'progress None': lambda record, dev: dev.update(progress=None),
+            'empty progress': lambda record, dev: dev.update(progress={}),
+            'progress head only, not the route head_sha': lambda record, dev: dev.update(
+                progress={'head': dev['source_sha']}),
+            'progress head_sha None': lambda record, dev: dev.update(
+                progress={'head_sha': None}),
+            'progress head_sha malformed': lambda record, dev: dev.update(
+                progress={'head_sha': ['not', 'a', 'sha']}),
+            'progress head_sha uppercase': lambda record, dev: dev.update(
+                progress={'head_sha': dev['source_sha'].upper()}),
+            'progress non-str key': lambda record, dev: dev['progress'].update(
+                {1: None}),
+        }
+        for name, change in changes.items():
+            with self.subTest(name=name):
+                self._assert_round_counts(quota, change)
+
+    def test_quota_stop_with_forged_or_contradictory_evidence_still_counts(self):
+        quota = 1
+        other_head = _sha('feed')
+        changes = {
+            'progress head contradicts head_sha': lambda record, dev: dev[
+                'progress'].update(head=other_head),
+            'progress result head': lambda record, dev: dev['progress'].update(
+                result_head=other_head),
+            'progress head_sha differs from source': lambda record, dev: dev.update(
+                progress={'head_sha': other_head}),
+            'source rewritten to the progress head': lambda record, dev: dev.update(
+                source_sha=other_head, progress={'head_sha': other_head}),
+            'quota condition on a non-quota code': lambda record, dev: dev.update(
+                error_code='CLAUDE_NO_CHANGES'),
+            'quota condition on a DONE execution': lambda record, dev: dev[
+                'execution'].update(status='DONE'),
+            'completion source differs': lambda record, dev: record['completion'][
+                'evidence'].update(source_sha=other_head),
+            'callback source differs': lambda record, dev: dev['direct_result_callback'][
+                'evidence'].update(source_sha=other_head),
+        }
+        for name, change in changes.items():
+            with self.subTest(name=name):
+                self._assert_round_counts(quota, change)
 
     def test_proved_stops_with_empty_progress_lists_are_still_skipped(self):
         def change(record, dev):
@@ -367,6 +420,34 @@ class EvidencedNoWorkStopUnitTests(unittest.TestCase):
             with self.subTest(kind=kind):
                 self.assertIs(task_submission_cli._evidenced_no_work_stop(
                     record['developer'], record), True)
+
+    def test_quota_stop_needs_route_progress_head_sha(self):
+        record = self._record('quota')
+        source = record['developer']['source_sha']
+        for progress in ('absent', None, {}, {'head': source}, {'head_sha': None},
+                         {'head_sha': source, 'head': _sha('feed')}):
+            developer = copy.deepcopy(record['developer'])
+            if progress == 'absent':
+                del developer['progress']
+            else:
+                developer['progress'] = progress
+            with self.subTest(progress=progress):
+                self.assertIs(task_submission_cli._evidenced_no_work_stop(
+                    developer, record), False)
+
+    def test_progress_predicate_fails_closed(self):
+        source = _sha('abc')
+        self.assertIs(task_submission_cli._progress_shows_no_change(
+            {'head_sha': source, 'changed_files': []}, source), True)
+        for progress in (None, 'x', [], {}, {'head': source},
+                         {'head_sha': source, 'head': _sha('feed')},
+                         {'head_sha': source, 'changed_files': ['README.md']},
+                         {'head_sha': source, 1: None}):
+            with self.subTest(progress=progress):
+                self.assertIs(task_submission_cli._progress_shows_no_change(
+                    progress, source), False)
+        self.assertIs(task_submission_cli._progress_shows_no_change(
+            {'head_sha': None}, None), False)
 
     def test_real_run_and_missing_record(self):
         record = self._record('responded')
