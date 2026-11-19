@@ -2676,8 +2676,18 @@ class GwAgentRealStoreTests(unittest.TestCase):
 
     def test_gw_agent_bind_accepts_execution_at_the_store_bounds(self):
         set_ = self._set_execution
-        for name, mutate in (('elapsed-zero', set_(elapsed_ms=0)),
-                             ('elapsed-max', set_(elapsed_ms=86_400_000))):
+        source = {'source_bytes': 10, 'source_file_count': 1,
+                  'source_manifest_sha256': 'b' * 64}
+        for name, mutate in (
+                ('elapsed-zero', set_(elapsed_ms=0)),
+                ('elapsed-max', set_(elapsed_ms=86_400_000)),
+                # #2281: the store source-byte bound is 5 MiB (5242880 bytes);
+                # a run above the old 2 MiB bound binds too.
+                ('source-bytes-zero', set_(**{**source, 'source_bytes': 0})),
+                ('source-bytes-over-old-bound',
+                 set_(**{**source, 'source_bytes': 2 * 1024 * 1024 + 1})),
+                ('source-bytes-max', set_(**{**source, 'source_bytes': 5 * 1024 * 1024})),
+                ('source-files-max', set_(**{**source, 'source_file_count': 32}))):
             with self.subTest(field=name):
                 run = self._bind_run(f'gw-agent-bounds-{name}.md', mutate=mutate)
                 self.assertEqual(run['code'], 0)

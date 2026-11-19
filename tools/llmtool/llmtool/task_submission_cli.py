@@ -28,7 +28,8 @@ from .errors import LLMToolError
 from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
 from .task_store import (TaskStore, TaskStoreConflict, new_id, _json_bytes,
-                         _DIRECT_EXECUTION_FIELDS, _NO_CHANGES_MAX_TURNS,
+                         _DIRECT_EXECUTION_FIELDS, MAX_EXECUTION_SOURCE_BYTES,
+                         _NO_CHANGES_MAX_TURNS,
                          _NO_CHANGES_REASON_MAX_CHARS, valid_provider_evidence,
                          CLAUDE_FAILURE_EXIT_CODE_RANGE, valid_claude_failure_evidence,
                          valid_claude_failure_evidence_record, _valid_reported_text)
@@ -4377,7 +4378,7 @@ def _store_accepts_direct_execution(developer):
             execution['cleanup_status'] != 'CONFIRMED' or
             type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None or
             not _bounded_int(execution['elapsed_ms'], 0, 86_400_000) or
-            not _bounded_int(execution['source_bytes'], 0, 2 * 1024 * 1024) or
+            not _bounded_int(execution['source_bytes'], 0, MAX_EXECUTION_SOURCE_BYTES) or
             not _bounded_int(execution['source_file_count'], 1, 32) or
             (manifest is not None and
              (type(manifest) is not str or

@@ -2148,6 +2148,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 ('elapsed-max', set_(elapsed_ms=86_400_000)),
                 ('elapsed-none', set_(elapsed_ms=None)),
                 ('source-bytes-zero', set_(source_bytes=0)),
+                # #2281: a run above the old 2 MiB bound binds too.
+                ('source-bytes-over-old-bound', set_(source_bytes=2 * 1024 * 1024 + 1)),
                 ('source-bytes-max', set_(source_bytes=5 * 1024 * 1024)),
                 ('source-files-max', set_(source_file_count=32))):
             with self.subTest(field=name):
