@@ -8,7 +8,7 @@ import re
 import secrets
 import stat
 
-from . import review_repair, task_completion
+from . import review_repair, start_failure, task_completion
 from .errors import LLMToolError
 
 AGENTS = {'opencode': 'opencode-developer', 'agy': 'agy-developer'}
@@ -57,6 +57,24 @@ def _checked_scope(args, developer, read_paths, write_paths):
         _refuse('DIRECT_REASSIGN_SCOPE_MISMATCH')
 
 
+def packet_digest(packet):
+    """Use the same identity for CI and excerpt-bearing review or EC2 packets."""
+    text = packet.get('reviewer_text_excerpt_untrusted_data', '')
+    if text.startswith(review_repair.CI_PACKET_HEADER + ' '):
+        header, _, excerpt = text.partition('\n')
+        match = re.fullmatch(
+            r'CI_CHECK_FAILURE check=(.+) run=([1-9][0-9]*) conclusion=failure head=([0-9a-f]{40})',
+            header)
+        if match is None or match[3] != packet.get('failed_head'):
+            _refuse('DIRECT_REASSIGN_REPAIR_PACKET_UNVERIFIED')
+        _, digest = review_repair._ci_failure(
+            {'task_id': packet['task']}, executor_task=packet['executor_task'],
+            pr_number=packet['pr'], ci_failure={'head': match[3], 'check_name': match[1],
+                'check_run_id': int(match[2]), 'conclusion': 'failure', 'excerpt': excerpt})
+        return digest
+    return hashlib.sha256(start_failure.canonical(packet).encode()).hexdigest()
+
+
 def _repair_packet(store, task, developer, registration, *, require_closed=True):
     # Repair Tasks keep their original ID, so the parent claim still counts.
     matches = []
@@ -91,7 +109,10 @@ def _repair_packet(store, task, developer, registration, *, require_closed=True)
         _refuse('DIRECT_REASSIGN_REPAIR_CLAIM_UNVERIFIED')
     packets = []
     if task.get('repair_packet') is not None:
-        packets.append(task['repair_packet'])
+        saved_packet = start_failure.decode_repair_packet(task['repair_packet'])
+        if saved_packet is None:
+            _refuse('DIRECT_REASSIGN_REPAIR_PACKET_UNVERIFIED')
+        packets.append(saved_packet)
     if claim.get('family', '').endswith('-ec2'):
         for receipt in parent.get('remote_test_receipts', []):
             if receipt.get('source_sha') != claim['head_sha'] or receipt.get('result') != 'FAIL':
@@ -104,9 +125,10 @@ def _repair_packet(store, task, developer, registration, *, require_closed=True)
                 continue
             packets.append(packet)
     for packet in packets:
-        digest = hashlib.sha256(json.dumps(packet, ensure_ascii=True, sort_keys=True,
-                                          separators=(',', ':')).encode()).hexdigest()
-        if digest == claim.get('packet_sha256'):
+        if (packet.get('task') == parent['task_id'] and packet.get('pr') == claim['pr'] and
+                packet.get('failed_head') == claim['head_sha'] and
+                packet.get('executor_task') == registration.task_id and
+                packet_digest(packet) == claim.get('packet_sha256')):
             return packet
     _refuse('DIRECT_REASSIGN_REPAIR_PACKET_UNVERIFIED')
 

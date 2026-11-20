@@ -5963,9 +5963,7 @@ class TaskStore:
             if direct_claim_recovery is not None:
                 from . import direct_reassignment
                 claim, repair_id, repair_digest, packet = direct_claim_recovery
-                packet_digest = hashlib.sha256(json.dumps(
-                    packet, ensure_ascii=True, sort_keys=True,
-                    separators=(',', ':')).encode()).hexdigest()
+                packet_digest = direct_reassignment.packet_digest(packet)
                 repair = self.get(repair_id)
                 claims = current.get('review_repair_claims') or []
                 if (changes or repair.get('record_sha256') != repair_digest or

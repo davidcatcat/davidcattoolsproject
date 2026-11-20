@@ -5069,12 +5069,14 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
             developer = copy.deepcopy(claimed['developer'])
             completion = copy.deepcopy(claimed['completion'])
         else:
+            packet_write = ({} if repair_packet is None else {
+                'repair_packet': start_failure.canonical(_validate_repair_packet(repair_packet))})
             _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
                 store.d6_bind_compare_and_update(
                     task['task_id'], executor_task_id=registration.task_id,
                     expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
                               'completion': None},
-                    developer=developer, completion=completion,
+                    developer=developer, completion=completion, **packet_write,
                 )))
     except TaskStoreConflict:
         raise LLMToolError(
@@ -5592,11 +5594,13 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             developer = copy.deepcopy(claimed['developer'])
             completion = copy.deepcopy(claimed['completion'])
         else:
+            packet_write = ({} if repair_packet is None else {
+                'repair_packet': start_failure.canonical(_validate_repair_packet(repair_packet))})
             _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
                 store.d6_bind_compare_and_update(task['task_id'],
                     executor_task_id=registration.task_id,
                     expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
-                              'completion': None}, developer=developer, completion=completion)))
+                              'completion': None}, developer=developer, completion=completion, **packet_write)))
     except TaskStoreConflict:
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
     owner_gate_denied = False
