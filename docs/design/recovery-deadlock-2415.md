@@ -461,23 +461,76 @@ also needs all of the following, each read again by ID at recording time:
    - the workflow run is on the same head and on the expected workflow path;
    - the jobs list is complete, and the bound job is the one named in the
      check's details URL.
-3. Fault localisation from the step conclusions of that job. A fixed list
-   names the test-executing steps. It is kept in `policy.json` and bound to
-   the digest of the workflow file on `main`, never taken from the run. Every
-   listed step must have concluded `success`, and the failure, timeout or
-   cancel must be in a step outside the list. This excludes executed test
-   failures: a real failed or hanging test fails or times out a listed step,
-   and the record then refuses.
+3. Fault localisation over the whole dependency set of the check, not only
+   the bound job. A required check job need not run any tests itself. The
+   v3 formal review of this note reports that `check (Linux 3.14)` on
+   `main` is an aggregate job whose only step fails when a separate shard
+   job ran failing tests. This note has not verified it (the workflow files
+   are outside the read paths). The rule must therefore hold for any job
+   shape:
+   - **Job set.** The bound check job plus every job in its `needs`
+     closure. The closure comes from a per-check table in `policy.json`
+     that is bound to the digest of the workflow file on `main`. It is never
+     taken from the run. A check with no table entry refuses. A jobs list
+     whose job names do not match the table, or that is incomplete, refuses.
+     `_mac_capacity_cancel` already reads all jobs of the workflow run and
+     requires a complete list (`total_count` equal to the list length). The
+     same read applies here, with full pagination.
+   - **Positive test evidence.** The table names the test-executing steps
+     of each job in the set. Every one of them must be present in the run,
+     with conclusion `success`. `skipped` is allowed only where the table
+     records that the workflow skips that step by design (for example a
+     step that runs on one matrix leg only). A missing, `cancelled`,
+     `failure` or `timed_out` test step refuses, including one cancelled
+     because a sibling job failed. If the table names no test-executing step
+     for the set, the check is not eligible, and the record refuses. An empty
+     list is never vacuously satisfied.
+   - **Failure origin on an allow-list.** The table also names gate-only
+     steps: steps whose result does not depend on the PR head's content (for
+     example runner setup or a cache step). Which steps qualify is UNKNOWN
+     until the workflows are read. A step that installs, builds, lints or
+     inspects the head is not gate-only, even if it runs no tests. Every
+     step in the set that did not conclude `success` (or an allowed
+     `skipped`) must be either a gate-only step or an aggregate step. An
+     aggregate step is one the table marks as only reading the results of
+     other jobs, such as a "require every shard to pass" step. An aggregate
+     step's failure is never the origin: it qualifies only when every failed
+     job it reads failed in a gate-only step. A failure, timeout or cancel
+     anywhere else refuses.
+
+   This excludes executed test failures in any job the check depends on. A
+   real failed or hanging test fails or times out a listed test step in some
+   job of the set, and the record then refuses. A Developer change that
+   breaks a non-test step that reads the head (an install, a syntax check, a
+   clean-tree check) is not on the allow-list, so it refuses too.
+
+   The rule has a cost. A gate-only step that fails before a job's test
+   steps run (for example runner setup) leaves those test steps skipped or
+   missing, so the positive-evidence rule refuses. Only a gate-only failure
+   after every test step in the set has passed can qualify. This is
+   deliberate: without CI test evidence the tool cannot rule out a Developer
+   fault, and the EC2 receipt in item 4 does not replace it. Setup failures
+   that GitHub reports as `cancelled` or `startup_failure` already wait
+   uncounted (INV-7). Others stay a counted repair or need the Owner
+   exception.
 4. An exact-head EC2 PASS receipt for the same head (`ran_total` above 0,
    `failures` empty), as independent evidence that the suite passes on that
-   head.
+   head. This is in addition to item 3, not a replacement. EC2 and CI need
+   not run the same steps.
 
-A timeout inside a test-executing step never qualifies. The tool reads step
-conclusions, not logs. From those it cannot tell a slow-runner limit from a
-Developer change that made a test hang. That class stays a counted repair.
-It is resolved only by a configuration or classifier fix like #2410, or by
-the Owner exception. Whether the #2408 timeout was inside a test-executing
-step is UNKNOWN. If it was, this kind would not have covered #2408.
+A timeout inside a test-executing step, in any job of the set, never
+qualifies. The tool reads step conclusions, not logs. From those it cannot
+tell a slow-runner limit from a Developer change that made a test hang. That
+class stays a counted repair. It is resolved only by a configuration or
+classifier fix like #2410, or by the Owner exception. Whether the #2408
+timeout was inside a test-executing step is UNKNOWN. If it was, this kind
+would not have covered #2408.
+
+The per-check table is new policy data. It must be written from the
+workflow files on `main` and reviewed with them, and a change to a workflow
+file changes the digest, so the table refuses until it is updated. Until the
+table exists, no CI item can qualify, and `CI_GATE_FAULT` refuses every
+record.
 
 **`CI_GATE_FAULT` route to a successful exact-head check.** Leaving the
 claim out of `test_fails` does not make the required check pass. The head
@@ -540,10 +593,12 @@ evidence a REVIEW_REDISPATCH needs today stays required.
   - Debug: entry index, `report_sha256`, `examined_sha`, `d6`,
     `recorded_at`, the status `RESERVED` and the absence of a launch marker;
   - CI: `repair_task_id`, `packet_sha256`, head, check name and check run
-    ID, plus the fault evidence: the real conclusion, the workflow run and
-    job IDs, the workflow file digest, the step names and conclusions of the
-    job (names and conclusions only, never output) and the EC2 receipt
-    identity;
+    ID, plus the fault evidence: the real conclusion, the workflow run ID,
+    the workflow file digest, the digest of the per-check table entry, the
+    ID, name and conclusion of every job in the dependency set, the step
+    names and conclusions of each of those jobs (names and conclusions
+    only, never output), the steps found as the failure origin, and the EC2
+    receipt identity;
   - Review: PR, head, version and claim state, and the comment count of the
     complete read;
 - the llmtool `main` commit that produced the fault;
@@ -564,8 +619,9 @@ evidence a REVIEW_REDISPATCH needs today stays required.
   never adds a review PASS, a test PASS or a confirmed RCA, never skips INV-4
   (the new Debug must still be RCA_CONFIRMED), never merges, and never
   applies to a Developer-attributed item: a review FAIL with blocking
-  findings, an EC2 FAIL with executed failures, or a CI check whose
-  test-executing step failed or timed out.
+  findings, an EC2 FAIL with executed failures, or a CI check with a
+  test-executing step that failed, timed out, was cancelled or is missing in
+  any job the check depends on.
 - Its only exception to INV-7 is the one bound `CI_GATE_FAULT` re-run. That
   exception exists only if the Owner approves it. Without that approval,
   `CI_GATE_FAULT` is left out, because without a re-run it has no route to
@@ -599,8 +655,9 @@ evidence a REVIEW_REDISPATCH needs today stays required.
   themselves never move, and a chain can use only a fixed number of records.
 - It applies only to items with positive evidence that the gate caused
   them: a Debug that write-ahead evidence shows never launched, a CI failure
-  outside every test-executing step on a head whose suite passed on EC2, or
-  a review claim with no verdict on a complete read. Matching identifiers
+  whose origin is a listed gate-only step while every test-executing step
+  in the check's dependency jobs passed, on a head whose suite also passed
+  on EC2, or a review claim with no verdict on a complete read. Matching identifiers
   alone never qualify. RCA outcomes, findings, launched Debugs and executed
   or hanging tests are excluded by precondition.
 - Each record needs an Owner decision and names a fix Issue. The store-wide
@@ -630,7 +687,7 @@ Task, tests and review.
    conclusion other than `failure`, so it changes too. Do not make
    `timed_out` ENV in `_CI_ENV_CONCLUSIONS` on the conclusion alone,
    because a hanging test also ends `timed_out`. Any ENV rule for timeouts
-   needs the step-level evidence of the `CI_GATE_FAULT` kind.
+   needs the dependency-set step evidence of the `CI_GATE_FAULT` kind.
 2. In `high_debug.run_high_debug`, write a launch marker into the
    `RESERVED` entry by compare-and-update under the chain lock before the
    runner is called, and refuse the launch if the write fails. Then
@@ -676,8 +733,15 @@ Task, tests and review.
   question. This proposal keeps it used.
 - Whether the GitHub jobs API reports a step-level timeout as its own step
   conclusion or only as `failure`: UNKNOWN.
-- Which steps of the llmtool workflows execute tests, and so belong on the
-  `CI_GATE_FAULT` step list: UNKNOWN (workflow files not read).
+- The content of the `CI_GATE_FAULT` per-check table: UNKNOWN (workflow
+  files not read). That covers the `needs` closure of each required check,
+  which steps in those jobs execute tests, which are aggregate steps, which
+  are gate-only, and which test steps a matrix skips by design. The v3
+  formal review reports that `check (Linux 3.14)` is an aggregate over a
+  separate shard job; this note has not verified it.
+- Whether any step of the llmtool workflows is truly gate-only, so that
+  `CI_GATE_FAULT` could ever qualify: UNKNOWN. If none is, the kind covers
+  no case and should be dropped.
 - Whether a requested re-run of failed jobs uses the original workflow
   version, and whether its check runs get new IDs: UNKNOWN.
 - Whether the #2408 timeout was inside a test-executing step: UNKNOWN.
