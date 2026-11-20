@@ -227,9 +227,9 @@ class ChainCountTests(unittest.TestCase):
             claim('pr-17', OLD_HEAD), claim('pr-18', OTHER_HEAD, pr=18),
             ec2_claim('pr-17', HEAD, attempt=2), ec2_claim('pr-18-ec2', HEAD, pr=18)]}
         counts = lineage_counts.lineage_counts(None, own, base_family='pr-17')
-        self.assertEqual((counts['review_repairs'], counts['test_fails']), (2, 1))
-        # task_advance's legacy count is unchanged for a Task alone in its chain.
-        self.assertEqual(task_advance._test_fail_count(own, 17, DictStore(own)), 1)
+        self.assertEqual((counts['review_repairs'], counts['test_fails']), (2, 2))
+        # task_advance counts every EC2/CI repair of the Task across every PR (A1, CWE-799).
+        self.assertEqual(task_advance._test_fail_count(own, 17, DictStore(own)), 2)
         # Without a store the successors cannot be read: never 0 by doubt.
         self.assertEqual(task_advance._test_fail_count(own, 17), UNKNOWN)
 
@@ -245,12 +245,25 @@ class ChainCountTests(unittest.TestCase):
         self.assertEqual((counts['review_repairs'], counts['test_fails']), (2, 2))
         self.assertEqual(counts['review_heads'], {OLD_HEAD: 'FAIL', OTHER_HEAD: 'FAIL'})
         self.assertEqual(task_advance._test_fail_count(current, 17, store), 2)
-        # The same claims on a Task without continues stay family-local (unchanged).
+        # Review claims stay family-local; test failure claims count across every PR (A1).
         alone = {'task_id': tid(3), 'review_repair_claims': own}
         plain = lineage_counts.lineage_counts(None, alone, base_family='pr-17')
         self.assertEqual((plain['review_repairs'], plain['test_fails'],
-                          plain['review_heads']), (0, 0, {}))
-        self.assertEqual(task_advance._test_fail_count(alone, 17, DictStore(alone)), 0)
+                          plain['review_heads']), (0, 2, {}))
+        self.assertEqual(task_advance._test_fail_count(alone, 17, DictStore(alone)), 2)
+
+    def test_task_alone_in_chain_counts_test_fails_across_all_prs(self):
+        # A2 regression (Codex security v91 on PR #2376, CWE-799):
+        # A Task alone in its chain counts test-failure claims across every PR.
+        alone = {'task_id': tid(1), 'review_repair_claims': [
+            ec2_claim('pr-10-ec2', OLD_HEAD, pr=10),
+            ec2_claim('pr-10-ec2', OTHER_HEAD, pr=10, attempt=2)]}
+        store = DictStore(alone)
+        # Counted with base_family for PR 20: test_fails reflects PR 10's claims.
+        counts = lineage_counts.lineage_counts(store, alone, base_family='pr-20')
+        self.assertEqual(counts['test_fails'], 2)
+        self.assertEqual(counts['review_repairs'], 0)
+        self.assertEqual(task_advance._test_fail_count(alone, 20, store), 2)
 
     def test_advance_test_fail_count_includes_successors(self):
         # Review F1 (v1): A <- B <- C; only C holds claims (two EC2 repairs).

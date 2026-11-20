@@ -36,7 +36,8 @@ import worker_policy_fixture
 TASK, EXECUTOR, PR = trr.TASK, trr.EXECUTOR, trr.PR
 HEADS = (trr.HEAD, '1' * 40, '2' * 40, '3' * 40, '4' * 40)
 PREPR = 'prepr-ec2'
-ALLOWED = type('Decision', (), {'allowed': True})()
+ALLOWED = worker_dispatch.PolicyDecision(
+    'claude-developer', True, 'OWNER_POLICY_ALLOWED', '0' * 64)
 
 
 def setUpModule():
@@ -222,6 +223,28 @@ class PrePrRepairTests(_Base):
         self.refused('REPAIR_LIMIT_REACHED', None, HEADS[0])
         self.assertEqual(self.dispatched, [])
 
+    def test_task_moving_from_pr_a_to_pr_b_shares_test_fail_allowance(self):
+        # A2 regression (Codex security v91 on PR #2376, CWE-799):
+        # One Task spends test_fail_max on PR A (PR), then moves to PR B (PR_B).
+        # The used count carried over from PR A refuses a further repair on PR B.
+        pr_a = PR
+        pr_b = PR + 1
+        used_on_a = [_used_claim(f'pr-{pr_a}-ec2', pr_a, HEADS[n], n)
+                     for n in range(1, self.max + 1)]
+        self.seed(used_on_a)
+        record = self.store.get(TASK)
+        # On PR B, the test failure count reflects all repairs from PR A.
+        self.assertEqual(task_advance._test_fail_count(record, pr_b, self.store), self.max)
+        self.assertTrue(task_advance._test_family_used_up(
+            record, pr_b, HEADS[self.max], self.store))
+        self.refused('REPAIR_LIMIT_REACHED', pr_b, HEADS[self.max])
+        # task advance on PR B stops with TEST_FAIL_LIMIT_REACHED.
+        result, invoked = self.advance(HEADS[self.max], pr_number=pr_b)
+        self.assertEqual((result['step'], result['codes']),
+                         ('STOPPED', ['TEST_FAIL_LIMIT_REACHED']))
+        self.assertEqual(invoked, [])
+        self.assertEqual(self.dispatched, [])
+
     def test_the_prepr_family_cannot_be_chosen_or_switched(self):
         ci_failure = {'head': HEADS[0], 'check_name': 'check (Linux 3.14)',
                       'check_run_id': 7, 'conclusion': 'failure', 'excerpt': 'FAIL'}
@@ -261,6 +284,12 @@ class PrePrRepairTests(_Base):
             dict(_used_claim(f'pr-{PR}-ec2', PR, HEADS[1], 1), family=7)]}
         self.assertEqual(lineage_counts.lineage_counts(
             None, alone_pr, base_family=f'pr-{PR}')['test_fails'],
+            UNKNOWN)
+        # A claim with malformed pr is UNKNOWN, never skipped.
+        alone_bad_pr = {'task_id': TASK, 'review_repair_claims': [
+            dict(_used_claim(f'pr-{PR}-ec2', 'bad', HEADS[1], 1))]}
+        self.assertEqual(lineage_counts.lineage_counts(
+            None, alone_bad_pr, base_family=f'pr-{PR}')['test_fails'],
             UNKNOWN)
         self.assertEqual(self.dispatched, [])
 

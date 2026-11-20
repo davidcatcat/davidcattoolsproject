@@ -193,14 +193,10 @@ def lineage_counts(store, task, *, base_family, include_successors=False):
     chain: the Task IDs of the chain, the Task first.
 
     A Task alone in its chain (no continues and, when include_successors, no
-    successor) counts as before: only its claims in the stored base_family
-    (review) and '<base>-ec2' plus legacy EC2 claims in base_family (tests).
-    #2190: its test count also adds every PREPR_FAMILY claim (a repair used
-    before the PR existed). With a PR base_family ('pr-<number>'), every EC2
-    and legacy repair of the Task on this PR counts, so switching family keys
-    never resets the shared test-failure cap. With base_family PREPR_BASE_FAMILY
-    (no PR yet) the test count adds every '-ec2' and legacy EC2 claim of the Task,
-    any PR, so no family key gives a fresh budget; a claim family or pr in doubt is
+    successor) counts review repairs in the stored base_family only. Its test
+    count adds every '-ec2' and legacy EC2 claim of the Task across every PR
+    (and pre-PR), so moving the Task between PRs never yields a fresh
+    test-failure allowance (CWE-799, #2190); a claim family or pr in doubt is
     UNKNOWN.
 
     include_successors (review_repair under the chain lock, and
@@ -225,10 +221,12 @@ def lineage_counts(store, task, *, base_family, include_successors=False):
         if later is None or len(records) + len(later) > MAX_CHAIN:
             return _unknown()
         records = records + later
-    # Family-local counting only for a Task alone in its chain; in a chain every
-    # Task's claims count on any PR, the Task's own included (#1502 F1).
+    # For a Task alone in its chain review repairs stay family-local; in a chain
+    # every Task's claims count on any PR, the Task's own included (#1502 F1).
+    # EC2 and CI test-failure claims of one Task are counted across every PR
+    # that Task has had, so moving from PR A to PR B never yields a fresh
+    # test-fail allowance (CWE-799, #2190).
     local = len(records) == 1
-    prepr = base_family == PREPR_BASE_FAMILY
     review, tests, heads, heads_known = 0, 0, {}, True
     for record in records:
         claims = record.get('review_repair_claims', [])
@@ -239,26 +237,14 @@ def lineage_counts(store, task, *, base_family, include_successors=False):
             legacy = ec2_claim_kind(claim) == 'LEGACY'
             if type(family) is not str:
                 return _unknown()
-            if local and prepr:
-                # #2190: no PR yet; every EC2 claim of the Task counts, but
-                # exclude any claim that is already accounted for by a later PR.
+            pr = claim.get('pr')
+            if pr is not None and (type(pr) is not int or isinstance(pr, bool) or pr < 1):
+                return _unknown()
+            if local:
                 is_review = family == base_family
-                is_test = (family.endswith(_EC2_SUFFIX) or legacy) and claim.get('pr') is None
-            elif local:
-                pr = claim.get('pr')
-                if pr is not None and type(pr) is not int:
-                    return _unknown()
-                is_review = family == base_family
-                is_test = (family == PREPR_FAMILY or
-                           (base_family.startswith('pr-') and
-                            base_family[3:].isdigit() and
-                            (family.endswith(_EC2_SUFFIX) or legacy) and
-                            pr == int(base_family[3:])) or
-                           (family == base_family + _EC2_SUFFIX or
-                            (family == base_family and legacy)))
             else:
                 is_review = not family.endswith(_EC2_SUFFIX)
-                is_test = family.endswith(_EC2_SUFFIX) or legacy
+            is_test = family.endswith(_EC2_SUFFIX) or legacy
             if is_review:
                 review += 1
                 head = claim.get('head_sha')
