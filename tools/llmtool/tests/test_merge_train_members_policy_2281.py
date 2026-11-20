@@ -26,6 +26,7 @@ import os
 import tempfile
 import types
 import unittest
+from datetime import datetime
 from unittest import mock
 
 from llmtool import cli, merge_train_build, merge_train_cli, repair_policy
@@ -127,22 +128,21 @@ class MergeTrainMembersPolicyTests(unittest.TestCase):
                                   'codes': ['TRAIN_MEMBERS_INVALID'], 'result': None})
 
     def test_eight_valid_members_pass_the_member_count_at_eight(self):
-        def no_store_read(*_args, **_kwargs):
-            raise AssertionError('store must not be read')
-
+        # A deliberately invalid (naive) clock stops the build at the clock
+        # gate, which build_train reaches only after the member-count gate.
+        # Refusing TRAIN_CLOCK_INVALID rather than TRAIN_MEMBERS_INVALID
+        # proves eight valid members were not refused for the member count;
+        # the clock gate runs before the store-reading owner gate, so the
+        # _Untouched store is never read and no GitHub/Git call is made.
+        naive = datetime(2020, 1, 1, 0, 0, 0)
         with mock.patch.object(repair_policy, 'load_policy',
-                               return_value=dict(BASE, **{KEY: 8})), \
-                mock.patch.object(merge_train_build.pm_caller,
-                                  'owner_refusal_code',
-                                  side_effect=no_store_read), \
-                mock.patch.object(merge_train_build.task_completion,
-                                  'read_authenticated_main_sha',
-                                  return_value='f' * 40):
-            result = _build(_pairs(8))
-        self.assertNotEqual(result['codes'], ['TRAIN_MEMBERS_INVALID'],
-                            'eight valid members must not be refused for the '
-                            'member count')
-        self.assertNotEqual(result['codes'], ['TRAIN_CLOCK_INVALID'])
+                               return_value=dict(BASE, **{KEY: 8})):
+            result = merge_train_build.build_train(
+                _pairs(8), store=_Untouched(), caller_key='caller',
+                github_get=None, git_runner=None, gh_runner=None, root='.',
+                now=naive)
+        self.assertEqual(result, {'step': 'REFUSED',
+                                  'codes': ['TRAIN_CLOCK_INVALID'], 'result': None})
 
     def test_build_refuses_one_valid_member_at_the_repository_value(self):
         result = _build(_pairs(1))
