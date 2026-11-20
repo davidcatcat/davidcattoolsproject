@@ -5,6 +5,13 @@ A1: revert_scope_prs_max drives the limit through the existing policy loader;
 A2: an absent key keeps the previous default and an invalid policy is refused
     POLICY_INVALID, with no silent fallback.
 A3: a revert over the configured maximum is still REVERT_SCOPE_TOO_LARGE.
+Order: the limit is pinned against its neighbours (admission docstring
+    steps 6 and 7): a well-formed scope over the configured maximum is
+    REVERT_SCOPE_TOO_LARGE before a non-dict or unknown-code dependency
+    result is read; an unsorted or repeating scope of three PRs is
+    REVERT_INCIDENT_INVALID, not REVERT_SCOPE_TOO_LARGE; and a scope equal
+    to the configured maximum passes the limit, so a non-dict dependency
+    result is REVERT_DEPENDENCY_UNKNOWN.
 """
 
 from __future__ import annotations
@@ -123,6 +130,30 @@ class RevertScopePolicyTests(unittest.TestCase):
         path = self._policy_file(revert_scope_prs_max=3)
         self.assertEqual(self._admit((12, 13, 14, 15), path),
                          {'code': tr.REVERT_SCOPE_TOO_LARGE, 'refused': True})
+
+    # Order (admission docstring steps 6 and 7): the scope shape check,
+    # then the policy.json limit, then the dependency result.
+    def test_over_the_maximum_is_refused_before_the_dependency_is_read(self):
+        path = self._policy_file(revert_scope_prs_max=2)
+        record = self._record((12, 13, 14))
+        self.assertEqual(tr.admit(record, None, path),
+                         {'code': tr.REVERT_SCOPE_TOO_LARGE, 'refused': True})
+        self.assertEqual(
+            tr.admit(record, {'code': 'UNKNOWN_DEPENDENCY_CODE'}, path),
+            {'code': tr.REVERT_SCOPE_TOO_LARGE, 'refused': True})
+
+    def test_unsorted_or_repeating_scope_is_invalid_not_too_large(self):
+        path = self._policy_file(revert_scope_prs_max=2)
+        self.assertEqual(self._admit((14, 12, 13), path),
+                         {'code': tr.REVERT_INCIDENT_INVALID, 'refused': True})
+        self.assertEqual(self._admit((12, 13, 12), path),
+                         {'code': tr.REVERT_INCIDENT_INVALID, 'refused': True})
+
+    def test_scope_equal_to_the_maximum_reaches_the_dependency_check(self):
+        path = self._policy_file(revert_scope_prs_max=2)
+        record = self._record((12, 13))
+        self.assertEqual(tr.admit(record, None, path),
+                         {'code': tr.REVERT_DEPENDENCY_UNKNOWN, 'refused': True})
 
 
 if __name__ == '__main__':
