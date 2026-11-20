@@ -392,23 +392,33 @@ def _pr_change_paths(pr, get=None):
     return None, 'PR_CHANGE_DATA_UNAVAILABLE'
 
 
-def _no_admissible_pr_module(pr, get=None):
-    """True when a PR changes no EC2-admissible test module; None if unknown.
+def _no_admissible_pr_module(pr, head, get=None):
+    """True when a PR at exactly ``head`` changes no EC2-admissible module.
 
     A scripts/ test or a docs-only change has no module the EC2 runner can
-    execute. Any module under tools/llmtool/tests keeps the existing run.
+    execute. Any module under tools/llmtool/tests keeps the existing run. The
+    change data is pinned to the caller's exact head: the PR head is read
+    before and after the file pages, and any move or read doubt is unknown.
     """
+    if get is None:
+        get = _github_get
+    if type(head) is not str or _SHA.fullmatch(head) is None:
+        return None
+    if _fresh_pr_head(pr, get=get) != head:
+        return None
     paths, _code = _pr_change_paths(pr, get=get)
     if paths is None:
+        return None
+    if _fresh_pr_head(pr, get=get) != head:
         return None
     return not any(_TEST_MODULE_PATH.fullmatch(path) for path in paths)
 
 
-def _record_no_admissible_module(store, task_id, task, *, executor_task, sha):
+def _record_no_admissible_module(store, task_id, task, *, executor_task, sha, pr):
     """Record that this exact head needs no EC2 test because no module is admissible."""
     return _record_outcome(store, task_id, task, result=NOT_REQUIRED,
                            code=NO_ADMISSIBLE_MODULE, executor_task=executor_task,
-                           sha=sha, modules=())
+                           sha=sha, modules=(), pr=pr)
 
 
 def _validate_remote_receipt(raw, *, sha, modules):
@@ -525,7 +535,8 @@ def valid_module_results(receipt):
     return len(entries) == len(modules) and all(passing)
 
 
-def _record_outcome(store, task_id, task, *, result, code, executor_task, sha, modules):
+def _record_outcome(store, task_id, task, *, result, code, executor_task, sha, modules,
+                    pr=None):
     safe_executor = executor_task if type(executor_task) is str and _TASK.fullmatch(executor_task) else None
     safe_sha = sha if type(sha) is str and _SHA.fullmatch(sha) else None
     safe_modules = sorted({item for item in modules
@@ -534,6 +545,8 @@ def _record_outcome(store, task_id, task, *, result, code, executor_task, sha, m
                'sha': safe_sha, 'modules': safe_modules,
                'at': datetime.now(timezone.utc).isoformat(timespec='microseconds').replace(
                    '+00:00', 'Z')}
+    if (type(pr) is int and not isinstance(pr, bool) and 1 <= pr <= 9999999):
+        outcome['pr'] = pr
     try:
         persisted = store.append_remote_test_outcome(task_id, outcome)
     except (KeyError, LLMToolError):
@@ -550,10 +563,11 @@ def _record_outcome(store, task_id, task, *, result, code, executor_task, sha, m
                     persisted=True, delivery='NOT_DELIVERED_INBOX_UNAVAILABLE', event_id=None)
 
 
-def _fresh_pr_head(pr):
+def _fresh_pr_head(pr, get=None):
     """Return this PR's current head SHA from GitHub, or None if unreadable."""
+    get = _github_get if get is None else get
     try:
-        pr_data = _github_get(f'pulls/{pr}')
+        pr_data = get(f'pulls/{pr}')
     except Exception:
         return None
     head = pr_data.get('head') if type(pr_data) is dict else None
@@ -665,9 +679,9 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         # Record the skip for this exact head so advance can continue; missing
         # or inconsistent change data still refuses MODULE_NOT_ADMITTED.
         if pr is not None and not modules and not admitted:
-            if _no_admissible_pr_module(pr, get=get) is True:
+            if _no_admissible_pr_module(pr, recorded_head, get=get) is True:
                 return _record_no_admissible_module(
-                    store, task_id, task, executor_task=executor_task, sha=sha)
+                    store, task_id, task, executor_task=executor_task, sha=sha, pr=pr)
         return denied('MODULE_NOT_ADMITTED')
     if hosted:
         return _run_hosted(store, task_id, task, executor_task=executor_task,

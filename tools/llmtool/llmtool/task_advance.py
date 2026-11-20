@@ -2299,7 +2299,7 @@ def _review_verdict_absent(claim, github_get):
     return True
 
 
-def _remote_test_status(record, d6):
+def _remote_test_status(record, d6, pr=None):
     """Return exact-head remote-test state, bounded excerpt, and validated receipt."""
     head = d6.get('result_head') if type(d6) is dict else None
     completion = record.get('completion') if type(record) is dict else None
@@ -2355,7 +2355,8 @@ def _remote_test_status(record, d6):
             return 'ADMISSION_DENIED', None, None
         if (outcome.get('result') == remote_test.NOT_REQUIRED and
                 outcome.get('code') == remote_test.NO_ADMISSIBLE_MODULE and
-                outcome.get('modules') == []):
+                outcome.get('modules') == [] and
+                type(pr) is int and outcome.get('pr') == pr):
             return remote_test.NOT_REQUIRED, None, None
     return None, None, None
 
@@ -2567,7 +2568,8 @@ def derive_repair_state(repair_record):
 
 def _pre_review_action(record, d6, pr, related, result_head):
     """Return the gate action before a Reviewer may start on this head."""
-    remote_status, _, _ = _remote_test_status(record, d6)
+    number = pr.get('number') if type(pr) is dict else None
+    remote_status, _, _ = _remote_test_status(record, d6, number)
     if remote_status == 'TIMEOUT':
         if _remote_test_timeout_count(record, d6) == 1:
             return 'RUN_REMOTE_TEST'
@@ -2612,7 +2614,7 @@ def decide(record, d6, pr, related):
             pr_head.get('sha') != result_head):
         # EC2 runs on the branch before any PR, so a stopped head stays here
         # with no PR. Every other state re-enters the idempotent publish step.
-        remote_status, _, _ = _remote_test_status(record, d6)
+        remote_status, _, _ = _remote_test_status(record, d6, chosen_pr)
         if remote_status == 'TIMEOUT':
             if _remote_test_timeout_count(record, d6) == 1:
                 return 'PUBLISH'

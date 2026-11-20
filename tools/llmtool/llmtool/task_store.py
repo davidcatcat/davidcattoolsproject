@@ -327,6 +327,10 @@ def _valid_remote_test_actions(value):
 MAX_REMOTE_TEST_OUTCOMES = 32
 _REMOTE_TEST_OUTCOME_FIELDS = frozenset((
     'result', 'code', 'executor_task', 'sha', 'modules', 'at'))
+# #2413: a no-admissible-module outcome is also bound to the PR it belongs to.
+_REMOTE_TEST_OUTCOME_FIELDS_WITH_PR = _REMOTE_TEST_OUTCOME_FIELDS | frozenset(('pr',))
+_REMOTE_TEST_OUTCOME_RESULTS = frozenset((
+    'ADMISSION_DENIED', 'TIMEOUT', 'UNAVAILABLE', 'UNKNOWN', 'NOT_REQUIRED'))
 MAX_REMOTE_TEST_DISPATCHES = 32
 _REMOTE_TEST_DISPATCH_FIELDS = frozenset((
     'nonce', 'sha', 'executor_task', 'modules', 'dispatched_at', 'run_id', 'state'))
@@ -1272,8 +1276,21 @@ def _validate_remote_test_outcomes(record):
     if type(outcomes) is not list or len(outcomes) > MAX_REMOTE_TEST_OUTCOMES:
         _fail('REMOTE_TEST_OUTCOME_INVALID')
     for outcome in outcomes:
-        if (type(outcome) is not dict or set(outcome) != _REMOTE_TEST_OUTCOME_FIELDS or
-                outcome.get('result') not in ('ADMISSION_DENIED', 'TIMEOUT', 'UNAVAILABLE', 'UNKNOWN') or
+        if (type(outcome) is not dict or
+                set(outcome) not in (_REMOTE_TEST_OUTCOME_FIELDS,
+                                     _REMOTE_TEST_OUTCOME_FIELDS_WITH_PR) or
+                type(outcome.get('result')) is not str or
+                outcome.get('result') not in _REMOTE_TEST_OUTCOME_RESULTS or
+                ((outcome.get('result') == 'NOT_REQUIRED') != ('pr' in outcome)) or
+                (('pr' in outcome) and
+                 (type(outcome['pr']) is not int or isinstance(outcome['pr'], bool) or
+                  not 1 <= outcome['pr'] <= 9999999)) or
+                (outcome.get('result') == 'NOT_REQUIRED' and
+                 (outcome.get('code') != 'NO_ADMISSIBLE_MODULE' or
+                  outcome.get('modules') != [] or
+                  type(outcome.get('sha')) is not str or
+                  re.fullmatch(r'[0-9a-f]{40}', outcome['sha']) is None or
+                  type(outcome.get('executor_task')) is not str)) or
                 type(outcome.get('code')) is not str or
                 re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', outcome['code']) is None or
                 (outcome.get('executor_task') is not None and
@@ -4732,12 +4749,16 @@ class TaskStore:
 
     def append_remote_test_outcome(self, task_id, outcome):
         """Persist one bounded no-receipt result; exact replays are idempotent."""
-        if type(outcome) is not dict or set(outcome) != _REMOTE_TEST_OUTCOME_FIELDS:
-            _fail('REMOTE_TEST_OUTCOME_INVALID')
+        _validate_remote_test_outcomes({'remote_test_outcomes': [outcome]})
         for _ in range(5):
             current = self.get(task_id)
-            if outcome['result'] not in ('ADMISSION_DENIED', 'TIMEOUT', 'UNAVAILABLE', 'UNKNOWN'):
-                _fail('REMOTE_TEST_OUTCOME_INVALID')
+            if outcome['result'] == 'NOT_REQUIRED':
+                # #2413: bind the skip to the Task's published PR at this exact HEAD.
+                published = current.get('published_pr')
+                if (type(published) is not dict or
+                        published.get('pr') != outcome.get('pr') or
+                        published.get('head_sha') != outcome.get('sha')):
+                    _fail('REMOTE_TEST_OUTCOME_INVALID')
             outcomes = list(current.get('remote_test_outcomes', []))
             existing = next((item for item in outcomes if item == outcome), None)
             if existing is not None:

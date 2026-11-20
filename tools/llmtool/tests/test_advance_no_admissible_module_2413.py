@@ -1,5 +1,6 @@
 """#2413: a PR with no EC2-admissible module completes the remote-test step."""
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -10,39 +11,75 @@ if str(ROOT) not in sys.path:
 
 from llmtool import remote_test as rt  # noqa: E402
 from llmtool import task_advance  # noqa: E402
+from llmtool import task_store as ts  # noqa: E402
+from llmtool.errors import LLMToolError  # noqa: E402
 
 HEAD = 'a' * 40
 OTHER_HEAD = 'b' * 40
 EXEC = 'c' * 32
 PR = 2413
+AT = '2026-01-01T00:00:00Z'
 
 
 def files(*paths):
     return [{'filename': path} for path in paths]
 
 
+def get_at_head(paths, head=HEAD):
+    """A get() that serves the PR snapshot and its changed files at one head."""
+    def get(path):
+        if path == f'pulls/{PR}':
+            return {'number': PR, 'head': {'sha': head}}
+        return files(*paths)
+    return get
+
+
 class ChangeDataTests(unittest.TestCase):
     def test_docs_only_pr_has_no_admissible_module(self):
         self.assertIs(rt._no_admissible_pr_module(
-            PR, get=lambda path: files('docs/readme.md')), True)
+            PR, HEAD, get=get_at_head(['docs/readme.md'])), True)
 
     def test_scripts_test_is_not_ec2_admissible(self):
         self.assertIs(rt._no_admissible_pr_module(
-            PR, get=lambda path: files('scripts/test_llmtool_monitor.py')), True)
+            PR, HEAD, get=get_at_head(['scripts/test_llmtool_monitor.py'])), True)
 
     def test_tools_test_module_keeps_the_existing_run(self):
         self.assertIs(rt._no_admissible_pr_module(
-            PR, get=lambda path: files('tools/llmtool/tests/test_alpha.py')), False)
+            PR, HEAD, get=get_at_head(['tools/llmtool/tests/test_alpha.py'])), False)
 
     def test_rename_old_path_also_counts(self):
         batch = [{'filename': 'docs/readme.md',
                   'previous_filename': 'tools/llmtool/tests/test_alpha.py'}]
-        self.assertIs(rt._no_admissible_pr_module(PR, get=lambda path: batch), False)
+
+        def get(path):
+            if path == f'pulls/{PR}':
+                return {'number': PR, 'head': {'sha': HEAD}}
+            return batch
+
+        self.assertIs(rt._no_admissible_pr_module(PR, HEAD, get=get), False)
+
+    def test_moved_pr_head_is_unknown(self):
+        self.assertIsNone(rt._no_admissible_pr_module(
+            PR, HEAD, get=get_at_head(['docs/readme.md'], head=OTHER_HEAD)))
+
+    def test_head_move_during_the_read_is_unknown(self):
+        calls = []
+
+        def get(path):
+            if path.startswith(f'pulls/{PR}/files'):
+                return files('docs/readme.md')
+            calls.append(path)
+            return {'number': PR,
+                    'head': {'sha': HEAD if len(calls) == 1 else OTHER_HEAD}}
+
+        self.assertIsNone(rt._no_admissible_pr_module(PR, HEAD, get=get))
 
     def test_unreadable_change_data_is_unknown(self):
         def get(path):
+            if path == f'pulls/{PR}':
+                return {'number': PR, 'head': {'sha': HEAD}}
             raise OSError('unreadable')
-        self.assertIsNone(rt._no_admissible_pr_module(PR, get=get))
+        self.assertIsNone(rt._no_admissible_pr_module(PR, HEAD, get=get))
 
     def test_malformed_change_data_is_unknown(self):
         cases = (
@@ -54,53 +91,114 @@ class ChangeDataTests(unittest.TestCase):
         )
         for batch in cases:
             with self.subTest(batch=batch):
-                self.assertIsNone(rt._no_admissible_pr_module(
-                    PR, get=lambda path, value=batch: value))
+                def get(path, value=batch):
+                    if path == f'pulls/{PR}':
+                        return {'number': PR, 'head': {'sha': HEAD}}
+                    return value
+                self.assertIsNone(rt._no_admissible_pr_module(PR, HEAD, get=get))
 
     def test_empty_change_list_is_unknown(self):
-        self.assertIsNone(rt._no_admissible_pr_module(PR, get=lambda path: []))
+        self.assertIsNone(rt._no_admissible_pr_module(
+            PR, HEAD, get=get_at_head([])))
 
     def test_full_last_page_is_unknown(self):
         full = files(*(f'docs/{index}.md' for index in range(100)))
-        self.assertIsNone(rt._no_admissible_pr_module(PR, get=lambda path: full))
+        self.assertIsNone(rt._no_admissible_pr_module(
+            PR, HEAD, get=get_at_head_full(full)))
 
     def test_every_page_is_read(self):
         first = files(*(f'docs/{index}.md' for index in range(100)))
         calls = []
 
         def get(path):
+            if path == f'pulls/{PR}':
+                return {'number': PR, 'head': {'sha': HEAD}}
             calls.append(path)
-            return first if path.endswith('page=1') or '&page=' not in path else files(
-                'docs/last.md')
+            return first if '&page=' not in path else files('docs/last.md')
 
-        self.assertIs(rt._no_admissible_pr_module(PR, get=get), True)
-        self.assertEqual(calls[0], 'pulls/2413/files?per_page=100')
-        self.assertEqual(calls[-1], 'pulls/2413/files?per_page=100&page=2')
+        self.assertIs(rt._no_admissible_pr_module(PR, HEAD, get=get), True)
+        self.assertEqual(calls[0], f'pulls/{PR}/files?per_page=100')
+        self.assertEqual(calls[-1], f'pulls/{PR}/files?per_page=100&page=2')
+
+
+def get_at_head_full(batch):
+    def get(path):
+        if path == f'pulls/{PR}':
+            return {'number': PR, 'head': {'sha': HEAD}}
+        return batch
+    return get
+
+
+def skip_outcome(**changes):
+    value = {'result': rt.NOT_REQUIRED, 'code': rt.NO_ADMISSIBLE_MODULE,
+             'executor_task': EXEC, 'sha': HEAD, 'modules': [], 'pr': PR,
+             'at': AT}
+    value.update(changes)
+    return value
+
+
+class StoreOutcomeTests(unittest.TestCase):
+    def test_real_store_accepts_the_not_required_outcome(self):
+        ts._validate_remote_test_outcomes(
+            {'remote_test_outcomes': [skip_outcome()]})
+
+    def test_real_store_refuses_an_unbound_not_required_outcome(self):
+        unbound = skip_outcome()
+        del unbound['pr']
+        with self.assertRaises(LLMToolError):
+            ts._validate_remote_test_outcomes(
+                {'remote_test_outcomes': [unbound]})
+        with self.assertRaises(LLMToolError):
+            ts._validate_remote_test_outcomes(
+                {'remote_test_outcomes': [skip_outcome(modules=['test_alpha'])]})
 
 
 class RecordedOutcomeTests(unittest.TestCase):
-    class Store:
-        def __init__(self):
-            self.saved = []
+    """Exercise TaskStore.append_remote_test_outcome and its real validator.
 
-        def append_remote_test_outcome(self, task_id, outcome):
-            self.saved.append((task_id, outcome))
-            return {'outcome': outcome, 'counter': len(self.saved)}
+    Only the unrelated Task-envelope I/O is stubbed: the outcome shape,
+    NOT_REQUIRED admission, PR/HEAD binding and append are the real store code.
+    """
+    def store_state(self):
+        return {'task_id': 'task-2413', 'run_id': 'run-2413',
+                'remote_test_outcomes': [],
+                'published_pr': {'pr': PR, 'head_sha': HEAD, 'recorded_at': AT},
+                'record_sha256': '0' * 64}
 
-    def test_skip_outcome_binds_task_executor_and_exact_head(self):
-        store = self.Store()
-        with mock.patch.object(rt, 'record_remote_test_outcome_event',
-                               return_value={'event_id': 'e' * 32}):
-            value = rt._record_no_admissible_module(
-                store, 'task-2413', {}, executor_task=EXEC, sha=HEAD)
-        task_id, outcome = store.saved[0]
-        self.assertEqual(task_id, 'task-2413')
-        self.assertEqual(outcome['result'], rt.NOT_REQUIRED)
-        self.assertEqual(outcome['code'], rt.NO_ADMISSIBLE_MODULE)
-        self.assertEqual(outcome['executor_task'], EXEC)
-        self.assertEqual(outcome['sha'], HEAD)
-        self.assertEqual(outcome['modules'], [])
+    def test_record_no_admissible_module_uses_the_real_store_append(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = ts.TaskStore(root=root)
+            current = self.store_state()
+            written = {}
+
+            def update(task_id, *, expected, changes, **kwargs):
+                written.update(changes)
+                return dict(current, **changes)
+
+            with mock.patch.object(ts.TaskStore, 'get', return_value=current), \
+                    mock.patch.object(ts.TaskStore, '_update', side_effect=update), \
+                    mock.patch.object(rt, 'record_remote_test_outcome_event',
+                                      return_value={'event_id': 'e' * 32}):
+                value = rt._record_no_admissible_module(
+                    store, 'task-2413', {}, executor_task=EXEC, sha=HEAD, pr=PR)
         self.assertTrue(value['persisted'])
+        self.assertEqual(value['outcome']['result'], rt.NOT_REQUIRED)
+        self.assertEqual(value['outcome']['code'], rt.NO_ADMISSIBLE_MODULE)
+        self.assertEqual(value['outcome']['executor_task'], EXEC)
+        self.assertEqual(value['outcome']['sha'], HEAD)
+        self.assertEqual(value['outcome']['modules'], [])
+        self.assertEqual(value['outcome']['pr'], PR)
+        self.assertEqual(written['remote_test_outcomes'], [value['outcome']])
+
+    def test_real_append_refuses_a_different_published_pr(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = ts.TaskStore(root=root)
+            current = self.store_state()
+            current['published_pr'] = dict(current['published_pr'], pr=PR + 1)
+            with mock.patch.object(ts.TaskStore, 'get', return_value=current):
+                with self.assertRaises(LLMToolError):
+                    store.append_remote_test_outcome(
+                        'task-2413', skip_outcome())
 
 
 class AdvanceStatusTests(unittest.TestCase):
@@ -109,39 +207,37 @@ class AdvanceStatusTests(unittest.TestCase):
                 'completion': {'executor_task_id': EXEC},
                 'remote_test_outcomes': [outcome]}
 
-    def outcome(self, **changes):
-        value = {'result': rt.NOT_REQUIRED, 'code': rt.NO_ADMISSIBLE_MODULE,
-                 'executor_task': EXEC, 'sha': HEAD, 'modules': []}
-        value.update(changes)
-        return value
-
-    def status(self, outcome):
+    def status(self, outcome, pr=PR):
         return task_advance._remote_test_status(
-            self.record(outcome), {'result_head': HEAD})[0]
+            self.record(outcome), {'result_head': HEAD}, pr)[0]
 
     def test_exact_head_skip_is_satisfied(self):
-        self.assertEqual(self.status(self.outcome()), rt.NOT_REQUIRED)
+        self.assertEqual(self.status(skip_outcome()), rt.NOT_REQUIRED)
 
     def test_other_head_is_not_satisfied(self):
-        self.assertIsNone(self.status(self.outcome(sha=OTHER_HEAD)))
+        self.assertIsNone(self.status(skip_outcome(sha=OTHER_HEAD)))
 
     def test_other_executor_is_not_satisfied(self):
-        self.assertIsNone(self.status(self.outcome(executor_task='d' * 32)))
+        self.assertIsNone(self.status(skip_outcome(executor_task='d' * 32)))
 
     def test_nonempty_modules_are_not_satisfied(self):
-        self.assertIsNone(self.status(self.outcome(modules=['test_alpha'])))
+        self.assertIsNone(self.status(skip_outcome(modules=['test_alpha'])))
 
     def test_other_code_is_not_satisfied(self):
-        self.assertIsNone(self.status(self.outcome(code='MODULE_NOT_ADMITTED')))
+        self.assertIsNone(self.status(skip_outcome(code='MODULE_NOT_ADMITTED')))
+
+    def test_other_or_missing_pr_is_not_satisfied(self):
+        self.assertIsNone(self.status(skip_outcome(pr=PR + 1)))
+        self.assertIsNone(self.status(skip_outcome(), pr=None))
 
     def test_pre_review_continues_after_the_skip(self):
         action = task_advance._pre_review_action(
-            self.record(self.outcome()), {'result_head': HEAD},
-            {'merged': False}, {'events': [], 'repair_claims': []}, HEAD)
+            self.record(skip_outcome()), {'result_head': HEAD},
+            {'number': PR, 'merged': False}, {'events': [], 'repair_claims': []}, HEAD)
         self.assertEqual(action, 'DISPATCH_REVIEW')
 
     def test_decide_continues_after_the_skip(self):
-        record = self.record(self.outcome())
+        record = self.record(skip_outcome())
         record['developer'] = {'state': 'DEVELOPER_RESPONDED'}
         d6 = {'result_head': HEAD, 'recorded_result_head': HEAD,
               'dirty': False, 'state': 'CLEAN'}
@@ -151,8 +247,8 @@ class AdvanceStatusTests(unittest.TestCase):
 
     def test_unknown_status_still_runs_the_remote_test(self):
         action = task_advance._pre_review_action(
-            self.record(self.outcome(code='MODULE_NOT_ADMITTED')),
-            {'result_head': HEAD}, {'merged': False},
+            self.record(skip_outcome(code='MODULE_NOT_ADMITTED')),
+            {'result_head': HEAD}, {'number': PR, 'merged': False},
             {'events': [], 'repair_claims': []}, HEAD)
         self.assertEqual(action, 'RUN_REMOTE_TEST')
 
@@ -161,7 +257,7 @@ class AdvanceStatusTests(unittest.TestCase):
             {'task_id': 'task-2413', 'run_id': 'run-2413',
              'completion': {'executor_task_id': EXEC},
              'remote_test_receipts': []},
-            {'result_head': HEAD}, {'merged': False},
+            {'result_head': HEAD}, {'number': PR, 'merged': False},
             {'events': [], 'repair_claims': []}, HEAD)
         self.assertEqual(action, 'RUN_REMOTE_TEST')
 
