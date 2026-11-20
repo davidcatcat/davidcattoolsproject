@@ -2784,6 +2784,16 @@ def _validate(record, *, strict=True):
                       developer['state'] == 'DEVELOPER_DISPATCHING' and
                       developer.get('execution') is not None))):
                 _fail('DIRECT_DISPATCH_BOUNDARY_INVALID')
+            if developer.get(_DIRECT_DISPATCH_BOUNDARY) == 'STOPPED':
+                execution = developer.get('execution')
+                if (developer.get('provider_profile') != 'opencode' or
+                        developer.get('state') != 'DEVELOPER_OUTCOME_UNKNOWN' or
+                        type(execution) is not dict or execution.get('cleanup_status') != 'CONFIRMED' or
+                        execution.get('native_session_id') is not None or
+                        execution.get('stdout_sha256') is not None or
+                        type(execution.get('process_exit_code')) is not int or
+                        execution['process_exit_code'] == 0):
+                    _fail('DIRECT_DISPATCH_BOUNDARY_INVALID')
             if (_DIRECT_HANDOFF_HISTORY in developer and
                     (not _valid_direct_handoffs(developer[_DIRECT_HANDOFF_HISTORY]) or
                      developer[_DIRECT_HANDOFF_HISTORY][-1]['new_assignment'] !=

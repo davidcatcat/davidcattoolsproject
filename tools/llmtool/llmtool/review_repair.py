@@ -687,6 +687,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
             completion.get('executor_task_id') != executor_task or
             developer.get('state') not in ('DEVELOPER_RESPONDED', 'DEVELOPER_OUTPUT_REJECTED')):
         _refuse('REPAIR_DEVELOPER_BINDING_INVALID')
+    from . import direct_reassignment
+    developer = direct_reassignment.authoring_route(store, task, developer, executor_task)
     profile = developer.get('provider_profile')
     claude_cli = (profile == 'claude' and
                   developer.get('backend_session_semantics') == 'CLI_REPORTED_SESSION_ID')
@@ -811,7 +813,6 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         # #2438: an already-counted direct repair can continue on a replacement
         # assignment. The delegate serializes the old controller and handoff,
         # then applies its ordinary scope, policy, quota and D6 checks.
-        from . import direct_reassignment
         repair_task = None
         if auto and dispatch_adapter is None:
             try:

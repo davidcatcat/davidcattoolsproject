@@ -1808,6 +1808,10 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 self.assertEqual(rescued['claim'], dict(claim, state='DISPATCHED'))
                 self.assertEqual(store.get(root['task_id'])['review_repair_claims'],
                                  [dict(claim, state='DISPATCHED')])
+                continued = store.get(root['task_id'])
+                selected = submission_cli.direct_reassignment.authoring_route(
+                    store, continued, continued['developer'], args.executor_task)
+                self.assertEqual(selected['provider_profile'], 'opencode')
             else:
                 self.assertEqual(run_task_delegate(args, store=store), 0)
             (opencode_launch if target == 'opencode' else agy_launch).assert_called_once()

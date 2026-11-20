@@ -4980,6 +4980,9 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
                               _delegate_d6_binding(args))
     if previous_developer is None:
         _reject_claude_reserved_d6(registration)
+        if (getattr(registration, 'session_ref', '').startswith('handoff-') and
+                registration.trusted_agent_id != direct_reassignment.AGENTS['opencode']):
+            raise LLMToolError('DIRECT_REASSIGN_D6_BINDING_MISMATCH')
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     reassignment = _direct_reassignment_plan(
         args, store, task, registration, snapshot, 'opencode', read_paths, write_paths)
@@ -5495,6 +5498,9 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     registration, snapshot = _delegate_d6_binding(args)
     if previous_developer is None:
         _reject_claude_reserved_d6(registration)
+        if (getattr(registration, 'session_ref', '').startswith('handoff-') and
+                registration.trusted_agent_id != direct_reassignment.AGENTS['agy']):
+            raise LLMToolError('DIRECT_REASSIGN_D6_BINDING_MISMATCH')
     # A fresh Owner decision is required before creating the durable assignment.
     decision = worker_dispatch.evaluate('agy', owner_ref, task['task_id'])
     if not decision.allowed:
@@ -8309,13 +8315,14 @@ def _auto_direct_replacement(args, store):
     if provider == 'agy':
         if getattr(args, 'mode', 'proposal') != 'direct' or getattr(args, 'background', False):
             return args
-        _optional_agy_owner_ref(args)
     elif getattr(args, 'mode', 'proposal') == 'direct':
         return args
     task = store.get(args.task_id)
     previous = task.get('developer')
     if not direct_reassignment.replacement_candidate(previous):
         return args
+    if provider == 'agy':
+        _optional_agy_owner_ref(args)
     history = previous.get('direct_handoffs', [])
     if (history and previous.get('state') == 'DEVELOPER_PENDING' and
             history[-1]['old_profile'] == provider):

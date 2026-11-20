@@ -364,6 +364,8 @@ def reconcile_claim(store, task_id, old_assignment):
 def effective_writer_admission(store, root, initial, executor_task):
     """Project verified handoff identity onto the original artifact chain."""
     claims = root.get('review_repair_claims') or []
+    if type(claims) is not list or any(type(claim) is not dict for claim in claims):
+        return initial
     for claim in reversed(claims):
         if claim.get('executor_task') != executor_task or claim.get('state') != 'DISPATCHED':
             continue
@@ -372,7 +374,8 @@ def effective_writer_admission(store, root, initial, executor_task):
         except (LLMToolError, KeyError):
             continue
         developer = repair.get('developer') or {}
-        if not developer.get('direct_handoffs'):
+        if (not developer.get('direct_handoffs') or
+                developer.get('state') != 'DEVELOPER_RESPONDED'):
             continue
         verified_repair_result(root, claim, repair)
         evidence = repair['completion']['evidence']
@@ -380,3 +383,22 @@ def effective_writer_admission(store, root, initial, executor_task):
             'executor_identity', 'executor_session_ref', 'executor_native_session_id',
             'executor_native_session')})
     return initial
+
+
+def authoring_route(store, root, developer, executor_task):
+    """Keep later repairs on the writer admitted by an earlier handoff."""
+    completion = root.get('completion') or {}
+    initial = completion.get('evidence') or {}
+    if not root.get('review_repair_claims') or not initial.get('common_dir'):
+        return developer
+    current = effective_writer_admission(store, root, initial, executor_task)
+    role = current.get('executor_identity')
+    if role == initial.get('executor_identity') and not str(
+            current.get('executor_session_ref', '')).startswith('handoff-'):
+        return developer
+    profile = next((profile for profile, agent in AGENTS.items() if agent == role), None)
+    if profile is None:
+        _refuse('DIRECT_REASSIGN_D6_BINDING_MISMATCH')
+    if profile == developer.get('provider_profile'):
+        return developer
+    return dict(developer, provider_profile=profile, owner_assignment_ref=None)

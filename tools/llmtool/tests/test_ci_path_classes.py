@@ -101,10 +101,12 @@ class CIPathClassTests(unittest.TestCase):
 
     def test_historical_and_boundary_path_sets_keep_mac_levels(self):
         cases = (
+            # The direct reassignment flow now exercises review repair through
+            # the submission CLI integration suite.
             ("#781", ["tools/llmtool/llmtool/review_repair.py",
                        "tools/llmtool/llmtool/task_advance.py",
                        "tools/llmtool/tests/test_review_repair.py",
-                       "tools/llmtool/tests/test_task_advance.py"], "L1"),
+                       "tools/llmtool/tests/test_task_advance.py"], "L2"),
             ("#782", ["tools/llmtool/llmtool/opencode_direct_developer.py",
                        "tools/llmtool/llmtool/task_store.py",
                        "tools/llmtool/llmtool/task_submission_cli.py",
