@@ -1,7 +1,8 @@
 """Owner #289: the AGY route also admits the Claude ids AGY itself serves.
 
-One test per row of the Task acceptance case table (a)-(g). These are model
-identifiers only; no credential-shaped or personal data is used.
+One test per row of the first delivery's case table (a)-(g) and per row of the
+security-repair dispute case table (a)-(e). These are model identifiers only;
+no credential-shaped or personal data is used.
 """
 
 import unittest
@@ -13,6 +14,8 @@ from llmtool.developer_routes import (
     load_route_config,
     route_has_family_check,
 )
+from llmtool.errors import LLMToolError
+from llmtool.review_repair import choose_arbiter, developer_family
 
 
 class AgyClaudeModelTests(unittest.TestCase):
@@ -84,6 +87,72 @@ class AgyClaudeModelTests(unittest.TestCase):
         with self.assertRaises(RouteError) as caught:
             check_route_model(self.config, 'opencode', 'bare-model')
         self.assertEqual(caught.exception.code, 'ROLE_MODEL_NOT_ALLOWED')
+
+
+class AgyDisputeArbiterFamilyTests(unittest.TestCase):
+    """Security repair (Codex security v91 F1, CWE-863): the family of an
+    AGY-authored run comes from its recorded model, never the route name."""
+
+    def assert_unknown_arbiter_refused(self, developer):
+        self.assertIsNone(developer_family(developer))
+        with self.assertRaises(LLMToolError) as caught:
+            choose_arbiter(developer_family=developer_family(developer),
+                           first_reviewer='codex-reviewer',
+                           first_review_session='review-session-1')
+        self.assertEqual(caught.exception.dispute_code, 'DISPUTE_ARBITER_UNAVAILABLE')
+
+    def test_a_agy_claude_developer_gets_no_claude_arbiter(self):
+        developer = {'provider_profile': 'agy', 'model': 'claude-sonnet-5-5-medium'}
+        self.assertEqual(developer_family(developer), 'claude')
+        arbiter = choose_arbiter(developer_family=developer_family(developer),
+                                 first_reviewer='codex-reviewer',
+                                 first_review_session='review-session-1')
+        self.assertEqual(arbiter['reviewer'], 'codex-reviewer')
+        self.assertEqual(arbiter['family'], 'codex')
+
+    def test_b_agy_gemini_developer_keeps_the_main_choice(self):
+        developer = {'provider_profile': 'agy', 'model': 'gemini-3.8-flash-medium'}
+        self.assertEqual(developer_family(developer), 'gemini')
+        arbiter = choose_arbiter(developer_family=developer_family(developer),
+                                 first_reviewer='codex-reviewer',
+                                 first_review_session='review-session-1')
+        self.assertEqual(arbiter['reviewer'], 'claude-reviewer')
+        self.assertEqual(arbiter['family'], 'claude')
+
+    def test_c_agy_developer_without_a_recorded_model_is_unknown(self):
+        for developer in ({'provider_profile': 'agy'},
+                          {'provider_profile': 'agy', 'model': None}):
+            with self.subTest(developer=developer):
+                self.assert_unknown_arbiter_refused(developer)
+
+    def test_d_claude_and_opencode_developers_are_unchanged(self):
+        self.assertEqual(developer_family(
+            {'provider_profile': 'claude', 'model': 'claude-opus-5-5'}), 'claude')
+        self.assertEqual(developer_family(
+            {'provider_profile': 'opencode',
+             'model': 'anthropic/claude-sonnet-5-5'}), 'claude')
+        self.assertEqual(developer_family(
+            {'provider_profile': 'opencode', 'model': 'openai/gpt-6-sol'}), 'codex')
+        self.assertEqual(developer_family(
+            {'provider_profile': 'opencode', 'model': 'opencode/paid-model'}), 'opencode')
+        # A Claude-authored run still gets the cross-family Codex arbiter.
+        arbiter = choose_arbiter(developer_family='claude',
+                                 first_reviewer='claude-reviewer',
+                                 first_review_session='review-session-1')
+        self.assertEqual(arbiter['reviewer'], 'codex-reviewer')
+
+    def test_e_agy_route_admission_rows_still_pass(self):
+        config = load_route_config()
+        for model in ('claude-sonnet-5-5-medium', 'claude-opus-5-5-high',
+                      'gemini-3.8-flash-medium'):
+            with self.subTest(model=model):
+                self.assertEqual(check_route_model(config, 'agy', model), model)
+                self.assertEqual(check_route_model_family('agy', model), model)
+        for model in ('claude-sonnet-5-5', 'gpt-6-sol',
+                      'Claude-Sonnet-5-5-medium'):
+            with self.subTest(model=model):
+                with self.assertRaises(RouteError):
+                    check_route_model(config, 'agy', model)
 
 
 if __name__ == '__main__':

@@ -96,7 +96,9 @@ def withdrawn_findings(task, pr, head):
 
 # Formal Reviewer keys and their model families, in the fixed choice order.
 ARBITER_REVIEWERS = (('claude-reviewer', 'claude'), ('codex-reviewer', 'codex'))
-_PROFILE_FAMILIES = {'claude': 'claude', 'codex': 'codex', 'agy': 'gemini',
+# AGY is deliberately absent: since Owner #289 it serves Gemini and Claude ids,
+# so developer_family resolves its family from the recorded model.
+_PROFILE_FAMILIES = {'claude': 'claude', 'codex': 'codex',
                      'opencode': 'opencode', 'gw-agent': 'gw-agent', 'company-gw': 'gw-agent'}
 _REVIEW_ACCOUNT_MODES = {'CODEX_CLI': 'codex-reviewer',
                          'EXPLICIT_CLAUDE_CONFIG_DIR': 'claude-reviewer',
@@ -104,22 +106,43 @@ _REVIEW_ACCOUNT_MODES = {'CODEX_CLI': 'codex-reviewer',
 _VERDICT_ACTOR = re.compile(r'<!-- activity: type=review_verdict actor=(Claude|Codex) ')
 
 
+# Model-name markers, in the fixed order used for a route that can serve more
+# than one vendor's model.
+_MODEL_FAMILY_MARKERS = (('claude', 'claude'), ('gpt', 'codex'),
+                         ('codex', 'codex'), ('gemini', 'gemini'))
+
+
+def _named_model_family(model):
+    """The family a recorded model name shows, or None when it shows none."""
+    if type(model) is not str:
+        return None
+    lowered = model.lower()
+    for marker, named in _MODEL_FAMILY_MARKERS:
+        if marker in lowered:
+            return named
+    return None
+
+
 def developer_family(developer):
     """The actual model family of a Task's Developer, or None when unknown.
 
-    A route that can serve another vendor's model (OpenCode, gw-agent) takes
-    the family of the recorded model when its name shows one.
+    A route that can serve another vendor's model (AGY, OpenCode, gw-agent)
+    takes the family of the recorded model when its name shows one. Security
+    repair (Codex security v91 F1, CWE-863): the AGY route serves both Gemini
+    and Claude ids, so its family is never the route name alone; an AGY run
+    with an unrecorded or unnamed model is UNKNOWN (None), and choose_arbiter
+    refuses rather than pairing a same-family arbiter with it.
     """
     if type(developer) is not dict:
         return None
-    family = _PROFILE_FAMILIES.get(developer.get('provider_profile'))
+    profile = developer.get('provider_profile')
+    family = _PROFILE_FAMILIES.get(profile)
     model = developer.get('model')
+    if profile == 'agy':
+        named = _named_model_family(model)
+        return named if named in ('claude', 'gemini') else None
     if family in ('opencode', 'gw-agent') and type(model) is str:
-        lowered = model.lower()
-        for marker, named in (('claude', 'claude'), ('gpt', 'codex'), ('codex', 'codex'),
-                              ('gemini', 'gemini')):
-            if marker in lowered:
-                return named
+        return _named_model_family(model) or family
     return family
 
 
