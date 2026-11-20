@@ -7982,10 +7982,11 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
                 diagnosis_task.get('task_id') != high_debug_task or
                 type(entries) is not list or not entries):
             raise ValueError
-        matching = [e for e in entries if type(e) is dict]
-        if not matching:
+        # The newest entry is the last one as recorded. A malformed newest
+        # entry refuses; it is never skipped for an older one (CWE-863).
+        entry = entries[-1]
+        if type(entry) is not dict:
             raise ValueError
-        entry = matching[-1]
         d6 = entry.get('d6')
         examined_sha = entry.get('examined_sha')
         family = entry.get('family')

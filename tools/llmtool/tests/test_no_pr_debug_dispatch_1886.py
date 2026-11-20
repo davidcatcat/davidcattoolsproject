@@ -6,7 +6,8 @@ A2: a PR continuation whose family already has a covering RCA_CONFIRMED is
 accepted the same way review repair accepts it, without a new Debug.
 A3: refusals stay for a wrong Task or lineage, an unfinished or unconfirmed
 Debug, a wrong family, HEAD or binding, a stale record, an unauthorized dispatch,
-and a Debug recorded before a later counted failure (CWE-863).
+a Debug recorded before a later counted failure, and a malformed newest High
+Debug entry (CWE-863).
 A4/A5: regression tests reproduce the real cases and verify repair limits and counts.
 Test data rule (Owner #763 A): no credential-shaped strings.
 """
@@ -671,6 +672,72 @@ class NoPrDebugAndCoveringRcaDispatchTests(unittest.TestCase):
                 args, store, d6_binding, policy, cont_task_id,
                 counted, set(), set(), stamps[pred2_task_id], stamps=stamps)
         self.assertIn('DELEGATE_HIGH_DEBUG_TASK_INVALID', str(ctx.exception))
+
+    def test_malformed_newest_entry_is_not_skipped_for_an_older_one(self):
+        """CWE-863 (Codex security v93): the newest entry is checked as recorded.
+
+        A non-dict newest High Debug entry refuses; it is never filtered out so
+        that an older RCA_CONFIRMED entry authorizes the continuation instead.
+        A well-formed newest entry after a malformed older one still passes.
+        """
+        pred1_task_id = _hex32('task-malformed-pred1')
+        pred2_task_id = _hex32('task-malformed-pred2')
+        cont_task_id = _hex32('task-malformed-cont')
+
+        entry, event = self._make_debug_entry(
+            pred2_task_id, self.head_1, 'no-pr', no_pr=True,
+            recorded_at='2026-11-20T10:30:00Z')
+
+        def build_store(entries):
+            pred1_record = {
+                'task_id': pred1_task_id,
+                'developer': {'executor_task_id': self.executor_d6,
+                              'created_at': '2026-11-20T10:00:00Z'},
+            }
+            pred2_record = {
+                'task_id': pred2_task_id,
+                'continues': pred1_task_id,
+                'developer': {'executor_task_id': self.executor_d6,
+                              'created_at': '2026-11-20T10:15:00Z'},
+                'high_debug': entries,
+                'completion_events': [event],
+            }
+            cont_record = {
+                'task_id': cont_task_id,
+                'continues': pred2_task_id,
+                'developer': {'executor_task_id': self.executor_d6,
+                              'created_at': '2026-11-20T11:00:00Z'},
+            }
+            return _Store(pred1_record, pred2_record, cont_record)
+
+        args = SimpleNamespace(
+            task_id=cont_task_id,
+            executor_task=self.executor_d6,
+            high_debug_task=pred2_task_id,
+            high_debug_family='no-pr',
+            high_debug_ref='https://github.com/davidcatcat/davidcattoolsproject/issues/1886#issuecomment-7017744285',
+            repair_packet=None,
+        )
+        d6_binding = (SimpleNamespace(result_sha=self.head_1), SimpleNamespace(head=self.head_1))
+        policy = {'repair_max': 4, 'test_fail_max': 5}
+        counted = [pred1_task_id, pred2_task_id]
+        stamps = {pred1_task_id: '2026-11-20T10:00:00Z', pred2_task_id: '2026-11-20T10:15:00Z'}
+
+        for malformed in ('RCA_CONFIRMED', None, ['RCA_CONFIRMED'], 7):
+            with self.subTest(malformed=malformed):
+                store = build_store([entry, malformed])
+                before = store.snapshot()
+                with self.assertRaises(LLMToolError) as ctx:
+                    cli._check_repair_limits(
+                        args, store, d6_binding, policy, cont_task_id,
+                        counted, set(), set(), stamps[pred2_task_id], stamps=stamps)
+                self.assertEqual(str(ctx.exception), 'DELEGATE_HIGH_DEBUG_TASK_INVALID')
+                self.assertEqual(store.snapshot(), before)
+
+        # The same confirmed entry, newest as recorded, is still accepted (A1).
+        cli._check_repair_limits(
+            args, build_store([None, entry]), d6_binding, policy, cont_task_id,
+            counted, set(), set(), stamps[pred2_task_id], stamps=stamps)
 
     def test_count_greater_than_two_covering_rca_ordering(self):
         """Repairs 3+ accept covering RCA newer than times[1], but refuse one recorded earlier."""
