@@ -4980,7 +4980,7 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
                               _delegate_d6_binding(args))
     if previous_developer is None:
         _reject_claude_reserved_d6(registration)
-        if (getattr(registration, 'session_ref', '').startswith('handoff-') and
+        if ((getattr(registration, 'session_ref', None) or '').startswith('handoff-') and
                 registration.trusted_agent_id != direct_reassignment.AGENTS['opencode']):
             raise LLMToolError('DIRECT_REASSIGN_D6_BINDING_MISMATCH')
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
@@ -5498,7 +5498,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     registration, snapshot = _delegate_d6_binding(args)
     if previous_developer is None:
         _reject_claude_reserved_d6(registration)
-        if (getattr(registration, 'session_ref', '').startswith('handoff-') and
+        if ((getattr(registration, 'session_ref', None) or '').startswith('handoff-') and
                 registration.trusted_agent_id != direct_reassignment.AGENTS['agy']):
             raise LLMToolError('DIRECT_REASSIGN_D6_BINDING_MISMATCH')
     # A fresh Owner decision is required before creating the durable assignment.
