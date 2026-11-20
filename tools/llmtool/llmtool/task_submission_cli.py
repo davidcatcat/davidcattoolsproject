@@ -7595,9 +7595,6 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
     this entry, live or compacted to a tombstone.
     """
     from .high_debug import REPORT_SECTIONS, _has_report_section, _outcome_status
-    # #1943 WP-5: a no-PR Debug is a diagnosis only, never repair evidence.
-    if entry.get('no_pr') is True:
-        raise ValueError
 
     allowed_executors = set()
     if isinstance(executor_task, str):
@@ -7612,8 +7609,14 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
     if not allowed_executors:
         raise ValueError
     completion = diagnosis_task.get('completion')
-    if (type(completion) is not dict or
-            completion.get('executor_task_id') not in allowed_executors):
+    diagnosis_executor = (completion.get('executor_task_id')
+                          if type(completion) is dict else None)
+    if diagnosis_executor is None and type(diagnosis_task.get('developer')) is dict:
+        dev = diagnosis_task['developer']
+        diagnosis_executor = dev.get('executor_task_id')
+        if diagnosis_executor is None and type(dev.get('direct_result_callback')) is dict:
+            diagnosis_executor = dev['direct_result_callback'].get('executor_task_id')
+    if diagnosis_executor not in allowed_executors:
         raise ValueError
     model_observed = entry.get('model_observed')
     if (type(model_observed) is not str or
@@ -7885,16 +7888,27 @@ def _check_repair_limits(args, store, d6_binding, policy, current_task_id, count
     if count < 2:
         # The original run and repair #1 need no root cause (D1).
         return
-    if count == 2:
-        _check_repair_rca(args, store, d6_binding, newest_assignment)
-        return
-    # A run without a known assignment time leaves the cover in doubt: refuse.
     times = sorted(stamps[task_id] for task_id in review_runs
                    if type(stamps) is dict and task_id in stamps)
     if len(times) != count:
         raise LLMToolError(
             f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
-    _check_repair_rca(args, store, d6_binding, times[1], covered=True)
+    is_continuation = False
+    if current_task_id is not None and store is not None:
+        try:
+            current_record = store.get(current_task_id)
+            if type(current_record) is dict and current_record.get('continues'):
+                is_continuation = True
+        except Exception:
+            pass
+
+    if count == 2:
+        if is_continuation:
+            _check_repair_rca(args, store, d6_binding, times[0], covered=True)
+        else:
+            _check_repair_rca(args, store, d6_binding, newest_assignment)
+        return
+    _check_repair_rca(args, store, d6_binding, times[0] if is_continuation else times[1], covered=True)
 
 
 def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=False):
@@ -7938,7 +7952,7 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
                 diagnosis_task.get('task_id') != high_debug_task or
                 type(entries) is not list or not entries):
             raise ValueError
-        matching = [e for e in entries if not (type(e) is dict and e.get('no_pr') is True)]
+        matching = [e for e in entries if type(e) is dict]
         if not matching:
             raise ValueError
         entry = matching[-1]
@@ -7982,6 +7996,7 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
         attempt = int(attempt_match.group(1))
         task_id = getattr(args, 'task_id', None)
         predecessor_executors = []
+        is_continuation = False
         if task_id is not None and store is not None:
             try:
                 task_record = store.get(task_id)
@@ -7991,12 +8006,24 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
                 from . import lineage_counts
                 chain = lineage_counts.chain_records(store, task_record)
                 if chain is not None:
+                    chain_ids = {r.get('task_id') for r in chain if type(r) is dict}
+                    if high_debug_task not in chain_ids:
+                        raise ValueError
+                    if task_record.get('continues'):
+                        is_continuation = True
                     for pred in chain[1:]:
                         pred_completion = pred.get('completion') if type(pred) is dict else None
                         pred_executor = (pred_completion.get('executor_task_id')
                                          if type(pred_completion) is dict else None)
+                        if pred_executor is None and type(pred.get('developer')) is dict:
+                            pdev = pred['developer']
+                            pred_executor = pdev.get('executor_task_id')
+                            if pred_executor is None and type(pdev.get('direct_result_callback')) is dict:
+                                pred_executor = pdev['direct_result_callback'].get('executor_task_id')
                         if type(pred_executor) is str and pred_executor not in predecessor_executors:
                             predecessor_executors.append(pred_executor)
+                elif high_debug_task != task_id:
+                    raise ValueError
         allowed_executors = []
         if type(executor_task) is str:
             allowed_executors.append(executor_task)
@@ -8006,6 +8033,11 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
         diagnosis_completion = diagnosis_task.get('completion')
         diagnosis_executor = (diagnosis_completion.get('executor_task_id')
                               if type(diagnosis_completion) is dict else None)
+        if diagnosis_executor is None and type(diagnosis_task.get('developer')) is dict:
+            dev = diagnosis_task['developer']
+            diagnosis_executor = dev.get('executor_task_id')
+            if diagnosis_executor is None and type(dev.get('direct_result_callback')) is dict:
+                diagnosis_executor = dev['direct_result_callback'].get('executor_task_id')
         matched_executor = None
         for candidate in allowed_executors:
             if (d6 == _d6_name(candidate, attempt, examined_sha) and
@@ -8019,7 +8051,7 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
             predecessor_executors=predecessor_executors)
     except Exception:
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
-    if covered:
+    if covered or is_continuation:
         # #2367 A2: the covering RCA was taken on an earlier head.
         return
     if d6_binding is None:
