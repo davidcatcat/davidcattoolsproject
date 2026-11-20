@@ -234,6 +234,40 @@ def _norm_path(path: Any) -> str:
     return path.replace("\\", "/").removeprefix("./")
 
 
+# #1817: the declared test modules are the distinct test paths in the read and
+# write lists; llmtool's remote test admits at most its _MAX_REMOTE_MODULES.
+TEST_MODULE_PATH = re.compile(r"tools/llmtool/tests/test_[a-z0-9_]{1,80}\.py")
+
+
+def _declared_paths(spec: dict[str, Any], field: str) -> list:
+    """The spec's own list for a field, falling back to its '<field>_paths' key."""
+    paths = spec.get(field)
+    if not isinstance(paths, list):
+        paths = spec.get(field + "_paths")
+    return paths if isinstance(paths, list) else []
+
+
+def declared_test_modules(spec: dict[str, Any]) -> set[str]:
+    """Return the distinct tools/llmtool/tests/test_*.py paths a spec declares."""
+    return {
+        _norm_path(path)
+        for field in ("read", "write")
+        for path in _declared_paths(spec, field)
+        if isinstance(path, str) and TEST_MODULE_PATH.fullmatch(_norm_path(path))
+    }
+
+
+def check_test_module_count(spec: dict[str, Any], maximum: int | None = None) -> list[str]:
+    """#1817: refuse more declared modules than llmtool's remote test accepts."""
+    if maximum is None:
+        from llmtool import remote_test
+        maximum = remote_test._MAX_REMOTE_MODULES
+    count = len(declared_test_modules(spec))
+    if count > maximum:
+        return [f"test_module_count_exceeds_max:count={count}:max={maximum}"]
+    return []
+
+
 def check_read_scope(spec: dict[str, Any], repo: str | Path) -> list[str]:
     """Check read scope covers acceptance paths and tests when --repo is given."""
     repo_dir = Path(repo)
@@ -385,7 +419,8 @@ def main(argv: list[str] | None = None) -> int:
         print(EDITS_FORBIDDEN_MESSAGE, file=sys.stderr)
         return 2
 
-    failures = check(spec) + check_ascii(spec) + check_open_bracket_ends(spec)
+    failures = (check(spec) + check_ascii(spec) + check_open_bracket_ends(spec)
+                + check_test_module_count(spec))
     if failures:
         print("SPEC_PREFLIGHT_FAIL:" + ",".join(failures))
         return 1
