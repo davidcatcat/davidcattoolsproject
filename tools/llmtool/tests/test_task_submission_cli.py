@@ -5508,7 +5508,7 @@ class DispatcherPreflightRefusalTests(unittest.TestCase):
 class DelegateRepairCapTests(unittest.TestCase):
     # #2367: a D6 takes 1 + repair_max review runs (the original run and 5
     # effective repairs); this many prior runs refuse the next one. Below it,
-    # repair #2 needs a High Debug and its RCA_CONFIRMED covers later repairs.
+    # repairs #4 and #5 require an applicable confirmed RCA.
     REVIEW_LIMIT = 1 + repair_policy.load_policy()['repair_max']
 
     def setUp(self):
@@ -5652,10 +5652,15 @@ class DelegateRepairCapTests(unittest.TestCase):
             self.assertEqual(run_task_delegate(args, store=self.store), 7)
         route.assert_called_once()
 
-    def test_repair_two_without_high_debug_refuses_before_route_call(self):
-        # #1502 WP-D D7: two prior runs make this repair #2, which needs a
-        # confirmed root cause.
-        self._prior_assignments(2)
+    def test_third_repair_without_high_debug_calls_route(self):
+        self._prior_assignments(3)
+        task = self._task()
+        with patch.object(submission_cli, 'run_task_opencode_delegate', return_value=7) as route:
+            self.assertEqual(run_task_delegate(self._args(task, 'opencode'), store=self.store), 7)
+        route.assert_called_once()
+
+    def test_fourth_repair_without_high_debug_refuses_before_route_call(self):
+        self._prior_assignments(4)
         task = self._task()
         with patch.object(submission_cli, 'run_task_opencode_delegate') as route:
             with self.assertRaisesRegex(LLMToolError,
@@ -6001,7 +6006,7 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertNotIn('repair_cap_override', self.store.get(task['task_id']))
 
     def test_valid_high_debug_ref_without_task_is_task_required(self):
-        self._prior_assignments(2)
+        self._prior_assignments(4)
         task = self._task()
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-123'
         args = self._args(task, 'opencode', high_debug_ref=ref)
@@ -6013,7 +6018,7 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertNotIn('repair_cap_override', self.store.get(task['task_id']))
 
     def test_invalid_high_debug_refs_refuse(self):
-        self._prior_assignments(2)
+        self._prior_assignments(4)
         task = self._task()
         refs = (
             'http://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-123',
