@@ -2393,6 +2393,8 @@ def _remote_fail_action(related, result_head):
             return 'DEVELOPER_START_FAILED'
         if state in ('UNAVAILABLE', 'BLOCKED', 'OUTPUT_REJECTED'):
             return 'REPAIR_RETRY'
+        if state == 'RECOVERABLE_DIRECT':
+            return 'REPAIR_REVIEW'
         if state in ('RUNNING', 'PENDING'):
             return 'WAITING_REPAIR'
         if state == 'UNKNOWN':
@@ -2441,6 +2443,9 @@ def derive_repair_state(repair_record):
         return 'BLOCKED'
     if state == 'BLOCKED' and start_failure.record_checks(repair_record).start_failure:
         return 'START_FAILED'
+    from . import direct_reassignment
+    if direct_reassignment.replacement_candidate(developer):
+        return 'RECOVERABLE_DIRECT'
     if state == 'DEVELOPER_PENDING' or repair_record.get('state') == 'PM_PENDING':
         return 'PENDING'
     if state == 'DEVELOPER_DISPATCHING':
@@ -3624,8 +3629,11 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                         except (TypeError, ValueError):
                             result = result_value
                     except Exception as exc:
-                        code = _refusal(exc, 'review_repair_code')
-                        if code == 'REPAIR_LIMIT_REACHED' and remote_status == 'FAIL':
+                        code = getattr(exc, 'task_store_error_code', None) or _refusal(
+                            exc, 'review_repair_code')
+                        if code == 'DIRECT_DISPATCH_LEASE_BUSY':
+                            step, codes = 'WAITING_REPAIR', [code]
+                        elif code == 'REPAIR_LIMIT_REACHED' and remote_status == 'FAIL':
                             step, codes = 'STOPPED', ['TEST_FAIL_LIMIT_REACHED']
                         elif code == 'REVIEW_REPAIR_PM_REQUIRED':
                             step, codes = 'STOPPED', ['REVIEW_REPAIR_PM_REQUIRED']

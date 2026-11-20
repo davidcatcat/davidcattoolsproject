@@ -29,6 +29,24 @@ A required check must be SUCCESS. A check that does not apply to the PR is recor
 
 Manual commands are recovery only: use the [manual recovery flow](../../.claude/skills/ai-team-delivery/pm-continuation.md#manual-recovery-flow) when `task advance` cannot run. Review FAIL, AI Debug, split and Owner notification rules are in the [PM Continuation Contract](../../.claude/skills/ai-team-delivery/pm-continuation.md).
 
+An interrupted AGY or OpenCode dispatch can continue on the same Task and D6.
+Run the original `task delegate` command as the owning PM with its original scope.
+The command automatically selects the other route when the old assignment is
+still pending, the persisted launch boundary proves it never authorized spawn,
+or the launcher recorded a verified stop before delivering any prompt. The
+replacement still needs current Owner authorization, route and quota admission.
+For an already counted repair, `task advance` uses this same delegate path.
+The handoff keeps the branch, PR and repair claim, and gives the replacement a
+new assignment and D6 session binding before launching it. A pending handoff
+can be resumed with the same command.
+
+`DIRECT_CHILD_LAUNCH_EVIDENCE_MISSING` identifies a historical dispatch with
+no durable launch observation. `DIRECT_CHILD_SPAWN_OUTCOME_UNVERIFIED` means
+spawn was authorized and its outcome still needs proof. For these records, keep
+the original worktree and claim, and use the ordinary result callback if an
+authentic result can be recovered. A missing PID, a clean tree, or a dead PID
+alone cannot authorize another writer.
+
 A review repair claim whose dispatch outcome was not recorded stays `UNKNOWN`, and llmtool does not treat it as dispatched.
 It settles only through `llmtool task repair TASK --executor-task D6 --pr N --recover-claim REPAIR_TASK_ID` (#1928).
 That sets the claim `DISPATCHED` in one locked TaskStore update, only after evidence checks E1-E5 pass: the claim, the repair Task's identity, its dispatch audit, its VERIFIED execution session, and the registered D6 and HEAD.

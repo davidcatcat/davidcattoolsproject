@@ -1,3 +1,4 @@
+import copy
 import contextlib
 import io
 import json
@@ -10,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, patch
 
+from llmtool.task_store import TaskStoreConflict
 from llmtool import (review_dispatch, skill_ledger, skill_manifest, task_completion,
                      task_submission_cli, worker_dispatch)
 from llmtool.developer_routes import (RouteError, resolve_route_max_diff_bytes,
@@ -156,21 +158,26 @@ class AgyRouteWiringTests(unittest.TestCase):
                 return dict(self.task)
 
             def compare_and_update(self, _task_id, *, expected, **updates):
+                if any(self.task.get(key) != value for key, value in expected.items()):
+                    raise TaskStoreConflict()
+                if (fail_success_persist and
+                        updates.get('developer', {}).get('state') == 'DEVELOPER_RESPONDED'):
+                    raise RuntimeError('simulated persistence rejection')
                 store_writes.append(updates)
-                self.task.update(updates)
-                return dict(self.task)
+                self.task.update(copy.deepcopy(updates))
+                return copy.deepcopy(self.task)
 
             def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
                                            expected, **updates):
                 return self.compare_and_update(task_id, expected=expected, **updates)
 
-            def update(self, _task_id, **updates):
-                if (fail_success_persist and
-                        updates.get('developer', {}).get('state') == 'DEVELOPER_RESPONDED'):
-                    raise RuntimeError('simulated persistence rejection')
-                store_writes.append(updates)
-                self.task.update(updates)
-                return dict(self.task)
+            def prepare_direct_dispatch(self, task_id, *, expected_developer, developer):
+                return self.compare_and_update(task_id, expected={'developer': expected_developer},
+                    developer=dict(developer, dispatch_boundary='PREPARED'))
+
+            def authorize_direct_spawn(self, task_id, *, expected_developer):
+                return self.compare_and_update(task_id, expected={'developer': expected_developer},
+                    developer=dict(expected_developer, dispatch_boundary='STARTING'))
 
         if store is None:
             store = Store()
@@ -235,12 +242,13 @@ class AgyRouteWiringTests(unittest.TestCase):
             bind_called = True
             return bind_result
 
-        def route_runner(_route, _request, *, gate, **_kwargs):
+        def route_runner(_route, _request, *, gate, on_launch, **_kwargs):
             prompts.append(_request['prompt'])
             gate_result = gate()
             if gate_result is False or getattr(gate_result, 'allowed', False) is not True:
                 raise RouteError('AGY_DISPATCH_DENIED',
                                  blocked_reason='OWNER_DISPATCH_DENIED')
+            on_launch()
             if route_error is not None:
                 raise route_error
             if audit is not None:

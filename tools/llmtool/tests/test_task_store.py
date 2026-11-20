@@ -3335,6 +3335,70 @@ class TaskStoreTests(unittest.TestCase):
             start_time='123456', pgid=123)
         self.assertEqual(saved['developer']['execution'], launch['execution'])
 
+    def test_direct_spawn_boundary_is_durable_and_consumed_once(self):
+        for profile, model in (('agy', 'gemini-test'), ('opencode', 'opencode/test-free')):
+            with self.subTest(profile=profile):
+                task = self._codex_dispatch_task()
+                task_id = task['task_id']
+                pending = self._developer_assignment(provider=profile)
+                pending.update(backend_session_semantics='CLI_REPORTED_SESSION_ID',
+                               execution=None)
+                if profile == 'agy':
+                    pending['owner_assignment_ref'] = None
+                self.store.create(task)
+                self.store.compare_and_update(
+                    task_id, expected={'developer': None}, developer=pending)
+                dispatching = dict(pending, state='DEVELOPER_DISPATCHING',
+                                   provider_type=profile + '-cli', model=model,
+                                   max_tokens=4096 if profile == 'opencode' else None)
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.update(task_id, developer=dict(dispatching,
+                                                               dispatch_boundary='PREPARED'))
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'DIRECT_DISPATCH_BOUNDARY_FORBIDDEN')
+                prepared = self.store.prepare_direct_dispatch(
+                    task_id, expected_developer=pending, developer=dispatching)['developer']
+                reopened = TaskStore(self.root)
+                self.assertEqual(reopened.get(task_id)['developer'], prepared)
+                self.assertEqual(prepared['dispatch_boundary'], 'PREPARED')
+                self.assertIsNone(prepared['execution'])
+                if profile == 'opencode':
+                    with self.assertRaises(LLMToolError) as caught:
+                        reopened.record_opencode_launch(
+                            task_id, assignment_id=pending['assignment_id'],
+                            pid=123, start_time='123456', pgid=123)
+                    self.assertEqual(caught.exception.task_store_error_code,
+                                     'DIRECT_DISPATCH_SPAWN_NOT_AUTHORIZED')
+
+                contender = threading.Barrier(2)
+                outcomes = []
+
+                def acquire():
+                    contender.wait(timeout=5)
+                    try:
+                        reopened.authorize_direct_spawn(task_id, expected_developer=prepared)
+                    except TaskStoreConflict:
+                        outcomes.append('conflict')
+                    else:
+                        outcomes.append('authorized')
+
+                runners = [threading.Thread(target=acquire) for _ in range(2)]
+                for runner in runners:
+                    runner.start()
+                for runner in runners:
+                    runner.join(timeout=10)
+                self.assertCountEqual(outcomes, ['authorized', 'conflict'])
+                after = reopened.get(task_id)['developer']
+                self.assertEqual(after['dispatch_boundary'], 'STARTING')
+                self.assertIsNone(after['execution'])
+                with self.assertRaises(LLMToolError):
+                    reopened.update(task_id, developer=prepared)
+                recorder = (reopened.record_agy_launch if profile == 'agy'
+                            else reopened.record_opencode_launch)
+                observed = recorder(task_id, assignment_id=pending['assignment_id'],
+                                    pid=123, start_time='123456', pgid=123)
+                self.assertEqual(observed['developer']['execution']['child_pid'], 123)
+
     def test_opencode_child_identity_is_profile_checked_and_trusted(self):
         task = self._codex_dispatch_task()
         task['pm_assignment']['route'] = 'opencode'

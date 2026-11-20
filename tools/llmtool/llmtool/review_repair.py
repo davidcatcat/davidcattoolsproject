@@ -687,6 +687,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
             completion.get('executor_task_id') != executor_task or
             developer.get('state') not in ('DEVELOPER_RESPONDED', 'DEVELOPER_OUTPUT_REJECTED')):
         _refuse('REPAIR_DEVELOPER_BINDING_INVALID')
+    from . import direct_reassignment
+    developer = direct_reassignment.authoring_route(store, task, developer, executor_task)
     profile = developer.get('provider_profile')
     claude_cli = (profile == 'claude' and
                   developer.get('backend_session_semantics') == 'CLI_REPORTED_SESSION_ID')
@@ -719,13 +721,16 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     if not test_failure and dispute_open_on(task, pr_number, packet['failed_head']):
         _refuse('REPAIR_DISPUTE_OPEN')
     policy_task = executor_task if claude_cli else task_id
-    decision = worker_dispatch.evaluate(
-        worker, developer.get('owner_assignment_ref'), policy_task)
-    if not decision.allowed:
-        _refuse(decision.reason_code)
-    # #1816: after the Owner policy, before any claim, Task or D6 write.
-    if worker_availability.fresh_quota_fail(store, worker):
-        _refuse(worker_availability.REFUSAL_CODE)
+    def require_original_worker():
+        decision = worker_dispatch.evaluate(
+            worker, developer.get('owner_assignment_ref'), policy_task)
+        if not decision.allowed:
+            _refuse(decision.reason_code)
+        # #1816: after the Owner policy, before any claim, Task or D6 write.
+        if worker_availability.fresh_quota_fail(store, worker):
+            _refuse(worker_availability.REFUSAL_CODE)
+    if not auto:
+        require_original_worker()
     base_family = f'pr-{pr_number}' if family is None else family
     if (type(base_family) is not str or
             re.fullmatch(r'[a-z0-9._-]{1,64}', base_family) is None or
@@ -805,6 +810,44 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     if retry_claim_id is not None and retry_claim is None:
         _refuse('REPAIR_CLAIM_UNAVAILABLE')
     if existing is not None and existing is not retry_claim:
+        # #2438: an already-counted direct repair can continue on a replacement
+        # assignment. The delegate serializes the old controller and handoff,
+        # then applies its ordinary scope, policy, quota and D6 checks.
+        repair_task = None
+        if auto and dispatch_adapter is None:
+            try:
+                repair_task = store.get(existing['repair_task_id'])
+            except (LLMToolError, KeyError):
+                pass
+        repair_developer = repair_task.get('developer') if type(repair_task) is dict else None
+        history = (repair_developer.get('direct_handoffs') or []
+                   if type(repair_developer) is dict else [])
+        if history and repair_developer.get('state') == 'DEVELOPER_RESPONDED':
+            if auto and not test_failure:
+                _auto_replay_claim(store, task, task_id, existing)
+            direct_reassignment.reconcile_claim(
+                store, existing['repair_task_id'], history[-1]['old_assignment'])
+            saved = store.get(task_id)
+            bound = next(claim for claim in saved['review_repair_claims']
+                         if claim['repair_task_id'] == existing['repair_task_id'])
+            return {'claim': bound, 'repair_task_id': existing['repair_task_id'],
+                    'attempt': bound['attempt'], 'replayed': True, 'next_action': 'task advance'}
+        if (direct_reassignment.replacement_candidate(repair_developer) and
+                (repair_developer.get('provider_profile') == profile or
+                 (history and history[-1]['old_profile'] == profile))):
+            if not test_failure:
+                _auto_replay_claim(store, task, task_id, existing)
+            value = _delegate_repair(task=repair_task, developer=developer, packet=packet,
+                                     executor_task=executor_task, delegate=delegate_callable,
+                                     store=store)
+            saved = store.get(task_id)
+            bound = next(claim for claim in saved['review_repair_claims']
+                         if claim['repair_task_id'] == existing['repair_task_id'])
+            return {'result': value, 'claim': bound, 'attempt': existing['attempt'],
+                    'repair_task_id': existing['repair_task_id'], 'replayed': True,
+                    'next_action': 'task advance'}
+        if auto:
+            require_original_worker()
         if auto and not test_failure:
             # v91 F1: an auto replay is decided under the chain lock too.
             existing = _auto_replay_claim(store, task, task_id, existing)
@@ -814,6 +857,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                 'replayed': dispatched,
                 'next_action': (f"review-dispatch --version {packet_version + 1}"
                                 if dispatched else f"task delegate {task_id_for_repair}")}
+    if auto:
+        require_original_worker()
     # #1502 WP-D: limits from policy.json; review repairs pass the counting gate.
     # L1 (I1, I2, I6): the counts cover the whole continuation chain; a link in
     # doubt makes them UNKNOWN, which counts as the limit. The replay above

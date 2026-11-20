@@ -78,6 +78,10 @@ class _Store:
     def d6_bind_compare_and_update(self, _task_id, *, executor_task_id, expected, **updates):
         return self._write('d6_bind_compare_and_update', updates)
 
+    def prepare_direct_dispatch(self, task_id, *, expected_developer, developer):
+        return self.compare_and_update(task_id, expected={'developer': expected_developer},
+                                       developer=dict(developer, dispatch_boundary='PREPARED'))
+
     def compare_and_update(self, _task_id, *, expected, **updates):
         return self._write('compare_and_update', updates)
 
