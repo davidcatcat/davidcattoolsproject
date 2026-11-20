@@ -245,13 +245,14 @@ class LineageOutcomeTests(unittest.TestCase):
 
     def test_auth_and_unknown_reason_due_at_once_for_a_large_value(self):
         # A3: AUTH is due at once even for a large configured value, and a
-        # reason that is not a known WAITING reason is due at once.
+        # reason that is not a known WAITING reason is due at once: at the
+        # moment of WAITING entry, now equals waiting_since.
         policy = dict(self.P, waiting_notify_after_hours=1000)
-        base, soon = '2026-11-13T00:00:00Z', '2026-11-13T00:00:01Z'
-        self.assertTrue(rp.waiting_notice_due(reason='AUTH', waiting_since=base,
-                                              now=soon, policy=policy))
+        at_once = '2026-11-13T00:00:00Z'
+        self.assertTrue(rp.waiting_notice_due(reason='AUTH', waiting_since=at_once,
+                                              now=at_once, policy=policy))
         self.assertTrue(rp.waiting_notice_due(reason='NOT_A_WAITING_REASON',
-                                              waiting_since=base, now=soon, policy=policy))
+                                              waiting_since=at_once, now=at_once, policy=policy))
 
     def test_zero_hours_is_due_at_once_for_a_known_non_auth_reason(self):
         # A4: with the value configured to 0, a known non-AUTH WAITING reason
