@@ -104,6 +104,19 @@ class OwnerOverrideTest(unittest.TestCase):
                             route='agy', fetch=fetch)
         self.assertEqual(fetch.calls, [COMMENT_ID])
 
+    def test_unknown_family_model_is_refused_for_agy_and_claude_before_the_ref_is_read(self):
+        # Owner #2302 part 1: agy and claude need a recognized model family,
+        # and no override can admit an UNKNOWN-family model.
+        for route in ('agy', 'claude'):
+            for model in (MODEL, 'claude-gpt-6'):
+                with self.subTest(route=route, model=model):
+                    override = valid_override()
+                    override['model'] = model
+                    fetch = FakeFetch(make_comment(MARKER + '\n' + OVERRIDE_LINE))
+                    self.assert_refused('ROLE_MODEL_NOT_ALLOWED', override=override,
+                                        route=route, fetch=fetch)
+                    self.assertEqual(fetch.calls, [])
+
     def test_model_malformed_for_its_route_is_refused_before_the_ref_is_read(self):
         # Owner #289: OpenCode ids are provider/model; this one has no provider
         # prefix, so no override can admit it.

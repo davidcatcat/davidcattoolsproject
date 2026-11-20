@@ -1,10 +1,10 @@
 """#1502 WP-E owner model override validation.
 
 Owner #2302 part 1: an owner override is optional and never required. A route
-accepts any well-formed model id without one (see
+accepts any well-formed model id of a recognized family without one (see
 role_config.check_role_model); the override is read only for a model the
 route's membership gate refuses (gw-agent). It never bypasses a route's
-format check.
+format or recognized-family check.
 
 This check is an accident guard, not a security boundary: it catches a
 malformed, stale or mismatched owner override before it is used, but it
@@ -57,7 +57,8 @@ def validate_owner_override(override, route, *, repository, fetch_comment):
         _fail('OWNER_OVERRIDE_INVALID')
     if type(route) is not str or _ROUTE.fullmatch(route) is None:
         _fail('OWNER_OVERRIDE_INVALID')
-    # An override never bypasses the route's own model format check. Refuse
+    # An override never bypasses the route's own model format and recognized
+    # family check. Refuse
     # here too so every caller is protected before the ref is read.
     from .developer_routes import RouteError, check_route_model_family
     try:

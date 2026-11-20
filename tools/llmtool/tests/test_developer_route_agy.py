@@ -151,6 +151,8 @@ class AgyRouteTests(unittest.TestCase):
         # Owner #2302 part 1: a model of another family is launched as asked.
         # A model the provider does not serve fails clearly (a mismatch or an
         # unverified model); it is never replaced silently by another model.
+        # This route validates the id format only; the recognized-family check
+        # runs at role resolve and dispatch (role_config.check_role_model).
         for other in ('claude-sonnet-5-5-medium', 'gpt-6.1-sol', 'example-model-b'):
             with self.subTest(model=other):
                 self.assertEqual(self.route.validate_profile(other, 'low'), (other, 'low'))

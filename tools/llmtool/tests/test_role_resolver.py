@@ -146,24 +146,53 @@ class AllowedModelTests(ResolverBase):
                 self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
                 self.assertIsNone(caught.exception.owner_override_code)
 
-    # Owner #2302 part 1: any well-formed model id, of any family, on any
-    # Developer route (here the two CLI routes), with no repository change.
+    # Owner #2302 part 1: any well-formed model id of a recognized family, on
+    # any Developer route (here the two CLI routes), with no repository change.
     ANY_MODELS = (
         ('agy-developer', 'gemini-4-hydrogen-medium', 'gemini'),
         ('agy-developer', 'claude-fable-5-2', 'claude'),
+        ('agy-developer', 'claude-sonnet-5-5-medium', 'claude'),
         ('agy-developer', 'gpt-6.1-sol', 'codex'),
         ('agy-developer', 'qwen3-coder-next', 'qwen'),
         ('agy-developer', 'deepseek-v4.1-flash', 'deepseek'),
         ('agy-developer', 'GEMINI-4-HYDROGEN-MEDIUM', 'gemini'),
         ('agy-developer', 'google/gemini-4-hydrogen-medium', 'gemini'),
-        ('agy-developer', 'example-model-b', 'UNKNOWN'),
         ('claude-developer', 'claude-fable-5-2', 'claude'),
         ('claude-developer', 'gemini-4-hydrogen-medium', 'gemini'),
         ('claude-developer', 'gpt-6.1-sol', 'codex'),
         ('claude-developer', 'anthropic/claude-fable-5-2', 'claude'),
         ('claude-developer', 'Claude-fable-5-2', 'claude'),
-        ('claude-developer', 'example-model-b', 'UNKNOWN'),
     )
+    # Well-formed ids of no known family (or of two families): refused for a
+    # Developer role, so a Developer family is never inferred from its route.
+    UNKNOWN_FAMILY_MODELS = ('example-model-b', 'opencode/example-model-b-free',
+                             'gemini-claude-b', 'claude-gpt-6', 'gpt-6.1-anthropic', 'opus')
+
+    def test_real_routes_refuse_a_model_of_unknown_family_at_every_layer(self):
+        for role in ('agy-developer', 'claude-developer'):
+            env_name = 'LLMTOOL_ROLE_' + role.upper().replace('-', '_') + '_MODEL'
+            for model in self.UNKNOWN_FAMILY_MODELS:
+                for layer in ('roles', 'env', 'cli'):
+                    with self.subTest(role=role, model=model, layer=layer):
+                        self.save({'roles': {role: {'model': model}}} if layer == 'roles'
+                                  else {})
+                        self.env = {env_name: model} if layer == 'env' else {}
+                        with self.assertRaises(LLMToolError) as caught:
+                            self.resolve(role, cli={'model': model} if layer == 'cli' else None)
+                        self.assertEqual(caught.exception.role_config_code,
+                                         'ROLE_MODEL_NOT_ALLOWED')
+                        self.assertIsNone(caught.exception.owner_override_code)
+
+    def test_an_owner_override_never_admits_a_model_of_unknown_family(self):
+        fetch = mock.Mock(side_effect=AssertionError('must not read'))
+        for role in ('agy-developer', 'claude-developer'):
+            with self.subTest(role=role):
+                with self.assertRaises(LLMToolError) as caught:
+                    self.resolve(role, cli={'model': 'example-model-b'},
+                                 owner_override={'model': 'example-model-b', 'ref': REF},
+                                 repository=REPOSITORY, fetch_comment=fetch)
+                self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
+        fetch.assert_not_called()
 
     def test_real_routes_accept_any_well_formed_model_from_user_config(self):
         for role, model, family in self.ANY_MODELS:
@@ -534,6 +563,32 @@ class DispatchPathTests(AccountBase):
                 task_submission_cli._claude_developer_profile(dict(self.routes()['claude']))
         self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
 
+    def test_dispatch_refuses_a_model_of_unknown_family(self):
+        # Owner #2302 part 1 (security repair v91 High 2): the Developer family
+        # is never inferred from the route, so an UNKNOWN-family model is refused
+        # by the resolver and again at dispatch.
+        self.isolated_resolver()
+        self.save({'accounts': self.accounts,
+                   'roles': {'agy-developer': {'model': 'example-model-b'},
+                             'claude-developer': {'account': 'work',
+                                                  'model': 'example-model-b'}}})
+        for profile in (task_submission_cli._agy_developer_profile,
+                        task_submission_cli._claude_developer_profile):
+            route = 'agy' if profile is task_submission_cli._agy_developer_profile else 'claude'
+            with self.subTest(route=route, check='resolver'):
+                with self.assertRaises(LLMToolError) as caught:
+                    profile(dict(self.routes()[route]))
+                self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
+        role = {'model': 'example-model-b', 'effort': None, 'account': None,
+                'config_dir': '/example/claude-config'}
+        for profile, route in ((task_submission_cli._agy_developer_profile, 'agy'),
+                               (task_submission_cli._claude_developer_profile, 'claude')):
+            with self.subTest(route=route, check='dispatch'):
+                with mock.patch.object(role_config, 'resolve_role', return_value=role):
+                    with self.assertRaises(LLMToolError) as caught:
+                        profile(dict(self.routes()[route]))
+                self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
+
     def test_dispatch_check_accepts_only_a_matching_verified_override(self):
         # Repair 2: only the gw-agent membership gate may be relaxed.
         route = dict(GW_ROUTE)
@@ -548,6 +603,20 @@ class DispatchPathTests(AccountBase):
                     task_submission_cli._require_developer_model(
                         'gw-agent-developer', 'gw-agent', route, 'model-extra',
                         {'owner_override': other})
+                self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
+
+    def test_dispatch_check_never_lets_an_override_admit_an_unknown_family_model(self):
+        # agy and claude keep their format and recognized-family gate even if a
+        # caller hands the dispatch check a matching "verified" override.
+        for role_name, route in (('agy-developer', 'agy'), ('claude-developer', 'claude')):
+            route_config = dict(self.routes()[route])
+            verified = {'route': route, 'model': 'example-model-b', 'ref': REF,
+                        'comment_id': 345}
+            with self.subTest(route=route):
+                with self.assertRaises(LLMToolError) as caught:
+                    task_submission_cli._require_developer_model(
+                        role_name, route, route_config, 'example-model-b',
+                        {'owner_override': verified})
                 self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
 
     def test_dispatch_refuses_a_malformed_model_before_reading_an_override(self):

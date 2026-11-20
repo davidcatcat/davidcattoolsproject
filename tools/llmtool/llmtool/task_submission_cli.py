@@ -4693,6 +4693,11 @@ def _require_developer_model(role_name, route, route_config, model, role):
         return
     except RouteError:
         pass
+    from .developer_routes import route_has_family_check
+    if route_has_family_check(route):
+        # agy, claude and opencode: the format and recognized-family gate is
+        # never relaxed by an override (Owner #2302 part 1).
+        _refuse_developer_model(role_name)
     verified = role.get('owner_override') if type(role) is dict else None
     if (type(verified) is dict and verified.get('route') == route and
             type(model) is str and verified.get('model') == model):

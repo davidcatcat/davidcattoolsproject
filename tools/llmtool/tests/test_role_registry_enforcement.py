@@ -1,13 +1,15 @@
 """#1502 WP-E invariant R1: one shared registry check for review/debug models.
 
 No code path may launch codex-reviewer, claude-reviewer, codex-debug or
-claude-debug with a malformed model id, whatever the CLI, environment or user
-config says. Owner #2302 part 1: any well-formed model id is admitted for any
-of the four roles, whatever its family, with no repository change; the role's
-allowed_models is not a membership list. A model the provider cannot serve
-fails from the provider path. Consumer launch tests live next to each
-consumer; this module covers the shared check and the resolver. Nothing here
-opens a network connection.
+claude-debug with a malformed model id or a model of another or an unknown
+family, whatever the CLI, environment or user config says. Owner #2302 part 1
+leaves review and AI Debug admission unchanged (security repair v91 High 1): a
+role admits any well-formed model of its own review family with no repository
+change, so a formal PASS is classified by the family of the model that ran;
+the role's allowed_models is not a membership list. A model the provider
+cannot serve fails from the provider path. Consumer launch tests live next to
+each consumer; this module covers the shared check and the resolver. Nothing
+here opens a network connection.
 """
 
 import copy
@@ -33,9 +35,22 @@ def listed(config, role):
 
 
 def cross_family(config, role):
-    """The other family's listed model: admitted for role (Owner #2302 part 1)."""
+    """The other family's listed model: refused for role."""
     other = 'claude-reviewer' if role in CODEX_ROLES else 'codex-reviewer'
     return listed(config, other)
+
+
+def not_own_family(config, role):
+    """Well-formed ids that are not a model of role's own review family."""
+    return (cross_family(config, role), 'gemini-4-hydrogen-medium',
+            'opencode/example-model-b-free', 'example-model-b', 'qwen3-coder-next',
+            'deepseek-v4.1-flash', 'claude-gpt-6', 'gpt-claude-opus-5-5')
+
+
+def prefix_and_case_variants(model):
+    """Forms of the role's own model that are not written as the family names it."""
+    return ('openai/' + model, 'anthropic/' + model, 'vendor/' + model,
+            model.upper(), model.title())
 
 
 # Badly formed model ids, refused for every role on every path.
@@ -78,26 +93,21 @@ class SharedCheckTests(unittest.TestCase):
                     self.assertEqual(check_registry_role_model(self.config, role, model),
                                      model)
 
-    def test_any_well_formed_model_is_admitted_whatever_its_family(self):
-        # Owner #2302 part 1: the other review family's model, other families
-        # and ids of no known family are all admitted for every role.
+    def test_a_model_of_another_or_unknown_family_is_refused(self):
+        # Reviewer and Debug independence is unchanged by Owner #2302 part 1:
+        # the other review family's model, other families, ids of no known
+        # family and mixed-family ids are refused for every role, so no
+        # formal PASS can be classified by a role whose model is not its family.
         for role in sorted(REGISTRY_ROLES):
-            for admitted in (cross_family(self.config, role), 'gemini-4-hydrogen-medium',
-                             'opencode/example-model-b-free', 'example-model-b',
-                             'qwen3-coder-next', 'deepseek-v4.1-flash'):
-                with self.subTest(role=role, model=admitted):
-                    self.assertEqual(check_registry_role_model(self.config, role, admitted),
-                                     admitted)
+            for refused in not_own_family(self.config, role):
+                with self.subTest(role=role, model=refused):
+                    self.assert_refused(self.config, role, refused)
 
-    def test_prefix_and_case_variants_are_admitted_whitespace_is_refused(self):
+    def test_prefix_case_and_whitespace_variants_are_refused(self):
         for role in sorted(REGISTRY_ROLES):
             model = listed(self.config, role)
-            for admitted in ('openai/' + model, 'anthropic/' + model, 'vendor/' + model,
-                             model.upper(), model.title()):
-                with self.subTest(role=role, model=admitted):
-                    self.assertEqual(check_registry_role_model(self.config, role, admitted),
-                                     admitted)
-            for refused in (' ' + model, model + '\n', model + ' x'):
+            for refused in prefix_and_case_variants(model) + (
+                    ' ' + model, model + '\n', model + ' x'):
                 with self.subTest(role=role, model=refused):
                     self.assert_refused(self.config, role, refused)
 
@@ -189,19 +199,14 @@ class ResolverEnforcementTests(unittest.TestCase):
                 self.assertEqual(resolved['model_source'], 'repo_default')
                 self.assertEqual(resolved['source'], 'builtin')
 
-    def test_any_well_formed_model_is_admitted_at_every_layer(self):
-        # Owner #2302 part 1: a model of the role's own family, of the other
-        # review family, of another family, or of no known family, each with
-        # the family recorded from the id.
+    def test_an_own_family_model_is_admitted_at_every_layer(self):
+        # Owner #2302 part 1: a model of the role's own review family, set at
+        # any layer with no repository change, is admitted with its family
+        # recorded from the id.
         for role in sorted(REGISTRY_ROLES):
             env_name = 'LLMTOOL_ROLE_' + role.upper().replace('-', '_') + '_MODEL'
             own = 'codex' if role in CODEX_ROLES else 'claude'
-            other = 'claude' if role in CODEX_ROLES else 'codex'
-            for model, family in ((same_family(role), own),
-                                  (cross_family(self.config, role), other),
-                                  ('gemini-4-hydrogen-medium', 'gemini'),
-                                  ('vendor/' + same_family(role), own),
-                                  ('example-model-b', 'UNKNOWN')):
+            for model in (same_family(role), listed(self.config, role)):
                 for layer in ('roles', 'env', 'cli'):
                     with self.subTest(role=role, model=model, layer=layer):
                         self.save({'roles': {role: {'model': model}}} if layer == 'roles'
@@ -213,7 +218,23 @@ class ResolverEnforcementTests(unittest.TestCase):
                         self.assertEqual((resolved['model'], resolved['model_source'],
                                           resolved['requested_model'],
                                           resolved['model_family']),
-                                         (model, layer, model, family))
+                                         (model, layer, model, own))
+
+    def test_another_or_unknown_family_model_is_refused_at_every_layer(self):
+        # Independence is unchanged: the other review family, another family,
+        # no known family and a mixed-family id are refused, so a formal PASS
+        # is never classified by a role whose model is not of its family.
+        for role in sorted(REGISTRY_ROLES):
+            env_name = 'LLMTOOL_ROLE_' + role.upper().replace('-', '_') + '_MODEL'
+            for model in not_own_family(self.config, role):
+                for layer in ('roles', 'env', 'cli'):
+                    with self.subTest(role=role, model=model, layer=layer):
+                        self.save({'roles': {role: {'model': model}}} if layer == 'roles'
+                                  else {})
+                        self.assert_refused(
+                            role,
+                            environ={env_name: model} if layer == 'env' else {},
+                            cli={'model': model} if layer == 'cli' else None)
 
     def test_malformed_models_are_refused_at_every_layer(self):
         for role in sorted(REGISTRY_ROLES):
@@ -236,14 +257,12 @@ class ResolverEnforcementTests(unittest.TestCase):
                 self.assertEqual(resolved['model_family'],
                                  'codex' if role in CODEX_ROLES else 'claude')
 
-    def test_prefixed_and_case_variants_are_admitted(self):
+    def test_prefixed_and_case_variants_are_refused(self):
         for role in sorted(REGISTRY_ROLES):
             model = listed(self.config, role)
-            for variant in ('openai/' + model, 'anthropic/' + model, model.upper()):
+            for variant in prefix_and_case_variants(model):
                 with self.subTest(role=role, model=variant):
-                    resolved = self.resolve(role, cli={'model': variant})
-                    self.assertEqual((resolved['model'], resolved['model_source']),
-                                     (variant, 'cli'))
+                    self.assert_refused(role, cli={'model': variant})
 
     def test_listed_model_from_cli_is_admitted(self):
         for role in sorted(REGISTRY_ROLES):
@@ -256,11 +275,12 @@ class ResolverEnforcementTests(unittest.TestCase):
         model = listed(self.config, 'claude-reviewer')
         self.save({'roles': {'reviewer': {'model': model}}})
         self.assertEqual(self.resolve('reviewer')['model'], model)
-        # Owner #2302 part 1: the other review family's model is admitted too.
+        self.assertEqual(self.resolve('claude-reviewer')['model_family'], 'claude')
+        # The legacy alias never admits the other review family's model.
         other = cross_family(self.config, 'claude-reviewer')
         self.save({'roles': {'reviewer': {'model': other}}})
-        self.assertEqual(self.resolve('reviewer')['model'], other)
-        self.assertEqual(self.resolve('claude-reviewer')['model_family'], 'codex')
+        self.assert_refused('reviewer')
+        self.assert_refused('claude-reviewer')
         self.save({'roles': {'reviewer': {'model': 'has space'}}})
         self.assert_refused('reviewer')
         self.assert_refused('claude-reviewer')
@@ -282,11 +302,12 @@ class ResolverEnforcementTests(unittest.TestCase):
     def test_check_registry_model_maps_an_alias_and_refuses_with_the_role_code(self):
         model = listed(self.config, 'claude-reviewer')
         self.assertEqual(role_config.check_registry_model('reviewer', model), model)
-        self.assertEqual(role_config.check_registry_model('reviewer', 'anthropic/' + model),
-                         'anthropic/' + model)
-        with self.assertRaises(LLMToolError) as caught:
-            role_config.check_registry_model('reviewer', 'has space')
-        self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
+        for refused in ('anthropic/' + model, 'has space',
+                        cross_family(self.config, 'claude-reviewer')):
+            with self.subTest(model=refused):
+                with self.assertRaises(LLMToolError) as caught:
+                    role_config.check_registry_model('reviewer', refused)
+                self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
 
 
 def _bg_dispatch_module():
@@ -333,19 +354,20 @@ class ConsumerAdmissionTests(unittest.TestCase):
         )
         self.bg_error = bg.DispatchError
 
-    def test_each_consumer_admits_any_well_formed_model_and_refuses_a_malformed_one(self):
+    def test_each_consumer_admits_an_own_family_model_and_refuses_any_other(self):
         for consumer, role, admit, code in self.rows:
             model = listed(self.config, role)
             family = 'gpt-' if role in CODEX_ROLES else 'claude-'
-            # Owner #2302 part 1: unlisted models, models of the other review
-            # family and models of any other family are admitted too.
-            for admitted in (model, family + 'unlisted-model', same_family(role),
-                             cross_family(self.config, role), 'gemini-4-hydrogen-medium',
-                             'openai/' + model, model.upper()):
+            # Owner #2302 part 1: unlisted models of the role's own family are
+            # admitted; the other review family, other families, ids of no
+            # known family, prefix and case variants and malformed ids are not.
+            for admitted in (model, family + 'unlisted-model', same_family(role)):
                 with self.subTest(consumer=consumer, role=role, model=admitted):
                     self.assertEqual(admit(admitted), admitted)
-            for refused in ('has space', '-leading-dash', 'https://example.invalid/m',
-                            model + '\n', '', None):
+            for refused in (not_own_family(self.config, role) +
+                            prefix_and_case_variants(model) +
+                            ('has space', '-leading-dash', 'https://example.invalid/m',
+                             model + '\n', '', None)):
                 with self.subTest(consumer=consumer, role=role, model=refused):
                     with self.assertRaises((LLMToolError, self.bg_error)) as caught:
                         admit(refused)

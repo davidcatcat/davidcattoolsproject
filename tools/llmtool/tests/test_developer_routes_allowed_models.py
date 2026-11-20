@@ -1,10 +1,12 @@
 """#1502 WP-E: per-route allowed_models in developer-routes.json.
 
-Owner #2302 part 1: agy and claude accept any well-formed model id, of any
-family; opencode accepts any well-formed provider/model id. allowed_models is
-optional for those routes and is not a membership list. gw-agent keeps its
-one-item allowed_models gate. The model family is recorded, not enforced
-(model_family).
+Owner #2302 part 1: agy and claude accept any well-formed model id of a
+recognized family (Claude, Gemini, Codex/GPT, Qwen, DeepSeek and the other
+named families) and refuse an UNKNOWN-family id; opencode accepts any
+well-formed provider/model id. allowed_models is optional for those routes and
+is not a membership list. gw-agent keeps its one-item allowed_models gate. The
+review and AI Debug roles keep their own-family admission, so a formal PASS is
+never classified by a role whose model is of another or an unknown family.
 """
 
 import copy
@@ -23,14 +25,17 @@ FAMILY_ROUTES = ('agy', 'claude', 'opencode')
 # Valid, same-family example model names that are not the default, per route.
 OTHER_MODEL = {'agy': 'gemini-example-b', 'claude': 'claude-example-b',
                'gw-agent': 'example-model-b', 'opencode': 'opencode/example-model-b-free'}
-# Well-formed names of another model family, per CLI route (Owner #2302 part 1:
-# admitted). OpenCode ids are provider/model, so a bare name is malformed there.
-OTHER_FAMILY = {'agy': ('claude-opus-5-5', 'gpt-6.1-sol', 'example-model-b',
-                        'opencode/example-model-b-free', 'gemini-claude-b',
+# Well-formed names of another RECOGNIZED model family, per CLI route (Owner
+# #2302 part 1: admitted). OpenCode ids are provider/model, so a bare name is
+# malformed there.
+OTHER_FAMILY = {'agy': ('claude-opus-5-5', 'claude-sonnet-5-5-medium', 'gpt-6.1-sol',
                         'GEMINI-UPPER', 'vendor/gemini-example-b', 'qwen3-coder-next'),
-                'claude': ('gemini-3.8-flash-medium', 'gpt-6.1-sol', 'example-model-b',
-                           'claude-gpt-6', 'claude-UPPER', 'anthropic/claude-fable-5-2',
-                           'deepseek-v4.1-flash')}
+                'claude': ('gemini-3.8-flash-medium', 'gpt-6.1-sol', 'claude-UPPER',
+                           'anthropic/claude-fable-5-2', 'deepseek-v4.1-flash')}
+# Well-formed names of an UNKNOWN family (none, or two different families):
+# refused for agy and claude Developers (Owner #2302 part 1).
+UNKNOWN_FAMILY = ('example-model-b', 'opencode/example-model-b-free', 'gemini-claude-b',
+                  'claude-gpt-6', 'gpt-6.1-anthropic', 'gw', 'opus')
 # Badly formatted names for each route's format check.
 BAD_FORMAT = {'agy': ('https://example.invalid/m', 'has space', '-leading-dash', '',
                       'x' * 129),
@@ -173,7 +178,7 @@ class AllowedModelsConfigTests(unittest.TestCase):
                         default_model=model))
 
     def test_other_family_default_and_listed_models_load_for_cli_routes(self):
-        # Owner #2302 part 1: the model family is not part of the format check.
+        # Owner #2302 part 1: any recognized family loads, not only the route's.
         for route in ('agy', 'claude'):
             for model in OTHER_FAMILY[route]:
                 with self.subTest(route=route, model=model):
@@ -183,6 +188,15 @@ class AllowedModelsConfigTests(unittest.TestCase):
                     entry = self.load_with(route, lambda entry, model=model: entry.update(
                         allowed_models=[entry['default_model'], model]))['routes'][route]
                     self.assertIn(model, entry['allowed_models'])
+
+    def test_unknown_family_default_and_listed_models_are_invalid_for_cli_routes(self):
+        for route in ('agy', 'claude'):
+            for model in UNKNOWN_FAMILY:
+                with self.subTest(route=route, model=model):
+                    self.assert_invalid(route, lambda entry, model=model: entry.update(
+                        default_model=model))
+                    self.assert_invalid(route, lambda entry, model=model: entry.update(
+                        allowed_models=[entry['default_model'], model]))
 
     def test_check_route_model_after_load(self):
         config = load_route_config()
@@ -414,16 +428,23 @@ class RoleRegistryTests(unittest.TestCase):
         self.assertEqual(self.load(data)['roles']['claude-debug'],
                          {'default_model': 'claude-fable-5-2'})
 
-    def test_role_entries_accept_models_of_any_family(self):
-        # Owner #2302 part 1: a role entry may name any well-formed model id.
-        for role in ('codex-reviewer', 'claude-reviewer', 'codex-debug', 'claude-debug'):
-            for model in ('gpt-example-b', 'claude-fable-5-2', 'gemini-3.8-flash-medium',
-                          'Claude-Upper', 'anthropic/claude-opus-5-5', 'example-model-b'):
-                with self.subTest(role=role, model=model):
-                    data = copy.deepcopy(self.shipped)
-                    data['roles'][role] = {'default_model': model, 'allowed_models': [model]}
-                    self.assertEqual(self.load(data)['roles'][role],
-                                     {'default_model': model, 'allowed_models': [model]})
+    def test_role_entries_accept_only_models_of_their_own_family(self):
+        # Owner #2302 part 1 leaves review and AI Debug admission unchanged: a
+        # role entry names a model of its own review family only.
+        own = {'codex-reviewer': 'gpt-example-b', 'codex-debug': 'gpt-example-b',
+               'claude-reviewer': 'claude-fable-5-2', 'claude-debug': 'claude-fable-5-2'}
+        other = {'codex': 'claude-fable-5-2', 'claude': 'gpt-example-b'}
+        for role, model in own.items():
+            with self.subTest(role=role, model=model):
+                data = copy.deepcopy(self.shipped)
+                data['roles'][role] = {'default_model': model, 'allowed_models': [model]}
+                self.assertEqual(self.load(data)['roles'][role],
+                                 {'default_model': model, 'allowed_models': [model]})
+            foreign = other[role.split('-')[0]]
+            for model in (foreign, 'gemini-3.8-flash-medium', 'example-model-b'):
+                with self.subTest(role=role, refused=model):
+                    self.assert_invalid(lambda data, role=role, model=model: data[
+                        'roles'].update({role: {'default_model': model}}))
 
     def test_registry_default_model_prefers_default_model(self):
         default = developer_routes.registry_default_model
@@ -476,29 +497,39 @@ class RoleRegistryTests(unittest.TestCase):
 
 
 class RoleModelFormatTests(unittest.TestCase):
-    """Owner #2302 part 1: role models are admitted by format, not by family.
+    """Review and AI Debug roles admit a model of their own review family only.
 
-    The check runs on the full identifier: it is never rewritten, so prefixed
-    and mixed-case forms are admitted exactly as written and a malformed one
-    is refused.
+    Owner #2302 part 1 leaves this unchanged (security repair v91 High 1): the
+    role a formal PASS is classified by is the family of the model that ran.
+    The check runs on the full identifier: it is never rewritten, so a
+    provider prefix, upper case and a mixed-family id are refused, as is a
+    malformed one.
     """
 
     CODEX_ROLES = ('codex-reviewer', 'codex-debug')
     CLAUDE_ROLES = ('claude-reviewer', 'claude-debug')
-    # Well-formed identifiers of every family and form: admitted for every role.
-    WELL_FORMED = (
-        'claude-opus-5-5', 'claude-example-b', 'Claude-opus-5-5', 'CLAUDE-OPUS-5-5',
-        'anthropic/claude-opus-5-5', 'bedrock/anthropic.claude-opus-5-5',
-        'us.anthropic.claude-opus-5-5', 'vertex_ai/claude-opus-5-5',
-        'openrouter:claude-opus-5-5', 'gpt-claude-opus-5-5', 'codex-claude-b',
-        'gpt-6.1-sol', 'codex-example-b', 'GPT-6.1-sol', 'openai/gpt-6.1-sol',
-        'azure/gpt-6.1-sol', 'claude-gpt-6', 'gemini-3.8-flash-medium',
-        'example-model-b', 'opencode/deepseek-v4.1-flash-free', 'gw-agent-default',
-        'gpt-', 'claude-', 'gpt', 'gpt_6', 'qwen3-coder-next', 'x' * 128,
+    OWN = {'codex': ('gpt-6.1-sol', 'gpt-example-b', 'codex-example-b', 'gpt-6'),
+           'claude': ('claude-opus-5-5', 'claude-sonnet-5-5', 'claude-example-b',
+                      'claude-fable-5-2')}
+    # Well-formed but not an own-family model: refused for the codex roles.
+    NOT_CODEX = (
+        'claude-opus-5-5', 'gemini-3.8-flash-medium', 'example-model-b', 'gw-agent-default',
+        'qwen3-coder-next', 'GPT-6.1-sol', 'openai/gpt-6.1-sol', 'azure/gpt-6.1-sol',
+        'gpt-claude-opus-5-5', 'codex-claude-b', 'gpt-', 'gpt', 'gpt_6', 'o3-mini',
+        'opencode/deepseek-v4.1-flash-free',
+    )
+    # Well-formed but not an own-family model: refused for the claude roles.
+    NOT_CLAUDE = (
+        'gpt-6.1-sol', 'gemini-3.8-flash-medium', 'example-model-b', 'gw-agent-default',
+        'Claude-opus-5-5', 'CLAUDE-OPUS-5-5', 'anthropic/claude-opus-5-5',
+        'bedrock/anthropic.claude-opus-5-5', 'us.anthropic.claude-opus-5-5',
+        'vertex_ai/claude-opus-5-5', 'openrouter:claude-opus-5-5', 'claude-gpt-6',
+        'claude-', 'claude',
     )
     # Malformed: refused for every role.
     MALFORMED = ('gpt-6 sol', ' gpt-6.1-sol', 'gpt-6.1-sol\n', '-gpt-6.1-sol', '',
-                 'https://example.invalid/m', 'x' * 129, 'gpt-6.1-sol;x', 'gpt-6.1-sol\x00')
+                 'https://example.invalid/m', 'x' * 129, 'gpt-6.1-sol;x', 'gpt-6.1-sol\x00',
+                 'claude-opus-5-5 x', 'claude-opus-5-5\n', 'claude-' + 'x' * 128)
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -517,12 +548,24 @@ class RoleModelFormatTests(unittest.TestCase):
             self.load_role(role, model)
         self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
 
-    def test_every_role_loads_any_well_formed_model_of_any_family(self):
-        for role in self.CODEX_ROLES + self.CLAUDE_ROLES:
-            for model in self.WELL_FORMED:
+    def roles_with_models(self):
+        for role in self.CODEX_ROLES:
+            yield role, self.OWN['codex'], self.NOT_CODEX
+        for role in self.CLAUDE_ROLES:
+            yield role, self.OWN['claude'], self.NOT_CLAUDE
+
+    def test_every_role_loads_its_own_family_model(self):
+        for role, own, _ in self.roles_with_models():
+            for model in own:
                 with self.subTest(role=role, model=model):
                     config = self.load_role(role, model)
                     self.assertEqual(config['roles'][role], {'allowed_models': [model]})
+
+    def test_every_role_refuses_a_model_that_is_not_its_own_family(self):
+        for role, _, foreign in self.roles_with_models():
+            for model in foreign:
+                with self.subTest(role=role, model=model):
+                    self.assert_refused(role, model)
 
     def test_a_malformed_model_is_refused_for_every_role(self):
         for role in self.CODEX_ROLES + self.CLAUDE_ROLES:
@@ -530,14 +573,15 @@ class RoleModelFormatTests(unittest.TestCase):
                 with self.subTest(role=role, model=model):
                     self.assert_refused(role, model)
 
-    def test_role_checks_are_the_one_format_check(self):
+    def test_role_checks_are_the_own_family_checks(self):
         checks = developer_routes._ROLE_MODEL_CHECKS
         self.assertEqual(set(checks), set(self.CODEX_ROLES + self.CLAUDE_ROLES))
-        for role, check in checks.items():
+        for role, own, foreign in self.roles_with_models():
+            check = checks[role]
             with self.subTest(role=role):
-                for model in self.WELL_FORMED:
+                for model in own:
                     self.assertTrue(check(model), model)
-                for model in self.MALFORMED:
+                for model in foreign + self.MALFORMED:
                     self.assertFalse(check(model), model)
         for value in (None, 7, True, ['gpt-6.1-sol'], {'claude-opus-5-5': 1}):
             for role, check in checks.items():
@@ -631,31 +675,52 @@ class CheckRouteModelTests(unittest.TestCase):
                 with self.subTest(route=route, model=model):
                     self.assert_refused(self.config, route, model)
 
-    def test_a_model_of_another_family_is_admitted_on_a_cli_route(self):
-        # Owner #2302 part 1: agy and claude admit any well-formed model id.
+    def test_a_model_of_another_recognized_family_is_admitted_on_a_cli_route(self):
+        # Owner #2302 part 1: agy and claude admit any well-formed model id of
+        # a recognized family, with the family recorded from the id.
         for route in ('agy', 'claude'):
             for model in OTHER_FAMILY[route]:
                 with self.subTest(route=route, model=model):
                     self.assertEqual(check_route_model(self.config, route, model), model)
+                    self.assertNotEqual(developer_routes.model_family(model),
+                                        developer_routes.MODEL_FAMILY_UNKNOWN)
+
+    def test_an_unknown_family_model_is_refused_on_a_cli_route(self):
+        # Owner #2302 part 1 (security repair v91 High 2): no known family, no
+        # admission; the family is never taken from the route.
+        listed_unknown = copy.deepcopy(self.config)
+        for route in ('agy', 'claude'):
+            listed_unknown['routes'][route]['allowed_models'] = list(UNKNOWN_FAMILY)
+        for config in (self.config, listed_unknown):
+            for route in ('agy', 'claude'):
+                for model in UNKNOWN_FAMILY:
+                    with self.subTest(route=route, model=model):
+                        self.assertEqual(developer_routes.model_family(model),
+                                         developer_routes.MODEL_FAMILY_UNKNOWN)
+                        self.assert_refused(config, route, model)
 
     def test_allowed_models_is_not_consulted_for_a_family_route(self):
         # Neither a listed nor an unlisted model changes the outcome.
         config = copy.deepcopy(self.config)
         config['routes']['agy']['allowed_models'] = ['gemini-3.8-flash-medium']
-        for model in ('claude-opus-5-5', 'gemini-3.8-flash-medium', 'example-model-b'):
+        for model in ('claude-opus-5-5', 'gemini-3.8-flash-medium', 'qwen3-coder-next'):
             self.assertEqual(check_route_model(config, 'agy', model), model)
         config['routes']['agy']['allowed_models'].append('has space')
         self.assert_refused(config, 'agy', 'has space')
+        # A listed unknown-family model is still refused.
+        config['routes']['agy']['allowed_models'] = ['example-model-b']
+        self.assert_refused(config, 'agy', 'example-model-b')
 
-    def test_route_family_check_helpers_are_format_only(self):
+    def test_route_family_check_helpers_check_format_and_recognized_family(self):
         # check_route_model_family and route_has_family_check keep their names
-        # but check the format only (Owner #2302 part 1).
+        # (Owner #2302 part 1: agy and claude need a recognized family).
         for route in ('agy', 'claude', 'opencode'):
             self.assertTrue(developer_routes.route_has_family_check(route))
         self.assertFalse(developer_routes.route_has_family_check('gw-agent'))
         self.assertEqual(developer_routes.check_route_model_family('agy', 'claude-opus-5-5'),
                          'claude-opus-5-5')
         for route, model in (('agy', 'has space'), ('claude', 'https://example.invalid/m'),
+                             ('agy', 'example-model-b'), ('claude', 'claude-gpt-6'),
                              ('opencode', 'claude-opus-5-5'), ('gw-agent', 'has space')):
             with self.subTest(route=route, model=model):
                 with self.assertRaises(RouteError) as caught:

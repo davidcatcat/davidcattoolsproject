@@ -17,7 +17,8 @@ _ENV_FIELDS = {
 }
 # #1502 WP-E: Developer role ids bound to a developer-routes.json route. The
 # route supplies the repo-default model and effort; Owner #2302 part 1: the
-# route admits any well-formed model id (see check_role_model).
+# route admits any well-formed model id of a recognized family (see
+# check_role_model).
 ROUTE_ROLES = {
     "agy-developer": "agy",
     "claude-developer": "claude",
@@ -216,6 +217,7 @@ def check_registry_model(role, model, role_registry=None):
 
     #1502 WP-E R1: a thin wrapper over developer_routes.check_registry_role_model
     that raises the role-config error (role_config_code ROLE_MODEL_NOT_ALLOWED).
+    The role's own review family decides (unchanged by Owner #2302 part 1).
     role may be a legacy alias; role_registry None loads developer-routes.json.
     """
     from .developer_routes import RouteError, check_registry_role_model
@@ -294,10 +296,12 @@ def check_role_model(route, route_config, model, *, owner_override=None,
                      repository=None, fetch_comment=None):
     """Return None for an allowed model, else the verified owner override.
 
-    Owner #2302 part 1: any well-formed model id is accepted for agy, claude
-    and opencode with no owner_override (the override is optional, never
-    required, and is not read); the model family is not checked.
-    allowed_models is not consulted for those routes; gw-agent keeps its
+    Owner #2302 part 1: any well-formed model id of a recognized family is
+    accepted for agy and claude, and any well-formed provider/model id for
+    opencode, with no owner_override (the override is optional, never
+    required, and is not read). An UNKNOWN-family id (no known family, or two
+    families) is refused for agy and claude. allowed_models is not consulted
+    for those routes; gw-agent keeps its
     allowed_models gate (see developer_routes.check_route_model). A malformed
     identifier is refused with ROLE_MODEL_NOT_ALLOWED on every path, before any
     override is read. Otherwise, owner_override ({"model", "ref"}) may relax only the
@@ -366,11 +370,12 @@ def resolve_role(role, cli=None, environ=None, *, home=None, route_config=None,
     repo default. Developer roles (ROUTE_ROLES) take their repo default model
     and effort from developer-routes.json (route_config overrides the loaded
     entry) and their model must be one the route accepts (Owner #2302 part 1:
-    any well-formed model id); see check_role_model.
+    any well-formed model id of a recognized family); see check_role_model.
     Review/debug roles (and the legacy 'reviewer' alias) take their default
     model from the developer-routes.json roles registry (role_registry
     overrides the loaded config) and the resolved model must pass
-    check_registry_model (any well-formed model id); the registry
+    check_registry_model (a well-formed model of the role's own review
+    family, as before part 1); the registry
     default never changes 'source'.
     Developer and review/debug results also carry requested_model (the model a
     layer asked for, None when the repo default applied) and model_family (the
