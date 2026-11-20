@@ -2152,6 +2152,53 @@ def _validate_repair_packet_text(value):
         _fail('REPAIR_PACKET_INVALID')
 
 
+_UNSTARTED_CHILD_KEYS = ('child_pid', 'child_start_time', 'child_pgid')
+
+
+def _unstarted_direct_dispatch(record):
+    """#2415: whether the record proves an AGY or OpenCode dispatch never launched.
+
+    True only for a PM_RESPONDED Task whose developer is DEVELOPER_DISPATCHING
+    for agy or opencode with no result and no recorded child (execution None, or
+    an execution with no child field and no process result), and whose completion
+    is absent or still the untouched WAITING_EXECUTOR claim with no result head.
+    """
+    developer = record.get('developer')
+    if (type(developer) is not dict or record.get('state') != 'PM_RESPONDED' or
+            record.get('abandonment') is not None or
+            developer.get('provider_profile') not in ('agy', 'opencode') or
+            developer.get('state') != 'DEVELOPER_DISPATCHING' or
+            developer.get('artifact') is not None or
+            developer.get('artifact_sha256') is not None or
+            developer.get('usage') is not None or
+            record.get('completion_events')):
+        return False
+    callback = developer.get('direct_result_callback')
+    if callback is not None and (
+            type(callback) is not dict or callback.get('state') != 'WAITING_EXECUTOR' or
+            callback.get('pm_dispatch') != 'NOT_STARTED' or 'review_handoff' in callback or
+            'review_return' in callback):
+        return False
+    execution = developer.get('execution')
+    if execution is not None and (
+            type(execution) is not dict or
+            any(execution.get(key) is not None for key in _UNSTARTED_CHILD_KEYS) or
+            execution.get('status') in ('RUNNING', 'TIMEOUT') or
+            execution.get('process_exit_code') is not None or
+            execution.get('stdout_sha256') is not None or
+            'diff_sha256' in execution):
+        return False
+    completion = record.get('completion')
+    if completion is None:
+        return True
+    evidence = completion.get('evidence') if type(completion) is dict else None
+    return (type(completion) is dict and
+            completion.get('state') == 'WAITING_EXECUTOR' and
+            completion.get('pm_dispatch') == 'NOT_STARTED' and
+            completion.get('reviewer_task_id') is None and
+            type(evidence) is dict and evidence.get('result_head') is None)
+
+
 def _check_repair_packet_write(current, changes):
     """#2188 design section 4: repair_packet is set once, with the first developer."""
     if 'repair_packet' not in changes:
@@ -4443,6 +4490,20 @@ class TaskStore:
             pgid=pgid, provider_profile='opencode',
             trusted_flag='trusted_opencode_launch')
 
+    def clear_unstarted_direct_dispatch(self, task_id, *, expected_developer):
+        """#2415: return a never-launched AGY or OpenCode dispatch to its post-PM state.
+
+        One compare-and-set under the Task lock. The stored developer must still
+        equal expected_developer and prove that no child was ever recorded
+        (``_unstarted_direct_dispatch``); developer and completion then both
+        become None. No dispatch audit entry, repair claim or count is written.
+        """
+        if type(expected_developer) is not dict:
+            _fail('TASK_UNSTARTED_RECOVERY_INVALID')
+        return self._update(task_id, expected={'developer': expected_developer},
+                            changes={'developer': None, 'completion': None},
+                            trusted_unstarted_recovery=True)
+
     def _record_direct_launch(self, task_id, *, assignment_id, pid, start_time, pgid,
                               provider_profile, trusted_flag):
         if (not _safe_identifier(assignment_id, TASK_ID) or type(pid) is not int or
@@ -5713,6 +5774,7 @@ class TaskStore:
                        trusted_completion_events=False, trusted_abandonment=False,
                        abandonment_pm_session_id=None, trusted_pm_session_adoption=False,
                        trusted_codex_launch=False, trusted_opencode_launch=False,
+                       trusted_unstarted_recovery=False,
                        trusted_split=None, split_child_max=None, high_debug_finalize=None,
                        trusted_file_ops_evidence=False, trusted_file_ops_reservation=False,
                        d6_unchanged=None):
@@ -5749,6 +5811,11 @@ class TaskStore:
             _fail('CODEX_LAUNCH_IDENTITY_FORBIDDEN')
         if (trusted_codex_launch or trusted_opencode_launch) and set(changes) != {'developer'}:
             _fail('CODEX_LAUNCH_IDENTITY_INVALID')
+        if trusted_unstarted_recovery and (
+                set(changes) != {'developer', 'completion'} or
+                changes['developer'] is not None or changes['completion'] is not None or
+                trusted_codex_launch or trusted_opencode_launch):
+            _fail('TASK_UNSTARTED_RECOVERY_INVALID')
         if 'dispatch_audit' in changes and not trusted_dispatch_audit:
             _fail()
         if 'merge_attempt' in changes:
@@ -6062,7 +6129,9 @@ class TaskStore:
                             raise worker_dispatch.WorkerDispatchDenied(
                                 'WORKER_DISPATCH_AUDIT_UNAVAILABLE') from None
                         raise worker_dispatch.WorkerDispatchDenied(refusal)
-            if (type(current.get('developer')) is dict and
+            if trusted_unstarted_recovery and not _unstarted_direct_dispatch(current):
+                _fail('TASK_UNSTARTED_RECOVERY_REFUSED')
+            if (type(current.get('developer')) is dict and not trusted_unstarted_recovery and
                     'developer' in changes and changes['developer'] is None):
                 old_developer = current['developer']
                 worker_key = worker_dispatch.worker_key_for(

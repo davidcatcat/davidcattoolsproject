@@ -4920,6 +4920,9 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
             previous_developer.get('state') == 'DEVELOPER_DISPATCHING'):
         _recover_direct_child_dispatch(
             args, task, previous_developer, store, expected_agent='opencode-developer')
+        # #2415: a never-launched dispatch was cleared; claim from the fresh record.
+        task = store.get(args.task_id)
+        previous_developer = task.get('developer')
     if (task['state'] != 'PM_RESPONDED' or not task['response'] or
             task['schema_version'] != 2):
         raise LLMToolError('task has no successful PM response')
@@ -5390,6 +5393,9 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             previous_developer.get('state') == 'DEVELOPER_DISPATCHING'):
         _recover_direct_child_dispatch(
             args, task, previous_developer, store, expected_agent='agy-developer')
+        # #2415: a never-launched dispatch was cleared; claim from the fresh record.
+        task = store.get(args.task_id)
+        previous_developer = task.get('developer')
     if (task.get('state') != 'PM_RESPONDED' or not task.get('response') or
             task.get('schema_version') != 2):
         raise LLMToolError('task has no successful PM response')
@@ -6796,9 +6802,25 @@ def _direct_child_liveness(execution):
     return 'ALIVE'
 
 
+def _direct_child_never_recorded(execution):
+    """#2415: True only when the record shows no child pid, start time or group."""
+    if execution is None:
+        return True
+    return (type(execution) is dict and
+            all(execution.get(key) is None
+                for key in ('child_pid', 'child_start_time', 'child_pgid')))
+
+
 def _recover_direct_child_dispatch(args, task, developer, store, *, expected_agent):
+    """Recover a DEVELOPER_DISPATCHING record of the agy or opencode route.
+
+    #2415: a record with no recorded child was interrupted before the provider
+    launched; it returns to its post-PM state through the store and the caller
+    re-reads the Task and claims normally. A record with a recorded child keeps
+    the ALIVE/DEAD/UNKNOWN handling below unchanged.
+    """
     previous_developer = developer
-    if (developer.get('provider_profile') != 'opencode' or
+    if (developer.get('provider_profile') not in ('agy', 'opencode') or
             developer.get('state') != 'DEVELOPER_DISPATCHING'):
         raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
     try:
@@ -6810,6 +6832,17 @@ def _recover_direct_child_dispatch(args, task, developer, store, *, expected_age
         raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
     if (developer.get('executor_task_id') != registration.task_id or
             registration.trusted_agent_id != expected_agent):
+        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
+    if _direct_child_never_recorded(developer.get('execution')):
+        try:
+            store.clear_unstarted_direct_dispatch(
+                args.task_id, expected_developer=previous_developer)
+        except Exception:
+            raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
+        return
+    if developer.get('provider_profile') != 'opencode':
+        # A recorded AGY child keeps the main-branch refusal; only the
+        # not-started recovery above is new for AGY.
         raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
     liveness = _direct_child_liveness(developer.get('execution'))
     if liveness == 'ALIVE':
@@ -8182,6 +8215,10 @@ def run_task_delegate(args, *, store=None):
             liveness = (_codex_child_liveness(previous.get('execution'))
                         if provider == 'codex' else
                         _direct_child_liveness(previous.get('execution')))
+            if (provider == 'opencode' and
+                    _direct_child_never_recorded(previous.get('execution'))):
+                # #2415: never launched; the delegate clears it and claims anew.
+                liveness = 'DEAD'
             if liveness == 'ALIVE':
                 code = ('CODEX_CHILD_STILL_RUNNING' if provider == 'codex'
                         else 'DIRECT_CHILD_STILL_RUNNING')
