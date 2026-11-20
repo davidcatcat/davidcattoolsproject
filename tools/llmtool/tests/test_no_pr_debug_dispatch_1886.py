@@ -774,3 +774,8 @@ class NoPrDebugAndCoveringRcaDispatchTests(unittest.TestCase):
                 args, store, d6_binding, policy, task_id,
                 counted, set(), set(), '2026-11-20T10:00:00Z')
         self.assertIn('DELEGATE_REPAIR_LIMIT_REACHED', str(ctx.exception))
+
+
+if __name__ == '__main__':
+    unittest.main()
+

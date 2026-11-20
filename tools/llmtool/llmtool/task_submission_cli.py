@@ -7888,11 +7888,6 @@ def _check_repair_limits(args, store, d6_binding, policy, current_task_id, count
     if count < 2:
         # The original run and repair #1 need no root cause (D1).
         return
-    times = sorted(stamps[task_id] for task_id in review_runs
-                   if type(stamps) is dict and task_id in stamps)
-    if len(times) != count:
-        raise LLMToolError(
-            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
     is_continuation = False
     if current_task_id is not None and store is not None:
         try:
@@ -7902,9 +7897,47 @@ def _check_repair_limits(args, store, d6_binding, policy, current_task_id, count
         except Exception:
             pass
 
+    def _parse_stamp(val):
+        if isinstance(val, datetime):
+            return val
+        if isinstance(val, str):
+            try:
+                return datetime.strptime(val, '%Y-%m-%dT%H:%M:%SZ')
+            except (TypeError, ValueError):
+                return None
+        return None
+
     if count == 2:
+        if newest_assignment is None and isinstance(stamps, dict):
+            parsed_stamps = [_parse_stamp(v) for v in stamps.values()]
+            valid_stamps = [s for s in parsed_stamps if s is not None]
+            if valid_stamps:
+                newest_assignment = max(valid_stamps)
         _check_repair_rca(args, store, d6_binding, newest_assignment, covered=is_continuation)
         return
+
+    stamps_dict = {}
+    if isinstance(stamps, dict):
+        for k, v in stamps.items():
+            parsed = _parse_stamp(v)
+            if parsed is not None:
+                stamps_dict[k] = parsed
+    for task_id in review_runs:
+        if task_id not in stamps_dict and store is not None:
+            try:
+                record = store.get(task_id)
+                dev = record.get('developer') if isinstance(record, dict) else None
+                cat = dev.get('created_at') if isinstance(dev, dict) else None
+                parsed = _parse_stamp(cat)
+                if parsed is not None:
+                    stamps_dict[task_id] = parsed
+            except Exception:
+                pass
+    times = sorted(stamps_dict[task_id] for task_id in review_runs
+                   if task_id in stamps_dict)
+    if len(times) != count:
+        raise LLMToolError(
+            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
     _check_repair_rca(args, store, d6_binding, times[1], covered=True)
 
 
