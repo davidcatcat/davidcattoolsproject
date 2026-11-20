@@ -1405,9 +1405,11 @@ class GwAgentRouteTests(unittest.TestCase):
             self.assertEqual(cm.exception.code, 'GW_AGENT_SESSION_PERSIST_FAILED')
 
     def test_shipped_route_gw_agent_wall_budget_matches_default_timeout(self):
-        # #2281: whole-run wall budget is 1800 s, matching route default_timeout.
+        # #2281 (Owner 2026-11-19): whole-run wall budget is 10800 s (3 hours),
+        # matching route default_timeout; the route max_timeout is 18000 s.
         config = load_route_config()['routes']['gw-agent']
-        self.assertEqual(config['budgets']['max_wall_seconds'], 1800)
+        self.assertEqual(config['budgets']['max_wall_seconds'], 10800)
+        self.assertEqual((config['default_timeout'], config['max_timeout']), (10800, 18000))
         self.assertEqual(config['budgets']['max_wall_seconds'], config['default_timeout'])
         self.assertLessEqual(config['budgets']['max_wall_seconds'], config['max_timeout'])
 

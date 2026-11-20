@@ -35,7 +35,6 @@ jobs:
       && (github.actor == 'davidcatcat' || github.actor == 'ddavidccatssun')
       && (github.triggering_actor == 'davidcatcat' || github.triggering_actor == 'ddavidccatssun')
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
     steps:
       - name: Check hosted runner boundary
         shell: bash

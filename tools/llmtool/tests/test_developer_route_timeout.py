@@ -24,16 +24,22 @@ from llmtool.task_store import TaskStoreConflict
 ROUTES_FILE = Path(__file__).resolve().parents[1] / 'developer-routes.json'
 DRIFT_SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'guidance_drift_check.py'
 ROUTE_NAMES = ('agy', 'claude', 'gw-agent', 'opencode')
-# Every shipped route is long (default 1800, max 3600). The short-route rule
-# (a registry max_timeout of 600) is still checked: SHORT_ROUTES run against a
-# copy of the shipped registry whose entry has the former 600/600 limits.
+# The adapter name of each registry route (DeveloperRoute.name). The registry
+# lookup reads '_' as '-', and error codes are built from the adapter name.
+ADAPTER_NAMES = ('agy', 'claude', 'gw_agent', 'opencode')
+# #2281 (Owner 2026-11-19): every shipped route is long (default 10800 s, 3 hours;
+# max 18000 s, 5 hours). The short-route rule (a registry max_timeout of 600) is
+# still checked: SHORT_ROUTES run against a copy of the shipped registry whose
+# entry has the former 600/600 limits.
 LONG_ROUTES = ROUTE_NAMES
 SHORT_ROUTES = ('agy', 'gw-agent')
 SHORT_LIMITS = {'default_timeout': 600, 'max_timeout': 600}
-EXPECTED_LIMITS = {'agy': (1800, 3600), 'claude': (1800, 3600),
-                   'gw-agent': (1800, 3600), 'opencode': (1800, 3600)}
+ROUTE_DEFAULT = 10800
+ROUTE_MAX = 18000
+EXPECTED_LIMITS = {route: (ROUTE_DEFAULT, ROUTE_MAX) for route in ROUTE_NAMES}
 NOT_INT = ('600', 600.0, 1.5, True, False, [600], {'s': 600}, b'600')
 HARD_CAP = developer_routes.HARD_TIMEOUT_CAP_SECONDS
+OVER_CAP = (18001, 36000)
 
 
 def short_route_config(*routes):
@@ -115,7 +121,7 @@ class ShippedTimeoutTests(unittest.TestCase):
 
     def test_constants_and_exports(self):
         self.assertEqual(developer_routes.DEFAULT_TIMEOUT_SECONDS, 600)
-        self.assertEqual(developer_routes.HARD_TIMEOUT_CAP_SECONDS, 3600)
+        self.assertEqual(developer_routes.HARD_TIMEOUT_CAP_SECONDS, 18000)
         self.assertIn('resolve_route_timeout', developer_routes.__all__)
 
     def test_rule_file_schema_cap_matches_hard_cap(self):
@@ -138,15 +144,15 @@ class ResolveRouteTimeoutTests(unittest.TestCase):
                                   config=self.config if config is None else config)
         self.assertEqual(caught.exception.code, code)
 
-    def test_every_route_defaults_to_1800(self):
+    def test_every_route_defaults_to_10800(self):
         for route in ROUTE_NAMES:
             with self.subTest(route=route):
-                self.assertEqual(resolve_route_timeout(route, config=self.config), 1800)
-                self.assertEqual(resolve_route_timeout(route), 1800)
+                self.assertEqual(resolve_route_timeout(route, config=self.config), 10800)
+                self.assertEqual(resolve_route_timeout(route), 10800)
 
-    def test_long_routes_accept_up_to_3600(self):
+    def test_long_routes_accept_up_to_18000(self):
         for route in LONG_ROUTES:
-            for requested in (1, 600, 601, 1200, 1800, 1801, 3600):
+            for requested in (1, 600, 601, 1200, 1800, 1801, 3600, 3601, 10800, 18000):
                 with self.subTest(route=route, requested=requested):
                     self.assertEqual(
                         resolve_route_timeout(route, requested, config=self.config), requested)
@@ -158,14 +164,14 @@ class ResolveRouteTimeoutTests(unittest.TestCase):
                 with self.subTest(route=route, requested=requested):
                     self.assertEqual(
                         resolve_route_timeout(route, requested, config=config), requested)
-            for requested in (601, 1200, 1800, 3600):
+            for requested in (601, 1200, 1800, 3600, 10800, 18000):
                 with self.subTest(route=route, requested=requested):
                     self.assert_refused(route, requested, 'TIMEOUT_OVER_ROUTE_MAX',
                                         config=config)
 
     def test_above_hard_cap_refused_for_every_route(self):
         for route in ROUTE_NAMES:
-            for requested in (3601, 7200, 10 ** 9):
+            for requested in OVER_CAP + (10 ** 9,):
                 with self.subTest(route=route, requested=requested):
                     self.assert_refused(route, requested, 'TIMEOUT_OVER_HARD_CAP')
 
@@ -182,7 +188,7 @@ class ResolveRouteTimeoutTests(unittest.TestCase):
 
     def test_hand_built_config_limits_are_checked(self):
         for limits in ({'default_timeout': 700, 'max_timeout': 600},
-                       {'default_timeout': 600, 'max_timeout': 3601},
+                       {'default_timeout': 600, 'max_timeout': 18001},
                        {'default_timeout': True, 'max_timeout': 600},
                        {'default_timeout': 600}):
             with self.subTest(limits=limits):
@@ -228,20 +234,20 @@ class LoaderTimeoutTests(unittest.TestCase):
 
     def test_max_above_hard_cap_refused(self):
         for route in ROUTE_NAMES:
-            for maximum in (3601, 7200):
+            for maximum in OVER_CAP:
                 with self.subTest(route=route, maximum=maximum):
                     self.assert_invalid(route, lambda entry, maximum=maximum: entry.update(
                         max_timeout=maximum))
 
     # Bad limit values that JSON can hold: bool, float, str, list, object,
-    # null, zero, negative and above the 3600 hard cap.
+    # null, zero, negative and above the 18000 hard cap.
     JSON_BAD_VALUES = (True, False, 600.0, 1.5, '600', [600], {'s': 600}, None,
-                       0, -1, -600, HARD_CAP + 1, 7200)
+                       0, -1, -600, HARD_CAP + 1, 36000)
     # Bad values JSON cannot hold; checked through the resolver only.
     RESOLVER_ONLY_BAD_VALUES = (b'600',)
 
     def bad_limit_values(self, route, key):
-        """JSON-safe bad values for one key; each breaks 1 <= default <= max <= 3600."""
+        """JSON-safe bad values for one key; each breaks 1 <= default <= max <= 18000."""
         entry = self.shipped['routes'][route]
         if key == 'default_timeout':
             return self.JSON_BAD_VALUES + (entry['max_timeout'] + 1,)  # default > max
@@ -300,7 +306,8 @@ class LoaderTimeoutTests(unittest.TestCase):
 
     def test_valid_limits_load(self):
         for route in ROUTE_NAMES:
-            for default, maximum in ((1, 1), (600, 1800), (1800, 3600), (3600, 3600)):
+            for default, maximum in ((1, 1), (600, 1800), (1800, 3600), (3600, 3600),
+                                     (10800, 18000), (18000, 18000)):
                 with self.subTest(route=route, default=default, maximum=maximum):
                     entry = self.load_with(route, lambda entry, d=default, m=maximum:
                                            entry.update(default_timeout=d,
@@ -360,15 +367,29 @@ class RunRouteTimeoutTests(unittest.TestCase):
     def test_default_and_long_timeout_reach_runner(self):
         for name in LONG_ROUTES:
             with self.subTest(name=name):
-                self.assertEqual(self.run_with(NamedRoute(name)), 1800)
+                self.assertEqual(self.run_with(NamedRoute(name)), 10800)
                 self.assertEqual(self.run_with(NamedRoute(name), timeout=1200), 1200)
                 self.assertEqual(self.run_with(NamedRoute(name), timeout=1800), 1800)
                 self.assertEqual(self.run_with(NamedRoute(name), timeout=3600), 3600)
+                self.assertEqual(self.run_with(NamedRoute(name), timeout=18000), 18000)
+
+    def test_route_run_defaults_to_3h_admits_5h_and_refuses_above(self):
+        # #2281 (Owner 2026-11-19) regression: a route run with no requested
+        # timeout gets 10800 s, a requested 18000 s reaches the runner and a
+        # requested 18001 s is refused before the runner with the existing code.
+        # Adapter names, not registry keys: the gw-agent adapter is named
+        # gw_agent, so its refusal code is GW_AGENT_REQUEST_INVALID.
+        for name in ADAPTER_NAMES:
+            with self.subTest(name=name):
+                self.assertEqual(self.run_with(NamedRoute(name)), 10800)
+                self.assertEqual(self.run_with(NamedRoute(name), timeout=18000), 18000)
+                self.assert_request_refused(NamedRoute(name), 18001, 'TIMEOUT_OVER_HARD_CAP')
 
     def test_adapter_name_maps_to_registry_entry(self):
         self.assertEqual(self.run_with(NamedRoute('CLAUDE'), timeout=3600), 3600)
         # The unregistered baseline would refuse 3600: gw_agent reads gw-agent.
         self.assertEqual(self.run_with(NamedRoute('gw_agent'), timeout=3600), 3600)
+        self.assertEqual(self.run_with(NamedRoute('gw_agent'), timeout=18000), 18000)
         with patch_short_routes('gw-agent'):
             self.assert_request_refused(NamedRoute('gw_agent'), 601, 'TIMEOUT_OVER_ROUTE_MAX')
 
@@ -378,11 +399,12 @@ class RunRouteTimeoutTests(unittest.TestCase):
             self.assert_request_refused(NamedRoute('agy'), 601, 'TIMEOUT_OVER_ROUTE_MAX')
             self.assert_request_refused(NamedRoute('agy'), 1200, 'TIMEOUT_OVER_ROUTE_MAX')
             self.assert_request_refused(NamedRoute('agy'), 3600, 'TIMEOUT_OVER_ROUTE_MAX')
+            self.assert_request_refused(NamedRoute('agy'), 18000, 'TIMEOUT_OVER_ROUTE_MAX')
 
     def test_hard_cap_and_invalid_refused_before_runner(self):
         for name in ('claude', 'agy', 'FAKE'):
             with self.subTest(name=name):
-                for value in (3601, 7200):
+                for value in OVER_CAP:
                     self.assert_request_refused(NamedRoute(name), value, 'TIMEOUT_OVER_HARD_CAP')
                 for value in NOT_INT + (0, -1):
                     self.assert_request_refused(NamedRoute(name), value, 'TIMEOUT_INVALID')
@@ -442,22 +464,23 @@ def timeout_refusals(route, short=False):
 
     short: the route runs under registry_for(route, True) (max_timeout 600).
     """
-    cases = [(3601, 'TIMEOUT_OVER_HARD_CAP'), (7200, 'TIMEOUT_OVER_HARD_CAP'),
+    cases = [(18001, 'TIMEOUT_OVER_HARD_CAP'), (36000, 'TIMEOUT_OVER_HARD_CAP'),
              (0, 'TIMEOUT_INVALID'), (-1, 'TIMEOUT_INVALID'), (True, 'TIMEOUT_INVALID')]
     if short:
         cases += [(601, 'TIMEOUT_OVER_ROUTE_MAX'), (1200, 'TIMEOUT_OVER_ROUTE_MAX'),
-                  (1800, 'TIMEOUT_OVER_ROUTE_MAX'), (3600, 'TIMEOUT_OVER_ROUTE_MAX')]
+                  (1800, 'TIMEOUT_OVER_ROUTE_MAX'), (3600, 'TIMEOUT_OVER_ROUTE_MAX'),
+                  (18000, 'TIMEOUT_OVER_ROUTE_MAX')]
     return cases
 
 
 def timeout_accepted(route, short=False):
     """Requested values the route accepts; None is the route default."""
-    return (None, 1, 600) + (() if short else (1200, 1800, 3600))
+    return (None, 1, 600) + (() if short else (1200, 1800, 3600, 10800, 18000))
 
 
 def timeout_default(short=False):
     """The default a delegate resolves for a shipped or short route."""
-    return 600 if short else 1800
+    return 600 if short else 10800
 
 
 class DelegateTimeoutTests(unittest.TestCase):
@@ -497,7 +520,7 @@ class DelegateTimeoutTests(unittest.TestCase):
             with self.subTest(route=route):
                 self.assertIsNone(parser.parse_args(base).timeout)
                 # The parser only reads an int; the route limits are the resolver's.
-                for value in ('600', '1200', '1800', '1801', '3600', '3601'):
+                for value in ('600', '1200', '1800', '1801', '3600', '3601', '18000', '18001'):
                     self.assertEqual(
                         parser.parse_args(base + ['--timeout', value]).timeout, int(value))
                 for value in ('soon', '1.5', ''):
@@ -595,8 +618,8 @@ class DelegateTimeoutTests(unittest.TestCase):
         return store.developers[0]
 
     def test_opencode_record_carries_resolved_timeout(self):
-        for requested, expected in ((None, 1800), (600, 600), (1200, 1200), (1800, 1800),
-                                    (3600, 3600)):
+        for requested, expected in ((None, 10800), (600, 600), (1200, 1200), (1800, 1800),
+                                    (3600, 3600), (18000, 18000)):
             with self.subTest(requested=requested):
                 developer = self.record_opencode_timeout(requested)
                 self.assertEqual(developer['timeout_seconds'], expected)

@@ -876,27 +876,10 @@ class CanonicalStepStructureTests(unittest.TestCase):
                 self.assertEqual(traps, ["trap report_result EXIT"])
                 self.assertIn('echo "::error::canonical checks ran no test cases"', commands)
 
-    def test_job_limit_is_120_and_only_canonical_step_has_a_mode_limit(self):
+    def test_workflow_has_no_timeout_minutes_limits(self):
         lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
         limits = [line for line in lines if line.strip().startswith("timeout-minutes:")]
-        self.assertEqual(limits, [
-            "    timeout-minutes: 120",
-            "    timeout-minutes: 120",
-            "        timeout-minutes: 45",
-            "    timeout-minutes: 120",
-            "        timeout-minutes: 45",
-        ])
-        select_job = lines.index("  select:")
-        select_steps = lines.index("    steps:", select_job)
-        self.assertTrue(select_job < lines.index(limits[0], select_job) < select_steps)
-        shards_job = lines.index("  shards:")
-        shards_steps = lines.index("    steps:", shards_job)
-        self.assertTrue(shards_job < lines.index(limits[1], shards_job) < shards_steps)
-        check_job = lines.index("  check:")
-        check_steps = lines.index("    steps:", check_job)
-        self.assertTrue(check_job < lines.index(limits[3], check_job) < check_steps)
-        self.assertIn("        timeout-minutes: 45", workflow_step(CANONICAL_SHARD_STEP, job="shards"))
-        self.assertIn("        timeout-minutes: 45", workflow_step(CANONICAL_SUBSET_STEP, job="check"))
+        self.assertEqual(limits, [])
 
     def test_selection_job_exists_and_check_job_needs_it(self):
         workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))

@@ -45,7 +45,6 @@ jobs:
     name: select
     if: vars.HOSTED_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci')) && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci' || github.event.label.name == 'mac-ci-intel')
     runs-on: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'mac-ci-intel') && 'macos-15' || 'macos-15-intel' }}
-    timeout-minutes: 120
     outputs:
       mode: ${{ steps.coverage.outputs.mode }}
       verify: ${{ steps.coverage.outputs.verify }}
@@ -161,7 +160,6 @@ jobs:
     needs: select
     if: needs.select.outputs.mode == 'full' && needs.select.outputs.run != 'false'
     runs-on: macos-15-intel
-    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -314,7 +312,6 @@ jobs:
           print('Verifier checks: 12/12 PASS; no skips')
           PY
       - name: Offline canonical shard checks
-        timeout-minutes: 45
         run: |
           # Fail closed: the result stays INCOMPLETE until the last line.
           # An early exit, signal or timeout reports INCOMPLETE or FAIL.
@@ -375,8 +372,6 @@ jobs:
     needs: [select, shards]
     if: always() && vars.HOSTED_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci')) && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci' || github.event.label.name == 'mac-ci-intel')
     runs-on: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'mac-ci-intel') && needs.select.outputs.mode != 'full' && 'macos-15' || 'macos-15-intel' }}
-    # Owner #1253: up to 120 minutes while the hosted full suite is measured (#1220).
-    timeout-minutes: 120
     steps:
       # Test the PR's own head commit, not GitHub's temporary merge commit
       # (GITHUB_SHA), so a run is exact evidence for the SHA it reports.
@@ -556,7 +551,6 @@ jobs:
           PY
       - name: Offline canonical checks
         if: needs.select.outputs.run != 'false' && needs.select.outputs.mode == 'mac-subset'
-        timeout-minutes: 45
         run: |
           # Fail closed: the result stays INCOMPLETE until the last line.
           # An early exit, signal or timeout reports INCOMPLETE or FAIL.

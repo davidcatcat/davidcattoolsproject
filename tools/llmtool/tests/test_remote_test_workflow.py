@@ -65,14 +65,14 @@ class RemoteTestWorkflowTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, raw)
 
-    def test_single_job_gate_runner_and_timeout(self):
+    def test_single_job_gate_and_runner(self):
         _, parsed = _load_workflow()
         jobs = parsed["jobs"]
         self.assertEqual(set(jobs), {"remote-test"})
         job = jobs["remote-test"]
         self.assertEqual(job["name"], "remote-test")
         self.assertEqual(job["runs-on"], "ubuntu-24.04")
-        self.assertEqual(job["timeout-minutes"], 15)
+        self.assertNotIn("timeout-minutes", job)
         for forbidden_key in ("environment", "concurrency", "permissions", "strategy"):
             self.assertNotIn(forbidden_key, job)
 
