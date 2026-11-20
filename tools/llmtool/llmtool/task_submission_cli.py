@@ -7888,14 +7888,6 @@ def _check_repair_limits(args, store, d6_binding, policy, current_task_id, count
     if count < 2:
         # The original run and repair #1 need no root cause (D1).
         return
-    is_continuation = False
-    if current_task_id is not None and store is not None:
-        try:
-            current_record = store.get(current_task_id)
-            if type(current_record) is dict and current_record.get('continues'):
-                is_continuation = True
-        except Exception:
-            pass
 
     def _parse_stamp(val):
         if isinstance(val, datetime):
@@ -7913,7 +7905,9 @@ def _check_repair_limits(args, store, d6_binding, policy, current_task_id, count
             valid_stamps = [s for s in parsed_stamps if s is not None]
             if valid_stamps:
                 newest_assignment = max(valid_stamps)
-        _check_repair_rca(args, store, d6_binding, newest_assignment, covered=is_continuation)
+        # #2417: whether a continuation's own chain Debug covers it is decided
+        # by the one gate rule in _check_repair_rca, never here.
+        _check_repair_rca(args, store, d6_binding, newest_assignment)
         return
 
     stamps_dict = {}
@@ -7941,12 +7935,160 @@ def _check_repair_limits(args, store, d6_binding, policy, current_task_id, count
     _check_repair_rca(args, store, d6_binding, times[1], covered=True)
 
 
+_DEBUG_GATE_FAMILY = re.compile(r'[a-z0-9._-]{1,64}')
+_DEBUG_GATE_STAMP = '%Y-%m-%dT%H:%M:%SZ'
+
+
+def _debug_gate_stamp(value):
+    """A datetime, or a canonical UTC stamp string as a datetime; else raise."""
+    if isinstance(value, datetime):
+        return value
+    if type(value) is not str:
+        raise ValueError
+    stamp = datetime.strptime(value, _DEBUG_GATE_STAMP)
+    if stamp.strftime(_DEBUG_GATE_STAMP) != value:
+        raise ValueError
+    return stamp
+
+
+def _developer_d6(record):
+    """The D6 a Task's developer record (or its result callback) names, else None."""
+    developer = record.get('developer') if type(record) is dict else None
+    if type(developer) is not dict:
+        return None
+    executor = developer.get('executor_task_id')
+    callback = developer.get('direct_result_callback')
+    if executor is None and type(callback) is dict:
+        executor = callback.get('executor_task_id')
+    return executor
+
+
+def _debug_gate_lineage(store, task_id, high_debug_task):
+    """(chain_ids, is_continuation, predecessor_executors) of the delegated Task.
+
+    The delegated Task's continuation chain, read with chain_records (#2190).
+    An unreadable delegated Task has no chain: only Tasks completed on the
+    delegated D6 can then hold its Debug. A chain in doubt admits only the
+    delegated Task itself and covers nothing.
+    """
+    from . import lineage_counts
+    if task_id is None or store is None:
+        return set(), False, []
+    try:
+        task_record = store.get(task_id)
+    except Exception:
+        return set(), False, []
+    if type(task_record) is not dict:
+        return set(), False, []
+    chain = lineage_counts.chain_records(store, task_record)
+    if chain is None:
+        if high_debug_task != task_id:
+            raise ValueError
+        return {task_id}, False, []
+    chain_ids = {task_id} | {record.get('task_id') for record in chain[1:]}
+    predecessors = []
+    for record in chain[1:]:
+        completion = record.get('completion')
+        executor = (completion.get('executor_task_id')
+                    if type(completion) is dict else None)
+        if executor is None:
+            executor = _developer_d6(record)
+        if type(executor) is str and executor not in predecessors:
+            predecessors.append(executor)
+    return chain_ids, len(chain) > 1, predecessors
+
+
+def _newest_debug_entry_verdict(args, store, high_debug_task, executor_task,
+                                newest_assignment):
+    """(examined_sha, chain_covered) when the newest Debug entry is accepted; else raise.
+
+    #2417 stated rule. Only the newest entry of the named High Debug Task is
+    considered, chosen before any filtering (entries are appended in order;
+    a RESERVED entry is finalized in place). It is accepted only when it is a
+    well-formed, completed RCA_CONFIRMED entry
+      - of the named family, its no-PR mark agreeing with family no-pr
+        (#1943 WP-5: an Issue Debug is family no-pr, a PR Debug never is);
+      - recorded strictly after newest_assignment, the newest counted
+        failure it is meant to cover;
+      - of the delegated Task's lineage: its Task is completed on the
+        delegated D6 or on the D6 of a verified continuation predecessor
+        (#2190), or, the no-PR binding, it is a no-PR entry of a Task with no
+        completion that is in the delegated Task's continuation chain and
+        whose developer record names one of those D6s;
+      - whose D6 name derives from that D6, its attempt and its examined
+        HEAD, and whose report and completion event are bound to the run
+        (_require_bound_high_debug_run).
+    Every other newest entry refuses. chain_covered is True when the
+    delegated Task is a continuation and the Debug is its own chain's
+    (PR #2406, PR #2377): the chain's Debug covers the chain, so the examined
+    HEAD need not be the current D6 head. Otherwise the caller binds the
+    examined HEAD to the current head unless the repair is covered (#2367).
+    """
+    from .high_debug import _d6_name
+    diagnosis_task = store.get(high_debug_task)
+    if type(diagnosis_task) is not dict or diagnosis_task.get('task_id') != high_debug_task:
+        raise ValueError
+    entries = diagnosis_task.get('high_debug')
+    if type(entries) is not list or not entries:
+        raise ValueError
+    entry = entries[-1]
+    if type(entry) is not dict or entry.get('status') != 'RCA_CONFIRMED':
+        raise ValueError
+    family = entry.get('family')
+    if (type(family) is not str or _DEBUG_GATE_FAMILY.fullmatch(family) is None or
+            getattr(args, 'high_debug_family', None) != family):
+        raise ValueError
+    if 'no_pr' in entry and entry['no_pr'] is not True:
+        raise ValueError
+    no_pr = entry.get('no_pr') is True
+    if no_pr != (family == 'no-pr'):
+        raise ValueError
+    if newest_assignment is None:
+        raise ValueError
+    if type(entry.get('recorded_at')) is not str:
+        raise ValueError
+    if _debug_gate_stamp(entry['recorded_at']) <= _debug_gate_stamp(newest_assignment):
+        raise ValueError
+    examined_sha = entry.get('examined_sha')
+    d6 = entry.get('d6')
+    if type(examined_sha) is not str or re.fullmatch(r'[0-9a-f]{40}', examined_sha) is None:
+        raise ValueError
+    if type(d6) is not str or re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', d6) is None:
+        raise ValueError
+    attempt_match = re.search(r'-hd([1-9][0-9]*)-[0-9a-f]{7}\Z', d6)
+    if attempt_match is None:
+        raise ValueError
+    chain_ids, is_continuation, predecessors = _debug_gate_lineage(
+        store, getattr(args, 'task_id', None), high_debug_task)
+    in_chain = high_debug_task in chain_ids
+    completion = diagnosis_task.get('completion')
+    if type(completion) is dict:
+        diagnosis_executor = completion.get('executor_task_id')
+    elif completion is None and no_pr and in_chain:
+        # The no-PR binding: run_high_debug --issue N --family no-pr on a Task
+        # with no completion debugs the D6 its developer record names.
+        diagnosis_executor = _developer_d6(diagnosis_task)
+    else:
+        raise ValueError
+    allowed = ([executor_task] if type(executor_task) is str else []) + predecessors
+    if (type(diagnosis_executor) is not str or diagnosis_executor not in allowed or
+            d6 != _d6_name(diagnosis_executor, int(attempt_match.group(1)), examined_sha)):
+        raise ValueError
+    _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry, executor_task,
+                                  predecessor_executors=predecessors)
+    return examined_sha, is_continuation and in_chain
+
+
 def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=False):
     """Repair #2 and later need a confirmed root cause (packet or High Debug Task).
 
-    covered (#2367, repairs 3 to repair_max): the High Debug was taken before
-    repair #2, so it must be newer than newest_assignment (the run whose FAIL
-    asked for it) but need not be on the current D6 head.
+    The High Debug Task's newest entry must pass _newest_debug_entry_verdict
+    (#2417, one rule for every case). covered (#2367, repairs 3 to
+    repair_max): the High Debug was taken before repair #2, so it must be
+    newer than newest_assignment (the run whose FAIL asked for it) but need
+    not be on the current D6 head; a continuation's own chain Debug is
+    covered the same way. Otherwise the examined HEAD must be the current D6
+    head (DELEGATE_HIGH_DEBUG_HEAD_MOVED).
     """
     executor_task = getattr(args, 'executor_task', None)
     high_debug_task = getattr(args, 'high_debug_task', None)
@@ -7976,113 +8118,13 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
             re.fullmatch(r'[0-9a-f]{32}', high_debug_task) is None):
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID')
     try:
-        diagnosis_task = store.get(high_debug_task)
-        entries = diagnosis_task.get('high_debug')
-        if (type(diagnosis_task) is not dict or
-                diagnosis_task.get('task_id') != high_debug_task or
-                type(entries) is not list or not entries):
-            raise ValueError
-        matching = [e for e in entries if type(e) is dict]
-        if not matching:
-            raise ValueError
-        entry = matching[-1]
-        d6 = entry.get('d6')
-        examined_sha = entry.get('examined_sha')
-        family = entry.get('family')
-        family_arg = getattr(args, 'high_debug_family', None)
-        if (type(family) is not str or
-                re.fullmatch(r'[a-z0-9._-]{1,64}', family) is None or
-                type(family_arg) is not str or
-                re.fullmatch(r'[a-z0-9._-]{1,64}', family_arg) is None or
-                family_arg != family):
-            raise ValueError
-        recorded_at = entry.get('recorded_at')
-        try:
-            recorded_stamp = datetime.strptime(recorded_at, '%Y-%m-%dT%H:%M:%SZ')
-            if recorded_stamp.strftime('%Y-%m-%dT%H:%M:%SZ') != recorded_at:
-                raise ValueError
-        except (TypeError, ValueError):
-            raise ValueError from None
-        if isinstance(newest_assignment, str):
-            try:
-                newest_assignment = datetime.strptime(newest_assignment, '%Y-%m-%dT%H:%M:%SZ')
-            except (TypeError, ValueError):
-                raise ValueError from None
-        if newest_assignment is None or recorded_stamp <= newest_assignment:
-            raise ValueError
-        # High Debug D6 names are derived from their executor D6, attempt
-        # number, and examined HEAD. Recompute the name to bind this entry to
-        # the executor D6 being repaired or a verified continuation predecessor (#2190).
-        from .high_debug import _d6_name
-        match = (re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', d6)
-                 if type(d6) is str else None)
-        attempt_match = (re.search(r'-hd([1-9][0-9]*)-[0-9a-f]{7}\Z', d6)
-                         if match else None)
-        if (entry.get('status') != 'RCA_CONFIRMED' or
-                type(examined_sha) is not str or
-                re.fullmatch(r'[0-9a-f]{40}', examined_sha) is None or
-                attempt_match is None):
-            raise ValueError
-        attempt = int(attempt_match.group(1))
-        task_id = getattr(args, 'task_id', None)
-        predecessor_executors = []
-        is_continuation = False
-        if task_id is not None and store is not None:
-            try:
-                task_record = store.get(task_id)
-            except Exception:
-                task_record = None
-            if type(task_record) is dict:
-                from . import lineage_counts
-                chain = lineage_counts.chain_records(store, task_record)
-                if chain is not None:
-                    chain_ids = {r.get('task_id') for r in chain if type(r) is dict}
-                    if high_debug_task not in chain_ids:
-                        raise ValueError
-                    if task_record.get('continues'):
-                        is_continuation = True
-                    for pred in chain[1:]:
-                        pred_completion = pred.get('completion') if type(pred) is dict else None
-                        pred_executor = (pred_completion.get('executor_task_id')
-                                         if type(pred_completion) is dict else None)
-                        if pred_executor is None and type(pred.get('developer')) is dict:
-                            pdev = pred['developer']
-                            pred_executor = pdev.get('executor_task_id')
-                            if pred_executor is None and type(pdev.get('direct_result_callback')) is dict:
-                                pred_executor = pdev['direct_result_callback'].get('executor_task_id')
-                        if type(pred_executor) is str and pred_executor not in predecessor_executors:
-                            predecessor_executors.append(pred_executor)
-                elif high_debug_task != task_id:
-                    raise ValueError
-        allowed_executors = []
-        if type(executor_task) is str:
-            allowed_executors.append(executor_task)
-        for pe in predecessor_executors:
-            if pe not in allowed_executors:
-                allowed_executors.append(pe)
-        diagnosis_completion = diagnosis_task.get('completion')
-        diagnosis_executor = (diagnosis_completion.get('executor_task_id')
-                              if type(diagnosis_completion) is dict else None)
-        if diagnosis_executor is None and type(diagnosis_task.get('developer')) is dict:
-            dev = diagnosis_task['developer']
-            diagnosis_executor = dev.get('executor_task_id')
-            if diagnosis_executor is None and type(dev.get('direct_result_callback')) is dict:
-                diagnosis_executor = dev['direct_result_callback'].get('executor_task_id')
-        matched_executor = None
-        for candidate in allowed_executors:
-            if (d6 == _d6_name(candidate, attempt, examined_sha) and
-                    diagnosis_executor == candidate):
-                matched_executor = candidate
-                break
-        if matched_executor is None:
-            raise ValueError
-        _require_bound_high_debug_run(
-            diagnosis_task, high_debug_task, entry, executor_task,
-            predecessor_executors=predecessor_executors)
+        examined_sha, chain_covered = _newest_debug_entry_verdict(
+            args, store, high_debug_task, executor_task, newest_assignment)
     except Exception:
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
-    if covered or is_continuation:
-        # #2367 A2: the covering RCA was taken on an earlier head.
+    if covered or chain_covered:
+        # #2367 A2: the covering RCA was taken on an earlier head. #2417: a
+        # continuation's own chain Debug covers the chain the same way.
         return
     if d6_binding is None:
         try:
