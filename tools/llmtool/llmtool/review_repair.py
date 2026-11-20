@@ -489,7 +489,7 @@ def _ci_failure(task, *, executor_task, pr_number, ci_failure):
 
 
 def _claim_family(claim):
-    return claim.get('family', f"pr-{claim.get('pr')}")
+    return claim.get('family', 'prepr' if claim.get('pr') is None else f"pr-{claim.get('pr')}")
 
 
 # EC2 remote-test and CI repairs store their claims in '<base>-ec2' so they keep
@@ -726,7 +726,16 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     # #1816: after the Owner policy, before any claim, Task or D6 write.
     if worker_availability.fresh_quota_fail(store, worker):
         _refuse(worker_availability.REFUSAL_CODE)
-    base_family = f'pr-{pr_number}' if family is None else family
+    if pr_number is None and not test_failure:
+        _refuse('REPAIR_FAMILY_INVALID')
+    if pr_number is None:
+        base_family = 'prepr' if family is None else family
+        if family is not None and family != 'prepr':
+            _refuse('REPAIR_FAMILY_INVALID')
+    else:
+        base_family = f'pr-{pr_number}' if family is None else family
+        if family == 'prepr':
+            _refuse('REPAIR_FAMILY_INVALID')
     if (type(base_family) is not str or
             re.fullmatch(r'[a-z0-9._-]{1,64}', base_family) is None or
             base_family.endswith(EC2_FAMILY_SUFFIX)):

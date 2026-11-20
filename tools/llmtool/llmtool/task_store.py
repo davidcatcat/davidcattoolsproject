@@ -2439,7 +2439,9 @@ def _validate(record, *, strict=True):
                     set(item) - _REVIEW_REPAIR_CLAIM_FIELDS - _REVIEW_REPAIR_OPTIONAL_FIELDS or
                     type(item.get('executor_task')) is not str or
                     not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', item['executor_task']) or
-                    type(item.get('pr')) is not int or not 1 <= item['pr'] <= 999999999 or
+                    (type(item.get('pr')) not in (int, type(None)) or
+                     (type(item.get('pr')) is int and not 1 <= item['pr'] <= 999999999)) or
+                    (item.get('pr') is None and 'family' not in item) or
                     type(item.get('head_sha')) is not str or
                     re.fullmatch(r'[0-9a-f]{40}', item['head_sha']) is None or
                     type(item.get('version')) is not int or not 1 <= item['version'] <= 9999 or
@@ -2467,7 +2469,7 @@ def _validate(record, *, strict=True):
             if identity in identities:
                 _fail('REVIEW_REPAIR_CLAIM_INVALID')
             identities.add(identity)
-            family = item.get('family', f"pr-{item['pr']}")
+            family = item.get('family', 'prepr' if item.get('pr') is None else f"pr-{item['pr']}")
             families.setdefault(family, []).append(item)
         for family_claims in families.values():
             if len(family_claims) > REPAIR_CLAIMS_PER_FAMILY_MAX:
@@ -2487,12 +2489,12 @@ def _validate(record, *, strict=True):
             for position, item in enumerate(family_claims, 1):
                 seen_heads.add(item['head_sha'])
                 if (position >= 3 and item.get('comment_id') is not None and
-                        not item.get('family', f"pr-{item['pr']}").endswith('-ec2') and
+                        not item.get('family', 'prepr' if item.get('pr') is None else f"pr-{item['pr']}").endswith('-ec2') and
                         'high_debug_report_sha256' not in item):
                     _fail('REVIEW_REPAIR_CLAIM_INVALID')
                 if ('high_debug_report_sha256' in item and
                         not any(type(entry) is dict and entry.get('family') ==
-                                item.get('family', f"pr-{item['pr']}") and
+                                item.get('family', 'prepr' if item.get('pr') is None else f"pr-{item['pr']}") and
                                 entry.get('no_pr') is not True and
                                 entry.get('status') == 'RCA_CONFIRMED' and
                                 entry.get('examined_sha') in seen_heads and
@@ -6004,11 +6006,11 @@ class TaskStore:
                             type(added.get('repair_task_id')) is not str or
                             re.fullmatch(r'[0-9a-f]{32}', added['repair_task_id']) is None or
                             sum(1 for item in old_claims
-                                if item.get('family', f"pr-{item.get('pr')}") ==
+                                if item.get('family', 'prepr' if item.get('pr') is None else f"pr-{item.get('pr')}") ==
                                 added.get('family')) >= REPAIR_CLAIMS_PER_FAMILY_MAX or
                             added.get('attempt') != 1 + sum(
                                 1 for item in old_claims
-                                if item.get('family', f"pr-{item.get('pr')}") ==
+                                if item.get('family', 'prepr' if item.get('pr') is None else f"pr-{item.get('pr')}") ==
                                 added.get('family'))):
                         _fail('REVIEW_REPAIR_CLAIM_LIMIT_REACHED')
                 else:

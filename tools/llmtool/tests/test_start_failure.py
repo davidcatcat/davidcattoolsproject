@@ -441,6 +441,8 @@ class RepairPacketEncodingTests(unittest.TestCase):
             dict(base, reviewer_text_excerpt_untrusted_data='x' * 2001),
             dict(base, failed_head='c' * 39),
             dict(base, pr=True),
+            dict(base, pr=None),
+            dict(base, pr=0),
             dict(base, extra='plain'),
             {key: value for key, value in base.items() if key != 'findings_count'},
             ['not', 'a', 'packet'],

@@ -216,12 +216,12 @@ def lineage_counts(store, task, *, base_family, include_successors=False):
         if type(claims) is not list or any(type(item) is not dict for item in claims):
             return _unknown()
         for claim in claims:
-            family = claim.get('family', f"pr-{claim.get('pr')}")
+            family = claim.get('family', 'prepr' if claim.get('pr') is None else f"pr-{claim.get('pr')}")
             legacy = ec2_claim_kind(claim) == 'LEGACY'
             if local:
                 is_review = family == base_family
-                is_test = (family == base_family + _EC2_SUFFIX or
-                           (family == base_family and legacy))
+                is_test = (family in (base_family + _EC2_SUFFIX, 'prepr' + _EC2_SUFFIX) or
+                           (family in (base_family, 'prepr') and legacy))
             elif type(family) is not str:
                 return _unknown()
             else:
@@ -268,7 +268,7 @@ def chain_review_repairs(store, task):
         for claim in claims:
             if type(claim) is not dict:
                 return UNKNOWN
-            family = claim.get('family', f"pr-{claim.get('pr')}")
+            family = claim.get('family', 'prepr' if claim.get('pr') is None else f"pr-{claim.get('pr')}")
             if type(family) is not str:
                 return UNKNOWN
             if not family.endswith(_EC2_SUFFIX):

@@ -421,6 +421,14 @@ class TaskRetryStartTests(unittest.TestCase):
         self.assertEqual(start_failure.decode_repair_packet(record['repair_packet']), packet)
         self.assertIn(record['repair_packet'], self.task_json(route.requests[0]))
 
+    def test_prepr_repair_packet_with_null_pr_is_stored_and_decoded(self):
+        packet, _base = review_packet('b' * 32, version=0, comment_id=0)
+        packet['pr'] = None
+        task = self.store.add(task_record())
+        record, route = self.first_delegate(task['task_id'], packet=packet)
+        self.assertEqual(start_failure.decode_repair_packet(record['repair_packet']), packet)
+        self.assertIn('"pr":null', record['repair_packet'])
+
     def test_delegate_without_packet_writes_no_repair_packet(self):
         record = self.started_task()
         self.assertNotIn('repair_packet', record)

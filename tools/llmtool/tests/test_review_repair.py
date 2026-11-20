@@ -942,7 +942,8 @@ class ReviewRepairTests(unittest.TestCase):
 
     def test_invalid_repair_families_are_refused_before_any_write(self):
         for receipt, family in ((None, EC2_FAMILY), (_receipt(), EC2_FAMILY),
-                                (None, 'network-ec2'), (_receipt(), 'x' * 61)):
+                                (None, 'network-ec2'), (_receipt(), 'x' * 61),
+                                (None, 'prepr'), (_receipt(), 'prepr')):
             with self.subTest(receipt=receipt is not None, family=family):
                 self._assert_refused('REPAIR_FAMILY_INVALID', family=family,
                                      remote_test_receipt=receipt)
@@ -951,6 +952,11 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(self.dispatch(family='x' * 61)['claim']['family'], 'x' * 61)
         result = self.dispatch(family='y' * 60, remote_test_receipt=_receipt())
         self.assertEqual(result['claim']['family'], 'y' * 60 + '-ec2')
+
+    def test_prepr_ec2_failure_without_pr_dispatches_in_prepr_ec2_family(self):
+        result = self.dispatch(pr_number=None, remote_test_receipt=_receipt())
+        self.assertEqual(result['claim']['family'], 'prepr-ec2')
+        self.assertIsNone(result['claim']['pr'])
 
     def test_review_and_ec2_claims_with_same_identity_refuse_without_provider_call(self):
         ec2 = self._stored_claim(attempt=1, family=EC2_FAMILY, comment_id=None,

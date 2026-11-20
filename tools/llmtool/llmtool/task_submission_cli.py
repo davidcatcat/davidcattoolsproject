@@ -5305,7 +5305,8 @@ def _validate_repair_packet(value):
             set(value) - fields - optional or
             type(value.get('task')) is not str or
             type(value.get('executor_task')) is not str or
-            type(value.get('pr')) is not int or
+            (type(value.get('pr')) not in (int, type(None)) or
+             (type(value.get('pr')) is int and not 1 <= value['pr'] <= 999999999)) or
             type(value.get('failed_head')) is not str or
             len(value['failed_head']) != 40 or
             type(value.get('version')) is not int or

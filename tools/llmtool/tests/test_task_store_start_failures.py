@@ -453,6 +453,15 @@ class StartFailureStoreTests(unittest.TestCase):
         task_id = self._failed_task(repair_packet=text)
         saved = self.store.get(task_id)
         self.assertEqual(saved['repair_packet'], text)
+
+    def test_prepr_repair_packet_with_null_pr_is_accepted_and_round_trips(self):
+        packet = dict(repair_packet(), pr=None)
+        text = start_failure.canonical(packet)
+        self.assertIn('"pr":null', text)
+        task_id = self._failed_task(repair_packet=text)
+        saved = self.store.get(task_id)
+        self.assertEqual(saved['repair_packet'], text)
+        self.assertEqual(start_failure.decode_repair_packet(saved['repair_packet']), packet)
         self.assertEqual(start_failure.decode_repair_packet(saved['repair_packet']), packet)
 
     def test_packet_byte_bound(self):

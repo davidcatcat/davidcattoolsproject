@@ -836,8 +836,9 @@ def _test_fail_count(record, number, store=None):
     own, on any PR, as review_repair does under the chain lock. A chain link or
     store scan in doubt (or no store) gives repair_policy.UNKNOWN, never 0.
     """
+    base_family = 'prepr' if number is None else f'pr-{number}'
     return lineage_counts.lineage_counts(
-        store, record, base_family=f'pr-{number}', include_successors=True)['test_fails']
+        store, record, base_family=base_family, include_successors=True)['test_fails']
 
 
 def _live_repair_claim(record, head):

@@ -831,6 +831,16 @@ class ReviewRepairChainTests(unittest.TestCase):
         self.calls.clear()
         self.refused(store, 'REPAIR_LIMIT_REACHED', remote_test_receipt=_receipt())
 
+    def test_prepr_ec2_claim_counted_and_retained_on_pr(self):
+        prepr = ec2_claim('prepr-ec2', OLD_HEAD, pr=None)
+        store = self.store([], review_repair_claims=[prepr])
+        counts_prepr = lineage_counts.lineage_counts(
+            store, store.records[TASK], base_family='prepr')
+        self.assertEqual(counts_prepr['test_fails'], 1)
+        counts_pr = lineage_counts.lineage_counts(
+            store, store.records[TASK], base_family=f'pr-{PR}')
+        self.assertEqual(counts_pr['test_fails'], 1)
+
     def test_gate_reads_chain_counts(self):
         packet = {'reviewer_text_excerpt_untrusted_data': _comment()['body'],
                   'failed_head': HEAD, 'pr': PR}

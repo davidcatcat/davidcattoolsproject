@@ -172,7 +172,8 @@ def repair_packet_shape_ok(value):
             set(value) - _PACKET_FIELDS - _PACKET_HIGH_DEBUG_FIELDS or
             type(value.get('task')) is not str or
             type(value.get('executor_task')) is not str or
-            type(value.get('pr')) is not int or
+            (type(value.get('pr')) not in (int, type(None)) or
+             (type(value.get('pr')) is int and not 1 <= value['pr'] <= 999999999)) or
             type(value.get('failed_head')) is not str or
             len(value['failed_head']) != 40 or
             type(value.get('version')) is not int or
@@ -293,7 +294,7 @@ def _matches(packet, claim, root):
             packet.get('high_debug_report_sha256') != report_sha256 or
             'high_debug_report_untrusted_data' not in packet):
         return False
-    family = claim.get('family', f"pr-{claim.get('pr')}")
+    family = claim.get('family', 'prepr' if claim.get('pr') is None else f"pr-{claim.get('pr')}")
     entries = root.get('high_debug', [])
     if type(entries) is not list:
         return False
