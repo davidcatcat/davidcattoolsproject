@@ -5,7 +5,8 @@ accepted by that lineage's next continuation dispatch.
 A2: a PR continuation whose family already has a covering RCA_CONFIRMED is
 accepted the same way review repair accepts it, without a new Debug.
 A3: refusals stay for a wrong Task or lineage, an unfinished or unconfirmed
-Debug, a wrong family, HEAD or binding, a stale record, and an unauthorized dispatch.
+Debug, a wrong family, HEAD or binding, a stale record, an unauthorized dispatch,
+and a Debug recorded before a later counted failure (CWE-863).
 A4/A5: regression tests reproduce the real cases and verify repair limits and counts.
 Test data rule (Owner #763 A): no credential-shaped strings.
 """
@@ -135,18 +136,29 @@ class NoPrDebugAndCoveringRcaDispatchTests(unittest.TestCase):
     # -- A1: Completed no-PR AI Debug accepted on continuation dispatch ----
 
     def test_no_pr_ai_debug_accepted_by_lineage_continuation_dispatch(self):
-        pred_task_id = _hex32('task-nopr-pred')
+        pred1_task_id = _hex32('task-nopr-pred1')
+        pred2_task_id = _hex32('task-nopr-pred2')
         cont_task_id = _hex32('task-nopr-cont')
 
         entry, event = self._make_debug_entry(
-            pred_task_id, self.head_1, 'no-pr', no_pr=True,
+            pred2_task_id, self.head_1, 'no-pr', no_pr=True,
             recorded_at='2026-11-20T10:30:00Z')
 
-        pred_record = {
-            'task_id': pred_task_id,
+        pred1_record = {
+            'task_id': pred1_task_id,
             'developer': {
                 'executor_task_id': self.executor_d6,
                 'created_at': '2026-11-20T10:00:00Z',
+                'state': 'DEVELOPER_RESPONDED',
+            },
+        }
+
+        pred2_record = {
+            'task_id': pred2_task_id,
+            'continues': pred1_task_id,
+            'developer': {
+                'executor_task_id': self.executor_d6,
+                'created_at': '2026-11-20T10:15:00Z',
                 'state': 'DEVELOPER_RESPONDED',
             },
             'high_debug': [entry],
@@ -155,7 +167,7 @@ class NoPrDebugAndCoveringRcaDispatchTests(unittest.TestCase):
 
         cont_record = {
             'task_id': cont_task_id,
-            'continues': pred_task_id,
+            'continues': pred2_task_id,
             'developer': {
                 'executor_task_id': self.executor_d6,
                 'created_at': '2026-11-20T11:00:00Z',
@@ -163,11 +175,11 @@ class NoPrDebugAndCoveringRcaDispatchTests(unittest.TestCase):
             },
         }
 
-        store = _Store(pred_record, cont_record)
+        store = _Store(pred1_record, pred2_record, cont_record)
         args = SimpleNamespace(
             task_id=cont_task_id,
             executor_task=self.executor_d6,
-            high_debug_task=pred_task_id,
+            high_debug_task=pred2_task_id,
             high_debug_family='no-pr',
             high_debug_ref='https://github.com/davidcatcat/davidcattoolsproject/issues/1886#issuecomment-7017744285',
             repair_packet=None,
@@ -178,21 +190,22 @@ class NoPrDebugAndCoveringRcaDispatchTests(unittest.TestCase):
             SimpleNamespace(head=self.head_1)
         )
         policy = {'repair_max': 4, 'test_fail_max': 5}
-        counted = [pred_task_id, cont_task_id]
+        counted = [pred1_task_id, pred2_task_id]
         stamps = {
-            pred_task_id: '2026-11-20T10:00:00Z',
-            cont_task_id: '2026-11-20T11:00:00Z',
+            pred1_task_id: '2026-11-20T10:00:00Z',
+            pred2_task_id: '2026-11-20T10:15:00Z',
         }
 
         # Should complete without raising DELEGATE_HIGH_DEBUG_TASK_INVALID
         cli._check_repair_limits(
             args, store, d6_binding, policy, cont_task_id,
-            counted, set(), set(), stamps[cont_task_id], stamps=stamps)
+            counted, set(), set(), stamps[pred2_task_id], stamps=stamps)
 
     # -- A2: PR continuation with covering RCA accepted without new debug --
 
     def test_pr_continuation_covering_rca_accepted_without_new_debug_or_exact_head(self):
         root_task_id = _hex32('task-pr-root')
+        pred2_task_id = _hex32('task-pr-pred2')
         cont_task_id = _hex32('task-pr-cont')
 
         # The covering RCA was examined at head_1
@@ -211,16 +224,26 @@ class NoPrDebugAndCoveringRcaDispatchTests(unittest.TestCase):
             'completion_events': [event],
         }
 
+        pred2_record = {
+            'task_id': pred2_task_id,
+            'continues': root_task_id,
+            'completion': {'executor_task_id': self.executor_d6},
+            'developer': {
+                'executor_task_id': self.executor_d6,
+                'created_at': '2026-11-20T10:15:00Z',
+            },
+        }
+
         cont_record = {
             'task_id': cont_task_id,
-            'continues': root_task_id,
+            'continues': pred2_task_id,
             'developer': {
                 'executor_task_id': self.executor_d6,
                 'created_at': '2026-11-20T11:00:00Z',
             },
         }
 
-        store = _Store(root_record, cont_record)
+        store = _Store(root_record, pred2_record, cont_record)
         args = SimpleNamespace(
             task_id=cont_task_id,
             executor_task=self.executor_d6,
@@ -236,26 +259,28 @@ class NoPrDebugAndCoveringRcaDispatchTests(unittest.TestCase):
             SimpleNamespace(head=self.head_2)
         )
         policy = {'repair_max': 4, 'test_fail_max': 5}
-        counted = [root_task_id, cont_task_id]
+        counted = [root_task_id, pred2_task_id]
         stamps = {
             root_task_id: '2026-11-20T10:00:00Z',
-            cont_task_id: '2026-11-20T11:00:00Z',
+            pred2_task_id: '2026-11-20T10:15:00Z',
         }
 
         # Must accept covering RCA without demanding a new Debug on head_2
         cli._check_repair_limits(
             args, store, d6_binding, policy, cont_task_id,
-            counted, set(), set(), stamps[cont_task_id], stamps=stamps)
+            counted, set(), set(), stamps[pred2_task_id], stamps=stamps)
 
     # -- A3: Refusals stay for invalid conditions -----------------------
 
     def test_refusal_for_unrelated_lineage_task(self):
-        pred_task_id = _hex32('task-pred')
+        pred1_task_id = _hex32('task-pred1')
+        pred2_task_id = _hex32('task-pred2')
         cont_task_id = _hex32('task-cont')
         unrelated_task_id = _hex32('task-unrelated')
 
         entry, event = self._make_debug_entry(
-            unrelated_task_id, self.head_1, 'no-pr', no_pr=True)
+            unrelated_task_id, self.head_1, 'no-pr', no_pr=True,
+            recorded_at='2026-11-20T10:30:00Z')
 
         unrelated_record = {
             'task_id': unrelated_task_id,
@@ -263,17 +288,22 @@ class NoPrDebugAndCoveringRcaDispatchTests(unittest.TestCase):
             'high_debug': [entry],
             'completion_events': [event],
         }
-        pred_record = {
-            'task_id': pred_task_id,
+        pred1_record = {
+            'task_id': pred1_task_id,
             'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T10:00:00Z'},
+        }
+        pred2_record = {
+            'task_id': pred2_task_id,
+            'continues': pred1_task_id,
+            'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T10:15:00Z'},
         }
         cont_record = {
             'task_id': cont_task_id,
-            'continues': pred_task_id,
+            'continues': pred2_task_id,
             'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T11:00:00Z'},
         }
 
-        store = _Store(unrelated_record, pred_record, cont_record)
+        store = _Store(unrelated_record, pred1_record, pred2_record, cont_record)
         args = SimpleNamespace(
             task_id=cont_task_id,
             executor_task=self.executor_d6,
@@ -284,91 +314,105 @@ class NoPrDebugAndCoveringRcaDispatchTests(unittest.TestCase):
         )
         d6_binding = (SimpleNamespace(result_sha=self.head_1), SimpleNamespace(head=self.head_1))
         policy = {'repair_max': 4, 'test_fail_max': 5}
-        counted = [pred_task_id, cont_task_id]
-        stamps = {pred_task_id: '2026-11-20T10:00:00Z', cont_task_id: '2026-11-20T11:00:00Z'}
+        counted = [pred1_task_id, pred2_task_id]
+        stamps = {pred1_task_id: '2026-11-20T10:00:00Z', pred2_task_id: '2026-11-20T10:15:00Z'}
 
         with self.assertRaises(LLMToolError) as ctx:
             cli._check_repair_limits(
                 args, store, d6_binding, policy, cont_task_id,
-                counted, set(), set(), stamps[cont_task_id], stamps=stamps)
+                counted, set(), set(), stamps[pred2_task_id], stamps=stamps)
         self.assertIn('DELEGATE_HIGH_DEBUG_TASK_INVALID', str(ctx.exception))
 
     def test_refusal_for_unconfirmed_debug_status(self):
-        pred_task_id = _hex32('task-pred')
+        pred1_task_id = _hex32('task-pred1')
+        pred2_task_id = _hex32('task-pred2')
         cont_task_id = _hex32('task-cont')
 
         entry, event = self._make_debug_entry(
-            pred_task_id, self.head_1, 'no-pr', status='RCA_UNCONFIRMED', no_pr=True)
+            pred2_task_id, self.head_1, 'no-pr', status='RCA_UNCONFIRMED', no_pr=True,
+            recorded_at='2026-11-20T10:30:00Z')
 
-        pred_record = {
-            'task_id': pred_task_id,
+        pred1_record = {
+            'task_id': pred1_task_id,
             'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T10:00:00Z'},
+        }
+        pred2_record = {
+            'task_id': pred2_task_id,
+            'continues': pred1_task_id,
+            'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T10:15:00Z'},
             'high_debug': [entry],
             'completion_events': [event],
         }
         cont_record = {
             'task_id': cont_task_id,
-            'continues': pred_task_id,
+            'continues': pred2_task_id,
             'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T11:00:00Z'},
         }
 
-        store = _Store(pred_record, cont_record)
+        store = _Store(pred1_record, pred2_record, cont_record)
         args = SimpleNamespace(
             task_id=cont_task_id,
             executor_task=self.executor_d6,
-            high_debug_task=pred_task_id,
+            high_debug_task=pred2_task_id,
             high_debug_family='no-pr',
             high_debug_ref='https://github.com/davidcatcat/davidcattoolsproject/issues/1886#issuecomment-7017744285',
             repair_packet=None,
         )
         d6_binding = (SimpleNamespace(result_sha=self.head_1), SimpleNamespace(head=self.head_1))
         policy = {'repair_max': 4, 'test_fail_max': 5}
-        counted = [pred_task_id, cont_task_id]
-        stamps = {pred_task_id: '2026-11-20T10:00:00Z', cont_task_id: '2026-11-20T11:00:00Z'}
+        counted = [pred1_task_id, pred2_task_id]
+        stamps = {pred1_task_id: '2026-11-20T10:00:00Z', pred2_task_id: '2026-11-20T10:15:00Z'}
 
         with self.assertRaises(LLMToolError) as ctx:
             cli._check_repair_limits(
                 args, store, d6_binding, policy, cont_task_id,
-                counted, set(), set(), stamps[cont_task_id], stamps=stamps)
+                counted, set(), set(), stamps[pred2_task_id], stamps=stamps)
         self.assertIn('DELEGATE_HIGH_DEBUG_TASK_INVALID', str(ctx.exception))
 
     def test_refusal_for_wrong_family(self):
-        pred_task_id = _hex32('task-pred')
+        pred1_task_id = _hex32('task-pred1')
+        pred2_task_id = _hex32('task-pred2')
         cont_task_id = _hex32('task-cont')
 
         entry, event = self._make_debug_entry(
-            pred_task_id, self.head_1, 'expected-family', no_pr=True)
+            pred2_task_id, self.head_1, 'expected-family', no_pr=True,
+            recorded_at='2026-11-20T10:30:00Z')
 
-        pred_record = {
-            'task_id': pred_task_id,
+        pred1_record = {
+            'task_id': pred1_task_id,
             'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T10:00:00Z'},
+        }
+        pred2_record = {
+            'task_id': pred2_task_id,
+            'continues': pred1_task_id,
+            'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T10:15:00Z'},
             'high_debug': [entry],
             'completion_events': [event],
         }
         cont_record = {
             'task_id': cont_task_id,
-            'continues': pred_task_id,
+            'continues': pred2_task_id,
             'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T11:00:00Z'},
         }
 
-        store = _Store(pred_record, cont_record)
+        store = _Store(pred1_record, pred2_record, cont_record)
         args = SimpleNamespace(
             task_id=cont_task_id,
             executor_task=self.executor_d6,
-            high_debug_task=pred_task_id,
+            high_debug_task=pred2_task_id,
             high_debug_family='wrong-family',
             high_debug_ref='https://github.com/davidcatcat/davidcattoolsproject/issues/1886#issuecomment-7017744285',
             repair_packet=None,
         )
         d6_binding = (SimpleNamespace(result_sha=self.head_1), SimpleNamespace(head=self.head_1))
         policy = {'repair_max': 4, 'test_fail_max': 5}
-        counted = [pred_task_id, cont_task_id]
-        stamps = {pred_task_id: '2026-11-20T10:00:00Z', cont_task_id: '2026-11-20T11:00:00Z'}
+        counted = [pred1_task_id, pred2_task_id]
+        stamps = {pred1_task_id: '2026-11-20T10:00:00Z', pred2_task_id: '2026-11-20T10:15:00Z'}
 
         with self.assertRaises(LLMToolError) as ctx:
             cli._check_repair_limits(
                 args, store, d6_binding, policy, cont_task_id,
-                counted, set(), set(), stamps[cont_task_id], stamps=stamps)
+                counted, set(), set(), stamps[pred2_task_id], stamps=stamps)
         self.assertIn('DELEGATE_HIGH_DEBUG_TASK_INVALID', str(ctx.exception))
 
     def test_refusal_for_head_moved_on_non_continuation(self):
@@ -439,125 +483,269 @@ class NoPrDebugAndCoveringRcaDispatchTests(unittest.TestCase):
         self.assertIn('DELEGATE_HIGH_DEBUG_TASK_REQUIRED', str(ctx.exception))
 
     def test_refusal_for_stale_debug_record(self):
-        pred_task_id = _hex32('task-pred')
+        pred1_task_id = _hex32('task-pred1')
+        pred2_task_id = _hex32('task-pred2')
         cont_task_id = _hex32('task-cont')
 
         # Recorded at 09:30:00, which is older than predecessor created at 10:00:00
         entry, event = self._make_debug_entry(
-            pred_task_id, self.head_1, 'no-pr', no_pr=True,
+            pred2_task_id, self.head_1, 'no-pr', no_pr=True,
             recorded_at='2026-11-20T09:30:00Z')
 
-        pred_record = {
-            'task_id': pred_task_id,
+        pred1_record = {
+            'task_id': pred1_task_id,
             'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T10:00:00Z'},
+        }
+        pred2_record = {
+            'task_id': pred2_task_id,
+            'continues': pred1_task_id,
+            'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T10:15:00Z'},
             'high_debug': [entry],
             'completion_events': [event],
         }
         cont_record = {
             'task_id': cont_task_id,
-            'continues': pred_task_id,
+            'continues': pred2_task_id,
             'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T11:00:00Z'},
         }
 
-        store = _Store(pred_record, cont_record)
+        store = _Store(pred1_record, pred2_record, cont_record)
         args = SimpleNamespace(
             task_id=cont_task_id,
             executor_task=self.executor_d6,
-            high_debug_task=pred_task_id,
+            high_debug_task=pred2_task_id,
             high_debug_family='no-pr',
             high_debug_ref='https://github.com/davidcatcat/davidcattoolsproject/issues/1886#issuecomment-7017744285',
             repair_packet=None,
         )
         d6_binding = (SimpleNamespace(result_sha=self.head_1), SimpleNamespace(head=self.head_1))
         policy = {'repair_max': 4, 'test_fail_max': 5}
-        counted = [pred_task_id, cont_task_id]
-        stamps = {pred_task_id: '2026-11-20T10:00:00Z', cont_task_id: '2026-11-20T11:00:00Z'}
+        counted = [pred1_task_id, pred2_task_id]
+        stamps = {pred1_task_id: '2026-11-20T10:00:00Z', pred2_task_id: '2026-11-20T10:15:00Z'}
 
         with self.assertRaises(LLMToolError) as ctx:
             cli._check_repair_limits(
                 args, store, d6_binding, policy, cont_task_id,
-                counted, set(), set(), stamps[cont_task_id], stamps=stamps)
+                counted, set(), set(), stamps[pred2_task_id], stamps=stamps)
         self.assertIn('DELEGATE_HIGH_DEBUG_TASK_INVALID', str(ctx.exception))
 
     def test_refusal_for_invalid_high_debug_ref(self):
-        pred_task_id = _hex32('task-pred')
+        pred1_task_id = _hex32('task-pred1')
+        pred2_task_id = _hex32('task-pred2')
         cont_task_id = _hex32('task-cont')
 
         entry, event = self._make_debug_entry(
-            pred_task_id, self.head_1, 'no-pr', no_pr=True)
+            pred2_task_id, self.head_1, 'no-pr', no_pr=True,
+            recorded_at='2026-11-20T10:30:00Z')
 
-        pred_record = {
-            'task_id': pred_task_id,
+        pred1_record = {
+            'task_id': pred1_task_id,
             'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T10:00:00Z'},
+        }
+        pred2_record = {
+            'task_id': pred2_task_id,
+            'continues': pred1_task_id,
+            'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T10:15:00Z'},
             'high_debug': [entry],
             'completion_events': [event],
         }
         cont_record = {
             'task_id': cont_task_id,
-            'continues': pred_task_id,
+            'continues': pred2_task_id,
             'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T11:00:00Z'},
         }
 
-        store = _Store(pred_record, cont_record)
+        store = _Store(pred1_record, pred2_record, cont_record)
         args = SimpleNamespace(
             task_id=cont_task_id,
             executor_task=self.executor_d6,
-            high_debug_task=pred_task_id,
+            high_debug_task=pred2_task_id,
             high_debug_family='no-pr',
             high_debug_ref='https://github.com/other-org/other-repo/issues/1886#issuecomment-7017744285',
             repair_packet=None,
         )
         d6_binding = (SimpleNamespace(result_sha=self.head_1), SimpleNamespace(head=self.head_1))
         policy = {'repair_max': 4, 'test_fail_max': 5}
-        counted = [pred_task_id, cont_task_id]
-        stamps = {pred_task_id: '2026-11-20T10:00:00Z', cont_task_id: '2026-11-20T11:00:00Z'}
+        counted = [pred1_task_id, pred2_task_id]
+        stamps = {pred1_task_id: '2026-11-20T10:00:00Z', pred2_task_id: '2026-11-20T10:15:00Z'}
 
         with self.assertRaises(LLMToolError) as ctx:
             cli._check_repair_limits(
                 args, store, d6_binding, policy, cont_task_id,
-                counted, set(), set(), stamps[cont_task_id], stamps=stamps)
+                counted, set(), set(), stamps[pred2_task_id], stamps=stamps)
         self.assertIn('DELEGATE_HIGH_DEBUG_REF_INVALID', str(ctx.exception))
 
     def test_refusal_for_wrong_d6_binding(self):
-        pred_task_id = _hex32('task-pred')
+        pred1_task_id = _hex32('task-pred1')
+        pred2_task_id = _hex32('task-pred2')
         cont_task_id = _hex32('task-cont')
 
         entry, event = self._make_debug_entry(
-            pred_task_id, self.head_1, 'no-pr', no_pr=True)
+            pred2_task_id, self.head_1, 'no-pr', no_pr=True,
+            recorded_at='2026-11-20T10:30:00Z')
         # Entry points to foreign D6 name
         entry['d6'] = _d6_name('other-executor-task', 1, self.head_1)
 
-        pred_record = {
-            'task_id': pred_task_id,
+        pred1_record = {
+            'task_id': pred1_task_id,
             'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T10:00:00Z'},
+        }
+        pred2_record = {
+            'task_id': pred2_task_id,
+            'continues': pred1_task_id,
+            'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T10:15:00Z'},
             'high_debug': [entry],
             'completion_events': [event],
         }
         cont_record = {
             'task_id': cont_task_id,
-            'continues': pred_task_id,
+            'continues': pred2_task_id,
             'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T11:00:00Z'},
         }
 
-        store = _Store(pred_record, cont_record)
+        store = _Store(pred1_record, pred2_record, cont_record)
         args = SimpleNamespace(
             task_id=cont_task_id,
             executor_task=self.executor_d6,
-            high_debug_task=pred_task_id,
+            high_debug_task=pred2_task_id,
             high_debug_family='no-pr',
             high_debug_ref='https://github.com/davidcatcat/davidcattoolsproject/issues/1886#issuecomment-7017744285',
             repair_packet=None,
         )
         d6_binding = (SimpleNamespace(result_sha=self.head_1), SimpleNamespace(head=self.head_1))
         policy = {'repair_max': 4, 'test_fail_max': 5}
-        counted = [pred_task_id, cont_task_id]
-        stamps = {pred_task_id: '2026-11-20T10:00:00Z', cont_task_id: '2026-11-20T11:00:00Z'}
+        counted = [pred1_task_id, pred2_task_id]
+        stamps = {pred1_task_id: '2026-11-20T10:00:00Z', pred2_task_id: '2026-11-20T10:15:00Z'}
 
         with self.assertRaises(LLMToolError) as ctx:
             cli._check_repair_limits(
                 args, store, d6_binding, policy, cont_task_id,
-                counted, set(), set(), stamps[cont_task_id], stamps=stamps)
+                counted, set(), set(), stamps[pred2_task_id], stamps=stamps)
         self.assertIn('DELEGATE_HIGH_DEBUG_TASK_INVALID', str(ctx.exception))
+
+    def test_refusal_for_debug_recorded_before_later_counted_failure(self):
+        """CWE-863: a Debug recorded before a later counted failure must not authorize repairing it."""
+        pred1_task_id = _hex32('task-order-pred1')
+        pred2_task_id = _hex32('task-order-pred2')
+        cont_task_id = _hex32('task-order-cont')
+
+        # Debug was recorded at 10:30:00Z (after pred1 at 10:00:00Z, but before pred2 at 11:00:00Z)
+        entry, event = self._make_debug_entry(
+            pred1_task_id, self.head_1, 'no-pr', no_pr=True,
+            recorded_at='2026-11-20T10:30:00Z')
+
+        pred1_record = {
+            'task_id': pred1_task_id,
+            'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T10:00:00Z'},
+            'high_debug': [entry],
+            'completion_events': [event],
+        }
+        pred2_record = {
+            'task_id': pred2_task_id,
+            'continues': pred1_task_id,
+            'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T11:00:00Z'},
+        }
+        cont_record = {
+            'task_id': cont_task_id,
+            'continues': pred2_task_id,
+            'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T11:30:00Z'},
+        }
+
+        store = _Store(pred1_record, pred2_record, cont_record)
+        args = SimpleNamespace(
+            task_id=cont_task_id,
+            executor_task=self.executor_d6,
+            high_debug_task=pred1_task_id,
+            high_debug_family='no-pr',
+            high_debug_ref='https://github.com/davidcatcat/davidcattoolsproject/issues/1886#issuecomment-7017744285',
+            repair_packet=None,
+        )
+        d6_binding = (SimpleNamespace(result_sha=self.head_1), SimpleNamespace(head=self.head_1))
+        policy = {'repair_max': 4, 'test_fail_max': 5}
+        counted = [pred1_task_id, pred2_task_id]
+        stamps = {pred1_task_id: '2026-11-20T10:00:00Z', pred2_task_id: '2026-11-20T11:00:00Z'}
+
+        # Debug at 10:30:00Z is before pred2 at 11:00:00Z; must be refused
+        with self.assertRaises(LLMToolError) as ctx:
+            cli._check_repair_limits(
+                args, store, d6_binding, policy, cont_task_id,
+                counted, set(), set(), stamps[pred2_task_id], stamps=stamps)
+        self.assertIn('DELEGATE_HIGH_DEBUG_TASK_INVALID', str(ctx.exception))
+
+    def test_count_greater_than_two_covering_rca_ordering(self):
+        """Repairs 3+ accept covering RCA newer than times[1], but refuse one recorded earlier."""
+        root_task_id = _hex32('task-root')
+        run2_task_id = _hex32('task-run2')
+        run3_task_id = _hex32('task-run3')
+        cont_task_id = _hex32('task-cont-3')
+
+        # Debug recorded at 10:10:00Z (before run2 at 10:15:00Z)
+        early_entry, early_event = self._make_debug_entry(
+            root_task_id, self.head_1, 'family-cov', no_pr=False,
+            recorded_at='2026-11-20T10:10:00Z')
+
+        # Covering Debug recorded at 10:20:00Z (after run2 at 10:15:00Z, before run3 at 10:45:00Z)
+        covering_entry, covering_event = self._make_debug_entry(
+            root_task_id, self.head_1, 'family-cov', no_pr=False,
+            recorded_at='2026-11-20T10:20:00Z')
+
+        def build_store(entry, event):
+            root_rec = {
+                'task_id': root_task_id,
+                'completion': {'executor_task_id': self.executor_d6},
+                'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T10:00:00Z'},
+                'high_debug': [entry],
+                'completion_events': [event],
+            }
+            run2_rec = {
+                'task_id': run2_task_id,
+                'continues': root_task_id,
+                'completion': {'executor_task_id': self.executor_d6},
+                'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T10:15:00Z'},
+            }
+            run3_rec = {
+                'task_id': run3_task_id,
+                'continues': run2_task_id,
+                'completion': {'executor_task_id': self.executor_d6},
+                'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T10:45:00Z'},
+            }
+            cont_rec = {
+                'task_id': cont_task_id,
+                'continues': run3_task_id,
+                'developer': {'executor_task_id': self.executor_d6, 'created_at': '2026-11-20T11:00:00Z'},
+            }
+            return _Store(root_rec, run2_rec, run3_rec, cont_rec)
+
+        d6_binding = (SimpleNamespace(result_sha=self.head_2), SimpleNamespace(head=self.head_2))
+        policy = {'repair_max': 4, 'test_fail_max': 5}
+        counted = [root_task_id, run2_task_id, run3_task_id]
+        stamps = {
+            root_task_id: '2026-11-20T10:00:00Z',
+            run2_task_id: '2026-11-20T10:15:00Z',
+            run3_task_id: '2026-11-20T10:45:00Z',
+        }
+        args = SimpleNamespace(
+            task_id=cont_task_id,
+            executor_task=self.executor_d6,
+            high_debug_task=root_task_id,
+            high_debug_family='family-cov',
+            high_debug_ref='https://github.com/davidcatcat/davidcattoolsproject/issues/1886#issuecomment-7017744285',
+            repair_packet=None,
+        )
+
+        # Early debug (10:10:00Z <= times[1] 10:15:00Z) must refuse
+        early_store = build_store(early_entry, early_event)
+        with self.assertRaises(LLMToolError) as ctx:
+            cli._check_repair_limits(
+                args, early_store, d6_binding, policy, cont_task_id,
+                counted, set(), set(), stamps[run3_task_id], stamps=stamps)
+        self.assertIn('DELEGATE_HIGH_DEBUG_TASK_INVALID', str(ctx.exception))
+
+        # Covering debug (10:20:00Z > times[1] 10:15:00Z) covers repair #3 and passes
+        covering_store = build_store(covering_entry, covering_event)
+        cli._check_repair_limits(
+            args, covering_store, d6_binding, policy, cont_task_id,
+            counted, set(), set(), stamps[run3_task_id], stamps=stamps)
 
     # -- A5: Repair limit reaches repair_max ------------------------------
 

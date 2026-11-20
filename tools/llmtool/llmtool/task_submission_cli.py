@@ -7903,12 +7903,9 @@ def _check_repair_limits(args, store, d6_binding, policy, current_task_id, count
             pass
 
     if count == 2:
-        if is_continuation:
-            _check_repair_rca(args, store, d6_binding, times[0], covered=True)
-        else:
-            _check_repair_rca(args, store, d6_binding, newest_assignment)
+        _check_repair_rca(args, store, d6_binding, newest_assignment, covered=is_continuation)
         return
-    _check_repair_rca(args, store, d6_binding, times[0] if is_continuation else times[1], covered=True)
+    _check_repair_rca(args, store, d6_binding, times[1], covered=True)
 
 
 def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=False):
