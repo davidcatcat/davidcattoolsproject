@@ -611,6 +611,65 @@ class AdvanceStatusTests(unittest.TestCase):
             {'events': [], 'repair_claims': []}, HEAD, get=get)
         self.assertEqual(action, 'RUN_REMOTE_TEST')
 
+    def test_case_g_advance_preserves_pr_files_too_many_outcome(self):
+        record = self.record(skip_outcome())
+        record['developer'] = {'state': 'DEVELOPER_RESPONDED'}
+        d6 = {'result_head': HEAD, 'recorded_result_head': HEAD,
+              'dirty': False, 'state': 'CLEAN', 'root': '/tmp'}
+        store = mock.MagicMock()
+        store.get.return_value = record
+        with mock.patch.object(task_advance, '_d6_snapshot', return_value=d6), \
+             mock.patch.object(task_advance, '_pr_files',
+                               return_value=(None, task_advance.PR_FILES_TOO_MANY)):
+            res = task_advance.advance(
+                task_id=record['task_id'], store=store, pr_number=PR,
+                github_get=lambda path: {'total_count': 1, 'check_runs': []})
+        self.assertEqual((res['step'], res['codes']), ('STOPPED', ['PR_FILES_TOO_MANY']))
+
+    def test_case_h_advance_preserves_linux_ci_unavailable_outcome(self):
+        record = self.record(skip_outcome())
+        record['developer'] = {'state': 'DEVELOPER_RESPONDED'}
+        d6 = {'result_head': HEAD, 'recorded_result_head': HEAD,
+              'dirty': False, 'state': 'CLEAN', 'root': '/tmp'}
+        store = mock.MagicMock()
+        store.get.return_value = record
+
+        def failing_get(path):
+            raise RuntimeError('unavailable')
+
+        with mock.patch.object(task_advance, '_d6_snapshot', return_value=d6):
+            res = task_advance.advance(
+                task_id=record['task_id'], store=store, pr_number=PR,
+                github_get=failing_get)
+        self.assertEqual((res['step'], res['codes']), ('WAITING_CI', ['LINUX_CI_UNAVAILABLE']))
+
+    def test_case_g_advance_with_pass_preserves_pr_files_too_many_outcome(self):
+        receipt = {
+            'task_id': 'task-2413', 'run_id': 'run-2413',
+            'executor_task': EXEC, 'source_sha': HEAD,
+            'result': 'PASS', 'modules': ['test_alpha'],
+            'ran_total': 1, 'elapsed_s': 0.01,
+        }
+        receipt['receipt_digest'] = hashlib.sha256(ts._json_bytes(receipt)).hexdigest()
+        record = {
+            'task_id': 'task-2413', 'run_id': 'run-2413',
+            'developer': {'state': 'DEVELOPER_RESPONDED'},
+            'completion': {'executor_task_id': EXEC},
+            'remote_test_receipts': [receipt],
+            'remote_test_outcomes': [],
+        }
+        d6 = {'result_head': HEAD, 'recorded_result_head': HEAD,
+              'dirty': False, 'state': 'CLEAN', 'root': '/tmp'}
+        store = mock.MagicMock()
+        store.get.return_value = record
+        with mock.patch.object(task_advance, '_d6_snapshot', return_value=d6), \
+             mock.patch.object(task_advance, '_pr_files',
+                               return_value=(None, task_advance.PR_FILES_TOO_MANY)):
+            res = task_advance.advance(
+                task_id=record['task_id'], store=store, pr_number=PR,
+                github_get=lambda path: {'total_count': 1, 'check_runs': []})
+        self.assertEqual((res['step'], res['codes']), ('STOPPED', ['PR_FILES_TOO_MANY']))
+
 
 class ExistingAdmissionTests(unittest.TestCase):
     def test_task_test_modules_are_still_admitted(self):

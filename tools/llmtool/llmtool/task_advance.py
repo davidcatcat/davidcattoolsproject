@@ -2585,14 +2585,14 @@ def _pre_review_action(record, d6, pr, related, result_head, get=None):
     if type(pr) is dict and 'files' in pr:
         raw_files = pr['files']
         if type(raw_files) is list:
-            if not raw_files:
+            if not raw_files and remote_status != remote_test.NOT_REQUIRED:
                 return 'RUN_REMOTE_TEST'
             paths = [item if type(item) is str else item.get('filename')
                      for item in raw_files if type(item) is str or
                      (type(item) is dict and type(item.get('filename')) is str)]
-            if len(paths) != len(raw_files):
+            if len(paths) != len(raw_files) and remote_status != remote_test.NOT_REQUIRED:
                 return 'RUN_REMOTE_TEST'
-    elif getter is not None and number is not None:
+    elif getter is not None and number is not None and remote_status != remote_test.NOT_REQUIRED:
         paths, _code = remote_test._pr_change_paths(number, get=getter, head=result_head)
         if paths is None:
             return 'RUN_REMOTE_TEST'
@@ -2610,6 +2610,8 @@ def _pre_review_action(record, d6, pr, related, result_head, get=None):
                 return 'RUN_REMOTE_TEST'
         elif remote_status not in ('PASS', remote_test.NOT_REQUIRED):
             return 'RUN_REMOTE_TEST'
+    elif remote_status != remote_test.NOT_REQUIRED and (getter is not None or (type(pr) is dict and 'files' in pr)):
+        return 'RUN_REMOTE_TEST'
     if type(pr) is dict and pr.get('merged') is True:
         # The code is already merged; a Reviewer must never start for it.
         return 'PR_MERGED_NO_REVIEW'
@@ -3352,6 +3354,42 @@ def advance(*, task_id, store=None, merge=False, owner_acceptance=None,
             return _advance_refused(task_id, refused.code)
 
 
+def _run_remote_test_step(store, task_id, executor_task, head, number, guard, codes,
+                          publish_gh_runner=None, d6=None, cwd=None):
+    guard()  # #1781: an EC2 run is an external action
+    result = {'task_id': task_id, 'executor_task': executor_task, 'head': head}
+    try:
+        remote_result = _run_remote_test(store, task_id, executor_task, head,
+                                         f'refs/pull/{number}/head', number)
+        code = remote_result.get('code') if type(remote_result) is dict else None
+        if type(code) is str and re.fullmatch(r'[A-Z0-9_]{1,64}', code):
+            codes.append(code)
+        try:
+            fresh_record = store.get(task_id)
+        except Exception:
+            fresh_record = None
+        summary = _remote_test_receipt_summary(fresh_record, head)
+        if summary is not None:
+            result['remote_test'] = summary
+            if number is not None:
+                try:
+                    _post_remote_test_comment(
+                        _publish_run_gh if publish_gh_runner is None else publish_gh_runner,
+                        (d6.get('root') if type(d6) is dict else None) or cwd or os.getcwd(),
+                        number, task_id, d6, head, summary)
+                except Exception:
+                    codes.append('REMOTE_TEST_COMMENT_FAILED')
+        elif (type(remote_result) is dict and
+                remote_result.get('result') == remote_test.NOT_REQUIRED):
+            result['remote_test'] = {
+                'result': remote_test.NOT_REQUIRED,
+                'code': remote_test.NO_ADMISSIBLE_MODULE,
+                'modules': [], 'head': head}
+    except Exception as exc:
+        codes.append(_refusal(exc, 'remote_test_code'))
+    return result
+
+
 def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                   merge=False, reviewer_session_done=False, dispatch_review_call,
                   record_review_result_call=None, repair_review_call, relay_verdict_call=None,
@@ -3528,7 +3566,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         return _ack_consumed_events(
             {'task_id': task_id, 'step': 'D6_BINDING_UNAVAILABLE', 'result': None,
              'next': 'D6_BINDING_UNAVAILABLE', 'codes': [code]}, record, store, None)
-    step = decide(record, d6, pr, related, get=get)
+    step = decide(record, d6, pr, related)
     result, codes, refusal_dict = None, [], None
     redispatch_reason = None
     ci_routed = False
@@ -3547,38 +3585,9 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             step = 'DISPATCH_REVIEW'
             codes.extend(('REVIEW_BLOCKED', 'REVIEWER_FALLBACK'))
     if step == 'RUN_REMOTE_TEST':
-        guard()  # #1781: an EC2 run is an external action
-        try:
-            remote_result = _run_remote_test(store, task_id, executor_task, d6['result_head'],
-                                             f'refs/pull/{number}/head', number)
-            code = remote_result.get('code') if type(remote_result) is dict else None
-            if type(code) is str and re.fullmatch(r'[A-Z0-9_]{1,64}', code):
-                codes.append(code)
-            result = {'task_id': task_id, 'executor_task': executor_task,
-                      'head': d6['result_head']}
-            try:
-                fresh_record = store.get(task_id)
-            except Exception:
-                fresh_record = None
-            summary = _remote_test_receipt_summary(fresh_record, d6['result_head'])
-            if summary is not None:
-                result['remote_test'] = summary
-                if number is not None:
-                    try:
-                        _post_remote_test_comment(
-                            _publish_run_gh if publish_gh_runner is None else publish_gh_runner,
-                            d6.get('root') or cwd or os.getcwd(), number, task_id,
-                            d6, d6['result_head'], summary)
-                    except Exception:
-                        codes.append('REMOTE_TEST_COMMENT_FAILED')
-            elif (type(remote_result) is dict and
-                    remote_result.get('result') == remote_test.NOT_REQUIRED):
-                result['remote_test'] = {
-                    'result': remote_test.NOT_REQUIRED,
-                    'code': remote_test.NO_ADMISSIBLE_MODULE,
-                    'modules': [], 'head': d6['result_head']}
-        except Exception as exc:
-            codes.append(_refusal(exc, 'remote_test_code'))
+        result = _run_remote_test_step(
+            store, task_id, executor_task, d6['result_head'], number,
+            guard, codes, publish_gh_runner=publish_gh_runner, d6=d6, cwd=cwd)
     elif step == 'DISPATCH_REVIEW':
         gate_latest = {}
         gate_step, ci_code = _review_ci_gate(number, d6['result_head'], get,
@@ -3587,6 +3596,14 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             step = gate_step
             if ci_code is not None:
                 codes.append(ci_code)
+        elif get is not None and number is not None:
+            action = _pre_review_action(record, d6, pr, related, d6['result_head'], get=get)
+            if action != 'DISPATCH_REVIEW':
+                step = action
+                if step == 'RUN_REMOTE_TEST':
+                    result = _run_remote_test_step(
+                        store, task_id, executor_task, d6['result_head'], number,
+                        guard, codes, publish_gh_runner=publish_gh_runner, d6=d6, cwd=cwd)
         if (step == 'CI_FAILED' and gate_latest.get('name') == _LINUX_CHECK and
                 gate_latest.get('conclusion') in ('failure', 'timed_out', *_CI_ENV_CONCLUSIONS)):
             # #1502 WP-D D11: route the newest exact-head Linux run before review.
