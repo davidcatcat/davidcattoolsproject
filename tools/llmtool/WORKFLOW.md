@@ -18,8 +18,8 @@ Declare read and write paths at task claude-bind, including an admitted test mod
 `llmtool task advance` is the only normal flow (#1502 §3-1). It runs one step at a time:
 
 1. Push the Developer's committed result branch.
-2. Run the Task's admitted test modules on EC2 (`task remote-test`) before the PR is opened.
-3. Open the PR.
+2. Open or reuse the branch's PR and record its number and exact HEAD on the Task.
+3. On the next advance, run the Task's admitted test modules on EC2 (`task remote-test`) using `refs/pull/<N>/head`. If EC2 fails, repair and retest the updated HEAD on the same PR.
 4. Wait for exact-head Linux CI: `check (Linux 3.14)`, or `check (docs)` for a documentation-only PR, must pass before review.
 5. Dispatch the formal cross-family review of that exact head.
 6. After PASS, `task advance` adds the `mac-ci` label; exact-head `check (macOS 3.13)` must be SUCCESS where required.
