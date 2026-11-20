@@ -62,10 +62,15 @@ All in `tools/llmtool/llmtool/start_failure.py`:
   `HIGH_DEBUG_EXCERPT_MAX_CHARS` characters of the `report` recorded on the root
   Task. A recorded RCA report longer than 6000 characters can therefore only round
   trip as its first 6000 characters; any other encoding fails the match.
-- The CI excerpt is not length-limited in the read scope: `_ci_identity_sha256` reads
-  only the first line of `reviewer_text_excerpt_untrusted_data` (fullmatch of the CI
-  header) and `_matches` routes to that identity digest when the excerpt starts with
-  `_CI_EXCERPT_PREFIX`; lines after the first are ignored by the digest.
+- The CI excerpt is stored in the same `reviewer_text_excerpt_untrusted_data`
+  field and is subject to the same 2000-character `REVIEWER_EXCERPT_MAX_CHARS`
+  bound that `repair_packet_shape_ok` applies unconditionally to every packet,
+  CI packets included; an over-length CI excerpt makes the packet undecodable and
+  unbindable exactly as for any other packet. What is absent from the read scope
+  is the row-19 40-line CI bound: `_ci_identity_sha256` reads only the first line
+  of the field (fullmatch of the CI header) and `_matches` routes to that
+  identity digest when the excerpt starts with `_CI_EXCERPT_PREFIX`; lines after
+  the first are ignored by the digest.
 
 ## Q3 — How the merged #2281 policy keys are loaded and validated
 
@@ -111,48 +116,73 @@ All in `tools/llmtool/llmtool/repair_policy.py`:
 
 ## Options for making the row-19 limits configurable (none recommended)
 
-The Owner decided every such limit becomes configurable; this note lists options only
-and recommends none.
+The Owner decided every such limit becomes configurable. The row-19 limits are
+three: the 2000-character Reviewer excerpt bound and the 6000-character High Debug
+bound (module constants in `tools/llmtool/llmtool/start_failure.py`) and the
+40-line CI excerpt bound, whose setting and enforcement site is not in the read
+scope. This note lists options only and recommends none. Every option below
+addresses all three limits: the in-scope files are
+`tools/llmtool/llmtool/repair_policy.py`, `tools/llmtool/policy.json` and
+`tools/llmtool/llmtool/start_failure.py`; the out-of-scope files are named only
+from the in-scope docstrings and are marked as requiring later inspection.
 
-1. **Add row-19 keys to `OPTIONAL_POSITIVE_POLICY_KEYS`** (existing L0b pattern).
+1. **Add row-19 keys to `OPTIONAL_POSITIVE_POLICY_KEYS`** (existing L0b pattern:
+   e.g. keys for the 2000-char, 6000-char and 40-line bounds).
    - Files: `tools/llmtool/llmtool/repair_policy.py` (extend the tuple and the
-     row-19 comment), `tools/llmtool/policy.json` (add the keys, e.g. at the current
-     2000 and 6000), `tools/llmtool/llmtool/start_failure.py` (replace the module
-     constants with policy-driven limits in `repair_packet_shape_ok`, `_matches`, and
-     their callers `decode_repair_packet` / `repair_packet_matches`).
+     row-19 comment), `tools/llmtool/policy.json` (add the keys, e.g. at the
+     current 2000, 6000 and 40), `tools/llmtool/llmtool/start_failure.py` (replace
+     the module constants with policy-driven limits in `repair_packet_shape_ok`,
+     `_matches`, and their callers `decode_repair_packet` / `repair_packet_matches`).
+     Out of scope, requiring later inspection: the CI-excerpt writer named in the
+     docstrings as `review_repair._ci_failure` (where the 40-line bound is set and
+     where CI packets are produced) and the packet writer/validator named as
+     `task_submission_cli._validate_repair_packet`.
    - Limits: L0b has no upper validation bound and the read scope shows no technical
-     ceiling (L0a basis) for a character count; the packet text is a stored
-     cross-run contract, so the writer
-     (`task_submission_cli._validate_repair_packet`, out of scope) and the reader must
+     ceiling (L0a basis) for a character or line count; the packet text is a stored
+     cross-run contract, so the out-of-scope writer and the in-scope reader must
      adopt a changed bound together, or old stored packets stop decoding/matching
      (tighter value) or over-limit packets pass (looser value) until the writer is
      updated; `repair_packet_shape_ok` is pure and takes only the packet dict, so a
      policy-driven limit changes its call shape and ripples to the out-of-scope
-     callers.
+     callers; the 40-line bound cannot be set in-scope at all, so this option
+     depends on the later inspection of `review_repair._ci_failure`.
 2. **A new bounded optional-limits entry in `repair_policy.py`** (the
-   `OPTIONAL_POLICY_LIMITS` pattern, e.g. each char bound in [1, N]).
+   `OPTIONAL_POLICY_LIMITS` pattern, e.g. the 2000-char and 6000-char bounds and
+   the 40-line bound each in [1, N]).
    - Files: `tools/llmtool/llmtool/repair_policy.py` (new entry plus its validation
      branch in `load_policy`), `tools/llmtool/policy.json`,
-     `tools/llmtool/llmtool/start_failure.py`.
+     `tools/llmtool/llmtool/start_failure.py`. Out of scope, requiring later
+     inspection: `review_repair._ci_failure` and `task_submission_cli._validate_repair_packet`,
+     same as option 1.
    - Limits: deviates from the recorded L0b rule (no upper bound) for #2281-table
-     keys, so the Owner must approve a new validation rule for character limits; the
-     upper bound N must satisfy L0a as a real technical limit, and no candidate is
-     visible in the read scope; the same caller/signature ripple as option 1.
-3. **Caller-passed limits instead of module constants** (an explicit limits argument
-   on the shape/decode/match functions defaulting to the current 2000/6000; values
-   can later be sourced from `policy.json` or elsewhere).
-   - Files: `tools/llmtool/llmtool/start_failure.py` (signatures and defaults) plus
-     every out-of-scope caller of those functions — an unbounded ripple that must be
-     inventoried separately.
-   - Limits: no `policy.json` change; the value only moves location, so
-     external configurability (e.g. via `policy.json`) is not achieved; signature
-     changes break the out-of-scope callers.
+     keys, so the Owner must approve a new validation rule for character and line
+     limits; the upper bound N must satisfy L0a as a real technical limit, and no
+     candidate is visible in the read scope; the same caller/signature ripple as
+     option 1, and the same dependence on the later inspection of
+     `review_repair._ci_failure` for the 40-line bound.
+3. **Caller-passed limits on the in-scope functions** (explicit limit arguments on
+   `repair_packet_shape_ok`, `decode_repair_packet` and `repair_packet_matches`,
+   defaulting to the current 2000 and 6000, so the out-of-scope callers can pass
+   policy-sourced values — including the 40-line bound for the CI excerpts they
+   produce).
+   - Files: `tools/llmtool/llmtool/start_failure.py` (signatures and defaults). Out
+     of scope, requiring later inspection: `review_repair._ci_failure`,
+     `task_submission_cli._validate_repair_packet` and every other caller of the
+     shape/decode/match functions — this option is only externally configurable once
+     all of them have been inventoried and updated to pass values, which this note
+     cannot do.
+   - Limits: no `policy.json` change and no new validation rule; the in-scope values
+     only move location, so external configurability (e.g. via `policy.json`) is
+     not achieved until the out-of-scope callers are updated; signature changes
+     break those callers until they are; the 40-line bound remains governed by the
+     not-yet-inspected `review_repair._ci_failure`.
 
 ## Out-of-scope statements
 
-- The 40-line CI-excerpt limit: not settable from the read scope; its writer and
-  enforcement site (the named `review_repair._ci_failure` and
-  `task_submission_cli._validate_repair_packet`) are outside the read scope.
+- The 40-line CI-excerpt limit: its writer and enforcement site (the named
+  `review_repair._ci_failure` and `task_submission_cli._validate_repair_packet`)
+  are outside the read scope; all three options above name that file as requiring
+  later inspection, and none of them sets the bound in this note.
 - The callers of the #2281 keys (e.g. `scripts/d6_worktree_lifecycle.py`) are outside
   the read scope; this note records only how the keys load and validate.
 - The store byte bound `task_store.REPAIR_PACKET_MAX_BYTES` named in the
