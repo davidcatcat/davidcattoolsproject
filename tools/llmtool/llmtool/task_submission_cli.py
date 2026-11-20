@@ -4661,6 +4661,31 @@ def _developer_role_value(role, key, route_config):
     return value or route_config.get('default_' + key)
 
 
+class _DeveloperProfile(tuple):
+    """A (model, effort[, config_dir]) profile that also carries the run's model record.
+
+    Owner #2302 part 1: it unpacks and compares exactly like the plain tuple the
+    profile functions always returned; model_record holds requested model,
+    resolved model, model source and model family (role_config.model_record).
+    """
+
+    model_record = None
+
+
+def _with_model_record(values, role, model):
+    profile = _DeveloperProfile(values)
+    profile.model_record = role_config.model_record(role, model)
+    return profile
+
+
+def _profile_model_record(profile, model):
+    """The model record a profile carries, else one built from the model alone."""
+    record = getattr(profile, 'model_record', None)
+    if type(record) is dict:
+        return dict(record)
+    return role_config.model_record({}, model)
+
+
 def _require_developer_model(role_name, route, route_config, model, role):
     """Dispatch-time allowed_models check; a verified override must match exactly."""
     try:
@@ -4695,7 +4720,7 @@ def _agy_developer_profile(route_config, *, owner_override=None, repository=None
         error.role_config_code = 'AGY_ROLE_PROFILE_INVALID'
         raise error from None
     _require_developer_model('agy-developer', 'agy', route_config, model, role)
-    return model, effort
+    return _with_model_record((model, effort), role, model)
 
 
 def _claude_developer_profile(route_config, *, owner_override=None, repository=None,
@@ -4716,7 +4741,7 @@ def _claude_developer_profile(route_config, *, owner_override=None, repository=N
     except RouteError:
         raise LLMToolError('claude-developer role model or effort is invalid') from None
     _require_developer_model('claude-developer', 'claude', route_config, model, role)
-    return model, effort, config_dir
+    return _with_model_record((model, effort, config_dir), role, model)
 
 
 _GW_AGENT_EFFORTS = ('minimal', 'low', 'medium', 'high')
@@ -4752,7 +4777,7 @@ def _gw_agent_developer_profile(route_config, *, served_model=None, owner_overri
         model = _require_gw_agent_served_model(
             route_config, served_model, role, owner_override=owner_override,
             repository=repository, fetch_comment=fetch_comment)
-    return model, effort
+    return _with_model_record((model, effort), role, model)
 
 
 def _require_gw_agent_served_model(route_config, served_model, role, *, owner_override=None,
@@ -5420,7 +5445,9 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     _screen_text(task['response'], RESPONSE_LIMIT)
     config = load_route_config()
     route_config = dict(config['routes']['agy'])
-    model, effort = _agy_developer_profile(route_config)
+    agy_profile = _agy_developer_profile(route_config)
+    model, effort = agy_profile
+    model_record = _profile_model_record(agy_profile, model)
     executable = shutil.which(route_config['executable'])
     if executable is None:
         raise LLMToolError('AGY executable is unavailable')
@@ -5501,7 +5528,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
     owner_gate_denied = False
     try:
-        developer.update(state='DEVELOPER_DISPATCHING', provider_type='agy-cli', model=model)
+        developer.update(state='DEVELOPER_DISPATCHING', provider_type='agy-cli', model=model,
+                         model_record=model_record)
         store.update(task['task_id'], developer=developer)
         def validate_binding():
             current = store.get(task['task_id'])
@@ -5549,6 +5577,9 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             'state_dirs': (),
         }, gate=route_gate, boundary=GatedBoundary(),
            snapshot=capture_snapshot)
+        # Owner #2302 part 1: keep the model the provider reported, when it did.
+        developer['model_record'] = role_config.model_record(
+            model_record, model, getattr(result, 'model', None))
         _record_skill_delivery(task, registration, snapshot, 'agy', result.model,
                                card_prefix_sha256, result)
         after_registration = task_completion.read_d6_registration(
@@ -6064,7 +6095,9 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
     if type(route_value) is not dict:
         raise LLMToolError('Claude route configuration is unavailable')
     route_config = dict(route_value)
-    model, effort, config_dir = _claude_developer_profile(route_config)
+    claude_profile = _claude_developer_profile(route_config)
+    model, effort, config_dir = claude_profile
+    model_record = _profile_model_record(claude_profile, model)
     executable = shutil.which('claude')
     if executable is None:
         raise LLMToolError('Claude executable is unavailable')
@@ -6180,7 +6213,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
     # Bound before the try: every failure handler asks whether a result returned.
     result = None
     try:
-        developer.update(state='DEVELOPER_DISPATCHING', provider_type='claude-cli', model=model)
+        developer.update(state='DEVELOPER_DISPATCHING', provider_type='claude-cli', model=model,
+                         model_record=model_record)
         store.update(task['task_id'], developer=developer)
         def validate_binding():
             current = store.get(task['task_id'])
@@ -6253,9 +6287,12 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
             raise RouteError('CLAUDE_WRITE_SCOPE_VIOLATION')
         artifact = raw.decode('utf-8', 'strict')
         usage = _normalize_agy_usage(result.usage)
+        # Owner #2302 part 1: keep the model the provider reported, when it did.
         developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
             artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
-            error_code=None, execution=_with_provider_evidence({
+            error_code=None, model_record=role_config.model_record(
+                model_record, model, getattr(result, 'model', None)),
+            execution=_with_provider_evidence({
                 'status': 'DONE', 'native_session_id': result.session_id,
                 'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
                 'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
@@ -6480,7 +6517,9 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     # resolver checks the role model and supplies the effort, and the model the
     # gateway profile will actually serve is checked against allowed_models (or
     # a verified owner override). Only that checked model is bound below.
-    model, effort = _gw_agent_developer_profile(role_route_config, served_model=model)
+    gw_profile = _gw_agent_developer_profile(role_route_config, served_model=model)
+    model, effort = gw_profile
+    model_record = _profile_model_record(gw_profile, model)
     route_config['default_model'] = model
     route_config['expected_served_model'] = model
     route_config['profile']['model'] = model
@@ -6613,7 +6652,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             return False
 
     developer.update(state='DEVELOPER_DISPATCHING', provider_type='gw-agent-cli',
-                     model=model)
+                     model=model, model_record=model_record)
     try:
         dispatching = store.compare_and_update(
             task['task_id'], expected={'developer': expected_developer},
@@ -6701,6 +6740,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             usage['served_model'] = served_model
         developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
             model=served_model,
+            model_record=role_config.model_record(model_record, model, served_model),
             artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
             usage=usage, error_code=None,
             audit_sha256=audit_sha,

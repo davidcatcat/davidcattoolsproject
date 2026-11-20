@@ -11,7 +11,9 @@ import uuid
 from .base import DeveloperRoute, RouteError, resolve_route_max_prompt_bytes, usage_reported
 from .. import github_identity
 
-_MODEL = re.compile(r'claude-[a-z0-9][a-z0-9.-]{0,120}\Z')
+# Owner #2302 part 1: any well-formed model id, not only a claude-* id. A model
+# the Claude CLI cannot serve fails from the CLI itself, never by a fallback.
+_MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z')
 _EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 _QUOTA = re.compile(r'quota|rate.?limit|usage limit|overloaded|spend.?limit', re.IGNORECASE)
 MAX_PROMPT_BYTES = 65536
@@ -103,6 +105,7 @@ class ClaudeRoute(DeveloperRoute):
 
     def validate_profile(self, model, effort):
         if (type(model) is not str or _MODEL.fullmatch(model) is None or
+                '://' in model or
                 type(effort) is not str or effort not in _EFFORTS):
             raise RouteError('CLAUDE_PROFILE_INVALID')
         return model, effort
@@ -208,7 +211,7 @@ class ClaudeRoute(DeveloperRoute):
         model_usage = getattr(self, '_model_usage', None)
         if type(model_usage) is not dict or not model_usage:
             return None
-        if any(type(key) is not str or not key.startswith('claude-')
+        if any(type(key) is not str or _MODEL.fullmatch(key) is None
                for key in model_usage):
             return '\0'
         requested_usage = model_usage.get(requested)

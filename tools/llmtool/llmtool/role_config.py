@@ -16,8 +16,8 @@ _ENV_FIELDS = {
     "EFFORT": "effort",
 }
 # #1502 WP-E: Developer role ids bound to a developer-routes.json route. The
-# route supplies the repo-default model and effort; Owner #2302 P2: the route
-# accepts any model of its own provider family (see check_role_model).
+# route supplies the repo-default model and effort; Owner #2302 part 1: the
+# route admits any well-formed model id (see check_role_model).
 ROUTE_ROLES = {
     "agy-developer": "agy",
     "claude-developer": "claude",
@@ -54,7 +54,7 @@ def _fail(message="role configuration: invalid configuration", code="ROLE_CONFIG
 
 
 def _fail_model(detail=None):
-    """Refuse a Developer model its route does not accept (wrong family or format)."""
+    """Refuse a Developer model its route does not accept (malformed id or membership)."""
     message = "role model is not allowed for its route: " + ROLE_MODEL_NOT_ALLOWED
     if detail is not None:
         message += " (" + detail + ")"
@@ -294,14 +294,13 @@ def check_role_model(route, route_config, model, *, owner_override=None,
                      repository=None, fetch_comment=None):
     """Return None for an allowed model, else the verified owner override.
 
-    Owner #2302 P2: a model of the route's own provider family in a valid
-    format is accepted with no owner_override (the override is optional, never
-    required, and is not read). allowed_models is not consulted for agy,
-    claude or opencode; gw-agent keeps its allowed_models gate (see
-    developer_routes.check_route_model). A model the route check refuses for a
-    wrong family or malformed identifier is refused with
-    ROLE_MODEL_NOT_ALLOWED on every path, before any override is read
-    (Repair 2). Otherwise, owner_override ({"model", "ref"}) may relax only the
+    Owner #2302 part 1: any well-formed model id is accepted for agy, claude
+    and opencode with no owner_override (the override is optional, never
+    required, and is not read); the model family is not checked.
+    allowed_models is not consulted for those routes; gw-agent keeps its
+    allowed_models gate (see developer_routes.check_route_model). A malformed
+    identifier is refused with ROLE_MODEL_NOT_ALLOWED on every path, before any
+    override is read. Otherwise, owner_override ({"model", "ref"}) may relax only the
     gw-agent membership gate when it names the same model and owner_override.py
     verifies that its ref names this route and model. fetch_comment(comment_id)
     is the injected GitHub reader; without it the ref is unreadable and the
@@ -315,9 +314,9 @@ def check_role_model(route, route_config, model, *, owner_override=None,
     )
     from .owner_override import OwnerOverrideError, validate_owner_override
 
-    # Owner #2302 P2 Repair 2: an override never bypasses the route's own
-    # format/family check. It is mandatory before the route/membership gate, so
-    # only a membership refusal (gw-agent) may be relaxed below.
+    # An override never bypasses the route's own format check. It is mandatory
+    # before the route/membership gate, so only a membership refusal (gw-agent)
+    # may be relaxed below.
     try:
         check_route_model_family(route, model)
     except RouteError:
@@ -326,9 +325,9 @@ def check_role_model(route, route_config, model, *, owner_override=None,
         check_route_model({"routes": {route: route_config}}, route, model)
         return None
     except RouteError:
-        # Repair 2: only a route without a provider family (gw-agent) has a
-        # membership gate an override may relax. A family/format route never
-        # reaches override validation.
+        # Only a route without a format check (gw-agent) has a membership gate
+        # an override may relax. A format-checked route never reaches override
+        # validation.
         if route_has_family_check(route):
             _fail_model()
     if owner_override is None:
@@ -338,7 +337,7 @@ def check_role_model(route, route_config, model, *, owner_override=None,
             raise OwnerOverrideError("OWNER_OVERRIDE_MISMATCH")
         if set(owner_override) == _VERIFIED_OVERRIDE_KEYS:
             # A caller may reuse the dict validate_owner_override already
-            # returned for this route and model. The family/format gate above
+            # returned for this route and model. The format gate above
             # already ran, and this identity check still applies; a raw
             # {"model", "ref"} override goes through the reader below.
             if owner_override.get("route") != route:
@@ -366,13 +365,17 @@ def resolve_role(role, cli=None, environ=None, *, home=None, route_config=None,
     Precedence: CLI > env > user config (the role or its legacy alias) >
     repo default. Developer roles (ROUTE_ROLES) take their repo default model
     and effort from developer-routes.json (route_config overrides the loaded
-    entry) and their model must be one the route accepts (Owner #2302 P2: any
-    model of the route's own provider family); see check_role_model.
+    entry) and their model must be one the route accepts (Owner #2302 part 1:
+    any well-formed model id); see check_role_model.
     Review/debug roles (and the legacy 'reviewer' alias) take their default
     model from the developer-routes.json roles registry (role_registry
     overrides the loaded config) and the resolved model must pass
-    check_registry_model (any model of the role's family); the registry
+    check_registry_model (any well-formed model id); the registry
     default never changes 'source'.
+    Developer and review/debug results also carry requested_model (the model a
+    layer asked for, None when the repo default applied) and model_family (the
+    family of the resolved model from its id, or UNKNOWN); model and
+    model_source are the resolved model and where it came from.
     """
     if not _name(role):
         _fail("role name is invalid", "ROLE_CONFIG_ROLE_INVALID")
@@ -448,14 +451,17 @@ def resolve_role(role, cli=None, environ=None, *, home=None, route_config=None,
         if owner_override is not None:
             _fail_registry_model()
         registry, default_model = _registry_default(review_role, role_registry)
+        settings["requested_model"] = settings["model"]
         if settings["model"] is None:
             settings["model"] = default_model
             model_source = "repo_default"
         settings["model_source"] = model_source
         check_registry_model(review_role, settings["model"], registry)
+        settings["model_family"] = _family_of(settings["model"])
     route = ROUTE_ROLES.get(role)
     if route is not None:
         entry = _route_entry(route, route_config)
+        settings["requested_model"] = settings["model"]
         if settings["model"] is None:
             settings["model"] = entry["default_model"]
             model_source = "repo_default"
@@ -469,7 +475,55 @@ def resolve_role(role, cli=None, environ=None, *, home=None, route_config=None,
         accepted = check_role_model(route, entry, settings["model"],
                                     owner_override=owner_override,
                                     repository=repository, fetch_comment=fetch_comment)
+        settings["model_family"] = _family_of(settings["model"])
         if accepted is not None:
             settings["owner_override"] = accepted
     settings["source"] = source
     return settings
+
+
+def _family_of(model):
+    """The family of a model id (developer_routes.model_family), or UNKNOWN."""
+    from .developer_routes import model_family
+    return model_family(model)
+
+
+MODEL_RECORD_FIELDS = frozenset((
+    "requested_model", "resolved_model", "model_source", "model_family", "reported_model"))
+MODEL_SOURCES = frozenset(("repo_default", "roles", "env", "cli"))
+# A model id kept in a record: no text, no whitespace. The task store checks
+# the same shape (an OpenCode id may carry a #variant).
+MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@#-]{0,127}")
+
+
+def model_record(role, resolved_model, reported_model=None):
+    """Return the per-run model record for a resolved role (Owner #2302 part 1).
+
+    role is a resolve_role() result (or any mapping with requested_model and
+    model_source); resolved_model is the model the run is dispatched with.
+    The record holds the five facts one run keeps:
+
+    * requested_model: the model a user layer (CLI, env, user config) asked
+      for, None when the repo default applied;
+    * resolved_model: the model the run is dispatched with;
+    * model_source: repo_default, roles, env or cli (None when unknown);
+    * model_family: from the resolved model id (developer_routes.model_family),
+      or UNKNOWN;
+    * reported_model: the model the provider reported using, None when the
+      provider reported none.
+
+    Values are model ids and fixed words only, never text from a provider run.
+    """
+    role = role if type(role) is dict else {}
+    source = role.get("model_source")
+
+    def model_id(value):
+        return value if type(value) is str and MODEL_ID.fullmatch(value) else None
+
+    return {
+        "requested_model": model_id(role.get("requested_model")),
+        "resolved_model": model_id(resolved_model),
+        "model_source": source if source in MODEL_SOURCES else None,
+        "model_family": _family_of(resolved_model),
+        "reported_model": model_id(reported_model),
+    }

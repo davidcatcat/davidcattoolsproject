@@ -1463,6 +1463,25 @@ class RealPolicyReviewerFallbackTests(unittest.TestCase):
         self.assertEqual(task_advance._reviewer_fallback(task, default.exception),
                          (None, 'REVIEWER_NOT_ALLOWED'))
 
+    def test_codex_family_model_admitted_on_a_developer_route_refuses_a_codex_pass(self):
+        # Owner #2302 part 1 (A4): the AGY route admits a Codex-family model set
+        # by the one-shot CLI with no repository change, and the run records
+        # family codex. Review independence is unchanged in this part: a Codex
+        # formal Reviewer is still refused for it as the same family.
+        from llmtool import role_config
+        with tempfile.TemporaryDirectory() as home:
+            resolved = role_config.resolve_role(
+                'agy-developer', cli={'model': 'gpt-6.1-sol'}, environ={}, home=Path(home))
+        self.assertEqual((resolved['model'], resolved['model_source'],
+                          resolved['requested_model'], resolved['model_family']),
+                         ('gpt-6.1-sol', 'cli', 'gpt-6.1-sol', 'codex'))
+        task = self._task({'provider_profile': 'agy', 'model': resolved['model']})
+        with self.assertRaises(LLMToolError) as default:
+            review_dispatch._select_reviewer(task)
+        self.assertEqual(default.exception.review_dispatch_code, 'REVIEWER_NOT_ALLOWED')
+        self.assertEqual(task_advance._reviewer_fallback(task, default.exception),
+                         (None, 'REVIEWER_NOT_ALLOWED'))
+
 
 class _NoSandboxBoundary:
     """The OS sandbox is proven by the real-sandbox route test; this runs on any host."""

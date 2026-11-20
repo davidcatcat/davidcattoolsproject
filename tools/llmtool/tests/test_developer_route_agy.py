@@ -147,6 +147,30 @@ class AgyRouteTests(unittest.TestCase):
                 self.run_case()
             self.assertEqual(caught.exception.code, code)
 
+    def test_any_well_formed_model_is_admitted_and_a_substitute_is_a_typed_mismatch(self):
+        # Owner #2302 part 1: a model of another family is launched as asked.
+        # A model the provider does not serve fails clearly (a mismatch or an
+        # unverified model); it is never replaced silently by another model.
+        for other in ('claude-sonnet-5-5-medium', 'gpt-6.1-sol', 'example-model-b'):
+            with self.subTest(model=other):
+                self.assertEqual(self.route.validate_profile(other, 'low'), (other, 'low'))
+        for bad in ('has space', 'https://example.invalid/m', '-model', 'x' * 129):
+            with self.subTest(model=bad):
+                with self.assertRaises(RouteError) as caught:
+                    self.route.validate_profile(bad, 'low')
+                self.assertEqual(caught.exception.code, 'AGY_PROFILE_INVALID')
+        other = 'claude-sonnet-5-5-medium'
+        original = self.request
+        self.request = lambda: dict(original(), model=other)
+        self.log.write_text(f'model_resolver: Resolving model {other}\n')
+        result, calls = self.run_case()
+        self.assertEqual(calls[0][calls[0].index('--model') + 1], other)
+        self.assertEqual(result.model, other)
+        self.log.write_text(f'model_resolver: Resolving model {MODEL}\n')
+        with self.assertRaises(RouteError) as caught:
+            self.run_case()
+        self.assertEqual(caught.exception.code, 'AGY_MODEL_MISMATCH')
+
     def test_config_loader_rejects_unknown_and_personal_values(self):
         config = load_route_config()
         self.assertEqual(config['routes']['agy']['default_model'],

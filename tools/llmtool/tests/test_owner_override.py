@@ -93,21 +93,25 @@ class OwnerOverrideTest(unittest.TestCase):
     def test_bad_route_is_invalid(self):
         self.assert_refused('OWNER_OVERRIDE_INVALID', route='Example_Route')
 
-    def test_wrong_family_model_is_refused_before_the_ref_is_read(self):
-        # Owner #2302 P2 Repair 2: no override bypasses a route family check.
+    def test_other_family_model_is_not_refused_by_the_format_check(self):
+        # Owner #2302 part 1: the route check is format only, so a well-formed
+        # model of another family passes it and the ref is read (here the
+        # override line names another route, so the comment does not match).
         override = valid_override()
         override['model'] = 'claude-opus-5-5'
         fetch = FakeFetch(make_comment(MARKER + '\n' + OVERRIDE_LINE))
-        self.assert_refused('ROLE_MODEL_NOT_ALLOWED', override=override,
+        self.assert_refused('OWNER_OVERRIDE_MISMATCH', override=override,
                             route='agy', fetch=fetch)
-        self.assertEqual(fetch.calls, [])
+        self.assertEqual(fetch.calls, [COMMENT_ID])
 
-    def test_malformed_model_is_refused_before_the_ref_is_read(self):
+    def test_model_malformed_for_its_route_is_refused_before_the_ref_is_read(self):
+        # Owner #289: OpenCode ids are provider/model; this one has no provider
+        # prefix, so no override can admit it.
         override = valid_override()
-        override['model'] = 'GEMINI-UPPER'
+        override['model'] = 'example-model-b-free'
         fetch = FakeFetch(make_comment(MARKER + '\n' + OVERRIDE_LINE))
         self.assert_refused('ROLE_MODEL_NOT_ALLOWED', override=override,
-                            route='agy', fetch=fetch)
+                            route='opencode', fetch=fetch)
         self.assertEqual(fetch.calls, [])
 
     def test_bad_repository_argument_is_invalid(self):

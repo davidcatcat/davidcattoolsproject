@@ -36,7 +36,9 @@ class AgyRoute(DeveloperRoute):
         return 'agy'
 
     def validate_profile(self, model, effort):
+        # Owner #2302 part 1: any well-formed model id (no URL), of any family.
         if (type(model) is not str or _MODEL.fullmatch(model) is None or
+                '://' in model or
                 type(effort) is not str or _EFFORT.fullmatch(effort) is None):
             raise RouteError('AGY_PROFILE_INVALID')
         return model, effort
