@@ -3,6 +3,7 @@
 import dataclasses
 import contextlib
 import copy
+from functools import wraps
 import hashlib
 import io
 import json
@@ -35,6 +36,7 @@ from .task_store import (TaskStore, TaskStoreConflict, new_id, _json_bytes,
 from . import active_pm_inbox
 from . import remote_test
 from . import task_completion
+from . import direct_reassignment
 from . import opencode_direct_developer
 from . import codex_direct_developer
 from . import worker_dispatch
@@ -894,6 +896,8 @@ def add_task_submission_parsers(actions):
                           help='Codex: text proposal (default) or direct D6 development')
     delegate.add_argument('--background', action='store_true',
                           help='run a direct Codex or OpenCode Developer in a detached child')
+    delegate.add_argument('--reassign-from', metavar='ASSIGNMENT_ID',
+                          help='replace a verified AGY or OpenCode assignment in its existing D6')
     delegate.add_argument('--selection-source', required=True, choices=('PM', 'USER'))
     delegate.add_argument('--executor-task', required=True,
                           help='registered D6 Executor task id; root/source/identity are read from its record')
@@ -4910,26 +4914,64 @@ def _delegate_timeout(args, route):
             f'{exc.code}: --timeout refused for the {route} Developer route') from None
 
 
+def _serialize_direct_dispatch(run):
+    @wraps(run)
+    def invoke(args, *, store, **kwargs):
+        lease = (store.direct_dispatch_lease
+                 if _store_implements(store, 'direct_dispatch_lease') else None)
+        if getattr(args, 'reassign_from', None) is not None and not callable(lease):
+            raise LLMToolError('DIRECT_REASSIGN_LEASE_UNAVAILABLE')
+        with lease(args.task_id) if callable(lease) else contextlib.nullcontext():
+            old_assignment = getattr(args, 'reassign_from', None)
+            if old_assignment is None:
+                return run(args, store=store, **kwargs)
+            current = store.get(args.task_id).get('developer') or {}
+            history = current.get('direct_handoffs') or []
+            if (history and history[-1]['old_assignment'] == old_assignment and
+                    current.get('provider_profile') == args.provider and
+                    current.get('state') == 'DEVELOPER_RESPONDED'):
+                direct_reassignment.reconcile_claim(store, args.task_id, old_assignment)
+                return run_task_direct_result_event(args.task_id, args.executor_task, store=store)
+            result = run(args, store=store, **kwargs)
+            direct_reassignment.reconcile_claim(store, args.task_id, old_assignment)
+            return result
+    return invoke
+
+
+def _direct_reassignment_plan(args, store, task, registration, snapshot, profile,
+                              read_paths, write_paths):
+    if getattr(args, 'reassign_from', None) is None:
+        return None
+    return direct_reassignment.inspect(args, store, task, registration, snapshot,
+                                       profile, read_paths, write_paths)
+
+
+@_serialize_direct_dispatch
 def run_task_opencode_delegate(args, *, store, d6_binding=None):
     """Claim one PM-bound OpenCode run and capture its real scoped workspace diff."""
     timeout = _delegate_timeout(args, 'opencode')
     task = store.get(args.task_id)
     previous_developer = task.get('developer')
-    if (type(previous_developer) is dict and
+    reassigning = getattr(args, 'reassign_from', None) is not None
+    if (reassigning and type(previous_developer) is dict and
+            previous_developer.get('assignment_id') == args.reassign_from and
+            previous_developer.get('state') == 'DEVELOPER_RESPONDED'):
+        return run_task_direct_result_event(args.task_id, args.executor_task, store=store)
+    if (not reassigning and type(previous_developer) is dict and
             previous_developer.get('provider_profile') == 'opencode' and
             previous_developer.get('state') == 'DEVELOPER_DISPATCHING'):
-        _recover_direct_child_dispatch(
+        return _recover_direct_child_dispatch(
             args, task, previous_developer, store, expected_agent='opencode-developer')
     if (task['state'] != 'PM_RESPONDED' or not task['response'] or
             task['schema_version'] != 2):
         raise LLMToolError('task has no successful PM response')
-    if task['developer'] is not None:
+    if not reassigning and task['developer'] is not None:
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
     if getattr(args, 'context_stdin', False):
         raise LLMToolError('OpenCode reads only its registered task-local file scope')
     pm_assignment = task['pm_assignment']
     if args.selection_source == 'PM':
-        if (type(pm_assignment) is not dict or pm_assignment.get('route') != 'opencode' or
+        if (type(pm_assignment) is not dict or (not reassigning and pm_assignment.get('route') != 'opencode') or
                 pm_assignment.get('risk') != 'LOW'):
             raise LLMToolError('no validated low-risk OpenCode recommendation from the selected PM')
         if args.acceptance != pm_assignment['acceptance']:
@@ -4939,6 +4981,12 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
     if previous_developer is None:
         _reject_claude_reserved_d6(registration)
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
+    reassignment = _direct_reassignment_plan(
+        args, store, task, registration, snapshot, 'opencode', read_paths, write_paths)
+    if reassignment is not None:
+        registration = reassignment.successor
+    repair_packet = (reassignment.repair_packet if reassignment is not None
+                     else getattr(args, 'repair_packet', None))
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
     acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
@@ -4950,13 +4998,21 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
     prompt_fields = dict(
         source_sha=snapshot.head, read_paths=read_paths,
         write_paths=write_paths, acceptance=acceptance, pm_goal=pm_goal,
-        repair_packet=getattr(args, 'repair_packet', None))
+        repair_packet=repair_packet)
     prompt = _opencode_developer_prompt(task, **prompt_fields)
     prompt_size = len(prompt.encode('utf-8'))
     if prompt_size > REQUEST_LIMIT:
         raise LLMToolError('OpenCode task prompt exceeds the supported size')
     _screen_text(prompt, REQUEST_LIMIT)
     model, steps = _opencode_developer_profile()
+    if reassignment is not None:
+        if not opencode_direct_developer.is_free_model(model):
+            raise LLMToolError('DIRECT_REASSIGN_OPENCODE_FREE_MODEL_REQUIRED')
+        if shutil.which('opencode') is None:
+            raise LLMToolError('DIRECT_REASSIGN_ALTERNATE_UNAVAILABLE')
+        decision = worker_dispatch.evaluate('opencode-developer', None, task['task_id'])
+        if not decision.allowed:
+            raise worker_dispatch.WorkerDispatchDenied(decision.reason_code)
     # #1502 WP-F: pin main and read the role cards before any Task write or
     # provider call; any pin or card failure refuses here (fail closed).
     card_prefix, card_prefix_sha256 = _developer_card_prefix(task, registration, 'opencode')
@@ -4965,8 +5021,11 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
     if prompt_size > REQUEST_LIMIT:
         raise LLMToolError('OPENCODE_SKILL_PROMPT_TOO_LARGE')
     _screen_text(prompt, REQUEST_LIMIT)
+    callback_policy = (direct_reassignment.test_policy(reassignment) if reassignment is not None
+                       else 'LOCAL')
     developer = {
-        'assignment_id': new_id(), 'selection_source': args.selection_source,
+        'assignment_id': reassignment.assignment if reassignment else new_id(),
+        'selection_source': args.selection_source,
         'state': 'DEVELOPER_PENDING', 'provider_profile': 'opencode',
         'provider_type': None, 'model': None,
         'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
@@ -4982,7 +5041,7 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         'execution': None, 'created_at': _timestamp(),
         'timeout_seconds': timeout,
         'direct_result_callback': _direct_result_callback(
-            task, registration, snapshot.head, test_policy='LOCAL'),
+            task, registration, snapshot.head, test_policy=callback_policy),
     }
     completion = {
         'state': 'WAITING_EXECUTOR', 'executor_task_id': registration.task_id,
@@ -5003,13 +5062,20 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
-            store.d6_bind_compare_and_update(
-                task['task_id'], executor_task_id=registration.task_id,
-                expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
-                          'completion': None},
-                developer=developer, completion=completion,
-            )))
+        if reassignment is not None:
+            claimed = _delegate_chain_gate(
+                args, store, (reassignment.original, snapshot),
+                lambda: direct_reassignment.claim(store, reassignment, developer, completion))
+            developer = copy.deepcopy(claimed['developer'])
+            completion = copy.deepcopy(claimed['completion'])
+        else:
+            _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
+                store.d6_bind_compare_and_update(
+                    task['task_id'], executor_task_id=registration.task_id,
+                    expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
+                              'completion': None},
+                    developer=developer, completion=completion,
+                )))
     except TaskStoreConflict:
         raise LLMToolError(
             'developer assignment already exists; duplicate dispatch refused') from None
@@ -5018,8 +5084,10 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         developer.update(state='DEVELOPER_DISPATCHING', provider_type='opencode-cli',
                          model=model,
                          max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS)
-        dispatching_record = store.update(task['task_id'], developer=developer)
-        expected_developer = copy.deepcopy(dispatching_record['developer'])
+        dispatching_record = store.prepare_direct_dispatch(
+            task['task_id'], expected_developer=expected_developer, developer=developer)
+        developer = copy.deepcopy(dispatching_record['developer'])
+        expected_developer = copy.deepcopy(developer)
 
         def validate_prelaunch_d6_binding():
             current_registration, current_snapshot = task_completion.bind_executor_task(
@@ -5042,6 +5110,13 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
             binding_error_code='OPENCODE_D6_BINDING_CHANGED',
             marker_error_code='OPENCODE_ENV2_MARKER_INVALID',
             write_paths=write_paths)
+
+        def authorize_opencode_spawn():
+            nonlocal expected_developer
+            saved = store.authorize_direct_spawn(
+                task['task_id'], expected_developer=expected_developer)
+            expected_developer = copy.deepcopy(saved['developer'])
+            developer['dispatch_boundary'] = 'STARTING'
 
         def record_opencode_launch(pid, started_at, pgid):
             nonlocal expected_developer
@@ -5067,7 +5142,8 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
             write_paths=write_paths, prompt=prompt,
             dispatch_store=store, dispatch_task_id=task['task_id'], steps=steps,
             prelaunch_validate=validate_prelaunch_d6_binding, model=model,
-            launch_callback=record_opencode_launch, timeout_seconds=timeout)
+            launch_callback=record_opencode_launch,
+            spawn_authorization=authorize_opencode_spawn, timeout_seconds=timeout)
         _record_skill_delivery(task, registration, snapshot, 'opencode', model,
                                card_prefix_sha256, result)
     except opencode_direct_developer.DirectOpenCodeError as exc:
@@ -5095,9 +5171,13 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         else:
             developer.update(state='DEVELOPER_UNAVAILABLE',
                               error_code=exc.direct_opencode_code)
-        saved = store.compare_and_update(
-            task['task_id'], expected={'developer': expected_developer},
-            developer=developer)
+        if (exc.stopped_before_prompt and
+                (expected_developer.get('execution') or {}).get('status') == 'RUNNING'):
+            saved = store.record_direct_stop(
+                task['task_id'], expected_developer=expected_developer, developer=developer)
+        else:
+            saved = store.compare_and_update(
+                task['task_id'], expected={'developer': expected_developer}, developer=developer)
         _print(_task_view(saved))
         return 1
     except (KeyboardInterrupt, CLIHostTermination) as exc:
@@ -5375,6 +5455,7 @@ def _optional_agy_owner_ref(args):
     return owner_ref
 
 
+@_serialize_direct_dispatch
 def run_task_agy_delegate(args, *, store, route_runner=None):
     """Run the provider-neutral AGY adapter against its registered D6 task."""
     owner_ref = _optional_agy_owner_ref(args)
@@ -5385,15 +5466,20 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     timeout = _delegate_timeout(args, 'agy')
     task = store.get(args.task_id)
     previous_developer = task.get('developer')
-    if (type(previous_developer) is dict and
+    reassigning = getattr(args, 'reassign_from', None) is not None
+    if (reassigning and type(previous_developer) is dict and
+            previous_developer.get('assignment_id') == args.reassign_from and
+            previous_developer.get('state') == 'DEVELOPER_RESPONDED'):
+        return run_task_direct_result_event(args.task_id, args.executor_task, store=store)
+    if (not reassigning and type(previous_developer) is dict and
             previous_developer.get('provider_profile') == 'agy' and
             previous_developer.get('state') == 'DEVELOPER_DISPATCHING'):
-        _recover_direct_child_dispatch(
+        return _recover_direct_child_dispatch(
             args, task, previous_developer, store, expected_agent='agy-developer')
     if (task.get('state') != 'PM_RESPONDED' or not task.get('response') or
             task.get('schema_version') != 2):
         raise LLMToolError('task has no successful PM response')
-    if task.get('developer') is not None:
+    if not reassigning and task.get('developer') is not None:
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
     binding = task.get('task_binding')
     task_completion.validate_task_binding(
@@ -5401,7 +5487,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         contract_digest=binding.get('contract_digest') if type(binding) is dict else None)
     assignment = task.get('pm_assignment')
     if args.selection_source == 'PM':
-        if (type(assignment) is not dict or assignment.get('route') != 'agy' or
+        if (type(assignment) is not dict or (not reassigning and assignment.get('route') != 'agy') or
                 assignment.get('risk') != 'LOW' or args.acceptance != assignment.get('acceptance')):
             raise LLMToolError('no matching low-risk AGY recommendation from the selected PM route')
     registration, snapshot = _delegate_d6_binding(args)
@@ -5412,6 +5498,12 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     if not decision.allowed:
         raise worker_dispatch.WorkerDispatchDenied(decision.reason_code)
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
+    reassignment = _direct_reassignment_plan(
+        args, store, task, registration, snapshot, 'agy', read_paths, write_paths)
+    if reassignment is not None:
+        registration = reassignment.successor
+    repair_packet = (reassignment.repair_packet if reassignment is not None
+                     else getattr(args, 'repair_packet', None))
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
     acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
@@ -5434,7 +5526,6 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         'goal': pm_goal, 'acceptance': acceptance, 'read_paths': read_paths,
         'write_paths': write_paths,
     }
-    repair_packet = getattr(args, 'repair_packet', None)
     if repair_packet is not None:
         prompt_packet['untrusted_repair_reference'] = _validate_repair_packet(repair_packet)
     instructions = ('You are the AGY Developer for this bounded llmtool Task. Work only in the '
@@ -5458,9 +5549,11 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     if len(prompt.encode('utf-8')) > min(64 * 1024 - 1, agy_max_prompt_bytes):
         raise LLMToolError('AGY_SKILL_PROMPT_TOO_LARGE')
     provider_input_bytes = len(prompt.encode('utf-8'))
-    test_policy = _remote_receipt_test_policy(task, read_paths=read_paths)
+    test_policy = (direct_reassignment.test_policy(reassignment) if reassignment is not None
+                   else _remote_receipt_test_policy(task, read_paths=read_paths))
     developer = {
-        'assignment_id': new_id(), 'selection_source': args.selection_source,
+        'assignment_id': reassignment.assignment if reassignment else new_id(),
+        'selection_source': args.selection_source,
         'state': 'DEVELOPER_PENDING', 'provider_profile': 'agy',
         'provider_type': None, 'model': None,
         'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
@@ -5492,17 +5585,43 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
-            store.d6_bind_compare_and_update(task['task_id'],
-                executor_task_id=registration.task_id,
-                expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
-                          'completion': None}, developer=developer, completion=completion)))
+        if reassignment is not None:
+            claimed = _delegate_chain_gate(
+                args, store, (reassignment.original, snapshot),
+                lambda: direct_reassignment.claim(store, reassignment, developer, completion))
+            developer = copy.deepcopy(claimed['developer'])
+            completion = copy.deepcopy(claimed['completion'])
+        else:
+            _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
+                store.d6_bind_compare_and_update(task['task_id'],
+                    executor_task_id=registration.task_id,
+                    expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
+                              'completion': None}, developer=developer, completion=completion)))
     except TaskStoreConflict:
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
     owner_gate_denied = False
+    expected_developer = copy.deepcopy(store.get(task['task_id'])['developer'])
     try:
         developer.update(state='DEVELOPER_DISPATCHING', provider_type='agy-cli', model=model)
-        store.update(task['task_id'], developer=developer)
+        dispatching_record = store.prepare_direct_dispatch(
+            task['task_id'], expected_developer=expected_developer, developer=developer)
+        developer = copy.deepcopy(dispatching_record['developer'])
+        expected_developer = copy.deepcopy(developer)
+
+        def authorize_agy_spawn():
+            nonlocal expected_developer
+            saved = store.authorize_direct_spawn(
+                task['task_id'], expected_developer=expected_developer)
+            expected_developer = copy.deepcopy(saved['developer'])
+            developer['dispatch_boundary'] = 'STARTING'
+
+        def record_agy_child(pid):
+            nonlocal expected_developer
+            saved = store.record_agy_launch(
+                task['task_id'], assignment_id=developer['assignment_id'], pid=pid,
+                start_time=codex_direct_developer.process_start_time(pid), pgid=os.getpgid(pid))
+            expected_developer = copy.deepcopy(saved['developer'])
+
         def validate_binding():
             current = store.get(task['task_id'])
             if (current.get('developer') != developer or current.get('task_binding') != binding or
@@ -5548,7 +5667,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             'prompt': prompt, 'log_path': 'agy.log', 'timeout': timeout,
             'state_dirs': (),
         }, gate=route_gate, boundary=GatedBoundary(),
-           snapshot=capture_snapshot)
+           snapshot=capture_snapshot, on_launch=authorize_agy_spawn, on_child=record_agy_child)
         _record_skill_delivery(task, registration, snapshot, 'agy', result.model,
                                card_prefix_sha256, result)
         after_registration = task_completion.read_d6_registration(
@@ -5570,7 +5689,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         if developer_diff_sensitive(artifact, _added_diff_content(artifact), _patch_paths):
             saved = _persist_developer_output_rejection(
                 store, task['task_id'], developer, 'DEVELOPER_OUTPUT_SENSITIVE', usage,
-                artifact, provider_type='agy-cli', model=model)
+                artifact, provider_type='agy-cli', model=model,
+                expected_developer=expected_developer)
             _print(_task_view(saved))
             return 1
         developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
@@ -5613,18 +5733,21 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                                           'agy', 'BLOCKED'))
             if execution is not None:
                 developer['execution'] = execution
-        store.update(task['task_id'], developer=developer)
+        store.compare_and_update(task['task_id'], expected={'developer': expected_developer},
+                                 developer=developer)
         _print(_task_view(store.get(task['task_id'])))
         return 1
     except Exception:
         developer.update(state='BLOCKED', provider_type='agy-cli', model=model,
                          error_code='AGY_RESULT_UNKNOWN', artifact=None,
                          artifact_sha256=None)
-        store.update(task['task_id'], developer=developer)
+        store.compare_and_update(task['task_id'], expected={'developer': expected_developer},
+                                 developer=developer)
         _print(_task_view(store.get(task['task_id'])))
         return 1
     try:
-        saved = store.update(task['task_id'], developer=developer, completion=completion)
+        saved = store.compare_and_update(task['task_id'], expected={'developer': expected_developer},
+                                 developer=developer, completion=completion)
     except Exception as exc:
         print(f'AGY_RESULT_PERSISTENCE_REJECTED reason={getattr(exc, "task_store_error_code", None) or type(exc).__name__}', file=sys.stderr)
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', artifact=None,
@@ -5632,7 +5755,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             execution={**developer['execution'], 'status': 'UNKNOWN',
                        'usage_source': 'UNKNOWN'}, usage=None)
         try:
-            saved = store.update(task['task_id'], developer=developer, completion=completion)
+            saved = store.compare_and_update(task['task_id'], expected={'developer': expected_developer},
+                                 developer=developer, completion=completion)
         except Exception:
             raise LLMToolError('AGY result was observed but could not be persisted') from None
     if developer['state'] == 'DEVELOPER_RESPONDED':
@@ -6796,25 +6920,59 @@ def _direct_child_liveness(execution):
     return 'ALIVE'
 
 
+def _direct_recovery_binding(args, record, developer, identity):
+    try:
+        registration, snapshot = _delegate_d6_binding(args)
+    except Exception:
+        raise LLMToolError('DIRECT_CHILD_D6_BINDING_UNVERIFIED') from None
+    completion = record.get('completion') or {}
+    executor = developer.get('executor_task_id') or completion.get('executor_task_id')
+    if (executor != registration.task_id or registration.trusted_agent_id != identity or
+            snapshot.head != developer.get('source_sha')):
+        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
+    return registration, snapshot
+
+
+def _same_direct_response(fresh, previous, args):
+    original = previous['developer']
+    current = fresh.get('developer')
+    completion = fresh.get('completion')
+    return (type(current) is dict and current.get('state') == 'DEVELOPER_RESPONDED' and
+            all(current.get(key) == original.get(key) for key in (
+                'assignment_id', 'provider_profile', 'source_sha', 'read_paths', 'write_paths',
+                'acceptance', 'context_sha256')) and
+            fresh.get('run_id') == previous.get('run_id') and
+            fresh.get('task_binding') == previous.get('task_binding') and
+            type(completion) is dict and completion.get('executor_task_id') == args.executor_task)
+
+
 def _recover_direct_child_dispatch(args, task, developer, store, *, expected_agent):
-    previous_developer = developer
-    if (developer.get('provider_profile') != 'opencode' or
+    identity = direct_reassignment.AGENTS.get(developer.get('provider_profile'))
+    if (identity is None or identity != expected_agent or
             developer.get('state') != 'DEVELOPER_DISPATCHING'):
         raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
-    try:
-        snapshot = task_completion.collect_git_snapshot(os.getcwd())
-        registration, _ = task_completion.bind_executor_task(
-            args.executor_task, expected_common_dir=snapshot.common_dir,
-            root=snapshot.root)
-    except Exception:
-        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
-    if (developer.get('executor_task_id') != registration.task_id or
-            registration.trusted_agent_id != expected_agent):
-        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
+    fresh = store.get(args.task_id)
+    if _same_direct_response(fresh, task, args):
+        return run_task_direct_result_event(args.task_id, args.executor_task, store=store)
+    if fresh.get('record_sha256') != task.get('record_sha256'):
+        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN')
+    first_binding = _direct_recovery_binding(args, task, developer, identity)
     liveness = _direct_child_liveness(developer.get('execution'))
     if liveness == 'ALIVE':
         raise LLMToolError('DIRECT_CHILD_STILL_RUNNING')
     if liveness != 'DEAD':
+        phase = developer.get('dispatch_boundary')
+        if phase == 'PREPARED':
+            raise LLMToolError('DIRECT_CHILD_SPAWN_NOT_AUTHORIZED')
+        if phase == 'STARTING':
+            raise LLMToolError('DIRECT_CHILD_SPAWN_OUTCOME_UNVERIFIED')
+        raise LLMToolError('DIRECT_CHILD_LAUNCH_EVIDENCE_MISSING')
+    fresh = store.get(args.task_id)
+    if _same_direct_response(fresh, task, args):
+        return run_task_direct_result_event(args.task_id, args.executor_task, store=store)
+    if (fresh.get('record_sha256') != task.get('record_sha256') or
+            _direct_recovery_binding(args, fresh, developer, identity) != first_binding or
+            _direct_child_liveness(developer.get('execution')) != 'DEAD'):
         raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN')
     outcome = dict(developer)
     execution = {
@@ -6828,8 +6986,13 @@ def _recover_direct_child_dispatch(args, task, developer, store, *, expected_age
                    error_code='DIRECT_CHILD_NOT_RUNNING', execution=execution)
     try:
         store.compare_and_update(args.task_id,
-                                 expected={'developer': previous_developer},
+                                 expected={'record_sha256': task.get('record_sha256'),
+                                           'developer': developer},
                                  developer=outcome)
+    except TaskStoreConflict:
+        if _same_direct_response(store.get(args.task_id), task, args):
+            return run_task_direct_result_event(args.task_id, args.executor_task, store=store)
+        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
     except Exception:
         raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
     raise LLMToolError('DIRECT_CHILD_OUTCOME_UNKNOWN') from None
@@ -8132,6 +8295,52 @@ def _delegate_chain_gate(args, store, d6_binding, claim):
     return result
 
 
+def _auto_direct_replacement(args, store):
+    """Resolve one different authorized route, then use its ordinary launcher."""
+    provider = getattr(args, 'provider', None)
+    if (provider not in direct_reassignment.AGENTS or
+            getattr(args, 'selection_source', None) != 'PM' or
+            getattr(args, 'reassign_from', None) is not None):
+        return args
+    if provider == 'agy':
+        if getattr(args, 'mode', 'proposal') != 'direct' or getattr(args, 'background', False):
+            return args
+        _optional_agy_owner_ref(args)
+    elif getattr(args, 'mode', 'proposal') == 'direct':
+        return args
+    task = store.get(args.task_id)
+    previous = task.get('developer')
+    if not direct_reassignment.replacement_candidate(previous):
+        return args
+    history = previous.get('direct_handoffs', [])
+    if (history and previous.get('state') == 'DEVELOPER_PENDING' and
+            history[-1]['old_profile'] == provider):
+        selected = history[-1]['new_profile']
+        assignment = history[-1]['old_assignment']
+    elif previous.get('provider_profile') == provider:
+        selected = next(profile for profile in direct_reassignment.AGENTS if profile != provider)
+        assignment = previous['assignment_id']
+    else:
+        return args
+    target_worker = worker_dispatch.worker_key_for(selected)
+    auth = worker_dispatch.evaluate(target_worker, None, args.task_id)
+    if not auth.allowed:
+        raise LLMToolError('DIRECT_REASSIGN_NO_AUTHORIZED_ALTERNATE: ' + auth.reason_code)
+    blocked = worker_availability.quota_refusal(
+        store, target_worker, owner_assignment_ref=None, policy_task_id=args.task_id)
+    if blocked is not None:
+        raise LLMToolError('DIRECT_REASSIGN_ALTERNATE_UNAVAILABLE: ' + blocked)
+    replacement = copy.copy(args)
+    replacement.provider = selected
+    replacement.mode = 'direct' if selected == 'agy' else 'proposal'
+    replacement.reassign_from = assignment
+    replacement.owner_ref = None
+    replacement.background = False
+    # A timeout for the former route belongs to that route's policy limits.
+    replacement.timeout = None
+    return replacement
+
+
 def run_task_delegate(args, *, store=None):
     store = TaskStore() if store is None else store
     if getattr(args, 'provider', None) == 'company-gw':
@@ -8143,11 +8352,18 @@ def run_task_delegate(args, *, store=None):
             f'{worker_dispatch.RETIRED_WORKER_ALIASES[retired]} (#1502 WP-E)')
     # #1815: refuse a bad --timeout before any Task read, fork or provider call.
     selected_route = getattr(args, 'provider', None)
+    if getattr(args, 'reassign_from', None) is not None and (
+            selected_route not in direct_reassignment.AGENTS or
+            getattr(args, 'background', False) or
+            getattr(args, 'selection_source', None) != 'PM' or
+            getattr(args, 'data_class', None) is not None):
+        raise LLMToolError('DIRECT_REASSIGN_ROUTE_REFUSED')
     if selected_route in TIMEOUT_ROUTES:
         _delegate_timeout(args, selected_route)
     elif getattr(args, 'timeout', None) is not None:
         raise LLMToolError('TIMEOUT_ROUTE_UNSUPPORTED: --timeout applies only to the '
                            'Claude, OpenCode, AGY and gw-agent Developer routes')
+    args = _auto_direct_replacement(args, store)
     if getattr(args, 'background', False):
         provider = getattr(args, 'provider', None)
         if provider == 'codex' and getattr(args, 'mode', 'proposal') != 'direct':
@@ -8465,6 +8681,7 @@ def run_task_delegate_checked(args, *, store=None):
     except pm_caller.PMCallerRefused as exc:
         _print(pm_caller.refusal(args.task_id, exc.code), None)
         return 1
+    args = _auto_direct_replacement(args, store)
     # #1816: a fresh quota FAIL refuses before any Task or D6 write. An Owner
     # policy refusal comes first (quota_refusal then defers to the route).
     worker = worker_dispatch.worker_key_for(getattr(args, 'provider', None))
@@ -9506,6 +9723,9 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
             expected={'completion': completion}, completion=waiting)
         _print(_task_view(saved))
         return 1
+    if task.get('review_repair_claims'):
+        initial = direct_reassignment.effective_writer_admission(
+            store, task, initial, args.executor_task)
     # Preserve the immutable D6 admission binding across WAITING retries, but do
     # not carry forward result/test/review facts from a prior incomplete attempt.
     admission_fields = ('executor_identity', 'executor_session_ref',

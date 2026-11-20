@@ -1,3 +1,4 @@
+import copy
 import io
 import hashlib
 import json
@@ -1613,6 +1614,250 @@ class TaskSubmissionCLITests(unittest.TestCase):
         values.update(changes)
         return Namespace(**values)
 
+    def _auto_reassign(self, phase, *, original='agy', refusal=None, repair=False):
+        from test_task_store import TaskStoreTests, remote_test_receipt
+        from llmtool import review_repair
+
+        task = self._pm_task_with_opencode_assignment()
+        target = 'opencode' if original == 'agy' else 'agy'
+        agents = submission_cli.direct_reassignment.AGENTS
+        args = self._opencode_delegate_args(task, provider=original,
+                                            mode='direct' if original == 'agy' else 'proposal',
+                                            cwd=str(self.executor_root))
+        store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+        registry = self._executor_record_path()
+        record = json.loads(registry.read_text(encoding='utf-8'))
+        record['trusted_agent_id'] = agents[original]
+        registry.write_text(json.dumps(record), encoding='utf-8')
+        old = TaskStoreTests._developer_assignment(provider=original)
+        old.update(source_sha=self.executor_head, read_paths=args.read_path,
+                   write_paths=args.write_path, acceptance=args.acceptance,
+                   egress_basis=args.egress_basis,
+                   execution=None, backend_session_semantics='CLI_REPORTED_SESSION_ID')
+        if original == 'agy':
+            old['owner_assignment_ref'] = None
+        completion = {
+            'state': 'WAITING_EXECUTOR', 'executor_task_id': args.executor_task,
+            'reviewer_task_id': None, 'evidence': {
+                'task_id': task['task_id'], 'run_id': task['run_id'],
+                'contract_digest': task['task_binding']['contract_digest'],
+                'executor_identity': agents[original], 'executor_session_ref': record['session_ref'],
+                'executor_native_session_id': None, 'executor_native_session': 'UNKNOWN',
+                'execution_mode': 'DIRECT_D6', 'root': str(self.executor_root),
+                'common_dir': self.executor_common_dir, 'branch': record['branch'],
+                'source_sha': self.executor_head, 'result_head': None,
+            }, 'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+            'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+        }
+        root = None
+        if repair:
+            root = self._pm_task_with_opencode_assignment()
+
+        with patch.dict(os.environ, {'HOME': str(self.home)}):
+            if repair:
+                root_completion = copy.deepcopy(completion)
+                root_completion['evidence'].update(
+                    task_id=root['task_id'], run_id=root['run_id'],
+                    contract_digest=root['task_binding']['contract_digest'])
+                root_dev = dict(old, assignment_id=new_id(), session_id='dev-' + new_id())
+                store.d6_bind_compare_and_update(
+                    root['task_id'], executor_task_id=args.executor_task,
+                    expected={'developer': None}, developer=root_dev, completion=root_completion)
+                root_dev = store.prepare_direct_dispatch(
+                    root['task_id'], expected_developer=root_dev,
+                    developer=dict(root_dev, state='DEVELOPER_DISPATCHING',
+                                   provider_type='agy-cli', model='gemini-test'))['developer']
+                root_dev = store.authorize_direct_spawn(
+                    root['task_id'], expected_developer=root_dev)['developer']
+                diff = ('diff --git a/sample.py b/sample.py\n--- a/sample.py\n'
+                        '+++ b/sample.py\n@@ -1 +1 @@\n-VALUE = 0\n+VALUE = 1\n')
+                root = store.compare_and_update(
+                    root['task_id'], expected={'developer': root_dev},
+                    developer=dict(root_dev, state='DEVELOPER_RESPONDED', artifact=diff,
+                                   artifact_sha256=hashlib.sha256(diff.encode()).hexdigest(),
+                                   execution={'status': 'DONE',
+                                              'native_session_id': 'conversation_12345678',
+                                              'process_exit_code': 0, 'stdout_sha256': 'a' * 64,
+                                              'elapsed_ms': 12, 'cleanup_status': 'CONFIRMED',
+                                              'usage_source': 'UNKNOWN', 'source_bytes': None,
+                                              'source_file_count': None,
+                                              'source_manifest_sha256': None}))
+                receipt = remote_test_receipt(
+                    root, result='FAIL', exit_code=1, source_sha=self.executor_head,
+                    fetch_head=self.executor_head, executor_task=args.executor_task,
+                    failure_excerpt='FAIL: test_example',
+                    final=['FAILED (failures=1)'], failures=['test_task_store'])
+                store.append_remote_test_receipt(root['task_id'], receipt)
+                packet = review_repair._remote_test_failure(
+                    root, executor_task=args.executor_task, pr_number=2436, receipt=receipt)
+                digest = hashlib.sha256(json.dumps(packet, ensure_ascii=True, sort_keys=True,
+                                                  separators=(',', ':')).encode()).hexdigest()
+                claim = {'executor_task': args.executor_task, 'pr': 2436,
+                         'head_sha': self.executor_head, 'version': 1, 'attempt': 1,
+                         'family': 'pr-2436-ec2', 'state': 'CLAIMED',
+                         'repair_task_id': task['task_id'], 'comment_id': None,
+                         'packet_sha256': digest, 'claimed_at': '2026-11-20T00:00:00Z'}
+                claimed = store.get(root['task_id'])
+                store.compare_and_update(root['task_id'],
+                    expected={'record_sha256': claimed['record_sha256']},
+                    review_repair_claims=[claim])
+            store.d6_bind_compare_and_update(
+                task['task_id'], executor_task_id=args.executor_task,
+                expected={'developer': None}, developer=old, completion=completion)
+            if phase in ('PREPARED', 'STARTING', 'STOPPED'):
+                prepared = store.prepare_direct_dispatch(
+                    task['task_id'], expected_developer=old,
+                    developer=dict(old, state='DEVELOPER_DISPATCHING', provider_type=original + '-cli',
+                                   model='gemini-test' if original == 'agy' else 'opencode/test-free',
+                                   max_tokens=None if original == 'agy' else 4096))['developer']
+                if phase in ('STARTING', 'STOPPED'):
+                    store.authorize_direct_spawn(task['task_id'], expected_developer=prepared)
+                if phase == 'STOPPED':
+                    launched = store.record_opencode_launch(task['task_id'],
+                        assignment_id=old['assignment_id'], pid=321, start_time='123456',
+                        pgid=321)['developer']
+                    outcome = dict(launched, state='DEVELOPER_OUTCOME_UNKNOWN',
+                                   error_code='OPENCODE_PROMPT_DELIVERY_INCOMPLETE')
+                    outcome['execution'] = {key: value for key, value in launched['execution'].items()
+                                            if not key.startswith('child_')}
+                    outcome['execution'].update(status='UNKNOWN', cleanup_status='CONFIRMED',
+                                                process_exit_code=1)
+                    store.record_direct_stop(task['task_id'], expected_developer=launched,
+                                             developer=outcome)
+
+        def launch_opencode(**kwargs):
+            if refusal == 'concurrent':
+                from llmtool import task_store
+                with patch.object(task_store, 'LINEAGE_LOCK_TIMEOUT_SECONDS', 0.05):
+                    with self.assertRaises(LLMToolError) as refused:
+                        run_task_delegate(args, store=TaskStore(store.root))
+                self.assertEqual(refused.exception.task_store_error_code,
+                                 'DIRECT_DISPATCH_LEASE_BUSY')
+            kwargs['spawn_authorization']()
+            kwargs['launch_callback'](321, '123456', 321)
+            (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+            return self._opencode_result()
+
+        def launch_agy(_route, request, *, gate, on_launch, **_kwargs):
+            self.assertTrue(gate().allowed)
+            on_launch()
+            (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+            return SimpleNamespace(session_id='conversation_12345678', model=request['model'],
+                                   exit_code=0, stdout_sha256='a' * 64, elapsed_ms=12,
+                                   cleanup_status='CONFIRMED', usage=None)
+
+        if refusal == 'dirty':
+            (self.executor_root / 'sample.py').write_text('VALUE = 3\n')
+        if refusal == 'scope':
+            args.egress_basis = 'Unrelated fixture context.'
+        if refusal == 'paused':
+            import worker_policy_fixture
+            worker_policy_fixture.update(self.policy_path, 'opencode-developer', 'PAUSED')
+
+        def bind_native(_registration, session):
+            if not repair:
+                return 'UNAVAILABLE'
+            self._set_executor_native_session(session)
+            return 'BOUND'
+
+        bind_direct = (patch.object(submission_cli, '_bind_direct_native_session',
+                                    side_effect=_REAL_DIRECT_BIND)
+                       if repair else patch.object(submission_cli, '_bind_direct_native_session',
+                                                  return_value=False))
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+             patch.object(submission_cli.opencode_direct_developer, 'run',
+                          side_effect=launch_opencode) as opencode_launch, \
+             patch.object(submission_cli, 'run_route', side_effect=launch_agy) as agy_launch, \
+             patch.object(submission_cli, '_agy_developer_profile', return_value=('gemini-test', 'high')), \
+             patch.object(submission_cli.shutil, 'which', return_value='/usr/bin/fake-cli'), \
+             bind_direct, \
+             patch.object(submission_cli, '_bind_codex_native_session', side_effect=bind_native), \
+             patch.object(submission_cli, 'run_task_direct_result_event', return_value=0), \
+             redirect_stdout(io.StringIO()):
+            if refusal == 'interrupted_handoff':
+                with patch.object(submission_cli.direct_reassignment, '_install_successor',
+                                  side_effect=KeyboardInterrupt):
+                    with self.assertRaises(KeyboardInterrupt):
+                        run_task_delegate(args, store=store)
+                pending = store.get(task['task_id'])['developer']
+                self.assertEqual(pending['state'], 'DEVELOPER_PENDING')
+                self.assertEqual(pending['provider_profile'], target)
+                self.assertEqual(json.loads(registry.read_text())['trusted_agent_id'],
+                                 agents[original])
+                opencode_launch.assert_not_called()
+            expected = {
+                'dirty': 'D6_SOURCE_BINDING_MISMATCH',
+                'scope': 'DIRECT_REASSIGN_SCOPE_MISMATCH',
+                'paused': 'DIRECT_REASSIGN_NO_AUTHORIZED_ALTERNATE',
+            }.get(refusal)
+            if phase == 'STARTING':
+                expected = 'DIRECT_CHILD_SPAWN_OUTCOME_UNVERIFIED'
+            if expected is not None:
+                with self.assertRaisesRegex(LLMToolError, expected):
+                    run_task_delegate(args, store=store)
+                opencode_launch.assert_not_called()
+                agy_launch.assert_not_called()
+                self.assertEqual(store.get(task['task_id'])['developer']['assignment_id'],
+                                 old['assignment_id'])
+                return
+            if repair:
+                rescued = review_repair.repair_review(
+                    store=store, task_id=root['task_id'], executor_task=args.executor_task,
+                    pr_number=2436, auto=True, remote_test_receipt=receipt)
+                self.assertEqual(rescued['repair_task_id'], task['task_id'])
+                self.assertEqual(rescued['claim'], dict(claim, state='DISPATCHED'))
+                self.assertEqual(store.get(root['task_id'])['review_repair_claims'],
+                                 [dict(claim, state='DISPATCHED')])
+            else:
+                self.assertEqual(run_task_delegate(args, store=store), 0)
+            (opencode_launch if target == 'opencode' else agy_launch).assert_called_once()
+            (agy_launch if target == 'opencode' else opencode_launch).assert_not_called()
+        persisted = store.get(task['task_id'])
+        assigned = persisted['developer']
+        self.assertEqual(assigned['provider_profile'], target)
+        self.assertEqual(assigned['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(assigned['direct_handoffs'][-1]['old_assignment'], old['assignment_id'])
+        self.assertNotEqual(assigned['assignment_id'], old['assignment_id'])
+        self.assertEqual(persisted['completion']['executor_task_id'], args.executor_task)
+        self.assertEqual(json.loads(registry.read_text())['trusted_agent_id'], agents[target])
+        self.assertIn('REASSIGN', [entry['action'] for entry in persisted['dispatch_audit']
+                                   if entry.get('assignment_id') == assigned['assignment_id']])
+
+    def test_auto_reassign_pending_launches_other_developer(self):
+        self._auto_reassign('PENDING')
+
+    def test_auto_reassign_prepared_launches_other_developer(self):
+        self._auto_reassign('PREPARED')
+
+    def test_auto_reassign_refuses_post_spawning_without_pid(self):
+        self._auto_reassign('STARTING')
+
+
+    def test_auto_reassign_opencode_prepared_launches_agy(self):
+        self._auto_reassign('PREPARED', original='opencode')
+
+    def test_auto_reassign_confirmed_stop_launches_agy(self):
+        self._auto_reassign('STOPPED', original='opencode')
+
+    def test_auto_reassign_refuses_paused_alternate(self):
+        self._auto_reassign('PREPARED', refusal='paused')
+
+    def test_auto_reassign_refuses_dirty_workspace(self):
+        self._auto_reassign('PREPARED', refusal='dirty')
+
+    def test_auto_reassign_refuses_changed_egress(self):
+        self._auto_reassign('PREPARED', refusal='scope')
+
+
+    def test_auto_reassign_preserves_real_ec2_claim(self):
+        self._auto_reassign('PREPARED', repair=True)
+
+    def test_auto_reassign_resume_does_not_replace_pending_successor(self):
+        self._auto_reassign('PREPARED', refusal='interrupted_handoff')
+
+    def test_auto_reassign_contender_cannot_start_another_writer(self):
+        self._auto_reassign('PREPARED', refusal='concurrent')
+
     def test_opencode_delegate_refuses_claude_reserved_d6_before_assignment(self):
         task = self._pm_task_with_opencode_assignment()
         registry_path = (Path(self.executor_common_dir) / 'llmtool-worktrees' /
@@ -1654,6 +1899,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
             self.assertEqual(kwargs['read_paths'], ['sample.py'])
             self.assertEqual(kwargs['write_paths'], ['sample.py'])
             self.assertIn(task['task_id'], kwargs['prompt'])
+            kwargs['spawn_authorization']()
             kwargs['launch_callback'](321, '123456', 321)
             (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
             return DirectResult(0, 'ses_Abc123', 'Updated fixture.',
@@ -1882,6 +2128,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                     return original_compare(task_id, expected=expected, **changes)
 
                 def execute(**kwargs):
+                    kwargs['spawn_authorization']()
                     kwargs['launch_callback'](321, '123456', 321)
                     (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
                     return result
@@ -2895,6 +3142,10 @@ class TaskSubmissionCLITests(unittest.TestCase):
 
             def __getattr__(self, name):
                 return getattr(self.store, name)
+
+            def prepare_direct_dispatch(self, task_id, **kwargs):
+                self._before_write(kwargs)
+                return self.store.prepare_direct_dispatch(task_id, **kwargs)
 
             def update(self, task_id, **kwargs):
                 self._before_write(kwargs)
@@ -4946,7 +5197,7 @@ class DirectRouteChildLivenessTests(unittest.TestCase):
 
     def _recover(self, store, task_id, *, agent, start='123456'):
         args = Namespace(task_id=task_id, executor_task='executor-one')
-        snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo'})()
+        snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo', 'head': 'a' * 40})()
         registration = type('Registration', (), {
             'task_id': 'executor-one', 'trusted_agent_id': agent})()
         with patch.object(submission_cli.task_completion, 'collect_git_snapshot',
@@ -5005,10 +5256,11 @@ class DirectRouteChildLivenessTests(unittest.TestCase):
                      patch.object(submission_cli.os, 'getpgid', return_value=321), \
                      patch.object(submission_cli.task_completion, 'collect_git_snapshot',
                                   return_value=type('Snapshot', (), {
-                                      'common_dir': '/repo/.git', 'root': '/repo'})()), \
+                                      'common_dir': '/repo/.git', 'root': '/repo', 'head': 'a' * 40})()), \
                      patch.object(submission_cli.task_completion, 'bind_executor_task',
                                   return_value=(type('Registration', (), {
-                                      'task_id': 'executor-one', 'trusted_agent_id': agent})(), None)):
+                                      'task_id': 'executor-one', 'trusted_agent_id': agent})(),
+                                                SimpleNamespace(head='a' * 40))):
                     with self.assertRaisesRegex(LLMToolError,
                                                 'DIRECT_CHILD_OUTCOME_UNKNOWN'):
                         submission_cli._recover_direct_child_dispatch(
@@ -5023,7 +5275,7 @@ class DirectRouteChildLivenessTests(unittest.TestCase):
             with self.subTest(profile=profile):
                 store, task_id = self._store(profile)
                 args = Namespace(task_id=task_id, executor_task='executor-one')
-                snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo'})()
+                snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo', 'head': 'a' * 40})()
                 registration = type('Registration', (), {
                     'task_id': 'executor-one', 'trusted_agent_id': agent})()
                 with patch.object(submission_cli.task_completion, 'collect_git_snapshot',
@@ -5073,7 +5325,7 @@ class DirectRouteChildLivenessTests(unittest.TestCase):
                         self.assertEqual(raced_record['developer'], newer)
                         self.assertEqual(store.get(task_id)['developer'], newer)
                     return original(_task_id, expected=expected, **changes)
-                snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo'})()
+                snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo', 'head': 'a' * 40})()
                 registration = type('Registration', (), {
                     'task_id': 'executor-one', 'trusted_agent_id': agent})()
                 with patch.object(submission_cli.task_completion, 'collect_git_snapshot',
