@@ -5,6 +5,8 @@ A1: the threshold is spec_preflight_large_file_lines from the trusted
     value (2000 lines) preflight results are unchanged.
 A2: an absent key keeps the #1570 default of 2000; an invalid policy refuses
     fail closed (SPEC_PREFLIGHT_INVALID) instead of falling back silently.
+A3: the threshold applies only to gw-agent specs, to every listed write file,
+    and only to files that actually exist.
 """
 
 import contextlib
@@ -98,6 +100,33 @@ class SpecPreflightPolicyTests(unittest.TestCase):
                                side_effect=lambda: repair_policy.load_policy(bad)):
             self.assertEqual(self.run_main({"small.txt": 1}),
                              (2, "SPEC_PREFLIGHT_INVALID\n"))
+
+    # A3
+    def test_non_gw_agent_provider_is_not_refused_for_file_size(self):
+        with mock.patch.object(spec_preflight, "load_policy", return_value={KEY: 3}):
+            for provider in ("codex", None):
+                self.assertEqual(self.run_main({"three.txt": 3}, provider=provider), OK)
+
+    def test_every_listed_write_file_is_checked_in_order(self):
+        with mock.patch.object(spec_preflight, "load_policy", return_value={KEY: 3}):
+            # The first file is under the threshold; the second is at it.
+            self.assertEqual(self.run_main({"one.txt": 1, "three.txt": 3}), REFUSED)
+            # Reordering the same files does not change the result.
+            self.assertEqual(self.run_main({"three.txt": 3, "one.txt": 1}), REFUSED)
+            # Every file under the threshold still passes.
+            self.assertEqual(self.run_main({"one.txt": 1, "two.txt": 2}), OK)
+
+    def test_write_path_without_a_file_is_not_refused_for_size(self):
+        # run_main would create the file, so build the spec here; the write
+        # path must not exist under the repo directory.
+        spec = dict(self.spec, provider="gw-agent", write=["missing.txt"])
+        spec_path = self.dir / "spec.json"
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+        with mock.patch.object(spec_preflight, "load_policy", return_value={KEY: 3}):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                status = spec_preflight.main(["--repo", str(self.dir), str(spec_path)])
+        self.assertEqual((status, output.getvalue()), OK)
 
 
 if __name__ == "__main__":
