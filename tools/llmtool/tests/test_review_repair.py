@@ -359,6 +359,7 @@ class ReviewRepairTests(unittest.TestCase):
         recorder = kwargs.pop('repair_task_recorder', default_recorder)
         runtime_path = kwargs.pop('runtime_path', '/usr/bin/codex')
         evaluate = kwargs.pop('evaluate', None)
+        pr_number = kwargs.pop('pr_number', PR)
         evaluate_patch = (
             patch.object(review_repair.worker_dispatch, 'evaluate', side_effect=evaluate)
             if evaluate is not None else
@@ -370,7 +371,7 @@ class ReviewRepairTests(unittest.TestCase):
              patch.object(review_repair.shutil, 'which', return_value=runtime_path):
             return review_repair.repair_review(
                 store=self.store, task_id=TASK, executor_task=EXECUTOR,
-                pr_number=PR, github_get=github_get,
+                pr_number=pr_number, github_get=github_get,
                 dispatch_adapter=adapter, current_head=current_head,
                 repair_task_recorder=recorder, **kwargs)
 

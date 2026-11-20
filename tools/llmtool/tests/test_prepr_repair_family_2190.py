@@ -41,6 +41,7 @@ PREPR_BASE_FAMILY = 'prepr'
 PREPR_EC2_FAMILY = 'prepr-ec2'
 PR_FAMILY = f'pr-{PR}'
 PR_EC2_FAMILY = f'pr-{PR}-ec2'
+EVENT_ID = 'e' * 32
 
 
 def setUpModule():
@@ -72,6 +73,13 @@ def _receipt(head=HEAD, task_id=TASK):
 
 
 def _base_record(task_id=TASK):
+    claim = {'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD, 'version': 1,
+             'state': 'DISPATCHED', 'reviewer_task': 'reviewer-d6',
+             'native_session_id': 'review-session', 'account_mode': 'DEFAULT_SECOND_ACCOUNT',
+             'claimed_at': '2026-10-27T00:00:00Z', 'updated_at': '2026-10-27T00:00:00Z'}
+    event = {'event_id': EVENT_ID, 'source': 'REVIEWER', 'state': 'PENDING',
+             'source_sha': HEAD, 'session_id': 'review-' + EVENT_ID,
+             'received_at': '2026-10-27T01:01:00Z'}
     record = {
         'schema_version': 2,
         'task_id': task_id,
@@ -94,6 +102,8 @@ def _base_record(task_id=TASK):
             'executor_task_id': EXECUTOR,
             'evidence': {'common_dir': '/fake/common', 'result_head': HEAD},
         },
+        'review_dispatch_claim': [claim],
+        'completion_events': [event],
     }
     record['record_sha256'] = hashlib.sha256(
         json.dumps(record, sort_keys=True).encode()).hexdigest()
@@ -327,9 +337,51 @@ class PreprRepairFamilyTests(unittest.TestCase):
         real_temp = tempfile.TemporaryDirectory()
         try:
             store = TaskStore(real_temp.name)
-            record = _base_record()
-            record['repair_packet'] = text
-            store.create(record)
+            request = 'Bounded plain Developer task.'
+            task = task_submission_cli._record(
+                TASK, RUN, 'pm-' + RUN[:16], 'pm-profile', request,
+                state='PM_RESPONDED', provider_type='openai-compatible',
+                model='pm-model', backend='NO_NATIVE_SESSION_ID_EXPOSED',
+                request_sha=hashlib.sha256(request.encode()).hexdigest())
+            task.update(
+                pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                                  'base_url': None},
+                response='PM accepted a bounded request.', error_code=None,
+                pm_assignment={'schema_version': 1, 'route': 'claude', 'risk': 'LOW',
+                               'goal': 'Add a focused test.',
+                               'acceptance': ['the focused test passes']})
+            store.create(task)
+
+            registration = SimpleNamespace(
+                task_id=EXECUTOR, root='/registered/root', common_dir='/repo/.git',
+                branch='task-branch', trusted_agent_id='claude-developer',
+                session_ref='session-ref', native_session_id=None)
+            callback = task_submission_cli._direct_result_callback(
+                task, registration, HEAD, test_policy='LOCAL')
+            dev = {
+                'assignment_id': new_id(), 'selection_source': 'PM', 'state': 'DEVELOPER_PENDING',
+                'provider_profile': 'claude', 'provider_type': None, 'model': None,
+                'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+                'session_id': 'dev-' + new_id(), 'source_sha': HEAD,
+                'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+                'read_paths': ['src.py'], 'write_paths': ['src.py'],
+                'acceptance': ['the focused test passes'], 'context_sha256': 'b' * 64,
+                'egress_basis': 'Plain project text for a bounded change.', 'input_bytes': 10,
+                'max_tokens': None, 'artifact_format': 'unified_diff', 'artifact': None,
+                'artifact_sha256': None, 'usage': None, 'error_code': None, 'execution': None,
+                'created_at': '2026-11-20T00:00:00Z', 'owner_assignment_ref': None, 'executor_task_id': EXECUTOR,
+                'timeout_seconds': 600, 'direct_result_callback': callback,
+            }
+            comp = {'state': 'WAITING_EXECUTOR', 'executor_task_id': EXECUTOR,
+                    'reviewer_task_id': None, 'evidence': dict(callback['evidence']),
+                    'missing_gates': [], 'pm_dispatch': 'NOT_STARTED',
+                    'pm_response': None, 'pm_recommendation': None, 'pm_usage': None,
+                    'pm_error_code': None}
+            store.d6_bind_compare_and_update(
+                TASK, executor_task_id=EXECUTOR,
+                expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
+                          'completion': None},
+                developer=dev, completion=comp, repair_packet=text)
             fetched = store.get(TASK)
             self.assertEqual(fetched['repair_packet'], text)
             self.assertEqual(start_failure.decode_repair_packet(fetched['repair_packet']), packet)

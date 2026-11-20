@@ -701,6 +701,26 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
     if profile == 'claude' and shutil.which(profile) is None:
         _refuse('RUNTIME_NOT_ON_PATH')
+    if pr_number is None and not test_failure:
+        _refuse('REPAIR_FAMILY_INVALID')
+    if pr_number is None:
+        base_family = 'prepr' if family is None else family
+        if family is not None and family != 'prepr':
+            _refuse('REPAIR_FAMILY_INVALID')
+    else:
+        base_family = f'pr-{pr_number}' if family is None else family
+        if family == 'prepr':
+            _refuse('REPAIR_FAMILY_INVALID')
+    if (type(base_family) is not str or
+            re.fullmatch(r'[a-z0-9._-]{1,64}', base_family) is None or
+            base_family.endswith(EC2_FAMILY_SUFFIX)):
+        _refuse('REPAIR_FAMILY_INVALID')
+    # The stored family: a review repair stays in the base family; an EC2
+    # remote-test or CI repair goes to '<base>-ec2' (one test-failure count).
+    family = (base_family if not test_failure
+              else base_family + EC2_FAMILY_SUFFIX)
+    if len(family) > 64:
+        _refuse('REPAIR_FAMILY_INVALID')
     ci_identity_sha = None
     body_holder = []
     if ci_failure is not None:
@@ -726,26 +746,6 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     # #1816: after the Owner policy, before any claim, Task or D6 write.
     if worker_availability.fresh_quota_fail(store, worker):
         _refuse(worker_availability.REFUSAL_CODE)
-    if pr_number is None and not test_failure:
-        _refuse('REPAIR_FAMILY_INVALID')
-    if pr_number is None:
-        base_family = 'prepr' if family is None else family
-        if family is not None and family != 'prepr':
-            _refuse('REPAIR_FAMILY_INVALID')
-    else:
-        base_family = f'pr-{pr_number}' if family is None else family
-        if family == 'prepr':
-            _refuse('REPAIR_FAMILY_INVALID')
-    if (type(base_family) is not str or
-            re.fullmatch(r'[a-z0-9._-]{1,64}', base_family) is None or
-            base_family.endswith(EC2_FAMILY_SUFFIX)):
-        _refuse('REPAIR_FAMILY_INVALID')
-    # The stored family: a review repair stays in the base family; an EC2
-    # remote-test or CI repair goes to '<base>-ec2' (one test-failure count).
-    family = (base_family if not test_failure
-              else base_family + EC2_FAMILY_SUFFIX)
-    if len(family) > 64:
-        _refuse('REPAIR_FAMILY_INVALID')
     # The count lives on the root Task, which task advance drives.
     try:
         candidate_ids = list(store.task_ids())
