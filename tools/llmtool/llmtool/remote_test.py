@@ -400,6 +400,31 @@ def _pr_change_paths(pr, get=None, *, head=None):
     return None, 'PR_CHANGE_DATA_UNAVAILABLE'
 
 
+def _pr_test_modules(pr, head, get=None):
+    """Return the EC2-admissible modules a PR changes at exactly ``head``, or None.
+
+    A Task that declares no module still runs the test modules its PR changes.
+    The change data is pinned to the caller's exact head; a read error, a head
+    move, no module, or more than the module cap is unknown, so the caller
+    fails closed.
+    """
+    if get is None:
+        get = _github_get
+    if type(head) is not str or _SHA.fullmatch(head) is None:
+        return None
+    if _fresh_pr_head(pr, get=get) != head:
+        return None
+    paths, _code = _pr_change_paths(pr, get=get, head=head)
+    if paths is None:
+        return None
+    modules = sorted({Path(path).stem for path in paths
+                      if _TEST_MODULE_PATH.fullmatch(path) and
+                      _MODULE.fullmatch(Path(path).stem)})
+    if not modules or len(modules) > _MAX_REMOTE_MODULES:
+        return None
+    return tuple(modules)
+
+
 def _no_admissible_pr_module(pr, head, get=None):
     """True when a PR at exactly ``head`` changes no EC2-admissible module.
 
@@ -683,15 +708,20 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         store.record_published_pr(task_id, pr, recorded_head)
     admitted = _task_path_modules(task)
     selected = tuple(sorted(set(modules or admitted)))
+    derived = ()
+    if not selected and pr is not None and not modules and not admitted:
+        # #2413: a Task that declares no module still runs the modules its PR
+        # changes. A PR with no admissible module records the skip for its exact
+        # head, while missing or inconsistent change data still fails closed.
+        derived = _pr_test_modules(pr, recorded_head, get=get)
+        if derived is not None:
+            selected = derived
+        elif _no_admissible_pr_module(pr, recorded_head, get=get) is True:
+            return _record_no_admissible_module(
+                store, task_id, task, executor_task=executor_task, sha=sha, pr=pr)
     if (not selected or len(selected) > _MAX_REMOTE_MODULES or
-            any(type(x) is not str or not _MODULE.fullmatch(x) or x not in admitted for x in selected)):
-        # #2413: a PR that changes no EC2-admissible module cannot run here.
-        # Record the skip for this exact head so advance can continue; missing
-        # or inconsistent change data still refuses MODULE_NOT_ADMITTED.
-        if pr is not None and not modules and not admitted:
-            if _no_admissible_pr_module(pr, recorded_head, get=get) is True:
-                return _record_no_admissible_module(
-                    store, task_id, task, executor_task=executor_task, sha=sha, pr=pr)
+            any(type(x) is not str or not _MODULE.fullmatch(x) or
+                (x not in admitted and x not in derived) for x in selected)):
         return denied('MODULE_NOT_ADMITTED')
     if hosted:
         return _run_hosted(store, task_id, task, executor_task=executor_task,

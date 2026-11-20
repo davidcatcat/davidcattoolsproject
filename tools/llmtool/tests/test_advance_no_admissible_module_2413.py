@@ -1,4 +1,6 @@
 """#2413: a PR with no EC2-admissible module completes the remote-test step."""
+import hashlib
+import json
 import sys
 import tempfile
 import unittest
@@ -17,8 +19,11 @@ from llmtool.errors import LLMToolError  # noqa: E402
 HEAD = 'a' * 40
 OTHER_HEAD = 'b' * 40
 EXEC = 'c' * 32
+TASK = '1' * 32
+RUN = '2' * 32
 PR = 2413
 AT = '2026-01-01T00:00:00Z'
+TEST_PATH = 'tools/llmtool/tests/test_advance_no_admissible_module_2413.py'
 
 
 def files(*paths):
@@ -167,34 +172,143 @@ class StoreOutcomeTests(unittest.TestCase):
                 {'remote_test_outcomes': [skip_outcome(modules=['test_alpha'])]})
 
 
-class RecordedOutcomeTests(unittest.TestCase):
-    """Exercise TaskStore.append_remote_test_outcome and its real validator.
+class RunStore:
+    """The small TaskStore surface run_remote_test needs for one admission."""
 
-    Only the unrelated Task-envelope I/O is stubbed: the outcome shape,
-    NOT_REQUIRED admission, PR/HEAD binding and append are the real store code.
-    """
-    def store_state(self):
-        return {'task_id': 'task-2413', 'run_id': 'run-2413',
-                'remote_test_outcomes': [],
-                'published_pr': {'pr': PR, 'head_sha': HEAD, 'recorded_at': AT},
-                'record_sha256': '0' * 64}
+    def __init__(self, task):
+        self.task = task
+        self.outcomes = []
+        self.published = []
+
+    def get(self, task_id):
+        return self.task
+
+    def record_published_pr(self, task_id, pr, head):
+        self.published.append((task_id, pr, head))
+
+    def append_remote_test_outcome(self, task_id, outcome):
+        self.outcomes.append(outcome)
+        return {'outcome': outcome, 'counter': len(self.outcomes) - 1}
+
+
+CONFIG = {'host': 'example.invalid', 'user': 'tester',
+          'repo_path': '/srv/repo', 'python': '/usr/bin/python3'}
+
+
+def remote_task(paths):
+    return {
+        'task_id': TASK, 'run_id': RUN, 'pm_session_id': 'pm-session',
+        'completion': {'executor_task_id': EXEC,
+                       'evidence': {'common_dir': '/canonical/.git',
+                                    'result': {'result_head': HEAD},
+                                    'review_pr_ci': {'pr_number': PR,
+                                                     'head_sha': HEAD}}},
+        'developer': {'read_paths': list(paths), 'write_paths': list(paths)},
+        'remote_test_receipts': [],
+    }
+
+
+def run_remote(task, get, transport=None):
+    store = RunStore(task)
+    registration = type('Registration', (), {'result_sha': HEAD, 'root': '/d6'})()
+    with mock.patch.object(rt, 'read_d6_registration', return_value=registration), \
+            mock.patch.object(rt, '_config', return_value=CONFIG), \
+            mock.patch.object(rt, '_ssh_timeout', return_value=5), \
+            mock.patch.object(rt, 'record_remote_test_outcome_event',
+                              return_value={'event_id': 'e' * 32}):
+        value = rt.run_remote_test(
+            TASK, executor_task=EXEC, sha=HEAD, ref=f'refs/pull/{PR}/head',
+            pr=PR, store=store, get=get, transport=transport)
+    return value, store
+
+
+def binding_mapping(binding):
+    import dataclasses
+    if dataclasses.is_dataclass(binding):
+        return dataclasses.asdict(binding)
+    as_dict = getattr(binding, '_asdict', None)
+    if callable(as_dict):
+        return dict(as_dict())
+    if hasattr(binding, '__dict__') and vars(binding):
+        return dict(vars(binding))
+    return dict(binding)
+
+
+def contract_fixture():
+    """A real synthetic Task contract parsed by the store's own parser."""
+    base = {
+        'task_id': TASK,
+        'goal': 'Persist a no-admissible-module outcome.',
+        'acceptance': ['The persisted outcome is reloaded from the store.'],
+        'read_paths': [TEST_PATH],
+        'write_paths': [TEST_PATH],
+        'source_sha': HEAD,
+    }
+
+    def with_digest(candidate):
+        payload = dict(candidate)
+        payload['task_contract_digest'] = hashlib.sha256(json.dumps(
+            candidate, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
+        return payload
+
+    variants = (
+        dict(base, schema_version=1, created_at=AT, run_id=RUN),
+        dict(base, schema_version=1, created_at=AT),
+        dict(base, schema_version=1, run_id=RUN),
+        dict(base, schema_version=1),
+        dict(base, created_at=AT, run_id=RUN),
+        dict(base, created_at=AT),
+        dict(base, run_id=RUN),
+        with_digest(dict(base, schema_version=1, created_at=AT, run_id=RUN)),
+        with_digest(dict(base, run_id=RUN)),
+        with_digest(base),
+        dict(base, run_id=RUN, task_contract_digest='0' * 64),
+        dict(base, task_contract_digest='0' * 64),
+        base,
+    )
+    for candidate in variants:
+        try:
+            return candidate, ts.parse_task_contract(json.dumps(candidate))
+        except Exception:
+            continue
+    raise AssertionError('no valid synthetic task contract')
+
+
+def real_record():
+    """A complete Task record the real TaskStore both writes and reloads."""
+    contract, parsed = contract_fixture()
+    request = '{}'
+    return {
+        'schema_version': 2, 'task_id': TASK, 'run_id': RUN,
+        'pm_session_id': 'pm-session', 'pm_provider_profile': 'codex',
+        'pm_provider_type': 'codex-cli', 'pm_model': None,
+        'backend_session_semantics': 'EPHEMERAL_SINGLE_CALL',
+        'native_session_id': None, 'state': 'PM_RESPONDED',
+        'created_at': AT, 'updated_at': AT,
+        'task_contract': contract,
+        'task_binding': binding_mapping(parsed.binding(RUN)),
+        'request': request,
+        'request_sha256': hashlib.sha256(request.encode('utf-8')).hexdigest(),
+        'response': '{"summary":"synthetic no-module outcome persistence"}',
+        'usage': None, 'error_code': None,
+        'developer': None, 'pm_assignment': None,
+        'published_pr': {'pr': PR, 'head_sha': HEAD, 'recorded_at': AT},
+    }
+
+
+class RecordedOutcomeTests(unittest.TestCase):
+    """Exercise append_remote_test_outcome on a real written and reloaded Task."""
 
     def test_record_no_admissible_module_uses_the_real_store_append(self):
         with tempfile.TemporaryDirectory() as root:
             store = ts.TaskStore(root=root)
-            current = self.store_state()
-            written = {}
-
-            def update(task_id, *, expected, changes, **kwargs):
-                written.update(changes)
-                return dict(current, **changes)
-
-            with mock.patch.object(ts.TaskStore, 'get', return_value=current), \
-                    mock.patch.object(ts.TaskStore, '_update', side_effect=update), \
-                    mock.patch.object(rt, 'record_remote_test_outcome_event',
-                                      return_value={'event_id': 'e' * 32}):
+            record = real_record()
+            store.create(record)
+            with mock.patch.object(rt, 'record_remote_test_outcome_event',
+                                   return_value={'event_id': 'e' * 32}):
                 value = rt._record_no_admissible_module(
-                    store, 'task-2413', {}, executor_task=EXEC, sha=HEAD, pr=PR)
+                    store, TASK, record, executor_task=EXEC, sha=HEAD, pr=PR)
+            reloaded = store.get(TASK)
         self.assertTrue(value['persisted'])
         self.assertEqual(value['outcome']['result'], rt.NOT_REQUIRED)
         self.assertEqual(value['outcome']['code'], rt.NO_ADMISSIBLE_MODULE)
@@ -202,31 +316,91 @@ class RecordedOutcomeTests(unittest.TestCase):
         self.assertEqual(value['outcome']['sha'], HEAD)
         self.assertEqual(value['outcome']['modules'], [])
         self.assertEqual(value['outcome']['pr'], PR)
-        self.assertEqual(written['remote_test_outcomes'], [value['outcome']])
+        self.assertEqual(reloaded['remote_test_outcomes'], [value['outcome']])
 
     def test_unpersisted_skip_is_not_reported_as_not_required(self):
         with tempfile.TemporaryDirectory() as root:
             store = ts.TaskStore(root=root)
-            current = self.store_state()
-            current['published_pr'] = None
-            with mock.patch.object(ts.TaskStore, 'get', return_value=current), \
-                    mock.patch.object(ts.TaskStore, '_update') as update:
-                value = rt._record_no_admissible_module(
-                    store, 'task-2413', {}, executor_task=EXEC, sha=HEAD, pr=PR)
+            record = real_record()
+            record['published_pr'] = dict(record['published_pr'], pr=PR + 1)
+            store.create(record)
+            value = rt._record_no_admissible_module(
+                store, TASK, record, executor_task=EXEC, sha=HEAD, pr=PR)
+            reloaded = store.get(TASK)
         self.assertFalse(value['persisted'])
         self.assertNotEqual(value['result'], rt.NOT_REQUIRED)
         self.assertEqual(value['code'], 'REMOTE_TEST_OUTCOME_NOT_PERSISTED')
-        self.assertFalse(update.called)
+        self.assertEqual(reloaded.get('remote_test_outcomes', []), [])
 
     def test_real_append_refuses_a_different_published_pr(self):
         with tempfile.TemporaryDirectory() as root:
             store = ts.TaskStore(root=root)
-            current = self.store_state()
-            current['published_pr'] = dict(current['published_pr'], pr=PR + 1)
-            with mock.patch.object(ts.TaskStore, 'get', return_value=current):
-                with self.assertRaises(LLMToolError):
-                    store.append_remote_test_outcome(
-                        'task-2413', skip_outcome())
+            record = real_record()
+            record['published_pr'] = dict(record['published_pr'], pr=PR + 1)
+            store.create(record)
+            with self.assertRaises(LLMToolError):
+                store.append_remote_test_outcome(TASK, skip_outcome())
+
+
+class RemoteTestAdmissionTests(unittest.TestCase):
+    def offline_transport(self, calls):
+        def transport(argv, script, timeout):
+            calls.append(argv)
+            raise OSError('offline')
+        return transport
+
+    def test_pr_test_module_runs_when_task_declares_none(self):
+        calls = []
+        value, store = run_remote(
+            remote_task([]), get_at_head(['tools/llmtool/tests/test_alpha.py']),
+            self.offline_transport(calls))
+        self.assertEqual((value['result'], value['code']),
+                         ('UNAVAILABLE', 'SSH_UNAVAILABLE'))
+        self.assertEqual(store.outcomes[-1]['modules'], ['test_alpha'])
+        self.assertIn('test_alpha', calls[0])
+        self.assertEqual(store.published, [(TASK, PR, HEAD)])
+
+    def test_declared_module_still_runs_as_before(self):
+        calls = []
+        value, store = run_remote(
+            remote_task(['tools/llmtool/tests/test_beta.py']),
+            get_at_head(['tools/llmtool/tests/test_alpha.py']),
+            self.offline_transport(calls))
+        self.assertEqual(value['code'], 'SSH_UNAVAILABLE')
+        self.assertEqual(store.outcomes[-1]['modules'], ['test_beta'])
+        self.assertIn('test_beta', calls[0])
+        self.assertNotIn('test_alpha', calls[0])
+
+    def test_docs_only_records_a_head_and_pr_bound_skip(self):
+        value, store = run_remote(
+            remote_task([]), get_at_head(['docs/readme.md']))
+        self.assertTrue(value['persisted'])
+        self.assertEqual(value['result'], rt.NOT_REQUIRED)
+        self.assertEqual(value['code'], rt.NO_ADMISSIBLE_MODULE)
+        self.assertEqual(len(store.outcomes), 1)
+        outcome = store.outcomes[0]
+        self.assertEqual((outcome['result'], outcome['code']), (
+            rt.NOT_REQUIRED, rt.NO_ADMISSIBLE_MODULE))
+        self.assertEqual((outcome['executor_task'], outcome['sha'], outcome['modules'],
+                          outcome['pr']), (EXEC, HEAD, [], PR))
+
+    def test_unreadable_change_data_fails_closed(self):
+        def get(path):
+            if path == f'pulls/{PR}':
+                return {'number': PR, 'head': {'sha': HEAD}}
+            raise OSError('unreadable')
+
+        value, store = run_remote(remote_task([]), get)
+        self.assertEqual((value['result'], value['code']),
+                         ('ADMISSION_DENIED', 'MODULE_NOT_ADMITTED'))
+        self.assertEqual(store.outcomes[-1]['result'], 'ADMISSION_DENIED')
+
+    def test_malformed_change_data_fails_closed(self):
+        value, store = run_remote(
+            remote_task([]), get_at_head([{'filename': 1}]))
+        self.assertEqual((value['result'], value['code']),
+                         ('ADMISSION_DENIED', 'MODULE_NOT_ADMITTED'))
+        self.assertEqual(store.outcomes[-1]['result'], 'ADMISSION_DENIED')
 
 
 class AdvanceStatusTests(unittest.TestCase):
