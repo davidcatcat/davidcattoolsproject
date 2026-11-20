@@ -74,6 +74,20 @@ class ChangeDataTests(unittest.TestCase):
 
         self.assertIsNone(rt._no_admissible_pr_module(PR, HEAD, get=get))
 
+    def test_head_move_between_pages_is_unknown(self):
+        first = files(*(f'docs/{index}.md' for index in range(100)))
+        heads = []
+
+        def get(path):
+            if path == f'pulls/{PR}':
+                heads.append(path)
+                return {'number': PR,
+                        'head': {'sha': HEAD if len(heads) < 3 else OTHER_HEAD}}
+            return first if '&page=' not in path else files('docs/last.md')
+
+        self.assertIsNone(rt._no_admissible_pr_module(PR, HEAD, get=get))
+        self.assertEqual(len(heads), 3)
+
     def test_unreadable_change_data_is_unknown(self):
         def get(path):
             if path == f'pulls/{PR}':
@@ -189,6 +203,20 @@ class RecordedOutcomeTests(unittest.TestCase):
         self.assertEqual(value['outcome']['modules'], [])
         self.assertEqual(value['outcome']['pr'], PR)
         self.assertEqual(written['remote_test_outcomes'], [value['outcome']])
+
+    def test_unpersisted_skip_is_not_reported_as_not_required(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = ts.TaskStore(root=root)
+            current = self.store_state()
+            current['published_pr'] = None
+            with mock.patch.object(ts.TaskStore, 'get', return_value=current), \
+                    mock.patch.object(ts.TaskStore, '_update') as update:
+                value = rt._record_no_admissible_module(
+                    store, 'task-2413', {}, executor_task=EXEC, sha=HEAD, pr=PR)
+        self.assertFalse(value['persisted'])
+        self.assertNotEqual(value['result'], rt.NOT_REQUIRED)
+        self.assertEqual(value['code'], 'REMOTE_TEST_OUTCOME_NOT_PERSISTED')
+        self.assertFalse(update.called)
 
     def test_real_append_refuses_a_different_published_pr(self):
         with tempfile.TemporaryDirectory() as root:

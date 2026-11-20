@@ -355,18 +355,24 @@ def _admitted_modules(task):
     return tuple(sorted(names))
 
 
-def _pr_change_paths(pr, get=None):
+def _pr_change_paths(pr, get=None, *, head=None):
     """Return (paths, None) for every changed file of a PR, or (None, code).
 
     A read error, a malformed page or a full last page (GitHub's 3000-file
-    limit) leaves the change data unknown, so the caller fails closed.
+    limit) leaves the change data unknown, so the caller fails closed. When
+    ``head`` is given, the PR head must still be exactly that SHA immediately
+    before and after each page, so the pages are pinned to the caller's HEAD.
     """
     if type(pr) is not int or not 1 <= pr <= 9999999:
+        return None, 'PR_CHANGE_DATA_UNAVAILABLE'
+    if head is not None and (type(head) is not str or _SHA.fullmatch(head) is None):
         return None, 'PR_CHANGE_DATA_UNAVAILABLE'
     if get is None:
         get = _github_get
     paths = []
     for page in range(1, _PR_FILES_MAX_PAGES + 1):
+        if head is not None and _fresh_pr_head(pr, get=get) != head:
+            return None, 'PR_CHANGE_DATA_UNAVAILABLE'
         path = f'pulls/{pr}/files?per_page={_PR_FILES_PER_PAGE}'
         if page > 1:
             path += f'&page={page}'
@@ -375,6 +381,8 @@ def _pr_change_paths(pr, get=None):
         except Exception:
             return None, 'PR_CHANGE_DATA_UNAVAILABLE'
         if type(batch) is not list or len(batch) > _PR_FILES_PER_PAGE:
+            return None, 'PR_CHANGE_DATA_UNAVAILABLE'
+        if head is not None and _fresh_pr_head(pr, get=get) != head:
             return None, 'PR_CHANGE_DATA_UNAVAILABLE'
         for item in batch:
             if type(item) is not dict or type(item.get('filename')) is not str:
@@ -397,8 +405,8 @@ def _no_admissible_pr_module(pr, head, get=None):
 
     A scripts/ test or a docs-only change has no module the EC2 runner can
     execute. Any module under tools/llmtool/tests keeps the existing run. The
-    change data is pinned to the caller's exact head: the PR head is read
-    before and after the file pages, and any move or read doubt is unknown.
+    change data is pinned to the caller's exact head: the PR head is checked
+    around every file page, and any move or read doubt is unknown.
     """
     if get is None:
         get = _github_get
@@ -406,19 +414,21 @@ def _no_admissible_pr_module(pr, head, get=None):
         return None
     if _fresh_pr_head(pr, get=get) != head:
         return None
-    paths, _code = _pr_change_paths(pr, get=get)
+    paths, _code = _pr_change_paths(pr, get=get, head=head)
     if paths is None:
-        return None
-    if _fresh_pr_head(pr, get=get) != head:
         return None
     return not any(_TEST_MODULE_PATH.fullmatch(path) for path in paths)
 
 
 def _record_no_admissible_module(store, task_id, task, *, executor_task, sha, pr):
     """Record that this exact head needs no EC2 test because no module is admissible."""
-    return _record_outcome(store, task_id, task, result=NOT_REQUIRED,
-                           code=NO_ADMISSIBLE_MODULE, executor_task=executor_task,
-                           sha=sha, modules=(), pr=pr)
+    value = _record_outcome(store, task_id, task, result=NOT_REQUIRED,
+                            code=NO_ADMISSIBLE_MODULE, executor_task=executor_task,
+                            sha=sha, modules=(), pr=pr)
+    if not value.get('persisted'):
+        # No durable outcome means no skip: advance must run the step again.
+        return dict(value, result='UNKNOWN', code='REMOTE_TEST_OUTCOME_NOT_PERSISTED')
+    return value
 
 
 def _validate_remote_receipt(raw, *, sha, modules):
