@@ -518,15 +518,13 @@ def _policy():
         _refuse('REPAIR_POLICY_INVALID')
 
 
-def _review_gate(task, attempts, packet, family, policy, counts=None, *, body=None):
+def _review_gate(task, attempts, packet, family, policy, counts=None, *, body=None, inherited=None, debug_used=0):
     """#1502 WP-D (O2, D1, D3): admit one review repair from the valid FAILs per HEAD.
 
     Each earlier review repair claim stands for a valid FAIL on its HEAD and the
     current FAIL adds its own HEAD, so a re-review of one HEAD never counts twice.
-    A FAIL whose IDs show no blocking finding is not valid. The second repair needs
-    an RCA_CONFIRMED Debug of this family on the failed HEAD; that entry is returned.
-    #2367 A2: repairs 3 to repair_max need no new Debug; the family's newest
-    Debug (RCA_CONFIRMED) covers them and is returned and bound the same way.
+    A FAIL whose IDs show no blocking finding is invalid. The fourth and fifth
+    repairs require an applicable confirmed RCA, which is returned for binding.
 
     D14 (spec section 7): the policy decides before the repair limit. A Task whose
     repair_max repairs are used escalates by kind at its next valid FAIL (ROOT
@@ -566,6 +564,8 @@ def _review_gate(task, attempts, packet, family, policy, counts=None, *, body=No
         fail_count = repair_policy.review_fail_count(heads)
     else:
         new_fail, fail_count = True, repair_policy.UNKNOWN
+    if spent and not new_fail:
+        _refuse('REPAIR_LIMIT_REACHED')
     if spent and new_fail and type(fail_count) is int:
         # No repair is left, so this new valid FAIL is at least the escalation FAIL.
         fail_count = max(fail_count, policy['review_fail_max'])
@@ -573,25 +573,50 @@ def _review_gate(task, attempts, packet, family, policy, counts=None, *, body=No
                if type(entry) is dict and entry.get('family') == family and
                entry.get('no_pr') is not True and
                entry.get('status') in ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED')]
-    on_head = [entry for entry in entries
-               if entry.get('examined_sha') == packet['failed_head']]
+    executor = packet.get('executor_task')
+    pr = packet.get('pr')
+    target = review_result.diagnosis_findings(
+        task, packet['failed_head'], executor, pr=pr, version=packet.get('version'),
+        excerpt=packet.get('reviewer_text_excerpt_untrusted_data'))
+    on_head = [item for item in entries if item.get('examined_sha') == packet['failed_head']]
     entry = on_head[-1] if on_head else None
-    if entry is None and used >= 2:
-        # #2367 A2: from repair #3 on, the family's newest Debug on a HEAD of
-        # its earlier claims covers the repair (the same HEADs the TaskStore
-        # accepts for the bound digest): an RCA_CONFIRMED needs no new Debug;
-        # a newer Debug that did not confirm a cause escalates. Repair #2
-        # keeps D1 (a Debug on its own failed HEAD).
+    if entry is not None:
+        original = review_result.diagnosis_findings(
+            task, entry['examined_sha'], executor, before=entry.get('recorded_at'), pr=pr)
+        if target is not None:
+            if original != target:
+                entry = None
+        elif used >= repair_policy.REVIEW_REPAIRS_WITHOUT_DEBUG:
+            # Older unstructured verdicts can bind the exact review on the
+            # same HEAD. Missing evidence or edited review text cannot do so.
+            options = {'pr': pr, 'version': packet.get('version'),
+                       'excerpt': packet.get('reviewer_text_excerpt_untrusted_data')}
+            current_body = review_result.diagnosis_review_body(
+                task, packet['failed_head'], executor, **options)
+            before_body = review_result.diagnosis_review_body(
+                task, packet['failed_head'], executor, before=entry.get('recorded_at'), **options)
+            if current_body is None or before_body != current_body:
+                entry = None
+    if entry is None and target is not None and used >= repair_policy.REVIEW_REPAIRS_WITHOUT_DEBUG:
+        # Reuse an earlier same-family report only for the same formally bound findings.
         claim_heads = {claim.get('head_sha') for claim in attempts if type(claim) is dict}
-        covering = [item for item in entries if item.get('examined_sha') in claim_heads]
-        if covering:
-            entry = covering[-1]
+        for item in reversed(entries):
+            if item['status'] != 'RCA_CONFIRMED' or item['examined_sha'] not in claim_heads:
+                continue
+            original = review_result.diagnosis_findings(
+                task, item['examined_sha'], executor, before=item.get('recorded_at'), pr=pr)
+            if original == target:
+                entry = item
+                break
+    if (entry is None or entry['status'] != 'RCA_CONFIRMED') and inherited is not None:
+        entry = inherited
     lineage = task.get('lineage')
     try:
         action = repair_policy.review_action(
             kind=lineage.get('kind') if type(lineage) is dict else 'root',
-            fail_count=fail_count,
-            debug_status=entry['status'] if entry else None, policy=policy)
+            fail_count=fail_count, repair_count=repair_count,
+            debug_status=entry['status'] if entry else None, group_debug_used=debug_used,
+            policy=policy)
     except LLMToolError:
         _refuse('REPAIR_LINEAGE_INVALID')
     if spent and action in ('REPAIR', 'DEBUG'):
@@ -814,7 +839,7 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         # assignment. The delegate serializes the old controller and handoff,
         # then applies its ordinary scope, policy, quota and D6 checks.
         repair_task = None
-        if auto and dispatch_adapter is None:
+        if dispatch_adapter is None:
             try:
                 repair_task = store.get(existing['repair_task_id'])
             except (LLMToolError, KeyError):
@@ -823,8 +848,6 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         history = (repair_developer.get('direct_handoffs') or []
                    if type(repair_developer) is dict else [])
         if history and repair_developer.get('state') == 'DEVELOPER_RESPONDED':
-            if auto and not test_failure:
-                _auto_replay_claim(store, task, task_id, existing)
             direct_reassignment.reconcile_claim(
                 store, existing['repair_task_id'], history[-1]['old_assignment'])
             saved = store.get(task_id)
@@ -835,7 +858,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         if (direct_reassignment.replacement_candidate(repair_developer) and
                 (repair_developer.get('provider_profile') == profile or
                  (history and history[-1]['old_profile'] == profile))):
-            if not test_failure:
+            if (auto and not test_failure and
+                    repair_developer.get('dispatch_boundary') != 'PREPARED'):
                 _auto_replay_claim(store, task, task_id, existing)
             value = _delegate_repair(task=repair_task, developer=developer, packet=packet,
                                      executor_task=executor_task, delegate=delegate_callable,
@@ -894,11 +918,24 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                 _refuse('REVIEW_REPAIR_PM_REQUIRED')
         counts = lineage_counts.lineage_counts(store, task, base_family=base_family,
                                                include_successors=True)
+        if not test_failure and retry_claim is None:
+            heads = counts.get('review_heads')
+            replaced_failure = any(item.get('head_sha') == packet['failed_head'] and
+                                   item.get('state') == 'FAILED' for item in attempts)
+            if (type(heads) is dict and packet['failed_head'] in heads and
+                    not replaced_failure and counts['review_repairs'] < _policy()['repair_max']):
+                _refuse('REPAIR_HEAD_ALREADY_CLAIMED')
         rca_entry = None
+        inherited = None
         if not test_failure:
+            from . import high_debug, start_failure
+            debug_used, _ = lineage_counts.chain_debug_used(
+                store, task, task.get('high_debug', []), high_debug._debug_entry_used)
+            inherited = start_failure.inherited_rca(store, task, packet)
             body = body_holder[0] if body_holder else None
             rca_entry = _review_gate(task, attempts, packet, family, _policy(), counts=counts,
-                                     body=body)
+                                     body=body, inherited=inherited[1] if inherited else None,
+                                     debug_used=debug_used)
             if rca_entry is not None:
                 packet = dict(packet,
                               high_debug_report_untrusted_data=rca_entry['report'][:6000],
@@ -929,6 +966,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         }
         if rca_entry is not None:
             claim['high_debug_report_sha256'] = rca_entry['report_sha256']
+            if inherited is not None and rca_entry is inherited[1]:
+                claim['high_debug_source_task'] = inherited[0]
         next_claims = list(claims)
         if retry_claim is not None:
             retry_index = next((index for index, item in enumerate(next_claims)

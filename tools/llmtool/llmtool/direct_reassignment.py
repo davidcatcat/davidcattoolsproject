@@ -1,6 +1,5 @@
 """Recover the single writer of a clean direct-Developer worktree."""
 from dataclasses import dataclass, replace
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -57,24 +56,6 @@ def _checked_scope(args, developer, read_paths, write_paths):
         _refuse('DIRECT_REASSIGN_SCOPE_MISMATCH')
 
 
-def packet_digest(packet):
-    """Use the same identity for CI and excerpt-bearing review or EC2 packets."""
-    text = packet.get('reviewer_text_excerpt_untrusted_data', '')
-    if text.startswith(review_repair.CI_PACKET_HEADER + ' '):
-        header, _, excerpt = text.partition('\n')
-        match = re.fullmatch(
-            r'CI_CHECK_FAILURE check=(.+) run=([1-9][0-9]*) conclusion=failure head=([0-9a-f]{40})',
-            header)
-        if match is None or match[3] != packet.get('failed_head'):
-            _refuse('DIRECT_REASSIGN_REPAIR_PACKET_UNVERIFIED')
-        _, digest = review_repair._ci_failure(
-            {'task_id': packet['task']}, executor_task=packet['executor_task'],
-            pr_number=packet['pr'], ci_failure={'head': match[3], 'check_name': match[1],
-                'check_run_id': int(match[2]), 'conclusion': 'failure', 'excerpt': excerpt})
-        return digest
-    return hashlib.sha256(start_failure.canonical(packet).encode()).hexdigest()
-
-
 def _repair_packet(store, task, developer, registration, *, require_closed=True):
     # Repair Tasks keep their original ID, so the parent claim still counts.
     matches = []
@@ -125,10 +106,7 @@ def _repair_packet(store, task, developer, registration, *, require_closed=True)
                 continue
             packets.append(packet)
     for packet in packets:
-        if (packet.get('task') == parent['task_id'] and packet.get('pr') == claim['pr'] and
-                packet.get('failed_head') == claim['head_sha'] and
-                packet.get('executor_task') == registration.task_id and
-                packet_digest(packet) == claim.get('packet_sha256')):
+        if start_failure.repair_packet_matches(packet, claim, parent, store):
             return packet
     _refuse('DIRECT_REASSIGN_REPAIR_PACKET_UNVERIFIED')
 

@@ -910,7 +910,7 @@ def add_task_submission_parsers(actions):
                                 'Claude and AGY direct Tasks, validated when given'))
     delegate.add_argument('--high-debug-ref',
                           help='trusted GitHub Issue comment URL of the confirmed High Debug '
-                               'diagnosis that review repair #2 needs')
+                               'diagnosis for a review repair that requires RCA')
     delegate.add_argument('--high-debug-task',
                           help='32-character Task ID containing the confirmed High Debug diagnosis')
     delegate.add_argument('--high-debug-family',
@@ -7757,7 +7757,7 @@ _HIGH_DEBUG_MODELS = frozenset(('gpt-6.1-sol', 'claude-opus-5-5'))
 
 
 def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
-                                  executor_task, predecessor_executors=None):
+                                  executor_task, predecessor_executors=None, *, diagnosis_issue=None):
     """Raise ValueError unless ``entry`` is bound to the run behind it (#914).
 
     The High Debug Task must be the original Task of the executor D6 being
@@ -7767,9 +7767,10 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
     Task must hold the HIGH_DEBUG completion event run_high_debug records for
     this entry, live or compacted to a tombstone.
     """
-    from .high_debug import REPORT_SECTIONS, _has_report_section, _outcome_status
-    # #1943 WP-5: a no-PR Debug is a diagnosis only, never repair evidence.
-    if entry.get('no_pr') is True:
+    from .high_debug import (REPORT_SECTIONS, _has_report_section, _outcome_status,
+                             completion_event_id)
+    no_pr = entry.get('no_pr') is True
+    if no_pr and (diagnosis_issue is None or entry.get('diagnosis_issue') != diagnosis_issue):
         raise ValueError
 
     allowed_executors = set()
@@ -7785,9 +7786,11 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
     if not allowed_executors:
         raise ValueError
     completion = diagnosis_task.get('completion')
-    if (type(completion) is not dict or
-            completion.get('executor_task_id') not in allowed_executors):
-        raise ValueError
+    if type(completion) is not dict or completion.get('executor_task_id') not in allowed_executors:
+        from .high_debug import _task_holds_d6
+        if not no_pr or not any(_task_holds_d6(diagnosis_task, executor)
+                                for executor in allowed_executors):
+            raise ValueError
     model_observed = entry.get('model_observed')
     if (type(model_observed) is not str or
             model_observed not in _HIGH_DEBUG_MODELS or
@@ -7803,9 +7806,8 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
         raise ValueError
     # The same derivation run_high_debug uses when it records the event.
     examined_sha = entry['examined_sha']
-    event_id = hashlib.sha256(
-        ('HIGH_DEBUG\0' + high_debug_task + '\0' + examined_sha + '\0' +
-         report_sha256).encode()).hexdigest()[:32]
+    event_ids = {completion_event_id(high_debug_task, examined_sha, report_sha256),
+                 completion_event_id(high_debug_task, examined_sha, report_sha256, entry['d6'])}
     session_id = 'high-debug-' + entry['d6']
     payload_sha256 = hashlib.sha256(report_sha256.encode()).hexdigest()
     events = diagnosis_task.get('completion_events', [])
@@ -7813,7 +7815,8 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
     if type(events) is not list or type(tombstones) is not list:
         raise ValueError
     live = [event for event in events
-            if type(event) is dict and event.get('event_id') == event_id]
+            if type(event) is dict and event.get('event_id') in event_ids and
+            event.get('session_id') == session_id]
     if live:
         if not all(event.get('source') == 'HIGH_DEBUG' and
                    event.get('session_id') == session_id and
@@ -7823,58 +7826,39 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
             raise ValueError
         return
     compacted = [tombstone for tombstone in tombstones
-                 if type(tombstone) is dict and tombstone.get('event_id') == event_id]
+                 if type(tombstone) is dict and tombstone.get('event_id') in event_ids and
+                 tombstone.get('session_id') == session_id]
     if not compacted or not all(tombstone.get('source') == 'HIGH_DEBUG' and
                                 tombstone.get('session_id') == session_id
                                 for tombstone in compacted):
         raise ValueError
 
 
-def _check_repair_packet_rca(packet, store, executor_task):
-    """Accept the confirmed root cause a review repair packet carries (#1502 D7).
-
-    review_repair adds high_debug_report_sha256 to the packet of repair #2.
-    The packet's Task, on this D6, must hold an RCA_CONFIRMED High Debug
-    entry examined at the packet's failed HEAD whose report digest is the
-    packet's digest. #2367: from repair #3 on, review_repair binds the
-    family's covering RCA_CONFIRMED, examined at an earlier HEAD; it is then
-    accepted when a stored review repair claim of that Task at the packet's
-    failed HEAD binds the same digest (the store checks that binding).
-    Anything else refuses DELEGATE_HIGH_DEBUG_TASK_INVALID.
-    """
+def _check_repair_packet_rca(packet, store, executor_task, repair_task_id):
+    """Verify the RCA packet against the immutable claim for this repair Task."""
     try:
-        report_sha256 = packet.get('high_debug_report_sha256')
-        failed_head = packet.get('failed_head')
-        task_id = packet.get('task')
-        if (type(report_sha256) is not str or
-                re.fullmatch(r'[0-9a-f]{64}', report_sha256) is None or
-                type(failed_head) is not str or
-                re.fullmatch(r'[0-9a-f]{40}', failed_head) is None or
-                type(task_id) is not str or
+        task_id = packet['task']
+        record = store.get(task_id)
+        completion = record.get('completion') or {}
+        if (record.get('task_id') != task_id or
+                completion.get('executor_task_id') != executor_task or
                 packet.get('executor_task') != executor_task):
             raise ValueError
-        record = store.get(task_id)
-        completion = record.get('completion') if type(record) is dict else None
-        entries = record.get('high_debug') if type(record) is dict else None
-        claims = record.get('review_repair_claims', []) if type(record) is dict else None
-        bound_heads = {failed_head}
-        if (type(claims) is list and
-                any(type(claim) is dict and claim.get('head_sha') == failed_head and
-                    claim.get('high_debug_report_sha256') == report_sha256
-                    for claim in claims)):
-            bound_heads.update(claim.get('head_sha') for claim in claims
-                               if type(claim) is dict and
-                               type(claim.get('head_sha')) is str)
-        if (record.get('task_id') != task_id or type(completion) is not dict or
-                completion.get('executor_task_id') != executor_task or
-                type(entries) is not list or
-                not any(type(entry) is dict and
-                        entry.get('no_pr') is not True and
-                        entry.get('status') == 'RCA_CONFIRMED' and
-                        entry.get('examined_sha') in bound_heads and
-                        entry.get('report_sha256') == report_sha256
-                        for entry in entries)):
+        claims = [claim for claim in record.get('review_repair_claims', [])
+                  if claim.get('repair_task_id') == repair_task_id and
+                  claim.get('state') in ('CLAIMED', 'DISPATCHED', 'UNKNOWN')]
+        if (len(claims) != 1 or
+                not start_failure.repair_packet_matches(packet, claims[0], record, store)):
             raise ValueError
+        if 'high_debug_source_task' in claims[0]:
+            return
+        for entry in start_failure.local_rca_entries(packet, claims[0], record):
+            try:
+                _require_bound_high_debug_run(record, task_id, entry, executor_task)
+            except ValueError:
+                continue
+            return
+        raise ValueError
     except Exception:
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
 
@@ -7887,11 +7871,9 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
     limit; every other Task takes the review limit. The limits come from
     policy.json (#1502 WP-D D7): at most 1 + repair_max review runs and
     test_fail_max EC2 repair runs per D6. At or over a limit the delegate
-    always refuses. Every review repair after the first (repair #2 under
-    policy.json) needs a confirmed root cause, bound by the High Debug
-    arguments or by the repair packet; from repair #3 on the one taken before
-    repair #2 covers it (#2367). A recorded start failure is not a run
-    (#2367 A4). This check never changes a Task.
+    always refuses. Review repairs four and five need a confirmed applicable
+    root cause through the High Debug arguments or repair packet. A recorded
+    start failure is not a run. This check never changes a Task.
     """
     executor_task = getattr(args, 'executor_task', None)
     current_task_id = getattr(args, 'task_id', None)
@@ -8033,13 +8015,9 @@ def _repair_run_stamp(task_id, developer, d6_unchanged):
 
 def _check_repair_limits(args, store, d6_binding, policy, current_task_id, counted,
                          new_ec2_ids, legacy_ec2_ids, newest_assignment, stamps=None):
-    """Apply the review and EC2 limits to counted runs, then the root cause.
+    """Apply the review and EC2 limits to counted runs, then the root cause."""
+    from .repair_policy import REVIEW_REPAIRS_WITHOUT_DEBUG
 
-    #2367: repair #2 needs a High Debug taken after the newest run on the
-    current head, as before. Repairs 3 to repair_max need no new Debug: the
-    RCA_CONFIRMED taken before repair #2 (recorded after the run whose FAIL
-    asked for it, the second review run) covers them.
-    """
     if current_task_id in new_ec2_ids or current_task_id in legacy_ec2_ids:
         # Prior EC2 repair runs, new and legacy. EC2 repairs never take the
         # High Debug path.
@@ -8055,10 +8033,13 @@ def _check_repair_limits(args, store, d6_binding, policy, current_task_id, count
     count = len(review_runs)
     if count >= 1 + policy['repair_max']:
         raise LLMToolError('DELEGATE_REPAIR_LIMIT_REACHED')
-    if count < 2:
-        # The original run and repair #1 need no root cause (D1).
+    if count <= REVIEW_REPAIRS_WITHOUT_DEBUG:
+        packet = getattr(args, 'repair_packet', None)
+        if type(packet) is dict and 'high_debug_report_sha256' in packet:
+            _check_repair_packet_rca(packet, store, getattr(args, 'executor_task', None),
+                                     current_task_id)
         return
-    if count == 2:
+    if count == REVIEW_REPAIRS_WITHOUT_DEBUG + 1:
         _check_repair_rca(args, store, d6_binding, newest_assignment)
         return
     # A run without a known assignment time leaves the cover in doubt: refuse.
@@ -8067,21 +8048,16 @@ def _check_repair_limits(args, store, d6_binding, policy, current_task_id, count
     if len(times) != count:
         raise LLMToolError(
             f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
-    _check_repair_rca(args, store, d6_binding, times[1], covered=True)
+    _check_repair_rca(args, store, d6_binding, times[REVIEW_REPAIRS_WITHOUT_DEBUG], covered=True)
 
 
 def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=False):
-    """Repair #2 and later need a confirmed root cause (packet or High Debug Task).
-
-    covered (#2367, repairs 3 to repair_max): the High Debug was taken before
-    repair #2, so it must be newer than newest_assignment (the run whose FAIL
-    asked for it) but need not be on the current D6 head.
-    """
+    """Require a confirmed diagnosis applicable to the current failed review."""
     executor_task = getattr(args, 'executor_task', None)
     high_debug_task = getattr(args, 'high_debug_task', None)
     packet = getattr(args, 'repair_packet', None)
     if type(packet) is dict and 'high_debug_report_sha256' in packet:
-        _check_repair_packet_rca(packet, store, executor_task)
+        _check_repair_packet_rca(packet, store, executor_task, getattr(args, 'task_id', None))
         return
     ref = getattr(args, 'high_debug_ref', None)
     try:
@@ -8109,16 +8085,19 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
         entries = diagnosis_task.get('high_debug')
         if (type(diagnosis_task) is not dict or
                 diagnosis_task.get('task_id') != high_debug_task or
-                type(entries) is not list or not entries):
+                type(entries) is not list or not entries or
+                any(type(entry) is not dict for entry in entries)):
             raise ValueError
-        matching = [e for e in entries if not (type(e) is dict and e.get('no_pr') is True)]
+        family_arg = getattr(args, 'high_debug_family', None)
+        matching = [e for e in entries if type(e) is dict and e.get('family') == family_arg]
         if not matching:
             raise ValueError
         entry = matching[-1]
+        no_pr = entry.get('no_pr') is True
+        diagnosis_issue = int(ref.split('/issues/', 1)[1].split('/', 1)[0].split('#', 1)[0])
         d6 = entry.get('d6')
         examined_sha = entry.get('examined_sha')
         family = entry.get('family')
-        family_arg = getattr(args, 'high_debug_family', None)
         if (type(family) is not str or
                 re.fullmatch(r'[a-z0-9._-]{1,64}', family) is None or
                 type(family_arg) is not str or
@@ -8137,8 +8116,6 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
                 newest_assignment = datetime.strptime(newest_assignment, '%Y-%m-%dT%H:%M:%SZ')
             except (TypeError, ValueError):
                 raise ValueError from None
-        if newest_assignment is None or recorded_stamp <= newest_assignment:
-            raise ValueError
         # High Debug D6 names are derived from their executor D6, attempt
         # number, and examined HEAD. Recompute the name to bind this entry to
         # the executor D6 being repaired or a verified continuation predecessor (#2190).
@@ -8154,31 +8131,24 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
             raise ValueError
         attempt = int(attempt_match.group(1))
         task_id = getattr(args, 'task_id', None)
-        predecessor_executors = []
-        if task_id is not None and store is not None:
-            try:
-                task_record = store.get(task_id)
-            except Exception:
-                task_record = None
-            if type(task_record) is dict:
-                from . import lineage_counts
-                chain = lineage_counts.chain_records(store, task_record)
-                if chain is not None:
-                    for pred in chain[1:]:
-                        pred_completion = pred.get('completion') if type(pred) is dict else None
-                        pred_executor = (pred_completion.get('executor_task_id')
-                                         if type(pred_completion) is dict else None)
-                        if type(pred_executor) is str and pred_executor not in predecessor_executors:
-                            predecessor_executors.append(pred_executor)
-        allowed_executors = []
-        if type(executor_task) is str:
-            allowed_executors.append(executor_task)
-        for pe in predecessor_executors:
-            if pe not in allowed_executors:
-                allowed_executors.append(pe)
+        from . import lineage_counts
+        try:
+            members = lineage_counts.debug_lineage_members(store, store.get(task_id))
+        except Exception:
+            members = None
+        allowed_executors = {executor_task} if type(executor_task) is str else set()
+        if members is not None and high_debug_task in members:
+            source_completion = diagnosis_task.get('completion') or {}
+            source_executor = source_completion.get('executor_task_id')
+            if type(source_executor) is str:
+                allowed_executors.add(source_executor)
         diagnosis_completion = diagnosis_task.get('completion')
         diagnosis_executor = (diagnosis_completion.get('executor_task_id')
                               if type(diagnosis_completion) is dict else None)
+        if no_pr and diagnosis_executor is None:
+            from .high_debug import _task_holds_d6
+            if _task_holds_d6(diagnosis_task, executor_task):
+                diagnosis_executor = executor_task
         matched_executor = None
         for candidate in allowed_executors:
             if (d6 == _d6_name(candidate, attempt, examined_sha) and
@@ -8188,13 +8158,10 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
         if matched_executor is None:
             raise ValueError
         _require_bound_high_debug_run(
-            diagnosis_task, high_debug_task, entry, executor_task,
-            predecessor_executors=predecessor_executors)
+            diagnosis_task, high_debug_task, entry, matched_executor,
+            diagnosis_issue=diagnosis_issue)
     except Exception:
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
-    if covered:
-        # #2367 A2: the covering RCA was taken on an earlier head.
-        return
     if d6_binding is None:
         try:
             d6_binding = _delegate_d6_binding(args)
@@ -8202,6 +8169,34 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
             raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
     _registration, snapshot = d6_binding
     current_head = getattr(snapshot, 'head', None)
+    if no_pr:
+        if not members or high_debug_task not in members:
+            raise LLMToolError('DELEGATE_HIGH_DEBUG_LINEAGE_MISMATCH')
+        if not any(event.get('source') == 'GITHUB' and
+                   event.get('issue_number') == diagnosis_issue
+                   for task in members.values() for event in task.get('completion_events', [])):
+            raise LLMToolError('DELEGATE_HIGH_DEBUG_ISSUE_UNVERIFIED')
+        if matched_executor != executor_task or examined_sha != current_head:
+            raise LLMToolError('DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED')
+    if matched_executor == executor_task and examined_sha == current_head:
+        if newest_assignment is None or recorded_stamp <= newest_assignment:
+            raise LLMToolError('DELEGATE_HIGH_DEBUG_TIME_MISMATCH')
+        return
+    if covered or matched_executor != executor_task:
+        from . import review_result
+        source_pr = re.fullmatch(r'pr-([1-9][0-9]*)', family)
+        source = (review_result.diagnosis_findings(
+            diagnosis_task, examined_sha, matched_executor, before=recorded_at,
+            pr=int(source_pr.group(1))) if source_pr is not None else None)
+        if task_id is None or source is None:
+            raise LLMToolError('DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED')
+        if not members or high_debug_task not in members:
+            raise LLMToolError('DELEGATE_HIGH_DEBUG_LINEAGE_MISMATCH')
+        targets = [review_result.diagnosis_findings(item, current_head, executor_task)
+                   for item in members.values()]
+        if [target for target in targets if target is not None] == [source]:
+            return
+        raise LLMToolError('DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED')
     if examined_sha != current_head:
         head_prefix = current_head[:12] if type(current_head) is str else ''
         examined_prefix = examined_sha[:12] if type(examined_sha) is str else ''
@@ -8263,7 +8258,7 @@ def _delegate_chain_gate(args, store, d6_binding, claim):
     Runs at each route's claim site, after every route refusal. Takes the
     chain locks of the delegated Task's and its D6 Tasks' chains, recomputes
     the view on fresh reads (changed keys are UNKNOWN), applies the
-    chain-wide repair cap (with repair #2's root cause) and
+    chain-wide repair cap and RCA validation and
     CONTINUATION_LINK_REQUIRED, then calls claim() and returns its result.
     Any doubt refuses DELEGATE_REPAIR_COUNT_UNAVAILABLE before any write. The
     locks are released on every path, before any provider call or fork.
@@ -8789,7 +8784,7 @@ def _start_retry_repair_packet(store, task):
             claim.get('head_sha') != developer.get('source_sha')):
         raise LLMToolError('START_RETRY_REPAIR_CLAIM_INVALID')
     packet = start_failure.decode_repair_packet(task['repair_packet'])
-    if packet is None or not start_failure.repair_packet_matches(packet, claim, root):
+    if packet is None or not start_failure.repair_packet_matches(packet, claim, root, store):
         raise LLMToolError('START_RETRY_REPAIR_PACKET_MISMATCH')
     return packet
 

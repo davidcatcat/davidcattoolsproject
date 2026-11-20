@@ -26,7 +26,7 @@ from .action_contract import TaskBinding
 from .diagnostics import validate_provider_usage
 from .errors import LLMToolError
 from . import file_ops
-from . import run_budget
+from . import repair_policy, run_budget
 from . import start_failure
 from .opencode_direct_developer import is_free_model, is_valid_model
 from .role_config import _NAME
@@ -153,7 +153,7 @@ _REVIEW_REPAIR_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'attempt', 'state',
     'comment_id', 'packet_sha256', 'claimed_at'))
 _REVIEW_REPAIR_OPTIONAL_FIELDS = frozenset(('repair_task_id', 'family',
-                                             'high_debug_report_sha256'))
+                                             'high_debug_report_sha256', 'high_debug_source_task'))
 # #2367: the claims one repair family may store, numbered 1..N by 'attempt':
 # the policy repair bound (run_budget.MAX_REPAIR_ATTEMPTS, from policy.json)
 # plus one replaced (FAILED) retry claim. The floor keeps every record written
@@ -191,7 +191,7 @@ _HIGH_DEBUG_FIELDS = frozenset(('family', 'failed_corrections', 'early_reason', 
     'report_sha256', 'report', 'usage', 'recorded_at'))
 # #1502 WP-D O7: a RESERVED entry keeps these values and gets one of these statuses.
 _HIGH_DEBUG_IDENTITY = ('family', 'failed_corrections', 'early_reason', 'examined_sha',
-                        'd6', 'model_requested', 'rules_sha256', 'no_pr')
+                        'd6', 'model_requested', 'rules_sha256', 'no_pr', 'diagnosis_issue')
 _HIGH_DEBUG_FINAL_STATUSES = ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED',
                               'REPORT_INVALID', 'RUN_FAILED')
 
@@ -2338,7 +2338,11 @@ def _validate(record, *, strict=True):
         for item in entries:
             # #1502 WP-F: rules_sha256 is optional so older entries stay valid.
             if (type(item) is not dict or
-                set(item) - {'rules_sha256', 'no_pr'} != _HIGH_DEBUG_FIELDS or
+                set(item) - {'rules_sha256', 'no_pr', 'diagnosis_issue'} != _HIGH_DEBUG_FIELDS or
+                ('diagnosis_issue' in item and
+                 (item.get('no_pr') is not True or item.get('family') != 'no-pr' or
+                  type(item['diagnosis_issue']) is not int or
+                  not 1 <= item['diagnosis_issue'] <= 9999999)) or
                 ('no_pr' in item and item['no_pr'] is not True) or
                 ('rules_sha256' in item and
                  (type(item['rules_sha256']) is not str or
@@ -2478,6 +2482,11 @@ def _validate(record, *, strict=True):
                     ('high_debug_report_sha256' in item and
                      (type(item['high_debug_report_sha256']) is not str or
                       re.fullmatch(r'[0-9a-f]{64}', item['high_debug_report_sha256']) is None)) or
+                    ('high_debug_source_task' in item and
+                     ('high_debug_report_sha256' not in item or
+                      type(item['high_debug_source_task']) is not str or
+                      re.fullmatch(r'[0-9a-f]{32}', item['high_debug_source_task']) is None or
+                      item['high_debug_source_task'] == record['task_id'])) or
                     item.get('state') not in ('CLAIMED', 'DISPATCHED', 'UNKNOWN', 'FAILED') or
                     (item.get('comment_id') is not None and
                      (type(item['comment_id']) is not int or item['comment_id'] < 0)) or
@@ -2509,15 +2518,17 @@ def _validate(record, *, strict=True):
             # the HEAD of an earlier claim of the family. An old record (the
             # second claim on its HEAD, a third claim with a Debug on its HEAD)
             # meets this rule unchanged. A review claim (comment_id set, not an
-            # '-ec2' family) from the third on must bind one, as before.
+            # '-ec2' family) from the fourth on must bind one.
             seen_heads = set()
             for position, item in enumerate(family_claims, 1):
                 seen_heads.add(item['head_sha'])
-                if (position >= 3 and item.get('comment_id') is not None and
+                if (position > repair_policy.REVIEW_REPAIRS_WITHOUT_DEBUG and
+                        item.get('comment_id') is not None and
                         not item.get('family', f"pr-{item['pr']}").endswith('-ec2') and
                         'high_debug_report_sha256' not in item):
                     _fail('REVIEW_REPAIR_CLAIM_INVALID')
                 if ('high_debug_report_sha256' in item and
+                        'high_debug_source_task' not in item and
                         not any(type(entry) is dict and entry.get('family') ==
                                 item.get('family', f"pr-{item['pr']}") and
                                 entry.get('no_pr') is not True and
@@ -4034,6 +4045,11 @@ class TaskStore:
             claims_list = [claims] if type(claims) is dict else claims if type(claims) is list else []
             if any(type(c) is dict and c.get('review_kind') == 'security' for c in claims_list):
                 _fail('REVIEW_DISPATCH_CLAIM_INVALID')
+        if type(record) is dict:
+            repairs = record.get('review_repair_claims')
+            if type(repairs) is list and any(type(claim) is dict and
+                    'high_debug_source_task' in claim for claim in repairs):
+                _fail('REVIEW_REPAIR_CLAIM_INVALID')
         if type(record) is dict and 'start_failures' in record:
             # #2188: appended to an existing Task by its START_RETRY write only.
             _fail('START_RETRY_INVALID')
@@ -5971,15 +5987,13 @@ class TaskStore:
                     dict(item, state='DISPATCHED') if item.get('repair_task_id') == repair_id
                     else item for item in current['review_repair_claims']]}
             if direct_claim_recovery is not None:
-                from . import direct_reassignment
+                from . import direct_reassignment, start_failure
                 claim, repair_id, repair_digest, packet = direct_claim_recovery
-                packet_digest = direct_reassignment.packet_digest(packet)
                 repair = self.get(repair_id)
                 claims = current.get('review_repair_claims') or []
                 if (changes or repair.get('record_sha256') != repair_digest or
                         claim not in claims or claim.get('repair_task_id') != repair_id or
-                        packet.get('task') != task_id or packet.get('pr') != claim.get('pr') or
-                        packet_digest != claim.get('packet_sha256') or
+                        not start_failure.repair_packet_matches(packet, claim, current, self) or
                         claim.get('state') not in ('CLAIMED', 'UNKNOWN')):
                     _fail('DIRECT_REASSIGN_REPAIR_CLAIM_UNVERIFIED')
                 direct_reassignment.verified_repair_result(current, claim, repair)
@@ -6214,6 +6228,15 @@ class TaskStore:
                                 if item.get('family', f"pr-{item.get('pr')}") ==
                                 added.get('family'))):
                         _fail('REVIEW_REPAIR_CLAIM_LIMIT_REACHED')
+                    if 'high_debug_source_task' in added:
+                        from .start_failure import inherited_rca
+                        target = {'failed_head': added['head_sha'], 'pr': added['pr'],
+                                  'executor_task': added['executor_task'],
+                                  'version': added['version']}
+                        if inherited_rca(
+                                self, current, target, source_task_id=added['high_debug_source_task'],
+                                report_sha256=added.get('high_debug_report_sha256')) is None:
+                            _fail('REVIEW_REPAIR_CLAIM_INVALID')
                 else:
                     changed = [i for i, (old, new) in enumerate(zip(old_claims, new_claims))
                                if old != new]
