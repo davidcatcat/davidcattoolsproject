@@ -2353,6 +2353,10 @@ def _remote_test_status(record, d6):
                 outcome.get('code') == 'MODULE_NOT_ADMITTED' and
                 outcome.get('modules') == []):
             return 'ADMISSION_DENIED', None, None
+        if (outcome.get('result') == remote_test.NOT_REQUIRED and
+                outcome.get('code') == remote_test.NO_ADMISSIBLE_MODULE and
+                outcome.get('modules') == []):
+            return remote_test.NOT_REQUIRED, None, None
     return None, None, None
 
 
@@ -2442,7 +2446,7 @@ def _pre_pr_remote_gate(record, store, executor_task, head, branch):
         return None, _remote_test_hold(
             'REMOTE_TEST_REFUSED',
             ['PUBLISH_REMOTE_TEST_REFUSED', _refusal(exc, 'remote_test_code')], **identity)
-    if status in ('PASS', 'ADMISSION_DENIED'):
+    if status in ('PASS', 'ADMISSION_DENIED', remote_test.NOT_REQUIRED):
         return status, None
     if status == 'NOT_EXECUTED':
         return status, _remote_test_hold('NEEDS_ATTENTION', ['TEST_REMOTE_MODULE_NOT_EXECUTED'],
@@ -2574,7 +2578,7 @@ def _pre_review_action(record, d6, pr, related, result_head):
         return 'NEEDS_ATTENTION'
     if remote_status == 'FAIL':
         return _remote_fail_action(related, result_head)
-    if remote_status not in ('PASS', 'ADMISSION_DENIED'):
+    if remote_status not in ('PASS', 'ADMISSION_DENIED', remote_test.NOT_REQUIRED):
         return 'RUN_REMOTE_TEST'
     if type(pr) is dict and pr.get('merged') is True:
         # The code is already merged; a Reviewer must never start for it.
@@ -3537,6 +3541,12 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                             d6, d6['result_head'], summary)
                     except Exception:
                         codes.append('REMOTE_TEST_COMMENT_FAILED')
+            elif (type(remote_result) is dict and
+                    remote_result.get('result') == remote_test.NOT_REQUIRED):
+                result['remote_test'] = {
+                    'result': remote_test.NOT_REQUIRED,
+                    'code': remote_test.NO_ADMISSIBLE_MODULE,
+                    'modules': [], 'head': d6['result_head']}
         except Exception as exc:
             codes.append(_refusal(exc, 'remote_test_code'))
     elif step == 'DISPATCH_REVIEW':

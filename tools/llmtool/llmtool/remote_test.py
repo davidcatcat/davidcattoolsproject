@@ -29,6 +29,12 @@ from .task_store import TaskStore, _emitted_sensitive, _json_bytes
 _SHA = re.compile(r'[0-9a-f]{40}\Z')
 _REF = re.compile(r'(?:refs/pull/[0-9]+/head|[A-Za-z0-9][A-Za-z0-9._/-]{0,99})\Z')
 _MODULE = re.compile(r'test_[a-z0-9_]{1,80}\Z')
+_TEST_MODULE_PATH = re.compile(r'tools/llmtool/tests/test_[a-z0-9_]{1,80}\.py\Z')
+# #2413: a PR with no EC2-admissible module completes the remote-test step.
+NO_ADMISSIBLE_MODULE = 'NO_ADMISSIBLE_MODULE'
+NOT_REQUIRED = 'NOT_REQUIRED'
+_PR_FILES_PER_PAGE = 100
+_PR_FILES_MAX_PAGES = 30
 _TASK = re.compile(r'[a-z0-9][a-z0-9-]{0,95}\Z')
 _NONCE = re.compile(r'[0-9a-f]{32}\Z')
 _HOSTED_WORKFLOW_PATH = '.github/workflows/llmtool-remote-test.yml'
@@ -349,6 +355,62 @@ def _admitted_modules(task):
     return tuple(sorted(names))
 
 
+def _pr_change_paths(pr, get=None):
+    """Return (paths, None) for every changed file of a PR, or (None, code).
+
+    A read error, a malformed page or a full last page (GitHub's 3000-file
+    limit) leaves the change data unknown, so the caller fails closed.
+    """
+    if type(pr) is not int or not 1 <= pr <= 9999999:
+        return None, 'PR_CHANGE_DATA_UNAVAILABLE'
+    if get is None:
+        get = _github_get
+    paths = []
+    for page in range(1, _PR_FILES_MAX_PAGES + 1):
+        path = f'pulls/{pr}/files?per_page={_PR_FILES_PER_PAGE}'
+        if page > 1:
+            path += f'&page={page}'
+        try:
+            batch = get(path)
+        except Exception:
+            return None, 'PR_CHANGE_DATA_UNAVAILABLE'
+        if type(batch) is not list or len(batch) > _PR_FILES_PER_PAGE:
+            return None, 'PR_CHANGE_DATA_UNAVAILABLE'
+        for item in batch:
+            if type(item) is not dict or type(item.get('filename')) is not str:
+                return None, 'PR_CHANGE_DATA_UNAVAILABLE'
+            paths.append(item['filename'])
+            old = item.get('previous_filename')
+            if old is not None:
+                if type(old) is not str:
+                    return None, 'PR_CHANGE_DATA_UNAVAILABLE'
+                paths.append(old)
+        if len(batch) < _PR_FILES_PER_PAGE:
+            if not paths:
+                return None, 'PR_CHANGE_DATA_UNAVAILABLE'
+            return paths, None
+    return None, 'PR_CHANGE_DATA_UNAVAILABLE'
+
+
+def _no_admissible_pr_module(pr, get=None):
+    """True when a PR changes no EC2-admissible test module; None if unknown.
+
+    A scripts/ test or a docs-only change has no module the EC2 runner can
+    execute. Any module under tools/llmtool/tests keeps the existing run.
+    """
+    paths, _code = _pr_change_paths(pr, get=get)
+    if paths is None:
+        return None
+    return not any(_TEST_MODULE_PATH.fullmatch(path) for path in paths)
+
+
+def _record_no_admissible_module(store, task_id, task, *, executor_task, sha):
+    """Record that this exact head needs no EC2 test because no module is admissible."""
+    return _record_outcome(store, task_id, task, result=NOT_REQUIRED,
+                           code=NO_ADMISSIBLE_MODULE, executor_task=executor_task,
+                           sha=sha, modules=())
+
+
 def _validate_remote_receipt(raw, *, sha, modules):
     if type(raw) is not bytes or not raw or len(raw) > _REMOTE_LIMIT:
         return None
@@ -599,6 +661,13 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
     selected = tuple(sorted(set(modules or admitted)))
     if (not selected or len(selected) > _MAX_REMOTE_MODULES or
             any(type(x) is not str or not _MODULE.fullmatch(x) or x not in admitted for x in selected)):
+        # #2413: a PR that changes no EC2-admissible module cannot run here.
+        # Record the skip for this exact head so advance can continue; missing
+        # or inconsistent change data still refuses MODULE_NOT_ADMITTED.
+        if pr is not None and not modules and not admitted:
+            if _no_admissible_pr_module(pr, get=get) is True:
+                return _record_no_admissible_module(
+                    store, task_id, task, executor_task=executor_task, sha=sha)
         return denied('MODULE_NOT_ADMITTED')
     if hosted:
         return _run_hosted(store, task_id, task, executor_task=executor_task,
