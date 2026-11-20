@@ -37,18 +37,19 @@ class RoutePromptCapsTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_max_prompt_bytes_ok(self):
-        for valid in (1, 100, 65536, 524288, 10_000_000):
+        for valid in (1, 100, 65536, 524288, 5242880):
             with self.subTest(valid=valid):
                 self.assertTrue(max_prompt_bytes_ok(valid))
 
-        for invalid in (0, -1, -500, True, False, "65536", 65536.0, None, [], {}):
+        for invalid in (0, -1, -500, True, False, "65536", 65536.0, None, [], {},
+                        5242881):
             with self.subTest(invalid=invalid):
                 self.assertFalse(max_prompt_bytes_ok(invalid))
 
     def test_loader_accepts_repository_keys(self):
         config = load_route_config()
         self.assertEqual(config["routes"]["claude"]["max_prompt_bytes"], 65536)
-        self.assertEqual(config["routes"]["agy"]["max_prompt_bytes"], 524288)
+        self.assertEqual(config["routes"]["agy"]["max_prompt_bytes"], 5242880)
 
     def test_loader_refuses_bad_max_prompt_bytes_values(self):
         base_config = load_route_config()
@@ -164,7 +165,7 @@ class RoutePromptCapsTests(unittest.TestCase):
             "default_effort": "high",
             "default_timeout": 1800,
             "max_timeout": 3600,
-            "max_prompt_bytes": 65536,
+            "max_prompt_bytes": 5242880,
         }
         self.assertEqual(schema.errors(valid_entry, "route"), [])
 
@@ -211,7 +212,7 @@ class RoutePromptCapsTests(unittest.TestCase):
             "loaded = developer_routes.load_route_config()\n"
             "assert 'agy' in loaded['routes']\n"
             "assert 'claude' not in loaded['routes']\n"
-            "assert developer_routes.resolve_route_max_prompt_bytes('agy') == 524288\n"
+            "assert developer_routes.resolve_route_max_prompt_bytes('agy') == 5242880\n"
             "try:\n"
             "    developer_routes.resolve_route_max_prompt_bytes('claude')\n"
             "    sys.exit(201)\n"
