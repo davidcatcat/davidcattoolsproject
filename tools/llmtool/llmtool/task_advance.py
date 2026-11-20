@@ -2349,10 +2349,6 @@ def _remote_test_status(record, d6, pr=None):
             continue
         if outcome.get('result') == 'TIMEOUT':
             return 'TIMEOUT', None, None
-        if (outcome.get('result') == 'ADMISSION_DENIED' and
-                outcome.get('code') == 'MODULE_NOT_ADMITTED' and
-                outcome.get('modules') == []):
-            return 'ADMISSION_DENIED', None, None
         if (outcome.get('result') == remote_test.NOT_REQUIRED and
                 outcome.get('code') == remote_test.NO_ADMISSIBLE_MODULE and
                 outcome.get('modules') == [] and
@@ -2447,7 +2443,7 @@ def _pre_pr_remote_gate(record, store, executor_task, head, branch):
         return None, _remote_test_hold(
             'REMOTE_TEST_REFUSED',
             ['PUBLISH_REMOTE_TEST_REFUSED', _refusal(exc, 'remote_test_code')], **identity)
-    if status in ('PASS', 'ADMISSION_DENIED', remote_test.NOT_REQUIRED):
+    if status in ('PASS', remote_test.NOT_REQUIRED):
         return status, None
     if status == 'NOT_EXECUTED':
         return status, _remote_test_hold('NEEDS_ATTENTION', ['TEST_REMOTE_MODULE_NOT_EXECUTED'],
@@ -2566,10 +2562,10 @@ def derive_repair_state(repair_record):
     return 'UNKNOWN'
 
 
-def _pre_review_action(record, d6, pr, related, result_head):
+def _pre_review_action(record, d6, pr, related, result_head, get=None):
     """Return the gate action before a Reviewer may start on this head."""
     number = pr.get('number') if type(pr) is dict else None
-    remote_status, _, _ = _remote_test_status(record, d6, number)
+    remote_status, _, receipt = _remote_test_status(record, d6, number)
     if remote_status == 'TIMEOUT':
         if _remote_test_timeout_count(record, d6) == 1:
             return 'RUN_REMOTE_TEST'
@@ -2580,15 +2576,47 @@ def _pre_review_action(record, d6, pr, related, result_head):
         return 'NEEDS_ATTENTION'
     if remote_status == 'FAIL':
         return _remote_fail_action(related, result_head)
-    if remote_status not in ('PASS', 'ADMISSION_DENIED', remote_test.NOT_REQUIRED):
+    if remote_status not in ('PASS', remote_test.NOT_REQUIRED):
         return 'RUN_REMOTE_TEST'
+    getter = get
+    if getter is None and type(pr) is dict and callable(pr.get('get')):
+        getter = pr['get']
+    paths = None
+    if type(pr) is dict and 'files' in pr:
+        raw_files = pr['files']
+        if type(raw_files) is list:
+            if not raw_files:
+                return 'RUN_REMOTE_TEST'
+            paths = [item if type(item) is str else item.get('filename')
+                     for item in raw_files if type(item) is str or
+                     (type(item) is dict and type(item.get('filename')) is str)]
+            if len(paths) != len(raw_files):
+                return 'RUN_REMOTE_TEST'
+    elif getter is not None and number is not None:
+        paths, _code = remote_test._pr_change_paths(number, get=getter, head=result_head)
+        if paths is None:
+            return 'RUN_REMOTE_TEST'
+    if paths is not None:
+        changed_modules = {
+            Path(p).stem for p in paths
+            if remote_test._TEST_MODULE_PATH.fullmatch(p) and
+            remote_test._MODULE.fullmatch(Path(p).stem)
+        }
+        if changed_modules:
+            if remote_status != 'PASS':
+                return 'RUN_REMOTE_TEST'
+            receipt_modules = set(receipt.get('modules', [])) if type(receipt) is dict else set()
+            if not changed_modules.issubset(receipt_modules):
+                return 'RUN_REMOTE_TEST'
+        elif remote_status not in ('PASS', remote_test.NOT_REQUIRED):
+            return 'RUN_REMOTE_TEST'
     if type(pr) is dict and pr.get('merged') is True:
         # The code is already merged; a Reviewer must never start for it.
         return 'PR_MERGED_NO_REVIEW'
     return 'DISPATCH_REVIEW'
 
 
-def decide(record, d6, pr, related):
+def decide(record, d6, pr, related, get=None):
     """Return the next action name using only supplied snapshots."""
     if type(record) is not dict:
         return 'DEVELOPER_ATTENTION'
@@ -2630,14 +2658,14 @@ def decide(record, d6, pr, related):
     matching = [claim for claim in claims if type(claim) is dict and
                 claim.get('pr') == chosen_pr and claim.get('head_sha') == result_head]
     if not matching:
-        return _pre_review_action(record, d6, pr, related, result_head)
+        return _pre_review_action(record, d6, pr, related, result_head, get=get)
     claim = max(matching, key=lambda item: item.get('version', 0))
     if claim.get('state') == 'UNKNOWN' and _failure_reason(claim.get('failure_reason')):
         # One head gets one redispatch: any earlier claim on it has spent that.
         if sum(type(item) is dict and item.get('head_sha') == result_head
                for item in claims) > 1:
             return 'REVIEW_UNUSABLE_STOPPED'
-        action = _pre_review_action(record, d6, pr, related, result_head)
+        action = _pre_review_action(record, d6, pr, related, result_head, get=get)
         return 'REVIEW_REDISPATCH' if action == 'DISPATCH_REVIEW' else action
     if claim.get('state') in ('CLAIMED', 'UNKNOWN'):
         return 'REVIEW_OUTCOME_UNKNOWN'
@@ -3500,7 +3528,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         return _ack_consumed_events(
             {'task_id': task_id, 'step': 'D6_BINDING_UNAVAILABLE', 'result': None,
              'next': 'D6_BINDING_UNAVAILABLE', 'codes': [code]}, record, store, None)
-    step = decide(record, d6, pr, related)
+    step = decide(record, d6, pr, related, get=get)
     result, codes, refusal_dict = None, [], None
     redispatch_reason = None
     ci_routed = False

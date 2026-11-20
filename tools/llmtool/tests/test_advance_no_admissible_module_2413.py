@@ -382,16 +382,26 @@ class RemoteTestAdmissionTests(unittest.TestCase):
         self.assertIn('test_alpha', calls[0])
         self.assertEqual(store.published, [(TASK, PR, HEAD)])
 
-    def test_declared_module_still_runs_as_before(self):
+    def test_case_b_declared_module_runs_changed_pr_module_too(self):
         calls = []
         value, store = run_remote(
             remote_task(['tools/llmtool/tests/test_beta.py']),
             get_at_head(['tools/llmtool/tests/test_alpha.py']),
             self.offline_transport(calls))
         self.assertEqual(value['code'], 'SSH_UNAVAILABLE')
-        self.assertEqual(store.outcomes[-1]['modules'], ['test_beta'])
+        self.assertEqual(store.outcomes[-1]['modules'], ['test_alpha', 'test_beta'])
+        self.assertIn('test_alpha', calls[0])
         self.assertIn('test_beta', calls[0])
-        self.assertNotIn('test_alpha', calls[0])
+
+    def test_case_b_modules_over_limit_refuses(self):
+        paths = [f'tools/llmtool/tests/test_alpha_{i}.py' for i in range(5)]
+        pr_paths = [f'tools/llmtool/tests/test_pr_{i}.py' for i in range(5)]
+        value, store = run_remote(
+            remote_task(paths),
+            get_at_head(pr_paths),
+            self.offline_transport([]))
+        self.assertEqual((value['result'], value['code']),
+                         ('ADMISSION_DENIED', 'MODULE_NOT_ADMITTED'))
 
     def test_docs_only_records_a_head_and_pr_bound_skip(self):
         value, store = run_remote(
@@ -483,6 +493,122 @@ class AdvanceStatusTests(unittest.TestCase):
              'remote_test_receipts': []},
             {'result_head': HEAD}, {'number': PR, 'merged': False},
             {'events': [], 'repair_claims': []}, HEAD)
+        self.assertEqual(action, 'RUN_REMOTE_TEST')
+
+    def test_case_b_prior_pass_missing_changed_pr_module_does_not_satisfy_gate(self):
+        receipt = {
+            'task_id': 'task-2413', 'run_id': 'run-2413',
+            'executor_task': EXEC, 'source_sha': HEAD,
+            'result': 'PASS', 'modules': ['test_beta'],
+            'ran_total': 1, 'elapsed_s': 0.01,
+        }
+        receipt['receipt_digest'] = hashlib.sha256(ts._json_bytes(receipt)).hexdigest()
+        record = {
+            'task_id': 'task-2413', 'run_id': 'run-2413',
+            'completion': {'executor_task_id': EXEC},
+            'remote_test_receipts': [receipt],
+            'remote_test_outcomes': [],
+        }
+        get = get_at_head(['tools/llmtool/tests/test_alpha.py'])
+        pr = {'number': PR, 'head': {'sha': HEAD}, 'merged': False, 'get': get}
+        action = task_advance._pre_review_action(
+            record, {'result_head': HEAD}, pr,
+            {'events': [], 'repair_claims': []}, HEAD, get=get)
+        self.assertEqual(action, 'RUN_REMOTE_TEST')
+
+    def test_case_b_exact_head_pass_covering_changed_pr_module_satisfies_gate(self):
+        receipt = {
+            'task_id': 'task-2413', 'run_id': 'run-2413',
+            'executor_task': EXEC, 'source_sha': HEAD,
+            'result': 'PASS', 'modules': ['test_alpha', 'test_beta'],
+            'ran_total': 2, 'elapsed_s': 0.02,
+        }
+        receipt['receipt_digest'] = hashlib.sha256(ts._json_bytes(receipt)).hexdigest()
+        record = {
+            'task_id': 'task-2413', 'run_id': 'run-2413',
+            'completion': {'executor_task_id': EXEC},
+            'remote_test_receipts': [receipt],
+            'remote_test_outcomes': [],
+        }
+        get = get_at_head(['tools/llmtool/tests/test_alpha.py'])
+        pr = {'number': PR, 'head': {'sha': HEAD}, 'merged': False, 'get': get}
+        action = task_advance._pre_review_action(
+            record, {'result_head': HEAD}, pr,
+            {'events': [], 'repair_claims': []}, HEAD, get=get)
+        self.assertEqual(action, 'DISPATCH_REVIEW')
+
+    def test_case_c_module_not_admitted_denial_is_never_satisfied(self):
+        action = task_advance._pre_review_action(
+            self.record({'result': 'ADMISSION_DENIED', 'code': 'MODULE_NOT_ADMITTED',
+                         'executor_task': EXEC, 'sha': HEAD, 'modules': []}),
+            {'result_head': HEAD}, {'number': PR, 'merged': False},
+            {'events': [], 'repair_claims': []}, HEAD)
+        self.assertEqual(action, 'RUN_REMOTE_TEST')
+
+    def test_case_c_unreadable_change_data_fails_closed(self):
+        def get(path):
+            if path == f'pulls/{PR}':
+                return {'number': PR, 'head': {'sha': HEAD}}
+            raise OSError('unreadable')
+        pr = {'number': PR, 'head': {'sha': HEAD}, 'merged': False, 'get': get}
+        receipt = {
+            'task_id': 'task-2413', 'run_id': 'run-2413',
+            'executor_task': EXEC, 'source_sha': HEAD,
+            'result': 'PASS', 'modules': ['test_beta'],
+            'ran_total': 1, 'elapsed_s': 0.01,
+        }
+        receipt['receipt_digest'] = hashlib.sha256(ts._json_bytes(receipt)).hexdigest()
+        record = {
+            'task_id': 'task-2413', 'run_id': 'run-2413',
+            'completion': {'executor_task_id': EXEC},
+            'remote_test_receipts': [receipt],
+            'remote_test_outcomes': [],
+        }
+        action = task_advance._pre_review_action(
+            record, {'result_head': HEAD}, pr,
+            {'events': [], 'repair_claims': []}, HEAD, get=get)
+        self.assertEqual(action, 'RUN_REMOTE_TEST')
+
+    def test_case_c_empty_by_error_change_data_fails_closed(self):
+        get = get_at_head([])
+        pr = {'number': PR, 'head': {'sha': HEAD}, 'merged': False, 'get': get}
+        receipt = {
+            'task_id': 'task-2413', 'run_id': 'run-2413',
+            'executor_task': EXEC, 'source_sha': HEAD,
+            'result': 'PASS', 'modules': ['test_beta'],
+            'ran_total': 1, 'elapsed_s': 0.01,
+        }
+        receipt['receipt_digest'] = hashlib.sha256(ts._json_bytes(receipt)).hexdigest()
+        record = {
+            'task_id': 'task-2413', 'run_id': 'run-2413',
+            'completion': {'executor_task_id': EXEC},
+            'remote_test_receipts': [receipt],
+            'remote_test_outcomes': [],
+        }
+        action = task_advance._pre_review_action(
+            record, {'result_head': HEAD}, pr,
+            {'events': [], 'repair_claims': []}, HEAD, get=get)
+        self.assertEqual(action, 'RUN_REMOTE_TEST')
+
+    def test_case_c_head_inconsistent_change_data_fails_closed(self):
+        get = get_at_head(['tools/llmtool/tests/test_alpha.py'], head=OTHER_HEAD)
+        pr = {'number': PR, 'head': {'sha': HEAD}, 'merged': False, 'get': get}
+        receipt = {
+            'task_id': 'task-2413', 'run_id': 'run-2413',
+            'executor_task': EXEC, 'source_sha': HEAD,
+            'result': 'PASS', 'modules': ['test_alpha'],
+            'ran_total': 1, 'elapsed_s': 0.01,
+        }
+        receipt['receipt_digest'] = hashlib.sha256(ts._json_bytes(receipt)).hexdigest()
+        record = {
+            'task_id': 'task-2413', 'run_id': 'run-2413',
+            'completion': {'executor_task_id': EXEC},
+            'remote_test_receipts': [receipt],
+            'remote_test_outcomes': [],
+        }
+        action = task_advance._pre_review_action(
+            record, {'result_head': HEAD}, pr,
+            {'events': [], 'repair_claims': []}, HEAD, get=get)
         self.assertEqual(action, 'RUN_REMOTE_TEST')
 
 

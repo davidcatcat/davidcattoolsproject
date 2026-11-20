@@ -50,9 +50,9 @@ def base_record(**changes):
                       'evidence': {'result': {'result_head': HEAD}}},
         'review_dispatch_claim': [], 'review_repair_claims': [],
         'completion_events': [],
-        'remote_test_outcomes': [{'result': 'ADMISSION_DENIED',
-            'code': 'MODULE_NOT_ADMITTED', 'executor_task': 'executor-1',
-            'sha': HEAD, 'modules': []}],
+        'remote_test_outcomes': [{'result': task_advance.remote_test.NOT_REQUIRED,
+            'code': task_advance.remote_test.NO_ADMISSIBLE_MODULE, 'executor_task': 'executor-1',
+            'sha': HEAD, 'modules': [], 'pr': 17}],
     }
     record.update(changes)
     return record
@@ -505,9 +505,9 @@ class TaskAdvanceTests(unittest.TestCase):
     def test_tampered_remote_test_receipt_is_skipped(self):
         receipt = remote_receipt(base_record(), result='FAIL', excerpt='failure')
         receipt['failure_excerpt'] = 'tampered'
-        record = base_record(remote_test_receipts=[receipt])
+        record = base_record(remote_test_receipts=[receipt], remote_test_outcomes=[])
         self.assertEqual(task_advance._remote_test_status(record, d6()),
-                         ('ADMISSION_DENIED', None, None))
+                         (None, None, None))
 
     def test_timeout_and_sha_mismatch_receipts_require_attention(self):
         single_timeout = base_record(remote_test_outcomes=[{
@@ -547,10 +547,18 @@ class TaskAdvanceTests(unittest.TestCase):
             self.assertEqual(result['step'], 'NEEDS_ATTENTION')
             self.assertEqual(result['codes'], [code])
 
-    def test_no_admitted_modules_admission_denied_allows_review(self):
+    def test_no_admitted_modules_admission_denied_does_not_allow_review(self):
         record = base_record(remote_test_outcomes=[{
             'result': 'ADMISSION_DENIED', 'code': 'MODULE_NOT_ADMITTED',
             'executor_task': 'executor-1', 'sha': HEAD, 'modules': [],
+        }])
+        self.assertEqual(task_advance.decide(record, d6(), PR, {}), 'RUN_REMOTE_TEST')
+
+    def test_not_required_outcome_allows_review(self):
+        record = base_record(remote_test_outcomes=[{
+            'result': task_advance.remote_test.NOT_REQUIRED,
+            'code': task_advance.remote_test.NO_ADMISSIBLE_MODULE,
+            'executor_task': 'executor-1', 'sha': HEAD, 'modules': [], 'pr': 17,
         }])
         self.assertEqual(task_advance.decide(record, d6(), PR, {}), 'DISPATCH_REVIEW')
 

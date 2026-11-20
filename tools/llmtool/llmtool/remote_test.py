@@ -707,21 +707,26 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
     if pr is not None:
         store.record_published_pr(task_id, pr, recorded_head)
     admitted = _task_path_modules(task)
-    selected = tuple(sorted(set(modules or admitted)))
+    declared = tuple(sorted(set(modules or admitted)))
+    selected = declared
     derived = ()
-    if not selected and pr is not None and not modules and not admitted:
-        # #2413: a Task that declares no module still runs the modules its PR
-        # changes. A PR with no admissible module records the skip for its exact
-        # head, while missing or inconsistent change data still fails closed.
-        derived = _pr_test_modules(pr, recorded_head, get=get)
-        if derived is not None:
-            selected = derived
-        elif _no_admissible_pr_module(pr, recorded_head, get=get) is True:
+    if pr is not None:
+        paths, _code = _pr_change_paths(pr, get=get, head=recorded_head)
+        if paths is None:
+            return denied('MODULE_NOT_ADMITTED')
+        pr_modules = tuple(sorted({
+            Path(path).stem for path in paths
+            if _TEST_MODULE_PATH.fullmatch(path) and _MODULE.fullmatch(Path(path).stem)
+        }))
+        derived = pr_modules
+        selected = tuple(sorted(set(declared) | set(pr_modules)))
+        if not selected and not pr_modules:
             return _record_no_admissible_module(
                 store, task_id, task, executor_task=executor_task, sha=sha, pr=pr)
+    declared_allowed = set(admitted) | set(modules if type(modules) in (list, tuple, set) else ())
     if (not selected or len(selected) > _MAX_REMOTE_MODULES or
             any(type(x) is not str or not _MODULE.fullmatch(x) or
-                (x not in admitted and x not in derived) for x in selected)):
+                (x not in declared_allowed and x not in derived) for x in selected)):
         return denied('MODULE_NOT_ADMITTED')
     if hosted:
         return _run_hosted(store, task_id, task, executor_task=executor_task,
