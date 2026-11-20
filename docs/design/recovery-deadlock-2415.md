@@ -59,8 +59,10 @@ The recommendation (section 6) is to make two kinds of change together:
 
 - narrow classifier fixes for the three known classes;
 - a small, Owner-authorized, evidence-bound gate-fault record. It can
-  reclassify exactly one recorded item as tool-caused. It never raises a
-  limit, adds a PASS, skips the root-cause rule or merges anything.
+  reclassify exactly one recorded item as tool-caused, and only with
+  positive evidence that the gate caused it. Matching identifiers are not
+  enough. It never raises a limit, adds a PASS, skips the root-cause rule
+  or merges anything.
 
 ## 2. The normal recovery flow on `main`
 
@@ -165,6 +167,28 @@ infrastructure faults that still use the slot:
   `confirm_screen_batch`, but the Debug entry stays used. The chain then
   has a cleared screen and no Debug left.
 - `HIGH_DEBUG_MODEL_UNVERIFIED` and `HIGH_DEBUG_WROTE_FILES`.
+
+**What the stored entry can and cannot prove.** Counting these entries as
+used is correct on the evidence stored today. Neither shape proves that no
+provider process ran:
+
+- `run_high_debug` writes the `RESERVED` entry (report
+  `HIGH_DEBUG_RESERVED`, model, effort and usage `UNKNOWN`) before the D6
+  create. Nothing updates it until `failed` or the final
+  `finalize_high_debug` call, and both run after the runner returns or
+  raises. A process that crashes during or after the provider run leaves the
+  same `RESERVED` entry as one that crashed before the D6 create. A
+  `finalize_high_debug` failure inside `failed` (detail
+  `reservation=UNFINALIZED`) can also come after a provider run.
+- `failed` writes RUN_FAILED with model, effort and usage still `UNKNOWN`
+  after a provider run too. Examples: a Codex non-zero exit
+  (`_codex_failure_code`), oversized Codex output, and a
+  `subprocess.TimeoutExpired` from `_run_codex` or `_run_claude`, which
+  lands in the generic `except Exception`.
+- The only shapes that prove "not started" today are the ones
+  `_debug_entry_used` already frees: `_DEBUG_NOT_STARTED` and
+  `_prelaunch_refused`. Each is tied to one code path that runs before the
+  launcher calls `subprocess.run`.
 
 **Conflicting invariants.** INV-1 and INV-5 together say that a doubtful
 Debug uses the one Debug. INV-4 says that the next repair needs a Debug.
@@ -329,12 +353,15 @@ currently needs a code change or an Owner exception.
 
 ### 6.1 Option A: none, fix each classifier
 
-Each known class gets a classifier fix like #2407, which reads existing
-evidence again at count time:
+Each known class gets a classifier fix like #2407, which reads evidence
+again at count time:
 
-- Debug: also treat RESERVED-but-dead and RUN_FAILED entries with nothing
-  observed as not used.
-- CI: treat `timed_out` as ENV.
+- Debug: record write-ahead evidence that the provider was not launched
+  (section 6.4 item 2), and free only entries that carry it. A `RESERVED` or
+  `UNKNOWN`-observed RUN_FAILED shape alone is not enough (section 4.1).
+- CI: record the real conclusion, then decide which conclusions are ENV.
+  `timed_out` cannot simply become ENV, because a Developer change that
+  makes a test hang also ends `timed_out`.
 - Review: name a next command, and prove absence with a full paginated
   comment read.
 
@@ -342,7 +369,9 @@ For:
 
 - no new authority;
 - no new record type;
-- the fix applies to old records too.
+- a re-read fix also applies to old records that already hold the evidence,
+  as #2407 did. A fix that needs a new evidence field helps only records
+  written after it.
 
 Against:
 
@@ -359,7 +388,8 @@ Against:
 ### 6.2 Option B: a gate-fault record (proposal)
 
 A gate-fault record says that one already recorded item was caused by the
-tool, not the Developer. It changes how that one item is counted. Nothing
+tool, not the Developer. It changes how that one item is counted. For a CI
+item only, it also allows the one bounded re-run described below. Nothing
 else changes. It follows two existing precedents:
 
 - the #981 / #1097 screen disposition: an Owner-referenced Issue comment, a
@@ -372,11 +402,121 @@ else changes. It follows two existing precedents:
 reclassified, not by the cause. This way a future cause on the same item
 kind is covered without a new rule.
 
-| Kind | Item it may bind | Effect | Precondition (refuse otherwise) |
-|---|---|---|---|
-| `DEBUG_NO_RESULT` | One `high_debug` entry | `_debug_entry_used` treats it as not used. One fresh Debug may be admitted on the same head. | Status RESERVED, or RUN_FAILED with model, effort and usage UNKNOWN. Never RCA_CONFIRMED, RCA_UNCONFIRMED, BLOCKED or REPORT_INVALID with a report. |
-| `CI_GATE_FAULT` | One `-ec2` repair claim built from a CI check | The claim is left out of `test_fails`. The check is treated as ENV (wait, no re-run). | The claim packet is a `CI_CHECK_FAILURE` packet. The check run ID from it, read again, is on the same head and the same check name. |
-| `REVIEW_RESULT_LOST` | One review claim on one PR, head and version | The claim becomes eligible for the existing single REVIEW_REDISPATCH, as if it had a failure reason. | State CLAIMED or UNKNOWN, and a complete paginated comment read shows no verdict-shaped comment for that head and version. |
+| Kind | Item it may bind | Effect |
+|---|---|---|
+| `DEBUG_NOT_LAUNCHED` | One `high_debug` entry | `_debug_entry_used` treats it as not used. One fresh Debug may be admitted on the same head. |
+| `CI_GATE_FAULT` | One `-ec2` repair claim built from a CI check | The claim is left out of `test_fails`, and one bounded re-run of the bound check is allowed (see below). |
+| `REVIEW_RESULT_LOST` | One review claim on one PR, head and version | The claim becomes eligible for the existing single REVIEW_REDISPATCH, as if it had a failure reason. |
+
+Each kind refuses unless its evidence below holds. The evidence must show
+that the gate caused the item. A shape that a Developer fault or a real
+provider run could also produce is never enough. Any read that fails, is
+incomplete or is in doubt refuses.
+
+**`DEBUG_NOT_LAUNCHED` evidence.** The record needs positive proof that the
+provider process was never started for that entry. As section 4.1 shows, the
+stored shapes cannot give that proof today. A `RESERVED` entry and a
+RUN_FAILED entry with model, effort and usage `UNKNOWN` are both written
+after real provider runs too. So this kind depends on new write-ahead
+evidence (section 6.4 item 2):
+
+- Before `run_high_debug` calls the runner, it updates its own `RESERVED`
+  entry to a launch stage (for example `launch: STARTED`). This is a
+  compare-and-update under the chain lock. If the write fails, the launch is
+  refused, so a provider process never runs without the marker.
+- The record may bind only an entry whose status is still `RESERVED` and
+  that has no launch marker. Under the same chain lock it appends the
+  gate-fault event. The launcher's launch-stage write refuses if a gate-fault
+  event exists for its entry. Without this check, a slow but live process
+  could launch after its slot was freed, and two Debugs would run.
+- Entries recorded before the marker existed carry no proof. They stay used,
+  and the record refuses them. For those entries the Owner exception stays
+  the only exit.
+- An entry with a launch marker never qualifies, whatever happened after the
+  launch (timeout, crash, MODEL_UNVERIFIED, WROTE_FILES, UNFINALIZED). A
+  Debug that ran counts as used even when the tool caused the failure.
+  Whether the Owner wants a different rule for "launched, no result" is an
+  open policy question (section 7). This proposal does not decide it.
+- RCA_CONFIRMED, RCA_UNCONFIRMED, BLOCKED and REPORT_INVALID entries never
+  qualify.
+
+Once the marker exists, freeing a `RESERVED` entry without a marker is
+plain classifier logic (Option A) and needs no Owner record. The record
+kind would cover only a fault the classifier has not yet been taught.
+Whether such a fault exists for Debug entries is UNKNOWN.
+
+**`CI_GATE_FAULT` evidence.** A real failed test has the same claim packet,
+check run ID, head and check name as a gate fault. Matching those fields
+proves only which item is bound, not what caused the failure. So the record
+also needs all of the following, each read again by ID at recording time:
+
+1. The check run, read with `task_advance._read_check_run`, is the bound
+   completed exact-head run, and its real conclusion is recorded. The stored
+   claim says `conclusion: failure` whatever the real conclusion was
+   (section 4.2), so the real value must come from this read.
+2. The trust checks of `task_advance._mac_capacity_cancel` apply to every
+   required check, not only Mac:
+   - the PR changes no `.github/` file, so the workflow is not the
+     Developer's change;
+   - the workflow run is on the same head and on the expected workflow path;
+   - the jobs list is complete, and the bound job is the one named in the
+     check's details URL.
+3. Fault localisation from the step conclusions of that job. A fixed list
+   names the test-executing steps. It is kept in `policy.json` and bound to
+   the digest of the workflow file on `main`, never taken from the run. Every
+   listed step must have concluded `success`, and the failure, timeout or
+   cancel must be in a step outside the list. This excludes executed test
+   failures: a real failed or hanging test fails or times out a listed step,
+   and the record then refuses.
+4. An exact-head EC2 PASS receipt for the same head (`ran_total` above 0,
+   `failures` empty), as independent evidence that the suite passes on that
+   head.
+
+A timeout inside a test-executing step never qualifies. The tool reads step
+conclusions, not logs. From those it cannot tell a slow-runner limit from a
+Developer change that made a test hang. That class stays a counted repair.
+It is resolved only by a configuration or classifier fix like #2410, or by
+the Owner exception. Whether the #2408 timeout was inside a test-executing
+step is UNKNOWN. If it was, this kind would not have covered #2408.
+
+**`CI_GATE_FAULT` route to a successful exact-head check.** Leaving the
+claim out of `test_fails` does not make the required check pass. The head
+still has a failed exact-head check, and every merge path still runs
+`_merge_checks`. On `main` a new check result can come only from a CI re-run
+(forbidden by INV-7) or from a new head. PUBLISH never merges `main` into
+the head (the #2367 M1 comment in `task_advance._publish_task`), so a new
+head needs a Developer change. That is no route, because the Developer has
+nothing to fix.
+So the proposal defines one route and makes it an explicit, bounded
+exception to INV-7. The Owner must approve it as part of the policy:
+
+- After the record exists, `llmtool task advance` (never a person) may
+  request one re-run of the failed jobs of the bound workflow run, through
+  its trusted GitHub path. The record binds that re-run: one per record,
+  never repeated, and never for a check without a record.
+- The new run must be a new completed exact-head run of the same check name.
+  It is then routed by the normal `_route_ci_failure` classifier. A
+  `success` lets the normal gates continue. Any other result is a normal
+  counted repair or ENV wait. No second record may bind the same head and
+  check.
+- Until the re-run's result exists, `task advance` stops with a named code
+  (for example `CI_GATE_FAULT_RERUN_PENDING`) that names the record and the
+  check run, not a silent WAITING_ENV.
+- Whether a re-run uses the workflow version of the original run or a later
+  one is UNKNOWN (the workflow files and their triggers were not read). If
+  it uses the original version, a re-run clears only a transient gate fault
+  (a lost runner, an infrastructure step). A configuration fault that only a
+  later `main` fixes then fails the re-run in the same way. That result is
+  routed normally as a counted repair, and no second record may bind it, so
+  the bound stays intact. For that case no route exists inside the tool.
+  Creating one would need a new step that moves the head onto the fixed
+  `main`. That step would change the PUBLISH rule above, needs its own Owner
+  decision, and is not part of this proposal.
+
+**`REVIEW_RESULT_LOST` evidence.** The claim state is CLAIMED or UNKNOWN. A
+complete paginated comment read of the PR shows no verdict-shaped comment
+(by `_may_be_review_verdict`) for that head and version. The other
+evidence a REVIEW_REDISPATCH needs today stays required.
 
 **Who may invoke it.**
 
@@ -388,7 +528,9 @@ kind is covered without a new rule.
 - Developers, Reviewers and AI Debug runs can never invoke it. How the
   subcommand checks that its caller is the PM (for example the Task's
   `pm_provenance` session) is an open design point.
-- It performs no Git mutation and no merge.
+- It performs no Git mutation, no merge and no CI request. The one
+  `CI_GATE_FAULT` re-run is requested later by `task advance`, not by this
+  subcommand.
 
 **What it binds.** Metadata and digests only, never text:
 
@@ -396,10 +538,14 @@ kind is covered without a new rule.
   `record_sha256` at recording (a compare-and-update, under the chain lock);
 - the kind and the item identity:
   - Debug: entry index, `report_sha256`, `examined_sha`, `d6`,
-    `recorded_at`;
+    `recorded_at`, the status `RESERVED` and the absence of a launch marker;
   - CI: `repair_task_id`, `packet_sha256`, head, check name and check run
-    ID;
-  - Review: PR, head, version and claim state;
+    ID, plus the fault evidence: the real conclusion, the workflow run and
+    job IDs, the workflow file digest, the step names and conclusions of the
+    job (names and conclusions only, never output) and the EC2 receipt
+    identity;
+  - Review: PR, head, version and claim state, and the comment count of the
+    complete read;
 - the llmtool `main` commit that produced the fault;
 - the Owner ref, and a required fix-Issue ref for the gate defect;
 - a recorded-at time.
@@ -416,9 +562,15 @@ kind is covered without a new rule.
   gate defect to be fixed rather than worked around.
 - It never changes `repair_max`, `test_fail_max` or the Debug limits. It
   never adds a review PASS, a test PASS or a confirmed RCA, never skips INV-4
-  (the new Debug must still be RCA_CONFIRMED), never re-runs CI (INV-7),
-  never merges, and never applies to a Developer-attributed item: a review
-  FAIL with blocking findings, or an EC2 FAIL with executed failures.
+  (the new Debug must still be RCA_CONFIRMED), never merges, and never
+  applies to a Developer-attributed item: a review FAIL with blocking
+  findings, an EC2 FAIL with executed failures, or a CI check whose
+  test-executing step failed or timed out.
+- Its only exception to INV-7 is the one bound `CI_GATE_FAULT` re-run. That
+  exception exists only if the Owner approves it. Without that approval,
+  `CI_GATE_FAULT` is left out, because without a re-run it has no route to
+  a passing check.
+- It never frees a Debug entry that may have launched a provider process.
 - It does not replace the #981 screen procedure. A screen refusal keeps its
   own disposition path.
 - Any doubt in the binding refuses with a fixed code and writes nothing.
@@ -445,9 +597,12 @@ kind is covered without a new rule.
 
 - It restores at most the one unit that one bound item used. The limits
   themselves never move, and a chain can use only a fixed number of records.
-- It applies only to items whose stored shape shows that no Developer result
-  was involved. RCA outcomes, findings and executed test failures are
-  excluded by precondition.
+- It applies only to items with positive evidence that the gate caused
+  them: a Debug that write-ahead evidence shows never launched, a CI failure
+  outside every test-executing step on a head whose suite passed on EC2, or
+  a review claim with no verdict on a complete read. Matching identifiers
+  alone never qualify. RCA outcomes, findings, launched Debugs and executed
+  or hanging tests are excluded by precondition.
 - Each record needs an Owner decision and names a fix Issue. The store-wide
   cap per kind stops it from becoming a habit, so the lasting fix stays a
   classifier change like #2407.
@@ -470,11 +625,21 @@ These are follow-up candidates, not part of this Task. Each needs its own
 Task, tests and review.
 
 1. Record the real CI conclusion in the CI claim identity and packet,
-   instead of forcing `failure` in `task_advance._route_ci_failure`. Then
-   decide in `_CI_ENV_CONCLUSIONS` whether `timed_out` is ENV.
-2. In `high_debug._debug_entry_used`, decide how a RESERVED entry older than
-   the Debug run timeout (`high_debug._debug_timeout`) is counted. Today it
-   is used forever.
+   instead of forcing `failure` in `task_advance._route_ci_failure`.
+   `review_repair._ci_failure` refuses CI_FAILURE_INVALID for any
+   conclusion other than `failure`, so it changes too. Do not make
+   `timed_out` ENV in `_CI_ENV_CONCLUSIONS` on the conclusion alone,
+   because a hanging test also ends `timed_out`. Any ENV rule for timeouts
+   needs the step-level evidence of the `CI_GATE_FAULT` kind.
+2. In `high_debug.run_high_debug`, write a launch marker into the
+   `RESERVED` entry by compare-and-update under the chain lock before the
+   runner is called, and refuse the launch if the write fails. Then
+   `high_debug._debug_entry_used` can free a `RESERVED` entry with no
+   marker, but only after a terminal "abandoned" event has been recorded
+   under the same lock, which makes any later launch of that entry refuse.
+   Age is not evidence. A `RESERVED` entry older than the Debug run timeout
+   (`high_debug._debug_timeout`) may still have run its provider, so it
+   stays used. Entries written before the marker exists stay used.
 3. In `review_repair.repair_review`, refuse with a distinct code when
    `test_fails` or `review_repairs` is UNKNOWN, so a store doubt is not
    reported as REPAIR_LIMIT_REACHED / TEST_FAIL_LIMIT_REACHED. The delegate
@@ -506,3 +671,15 @@ Task, tests and review.
 - Whether the fix PRs #2407 and #2410 needed exceptions themselves: UNKNOWN.
 - How the gate-fault subcommand would check that its caller is the PM:
   open design point.
+- Whether a Debug that launched but returned no result (timeout, crash,
+  MODEL_UNVERIFIED, WROTE_FILES) should ever free its slot: Owner policy
+  question. This proposal keeps it used.
+- Whether the GitHub jobs API reports a step-level timeout as its own step
+  conclusion or only as `failure`: UNKNOWN.
+- Which steps of the llmtool workflows execute tests, and so belong on the
+  `CI_GATE_FAULT` step list: UNKNOWN (workflow files not read).
+- Whether a requested re-run of failed jobs uses the original workflow
+  version, and whether its check runs get new IDs: UNKNOWN.
+- Whether the #2408 timeout was inside a test-executing step: UNKNOWN.
+- Whether the Owner accepts the one bound re-run as an exception to INV-7:
+  Owner decision. Without it, `CI_GATE_FAULT` is dropped from the proposal.
