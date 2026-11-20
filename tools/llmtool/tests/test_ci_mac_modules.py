@@ -62,14 +62,14 @@ PR_787_PATHS = (
 
 class MacTestIdSelectionTests(unittest.TestCase):
     def assert_pr_781_selection(self, report):
-        """Check the #781 report against its core set and import-derived extras."""
+        """Check the #781 report, including the direct repair CLI integration."""
         self.assert_import_derived_selection(
             report, "#781",
             {"llmtool.review_repair", "llmtool.task_advance"},
             MAC_REQUIRED | {
                 "test_review_repair", "test_task_advance", "test_task_drive",
-                "test_claude_route_wiring",
-            },
+                "test_claude_route_wiring", "test_task_submission_cli",
+            }, level="L2",
         )
 
     def assert_pr_787_selection(self, report):
@@ -86,8 +86,8 @@ class MacTestIdSelectionTests(unittest.TestCase):
             },
         )
 
-    def assert_import_derived_selection(self, report, label, targets, core):
-        """Check an L1 report: every core ID, plus exactly the importing test modules.
+    def assert_import_derived_selection(self, report, label, targets, core, *, level="L1"):
+        """Check an impact-selected report: every core ID, plus exactly the importing test modules.
 
         The extras are derived from the test tree with ``ast`` here, so a new
         test module importing a changed source module needs no edit.
@@ -110,7 +110,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
                     return True
             return False
 
-        self.assertEqual(report["level"], "L1")
+        self.assertEqual(report["level"], level)
         self.assertEqual(report["fallback_reasons"], [])
         self.assertEqual(report["fallback_paths"], [])
         self.assertEqual(report["fallback_details"], [])
@@ -452,7 +452,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
     def test_historical_pr_path_fixtures_preserve_selection_and_rejection_reasons(self):
         fixtures = (
             # #781 ids are checked by assert_pr_781_selection, not a frozen list.
-            ("#781", list(PR_781_PATHS), "L1", None, None),
+            ("#781", list(PR_781_PATHS), "L2", None, None),
             (
                 "#782",
                 [
