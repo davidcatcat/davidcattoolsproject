@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from argparse import Namespace
 
-from . import active_pm_inbox, github_events, remote_test, review_dispatch, review_repair
+from . import active_pm_inbox, github_events, review_dispatch, review_repair
 from . import github_identity, review_result, sensitive_paths, task_completion
 from . import lineage_counts, mac_full_suite, repair_policy, review_transcript
 from . import start_failure, task_submission_cli
@@ -29,14 +29,6 @@ _MERGE_LINEAGE_CODES = {'TASK_LINEAGE_PENDING': 'TASK_LINEAGE_PENDING',
                         'TASK_LINEAGE_PARKED': 'MERGE_ROOT_PARKED',
                         'TASK_LINEAGE_ENDED': 'MERGE_LINEAGE_ENDED',
                         'TASK_LINEAGE_UNKNOWN': 'MERGE_LINEAGE_UNKNOWN'}
-
-# Outcomes that remote_test.py records as UNAVAILABLE: nothing ran on EC2, so
-# the next advance step may retry the same head. A hosted run is read back by
-# its nonce on the next step and never dispatched twice.
-_REMOTE_TEST_RETRY_CODES = frozenset((
-    'SSH_UNAVAILABLE', 'SSH_FAILED', 'REMOTE_BUSY', 'REMOTE_LOCK_UNSAFE',
-    'HOSTED_PENDING', 'HOSTED_QUEUE_FULL', 'HOSTED_DISPATCH_UNCONFIRMED'))
-
 
 class _PublishRefusal(Exception):
     def __init__(self, code, operation=None):
@@ -166,22 +158,8 @@ def _find_published_pr(gh_runner, root, branch, expected_head):
     return number if type(number) is int and number > 0 else None
 
 
-def _open_pr_present(gh_runner, root, branch):
-    """Return whether the branch already has an open PR; any doubt refuses."""
-    output = _publish_command(gh_runner, root,
-        ['pr', 'list', '--head', branch, '--state', 'open',
-         '--json', 'number,headRefOid'], code='PUBLISH_GITHUB_FAILED')
-    try:
-        pulls = json.loads(output)
-    except (ValueError, TypeError):
-        raise _PublishRefusal('PUBLISH_GITHUB_FAILED') from None
-    if type(pulls) is not list:
-        raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
-    return bool(pulls)
-
-
 def _require_published_head(git_runner, root, branch, head):
-    """Refuse a PR unless the cleared head is still the local and pushed tip."""
+    """Refuse a PR unless the candidate head is still the local and pushed tip."""
     local = _publish_command(git_runner, root, ['rev-parse', '--verify', 'HEAD']).strip()
     remote = _publish_command(git_runner, root,
         ['ls-remote', '--heads', 'origin', f'refs/heads/{branch}']).split()
@@ -373,22 +351,26 @@ def _publish_created_pr(gh_runner, root, branch, task_id, expected_head, title, 
     raise _PublishRefusal(code, operation)
 
 
-def _publish_pr(gh_runner, root, branch, task_id, expected_head, title, body):
+def _publish_pr(gh_runner, root, branch, task_id, expected_head, title, body, *, bound_pr=None):
     pulls = _read_open_prs(gh_runner, root, branch)
     if type(pulls) is not list:
         raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
     if not pulls:
+        if bound_pr is not None:
+            raise _PublishRefusal('PUBLISH_BOUND_PR_UNAVAILABLE')
         return _publish_created_pr(gh_runner, root, branch, task_id, expected_head,
                                    title, body)
     # A PR open before this call is never closed; a head mismatch refuses.
     for attempt in range(4):
-        if type(pulls) is not list or not pulls:
+        if type(pulls) is not list or len(pulls) != 1:
             raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
         pull = pulls[0]
         number = pull.get('number') if type(pull) is dict else None
         head = pull.get('headRefOid') if type(pull) is dict else None
         if type(number) is not int or number < 1 or type(head) is not str:
             raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+        if bound_pr is not None and number != bound_pr:
+            raise _PublishRefusal('PUBLISH_BOUND_PR_MISMATCH')
         if head == expected_head:
             return number
         if attempt == 3:
@@ -2065,14 +2047,9 @@ def _publish_screen_commits(git_runner, root, commits):
             raise _PublishRefusal('DEVELOPER_OUTPUT_SENSITIVE')
 
 
-def _publish_task(record, d6, executor_task, *, pre_pr_gate, git_runner=None,
+def _publish_task(record, d6, executor_task, *, git_runner=None,
                   gh_runner=None, record_result_call=None):
-    """Commit scoped D6 changes, record the result and push the branch.
-
-    With no open PR, pre_pr_gate(head, branch) decides whether one may open: a
-    returned hold is passed back with pr=None. An open PR already follows the
-    branch, so it keeps the PR-ref remote test step.
-    """
+    """Commit scoped D6 changes, record the result, push and open or reuse a PR."""
     git_runner = _publish_run_git if git_runner is None else git_runner
     gh_runner = _publish_run_gh if gh_runner is None else gh_runner
     task_id = record.get('task_id')
@@ -2181,14 +2158,10 @@ def _publish_task(record, d6, executor_task, *, pre_pr_gate, git_runner=None,
         _publish_command(git_runner, root,
             ['push', 'origin', f'HEAD:refs/heads/{branch}'],
             code='PUBLISH_PUSH_FAILED')
-    if not _open_pr_present(gh_runner, root, branch):
-        hold = pre_pr_gate(local_head, branch)
-        if hold is not None:
-            return dict(hold, pr=None, head=local_head)
-        # The EC2 run can take minutes, and gh opens the PR from the branch tip.
-        _require_published_head(git_runner, root, branch, local_head)
+    _require_published_head(git_runner, root, branch, local_head)
     title, body = _publication_text(record, executor_task, branch)
-    number = _publish_pr(gh_runner, root, branch, task_id, local_head, title, body)
+    number = _publish_pr(gh_runner, root, branch, task_id, local_head, title, body,
+                         bound_pr=_pr_number(record, None))
     return {'pr': number, 'head': local_head}
 
 
@@ -2409,80 +2382,6 @@ def _run_remote_test(store, task_id, executor_task, head, ref, pr):
         return value if type(value) is dict else {}
 
 
-def _remote_test_hold(step, codes, *, task_id, executor_task, head, record=None,
-                      next_step=None):
-    result = {'task_id': task_id, 'executor_task': executor_task, 'head': head}
-    summary = _remote_test_receipt_summary(record, head)
-    if summary is not None:
-        result['remote_test'] = summary
-    return {'step': step, 'next': next_step or step, 'codes': codes, 'result': result}
-
-
-def _pre_pr_remote_gate(record, store, executor_task, head, branch):
-    """Decide whether a pushed branch head with no PR may open one.
-
-    Return (status, hold). A None hold lets the PR open. A None status with it
-    means no test module is declared, so the PR-ref step records that as today.
-    """
-    if not remote_test._task_path_modules(record):
-        return None, None
-    task_id = record.get('task_id')
-    binding = {'result_head': head}
-    identity = {'task_id': task_id, 'executor_task': executor_task, 'head': head}
-    remote_result = None
-    try:
-        fresh = store.get(task_id)
-        status = _remote_test_status(fresh, binding)[0]
-        if status is None or (status == 'TIMEOUT' and _remote_test_timeout_count(fresh, binding) == 1):
-            remote_result = _run_remote_test(store, task_id, executor_task, head,
-                                             f'refs/heads/{branch}', None)
-            fresh = store.get(task_id)
-            status = _remote_test_status(fresh, binding)[0]
-    except Exception as exc:
-        return None, _remote_test_hold(
-            'REMOTE_TEST_REFUSED',
-            ['PUBLISH_REMOTE_TEST_REFUSED', _refusal(exc, 'remote_test_code')], **identity)
-    if status in ('PASS', 'ADMISSION_DENIED'):
-        return status, None
-    if status == 'NOT_EXECUTED':
-        return status, _remote_test_hold('NEEDS_ATTENTION', ['TEST_REMOTE_MODULE_NOT_EXECUTED'],
-                                         record=fresh, **identity)
-    if status == 'FAIL':
-        return status, _remote_test_hold('RUN_REMOTE_TEST', ['REMOTE_TEST_FAIL'],
-                                         record=fresh, next_step='REPAIR_REVIEW', **identity)
-    if status in ('TIMEOUT', 'SHA_MISMATCH'):
-        return status, _remote_test_hold('NEEDS_ATTENTION', ['REMOTE_TEST_' + status],
-                                         record=fresh, **identity)
-    code = remote_result.get('code') if type(remote_result) is dict else None
-    code = code if type(code) is str and re.fullmatch(r'[A-Z0-9_]{1,64}', code) else None
-    detail = [code] if code else []
-    if code in _REMOTE_TEST_RETRY_CODES:
-        return None, _remote_test_hold('WAITING_REMOTE_TEST',
-                                       ['REMOTE_TEST_UNAVAILABLE', *detail], **identity)
-    return None, _remote_test_hold('REMOTE_TEST_REFUSED',
-                                   ['PUBLISH_REMOTE_TEST_REFUSED', *detail], **identity)
-
-
-def _record_cleared_pr(store, task_id, number, head, d6, gh_runner, root):
-    """Bind a PR opened after EC2 cleared its head and report that result on it.
-
-    The remote test ran before the PR existed, so neither of these happened
-    during that run. Both are warnings: the PR is already open.
-    """
-    codes = []
-    try:
-        store.record_published_pr(task_id, number, head)
-    except Exception:
-        codes.append('PUBLISH_PR_RECORD_FAILED')
-    try:
-        summary = _remote_test_receipt_summary(store.get(task_id), head)
-        if summary is not None:
-            _post_remote_test_comment(gh_runner, root, number, task_id, d6, head, summary)
-    except Exception:
-        codes.append('REMOTE_TEST_COMMENT_FAILED')
-    return codes
-
-
 def _remote_fail_action(related, result_head):
     """Return the repair action for an exact-head EC2 FAIL."""
     repairs = related.get('repair_claims', []) if type(related) is dict else []
@@ -2600,25 +2499,15 @@ def decide(record, d6, pr, related):
             d6.get('recorded_result_head') != result_head):
         return 'PUBLISH'
     claims = _claims(record)
-    chosen_pr = (pr.get('number') if type(pr) is dict else None)
-    if chosen_pr is None and claims:
-        chosen_pr = claims[-1].get('pr') if type(claims[-1]) is dict else None
+    chosen_pr = pr.get('number') if type(pr) is dict else None
     pr_head = pr.get('head') if type(pr) is dict else None
-    if (type(chosen_pr) is not int or chosen_pr < 1 or type(pr_head) is not dict or
-            pr_head.get('sha') != result_head):
-        # EC2 runs on the branch before any PR, so a stopped head stays here
-        # with no PR. Every other state re-enters the idempotent publish step.
-        remote_status, _, _ = _remote_test_status(record, d6)
-        if remote_status == 'TIMEOUT':
-            if _remote_test_timeout_count(record, d6) == 1:
-                return 'PUBLISH'
-            return 'NEEDS_ATTENTION'
-        if remote_status == 'SHA_MISMATCH':
-            return 'NEEDS_ATTENTION'
-        if remote_status == 'NOT_EXECUTED':
-            return 'NEEDS_ATTENTION'
-        if remote_status == 'FAIL':
-            return _remote_fail_action(related, result_head)
+    if (type(chosen_pr) is not int or not 1 <= chosen_pr <= 9999999 or
+            type(pr_head) is not dict or pr_head.get('sha') != result_head or
+            (pr.get('state') == 'closed' and pr.get('merged') is not True)):
+        return 'PUBLISH'
+    published = record.get('published_pr')
+    if (type(published) is dict and published.get('pr') == chosen_pr and
+            published.get('head_sha') != result_head):
         return 'PUBLISH'
 
     matching = [claim for claim in claims if type(claim) is dict and
@@ -2735,6 +2624,10 @@ def _refusal(exc, attribute):
 def _pr_number(record, requested):
     if requested is not None:
         return requested
+    published = record.get('published_pr')
+    number = published.get('pr') if type(published) is dict else None
+    if type(number) is int and 1 <= number <= 9999999:
+        return number
     claims = _claims(record)
     return claims[-1].get('pr') if claims and type(claims[-1]) is dict else None
 
@@ -3379,6 +3272,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         d6 = _d6_snapshot(record, executor_task, allow_cwd_fallback=True, cwd=cwd)
     else:
         d6 = _d6_snapshot(record, executor_task) if type(executor_task) is str else None
+    recovered_pr = False
     if (number is None and type(d6) is dict and d6.get('dirty') is False and
             type(d6.get('root')) is str and d6.get('root') and
             type(d6.get('branch')) is str and d6.get('branch') and
@@ -3387,8 +3281,11 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         number = _find_published_pr(
             _publish_run_gh if publish_gh_runner is None else publish_gh_runner,
             d6['root'], d6['branch'], d6['result_head'])
+        recovered_pr = number is not None
     try:
         pr = _pr_snapshot(number, get) if number is not None else None
+        if type(pr) is dict and pr.get('number') != number:
+            pr = None
     except Exception:
         pr = None
     related = {'events': record.get('completion_events', []),
@@ -3495,6 +3392,15 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             {'task_id': task_id, 'step': 'D6_BINDING_UNAVAILABLE', 'result': None,
              'next': 'D6_BINDING_UNAVAILABLE', 'codes': [code]}, record, store, None)
     step = decide(record, d6, pr, related)
+    # A crash after GitHub creates the PR can leave the Task without its binding.
+    # Only an exact-head open PR recovered from this D6 branch may fill it.
+    if (recovered_pr and step not in ('PUBLISH', 'DEVELOPER_ATTENTION') and
+            pr.get('state') == 'open'):
+        try:
+            store.record_published_pr(task_id, number, d6['result_head'])
+        except Exception:
+            return {'task_id': task_id, 'step': 'REFUSED', 'codes': ['PUBLISH_PR_RECORD_FAILED'],
+                    'pr': number, 'head': d6['result_head']}
     result, codes, refusal_dict = None, [], None
     redispatch_reason = None
     ci_routed = False
@@ -3838,32 +3744,20 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
     elif step == 'REVIEW_NOT_POSTED':
         pass
     elif step == 'PUBLISH':
-        cleared = []
-
-        def pre_pr_gate(head, branch):
-            guard()  # #1781: the pre-PR EC2 run is an external action
-            status, hold = _pre_pr_remote_gate(record, store, executor_task, head, branch)
-            if hold is None and status is not None:
-                cleared.append(head)
-            return hold
-
         try:
-            result = _publish_task(record, d6, executor_task, pre_pr_gate=pre_pr_gate,
+            result = _publish_task(record, d6, executor_task,
                 git_runner=publish_git_runner, gh_runner=publish_gh_runner,
                 record_result_call=record_result_call)
-            if result['pr'] is None:
-                return dict(result, task_id=task_id)
-            if cleared:
-                codes = _record_cleared_pr(
-                    store, task_id, result['pr'], result['head'], d6,
-                    _publish_run_gh if publish_gh_runner is None else publish_gh_runner,
-                    d6.get('root') or cwd or os.getcwd())
-            return {'task_id': task_id, 'codes': codes, 'pr': result['pr'],
-                    'head': result['head']}
         except _PublishRefusal as exc:
             return _publish_refusal_result(store, task_id, exc)
         except Exception:
             return {'task_id': task_id, 'codes': ['PUBLISH_FAILED']}
+        try:
+            store.record_published_pr(task_id, result['pr'], result['head'])
+        except Exception:
+            return dict(result, task_id=task_id, step='REFUSED',
+                        codes=['PUBLISH_PR_RECORD_FAILED'])
+        return dict(result, task_id=task_id, codes=codes)
     elif step == 'DEVELOPER_ATTENTION':
         active_repair = next((item for item in reversed(related['repair_claims'])
                               if type(item) is dict and item.get('head_sha') ==
