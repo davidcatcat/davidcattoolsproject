@@ -392,6 +392,11 @@ class HistoricalDispatchVoidTests(unittest.TestCase):
     def test_g_boundary_records_are_never_voided(self):
         for boundary in ('PREPARED', 'STARTING'):
             with self.subTest(boundary=boundary):
+                # One registered D6 has one live holder, so each case gets its
+                # own store rather than a second Task on the same D6.
+                scratch = tempfile.TemporaryDirectory()
+                self.addCleanup(scratch.cleanup)
+                self.store = TaskStore(Path(scratch.name).resolve() / 'tasks')
                 task_id = self._historical(boundary=boundary)
                 developer = self.store.get(task_id)['developer']
                 self.assertEqual(developer['dispatch_boundary'], boundary)
