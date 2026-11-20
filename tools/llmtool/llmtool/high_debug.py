@@ -251,11 +251,18 @@ def _usage_from_events(events_raw):
     return fields
 
 
-def _session_observed(thread_id, sessions_dir=None):
+def _session_observed(thread_id, sessions_dir=None, codex_home=None):
     """Read only model/effort metadata from bounded, regular rollout files."""
     if type(thread_id) is not str or not thread_id:
         return 'UNKNOWN', 'UNKNOWN'
-    root = Path(sessions_dir) if sessions_dir is not None else Path.home() / '.codex' / 'sessions'
+    if sessions_dir is not None:
+        root = Path(sessions_dir)
+    else:
+        home = codex_home if codex_home is not None else os.environ.get('CODEX_HOME')
+        if home and isinstance(home, (str, Path)) and (not isinstance(home, str) or home.strip()):
+            root = Path(os.path.expanduser(home)) / 'sessions'
+        else:
+            root = Path.home() / '.codex' / 'sessions'
     try:
         root_stat = root.lstat()
         if root.is_symlink() or not stat.S_ISDIR(root_stat.st_mode):
@@ -1056,7 +1063,7 @@ def _launch_settings(role, model):
         raise refused from None
 
 
-def _run_codex(*, prompt, cwd, output_path, model=_CODEX_MODEL):
+def _run_codex(*, prompt, cwd, output_path, model=_CODEX_MODEL, codex_home=None):
     from . import codex_direct_developer
     model, timeout = _launch_settings('codex-debug', model)
     argv =['codex', 'exec', '--ignore-user-config', '--ignore-rules',
@@ -1067,8 +1074,11 @@ def _run_codex(*, prompt, cwd, output_path, model=_CODEX_MODEL):
         argv.extend(('-c', setting))
     argv.extend(('-s', 'read-only', '--json', '-o', output_path, '-'))
     with tempfile.TemporaryDirectory(prefix='llmtool-high-debug-tmp-') as tmpdir:
+        env = codex_direct_developer._environment(tmpdir)
+        if codex_home is not None:
+            env['CODEX_HOME'] = str(codex_home)
         return subprocess.run(argv, input=prompt.encode('utf-8'), cwd=cwd,
-            env=codex_direct_developer._environment(tmpdir), stdout=subprocess.PIPE,
+            env=env, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, check=False, timeout=timeout)
 
 
@@ -1655,7 +1665,7 @@ _CODEX_ATTEMPT_UNCONFIRMED_DETAIL = (_CLAUDE_ROUTE_REFUSED_DETAIL +
 def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_number=None, family,
                    failed_corrections=None, early_reason=None, evidence=None,
                    runner=None, create_d6=None, repo_root=None,
-                   read_registration=None, sessions_dir=None,
+                   read_registration=None, sessions_dir=None, codex_home=None,
                    route='codex', claude_fallback=None, codex_attempt=None):
     # PR #2222 v91 (CWE-862): the Claude route needs this run's recorded Codex
     # quota or login failure (a grant from run_high_debug_with_fallback). The
@@ -1895,7 +1905,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
             actual_runner = functools.partial(_run_claude, config_dir=config_dir,
                                               model=debug_model)
         else:
-            actual_runner = functools.partial(_run_codex, model=debug_model)
+            actual_runner = functools.partial(_run_codex, model=debug_model, codex_home=codex_home)
         result = actual_runner(prompt=prompt, cwd=diagnosis_root or d6, output_path=output_path)
         if route == 'codex':
             if result.returncode != 0:
@@ -1911,7 +1921,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
                 raise _AttemptFailed('HIGH_DEBUG_RUN_FAILED')
             raw = Path(output_path).read_bytes()
             thread_id = _thread_id_from_events(events_raw)
-            observed, effort = _session_observed(thread_id, sessions_dir)
+            observed, effort = _session_observed(thread_id, sessions_dir, codex_home=codex_home)
             usage = _usage_from_events(events_raw)
             report = raw.decode('utf-8')
         else:
