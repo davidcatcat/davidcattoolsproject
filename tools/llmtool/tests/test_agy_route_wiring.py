@@ -1266,8 +1266,8 @@ class AgyRouteWiringTests(unittest.TestCase):
             self.assertEqual(status, 0)
             return prompts[0]
 
-        limit = min(64 * 1024 - 1, resolve_route_max_prompt_bytes('agy'))
-        self.assertEqual(limit, 64 * 1024 - 1)
+        limit = min(5 * 1024 * 1024 - 1, resolve_route_max_prompt_bytes('agy'))
+        self.assertEqual(limit, 5 * 1024 * 1024 - 1)
         room = limit - len(run(0).encode('utf-8'))
         self.assertGreater(room, 0)
         fitted = run(room)
