@@ -11162,7 +11162,7 @@ class RouteRowTests(unittest.TestCase):
         self.assertTrue(row.detail.startswith("task 6a6a6a6a"))
         self.assertIn("另有 1 件記錄派工中但沒看到程序", row.detail)
         # Only the stale record and an unrelated run: never 工作中.
-        for runs in ([], [self.run("Claude")], [self.run("AGY", command="advance", task="")],
+        for runs in ([], [self.run("Claude")], [self.run("AGY", command="advance", task="8" * 32)],
                      [self.run("AGY", command="drive", task="7" * 32)]):
             with self.subTest(runs=runs):
                 alone = self.by_name(self.rows(tasks=[stale], delegates=runs))["AGY"]
@@ -11177,6 +11177,9 @@ class RouteRowTests(unittest.TestCase):
         alone_unidentified = self.by_name(self.rows(tasks=[fresh], delegates=[unidentified]))["AGY"]
         self.assertEqual(alone_unidentified.state, mon.UNCHECKED)
         self.assertIn("無法確認關聯", alone_unidentified.detail)
+        alone_stale_unidentified = self.by_name(self.rows(tasks=[stale], delegates=[unidentified]))["AGY"]
+        self.assertEqual(alone_stale_unidentified.state, mon.UNCHECKED)
+        self.assertIn("無法確認關聯", alone_stale_unidentified.detail)
 
     def test_paused_route_names_who_when_and_why(self):
         switches = dict(self.ALLOWED, agy=("PAUSED", "Owner", "11-15"),
