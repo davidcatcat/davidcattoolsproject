@@ -6,13 +6,10 @@ their own Task records. A count that cannot be derived is UNKNOWN, and UNKNOWN
 counts as used up (spec section 7).
 
 #2367 (Owner 2026-11-19): a work item has repair_max effective review repairs
-and test_fail_max effective EC2/CI test repairs (5 each). AI Debug is still
-required once, before the review repair that follows the 2nd valid FAIL; one
-RCA_CONFIRMED of a family then covers that family's later repairs, so FAILs 3
-to repair_max are repaired without a new Debug. review_fail_max is the FAIL
+and test_fail_max effective EC2/CI test repairs (5 each). The fourth review
+repair is the first to require a confirmed RCA. review_fail_max is the FAIL
 after the last repair (repair_max + 1), where the Task escalates by its kind.
-Each split child is its own work item with one Debug (parent_debug_max); the
-children of a lineage share group_debug_max (one per child up to child_max).
+ROOT, CHILD, REPLAN and continued Tasks share one Debug budget.
 Every other module takes these numbers from here (repair_attempts_max for the
 stored claim and run budget bounds); none keeps its own copy.
 """
@@ -132,17 +129,12 @@ def review_fail_count(heads):
     return sum(outcome == 'FAIL' for outcome in heads.values())
 
 
-def review_action(*, kind, fail_count, debug_status=None, group_debug_used=0, policy):
-    """The next step after a valid review FAIL: REPAIR, DEBUG or the escalation.
+REVIEW_REPAIRS_WITHOUT_DEBUG = 3
 
-    FAIL #1 is repaired. FAIL #2 needs AI Debug first (O2); RCA_CONFIRMED allows
-    the second repair (D1), any other Debug outcome escalates. #2367: a later
-    FAIL below review_fail_max is decided the same way by the Debug that covers
-    it (the caller passes the family's RCA_CONFIRMED), so no new Debug is run.
-    From FAIL review_fail_max on, ROOT splits, a child goes to PM_DECIDE and a
-    REPLAN ends FAILED_FINAL. A child whose lineage used its group Debug
-    escalates.
-    """
+
+def review_action(*, kind, fail_count, debug_status=None, group_debug_used=0,
+                  repair_count=None, policy):
+    """Select the action after a formal review FAIL."""
     if kind not in KINDS:
         _refuse('LINEAGE_KIND_INVALID')
     escalate = _ESCALATION[kind]
@@ -151,48 +143,33 @@ def review_action(*, kind, fail_count, debug_status=None, group_debug_used=0, po
         _refuse('REVIEW_FAIL_COUNT_INVALID')
     if fails >= policy['review_fail_max']:
         return escalate
-    if fails == 1:
+    done = fails - 1 if repair_count is None else _used(repair_count, policy['repair_max'])
+    if done < REVIEW_REPAIRS_WITHOUT_DEBUG or debug_status == 'RCA_CONFIRMED':
         return 'REPAIR'
-    if debug_status is None:
-        if kind == 'child' and (_used(group_debug_used, policy['group_debug_max']) >=
-                                policy['group_debug_max']):
-            return escalate
-        return 'DEBUG'
-    return 'REPAIR' if debug_status == 'RCA_CONFIRMED' else escalate
+    if admit_debug(kind=kind, group_debug_used=group_debug_used, policy=policy) is not None:
+        return escalate
+    return 'DEBUG'
 
 
 def admit_repair(*, repair_count, rca_confirmed, policy):
-    """None admits one more review repair; else the refusal code.
-
-    At most repair_max repairs; every repair after the first needs an
-    RCA_CONFIRMED Debug: repair #2 one bound to its failed HEAD (D1), a later
-    repair the family's RCA_CONFIRMED that covers it (#2367).
-    """
+    """Admit an effective review repair within the cap and RCA threshold."""
     done = _used(repair_count, policy['repair_max'])
     if done >= policy['repair_max']:
         return 'REPAIR_LIMIT_REACHED'
-    if done >= 1 and rca_confirmed is not True:
+    if done >= REVIEW_REPAIRS_WITHOUT_DEBUG and rca_confirmed is not True:
         return 'REPAIR_DEBUG_REQUIRED'
     return None
 
 
 def admit_debug(*, kind, parent_debug_used=0, group_debug_used=0, policy):
-    """None admits one AI Debug.
-
-    ROOT and REPLAN own parent_debug_max each. #2367: a split child is a work
-    item too, so it owns parent_debug_max (parent_debug_used is the child's
-    own count), and the children of one lineage share group_debug_max. Both
-    child refusals use DEBUG_GROUP_USED.
-    """
+    """Apply one shared Debug budget to the entire original work."""
     if kind not in KINDS:
         _refuse('LINEAGE_KIND_INVALID')
-    if kind == 'child':
-        if _used(parent_debug_used, policy['parent_debug_max']) >= policy['parent_debug_max']:
-            return 'DEBUG_GROUP_USED'
-        used, limit, code = group_debug_used, policy['group_debug_max'], 'DEBUG_GROUP_USED'
-    else:
-        used, limit, code = parent_debug_used, policy['parent_debug_max'], 'DEBUG_PARENT_USED'
-    return code if _used(used, limit) >= limit else None
+    limit = min(policy['parent_debug_max'], policy['group_debug_max'])
+    used = max(_used(parent_debug_used, limit), _used(group_debug_used, limit))
+    if used < limit:
+        return None
+    return 'DEBUG_GROUP_USED' if kind == 'child' else 'DEBUG_PARENT_USED'
 
 
 def test_failure_action(*, test_fail_count, policy):

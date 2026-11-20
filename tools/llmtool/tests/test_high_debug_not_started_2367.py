@@ -91,7 +91,7 @@ class EntryClassificationTests(unittest.TestCase):
             with self.subTest(case=name):
                 self.assertTrue(high_debug._debug_entry_used(entry))
 
-    def test_finished_outcomes_and_quota_rule_are_unchanged(self):
+    def test_finished_outcomes_and_refusals_with_observed_usage_count(self):
         for status in ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED', 'REPORT_INVALID',
                        'RESERVED'):
             with self.subTest(status=status):
@@ -101,7 +101,7 @@ class EntryClassificationTests(unittest.TestCase):
             with self.subTest(code=code):
                 entry = reservation.entry('RUN_FAILED', code)
                 self.assertFalse(high_debug._debug_entry_used(entry))
-                self.assertFalse(high_debug._debug_entry_used(dict(entry, usage=dict(USAGE))))
+                self.assertTrue(high_debug._debug_entry_used(dict(entry, usage=dict(USAGE))))
         self.assertNotIn(MODEL, high_debug.DEBUG_FALLBACK_CODES)
 
 
@@ -228,6 +228,7 @@ class NotStartedRunTests(reservation.ReservationCase):
         self.eq(self.debug(task_id, reservation.succeeds),
                 (None, [['RUN_FAILED', 'RESERVED']]))
         self.eq(self.statuses(task_id), ['RUN_FAILED', 'RCA_CONFIRMED'])
+        self.spend_two_slots(task_id)
         runner = Mock()
         self.eq(self.debug(task_id, runner), (PARENT, []))
         runner.assert_not_called()
@@ -259,6 +260,7 @@ class NotStartedRunTests(reservation.ReservationCase):
                 else:
                     self.eq(self.statuses(task_id), ['REPORT_INVALID'])
                 self.assertTrue(high_debug._debug_entry_used(self.entries(task_id)[0]))
+                self.spend_two_slots(task_id)
                 later = Mock()
                 self.eq(self.debug(task_id, later), (PARENT, []))
                 later.assert_not_called()
@@ -274,6 +276,7 @@ class NotStartedRunTests(reservation.ReservationCase):
                 self.eq(self.debug(task_id, runner)[0], RUN)
                 self.eq(self.pairs(task_id), [('RUN_FAILED', RUN)])
                 self.eq(self.entries(task_id)[0]['usage'], 'UNKNOWN')
+                self.spend_two_slots(task_id)
                 self.eq(self.debug(task_id, Mock())[0], PARENT)
 
     def test_two_requests_after_a_freed_entry_keep_mutual_exclusion(self):
@@ -282,8 +285,9 @@ class NotStartedRunTests(reservation.ReservationCase):
         self.eq(lineage_counts.chain_debug_used(
             self.store, self.store.get(first), self.entries(first),
             high_debug._debug_entry_used), (0, 0))
+        self.spend_two_slots(first)
         winner, loser = self.race(first, second)
-        self.assertIn(winner, (0, 1))
+        self.assertIn(winner, (0, 3))
         self.eq(loser, PARENT)
         self.eq((self.statuses(first) + self.statuses(second)).count('RESERVED'), 1)
         alone = self.task()

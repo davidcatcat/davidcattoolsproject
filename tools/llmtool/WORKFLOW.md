@@ -29,6 +29,15 @@ A required check must be SUCCESS. A check that does not apply to the PR is recor
 
 Manual commands are recovery only: use the [manual recovery flow](../../.claude/skills/ai-team-delivery/pm-continuation.md#manual-recovery-flow) when `task advance` cannot run. Review FAIL, AI Debug, split and Owner notification rules are in the [PM Continuation Contract](../../.claude/skills/ai-team-delivery/pm-continuation.md).
 
+The first three effective formal-review repairs can proceed without High Debug.
+If the third repair receives another formal FAIL, the fourth repair requires
+an applicable confirmed RCA. The fifth repair has the same requirement.
+A work lineage, including ROOT, split children, REPLAN and continuations,
+shares three effective High Debug runs. A confirmed RCA can cover the same
+blocking findings on a continuation when the previous Task and the current
+formal review provide matching evidence. An unconfirmed diagnosis or changed
+findings require fresh evidence. Uncertain launches count toward the budget.
+
 An interrupted AGY or OpenCode dispatch can continue on the same Task and D6.
 Run the original `task delegate` command as the owning PM with its original scope.
 The command automatically selects the other route when the old assignment is

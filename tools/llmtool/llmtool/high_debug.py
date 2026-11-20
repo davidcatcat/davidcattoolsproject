@@ -1242,6 +1242,14 @@ def _report_rejection(code, checks, byte_count, report, hits=()):
     return stored
 
 
+def completion_event_id(task_id, head, report_sha256, d6=None):
+    """Identify the report event for one Debug attempt."""
+    keys = ('HIGH_DEBUG', task_id, head, report_sha256)
+    if d6 is not None:
+        keys += (d6,)
+    return hashlib.sha256('\0'.join(keys).encode()).hexdigest()[:32]
+
+
 def _d6_name(executor_task, attempt, head):
     """A D6 id unique per attempt that fits the lifecycle's 96-character id."""
     prefix = executor_task
@@ -1379,17 +1387,16 @@ def _debug_entry_used(entry):
         report = entry.get('report')
         if type(report) is not str:
             return True
+        usage = entry.get('usage')
+        if type(usage) is dict and any(type(tokens) is int and tokens > 0
+                                       for tokens in usage.values()):
+            return True
         return not (report in _DEBUG_NOT_STARTED or _prelaunch_refused(entry, report))
     return True
 
 
 def _admit_debug(task, entries):
-    """O2, D3: one AI Debug per ROOT or REPLAN Task; one per child within the lineage group.
-
-    #2367: policy group_debug_max is shared by the children of a lineage and
-    each child owns parent_debug_max of it; this first check sees the Task's
-    own entries only, the group is counted under the lock (_reserve_debug).
-    """
+    """Preflight the local entries before counting the lineage under lock."""
     from . import repair_policy
     try:
         policy = repair_policy.load_policy()
@@ -1408,13 +1415,11 @@ def _admit_debug(task, entries):
 
 
 def _debug_kind_and_key(store, task):
-    """(lineage kind, lock key): a split child locks on its ROOT, others on their chain."""
+    """Return the lineage kind and shared Debug lock key."""
     from . import lineage_counts
     lineage = task.get('lineage')
     kind = lineage.get('kind') if type(lineage) is dict else 'root'
-    if kind == 'child':
-        return kind, lineage.get('lineage_id')
-    return kind, lineage_counts.chain_key(store, task)
+    return kind, lineage_counts.debug_lineage_key(store, task)
 
 
 def _read_task(store, task_id):
@@ -1424,65 +1429,6 @@ def _read_task(store, task_id):
     except Exception:
         return None
     return task if type(task) is dict and task.get('task_id') == task_id else None
-
-
-def _group_children(records, root_id, line):
-    """Every child ID of the ROOT root_id, or None when the group is in doubt.
-
-    Codex security v91 on PR #2381 (CWE-841): a ROOT's 'splits' lists only the
-    children committed since Owner B, and a child written before Owner B has no
-    entry there (task_store keeps that legacy shape). So the group is every
-    child the splits list plus every stored Task whose lineage is a child of
-    root_id, in any state, as the split COMMIT counts them. A malformed split
-    entry, child ID or Task lineage is doubt.
-    """
-    children = set()
-    for split in line.get('splits', []):
-        listed = split.get('children') if type(split) is dict else None
-        if type(listed) is not list or any(type(child) is not str for child in listed):
-            return None
-        children.update(listed)
-    for other_id, other in records.items():
-        other_line = other.get('lineage')
-        if other_line is None:
-            continue
-        if type(other_line) is not dict:
-            return None
-        if other_line.get('kind') == 'child' and other_line.get('lineage_id') == root_id:
-            children.add(other_id)
-    return children
-
-
-def _group_debug_used(store, task, entries):
-    """Debugs used by the child and every other child of its ROOT; doubt is UNKNOWN.
-
-    The other children are found by a store scan, so a legacy child that its
-    ROOT's 'splits' does not list still counts; a scan in doubt is UNKNOWN,
-    which the policy treats as the limit. Run it under the ROOT lock.
-    """
-    from . import lineage_counts
-    from .repair_policy import UNKNOWN
-    root_id = task['lineage'].get('lineage_id')
-    root = _read_task(store, root_id)
-    line = root.get('lineage') if root else None
-    if (type(line) is not dict or type(line.get('splits', [])) is not list or
-            type(entries) is not list):
-        return UNKNOWN
-    records = lineage_counts.store_records(store)
-    children = _group_children(records, root_id, line) if records is not None else None
-    if children is None:
-        return UNKNOWN
-    children.discard(task.get('task_id'))
-    used = sum(1 for entry in entries if _debug_entry_used(entry))
-    for child_id in sorted(children):
-        child = records.get(child_id)
-        if type(child) is not dict or child.get('task_id') != child_id:
-            return UNKNOWN
-        other = child.get('high_debug', [])
-        if type(other) is not list:
-            return UNKNOWN
-        used += sum(1 for entry in other if _debug_entry_used(entry))
-    return used
 
 
 def _reserve_debug(store, task_id, entries, reservation):
@@ -1506,15 +1452,9 @@ def _reserve_debug(store, task_id, entries, reservation):
                 current.get('high_debug', []) != entries):
             _refuse('HIGH_DEBUG_BUSY')
         kind = _debug_kind_and_key(store, current)[0]
-        used = (_group_debug_used(store, current, entries) if kind == 'child' else
-                lineage_counts.chain_debug_used(store, current, entries, _debug_entry_used)[0])
-        # #2367: a split child is its own work item; it owns one Debug
-        # (its own entries) within the lineage's shared group limit.
-        own = (sum(1 for entry in entries if _debug_entry_used(entry))
-               if kind == 'child' else used)
+        used, _ = lineage_counts.chain_debug_used(store, current, entries, _debug_entry_used)
         try:
-            code = repair_policy.admit_debug(kind=kind, parent_debug_used=own,
-                                             group_debug_used=used, policy=policy)
+            code = repair_policy.admit_debug(kind=kind, group_debug_used=used, policy=policy)
         except LLMToolError:
             _refuse('HIGH_DEBUG_LINEAGE_INVALID')
         if code is not None:
@@ -1831,6 +1771,8 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
         head=head, d6=d6, code='HIGH_DEBUG_RESERVED', observed='UNKNOWN', effort='UNKNOWN',
         usage='UNKNOWN', recorded_at=reserved_at, model_requested=model_requested,
         rules_sha256=rules_sha256, no_pr=no_pr)
+    if no_pr:
+        reservation['diagnosis_issue'] = issue_number
     reservation['status'] = 'RESERVED'
     index = _reserve_debug(store, task_id, entries, reservation)
 
@@ -1846,6 +1788,8 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
                 observed=observed, effort=effort, usage=usage,
                 recorded_at=recorded_at, model_requested=model_requested,
                 rules_sha256=rules_sha256, no_pr=no_pr)
+        if no_pr:
+            entry['diagnosis_issue'] = issue_number
         try:
             store.finalize_high_debug(task_id, index, entry)
         except Exception:
@@ -1994,10 +1938,11 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
        'rules_sha256':rules_sha256}
     if no_pr:
         entry['no_pr'] = True
+        entry['diagnosis_issue'] = issue_number
     store.finalize_high_debug(task_id, index, entry)
     posted = _post_record(entry, target_number, repo_root, task_id, account=account, issue_only=no_pr is True)
     payload=entry['report_sha256'].encode()
-    event_id=hashlib.sha256(('HIGH_DEBUG\0'+task_id+'\0'+head+'\0'+entry['report_sha256']).encode()).hexdigest()[:32]
+    event_id = completion_event_id(task_id, head, entry['report_sha256'], d6)
     result=store.record_completion_event(task_id,event_id=event_id,run_id=task['run_id'],
        session_id='high-debug-'+d6,source='HIGH_DEBUG',source_sha=head,sequence=len(entries),
        payload_sha256=hashlib.sha256(payload).hexdigest())
