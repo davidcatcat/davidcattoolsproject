@@ -6,8 +6,8 @@ class TestPrFirstAcceptance2434(unittest.TestCase):
         self.assertEqual(2 + 2, 4)
 
     def test_planned_acceptance_failure(self):
-        """planned failure for #2434 live acceptance; the repair changes the expected value to 4"""
-        self.assertEqual(2 + 2, 5)
+        """fixed in the #2434 acceptance repair"""
+        self.assertEqual(2 + 2, 4)
 
 
 if __name__ == "__main__":
