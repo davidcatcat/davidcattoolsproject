@@ -251,6 +251,9 @@ def _usage_from_events(events_raw):
     return fields
 
 
+_SYSTEM_SYMLINKS = frozenset((Path('/var'), Path('/tmp'), Path('/etc')))
+
+
 def _session_observed(thread_id, sessions_dir=None, codex_home=None):
     """Read only model/effort metadata from bounded, regular rollout files."""
     if type(thread_id) is not str or not thread_id:
@@ -260,12 +263,26 @@ def _session_observed(thread_id, sessions_dir=None, codex_home=None):
     else:
         home = codex_home if codex_home is not None else os.environ.get('CODEX_HOME')
         if home and isinstance(home, (str, Path)) and (not isinstance(home, str) or home.strip()):
-            root = Path(os.path.expanduser(home)) / 'sessions'
+            home_dir = Path(os.path.expanduser(home))
         else:
-            root = Path.home() / '.codex' / 'sessions'
+            home_dir = Path.home() / '.codex'
+        root = home_dir / 'sessions'
+
+    check_path = root
+    while True:
+        try:
+            st = check_path.lstat()
+            if stat.S_ISLNK(st.st_mode) and check_path not in _SYSTEM_SYMLINKS:
+                return 'UNKNOWN', 'UNKNOWN'
+        except OSError:
+            return 'UNKNOWN', 'UNKNOWN'
+        if check_path.parent == check_path:
+            break
+        check_path = check_path.parent
+
     try:
         root_stat = root.lstat()
-        if root.is_symlink() or not stat.S_ISDIR(root_stat.st_mode):
+        if not stat.S_ISDIR(root_stat.st_mode):
             return 'UNKNOWN', 'UNKNOWN'
     except OSError:
         return 'UNKNOWN', 'UNKNOWN'
@@ -274,8 +291,14 @@ def _session_observed(thread_id, sessions_dir=None, codex_home=None):
     matched = False
     try:
         for current, dirs, files in os.walk(root, followlinks=False):
-            dirs[:] = [name for name in dirs
-                       if not (Path(current) / name).is_symlink()]
+            for name in dirs:
+                dir_path = Path(current) / name
+                try:
+                    if dir_path.is_symlink():
+                        return 'UNKNOWN', 'UNKNOWN'
+                except OSError:
+                    return 'UNKNOWN', 'UNKNOWN'
+
             for name in files:
                 if not (name.startswith('rollout-') and
                         name.endswith('-' + thread_id + '.jsonl')):
@@ -305,23 +328,49 @@ def _session_observed(thread_id, sessions_dir=None, codex_home=None):
                 if len(raw) > _SESSION_READ_LIMIT:
                     return 'UNKNOWN', 'UNKNOWN'
                 matched = True
+                file_valid_meta = False
                 for line in raw.decode('utf-8', 'replace').split('\n'):
+                    if not line:
+                        continue
                     try:
                         record = json.loads(line)
                     except (TypeError, ValueError):
                         continue
                     if type(record) is not dict:
                         continue
-                    containers = [record]
-                    if type(record.get('payload')) is dict:
-                        containers.append(record['payload'])
-                    for container in containers:
-                        model = container.get('model')
-                        effort = container.get('effort', container.get('reasoning_effort'))
-                        if type(model) is str:
-                            models.add(model)
-                        if type(effort) is str:
-                            efforts.add(effort)
+                    if record.get('type') not in ('session_meta', 'session_metadata'):
+                        continue
+                    payload = record.get('payload')
+                    if not isinstance(payload, dict):
+                        return 'UNKNOWN', 'UNKNOWN'
+
+                    session_id = payload.get('id') or payload.get('session_id')
+                    if not session_id:
+                        session_id = record.get('id') or record.get('session_id')
+
+                    if session_id is not None and session_id != thread_id:
+                        return 'UNKNOWN', 'UNKNOWN'
+                    if sessions_dir is None and not session_id:
+                        return 'UNKNOWN', 'UNKNOWN'
+
+                    model = payload.get('model')
+                    if model is None:
+                        model = record.get('model')
+                    effort = payload.get('effort', payload.get('reasoning_effort'))
+                    if effort is None:
+                        effort = record.get('effort', record.get('reasoning_effort'))
+
+                    if type(model) is not str or not model:
+                        return 'UNKNOWN', 'UNKNOWN'
+                    if effort is not None and type(effort) is not str:
+                        return 'UNKNOWN', 'UNKNOWN'
+
+                    models.add(model)
+                    efforts.add(effort if type(effort) is str else 'UNKNOWN')
+                    file_valid_meta = True
+
+                if not file_valid_meta:
+                    return 'UNKNOWN', 'UNKNOWN'
     except OSError:
         return 'UNKNOWN', 'UNKNOWN'
     if not matched:
@@ -1674,6 +1723,8 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
         if not _consume_claude_grant(claude_fallback, task_id):
             _refuse(CLAUDE_ROUTE_REFUSED, _CLAUDE_ROUTE_REFUSED_DETAIL)
     elif claude_fallback is not None:
+        _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
+    if runner is None and sessions_dir is not None:
         _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
     # PR #2222 v92: an attempt record is only for the Codex route, belongs to
     # this Task and starts empty; only the Codex attempt below fills it in.
