@@ -406,9 +406,30 @@ CLAUDE_FAILURE_EXIT_CODE_RANGE = (-255, 255)
 _DIRECT_DISPATCH_PROFILES = frozenset(('opencode', 'agy'))
 _DIRECT_DISPATCH_BOUNDARY = 'dispatch_boundary'
 _DIRECT_HANDOFF_HISTORY = 'direct_handoffs'
-_DEVELOPER_OPTIONAL_FIELDS = (frozenset((_DIRECT_DISPATCH_BOUNDARY, _DIRECT_HANDOFF_HISTORY)) |
+# #2447: the audit trail of a historical direct assignment that was voided.
+_DIRECT_VOID_HISTORY = 'voided_assignments'
+_DIRECT_VOID_BOUNDARY = 'HISTORICAL_VOID'
+_DIRECT_VOID_REASON = 'HISTORICAL_NO_LAUNCH_EVIDENCE'
+_DEVELOPER_OPTIONAL_FIELDS = (frozenset((_DIRECT_DISPATCH_BOUNDARY, _DIRECT_HANDOFF_HISTORY,
+                                         _DIRECT_VOID_HISTORY)) |
                               _DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS |
                               _DEVELOPER_CLAUDE_FAILURE_EVIDENCE_FIELDS)
+
+
+def _valid_voided_assignments(entries):
+    fields = {'assignment_id', 'provider_profile', 'source_sha', 'created_at',
+              'record_sha256', 'reason', 'recorded_at'}
+    return (type(entries) is list and 0 < len(entries) <= 8 and
+            all(type(entry) is dict and set(entry) == fields and
+                _safe_identifier(entry['assignment_id'], TASK_ID) and
+                entry['provider_profile'] in _DIRECT_DISPATCH_PROFILES and
+                type(entry['source_sha']) is str and
+                re.fullmatch(r'[0-9a-f]{40}', entry['source_sha']) is not None and
+                _valid_utc_seconds(entry['created_at']) and
+                _policy_digest(entry['record_sha256']) and
+                entry['reason'] == _DIRECT_VOID_REASON and
+                _valid_utc_seconds(entry['recorded_at']) for entry in entries) and
+            len({entry['assignment_id'] for entry in entries}) == len(entries))
 
 
 def _valid_direct_handoffs(entries):
@@ -2799,6 +2820,14 @@ def _validate(record, *, strict=True):
                      developer[_DIRECT_HANDOFF_HISTORY][-1]['new_assignment'] !=
                      developer.get('assignment_id'))):
                 _fail('DIRECT_REASSIGN_HISTORY_INVALID')
+            if (_DIRECT_VOID_HISTORY in developer and
+                    (not _valid_voided_assignments(developer[_DIRECT_VOID_HISTORY]) or
+                     developer.get('provider_profile') not in _DIRECT_DISPATCH_PROFILES or
+                     (developer[_DIRECT_VOID_HISTORY][-1]['assignment_id'] ==
+                      developer.get('assignment_id') and
+                      (developer.get(_DIRECT_DISPATCH_BOUNDARY) != 'PREPARED' or
+                       developer.get('execution') is not None)))):
+                _fail('DIRECT_HISTORICAL_VOID_HISTORY_INVALID')
             if ('no_changes_diagnosis' in developer and
                     not _valid_no_changes_diagnosis(developer)):
                 _fail()
@@ -4536,10 +4565,39 @@ class TaskStore:
             'recorded_at': datetime.now(timezone.utc).strftime(_UTC_SECONDS),
         }
         replacement = dict(developer, direct_handoffs=[*old.get('direct_handoffs', []), entry])
+        if old.get(_DIRECT_VOID_HISTORY) is not None:
+            # #2447: a voided historical assignment stays in the audit trail.
+            replacement[_DIRECT_VOID_HISTORY] = copy.deepcopy(old[_DIRECT_VOID_HISTORY])
         return self._update(task_id,
             expected={'record_sha256': current['record_sha256'], 'developer': old},
             changes={'developer': replacement, 'completion': completion},
             direct_reassign_verify=verify_binding)
+
+    def void_historical_direct_dispatch(self, task_id, *, current, verify):
+        """#2447: void one historical direct assignment, once, keeping it in history.
+
+        The record is written under the Task lock only when ``verify`` (the live
+        D6 and process checks) returns True and the stored record is exactly
+        ``current``. The assignment, claim and counts are untouched; the record
+        gains the PREPARED boundary and one voided_assignments entry, so only
+        the #2440 reassignment can follow. A second or concurrent void sees a
+        changed record and raises TaskStoreConflict.
+        """
+        old = current.get('developer')
+        if type(old) is not dict:
+            _fail('DIRECT_HISTORICAL_VOID_EVIDENCE_INVALID')
+        entry = {
+            'assignment_id': old.get('assignment_id'),
+            'provider_profile': old.get('provider_profile'),
+            'source_sha': old.get('source_sha'), 'created_at': old.get('created_at'),
+            'record_sha256': current['record_sha256'], 'reason': _DIRECT_VOID_REASON,
+            'recorded_at': datetime.now(timezone.utc).strftime(_UTC_SECONDS),
+        }
+        voided = dict(old, dispatch_boundary='PREPARED', voided_assignments=[entry])
+        return self._update(task_id,
+            expected={'record_sha256': current['record_sha256'], 'developer': old},
+            changes={'developer': voided}, direct_dispatch_boundary=_DIRECT_VOID_BOUNDARY,
+            direct_historical_void=verify)
 
     def prepare_direct_dispatch(self, task_id, *, expected_developer, developer):
         """Record the assignment before a provider can acquire launch authority."""
@@ -5832,7 +5890,8 @@ class TaskStore:
                        trusted_split=None, split_child_max=None, high_debug_finalize=None,
                        trusted_file_ops_evidence=False, trusted_file_ops_reservation=False,
                        d6_unchanged=None, direct_dispatch_boundary=None,
-                       direct_reassign_verify=None, direct_claim_recovery=None):
+                       direct_reassign_verify=None, direct_claim_recovery=None,
+                       direct_historical_void=None):
         # Refused here, not by the writable-field check: the dispatch gate
         # before that check can write its audit to the record.
         if _D6_CLAIM_ARGUMENTS & set(changes):
@@ -6021,7 +6080,41 @@ class TaskStore:
                         _fail('DIRECT_REASSIGN_EVIDENCE_INVALID')
                 elif old_history != new_history:
                     _fail('DIRECT_REASSIGN_HISTORY_FORBIDDEN')
-                if direct_dispatch_boundary == 'PREPARED':
+                old_voids = old.get(_DIRECT_VOID_HISTORY)
+                new_voids = new.get(_DIRECT_VOID_HISTORY)
+                if (direct_dispatch_boundary != _DIRECT_VOID_BOUNDARY and
+                        old_voids != new_voids):
+                    # #2447: the voided-assignment trail is written once, by the void.
+                    _fail('DIRECT_HISTORICAL_VOID_HISTORY_FORBIDDEN')
+                if direct_historical_void is not None and (
+                        direct_dispatch_boundary != _DIRECT_VOID_BOUNDARY):
+                    _fail('DIRECT_DISPATCH_BOUNDARY_FORBIDDEN')
+                if direct_dispatch_boundary == _DIRECT_VOID_BOUNDARY:
+                    # #2447: DISPATCHING without any boundary and without a launch,
+                    # an artifact, a usage or an error becomes PREPARED, once.
+                    entry = (new_voids[-1] if _valid_voided_assignments(new_voids)
+                             else None)
+                    valid = (entry is not None and callable(direct_historical_void) and
+                             direct_reassign_verify is None and
+                             set(changes) == {'developer'} and
+                             _DIRECT_DISPATCH_BOUNDARY not in old and
+                             _DIRECT_VOID_HISTORY not in old and
+                             _DIRECT_HANDOFF_HISTORY not in old and
+                             old.get('state') == 'DEVELOPER_DISPATCHING' and
+                             old.get('provider_profile') in _DIRECT_DISPATCH_PROFILES and
+                             all(old.get(field) is None for field in (
+                                 'execution', 'artifact', 'artifact_sha256', 'usage',
+                                 'error_code')) and
+                             new == dict(old, dispatch_boundary='PREPARED',
+                                         voided_assignments=new_voids) and
+                             len(new_voids) == 1 and
+                             entry['assignment_id'] == old.get('assignment_id') and
+                             entry['provider_profile'] == old.get('provider_profile') and
+                             entry['source_sha'] == old.get('source_sha') and
+                             entry['created_at'] == old.get('created_at') and
+                             entry['record_sha256'] == current.get('record_sha256') and
+                             direct_historical_void() is True)
+                elif direct_dispatch_boundary == 'PREPARED':
                     valid = (before is None and after == 'PREPARED' and
                              old.get('state') == 'DEVELOPER_PENDING' and
                              new.get('state') == 'DEVELOPER_DISPATCHING' and

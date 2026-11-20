@@ -6956,6 +6956,24 @@ def _same_direct_response(fresh, previous, args):
             type(completion) is dict and completion.get('executor_task_id') == args.executor_task)
 
 
+def _void_historical_direct_dispatch(args, task, store, binding):
+    """#2447: void a pre-boundary assignment only when its record proves no launch.
+
+    Any unmet condition keeps the old refusal, DIRECT_CHILD_LAUNCH_EVIDENCE_MISSING.
+    A void ends this call; the next ordinary delegate (#2440) starts the new
+    assignment on the same repair claim.
+    """
+    registration, snapshot = binding
+    try:
+        direct_reassignment.void_historical(
+            store, task, registration, snapshot, executor_task=args.executor_task)
+    except Exception:
+        raise LLMToolError('DIRECT_CHILD_LAUNCH_EVIDENCE_MISSING') from None
+    raise LLMToolError(
+        'DIRECT_HISTORICAL_DISPATCH_VOIDED: the old assignment never launched and is '
+        'recorded as voided; run task delegate again to start a new assignment')
+
+
 def _recover_direct_child_dispatch(args, task, developer, store, *, expected_agent):
     identity = direct_reassignment.AGENTS.get(developer.get('provider_profile'))
     if (identity is None or identity != expected_agent or
@@ -6976,6 +6994,8 @@ def _recover_direct_child_dispatch(args, task, developer, store, *, expected_age
             raise LLMToolError('DIRECT_CHILD_SPAWN_NOT_AUTHORIZED')
         if phase == 'STARTING':
             raise LLMToolError('DIRECT_CHILD_SPAWN_OUTCOME_UNVERIFIED')
+        if direct_reassignment.historical_candidate(developer):
+            _void_historical_direct_dispatch(args, fresh, store, first_binding)
         raise LLMToolError('DIRECT_CHILD_LAUNCH_EVIDENCE_MISSING')
     fresh = store.get(args.task_id)
     if _same_direct_response(fresh, task, args):

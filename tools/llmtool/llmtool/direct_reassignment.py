@@ -1,5 +1,6 @@
 """Recover the single writer of a clean direct-Developer worktree."""
 from dataclasses import dataclass, replace
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -46,6 +47,183 @@ def replacement_candidate(developer):
     return (state == 'DEVELOPER_PENDING' or
             (state == 'DEVELOPER_DISPATCHING' and phase == 'PREPARED') or
             (state == 'DEVELOPER_OUTCOME_UNKNOWN' and phase == 'STOPPED'))
+
+
+# #2447: a direct assignment recorded before launch-boundary recording (#2440)
+# carries no dispatch_boundary. Every record created on or after this instant
+# is written by code that records the boundary, so a missing boundary there is
+# never proof of "never launched". The exact #2440 deployment instant is not
+# recorded in the repository (UNKNOWN); this later bound is safe because new
+# code always writes the boundary, and the other void conditions still apply.
+HISTORICAL_BOUNDARY_CUTOFF = '2026-11-21T00:00:00Z'
+_UTC_SECONDS = '%Y-%m-%dT%H:%M:%SZ'
+_LSOF_PATHS = ('/usr/sbin/lsof', '/usr/bin/lsof')
+# Result or recovery fields a never-launched historical assignment cannot carry.
+_VOID_FORBIDDEN_FIELDS = frozenset((
+    'reported', 'changed_files', 'progress', 'final_answer', 'result_status',
+    'normalizations', 'rejection_detail', 'rejected_output_capture',
+    'no_changes_diagnosis', 'claude_failure_evidence', 'direct_handoffs',
+    'voided_assignments', 'dispatch_boundary'))
+
+
+def historical_candidate(developer):
+    """True for a direct DISPATCHING record that has no boundary and no launch.
+
+    Only a hint: void_historical decides, and a missing launch record alone
+    never proves that nothing started.
+    """
+    return (type(developer) is dict and developer.get('provider_profile') in AGENTS and
+            developer.get('state') == 'DEVELOPER_DISPATCHING' and
+            'dispatch_boundary' not in developer and developer.get('execution') is None)
+
+
+def d6_processes(root):
+    """PIDs of this user's processes whose working directory is inside root.
+
+    Fails closed: a missing or failing lsof, or an unreadable answer, refuses.
+    The caller's own process and the lsof child are not counted.
+    """
+    tool = next((path for path in _LSOF_PATHS if os.access(path, os.X_OK)), None)
+    if tool is None or type(root) is not str or not os.path.isabs(root):
+        _refuse('DIRECT_HISTORICAL_VOID_PROCESS_UNVERIFIED')
+    import subprocess
+    try:
+        base = os.path.realpath(root)
+        child = subprocess.Popen(
+            [tool, '-w', '-n', '-P', '-a', '-u', str(os.getuid()), '-d', 'cwd', '-Fpn'],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env={'PATH': '/usr/bin:/bin'})
+        try:
+            output, _ = child.communicate(timeout=30)
+        except BaseException:
+            child.kill()
+            child.wait()
+            raise
+    except (OSError, subprocess.SubprocessError):
+        _refuse('DIRECT_HISTORICAL_VOID_PROCESS_UNVERIFIED')
+    if child.returncode != 0:
+        _refuse('DIRECT_HISTORICAL_VOID_PROCESS_UNVERIFIED')
+    ignored = {os.getpid(), child.pid}
+    pids = []
+    pid = None
+    for line in output.decode('utf-8', 'surrogateescape').splitlines():
+        if line.startswith('p') and line[1:].isdigit():
+            pid = int(line[1:])
+        elif line.startswith('n') and pid is not None:
+            where = os.path.realpath(line[1:]) if line[1:].startswith('/') else line[1:]
+            if (where == base or where.startswith(base.rstrip('/') + '/')) and pid not in ignored:
+                pids.append(pid)
+    return pids
+
+
+def _check_no_process(root, process_probe):
+    try:
+        pids = (process_probe or d6_processes)(root)
+    except LLMToolError:
+        raise
+    except Exception:
+        _refuse('DIRECT_HISTORICAL_VOID_PROCESS_UNVERIFIED')
+    if type(pids) is not list:
+        _refuse('DIRECT_HISTORICAL_VOID_PROCESS_UNVERIFIED')
+    if pids:
+        _refuse('DIRECT_HISTORICAL_VOID_PROCESS_LIVE')
+
+
+def _before_cutoff(developer, cutoff):
+    created = developer.get('created_at')
+    try:
+        stamp = datetime.strptime(created, _UTC_SECONDS)
+        bound = datetime.strptime(cutoff, _UTC_SECONDS)
+    except (TypeError, ValueError):
+        _refuse('DIRECT_HISTORICAL_VOID_NOT_HISTORICAL')
+    if stamp.strftime(_UTC_SECONDS) != created or stamp >= bound:
+        _refuse('DIRECT_HISTORICAL_VOID_NOT_HISTORICAL')
+
+
+def _check_void(store, task, registration, snapshot, executor_task, process_probe, cutoff):
+    """Every void condition on one stored record; any miss refuses."""
+    developer = task.get('developer')
+    if not historical_candidate(developer):
+        _refuse('DIRECT_HISTORICAL_VOID_NOT_HISTORICAL')
+    profile = developer['provider_profile']
+    identity = AGENTS[profile]
+    _before_cutoff(developer, cutoff)
+    # No execution (checked above), artifact, usage, error, report or recovery trail.
+    if (_VOID_FORBIDDEN_FIELDS & set(developer) or
+            any(developer.get(field) is not None for field in (
+                'artifact', 'artifact_sha256', 'usage', 'error_code'))):
+        _refuse('DIRECT_HISTORICAL_VOID_RESULT_PRESENT')
+    # No completion result, completion event or result callback.
+    completion = task.get('completion') or {}
+    evidence = completion.get('evidence') or {}
+    callback = developer.get('direct_result_callback')
+    callback_evidence = (callback or {}).get('evidence') or {}
+    if (task.get('state') != 'PM_RESPONDED' or
+            completion.get('state') != 'WAITING_EXECUTOR' or
+            completion.get('reviewer_task_id') is not None or
+            completion.get('pm_dispatch') != 'NOT_STARTED' or
+            completion.get('pm_response') is not None or
+            completion.get('missing_gates') != [] or
+            evidence.get('result_head') is not None or
+            task.get('completion_events') or task.get('completion_event_tombstones') or
+            (callback is not None and
+             (type(callback) is not dict or callback.get('state') != 'WAITING_EXECUTOR' or
+              callback.get('pm_dispatch') != 'NOT_STARTED' or
+              callback.get('pm_response') is not None or
+              {'review_handoff', 'review_return'} & set(callback) or
+              callback_evidence.get('result_head') is not None or
+              callback_evidence.get('verification_state') != 'NOT_STARTED'))):
+        _refuse('DIRECT_HISTORICAL_VOID_RESULT_PRESENT')
+    # No provider session evidence anywhere in the record or the D6 registration.
+    if (evidence.get('executor_native_session_id') not in (None, 'UNKNOWN') or
+            evidence.get('executor_native_session') == 'VERIFIED' or
+            registration.native_session_id not in (None, 'UNKNOWN') or
+            callback_evidence.get('executor_native_session_id') not in (None, 'UNKNOWN')):
+        _refuse('DIRECT_HISTORICAL_VOID_SESSION_EVIDENCE')
+    # The D6 is the one the record names, at its source_sha, with a clean tree.
+    if (completion.get('executor_task_id') != executor_task or
+            registration.task_id != executor_task or
+            registration.trusted_agent_id != identity or
+            evidence.get('executor_identity') != identity or
+            evidence.get('executor_session_ref') != registration.session_ref or
+            evidence.get('root') != registration.root or
+            evidence.get('common_dir') != registration.common_dir or
+            evidence.get('branch') != registration.branch or
+            snapshot.head != developer.get('source_sha') or snapshot.clean is not True):
+        _refuse('DIRECT_HISTORICAL_VOID_D6_UNVERIFIED')
+    # The same counted repair claim, if any, is still intact.
+    _repair_packet(store, task, developer, registration)
+    _check_no_process(registration.root, process_probe)
+
+
+def void_historical(store, task, registration, snapshot, *, executor_task,
+                    process_probe=None, cutoff=HISTORICAL_BOUNDARY_CUTOFF):
+    """Void one historical DISPATCHING assignment that provably never started.
+
+    The assignment stays in the Task record (voided_assignments and the
+    PREPARED boundary); the repair claim, family, attempt and counts are not
+    touched. The ordinary #2440 reassignment then creates the new assignment.
+    Any unmet condition refuses; a second or concurrent void refuses
+    DIRECT_HISTORICAL_VOID_CONFLICT.
+    """
+    from .task_store import TaskStoreConflict
+
+    _check_void(store, task, registration, snapshot, executor_task, process_probe, cutoff)
+
+    def verify():
+        # Under the Task lock, after the CAS read: the D6 and its processes now.
+        if task_completion.bind_executor_task(
+                registration.task_id, expected_common_dir=registration.common_dir,
+                root=registration.root) != (registration, snapshot):
+            _refuse('DIRECT_HISTORICAL_VOID_D6_UNVERIFIED')
+        _check_no_process(registration.root, process_probe)
+        return True
+
+    try:
+        return store.void_historical_direct_dispatch(
+            task['task_id'], current=task, verify=verify)
+    except TaskStoreConflict:
+        _refuse('DIRECT_HISTORICAL_VOID_CONFLICT')
 
 
 def _checked_scope(args, developer, read_paths, write_paths):
