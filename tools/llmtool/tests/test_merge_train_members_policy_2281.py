@@ -12,6 +12,11 @@ A4: the fixed 64-member cap in merge_train.build_candidate and
     merge_train_store is a real technical limit; a configured maximum above it
     is stated next to the bound and refused at load time (POLICY_INVALID), not
     silently capped to 64.
+A5: the merged build path honours a raised configured maximum (8): a train of
+    exactly 8 valid members is not refused for its member count, a train of 9
+    is refused with TRAIN_MEMBERS_INVALID, and a train of one valid member is
+    refused with TRAIN_MEMBERS_INVALID at the repository value and at the
+    configured 8, the refusals before any Task store read.
 """
 
 import contextlib
@@ -104,6 +109,52 @@ class MergeTrainMembersPolicyTests(unittest.TestCase):
             self.assertEqual(merge_train_cli._max_members(), 8)
             self.assertIsNotNone(merge_train_cli._members(_raw(8)))
             self.assertIsNone(merge_train_cli._members(_raw(9)))
+
+    # A5: the merged build path honours a raised configured maximum too, and
+    # keeps the two-member minimum under it.
+    def test_build_honours_a_higher_configured_limit(self):
+        with mock.patch.object(repair_policy, 'load_policy',
+                               return_value=dict(BASE, **{KEY: 8})):
+            self.assertEqual(merge_train_build._max_members(), 8)
+            self.assertIsNotNone(merge_train_build._member_pairs(_pairs(8), 8))
+            self.assertIsNone(merge_train_build._member_pairs(_pairs(9), 8))
+
+    def test_build_refuses_nine_valid_members_at_eight(self):
+        with mock.patch.object(repair_policy, 'load_policy',
+                               return_value=dict(BASE, **{KEY: 8})):
+            result = _build(_pairs(9))
+        self.assertEqual(result, {'step': 'REFUSED',
+                                  'codes': ['TRAIN_MEMBERS_INVALID'], 'result': None})
+
+    def test_eight_valid_members_pass_the_member_count_at_eight(self):
+        def no_store_read(*_args, **_kwargs):
+            raise AssertionError('store must not be read')
+
+        with mock.patch.object(repair_policy, 'load_policy',
+                               return_value=dict(BASE, **{KEY: 8})), \
+                mock.patch.object(merge_train_build.pm_caller,
+                                  'owner_refusal_code',
+                                  side_effect=no_store_read), \
+                mock.patch.object(merge_train_build.task_completion,
+                                  'read_authenticated_main_sha',
+                                  return_value='f' * 40):
+            result = _build(_pairs(8))
+        self.assertNotEqual(result['codes'], ['TRAIN_MEMBERS_INVALID'],
+                            'eight valid members must not be refused for the '
+                            'member count')
+        self.assertNotEqual(result['codes'], ['TRAIN_CLOCK_INVALID'])
+
+    def test_build_refuses_one_valid_member_at_the_repository_value(self):
+        result = _build(_pairs(1))
+        self.assertEqual(result, {'step': 'REFUSED',
+                                  'codes': ['TRAIN_MEMBERS_INVALID'], 'result': None})
+
+    def test_build_refuses_one_valid_member_at_eight(self):
+        with mock.patch.object(repair_policy, 'load_policy',
+                               return_value=dict(BASE, **{KEY: 8})):
+            result = _build(_pairs(1))
+        self.assertEqual(result, {'step': 'REFUSED',
+                                  'codes': ['TRAIN_MEMBERS_INVALID'], 'result': None})
 
     # A4 (F1 repair): the fixed 64-member candidate/record cap is a real
     # technical limit, so it is enforced at load time and never hides behind a
