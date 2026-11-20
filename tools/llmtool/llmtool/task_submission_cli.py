@@ -7504,7 +7504,7 @@ def _paths_overlap(status_paths, write_paths):
     return False
 
 
-def _launched_run_did_no_work(developer, d6_unchanged=None):
+def _launched_run_did_no_work(developer, d6_unchanged=None, record=None):
     """True only when a launched run's record proves it did no work.
 
     It must have ended blocked or interrupted, with no artifact and confirmed
@@ -7512,13 +7512,23 @@ def _launched_run_did_no_work(developer, d6_unchanged=None):
     alone proves nothing, so ``d6_unchanged(source_sha, write_paths=...)``
     must also confirm that the D6 head still equals the run's recorded source
     SHA, that its tree is clean, and that no status path overlaps the run's
-    write paths. Anything missing, malformed or unknown does not prove that,
+    write paths. A quota or Claude NO_CHANGES stop is governed by
+    _evidenced_no_work_stop; incomplete or inconsistent execution evidence
+    never excludes a run. Anything missing, malformed or unknown does not prove that,
     so the run still counts.
     """
     if type(developer) is not dict:
         return False
-    state = developer.get('state')
     error_code = developer.get('error_code')
+    execution = developer.get('execution')
+    provider_evidence = (execution.get('provider_evidence')
+                         if type(execution) is dict else None)
+    if ((type(error_code) is str and error_code.endswith('_QUOTA_EXHAUSTED')) or
+            (type(provider_evidence) is dict and
+             provider_evidence.get('condition') == 'QUOTA_EXHAUSTED') or
+            error_code == 'CLAUDE_NO_CHANGES'):
+        return False
+    state = developer.get('state')
     if state == 'BLOCKED':
         ended = True
     elif state == 'DEVELOPER_OUTCOME_UNKNOWN':
@@ -7534,6 +7544,8 @@ def _launched_run_did_no_work(developer, d6_unchanged=None):
         ended = False
     if not ended:
         return False
+    if record is not None and not _no_recorded_change(developer, record):
+        return False
     if not all(key in developer and developer[key] is None
                for key in ('artifact', 'artifact_sha256')):
         return False
@@ -7541,14 +7553,16 @@ def _launched_run_did_no_work(developer, d6_unchanged=None):
         changed_files = developer['changed_files']
         if type(changed_files) is not list or changed_files:
             return False
-    execution = developer.get('execution')
-    if not (type(execution) is dict and
-            execution.get('cleanup_status') == 'CONFIRMED'):
-        return False
     source_sha = developer.get('source_sha')
     if (type(source_sha) is not str or
             re.fullmatch(r'[0-9a-f]{40}', source_sha) is None or
             d6_unchanged is None):
+        return False
+    if ('progress' in developer and
+            not _progress_shows_no_change(developer['progress'], source_sha)):
+        return False
+    if not (type(execution) is dict and
+            execution.get('cleanup_status') == 'CONFIRMED'):
         return False
     write_paths = developer.get('write_paths')
     if (type(write_paths) is not list or not write_paths or
@@ -7979,12 +7993,14 @@ def _repair_run_stamp(task_id, developer, d6_unchanged, record=None):
         (type(developer['changed_files']) is list and
          not developer['changed_files'])
     )
+    from . import lineage_counts
     if (known_prelaunch_refusal and known_empty and
-            changed_files_empty and 'progress' not in developer):
-        return None
-    if _launched_run_did_no_work(developer, d6_unchanged):
+            changed_files_empty and 'progress' not in developer and
+            (record is None or lineage_counts.recorded_result_heads(record) == set())):
         return None
     if _evidenced_no_work_stop(developer, record):
+        return None
+    if _launched_run_did_no_work(developer, d6_unchanged, record=record):
         return None
     created_at = developer.get('created_at')
     try:

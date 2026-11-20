@@ -1273,6 +1273,85 @@ class EvidencedNoWorkStopRepairCountTests(unittest.TestCase):
                     task_submission_cli._check_delegate_repair_cap(_args(), store)
                 self.assertEqual(store.writes, [])
 
+    def test_same_d6_quota_stop_without_consistent_progress_still_counts(self):
+        # Security finding v92 on PR #2405 (CWE-863): on the same D6 with
+        # confirmed cleanup and clean tree, a quota stop with missing,
+        # partial, or inconsistent execution evidence must still count.
+        base = _quota_stop(
+            source_sha=_HEAD,
+            execution={'status': 'BLOCKED', 'process_exit_code': 1,
+                       'cleanup_status': 'CONFIRMED', 'usage_source': 'CLI_REPORTED',
+                       'provider_evidence': {'condition': 'QUOTA_EXHAUSTED'}})
+        # Affirmative evidence is skipped on the same D6 as on an earlier head.
+        self._assert_skipped(_quota_stop(
+            source_sha=_HEAD, progress={'head_sha': _HEAD},
+            execution={'status': 'BLOCKED', 'process_exit_code': 1,
+                       'cleanup_status': 'CONFIRMED', 'usage_source': 'CLI_REPORTED',
+                       'provider_evidence': {'condition': 'QUOTA_EXHAUSTED'}}))
+        missing_progress = copy.deepcopy(base)
+        del missing_progress['progress']
+        other_head = 'c' * 40
+        cases = {
+            'missing progress': missing_progress,
+            'progress None': _quota_stop(
+                source_sha=_HEAD, progress=None,
+                execution={'status': 'BLOCKED', 'process_exit_code': 1,
+                           'cleanup_status': 'CONFIRMED',
+                           'provider_evidence': {'condition': 'QUOTA_EXHAUSTED'}}),
+            'empty progress': _quota_stop(
+                source_sha=_HEAD, progress={},
+                execution={'status': 'BLOCKED', 'process_exit_code': 1,
+                           'cleanup_status': 'CONFIRMED',
+                           'provider_evidence': {'condition': 'QUOTA_EXHAUSTED'}}),
+            'progress head only': _quota_stop(
+                source_sha=_HEAD, progress={'head': _HEAD},
+                execution={'status': 'BLOCKED', 'process_exit_code': 1,
+                           'cleanup_status': 'CONFIRMED',
+                           'provider_evidence': {'condition': 'QUOTA_EXHAUSTED'}}),
+            'progress head moved': _quota_stop(
+                source_sha=_HEAD, progress={'head_sha': other_head},
+                execution={'status': 'BLOCKED', 'process_exit_code': 1,
+                           'cleanup_status': 'CONFIRMED',
+                           'provider_evidence': {'condition': 'QUOTA_EXHAUSTED'}}),
+            'contradictory progress head': _quota_stop(
+                source_sha=_HEAD, progress={'head_sha': _HEAD, 'head': other_head},
+                execution={'status': 'BLOCKED', 'process_exit_code': 1,
+                           'cleanup_status': 'CONFIRMED',
+                           'provider_evidence': {'condition': 'QUOTA_EXHAUSTED'}}),
+            'progress changed files': _quota_stop(
+                source_sha=_HEAD,
+                progress={'head_sha': _HEAD, 'changed_files': ['src/main.py']},
+                execution={'status': 'BLOCKED', 'process_exit_code': 1,
+                           'cleanup_status': 'CONFIRMED',
+                           'provider_evidence': {'condition': 'QUOTA_EXHAUSTED'}}),
+            'changed files on developer': _quota_stop(
+                source_sha=_HEAD, progress={'head_sha': _HEAD},
+                changed_files=['src/main.py'],
+                execution={'status': 'BLOCKED', 'process_exit_code': 1,
+                           'cleanup_status': 'CONFIRMED',
+                           'provider_evidence': {'condition': 'QUOTA_EXHAUSTED'}}),
+            'result head on completion evidence': _quota_stop(
+                source_sha=_HEAD, progress={'head_sha': _HEAD},
+                execution={'status': 'BLOCKED', 'process_exit_code': 1,
+                           'cleanup_status': 'CONFIRMED',
+                           'provider_evidence': {'condition': 'QUOTA_EXHAUSTED'}}),
+        }
+        for name, developer in cases.items():
+            with self.subTest(case=name):
+                store = self._store(developer)
+                if name == 'result head on completion evidence':
+                    store.records[self._NEWEST]['completion'] = {
+                        'executor_task_id': _EXECUTOR_TASK,
+                        'evidence': {'source_sha': _HEAD, 'result_head': other_head}}
+                else:
+                    store.records[self._NEWEST]['completion'] = {
+                        'executor_task_id': _EXECUTOR_TASK,
+                        'evidence': {'source_sha': _HEAD, 'result_head': None}}
+                with self.assertRaisesRegex(LLMToolError,
+                                            '^DELEGATE_REPAIR_LIMIT_REACHED$'):
+                    task_submission_cli._check_delegate_repair_cap(_args(), store)
+                self.assertEqual(store.writes, [])
+
     def test_unknown_or_unproved_stops_count(self):
         for developer in (
                 _quota_stop(state='DEVELOPER_OUTCOME_UNKNOWN'),

@@ -404,6 +404,50 @@ class EffectiveRepairCountTests(unittest.TestCase):
         self.assertEqual(outcome, 'CLAIMED')
         self.assertEqual(counted, EFFECTIVE_RUNS)
 
+    def test_same_d6_quota_stop_with_missing_or_inconsistent_evidence_still_counts(self):
+        # Security finding v92 on PR #2405 (CWE-863): when a quota stop is on
+        # the same D6 as the target D6 and cleanup is confirmed, missing,
+        # partial, or contradictory execution evidence must still count.
+        other_head = _sha('feed')
+        with patch.object(task_submission_cli.task_completion, '_worktree_diff',
+                          return_value=([], b'')), \
+                patch.object(task_submission_cli, '_git_status_paths',
+                             return_value=()):
+            def change_affirmative(record, dev):
+                dev.update(source_sha=NEXT_SOURCE, progress={'head_sha': NEXT_SOURCE},
+                           executor_task_id=NEXT_EXECUTOR)
+                dev['execution'].update(cleanup_status='CONFIRMED')
+                record['completion'].update(executor_task_id=NEXT_EXECUTOR)
+                record['completion']['evidence'].update(source_sha=NEXT_SOURCE)
+            records, _ = self._with_round(1, change_affirmative)
+            outcome, counted = self._gate(records)
+            self.assertEqual(outcome, 'CLAIMED')
+            self.assertEqual(counted, EFFECTIVE_RUNS)
+
+            changes = {
+                'missing progress': lambda record, dev: dev.pop('progress'),
+                'progress None': lambda record, dev: dev.update(progress=None),
+                'empty progress': lambda record, dev: dev.update(progress={}),
+                'progress head moved': lambda record, dev: dev['progress'].update(
+                    head_sha=other_head),
+                'progress changed files': lambda record, dev: dev['progress'].update(
+                    changed_files=['README.md']),
+                'changed files on developer': lambda record, dev: dev.update(
+                    changed_files=['README.md']),
+                'completion result head': lambda record, dev: record['completion'][
+                    'evidence'].update(result_head=other_head),
+            }
+            for name, change in changes.items():
+                with self.subTest(case=name):
+                    def apply_change(record, dev):
+                        change_affirmative(record, dev)
+                        change(record, dev)
+                    records, task_id = self._with_round(1, apply_change)
+                    outcome, counted = self._gate(records)
+                    self.assertEqual(outcome, 'CLAIMED')
+                    self.assertEqual(counted, EFFECTIVE_RUNS | {task_id})
+                    self.assertEqual(self._effective_repairs(counted), 3)
+
 
 class EvidencedNoWorkStopUnitTests(unittest.TestCase):
     """The predicate alone: False for any doubt, never a write."""
