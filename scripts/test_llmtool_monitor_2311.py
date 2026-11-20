@@ -93,6 +93,41 @@ class TestMonitor2311Acceptance(unittest.TestCase):
         # A3: DISK_REFRESH_SECONDS is 5.0 live reading
         self.assertEqual(mon.DISK_REFRESH_SECONDS, 5.0)
 
+    def test_a4_one_general_rule_and_fewer_items(self):
+        # A4: one general rule instead of per-route branches; fewer items, clear state names
+        # Every route row is evaluated by the same rule in route_rows
+        switches = {
+            k: ("ALLOWED", "Owner", "11-01") if k != "gw-agent"
+            else ("ALLOWED", "Owner", "11-10")
+            for k in mon.DISPATCH_WORKERS
+        }
+        board = mon.PmBoard("ok", 0, [], [], [])
+        rows = mon.route_rows([], switches, "", {}, [], board, [], NOW)
+        self.assertEqual([r.name for r in rows], mon.ROUTE_NAMES)
+        for r in rows:
+            self.assertEqual(r.state, mon.ROUTE_FREE)
+            self.assertEqual(r.detail, "沒有工作")
+
+        # Clear state names
+        self.assertIn(mon.WORKING, ("工作中",))
+        self.assertIn(mon.UNCHECKED, ("未確認",))
+        self.assertIn(mon.ROUTE_WAITING_PM, ("等 PM",))
+        self.assertIn(mon.ROUTE_FREE, ("可派工",))
+        self.assertIn(mon.PAUSED, ("暫停中",))
+        self.assertIn(mon.ROUTE_ONLY_OWNER, ("僅指定",))
+
+        # Office view includes routes and removes individual dispatch switch rows
+        office_with_switches = [
+            mon.OfficeRow("agy", mon.PAUSED, "paused", 10, 60, kind="worker"),
+            mon.OfficeRow("claude PM", mon.WORKING, "idle", 5, 30, role="pm"),
+        ]
+        view_without_routes = mon.office_view(office_with_switches, routes=None, now=NOW)
+        view_with_routes = mon.office_view(office_with_switches, routes=rows, now=NOW)
+        lines_with_routes = [line for line, _ in view_with_routes]
+        lines_without_routes = [line for line, _ in view_without_routes]
+        self.assertTrue(any("AGY" in l for l in lines_with_routes))
+        self.assertFalse(any(l.startswith("agy ") for l in lines_with_routes))
+
     def test_a5_v1_f1_waiting_result_not_hidden_and_mismatched_task_id(self):
         # A5 / Finding F1: waiting result not hidden by newer task
         t_older = mon.RouteTask("AGY", "11111111", False, "成功回應", NOW - 200, "100", False, NOW - 250)
@@ -161,7 +196,10 @@ class TestMonitor2311Acceptance(unittest.TestCase):
             dispatch = Path(root, "worker-dispatch.json")
             dispatch.write_text(json.dumps({"schema_version": 1, "workers": {
                 k: {"dispatch": "ALLOWED", "decided_by": "Owner", "decided_at": "2026-11-10",
-                    "reason": "open", "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6760670167"}
+                    "reason": "open",
+                    "evidence": ("https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6760670167"
+                                 if k == "gw-agent" else
+                                 "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6685246395")}
                 for k in mon.DISPATCH_WORKERS}}), encoding="utf-8")
             tasks = Path(root, "tasks")
             tasks.mkdir()

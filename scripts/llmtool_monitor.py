@@ -2150,8 +2150,10 @@ class SubPmLease:
 SUBPM_LEASE_FILE = os.path.join(os.path.expanduser("~"), ".local/state/llmtool/subpm-leases.json")
 
 
-def _load_subpm_leases(path: str = SUBPM_LEASE_FILE) -> list:
+def _load_subpm_leases(path: str | None = None) -> list:
     """Load persisted HELD sub-PM leases across restarts. Returns [] when absent or invalid."""
+    if path is None:
+        path = SUBPM_LEASE_FILE
     try:
         with open(path, "rb") as stream:
             raw = stream.read(1 << 20)
@@ -2177,8 +2179,10 @@ def _load_subpm_leases(path: str = SUBPM_LEASE_FILE) -> list:
     return out
 
 
-def _save_subpm_leases(leases: list, path: str = SUBPM_LEASE_FILE) -> None:
+def _save_subpm_leases(leases: list, path: str | None = None) -> None:
     """Atomically save HELD sub-PM leases to disk with private file and directory modes."""
+    if path is None:
+        path = SUBPM_LEASE_FILE
     try:
         parent = os.path.dirname(os.path.abspath(path))
         os.makedirs(parent, mode=0o700, exist_ok=True)
