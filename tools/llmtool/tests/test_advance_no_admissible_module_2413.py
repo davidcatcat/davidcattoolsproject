@@ -1,5 +1,6 @@
 """#2413: a PR with no EC2-admissible module completes the remote-test step."""
 import hashlib
+import itertools
 import json
 import sys
 import tempfile
@@ -234,43 +235,102 @@ def binding_mapping(binding):
     return dict(binding)
 
 
+_CONTRACT = None
+_DIGEST_CACHE = {}
+
+
+def _canonical_digests(value):
+    """Every digest a strict contract producer might bind to this value."""
+    key = json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True)
+    if key in _DIGEST_CACHE:
+        return _DIGEST_CACHE[key]
+    digests = set()
+    for sort_keys in (True, False):
+        for ensure_ascii in (False, True):
+            for separators in (None, (',', ':')):
+                text = json.dumps(value, sort_keys=sort_keys, ensure_ascii=ensure_ascii,
+                                  separators=separators, allow_nan=False)
+                for bound in (text, text + '\n', 'sha256:' + text):
+                    digests.add(hashlib.sha256(bound.encode('utf-8')).hexdigest())
+    _DIGEST_CACHE[key] = digests
+    return digests
+
+
 def contract_fixture():
-    """A real synthetic Task contract parsed by the store's own parser."""
-    base = {
-        'task_id': TASK,
-        'goal': 'Persist a no-admissible-module outcome.',
-        'acceptance': ['The persisted outcome is reloaded from the store.'],
-        'read_paths': [TEST_PATH],
-        'write_paths': [TEST_PATH],
-        'source_sha': HEAD,
-    }
+    """A real synthetic Task contract parsed by the store's own parser.
 
-    def with_digest(candidate):
-        payload = dict(candidate)
-        payload['task_contract_digest'] = hashlib.sha256(json.dumps(
-            candidate, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
-        return payload
-
-    variants = (
-        dict(base, schema_version=1, created_at=AT, run_id=RUN),
-        dict(base, schema_version=1, created_at=AT),
-        dict(base, schema_version=1, run_id=RUN),
-        dict(base, schema_version=1),
-        dict(base, created_at=AT, run_id=RUN),
-        dict(base, created_at=AT),
-        dict(base, run_id=RUN),
-        with_digest(dict(base, schema_version=1, created_at=AT, run_id=RUN)),
-        with_digest(dict(base, run_id=RUN)),
-        with_digest(base),
-        dict(base, run_id=RUN, task_contract_digest='0' * 64),
-        dict(base, task_contract_digest='0' * 64),
-        base,
+    The persistence tests below must exercise a record the real TaskStore writes
+    and reloads, not a mocked store (#2413 F2). The store's contract parser owns
+    the accepted field set, so this builds the smallest contract with each
+    supported binding field in turn and keeps the first one it accepts.
+    """
+    global _CONTRACT
+    if _CONTRACT is not None:
+        return _CONTRACT
+    scopes = (
+        {'task_id': TASK,
+         'goal': 'Persist a no-admissible-module outcome.',
+         'acceptance': ['The persisted outcome is reloaded from the store.'],
+         'read_paths': [TEST_PATH],
+         'write_paths': [TEST_PATH],
+         'source_sha': HEAD},
+        {'task_id': TASK,
+         'goal': 'Persist a no-admissible-module outcome.',
+         'acceptance': ['The persisted outcome is reloaded from the store.'],
+         'read_paths': [TEST_PATH],
+         'write_paths': [TEST_PATH]},
     )
-    for candidate in variants:
+    options = (
+        ('run_id', (None, RUN)),
+        ('schema_version', (None, 1)),
+        ('contract_version', (None, 1)),
+        ('created_at', (None, AT)),
+        ('risk', (None, 'LOW')),
+        ('route', (None, 'codex', 'none')),
+    )
+    shapes = []
+    for scope in scopes:
+        for chosen_values in itertools.product(*(values for _name, values in options)):
+            shape = dict(scope)
+            for (name, _values), chosen in zip(options, chosen_values):
+                if chosen is not None:
+                    shape[name] = chosen
+            shapes.append((shape, scope))
+
+    def accept(candidate):
         try:
-            return candidate, ts.parse_task_contract(json.dumps(candidate))
+            # The store re-serialises the contract this way before parsing it.
+            parsed = ts.parse_task_contract(json.dumps(
+                candidate, ensure_ascii=True, separators=(',', ':')))
+            parsed.binding(RUN)
         except Exception:
-            continue
+            return None
+        return candidate, parsed
+
+    for shape, _scope in shapes:
+        found = accept(shape)
+        if found is not None:
+            _CONTRACT = found
+            return _CONTRACT
+    for shape, scope in shapes:
+        digest_sources = (
+            shape,
+            scope,
+            {key: value for key, value in scope.items() if key != 'source_sha'},
+            {key: value for key, value in shape.items()
+             if key in ('goal', 'acceptance')},
+            {key: value for key, value in shape.items()
+             if key in ('goal', 'acceptance', 'read_paths', 'write_paths')},
+        )
+        digests = set()
+        for source in digest_sources:
+            digests |= _canonical_digests(source)
+        for field in ('task_contract_digest', 'contract_digest', 'digest'):
+            for digest in digests:
+                found = accept(dict(shape, **{field: digest}))
+                if found is not None:
+                    _CONTRACT = found
+                    return _CONTRACT
     raise AssertionError('no valid synthetic task contract')
 
 
