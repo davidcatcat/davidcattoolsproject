@@ -1,5 +1,6 @@
 """#1502 WP-D: policy.json carries the repair, Debug, split and test-failure limits."""
 
+import datetime
 import json
 import os
 import tempfile
@@ -205,6 +206,61 @@ class LineageOutcomeTests(unittest.TestCase):
         self.assertTrue(due('ENV', '2026-11-12T12:00:00Z'))
         self.assertTrue(due('NO_REVIEWER', 'yesterday'))
         self.assertTrue(due('OTHER', '2026-11-13T11:59:59Z'))
+
+    def test_non_auth_waiting_moves_with_the_configured_hours(self):
+        # #2281 row 21 / PR #2427: the Owner notice is timed by
+        # waiting_notify_after_hours, so a value other than 24 moves the time.
+        fmt = '%Y-%m-%dT%H:%M:%SZ'
+        base = datetime.datetime(2026, 11, 13, 0, 0, 0)
+        for hours in (1, 7, 48, 1000):
+            policy = dict(self.P, waiting_notify_after_hours=hours)
+            at = base + datetime.timedelta(hours=hours)
+            with self.subTest(hours=hours):
+                # One second before the configured hours have passed: not due.
+                self.assertFalse(rp.waiting_notice_due(
+                    reason='ENV', waiting_since=base.strftime(fmt),
+                    now=(at - datetime.timedelta(seconds=1)).strftime(fmt), policy=policy))
+                # Exactly the configured hours have passed: due.
+                self.assertTrue(rp.waiting_notice_due(
+                    reason='ENV', waiting_since=base.strftime(fmt),
+                    now=at.strftime(fmt), policy=policy))
+
+    def test_every_non_auth_waiting_reason_follows_the_configured_hours(self):
+        # A2: every WAITING reason other than AUTH follows the configured value.
+        fmt = '%Y-%m-%dT%H:%M:%SZ'
+        base = datetime.datetime(2026, 11, 13, 0, 0, 0)
+        hours = 6
+        policy = dict(self.P, waiting_notify_after_hours=hours)
+        at = base + datetime.timedelta(hours=hours)
+        for reason in ('QUOTA', 'ROUTE_UNAVAILABLE', 'NO_REVIEWER', 'DISPUTE', 'ENV'):
+            with self.subTest(reason=reason):
+                # One second short of the configured hours: not due.
+                self.assertFalse(rp.waiting_notice_due(
+                    reason=reason, waiting_since=base.strftime(fmt),
+                    now=(at - datetime.timedelta(seconds=1)).strftime(fmt), policy=policy))
+                # Exactly the configured hours: due.
+                self.assertTrue(rp.waiting_notice_due(
+                    reason=reason, waiting_since=base.strftime(fmt),
+                    now=at.strftime(fmt), policy=policy))
+
+    def test_auth_and_unknown_reason_due_at_once_for_a_large_value(self):
+        # A3: AUTH is due at once even for a large configured value, and a
+        # reason that is not a known WAITING reason is due at once: at the
+        # moment of WAITING entry, now equals waiting_since.
+        policy = dict(self.P, waiting_notify_after_hours=1000)
+        at_once = '2026-11-13T00:00:00Z'
+        self.assertTrue(rp.waiting_notice_due(reason='AUTH', waiting_since=at_once,
+                                              now=at_once, policy=policy))
+        self.assertTrue(rp.waiting_notice_due(reason='NOT_A_WAITING_REASON',
+                                              waiting_since=at_once, now=at_once, policy=policy))
+
+    def test_zero_hours_is_due_at_once_for_a_known_non_auth_reason(self):
+        # A4: with the value configured to 0, a known non-AUTH WAITING reason
+        # is due at once, at the moment of WAITING entry.
+        policy = dict(self.P, waiting_notify_after_hours=0)
+        at_once = '2026-11-13T00:00:00Z'
+        self.assertTrue(rp.waiting_notice_due(reason='ENV', waiting_since=at_once,
+                                              now=at_once, policy=policy))
 
 
 class LineageBoundTests(unittest.TestCase):
