@@ -60,8 +60,11 @@ class _Store:
 
 class HighDebugCodexHome2415Tests(unittest.TestCase):
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp_dir.cleanup)
+        real_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(real_temp.cleanup)
+        # Resolve the temp root so the symlink refusal (no exempt ancestors) is not
+        # tripped by a system temp directory that itself sits below a symlink.
+        self.temp_dir = SimpleNamespace(name=os.path.realpath(real_temp.name))
 
         self._verified_ai_env_patch = patch.object(
             high_debug.ai_github_exec, 'verified_ai_env',
@@ -349,6 +352,88 @@ class HighDebugCodexHome2415Tests(unittest.TestCase):
             observed, effort = high_debug._session_observed(thread_id)
             self.assertEqual(observed, 'UNKNOWN')
             self.assertEqual(effort, 'UNKNOWN')
+
+    def test_system_style_symlinked_ancestor_yields_unknown(self):
+        """CODEX_HOME below a symlinked /var-, /tmp- or /etc-style ancestor -> UNKNOWN (no exempt directories)."""
+        thread_id = 'thread-case-sys-symlink-12345'
+        for name in ('var', 'tmp', 'etc'):
+            with self.subTest(ancestor=name):
+                base = Path(self.temp_dir.name) / ('sys_' + name)
+                real_dir = base / ('real_' + name)
+                self._create_session_file(real_dir / 'codex_home' / 'sessions', thread_id,
+                                          model='gpt-6.1-sol', effort='high')
+                link = base / name
+                link.symlink_to(real_dir, target_is_directory=True)
+                home = link / 'codex_home'
+
+                observed, effort = high_debug._session_observed(thread_id, codex_home=home)
+                self.assertEqual((observed, effort), ('UNKNOWN', 'UNKNOWN'))
+
+                with patch.dict(os.environ, {'CODEX_HOME': str(home)}):
+                    observed, effort = high_debug._session_observed(thread_id)
+                    self.assertEqual((observed, effort), ('UNKNOWN', 'UNKNOWN'))
+
+                    store = _Store()
+                    self._run_debug(store, self._repo(), thread_id)
+                    entry = store.entries[0]
+                    self.assertEqual(entry['model_observed'], 'UNKNOWN')
+                    self.assertEqual(entry['effort_observed'], 'UNKNOWN')
+
+                # Same content under the real path is accepted.
+                observed, effort = high_debug._session_observed(
+                    thread_id, codex_home=real_dir / 'codex_home')
+                self.assertEqual((observed, effort), ('gpt-6.1-sol', 'high'))
+
+    def _write_lines(self, sessions_dir, thread_id, lines):
+        rollout_dir = Path(sessions_dir) / '2026' / '11' / '20'
+        rollout_dir.mkdir(parents=True, exist_ok=True)
+        rollout_file = rollout_dir / f'rollout-2026-11-20T12-00-00-{thread_id}.jsonl'
+        rollout_file.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+    def test_malformed_line_before_valid_metadata_yields_unknown(self):
+        """A malformed JSON line anywhere in the file -> UNKNOWN (no skipping to a later valid line)."""
+        thread_id = 'thread-case-malformed-12345'
+        valid = json.dumps({'type': 'session_meta',
+                            'payload': {'id': thread_id, 'model': 'gpt-6.1-sol',
+                                        'reasoning_effort': 'high'}})
+        for label, lines in (('before', ['{not valid json', valid]),
+                             ('after', [valid, '{not valid json']),
+                             ('non_object', ['[1, 2]', valid])):
+            with self.subTest(position=label):
+                home = Path(self.temp_dir.name) / ('home_malformed_' + label)
+                self._write_lines(home / 'sessions', thread_id, lines)
+                observed, effort = high_debug._session_observed(thread_id, codex_home=home)
+                self.assertEqual((observed, effort), ('UNKNOWN', 'UNKNOWN'))
+
+                store = _Store()
+                self._run_debug(store, self._repo(), thread_id, codex_home=home)
+                entry = store.entries[0]
+                self.assertEqual(entry['model_observed'], 'UNKNOWN')
+                self.assertEqual(entry['effort_observed'], 'UNKNOWN')
+
+    def test_invalid_metadata_before_valid_metadata_yields_unknown(self):
+        """Invalid session metadata before a valid metadata line -> UNKNOWN."""
+        thread_id = 'thread-case-invalid-meta-12345'
+        valid = json.dumps({'type': 'session_meta',
+                            'payload': {'id': thread_id, 'model': 'gpt-6.1-sol',
+                                        'reasoning_effort': 'high'}})
+        invalid_variants = {
+            'non_dict_payload': {'type': 'session_meta', 'payload': 'not-a-dict'},
+            'missing_model': {'type': 'session_meta', 'payload': {'id': thread_id}},
+            'empty_model': {'type': 'session_meta', 'payload': {'id': thread_id, 'model': ''}},
+            'missing_id': {'type': 'session_meta',
+                           'payload': {'model': 'gpt-6.1-sol', 'reasoning_effort': 'high'}},
+            'other_id': {'type': 'session_meta',
+                         'payload': {'id': 'thread-someone-else', 'model': 'gpt-6.1-sol'}},
+            'bad_effort': {'type': 'session_meta',
+                           'payload': {'id': thread_id, 'model': 'gpt-6.1-sol', 'reasoning_effort': 5}},
+        }
+        for label, record in invalid_variants.items():
+            with self.subTest(variant=label):
+                home = Path(self.temp_dir.name) / ('home_invalid_' + label)
+                self._write_lines(home / 'sessions', thread_id, [json.dumps(record), valid])
+                observed, effort = high_debug._session_observed(thread_id, codex_home=home)
+                self.assertEqual((observed, effort), ('UNKNOWN', 'UNKNOWN'))
 
     def test_e_thread_id_with_no_session_file_yields_unknown(self):
         """(e) a thread id with no session file -> UNKNOWN as on main."""

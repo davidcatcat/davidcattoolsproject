@@ -251,9 +251,6 @@ def _usage_from_events(events_raw):
     return fields
 
 
-_SYSTEM_SYMLINKS = frozenset((Path('/var'), Path('/tmp'), Path('/etc')))
-
-
 def _session_observed(thread_id, sessions_dir=None, codex_home=None):
     """Read only model/effort metadata from bounded, regular rollout files."""
     if type(thread_id) is not str or not thread_id:
@@ -268,17 +265,21 @@ def _session_observed(thread_id, sessions_dir=None, codex_home=None):
             home_dir = Path.home() / '.codex'
         root = home_dir / 'sessions'
 
-    check_path = root
-    while True:
-        try:
-            st = check_path.lstat()
-            if stat.S_ISLNK(st.st_mode) and check_path not in _SYSTEM_SYMLINKS:
+    # The Codex home path (and every ancestor) must contain no symlink, with no
+    # exempt directories. The explicit sessions_dir override is test-only (the
+    # launch path refuses it), so only its own root is checked below.
+    if sessions_dir is None:
+        check_path = root
+        while True:
+            try:
+                st = check_path.lstat()
+                if stat.S_ISLNK(st.st_mode):
+                    return 'UNKNOWN', 'UNKNOWN'
+            except OSError:
                 return 'UNKNOWN', 'UNKNOWN'
-        except OSError:
-            return 'UNKNOWN', 'UNKNOWN'
-        if check_path.parent == check_path:
-            break
-        check_path = check_path.parent
+            if check_path.parent == check_path:
+                break
+            check_path = check_path.parent
 
     try:
         root_stat = root.lstat()
@@ -335,9 +336,9 @@ def _session_observed(thread_id, sessions_dir=None, codex_home=None):
                     try:
                         record = json.loads(line)
                     except (TypeError, ValueError):
-                        continue
+                        return 'UNKNOWN', 'UNKNOWN'
                     if type(record) is not dict:
-                        continue
+                        return 'UNKNOWN', 'UNKNOWN'
                     is_meta = record.get('type') in ('session_meta', 'session_metadata')
                     if not is_meta:
                         if sessions_dir is None:
