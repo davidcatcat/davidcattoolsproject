@@ -453,14 +453,14 @@ class WorkerEnvelopeTests(unittest.TestCase):
             self.assertLess(time.monotonic()-started,1.5)
             self.assertIsNone(provider.pending_job)
 
-    def test_review_job_refuses_other_family_and_malformed_model_before_spawn(self):
-        # #1502 WP-E R1, Owner #2302 P2: the review job admits only a model of
-        # the claude-reviewer family.
+    def test_review_job_refuses_a_malformed_model_before_spawn(self):
+        # #1502 WP-E R1, Owner #2302 part 1: the review job admits any
+        # well-formed model id and refuses a malformed or non-text one.
         import time
         with tempfile.TemporaryDirectory() as tmp:
             exe=Path(tmp)/'fake-unused';exe.write_text('#!'+sys.executable+' -IB\n');exe.chmod(0o700)
-            for model in ('gemini-unlisted-model', CROSS_FAMILY_MODEL,
-                          'anthropic/'+REVIEW_MODEL, REVIEW_MODEL.upper(), None):
+            for model in ('has space', '-leading-dash', 'https://example.invalid/m',
+                          REVIEW_MODEL+'\n', '', None):
                 with self.subTest(model=model):
                     provider=ClaudeCLIProvider({'model':model},None)
                     with patch('subprocess.Popen',side_effect=AssertionError('spawn')) as spawn, \
@@ -473,9 +473,12 @@ class WorkerEnvelopeTests(unittest.TestCase):
                     self.assertIsNone(getattr(provider,'pending_job',None))
 
     def test_review_job_launches_the_admitted_model_explicitly(self):
-        # The listed model and (Owner #2302 P2) another Claude-family model.
+        # The listed model and (Owner #2302 part 1) any other well-formed
+        # model id, of the Claude family or not. The provider path, not this
+        # check, decides whether the CLI can serve it.
         import time
-        for model in (REVIEW_MODEL,'claude-fable-5-2'):
+        for model in (REVIEW_MODEL,'claude-fable-5-2',CROSS_FAMILY_MODEL,
+                      'gemini-unlisted-model','anthropic/'+REVIEW_MODEL,REVIEW_MODEL.upper()):
             with self.subTest(model=model),tempfile.TemporaryDirectory() as tmp:
                 exe=Path(tmp)/'fake-unused';exe.write_text('#!'+sys.executable+' -IB\n');exe.chmod(0o700)
                 provider=ClaudeCLIProvider({'model':model},None)

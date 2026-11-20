@@ -403,8 +403,44 @@ CLAUDE_CLI_SUBTYPES = frozenset((
 CLAUDE_FAILURE_MAX_TURNS = _NO_CHANGES_MAX_TURNS
 CLAUDE_FAILURE_MAX_DURATION_MS = 86_400_000
 CLAUDE_FAILURE_EXIT_CODE_RANGE = (-255, 255)
+# Owner #2302 part 1: the per-run model record (requested model, resolved model,
+# model source, model family and the provider-reported model). Optional on every
+# developer shape; legacy records omit it. Model ids and fixed words only.
+_DEVELOPER_MODEL_RECORD_FIELDS = frozenset(('model_record',))
+_MODEL_RECORD_KEYS = frozenset((
+    'requested_model', 'resolved_model', 'model_source', 'model_family', 'reported_model'))
+_MODEL_RECORD_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/@#-]{0,127}')
+_MODEL_RECORD_SOURCES = frozenset(('repo_default', 'roles', 'env', 'cli'))
+_MODEL_RECORD_FAMILY = re.compile(r'[a-z0-9]{1,32}')
 _DEVELOPER_OPTIONAL_FIELDS = (_DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS |
-                              _DEVELOPER_CLAUDE_FAILURE_EVIDENCE_FIELDS)
+                              _DEVELOPER_CLAUDE_FAILURE_EVIDENCE_FIELDS |
+                              _DEVELOPER_MODEL_RECORD_FIELDS)
+
+
+def valid_model_record(record):
+    """Owner #2302 part 1: strict value of developer.model_record.
+
+    A dict with exactly the five keys. requested_model and reported_model are
+    a model id or None, resolved_model is a model id, model_source is one of
+    repo_default, roles, env, cli or None, and model_family is a lower-case
+    family word or the word UNKNOWN. The family is a shape check only: it is
+    recorded evidence, so a later change to the family names must not make an
+    older record unreadable.
+    """
+    def model_id(value, optional):
+        return ((value is None and optional) or
+                (type(value) is str and _MODEL_RECORD_ID.fullmatch(value) is not None))
+
+    return (type(record) is dict and set(record) == _MODEL_RECORD_KEYS and
+            model_id(record['requested_model'], True) and
+            model_id(record['resolved_model'], False) and
+            model_id(record['reported_model'], True) and
+            (record['model_source'] is None or
+             (type(record['model_source']) is str and
+              record['model_source'] in _MODEL_RECORD_SOURCES)) and
+            type(record['model_family']) is str and
+            (record['model_family'] == 'UNKNOWN' or
+             _MODEL_RECORD_FAMILY.fullmatch(record['model_family']) is not None))
 
 
 def valid_claude_failure_evidence(evidence):
@@ -2754,6 +2790,9 @@ def _validate(record, *, strict=True):
                 _fail()
             if ('claude_failure_evidence' in developer and
                     not valid_claude_failure_evidence_record(developer)):
+                _fail()
+            if ('model_record' in developer and
+                    not valid_model_record(developer['model_record'])):
                 _fail()
             if ('data_class' in developer and
                     (developer.get('provider_profile') != 'gw-agent' or

@@ -113,11 +113,17 @@ class ClaudeRouteTests(unittest.TestCase):
         with self.assertRaises(RouteError) as caught:
             self.route.validate_request(self.request('x' * (MAX_PROMPT_BYTES + 1)))
         self.assertEqual(caught.exception.code, 'CLAUDE_REQUEST_INVALID')
-        for model, effort in (('claude', 'high'), ('opus', 'high'),
-                              ('claude-opus-5-5', 'default')):
+        # Owner #2302 part 1: a malformed model id or an unknown effort is
+        # refused; any well-formed id is admitted whatever its family.
+        for model, effort in (('has space', 'high'), ('-leading-dash', 'high'),
+                              ('https://example.invalid/m', 'high'), ('', 'high'),
+                              (None, 'high'), ('claude-opus-5-5', 'default')):
             with self.assertRaises(RouteError) as caught:
                 self.route.validate_profile(model, effort)
             self.assertEqual(caught.exception.code, 'CLAUDE_PROFILE_INVALID')
+        for model in ('claude-opus-5-5', 'claude-fable-5-2', 'gemini-3.8-flash-medium',
+                      'gpt-6.1-sol', 'opus', 'Claude-Upper'):
+            self.assertEqual(self.route.validate_profile(model, 'high'), (model, 'high'))
         route = ClaudeRoute({'executable': 'claude', 'config_dir': 'relative'})
         with self.assertRaises(RouteError) as caught:
             route.validate_request(self.request())
@@ -250,7 +256,11 @@ class ClaudeRouteTests(unittest.TestCase):
         cases = [({'claude-opus-5-5': {'outputTokens': 1},
                    'claude-helper': {'outputTokens': 3}}, 'claude-opus-5-5'),
                  ({'claude-other': {'outputTokens': 4}}, 'claude-other'),
-                 ({'other': {'outputTokens': 2}}, '\0'), ({}, None),
+                 # Owner #2302 part 1: a well-formed non-claude model id is
+                 # reported as it is (and differs from the requested model);
+                 # only a malformed key is the mismatch marker.
+                 ({'other': {'outputTokens': 2}}, 'other'),
+                 ({'bad key': {'outputTokens': 2}}, '\0'), ({}, None),
                  ({'claude-opus-5-5': {'outputTokens': 0}}, None)]
         for models, expected in cases:
             parsed = self.route.parse_output(self.envelope(modelUsage=models), b'', '')

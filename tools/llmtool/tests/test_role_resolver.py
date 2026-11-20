@@ -20,13 +20,14 @@ from llmtool.owner_override import _MARKER
 REPOSITORY = 'example-owner/example-repo'
 REF = 'https://github.com/' + REPOSITORY + '/issues/12#issuecomment-345'
 ISSUE_URL = 'https://api.github.com/repos/' + REPOSITORY + '/issues/12'
-# An agy route fixture. Owner #2302 P2: agy accepts any Gemini-family model,
-# so the precedence layers use Gemini names; 'model-extra' is of no provider
-# family and is refused on every path, including the owner-override path.
+# An agy route fixture. Owner #2302 part 1: agy admits any well-formed model
+# id, of any family. MALFORMED_MODEL is refused on every path, including the
+# owner-override path.
 ROUTE = {'default_model': 'gemini-default', 'default_effort': 'medium',
          'allowed_models': ['gemini-default']}
-# A gw-agent route fixture. Owner #2302 P2 Repair 2: gw-agent has no model
-# family, so an owner override may still relax its allowed_models membership.
+MALFORMED_MODEL = 'has space'
+# A gw-agent route fixture. Owner #2302 part 1: gw-agent keeps its
+# allowed_models membership gate, so an owner override may still relax it.
 GW_ROUTE = {'default_model': 'gw', 'default_effort': 'low',
             'allowed_models': ['gw']}
 # The claude-reviewer model listed in developer-routes.json (#1502 WP-E).
@@ -130,11 +131,11 @@ class PrecedenceTests(ResolverBase):
 
 
 class AllowedModelTests(ResolverBase):
-    def test_wrong_family_model_is_refused_at_every_layer(self):
+    def test_malformed_model_is_refused_at_every_layer(self):
         cases = (
-            ({'roles': {'agy-developer': {'model': 'model-extra'}}}, {}, None),
-            ({}, {'LLMTOOL_ROLE_AGY_DEVELOPER_MODEL': 'model-extra'}, None),
-            ({}, {}, {'model': 'model-extra'}),
+            ({'roles': {'agy-developer': {'model': MALFORMED_MODEL}}}, {}, None),
+            ({}, {'LLMTOOL_ROLE_AGY_DEVELOPER_MODEL': MALFORMED_MODEL}, None),
+            ({}, {}, {'model': MALFORMED_MODEL}),
         )
         for config, env, cli_values in cases:
             with self.subTest(config=config, env=env, cli=cli_values):
@@ -145,38 +146,109 @@ class AllowedModelTests(ResolverBase):
                 self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
                 self.assertIsNone(caught.exception.owner_override_code)
 
-    def test_real_routes_accept_a_same_family_model_from_user_config(self):
-        # Owner #2302 P2: no allowed_models entry and no owner override needed.
-        for role, model in (('agy-developer', 'gemini-4-hydrogen-medium'),
-                            ('claude-developer', 'claude-fable-5-2')):
+    # Owner #2302 part 1: any well-formed model id, of any family, on any
+    # Developer route (here the two CLI routes), with no repository change.
+    ANY_MODELS = (
+        ('agy-developer', 'gemini-4-hydrogen-medium', 'gemini'),
+        ('agy-developer', 'claude-fable-5-2', 'claude'),
+        ('agy-developer', 'gpt-6.1-sol', 'codex'),
+        ('agy-developer', 'qwen3-coder-next', 'qwen'),
+        ('agy-developer', 'deepseek-v4.1-flash', 'deepseek'),
+        ('agy-developer', 'GEMINI-4-HYDROGEN-MEDIUM', 'gemini'),
+        ('agy-developer', 'google/gemini-4-hydrogen-medium', 'gemini'),
+        ('agy-developer', 'example-model-b', 'UNKNOWN'),
+        ('claude-developer', 'claude-fable-5-2', 'claude'),
+        ('claude-developer', 'gemini-4-hydrogen-medium', 'gemini'),
+        ('claude-developer', 'gpt-6.1-sol', 'codex'),
+        ('claude-developer', 'anthropic/claude-fable-5-2', 'claude'),
+        ('claude-developer', 'Claude-fable-5-2', 'claude'),
+        ('claude-developer', 'example-model-b', 'UNKNOWN'),
+    )
+
+    def test_real_routes_accept_any_well_formed_model_from_user_config(self):
+        for role, model, family in self.ANY_MODELS:
             with self.subTest(role=role, model=model):
                 self.save({'roles': {role: {'model': model}}})
                 resolved = self.resolve(role)
                 self.assertEqual((resolved['model'], resolved['model_source'],
                                   resolved['source']), (model, 'roles', 'roles'))
+                self.assertEqual((resolved['requested_model'], resolved['model_family']),
+                                 (model, family))
                 self.assertNotIn('owner_override', resolved)
 
-    def test_real_routes_accept_a_same_family_model_from_env_and_cli(self):
-        for role, model in (('agy-developer', 'gemini-4-hydrogen-medium'),
-                            ('claude-developer', 'claude-fable-5-2')):
+    def test_real_routes_accept_any_well_formed_model_from_env_and_cli(self):
+        for role, model, family in self.ANY_MODELS:
             env_name = 'LLMTOOL_ROLE_' + role.upper().replace('-', '_') + '_MODEL'
-            with self.subTest(role=role, layer='env'):
+            with self.subTest(role=role, model=model, layer='env'):
                 self.env = {env_name: model}
-                self.assertEqual(self.resolve(role)['model'], model)
-            with self.subTest(role=role, layer='cli'):
+                resolved = self.resolve(role)
+                self.assertEqual((resolved['model'], resolved['model_source'],
+                                  resolved['model_family']), (model, 'env', family))
+            with self.subTest(role=role, model=model, layer='cli'):
                 self.env = {}
-                self.assertEqual(self.resolve(role, cli={'model': model})['model'], model)
+                resolved = self.resolve(role, cli={'model': model})
+                self.assertEqual((resolved['model'], resolved['model_source'],
+                                  resolved['model_family']), (model, 'cli', family))
 
-    def test_real_routes_refuse_a_wrong_family_or_malformed_model(self):
+    def test_agy_developer_switches_to_a_claude_model_and_back_by_user_config(self):
+        # Owner #2302 part 1 (A4): config only, no repository change, both ways.
+        default = load_route_config()['routes']['agy']['default_model']
+        for model in ('claude-sonnet-5-5-medium', 'gemini-3.8-flash-medium'):
+            with self.subTest(model=model):
+                self.save({'roles': {'agy-developer': {'model': model}}})
+                resolved = self.resolve('agy-developer')
+                self.assertEqual((resolved['model'], resolved['model_source']),
+                                 (model, 'roles'))
+        self.assertEqual(default, 'gemini-3.8-flash-medium')
+        self.assertEqual(self.resolve('agy-developer')['model_family'], 'gemini')
+
+    def test_resolved_model_records_requested_source_and_family(self):
+        # Owner #2302 part 1 (A2): a repo default has no requested model.
+        resolved = self.resolve('agy-developer')
+        self.assertEqual((resolved['model'], resolved['model_source'],
+                          resolved['requested_model'], resolved['model_family']),
+                         (load_route_config()['routes']['agy']['default_model'],
+                          'repo_default', None, 'gemini'))
+        record = role_config.model_record(resolved, resolved['model'], 'gemini-3.8-flash-medium')
+        self.assertEqual(record, {
+            'requested_model': None, 'resolved_model': 'gemini-3.8-flash-medium',
+            'model_source': 'repo_default', 'model_family': 'gemini',
+            'reported_model': 'gemini-3.8-flash-medium'})
+        # A provider-reported value that is not a model id is never kept.
+        self.assertIsNone(role_config.model_record(resolved, resolved['model'],
+                                                   'two words')['reported_model'])
+        self.assertIsNone(role_config.model_record(resolved, resolved['model'])['reported_model'])
+
+    def test_model_record_is_what_the_task_store_accepts(self):
+        # Owner #2302 part 1 (A2): the record a dispatch stores passes the store
+        # shape check; a changed or extra key, or a value that is not a model
+        # id, does not.
+        from llmtool import task_store
+        self.save({'roles': {'agy-developer': {'model': 'gpt-6.1-sol'}}})
+        resolved = self.resolve('agy-developer')
+        record = role_config.model_record(resolved, resolved['model'], 'gpt-6.1-sol')
+        self.assertEqual(set(record), role_config.MODEL_RECORD_FIELDS)
+        self.assertTrue(task_store.valid_model_record(record))
+        self.assertTrue(task_store.valid_model_record(
+            role_config.model_record({}, 'example-model-b')))
+        for bad in (dict(record, extra='x'), {k: v for k, v in record.items()
+                                              if k != 'model_family'},
+                    dict(record, resolved_model=None), dict(record, resolved_model='two words'),
+                    dict(record, model_source='file'), dict(record, model_family='Codex'),
+                    dict(record, model_family=''), dict(record, reported_model='x\ny'),
+                    dict(record, requested_model=7), 'record', None, []):
+            with self.subTest(record=bad):
+                self.assertFalse(task_store.valid_model_record(bad))
+
+    def test_real_routes_refuse_a_malformed_model(self):
         cases = (
-            ('agy-developer', 'claude-fable-5-2'),
-            ('agy-developer', 'gpt-6.1-sol'),
-            ('agy-developer', 'GEMINI-4-HYDROGEN-MEDIUM'),
-            ('agy-developer', 'google/gemini-4-hydrogen-medium'),
-            ('claude-developer', 'gemini-4-hydrogen-medium'),
-            ('claude-developer', 'claude-gpt-6'),
-            ('claude-developer', 'anthropic/claude-fable-5-2'),
-            ('claude-developer', 'Claude-fable-5-2'),
+            ('agy-developer', 'has space'),
+            ('agy-developer', '-leading-dash'),
+            ('agy-developer', 'https://example.invalid/m'),
+            ('agy-developer', 'x' * 129),
+            ('claude-developer', 'has space'),
+            ('claude-developer', 'https://example.invalid/m'),
+            ('claude-developer', 'x' * 129),
         )
         for role, model in cases:
             with self.subTest(role=role, model=model):
@@ -251,18 +323,17 @@ class AllowedModelTests(ResolverBase):
                 self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
                 self.assertEqual(caught.exception.owner_override_code, code)
 
-    def test_owner_override_never_bypasses_the_family_or_format_check(self):
-        # Repair 2: a matching, verifiable override cannot admit a wrong-family
-        # or malformed model; the family check refuses before the ref is read.
+    def test_owner_override_never_bypasses_the_format_check(self):
+        # A matching, verifiable override cannot admit a malformed model; the
+        # format check refuses before the ref is read.
         claude_route = {'default_model': 'claude-default',
                         'default_effort': 'high',
                         'allowed_models': ['claude-default']}
         cases = (
-            ('agy-developer', ROUTE, 'agy', 'claude-fable-5-2'),
-            ('agy-developer', ROUTE, 'agy', 'GEMINI-4-HYDROGEN-MEDIUM'),
-            ('claude-developer', claude_route, 'claude',
-             'gemini-4-hydrogen-medium'),
-            ('claude-developer', claude_route, 'claude', 'Claude-fable-5-2'),
+            ('agy-developer', ROUTE, 'agy', 'has space'),
+            ('agy-developer', ROUTE, 'agy', 'https://example.invalid/m'),
+            ('claude-developer', claude_route, 'claude', '-leading-dash'),
+            ('claude-developer', claude_route, 'claude', 'x' * 129),
         )
         for role, route, name, model in cases:
             with self.subTest(role=role, model=model):
@@ -388,53 +459,79 @@ class DispatchPathTests(AccountBase):
         self.assertEqual(model, route['default_model'])
         self.assertEqual(calls, ['agy-developer'])
 
-    def test_agy_dispatch_refuses_a_wrong_family_model(self):
+    def test_agy_dispatch_refuses_a_malformed_model(self):
         self.isolated_resolver()
-        for model in ('model-extra', 'claude-fable-5-2'):
+        for model in (MALFORMED_MODEL, 'https://example.invalid/m'):
             with self.subTest(model=model):
                 self.save({'roles': {'agy-developer': {'model': model}}})
                 with self.assertRaises(LLMToolError) as caught:
                     task_submission_cli._agy_developer_profile(dict(self.routes()['agy']))
                 self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
 
-    def test_agy_dispatch_accepts_a_same_family_model_from_user_config(self):
-        # Owner #2302 P2: gemini-4-hydrogen-medium is not in allowed_models.
+    def test_agy_dispatch_accepts_any_well_formed_model_from_user_config(self):
+        # Owner #2302 part 1: none of these is in allowed_models, and a model of
+        # another family is admitted too. The profile carries the model record.
         calls = self.isolated_resolver()
-        self.save({'roles': {'agy-developer': {'model': 'gemini-4-hydrogen-medium'}}})
-        model, _effort = task_submission_cli._agy_developer_profile(dict(self.routes()['agy']))
-        self.assertEqual(model, 'gemini-4-hydrogen-medium')
-        self.assertEqual(calls, ['agy-developer'])
+        for model, family in (('gemini-4-hydrogen-medium', 'gemini'),
+                              ('claude-sonnet-5-5-medium', 'claude'),
+                              ('gpt-6.1-sol', 'codex')):
+            with self.subTest(model=model):
+                self.save({'roles': {'agy-developer': {'model': model}}})
+                profile = task_submission_cli._agy_developer_profile(dict(self.routes()['agy']))
+                resolved, _effort = profile
+                self.assertEqual(resolved, model)
+                self.assertEqual(profile.model_record, {
+                    'requested_model': model, 'resolved_model': model,
+                    'model_source': 'roles', 'model_family': family,
+                    'reported_model': None})
+        self.assertEqual(calls, ['agy-developer'] * 3)
 
-    def test_claude_dispatch_accepts_a_same_family_model_from_user_config(self):
-        # Owner #2302 P2: claude-fable-5-2 is not in allowed_models.
+    def test_claude_dispatch_accepts_any_well_formed_model_from_user_config(self):
+        # Owner #2302 part 1: claude-fable-5-2 is not in allowed_models, and a
+        # model of another family is admitted too.
+        calls = self.isolated_resolver()
+        for model, family in (('claude-fable-5-2', 'claude'),
+                              ('gemini-4-hydrogen-medium', 'gemini')):
+            with self.subTest(model=model):
+                self.save({'accounts': self.accounts,
+                           'roles': {'claude-developer': {'account': 'work',
+                                                          'model': model}}})
+                profile = task_submission_cli._claude_developer_profile(
+                    dict(self.routes()['claude']))
+                if str(profile[0]) == str(self.account_dir):
+                    account_dir, resolved, _effort = profile
+                else:
+                    resolved, _effort, account_dir = profile
+                self.assertEqual(resolved, model)
+                self.assertEqual(str(account_dir), str(self.account_dir))
+                self.assertEqual(profile.model_record['model_family'], family)
+        self.assertEqual(calls, ['claude-developer'] * 2)
+
+    def test_claude_dispatch_refuses_a_malformed_model(self):
         calls = self.isolated_resolver()
         self.save({'accounts': self.accounts,
                    'roles': {'claude-developer': {'account': 'work',
-                                                  'model': 'claude-fable-5-2'}}})
-        profile = task_submission_cli._claude_developer_profile(dict(self.routes()['claude']))
-        if str(profile[0]) == str(self.account_dir):
-            account_dir, model, _effort = profile
-        else:
-            model, _effort, account_dir = profile
-        self.assertEqual(model, 'claude-fable-5-2')
-        self.assertEqual(str(account_dir), str(self.account_dir))
-        self.assertEqual(calls, ['claude-developer'])
-
-    def test_claude_dispatch_refuses_a_wrong_family_model(self):
-        calls = self.isolated_resolver()
-        self.save({'accounts': self.accounts,
-                   'roles': {'claude-developer': {'account': 'work',
-                                                  'model': 'gemini-4-hydrogen-medium'}}})
+                                                  'model': MALFORMED_MODEL}}})
         with self.assertRaises(LLMToolError) as caught:
             task_submission_cli._claude_developer_profile(dict(self.routes()['claude']))
         self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
         self.assertEqual(calls, ['claude-developer'])
 
-    def test_dispatch_checks_again_when_a_resolver_returns_a_wrong_family_model(self):
-        role = {'model': 'model-extra', 'effort': None, 'account': None}
+    def test_profile_model_record_falls_back_for_a_plain_tuple(self):
+        # A profile function replaced by a plain tuple still gives a record:
+        # the resolved model and its family, with no requested model or source.
+        record = task_submission_cli._profile_model_record(('gpt-6.1-sol', 'high'), 'gpt-6.1-sol')
+        self.assertEqual(record, {
+            'requested_model': None, 'resolved_model': 'gpt-6.1-sol', 'model_source': None,
+            'model_family': 'codex', 'reported_model': None})
+
+    def test_dispatch_checks_again_when_a_resolver_returns_a_malformed_model(self):
+        # The dispatch check does not rely on the resolver having refused it.
+        role = {'model': MALFORMED_MODEL, 'effort': None, 'account': None,
+                'config_dir': '/example/claude-config'}
         with mock.patch.object(role_config, 'resolve_role', return_value=role):
             with self.assertRaises(LLMToolError) as caught:
-                task_submission_cli._agy_developer_profile(dict(self.routes()['agy']))
+                task_submission_cli._claude_developer_profile(dict(self.routes()['claude']))
         self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
 
     def test_dispatch_check_accepts_only_a_matching_verified_override(self):
@@ -453,16 +550,16 @@ class DispatchPathTests(AccountBase):
                         {'owner_override': other})
                 self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
 
-    def test_dispatch_refuses_a_wrong_family_model_before_reading_an_override(self):
-        # Repair 2: the production dispatch path cannot admit a wrong-family
-        # model through a matching override; the ref is never fetched.
+    def test_dispatch_refuses_a_malformed_model_before_reading_an_override(self):
+        # The production dispatch path cannot admit a malformed model through
+        # a matching override; the ref is never fetched.
         self.isolated_resolver()
-        self.save({'roles': {'agy-developer': {'model': 'claude-fable-5-2'}}})
-        fetch = mock.Mock(return_value=comment(route='agy', model='claude-fable-5-2'))
+        self.save({'roles': {'agy-developer': {'model': MALFORMED_MODEL}}})
+        fetch = mock.Mock(return_value=comment(route='agy', model=MALFORMED_MODEL))
         with self.assertRaises(LLMToolError) as caught:
             task_submission_cli._agy_developer_profile(
                 dict(self.routes()['agy']),
-                owner_override={'model': 'claude-fable-5-2', 'ref': REF},
+                owner_override={'model': MALFORMED_MODEL, 'ref': REF},
                 repository=REPOSITORY, fetch_comment=fetch)
         self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
         self.assertIsNone(getattr(caught.exception, 'owner_override_code', None))
@@ -627,7 +724,7 @@ class RolesCommandTests(AccountBase):
 
     def test_lists_extra_configured_roles_and_reports_refusals(self):
         self.save({'roles': {'pm-codex-binding': {'model': 'm1'},
-                             'agy-developer': {'model': 'model-extra'}}})
+                             'agy-developer': {'model': MALFORMED_MODEL}}})
         status, lines = self.run_roles()
         self.assertEqual(status, 1)
         rows = {line.split('\t')[0]: line.split('\t') for line in lines}
