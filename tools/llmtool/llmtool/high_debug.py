@@ -338,11 +338,19 @@ def _session_observed(thread_id, sessions_dir=None, codex_home=None):
                         continue
                     if type(record) is not dict:
                         continue
-                    if record.get('type') not in ('session_meta', 'session_metadata'):
-                        continue
-                    payload = record.get('payload')
-                    if not isinstance(payload, dict):
-                        return 'UNKNOWN', 'UNKNOWN'
+                    is_meta = record.get('type') in ('session_meta', 'session_metadata')
+                    if not is_meta:
+                        if sessions_dir is None:
+                            continue
+                        payload = record.get('payload')
+                        if not isinstance(payload, dict):
+                            payload = record
+                        if 'model' not in payload and 'model' not in record:
+                            continue
+                    else:
+                        payload = record.get('payload')
+                        if not isinstance(payload, dict):
+                            return 'UNKNOWN', 'UNKNOWN'
 
                     session_id = payload.get('id') or payload.get('session_id')
                     if not session_id:
