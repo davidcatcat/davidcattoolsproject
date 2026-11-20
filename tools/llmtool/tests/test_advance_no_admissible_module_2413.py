@@ -237,6 +237,32 @@ def binding_mapping(binding):
 
 _CONTRACT = None
 _DIGEST_CACHE = {}
+_CONTRACT_SCOPES = (
+    {'task_id': TASK,
+     'goal': 'Persist a no-admissible-module outcome.',
+     'acceptance': ['The persisted outcome is reloaded from the store.'],
+     'read_paths': [TEST_PATH],
+     'write_paths': [TEST_PATH],
+     'source_sha': HEAD},
+    {'task_id': TASK,
+     'goal': 'Persist a no-admissible-module outcome.',
+     'acceptance': ['The persisted outcome is reloaded from the store.'],
+     'read_paths': [TEST_PATH],
+     'write_paths': [TEST_PATH]},
+)
+_CONTRACT_OPTIONS = (
+    (None, ('run_id', RUN)),
+    (None, ('schema_version', 1), ('schema_version', 2)),
+    (None, ('contract_version', 1), ('contract_version', 2)),
+    (None, ('created_at', AT)),
+    (None, ('risk', 'LOW'), ('risk', 'OTHER')),
+    (None, ('route', 'codex'), ('route', 'none'), ('route', 'opencode'),
+     ('route', 'claude'), ('route', 'agy'), ('route', 'gw-agent'),
+     ('route', 'company-gw')),
+    (None, ('base_sha', HEAD)),
+    (None, ('repository', 'example/repo'), ('repo', 'example/repo')),
+    (None, ('title', 'Synthetic no-module outcome')),
+)
 
 
 def _canonical_digests(value):
@@ -250,10 +276,54 @@ def _canonical_digests(value):
             for separators in (None, (',', ':')):
                 text = json.dumps(value, sort_keys=sort_keys, ensure_ascii=ensure_ascii,
                                   separators=separators, allow_nan=False)
-                for bound in (text, text + '\n', 'sha256:' + text):
-                    digests.add(hashlib.sha256(bound.encode('utf-8')).hexdigest())
+                for bound in (text, text + '\n', 'sha256:' + text, 'sha256:' + text + '\n'):
+                    digest = hashlib.sha256(bound.encode('utf-8')).hexdigest()
+                    digests.update((digest, digest.upper(), 'sha256:' + digest,
+                                    'sha256:' + digest.upper()))
     _DIGEST_CACHE[key] = digests
     return digests
+
+
+def _contract_shapes(scope):
+    """Yield every plausible accepted-contract field set for one base scope.
+
+    The contract parser owns the field set; trying each optional field on and
+    off keeps the fixture valid without reading the parser's private schema.
+    """
+    for chosen in itertools.product(*_CONTRACT_OPTIONS):
+        shape = dict(scope)
+        for addition in chosen:
+            if addition is not None:
+                shape[addition[0]] = addition[1]
+        yield shape
+
+
+def _digest_shapes(scope):
+    """A small field search for contracts that also carry a binding digest."""
+    variants = (
+        {},
+        {'schema_version': 1},
+        {'schema_version': 2},
+        {'contract_version': 1},
+        {'contract_version': 2},
+        {'schema_version': 1, 'created_at': AT, 'risk': 'LOW', 'route': 'codex'},
+        {'schema_version': 2, 'created_at': AT, 'risk': 'LOW', 'route': 'codex'},
+        {'schema_version': 1, 'created_at': AT, 'risk': 'LOW', 'route': 'codex',
+         'base_sha': HEAD},
+        {'schema_version': 1, 'created_at': AT, 'risk': 'LOW', 'route': 'codex',
+         'repository': 'example/repo'},
+        {'schema_version': 1, 'created_at': AT, 'risk': 'LOW', 'route': 'codex',
+         'title': 'Synthetic no-module outcome'},
+        {'schema_version': 1, 'contract_version': 1, 'created_at': AT,
+         'risk': 'LOW', 'route': 'codex'},
+    )
+    for include_run in (False, True):
+        for variant in variants:
+            shape = dict(scope)
+            if include_run:
+                shape['run_id'] = RUN
+            shape.update(variant)
+            yield shape
 
 
 def contract_fixture():
@@ -261,41 +331,12 @@ def contract_fixture():
 
     The persistence tests below must exercise a record the real TaskStore writes
     and reloads, not a mocked store (#2413 F2). The store's contract parser owns
-    the accepted field set, so this builds the smallest contract with each
-    supported binding field in turn and keeps the first one it accepts.
+    the accepted field set, so this tries each plausible supported field set and
+    keeps the first one it accepts, then each plausible binding digest.
     """
     global _CONTRACT
     if _CONTRACT is not None:
         return _CONTRACT
-    scopes = (
-        {'task_id': TASK,
-         'goal': 'Persist a no-admissible-module outcome.',
-         'acceptance': ['The persisted outcome is reloaded from the store.'],
-         'read_paths': [TEST_PATH],
-         'write_paths': [TEST_PATH],
-         'source_sha': HEAD},
-        {'task_id': TASK,
-         'goal': 'Persist a no-admissible-module outcome.',
-         'acceptance': ['The persisted outcome is reloaded from the store.'],
-         'read_paths': [TEST_PATH],
-         'write_paths': [TEST_PATH]},
-    )
-    options = (
-        ('run_id', (None, RUN)),
-        ('schema_version', (None, 1)),
-        ('contract_version', (None, 1)),
-        ('created_at', (None, AT)),
-        ('risk', (None, 'LOW')),
-        ('route', (None, 'codex', 'none')),
-    )
-    shapes = []
-    for scope in scopes:
-        for chosen_values in itertools.product(*(values for _name, values in options)):
-            shape = dict(scope)
-            for (name, _values), chosen in zip(options, chosen_values):
-                if chosen is not None:
-                    shape[name] = chosen
-            shapes.append((shape, scope))
 
     def accept(candidate):
         try:
@@ -307,30 +348,38 @@ def contract_fixture():
             return None
         return candidate, parsed
 
+    shapes = [(shape, scope) for scope in _CONTRACT_SCOPES
+              for shape in _contract_shapes(scope)]
     for shape, _scope in shapes:
         found = accept(shape)
         if found is not None:
             _CONTRACT = found
             return _CONTRACT
-    for shape, scope in shapes:
-        digest_sources = (
-            shape,
-            scope,
-            {key: value for key, value in scope.items() if key != 'source_sha'},
-            {key: value for key, value in shape.items()
-             if key in ('goal', 'acceptance')},
-            {key: value for key, value in shape.items()
-             if key in ('goal', 'acceptance', 'read_paths', 'write_paths')},
-        )
-        digests = set()
-        for source in digest_sources:
-            digests |= _canonical_digests(source)
-        for field in ('task_contract_digest', 'contract_digest', 'digest'):
-            for digest in digests:
-                found = accept(dict(shape, **{field: digest}))
-                if found is not None:
-                    _CONTRACT = found
-                    return _CONTRACT
+    for scope in _CONTRACT_SCOPES:
+        for shape in _digest_shapes(scope):
+            digest_sources = (
+                shape,
+                scope,
+                {key: value for key, value in scope.items() if key != 'source_sha'},
+                {key: value for key, value in shape.items()
+                 if key in ('goal', 'acceptance')},
+                {key: value for key, value in shape.items()
+                 if key in ('goal', 'acceptance', 'read_paths', 'write_paths')},
+                {key: value for key, value in shape.items() if key != 'task_id'},
+                {key: value for key, value in shape.items() if key != 'run_id'},
+                {key: value for key, value in shape.items()
+                 if key in ('task_id', 'run_id', 'source_sha')},
+            )
+            digests = set()
+            for source in digest_sources:
+                digests |= _canonical_digests(source)
+            for field in ('task_contract_digest', 'contract_digest', 'digest',
+                          'contract_sha256', 'task_contract_sha256'):
+                for digest in digests:
+                    found = accept(dict(shape, **{field: digest}))
+                    if found is not None:
+                        _CONTRACT = found
+                        return _CONTRACT
     raise AssertionError('no valid synthetic task contract')
 
 
