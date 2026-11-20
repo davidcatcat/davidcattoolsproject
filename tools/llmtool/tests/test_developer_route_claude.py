@@ -372,8 +372,10 @@ class ClaudeRouteTests(unittest.TestCase):
         self.assertEqual(config['routes']['claude']['default_model'], 'claude-opus-5-5')
         self.assertEqual(config['routes']['claude']['default_effort'], 'high')
         routes = config['routes']
+        # Owner #2302 part 1: a well-formed id such as 'opus' is admitted; only
+        # a malformed model id is refused.
         for changes in ({'executable': '/usr/bin/claude'}, {'extra': True},
-                        {'default_model': 'opus'}, {'default_effort': 'default'}):
+                        {'default_model': 'has space'}, {'default_effort': 'default'}):
             bad = dict(routes['claude'])
             bad.update(changes)
             data = {'schema_version': 1, 'routes': {'agy': routes['agy'], 'claude': bad}}
@@ -382,6 +384,12 @@ class ClaudeRouteTests(unittest.TestCase):
             with self.assertRaises(RouteError) as caught:
                 load_route_config(path)
             self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
+        admitted = dict(routes['claude'])
+        admitted['default_model'] = 'opus'
+        path = self.root / 'admitted.json'
+        path.write_text(json.dumps({'schema_version': 1,
+                                    'routes': {'agy': routes['agy'], 'claude': admitted}}))
+        self.assertEqual(load_route_config(path)['routes']['claude']['default_model'], 'opus')
         without = {'schema_version': 1, 'routes': {'agy': routes['agy']}}
         path = self.root / 'without.json'
         path.write_text(json.dumps(without))
