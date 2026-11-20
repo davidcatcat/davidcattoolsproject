@@ -102,7 +102,7 @@ class PolicyLimitKeysTests(unittest.TestCase):
             'replan_max', 'test_fail_max', 'review_fail_max', 'waiting_notify_after_hours'))
         self.assertEqual(rp.OPTIONAL_POLICY_LIMITS, {'timeout_continuation_max': (0, 3)})
         policy = rp.load_policy()
-        self.assertEqual({key: policy[key] for key in BASE}, BASE)
+        self.assertEqual({key: policy[key] for key in BASE}, dict(BASE, parent_debug_max=3))
         self.assertEqual(policy['timeout_continuation_max'], 1)
         self.assertEqual(set(policy), {*BASE, 'timeout_continuation_max', *LIMITS,
                                        *LATER_LIMITS})
