@@ -7523,7 +7523,8 @@ def _launched_run_did_no_work(developer, d6_unchanged=None, record=None):
     execution = developer.get('execution')
     provider_evidence = (execution.get('provider_evidence')
                          if type(execution) is dict else None)
-    if ((type(error_code) is str and error_code.endswith('_QUOTA_EXHAUSTED')) or
+    if ((type(error_code) is str and
+         (error_code == 'QUOTA_EXHAUSTED' or error_code.endswith('_QUOTA_EXHAUSTED'))) or
             (type(provider_evidence) is dict and
              provider_evidence.get('condition') == 'QUOTA_EXHAUSTED') or
             error_code == 'CLAUDE_NO_CHANGES'):
@@ -7695,7 +7696,8 @@ def _evidenced_no_work_stop(developer, record):
     if (type(provider_evidence) is dict and
             provider_evidence.get('condition') == 'QUOTA_EXHAUSTED'):
         # Every part of the quota evidence must agree; any gap counts the run.
-        return (error_code.endswith('_QUOTA_EXHAUSTED') and status == 'BLOCKED' and
+        return ((error_code == 'QUOTA_EXHAUSTED' or error_code.endswith('_QUOTA_EXHAUSTED')) and
+                status == 'BLOCKED' and
                 'progress' in developer and
                 _progress_shows_no_change(developer['progress'],
                                           developer.get('source_sha')))

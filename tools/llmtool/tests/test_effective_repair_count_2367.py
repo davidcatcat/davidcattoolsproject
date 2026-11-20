@@ -417,6 +417,7 @@ class EffectiveRepairCountTests(unittest.TestCase):
                 dev.update(source_sha=NEXT_SOURCE, progress={'head_sha': NEXT_SOURCE},
                            executor_task_id=NEXT_EXECUTOR)
                 dev['execution'].update(cleanup_status='CONFIRMED')
+                dev['direct_result_callback']['evidence'].update(source_sha=NEXT_SOURCE)
                 record['completion'].update(executor_task_id=NEXT_EXECUTOR)
                 record['completion']['evidence'].update(source_sha=NEXT_SOURCE)
             records, _ = self._with_round(1, change_affirmative)
@@ -436,6 +437,10 @@ class EffectiveRepairCountTests(unittest.TestCase):
                     changed_files=['README.md']),
                 'completion result head': lambda record, dev: record['completion'][
                     'evidence'].update(result_head=other_head),
+                'callback result head': lambda record, dev: dev['direct_result_callback'][
+                    'evidence'].update(result_head=other_head),
+                'callback source differs': lambda record, dev: dev['direct_result_callback'][
+                    'evidence'].update(source_sha=other_head),
             }
             for name, change in changes.items():
                 with self.subTest(case=name):
