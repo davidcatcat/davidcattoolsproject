@@ -1,10 +1,19 @@
 # Formal verdict comment for `llmtool task complete`
 
-This format applies only when an llmtool Task's formal Claude or Codex review is checked by
-`llmtool task complete --reviewer-task --pr`, which parses it strictly
-(`tools/llmtool/llmtool/task_completion.py`). Every other PR records its review
-conclusion under the [Transition record](pm-continuation.md#transition-record) rule,
+This format applies when an llmtool Task's formal Claude or Codex review is checked by
+`llmtool task complete --reviewer-task --pr` (`tools/llmtool/llmtool/task_completion.py`)
+and when Codex Reviewer output is parsed by review dispatch
+(`tools/llmtool/llmtool/review_dispatch.py`, function `_parse_codex_review_inner` and function `_preflight`).
+Every other PR records its review conclusion under the [Transition record](pm-continuation.md#transition-record) rule,
 which also governs the marker and `Verdict:` line used here.
+
+## Parser backing and version ranges
+
+Backed by `tools/llmtool/llmtool/review_dispatch.py` function `_parse_codex_review_inner` and function `_preflight`:
+- **Formal verdict:** version integer must be in range 1 <= version <= 90 (`Version: v1` .. `Version: v90`).
+- **Security verdict:** version integer must be in range 91 <= version <= 9999 (`Version: v91` .. `Version: v9999`). Note that `dispatch_review` in `tools/llmtool/llmtool/review_dispatch.py` currently enforces `kind == 'formal'`, refusing other kinds with `REVIEW_KIND_UNSUPPORTED` at dispatch time, while kind-aware version validation in function `_preflight` retains the security version range.
+
+## PR comment shape
 
 Every agent posts to GitHub as one shared account, and GitHub refuses APPROVE from
 a PR's own author. The Task's formal Reviewer therefore publishes its verdict as one
@@ -17,6 +26,51 @@ LLMTOOL-REVIEW-BINDING v1 task=<task_id> run=<run_id> contract=<contract_digest>
 FORMAL SECURITY/FUNCTIONAL/QA ACCEPT
 
 <findings, evidence, gates and disposition as free text>
+```
+
+### Minimal valid formal verdict example
+
+```text
+<!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->
+Verdict: PASS | Version: v1 | HEAD: 0123456789abcdef0123456789abcdef01234567
+LLMTOOL-REVIEW-BINDING v1 task=task-1 run=run-1 contract=digest-1 head=0123456789abcdef0123456789abcdef01234567
+FORMAL SECURITY/FUNCTIONAL/QA ACCEPT
+
+No findings.
+```
+
+### Minimal valid security verdict example
+
+```text
+<!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->
+Verdict: PASS | Version: v91 | HEAD: 0123456789abcdef0123456789abcdef01234567
+LLMTOOL-REVIEW-BINDING v1 task=task-1 run=run-1 contract=digest-1 head=0123456789abcdef0123456789abcdef01234567
+FORMAL SECURITY/FUNCTIONAL/QA ACCEPT
+
+No findings.
+```
+
+## Codex Reviewer dispatch JSON reply shape
+
+Backed by `tools/llmtool/llmtool/review_dispatch.py` function `_parse_codex_review_inner`:
+Codex Reviewer emits JSONL stream events. The final agent message (`item.completed` -> `agent_message.text`) must be valid JSON with exact keys:
+- `task_id` (string matching task ID)
+- `run_id` (string matching run ID)
+- `head` (40-hex commit SHA matching result HEAD)
+- `verdict` (string: `'PASS'`, `'FIX'`, `'FAIL'`, or `'BLOCKED'`)
+- `review` (string up to 65536 bytes containing the PR comment format above)
+- `contract_digest` (optional string, value ignored)
+
+### Minimal valid Codex review JSON example
+
+```json
+{
+  "task_id": "task-1",
+  "run_id": "run-1",
+  "head": "0123456789abcdef0123456789abcdef01234567",
+  "verdict": "PASS",
+  "review": "<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->\nVerdict: PASS | Version: v1 | HEAD: 0123456789abcdef0123456789abcdef01234567\nLLMTOOL-REVIEW-BINDING v1 task=task-1 run=run-1 contract=digest-1 head=0123456789abcdef0123456789abcdef01234567\nFORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n\nNo findings."
+}
 ```
 
 - The marker is the first non-empty line and the `Verdict:` line the next one, each
