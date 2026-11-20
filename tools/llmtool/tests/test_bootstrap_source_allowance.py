@@ -781,10 +781,14 @@ class BootstrapSourceAllowanceTests(unittest.TestCase):
             ("push", "origin", "HEAD:refs/heads/feature-branch"): "",
         }
         events = []
+        branch_ref = ("ls-remote", "--heads", "origin", "refs/heads/feature-branch")
+        push_args = ("push", "origin", "HEAD:refs/heads/feature-branch")
 
         def fake_git(root, args):
             key = tuple(args)
             events.append(("git", key))
+            if key == push_args:
+                git_outputs[branch_ref] = f"{self.base}\trefs/heads/feature-branch\n"
             if key in git_outputs:
                 return subprocess.CompletedProcess(args, 0, git_outputs[key], "")
             # Any other command (for example a main fetch or merge) fails.
@@ -798,11 +802,9 @@ class BootstrapSourceAllowanceTests(unittest.TestCase):
             return self.base
 
         d6_binding["branch"] = "feature-branch"
-        with patch.object(task_advance, "_open_pr_present", return_value=True), \
-                patch.object(task_advance, "_publish_pr", return_value=99):
+        with patch.object(task_advance, "_publish_pr", return_value=99):
             published = task_advance._publish_task(
                 record, d6_binding, "task-publish-1",
-                pre_pr_gate=lambda _h, _b: None,
                 git_runner=fake_git,
                 gh_runner=lambda *_a: subprocess.CompletedProcess([], 0, b"", b""),
                 record_result_call=fake_record_result)
@@ -812,8 +814,7 @@ class BootstrapSourceAllowanceTests(unittest.TestCase):
         self.assertEqual(recorded_calls[0]["write_paths"], write_paths)
         self.assertEqual(recorded_calls[0]["task_id"], "task-publish-1")
         # The result is recorded before the push, and main is never fetched or merged.
-        push = ("git", ("push", "origin", "HEAD:refs/heads/feature-branch"))
-        self.assertLess(events.index(("record",)), events.index(push))
+        self.assertLess(events.index(("record",)), events.index(("git", push_args)))
         self.assertFalse(any(event[0] == "git" and event[1][:1] in (("fetch",), ("merge",))
                              for event in events))
 

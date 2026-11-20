@@ -2112,10 +2112,6 @@ class TaskAdvancePublishTests(unittest.TestCase):
                     'number': 23, 'head': {'sha': self.pushed_head()}, 'state': 'open',
                     'merged': False} if path == 'pulls/23' and self.pr_exists else []))
 
-    def assert_no_pr(self):
-        self.assertFalse(self.pr_exists)
-        self.assertFalse(any(args[:2] == ['pr', 'create'] for args in self.gh_calls))
-
     def test_push_opens_and_records_pr_before_testing_its_exact_ref(self):
         self.change_file()
         store = self.gated_store()
