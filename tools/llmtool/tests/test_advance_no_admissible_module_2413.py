@@ -1,6 +1,5 @@
 """#2413: a PR with no EC2-admissible module completes the remote-test step."""
 import hashlib
-import itertools
 import json
 import sys
 import tempfile
@@ -223,169 +222,29 @@ def run_remote(task, get, transport=None):
     return value, store
 
 
-def binding_mapping(binding):
-    import dataclasses
-    if dataclasses.is_dataclass(binding):
-        return dataclasses.asdict(binding)
-    as_dict = getattr(binding, '_asdict', None)
-    if callable(as_dict):
-        return dict(as_dict())
-    if hasattr(binding, '__dict__') and vars(binding):
-        return dict(vars(binding))
-    return dict(binding)
+def synthetic_contract():
+    """A synthetic Task contract in the exact TaskContract field set.
 
-
-_CONTRACT = None
-_DIGEST_CACHE = {}
-_CONTRACT_SCOPES = (
-    {'task_id': TASK,
-     'goal': 'Persist a no-admissible-module outcome.',
-     'acceptance': ['The persisted outcome is reloaded from the store.'],
-     'read_paths': [TEST_PATH],
-     'write_paths': [TEST_PATH],
-     'source_sha': HEAD},
-    {'task_id': TASK,
-     'goal': 'Persist a no-admissible-module outcome.',
-     'acceptance': ['The persisted outcome is reloaded from the store.'],
-     'read_paths': [TEST_PATH],
-     'write_paths': [TEST_PATH]},
-)
-_CONTRACT_OPTIONS = (
-    (None, ('run_id', RUN)),
-    (None, ('schema_version', 1), ('schema_version', 2)),
-    (None, ('contract_version', 1), ('contract_version', 2)),
-    (None, ('created_at', AT)),
-    (None, ('risk', 'LOW'), ('risk', 'OTHER')),
-    (None, ('route', 'codex'), ('route', 'none'), ('route', 'opencode'),
-     ('route', 'claude'), ('route', 'agy'), ('route', 'gw-agent'),
-     ('route', 'company-gw')),
-    (None, ('base_sha', HEAD)),
-    (None, ('repository', 'example/repo'), ('repo', 'example/repo')),
-    (None, ('title', 'Synthetic no-module outcome')),
-)
-
-
-def _canonical_digests(value):
-    """Every digest a strict contract producer might bind to this value."""
-    key = json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True)
-    if key in _DIGEST_CACHE:
-        return _DIGEST_CACHE[key]
-    digests = set()
-    for sort_keys in (True, False):
-        for ensure_ascii in (False, True):
-            for separators in (None, (',', ':')):
-                text = json.dumps(value, sort_keys=sort_keys, ensure_ascii=ensure_ascii,
-                                  separators=separators, allow_nan=False)
-                for bound in (text, text + '\n', 'sha256:' + text, 'sha256:' + text + '\n'):
-                    digest = hashlib.sha256(bound.encode('utf-8')).hexdigest()
-                    digests.update((digest, digest.upper(), 'sha256:' + digest,
-                                    'sha256:' + digest.upper()))
-    _DIGEST_CACHE[key] = digests
-    return digests
-
-
-def _contract_shapes(scope):
-    """Yield every plausible accepted-contract field set for one base scope.
-
-    The contract parser owns the field set; trying each optional field on and
-    off keeps the fixture valid without reading the parser's private schema.
+    The fields are those of task_verification.TaskContract, which the real
+    store parses on every write and read; no value is credential-shaped.
     """
-    for chosen in itertools.product(*_CONTRACT_OPTIONS):
-        shape = dict(scope)
-        for addition in chosen:
-            if addition is not None:
-                shape[addition[0]] = addition[1]
-        yield shape
-
-
-def _digest_shapes(scope):
-    """A small field search for contracts that also carry a binding digest."""
-    variants = (
-        {},
-        {'schema_version': 1},
-        {'schema_version': 2},
-        {'contract_version': 1},
-        {'contract_version': 2},
-        {'schema_version': 1, 'created_at': AT, 'risk': 'LOW', 'route': 'codex'},
-        {'schema_version': 2, 'created_at': AT, 'risk': 'LOW', 'route': 'codex'},
-        {'schema_version': 1, 'created_at': AT, 'risk': 'LOW', 'route': 'codex',
-         'base_sha': HEAD},
-        {'schema_version': 1, 'created_at': AT, 'risk': 'LOW', 'route': 'codex',
-         'repository': 'example/repo'},
-        {'schema_version': 1, 'created_at': AT, 'risk': 'LOW', 'route': 'codex',
-         'title': 'Synthetic no-module outcome'},
-        {'schema_version': 1, 'contract_version': 1, 'created_at': AT,
-         'risk': 'LOW', 'route': 'codex'},
-    )
-    for include_run in (False, True):
-        for variant in variants:
-            shape = dict(scope)
-            if include_run:
-                shape['run_id'] = RUN
-            shape.update(variant)
-            yield shape
-
-
-def contract_fixture():
-    """A real synthetic Task contract parsed by the store's own parser.
-
-    The persistence tests below must exercise a record the real TaskStore writes
-    and reloads, not a mocked store (#2413 F2). The store's contract parser owns
-    the accepted field set, so this tries each plausible supported field set and
-    keeps the first one it accepts, then each plausible binding digest.
-    """
-    global _CONTRACT
-    if _CONTRACT is not None:
-        return _CONTRACT
-
-    def accept(candidate):
-        try:
-            # The store re-serialises the contract this way before parsing it.
-            parsed = ts.parse_task_contract(json.dumps(
-                candidate, ensure_ascii=True, separators=(',', ':')))
-            parsed.binding(RUN)
-        except Exception:
-            return None
-        return candidate, parsed
-
-    shapes = [(shape, scope) for scope in _CONTRACT_SCOPES
-              for shape in _contract_shapes(scope)]
-    for shape, _scope in shapes:
-        found = accept(shape)
-        if found is not None:
-            _CONTRACT = found
-            return _CONTRACT
-    for scope in _CONTRACT_SCOPES:
-        for shape in _digest_shapes(scope):
-            digest_sources = (
-                shape,
-                scope,
-                {key: value for key, value in scope.items() if key != 'source_sha'},
-                {key: value for key, value in shape.items()
-                 if key in ('goal', 'acceptance')},
-                {key: value for key, value in shape.items()
-                 if key in ('goal', 'acceptance', 'read_paths', 'write_paths')},
-                {key: value for key, value in shape.items() if key != 'task_id'},
-                {key: value for key, value in shape.items() if key != 'run_id'},
-                {key: value for key, value in shape.items()
-                 if key in ('task_id', 'run_id', 'source_sha')},
-            )
-            digests = set()
-            for source in digest_sources:
-                digests |= _canonical_digests(source)
-            for field in ('task_contract_digest', 'contract_digest', 'digest',
-                          'contract_sha256', 'task_contract_sha256'):
-                for digest in digests:
-                    found = accept(dict(shape, **{field: digest}))
-                    if found is not None:
-                        _CONTRACT = found
-                        return _CONTRACT
-    raise AssertionError('no valid synthetic task contract')
+    return {
+        'schema_version': 1, 'task_id': TASK, 'contract_version': 1,
+        'previous_digest': None,
+        'goal': 'Persist a no-admissible-module outcome.',
+        'authorized_scope': [TEST_PATH], 'forbidden_scope': [],
+        'criteria': [{'criterion_id': 'persisted-outcome',
+                      'kind': 'DETERMINISTIC_CHECK',
+                      'description': 'The persisted outcome is reloaded from the store.'}],
+    }
 
 
 def real_record():
-    """A complete Task record the real TaskStore both writes and reloads."""
-    contract, parsed = contract_fixture()
+    """A complete Task record the real TaskStore both writes and reloads (#2413 F2)."""
+    contract = synthetic_contract()
+    # The store re-serialises the contract this way before parsing it.
+    parsed = ts.parse_task_contract(json.dumps(
+        contract, ensure_ascii=True, separators=(',', ':')))
     request = '{}'
     return {
         'schema_version': 2, 'task_id': TASK, 'run_id': RUN,
@@ -395,7 +254,7 @@ def real_record():
         'native_session_id': None, 'state': 'PM_RESPONDED',
         'created_at': AT, 'updated_at': AT,
         'task_contract': contract,
-        'task_binding': binding_mapping(parsed.binding(RUN)),
+        'task_binding': parsed.binding(RUN).to_dict(),
         'request': request,
         'request_sha256': hashlib.sha256(request.encode('utf-8')).hexdigest(),
         'response': '{"summary":"synthetic no-module outcome persistence"}',
@@ -405,12 +264,21 @@ def real_record():
     }
 
 
+def real_store(root):
+    """The real TaskStore on a private temporary root.
+
+    The store opens every root component without following links, so the
+    root is resolved first (a temporary directory may sit under a symlink).
+    """
+    return ts.TaskStore(root=Path(root).resolve())
+
+
 class RecordedOutcomeTests(unittest.TestCase):
     """Exercise append_remote_test_outcome on a real written and reloaded Task."""
 
     def test_record_no_admissible_module_uses_the_real_store_append(self):
         with tempfile.TemporaryDirectory() as root:
-            store = ts.TaskStore(root=root)
+            store = real_store(root)
             record = real_record()
             store.create(record)
             with mock.patch.object(rt, 'record_remote_test_outcome_event',
@@ -429,7 +297,7 @@ class RecordedOutcomeTests(unittest.TestCase):
 
     def test_unpersisted_skip_is_not_reported_as_not_required(self):
         with tempfile.TemporaryDirectory() as root:
-            store = ts.TaskStore(root=root)
+            store = real_store(root)
             record = real_record()
             record['published_pr'] = dict(record['published_pr'], pr=PR + 1)
             store.create(record)
@@ -443,12 +311,57 @@ class RecordedOutcomeTests(unittest.TestCase):
 
     def test_real_append_refuses_a_different_published_pr(self):
         with tempfile.TemporaryDirectory() as root:
-            store = ts.TaskStore(root=root)
+            store = real_store(root)
             record = real_record()
             record['published_pr'] = dict(record['published_pr'], pr=PR + 1)
             store.create(record)
             with self.assertRaises(LLMToolError):
                 store.append_remote_test_outcome(TASK, skip_outcome())
+            reloaded = store.get(TASK)
+        self.assertEqual(reloaded.get('remote_test_outcomes', []), [])
+
+    def test_real_append_refuses_a_different_published_head(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = real_store(root)
+            record = real_record()
+            record['published_pr'] = dict(record['published_pr'], head_sha=OTHER_HEAD)
+            store.create(record)
+            with self.assertRaises(LLMToolError):
+                store.append_remote_test_outcome(TASK, skip_outcome())
+            reloaded = store.get(TASK)
+        self.assertEqual(reloaded.get('remote_test_outcomes', []), [])
+
+    def test_real_append_refuses_a_task_with_no_published_pr(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = real_store(root)
+            record = real_record()
+            del record['published_pr']
+            store.create(record)
+            with self.assertRaises(LLMToolError):
+                store.append_remote_test_outcome(TASK, skip_outcome())
+            reloaded = store.get(TASK)
+        self.assertEqual(reloaded.get('remote_test_outcomes', []), [])
+
+    def test_reloaded_skip_satisfies_only_its_pr_and_head(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = real_store(root)
+            store.create(real_record())
+            store.append_remote_test_outcome(TASK, skip_outcome())
+            replay = store.append_remote_test_outcome(TASK, skip_outcome())
+            reloaded = store.get(TASK)
+        self.assertFalse(replay['created'])
+        self.assertEqual(reloaded['remote_test_outcomes'], [skip_outcome()])
+        # Status reads the outcomes exactly as the real store reloaded them; only
+        # the executor binding, normally from the completion, is supplied here.
+        view = dict(reloaded, completion={'executor_task_id': EXEC})
+
+        def status(head, pr):
+            return task_advance._remote_test_status(view, {'result_head': head}, pr)[0]
+
+        self.assertEqual(status(HEAD, PR), rt.NOT_REQUIRED)
+        self.assertIsNone(status(OTHER_HEAD, PR))
+        self.assertIsNone(status(HEAD, PR + 1))
+        self.assertIsNone(status(HEAD, None))
 
 
 class RemoteTestAdmissionTests(unittest.TestCase):
