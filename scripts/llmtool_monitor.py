@@ -9166,7 +9166,7 @@ def monitor_routes(office, processes, board, github, now: float, *, canonical: s
     tasks, task_problem = route_tasks(root)
     fresh = github is not None and github.successful_read and not github.read_failed
     leases = getattr(github, "leases", None)
-    if leases is None:
+    if leases is None or (not fresh and not leases):
         leases = _load_subpm_leases()
     return route_rows(office, switches, problem, dispatch_reasons(raw), tasks, board,
                       leases, now,

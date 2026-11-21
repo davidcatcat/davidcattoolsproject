@@ -11470,6 +11470,12 @@ class RouteOfficeViewTests(unittest.TestCase):
 
 
 class MonitorRoutesTests(unittest.TestCase):
+    def setUp(self):
+        mon.waiting_scan_reset()
+
+    def tearDown(self):
+        mon.waiting_scan_reset()
+
     def test_monitor_routes_reads_the_dispatch_file_and_task_store(self):
         workers = {key: {"dispatch": "ALLOWED", "decided_by": "Owner", "decided_at": "2026-11-10",
                          "reason": "open", "evidence": POLICY_EVIDENCE}
@@ -11570,3 +11576,23 @@ class RouteDelegateTests(unittest.TestCase):
         mismatched_run = mon.RouteDelegate("AGY", NOW - 40, "delegate", "99999999" * 4)
         bound = mon._route_bound([newer, older], [mismatched_run])
         self.assertEqual(bound, set())
+
+    def test_unidentified_process_never_binds_and_reports_uncertainty(self):
+        # Security finding 1: an unidentified process (no Task ID) never binds
+        # to a Task by time alone and reports uncertainty.
+        running_task = RouteRowTests.task("AGY", running=True, when=NOW - 100, task="11111111")
+        unidentified_run = mon.RouteDelegate("AGY", NOW - 40, "delegate", "")
+        bound = mon._route_bound([running_task], [unidentified_run])
+        self.assertEqual(bound, set())
+        rows = {row.name: row for row in mon.route_rows(
+            [], RouteRowTests.ALLOWED, "", {}, [running_task], RouteRowTests.BOARD, [], NOW,
+            delegates=[unidentified_run])}
+        self.assertEqual(rows["AGY"].state, mon.UNCHECKED)
+        self.assertIn("無法確認關聯", rows["AGY"].detail)
+        self.assertIn("有未指定 Task 的派工程序執行中", rows["AGY"].detail)
+        # Without any running Task, the unidentified process still reports uncertainty
+        rows_empty = {row.name: row for row in mon.route_rows(
+            [], RouteRowTests.ALLOWED, "", {}, [], RouteRowTests.BOARD, [], NOW,
+            delegates=[unidentified_run])}
+        self.assertEqual(rows_empty["AGY"].state, mon.UNCHECKED)
+        self.assertIn("有未指定 Task 的派工程序執行中（無法確認關聯）", rows_empty["AGY"].detail)

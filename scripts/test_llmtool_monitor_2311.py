@@ -12,19 +12,48 @@ Covers:
 import json
 import os
 import sys
+import importlib.util
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-SCRIPTS = os.path.dirname(os.path.abspath(__file__))
-if SCRIPTS not in sys.path:
-    sys.path.insert(0, SCRIPTS)
-
-import llmtool_monitor as mon
+_PATH = Path(__file__).with_name("llmtool_monitor.py")
+_SPEC = importlib.util.spec_from_file_location("llmtool_monitor_2311_under_test", _PATH)
+mon = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = mon
+_SPEC.loader.exec_module(mon)
 
 NOW = 1_800_000_000.0
+
+_ISOLATED = tempfile.TemporaryDirectory()
+_RULE_ALERT_ISOLATED = tempfile.TemporaryDirectory()
+_RULE_ALERT_PATCH = patch.object(
+    mon, "RULE_ALERT_FILE",
+    os.path.join(_RULE_ALERT_ISOLATED.name, "rule-file-alerts.json"))
+_SUBPM_LEASE_ISOLATED = tempfile.TemporaryDirectory()
+_SUBPM_LEASE_PATCH = patch.object(
+    mon, "SUBPM_LEASE_FILE",
+    os.path.join(_SUBPM_LEASE_ISOLATED.name, "subpm-leases.json"))
+
+
+def setUpModule():
+    for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CODEX_STATE", "CLAUDE_PROJECTS",
+                 "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS", "GW_AUDIT_ROOT"):
+        setattr(mon, name, os.path.join(_ISOLATED.name, name))
+    _RULE_ALERT_PATCH.start()
+    _SUBPM_LEASE_PATCH.start()
+    mon.waiting_scan_reset()
+
+
+def tearDownModule():
+    mon.waiting_scan_reset()
+    _SUBPM_LEASE_PATCH.stop()
+    _SUBPM_LEASE_ISOLATED.cleanup()
+    _RULE_ALERT_PATCH.stop()
+    _RULE_ALERT_ISOLATED.cleanup()
+    _ISOLATED.cleanup()
 
 
 def iso_stamp(seconds: float) -> str:
