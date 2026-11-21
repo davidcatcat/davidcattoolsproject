@@ -399,6 +399,42 @@ class ConsumerBatchTests(BatchCase):
                     len(task_submission_cli._remote_task_test_paths(task, read_paths=read_paths)),
                     count)
 
+    def test_review_handoff_shows_every_passing_batch(self):
+        first, second = self.batches(12)
+        task = self.task_with(12, sealed(first), sealed(second))
+        line = task_submission_cli._review_ec2_line(task, SHA)
+        rows = line.split('\n')
+        self.assertEqual(len(rows), 2)
+        for row, batch, sealed_receipt in zip(rows, (first, second),
+                                              task['remote_test_receipts']):
+            self.assertIn(f"modules={','.join(batch)}", row)
+            self.assertIn(f"receipt={sealed_receipt['receipt_digest'][:8]}", row)
+        self.assertTrue(rows[0].startswith('batch 1 of 2: '))
+        self.assertTrue(rows[1].startswith('batch 2 of 2: '))
+
+    def test_review_handoff_leaves_out_receipts_behind_a_later_fail_and_repeats(self):
+        first, second = self.batches(12)
+        task = self.task_with(12, sealed(first), sealed(second, 'FAIL'),
+                              sealed(first), sealed(second), sealed(second))
+        rows = task_submission_cli._review_ec2_line(task, SHA).split('\n')
+        self.assertEqual(len(rows), 2)
+        self.assertIn(f"modules={','.join(first)}", rows[0])
+        self.assertIn(f"modules={','.join(second)}", rows[1])
+
+    def test_review_handoff_for_eight_modules_stays_one_unlabelled_line(self):
+        names = tuple(module_names(8))
+        task = self.task_with(8, sealed(names))
+        line = task_submission_cli._review_ec2_line(task, SHA)
+        self.assertNotIn('\n', line)
+        self.assertTrue(line.startswith('EC2 remote-test: result=PASS'))
+
+    def test_review_handoff_with_one_batch_of_twelve_shows_the_failing_receipt_only(self):
+        first, _ = self.batches(12)
+        task = self.task_with(12, sealed(first, 'FAIL'))
+        line = task_submission_cli._review_ec2_line(task, SHA)
+        self.assertNotIn('\n', line)
+        self.assertIn('result=FAIL', line)
+
     def match(self, task):
         paths = task_submission_cli._remote_task_test_paths(
             task, read_paths=task['developer']['read_paths'])

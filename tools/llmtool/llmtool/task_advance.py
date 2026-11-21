@@ -2308,6 +2308,46 @@ def _batch_remote_test_status(record, executor_task, head, declared):
     return _non_pass_receipt_status(receipts[last_bad])
 
 
+def _batch_pass_receipts(record, executor_task, head, declared):
+    """#2457: the PASS receipts that together cover every declared module, oldest first.
+
+    Empty unless every declared module has a PASS receipt at this head after the
+    newest non-PASS receipt. A later receipt that adds no module is left out.
+    """
+    from . import remote_test
+    receipts = remote_test.head_remote_receipts(record, executor_task, head)
+    last_bad, missing = remote_test.batch_missing_modules(receipts, declared)
+    if missing:
+        return []
+    wanted = set(declared)
+    covered = set()
+    kept = []
+    for receipt in receipts[last_bad + 1:]:
+        new = ({item for item in receipt['modules'] if type(item) is str} & wanted) - covered
+        if new:
+            kept.append(receipt)
+            covered |= new
+    return kept
+
+
+def _remote_test_review_receipts(record, head):
+    """Receipts the review handoff shows for this head: every batch behind a batch PASS."""
+    status, _, receipt = _remote_test_status(record, {'result_head': head})
+    if receipt is None:
+        return []
+    if status == 'PASS':
+        from . import remote_test
+        completion = record.get('completion') if type(record) is dict else None
+        executor_task = (completion.get('executor_task_id')
+                         if type(completion) is dict else None)
+        declared = remote_test._task_path_modules(record)
+        if type(executor_task) is str and len(declared) > remote_test._MAX_REMOTE_MODULES:
+            batches = _batch_pass_receipts(record, executor_task, head, declared)
+            if batches:
+                return batches
+    return [receipt]
+
+
 def _remote_test_status(record, d6):
     """Return exact-head remote-test state, bounded excerpt, and validated receipt."""
     head = d6.get('result_head') if type(d6) is dict else None

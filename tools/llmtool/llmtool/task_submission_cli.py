@@ -1758,20 +1758,26 @@ def _review_ec2_line(task, head):
     """Render the receipt that the advance gate accepts for this exact HEAD."""
     from . import task_advance  # task_advance imports this module at load time.
     try:
-        receipt = task_advance._remote_test_status(task, {'result_head': head})[2]
-        summary = (task_advance._remote_test_receipt_summary(
-            {'remote_test_receipts': [receipt]}, head) if receipt is not None else None)
+        # #2457: a Task with more modules than one EC2 run shows every batch.
+        receipts = task_advance._remote_test_review_receipts(task, head)
+        summaries = [task_advance._remote_test_receipt_summary(
+            {'remote_test_receipts': [receipt]}, head) for receipt in receipts]
     except Exception:
         return _REVIEW_EC2_NONE
-    if summary is None:
+    if not summaries or any(summary is None for summary in summaries):
         return _REVIEW_EC2_NONE
-    hosted_run_id = summary.get('hosted_run_id')
-    prefix = (f"remote-test (GitHub-hosted run {hosted_run_id}): result="
-              if hosted_run_id is not None
-              else "EC2 remote-test: result=")
-    return (f"{prefix}{summary['result']}, "
-            f"modules={','.join(summary['modules'])}, tests run={summary['ran_total']}, "
-            f"seconds={summary['elapsed_s']}, receipt={summary['receipt_digest']}")
+    lines = []
+    for index, summary in enumerate(summaries, 1):
+        hosted_run_id = summary.get('hosted_run_id')
+        prefix = (f"remote-test (GitHub-hosted run {hosted_run_id}): result="
+                  if hosted_run_id is not None
+                  else "EC2 remote-test: result=")
+        label = f"batch {index} of {len(summaries)}: " if len(summaries) > 1 else ''
+        lines.append(f"{label}{prefix}{summary['result']}, "
+                     f"modules={','.join(summary['modules'])}, "
+                     f"tests run={summary['ran_total']}, "
+                     f"seconds={summary['elapsed_s']}, receipt={summary['receipt_digest']}")
+    return '\n'.join(lines)
 
 
 def _review_ci_value(value):
