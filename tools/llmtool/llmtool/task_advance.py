@@ -2249,6 +2249,75 @@ def _head_review_claim(record, number, head):
     return max(matching, key=lambda item: item.get('version', 0), default=None)
 
 
+# #2486: fixed codes for a refused review whose one bounded re-run is not allowed.
+REVIEW_RERUN_RECEIPT_INVALID = 'REVIEW_RERUN_RECEIPT_INVALID'
+REVIEW_RERUN_ALREADY_DONE = 'REVIEW_RERUN_ALREADY_DONE'
+REVIEW_RERUN_HEAD_CHANGED = 'REVIEW_RERUN_HEAD_CHANGED'
+REVIEW_RERUN_CONTRACT_CHANGED = 'REVIEW_RERUN_CONTRACT_CHANGED'
+REVIEW_RERUN_REVIEWER_LIVE = 'REVIEW_RERUN_REVIEWER_LIVE'
+REVIEW_RERUN_RECORD_FAILED = 'REVIEW_RERUN_RECORD_FAILED'
+
+
+def _reviewer_process_live(claim):
+    """True when a reviewer attempt may still be running; doubt refuses.
+
+    A COMPLETED claim has ended. A stored fixed-word refusal (UNKNOWN with a
+    failure_reason) ended with nothing posted, so it is only a doubt when it
+    also carries a bound native session id. Every other state, including
+    CLAIMED, DISPATCHED and UNKNOWN without a refusal, may still be running.
+    """
+    if type(claim) is not dict:
+        return True
+    state = claim.get('state')
+    if state == 'COMPLETED':
+        return False
+    if (state == 'UNKNOWN' and
+            _failure_reason(claim.get('failure_reason')) is not None):
+        return claim.get('native_session_id') is not None
+    return True
+
+
+def _review_refusal_rerun(record, claim, d6, pr, store, github_get):
+    """Check one bounded automatic re-run of a stored refusal.
+
+    Return (next_version, None) when it is allowed, (None, code) for a fixed
+    refusal, or (None, None) when the claim is not a stored refusal.
+    """
+    if (type(claim) is not dict or claim.get('state') != 'UNKNOWN' or
+            _failure_reason(claim.get('failure_reason')) is None):
+        return None, None
+    receipt = review_dispatch.read_refusal_receipt(
+        store=store, task_id=record.get('task_id'), claim=claim)
+    if receipt is None:
+        return None, REVIEW_RERUN_RECEIPT_INVALID
+    if 'rerun' in receipt or receipt.get('automatic_rerun') is True:
+        return None, REVIEW_RERUN_ALREADY_DONE
+    head = claim.get('head_sha')
+    result_head = d6.get('result_head') if type(d6) is dict else None
+    pr_head = pr.get('head') if type(pr) is dict else None
+    if (type(head) is not str or head != result_head or
+            type(pr_head) is not dict or pr_head.get('sha') != head):
+        return None, REVIEW_RERUN_HEAD_CHANGED
+    binding = record.get('task_binding')
+    contract_digest = binding.get('contract_digest') if type(binding) is dict else None
+    if (type(contract_digest) is not str or
+            receipt.get('contract_digest') != contract_digest):
+        return None, REVIEW_RERUN_CONTRACT_CHANGED
+    # #2486 security v91: any attempt for this PR and head may still be running,
+    # not only the newest refused claim. One live attempt is doubt; doubt refuses.
+    live_attempts = [item for item in _claims(record)
+                     if type(item) is dict and item.get('pr') == claim.get('pr') and
+                     item.get('head_sha') == head]
+    if any(_reviewer_process_live(item) for item in live_attempts):
+        return None, REVIEW_RERUN_REVIEWER_LIVE
+    if not _review_verdict_absent(claim, github_get):
+        return None, None
+    versions = [item.get('version') for item in _claims(record)
+                if type(item) is dict and type(item.get('version')) is int and
+                not isinstance(item.get('version'), bool)]
+    return max(versions, default=0) + 1, None
+
+
 def _may_be_review_verdict(body, head, version):
     """Treat anything shaped like a verdict for this head and version as posted."""
     if head not in body or not any(mark in body for mark in (
@@ -2607,7 +2676,8 @@ def decide(record, d6, pr, related, docs_only=False):
         return _pre_review_action(record, d6, pr, related, result_head, docs_only)
     claim = max(matching, key=lambda item: item.get('version', 0))
     if claim.get('state') == 'UNKNOWN' and _failure_reason(claim.get('failure_reason')):
-        # One head gets one redispatch: any earlier claim on it has spent that.
+        # #2486: advance may re-run the newest stored refusal once even when
+        # older claims exist on the head; decide() itself only names the stop.
         if sum(type(item) is dict and item.get('head_sha') == result_head
                for item in claims) > 1:
             return 'REVIEW_UNUSABLE_STOPPED'
@@ -3501,9 +3571,31 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
     result, codes, refusal_dict = None, [], None
     redispatch_reason = None
     ci_routed = False
+    rerun_version = None
+    rerun_claim = None
+    rerun_contract = None
+    rerun_refusal_code = None
+    if step in ('REVIEW_REDISPATCH', 'REVIEW_UNUSABLE_STOPPED'):
+        # #2486: a stored refusal may be re-run exactly once even when older
+        # claims exist on the head. The receipt proves the refusal and records
+        # the re-run, so it can never repeat.
+        candidate = _head_review_claim(record, number, d6['result_head'])
+        rerun_version, rerun_refusal_code = _review_refusal_rerun(
+            record, candidate, d6, pr, store, get)
+        if rerun_version is not None:
+            step = 'REVIEW_REDISPATCH'
+            binding = record.get('task_binding')
+            rerun_claim = candidate
+            rerun_contract = (binding.get('contract_digest')
+                              if type(binding) is dict else None)
+            redispatch_reason = _failure_reason(candidate.get('failure_reason'))
+        elif rerun_refusal_code is not None:
+            step = 'REVIEW_UNUSABLE_STOPPED'
     if step == 'REVIEW_REDISPATCH':
         unusable = _head_review_claim(record, number, d6['result_head'])
-        if unusable is not None and _review_verdict_absent(unusable, get):
+        if rerun_version is not None:
+            step = 'DISPATCH_REVIEW'
+        elif unusable is not None and _review_verdict_absent(unusable, get):
             step = 'DISPATCH_REVIEW'
             redispatch_reason = _failure_reason(unusable.get('failure_reason'))
         else:
@@ -3569,50 +3661,65 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
     if ci_routed:
         pass   # _route_ci_failure already set the step, codes and result.
     elif step == 'DISPATCH_REVIEW':
-        claims = _claims(record)
-        versions = [c.get('version', 0) for c in claims if type(c) is dict and
-                    type(c.get('version')) is int]
-        version = max(versions, default=0) + 1
-        invoke = dispatch_review_call or review_dispatch.dispatch_review
-        if redispatch_reason is not None:
-            codes.extend(('REVIEW_REDISPATCHED', redispatch_reason))
-        try:
+        rerun_recorded = True
+        if rerun_version is not None:
+            # Record the one re-run before starting it. A crash after this point
+            # cannot repeat it for the same refusal.
+            rerun_recorded = review_dispatch.mark_refusal_rerun(
+                store=store, task_id=task_id, claim=rerun_claim,
+                contract_digest=rerun_contract, rerun_version=rerun_version)
+        if not rerun_recorded:
+            step = 'REVIEW_UNUSABLE_STOPPED'
+            codes.append(REVIEW_RERUN_RECORD_FAILED)
+        else:
+            claims = _claims(record)
+            versions = [c.get('version', 0) for c in claims if type(c) is dict and
+                        type(c.get('version')) is int]
+            version = (rerun_version if rerun_version is not None
+                       else max(versions, default=0) + 1)
+            invoke = dispatch_review_call or review_dispatch.dispatch_review
+            if redispatch_reason is not None:
+                codes.extend(('REVIEW_REDISPATCHED', redispatch_reason))
+            rerun_kwargs = ({} if rerun_version is None else {'refusal_rerun': True})
             try:
-                result = invoke(store=store, task_id=task_id, executor_task=executor_task,
-                                pr_number=number, version=version,
-                                **({} if blocked_reviewer is None else
-                                   {'reviewer': blocked_reviewer}))
+                try:
+                    result = invoke(store=store, task_id=task_id, executor_task=executor_task,
+                                    pr_number=number, version=version,
+                                    **({} if blocked_reviewer is None else
+                                       {'reviewer': blocked_reviewer}),
+                                    **rerun_kwargs)
+                except Exception as exc:
+                    # A P2 redispatch already uses the alternate: no P1 fallback on top.
+                    fallback = None if blocked_reviewer else _reviewer_fallback(record, exc)
+                    if fallback is None:
+                        raise
+                    # #1831 P1: one fallback per step, through dispatch_review only.
+                    alternate, original = fallback
+                    codes.append(original)
+                    if alternate is not None:
+                        codes.append('REVIEWER_FALLBACK')
+                        try:
+                            result = invoke(store=store, task_id=task_id,
+                                            executor_task=executor_task, pr_number=number,
+                                            version=version, reviewer=alternate,
+                                            **rerun_kwargs)
+                        except Exception as alt_exc:
+                            if (getattr(alt_exc, 'review_dispatch_code', None) not in
+                                    _REVIEWER_ROUTE_UNAVAILABLE):
+                                # Security v91 F1: any other refusal of the alternate keeps
+                                # the existing handling (failure reason, refusal receipt).
+                                raise
+                            codes.append(_refusal(alt_exc, 'review_dispatch_code'))
+                            alternate = None
+                    if alternate is None:
+                        step = 'REVIEWER_UNAVAILABLE'
+                        codes.append('REVIEWER_UNAVAILABLE')
             except Exception as exc:
-                # A P2 redispatch already uses the alternate: no P1 fallback on top.
-                fallback = None if blocked_reviewer else _reviewer_fallback(record, exc)
-                if fallback is None:
-                    raise
-                # #1831 P1: one fallback per step, through dispatch_review only.
-                alternate, original = fallback
-                codes.append(original)
-                if alternate is not None:
-                    codes.append('REVIEWER_FALLBACK')
-                    try:
-                        result = invoke(store=store, task_id=task_id,
-                                        executor_task=executor_task, pr_number=number,
-                                        version=version, reviewer=alternate)
-                    except Exception as alt_exc:
-                        if (getattr(alt_exc, 'review_dispatch_code', None) not in
-                                _REVIEWER_ROUTE_UNAVAILABLE):
-                            # Security v91 F1: any other refusal of the alternate keeps
-                            # the existing handling (failure reason, refusal receipt).
-                            raise
-                        codes.append(_refusal(alt_exc, 'review_dispatch_code'))
-                        alternate = None
-                if alternate is None:
-                    step = 'REVIEWER_UNAVAILABLE'
-                    codes.append('REVIEWER_UNAVAILABLE')
-        except Exception as exc:
-            codes.append(_refusal(exc, 'review_dispatch_code'))
-            failure = _failure_reason(getattr(exc, 'review_failure_reason', None))
-            if failure is not None:
-                codes.append(failure)
-            refusal_dict = _well_formed_review_refusal(getattr(exc, 'review_refusal', None))
+                codes.append(_refusal(exc, 'review_dispatch_code'))
+                failure = _failure_reason(getattr(exc, 'review_failure_reason', None))
+                if failure is not None:
+                    codes.append(failure)
+                refusal_dict = _well_formed_review_refusal(getattr(exc, 'review_refusal', None))
         if type(result) is dict:
             review_text = result.get('review_text')
             if (result.get('state') == 'COMPLETED' and
@@ -3887,6 +3994,8 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         codes.append('PR_MERGED_NO_REVIEW')
     elif step in ('REVIEW_OUTCOME_UNKNOWN', 'REVIEW_UNUSABLE_STOPPED'):
         codes.append(step)
+        if rerun_refusal_code is not None:
+            codes.append(rerun_refusal_code)
         claim = _head_review_claim(record, number, d6['result_head'])
         failure = _failure_reason(claim.get('failure_reason')) if claim else None
         if failure is not None:
