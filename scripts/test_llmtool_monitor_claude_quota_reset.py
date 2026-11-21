@@ -89,8 +89,8 @@ class TestClaudeQuotaResetParsing(unittest.TestCase):
         self.assertEqual(reset_ts, expected_dt.timestamp())
 
 
-class TestLlmtoolMonitorClaudeQuotaReset(unittest.TestCase):
-    """End-to-end quota_warnings tests for Claude quota reset behavior (A1-A4)."""
+class _SessionFixture:
+    """Shared fixture: a temp directory of per-account Claude session logs."""
 
     def setUp(self):
         self.test_dir = tempfile.mkdtemp(prefix="test-claude-quota-")
@@ -118,6 +118,10 @@ class TestLlmtoolMonitorClaudeQuotaReset(unittest.TestCase):
         os.utime(session_path, (mtime, mtime))
         os.utime(proj_dir, (mtime, mtime))
         return top
+
+
+class TestLlmtoolMonitorClaudeQuotaReset(_SessionFixture, unittest.TestCase):
+    """End-to-end quota_warnings tests for Claude quota reset behavior (A1-A4)."""
 
     def test_a1_reset_time_passed_not_shown(self):
         # A1: once the reported reset time has passed, the monitor no longer shows that account as at its limit.
@@ -264,6 +268,92 @@ class TestLlmtoolMonitorClaudeQuotaReset(unittest.TestCase):
 
         warnings = monitor.quota_warnings(now_ts, claude_root=[top1, top2])
         self.assertEqual(warnings, ["Claude（.claude-account2）已到用量上限，resets 5:30am"])
+
+
+def _zone_available(name: str) -> bool:
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(name)
+        return True
+    except Exception:
+        return False
+
+
+class TestClaudeQuotaResetNamedZone(_SessionFixture, unittest.TestCase):
+    """A notice that names its zone is read in that zone, whatever the local zone is.
+    Hit times use the ISO string form Claude session logs carry."""
+
+    ZONE = "Asia/Taipei"
+    HIT_ISO = "2026-11-19T19:30:00Z"   # 03:30 in Asia/Taipei
+
+    def _hit(self, text: str) -> list[dict]:
+        return [{
+            "timestamp": self.HIT_ISO,
+            "error": "rate_limit",
+            "message": {"content": [{"text": text}]},
+        }]
+
+    def _utc(self, hour: int, minute: int) -> float:
+        # 2026-11-19 UTC clock time; Asia/Taipei is UTC+8, so 20:41 UTC is 04:41 next day there.
+        from datetime import timezone
+        return datetime(2026, 11, 19, hour, minute, tzinfo=timezone.utc).timestamp()
+
+    @unittest.skipUnless(_zone_available(ZONE), "tz database not available")
+    def test_named_zone_reset_passed_not_shown(self):
+        now_ts = self._utc(20, 41)   # 04:41 in Asia/Taipei
+        top = self._create_account_session(
+            ".claude-account3", self._hit("Limit reached, resets 4:40am (Asia/Taipei)"), mtime=now_ts)
+        self.assertEqual(monitor.quota_warnings(now_ts, claude_root=top), [])
+
+    @unittest.skipUnless(_zone_available(ZONE), "tz database not available")
+    def test_named_zone_reset_not_passed_shows_without_zone_in_line(self):
+        now_ts = self._utc(20, 20)   # 04:20 in Asia/Taipei
+        top = self._create_account_session(
+            ".claude-account3", self._hit("Limit reached, resets 4:40am (Asia/Taipei)"), mtime=now_ts)
+        self.assertEqual(monitor.quota_warnings(now_ts, claude_root=top),
+                         ["Claude（.claude-account3）已到用量上限，resets 4:40am"])
+
+    @unittest.skipUnless(_zone_available(ZONE), "tz database not available")
+    def test_named_zone_next_day_reset_within_one_hour_still_shows(self):
+        # Hit 04:50 Asia/Taipei saying resets 4:40am means the next day; at 05:00 it still shows.
+        hit = [{"timestamp": "2026-11-19T20:50:00Z", "error": "rate_limit",
+                "message": {"content": [{"text": "resets 4:40am (Asia/Taipei)"}]}}]
+        now_ts = self._utc(21, 0)
+        top = self._create_account_session(".claude-account3", hit, mtime=now_ts)
+        self.assertEqual(monitor.quota_warnings(now_ts, claude_root=top),
+                         ["Claude（.claude-account3）已到用量上限，resets 4:40am"])
+
+    def test_unresolvable_zone_keeps_current_behaviour(self):
+        # A zone that cannot be resolved is not a readable reset time (A3): still shown.
+        now_ts = self._utc(21, 30)
+        top = self._create_account_session(
+            ".claude-account3", self._hit("resets 4:40am (Mars/Olympus)"), mtime=now_ts)
+        self.assertEqual(monitor.quota_warnings(now_ts, claude_root=top),
+                         ["Claude（.claude-account3）已到用量上限，resets 4:40am"])
+
+    def test_unresolvable_zone_helper_returns_none(self):
+        self.assertIsNone(monitor._claude_quota_reset_timestamp(
+            "4:40am", self._utc(19, 30), "Mars/Olympus"))
+        self.assertIsNone(monitor._claude_quota_reset_timestamp(
+            "4:40am", self._utc(19, 30), "../etc"))
+
+    @unittest.skipUnless(_zone_available(ZONE), "tz database not available")
+    def test_named_zone_helper_value(self):
+        from datetime import timezone
+        got = monitor._claude_quota_reset_timestamp("4:40am", self._utc(19, 30), self.ZONE)
+        # 04:40 Asia/Taipei on 2026-11-20 is 20:40 UTC on 2026-11-19.
+        self.assertEqual(got, datetime(2026, 11, 19, 20, 40, tzinfo=timezone.utc).timestamp())
+
+    def test_note_without_zone_text_in_parentheses_is_read_as_local(self):
+        # Parenthesised words that are not a single zone token do not turn the notice unreadable.
+        hit_dt = datetime(2026, 11, 20, 3, 30, 0)
+        now_ts = datetime(2026, 11, 20, 4, 41, 0).timestamp()
+        top = self._create_account_session(
+            ".claude-account3",
+            [{"timestamp": hit_dt.timestamp(), "error": "rate_limit",
+              "message": {"content": [{"text": "resets 4:40am (see usage page)"}]}}],
+            mtime=now_ts)
+        self.assertEqual(monitor.quota_warnings(now_ts, claude_root=top), [])
 
 
 if __name__ == "__main__":
