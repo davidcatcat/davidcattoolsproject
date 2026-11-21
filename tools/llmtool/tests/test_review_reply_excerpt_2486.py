@@ -1,9 +1,12 @@
 """#2486: a refused plain reply leaves screened evidence on the refusal receipt.
 
+#2487 security v91 (CWE-532): a pattern screen cannot prove free reviewer text
+safe, so the receipt holds a content-free diagnostic instead: fixed categories,
+fixed JSON key names, fixed status words and counts. No reply prose is stored.
+
 Every receipt still records the fixed-word shape and stays ``not_a_verdict``.
-The new ``reply_excerpt`` field holds the bounded reply text only after the
-existing sensitive-content screen passes. A screen refusal or undecodable
-bytes keep a fixed refusal word and no text.
+A screen refusal or undecodable bytes keep a fixed refusal word and no reply
+diagnostic.
 """
 import json
 import unittest
@@ -16,9 +19,20 @@ from llmtool.errors import LLMToolError
 import test_review_dispatch as base
 from test_review_dispatch import HEAD, setUpModule, tearDownModule  # noqa: F401
 
+MARKER = 'synthetic-marker-prose'
+_FIXED_KINDS = frozenset((
+    'code_fence', 'json_array', 'json_object', 'json_scalar', 'text'))
+_FIXED_FIRST = frozenset(('blank', 'brace', 'digit', 'letter', 'other'))
+_FIXED_STATUS = frozenset(('PASS', 'FIX', 'FAIL', 'BLOCKED'))
+
 
 def _pass_screen(text, _limit):
     return text
+
+
+def _refuse_screen(_text, _limit):
+    # Test data rule: the screen is injected, never the detector's patterns.
+    raise LLMToolError('synthetic screen refusal')
 
 
 class ReplyExcerptReceiptTests(unittest.TestCase):
@@ -43,59 +57,66 @@ class ReplyExcerptReceiptTests(unittest.TestCase):
 
     def _receipt(self, exc):
         path = Path(exc.review_refusal['receipt_path'])
-        return json.loads(path.read_text(encoding='utf-8'))
+        self.receipt_text = path.read_text(encoding='utf-8')
+        return json.loads(self.receipt_text)
 
-    def test_short_plain_reply_keeps_shape_and_screened_excerpt(self):
-        # (a) A short plain-text reply is refused as non-JSONL.
-        reply = 'short synthetic reply'
+    def _assert_no_text(self, receipt, marker=MARKER):
+        self.assertNotIn(marker, self.receipt_text)
+        self.assertNotIn('reply_excerpt', receipt)
+
+    def test_short_plain_text_reply_shows_cause_class_without_text(self):
+        # (a) A short plain-text reply is refused as non-JSONL. The diagnostic
+        # names the cause class (plain text), never the reply itself.
+        reply = MARKER + ' short reply'
         exc = self._refusal(reply.encode('utf-8'), _pass_screen)
 
         receipt = self._receipt(exc)
         self.assertEqual(receipt['failure_reason'], 'OUTPUT_NOT_JSONL')
-        self.assertEqual(receipt['excerpt'], exc.review_refusal['excerpt'])
         self.assertTrue(receipt['excerpt'].startswith('OUTPUT_SHAPE '))
-        self.assertEqual(receipt['reply_excerpt'], reply)
-        self.assertNotIn('reply_excerpt_truncated', receipt)
+        diagnostic = receipt['reply_diagnostic']
+        self.assertEqual(diagnostic['kind'], 'text')
+        self.assertEqual(diagnostic['first'], 'letter')
+        self.assertEqual(diagnostic['bytes'], len(reply.encode('utf-8')))
+        self.assertEqual(diagnostic['lines'], 1)
+        self.assertIs(diagnostic['truncated'], False)
+        self._assert_no_text(receipt)
 
-    def test_jsonl_stream_with_plain_reply_keeps_shape_and_excerpt(self):
+    def test_jsonl_stream_with_bad_line_keeps_content_free_diagnostic(self):
         # The PR #2484 form: a readable agent message followed by a bad line.
-        reply = 'synthetic plain reviewer reply'
+        reply = MARKER + ' plain reviewer reply'
         raw = base._codex_event_stream(reply) + b'\nnot jsonl\n'
         exc = self._refusal(raw, _pass_screen)
 
         receipt = self._receipt(exc)
         self.assertEqual(receipt['failure_reason'], 'OUTPUT_NOT_JSONL')
         self.assertTrue(receipt['excerpt'].startswith('REPLY_SHAPE '))
-        self.assertEqual(receipt['reply_excerpt'], reply)
+        self.assertEqual(receipt['reply_diagnostic']['kind'], 'text')
+        self._assert_no_text(receipt)
 
-    def test_long_reply_excerpt_is_bounded_and_marked_truncated(self):
-        # (b) The excerpt is cut to the bound and marked truncated.
-        reply = '\n'.join('line %02d synthetic reply content' % index
-                          for index in range(60))
+    def test_long_reply_diagnostic_is_bounded_without_text(self):
+        # (b) A long reply is marked truncated; only counts are stored.
+        reply = '\n'.join('line %02d %s' % (index, MARKER) for index in range(60))
         exc = self._refusal(reply.encode('utf-8'), _pass_screen)
 
         receipt = self._receipt(exc)
-        excerpt = receipt['reply_excerpt']
-        self.assertLessEqual(len(excerpt.encode('utf-8')), 2048)
-        self.assertLessEqual(len(excerpt.splitlines()), 40)
-        self.assertTrue(reply.startswith(excerpt))
-        self.assertIs(receipt['reply_excerpt_truncated'], True)
-        self.assertTrue(receipt['excerpt'].startswith('OUTPUT_SHAPE '))
+        diagnostic = receipt['reply_diagnostic']
+        self.assertEqual(diagnostic['lines'], 60)
+        self.assertIs(diagnostic['truncated'], True)
+        self.assertLessEqual(len(json.dumps(receipt).encode('utf-8')), 4096)
+        self._assert_no_text(receipt)
 
-    def test_screened_reply_keeps_a_fixed_word_and_no_text(self):
-        # (c) The refusal-flow test injects the screen; its refusal keeps no text.
-        reply = 'synthetic reply refused by the screen'
-
-        def refuse(_text, _limit):
-            raise LLMToolError('sensitive')
-
-        exc = self._refusal(reply.encode('utf-8'), refuse)
+    def test_credential_like_reply_is_not_persisted(self):
+        # (c) The screen refusal path stands in for the sensitive detector; the
+        # test itself never contains a credential-shaped string (test data rule).
+        reply = 'synthetic-sensitive-value\n' + MARKER
+        exc = self._refusal(reply.encode('utf-8'), _refuse_screen)
 
         receipt = self._receipt(exc)
         self.assertEqual(receipt['label'], review_dispatch.REVIEW_OUTPUT_WITHHELD)
         self.assertNotIn('excerpt', receipt)
-        self.assertNotIn('reply_excerpt', receipt)
-        self.assertNotIn(reply, json.dumps(receipt))
+        self.assertNotIn('reply_diagnostic', receipt)
+        self.assertNotIn(MARKER, json.dumps(receipt))
+        self.assertNotIn('synthetic-sensitive-value', json.dumps(receipt))
 
     def test_undecodable_reply_keeps_a_fixed_word_and_no_text(self):
         # (d) Undecodable bytes cannot be screened, so only a word is stored.
@@ -105,7 +126,7 @@ class ReplyExcerptReceiptTests(unittest.TestCase):
         receipt = self._receipt(exc)
         self.assertEqual(receipt['label'], review_dispatch.REVIEW_OUTPUT_UNDECODABLE)
         self.assertNotIn('excerpt', receipt)
-        self.assertNotIn('reply_excerpt', receipt)
+        self.assertNotIn('reply_diagnostic', receipt)
 
     def test_valid_jsonl_verdict_is_unchanged_and_writes_no_receipt(self):
         # (e) A valid JSONL verdict keeps the existing success path.
@@ -128,7 +149,7 @@ class ReplyExcerptReceiptTests(unittest.TestCase):
     def test_receipt_is_not_a_verdict_and_nothing_is_posted(self):
         # (f) Even with the new field the receipt is not a verdict and no
         # GitHub post is attempted (the module fixtures fail any post).
-        reply = 'short synthetic reply'
+        reply = MARKER + ' short reply'
         exc = self._refusal(reply.encode('utf-8'), _pass_screen)
 
         receipt = self._receipt(exc)
@@ -138,6 +159,49 @@ class ReplyExcerptReceiptTests(unittest.TestCase):
         claim = self.store.get(self.task_id)['review_dispatch_claim'][0]
         self.assertEqual(claim['state'], 'UNKNOWN')
         self.assertNotIn('review_result', claim)
+
+    def test_arbitrary_private_prose_is_never_persisted(self):
+        # (g) Private-looking prose with no credential pattern leaves no words.
+        reply = ('A private-looking narrative about a named person and place.\n'
+                 'It mentions ' + MARKER + ' only as a test marker.')
+        exc = self._refusal(reply.encode('utf-8'), _pass_screen)
+
+        receipt = self._receipt(exc)
+        self.assertEqual(receipt['reply_diagnostic']['kind'], 'text')
+        for phrase in ('narrative', 'named person', MARKER):
+            self.assertNotIn(phrase, self.receipt_text)
+        self._assert_no_text(receipt)
+
+    def test_json_reply_diagnostic_keeps_only_fixed_key_names(self):
+        # A JSON-looking reply may name arbitrary keys; only fixed verdict key
+        # names are kept, so a private key name cannot reach the receipt.
+        reply = json.dumps({'task_id': 't', 'private-note': MARKER})
+        raw = base._codex_event_stream(reply, plain=True) + b'\nnot jsonl\n'
+        exc = self._refusal(raw, _pass_screen)
+
+        receipt = self._receipt(exc)
+        diagnostic = receipt['reply_diagnostic']
+        self.assertEqual(diagnostic['kind'], 'json_object')
+        self.assertEqual(diagnostic['keys'], ['task_id'])
+        self.assertNotIn('private-note', self.receipt_text)
+        self._assert_no_text(receipt)
+
+    def test_diagnostic_holds_only_fixed_words_and_counts(self):
+        # The schema itself proves no free reply text can reach the receipt.
+        reply = MARKER + ' short reply'
+        exc = self._refusal(reply.encode('utf-8'), _pass_screen)
+        diagnostic = self._receipt(exc)['reply_diagnostic']
+
+        self.assertIn(diagnostic['kind'], _FIXED_KINDS)
+        self.assertIn(diagnostic['first'], _FIXED_FIRST)
+        self.assertIs(type(diagnostic['bytes']), int)
+        self.assertIs(type(diagnostic['lines']), int)
+        self.assertIs(type(diagnostic['truncated']), bool)
+        self.assertEqual(set(diagnostic) - {
+            'kind', 'first', 'bytes', 'lines', 'truncated', 'keys',
+            'status_words', 'verdict_marker', 'binding_line'}, set())
+        for word in diagnostic.get('status_words', ()):
+            self.assertIn(word, _FIXED_STATUS)
 
 
 if __name__ == '__main__':
