@@ -120,15 +120,19 @@ _GEMINI_FAMILY_PATTERN = r'gemini-[a-z0-9][a-z0-9.-]{0,120}'
 # bare Claude id stays refused on this route.
 _AGY_CLAUDE_FAMILY_PATTERN = (
     r'claude-[a-z][a-z0-9]*-[a-z0-9]+(?:[.-][a-z0-9]+)*-(?:low|medium|high)')
+# Owner #289: the Gemini family that shares the AGY route. A Claude id that
+# names it is another family's identifier, so it stays refused (symmetry with
+# the Gemini branch, which refuses Claude and Codex markers).
+_GEMINI_FAMILY_MARKERS = ('gemini',)
 
 
 def _agy_model_ok(value):
     """An AGY route model: a Gemini id, or a Claude id with a served effort.
 
     Owner #289: the Claude ids AGY serves (claude-<name>-<version>-<effort>)
-    are admitted alongside Gemini ids. Codex/GPT ids, other families, bare
-    Claude ids without an effort suffix and malformed ids stay refused. No
-    owner override relaxes this check (route_has_family_check).
+    are admitted alongside Gemini ids. Codex/GPT ids, Gemini ids, other
+    families, bare Claude ids without an effort suffix and malformed ids stay
+    refused. No owner override relaxes this check (route_has_family_check).
     """
     import re
 
@@ -137,8 +141,10 @@ def _agy_model_ok(value):
         return True
     if type(value) is not str or re.fullmatch(_AGY_CLAUDE_FAMILY_PATTERN, value) is None:
         return False
-    # Defence in depth: no Codex/GPT marker anywhere in a Claude identifier.
-    return not any(marker in value.casefold() for marker in _CODEX_FAMILY_MARKERS)
+    # Defence in depth: no marker of another vendor's family anywhere in a
+    # Claude identifier.
+    foreign = _CODEX_FAMILY_MARKERS + _GEMINI_FAMILY_MARKERS
+    return not any(marker in value.casefold() for marker in foreign)
 
 
 # Owner #2302 P2, Owner #289: a route accepts any model of its own provider family

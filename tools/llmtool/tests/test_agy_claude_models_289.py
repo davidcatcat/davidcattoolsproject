@@ -46,10 +46,11 @@ class AgyClaudeModelTests(unittest.TestCase):
     def test_c_gemini_3_8_flash_medium_is_accepted_as_on_main(self):
         self.assert_admitted('gemini-3.8-flash-medium')
 
-    def test_d_codex_and_gpt_ids_are_refused(self):
+    def test_d_other_family_ids_are_refused(self):
         for model in ('gpt-6-sol', 'gpt-6.1-sol', 'codex-example-b',
                       'openai/gpt-6-sol', 'claude-gpt-5-5-medium',
-                      'claude-codex-5-5-high', 'claude-openai-5-5-low'):
+                      'claude-codex-5-5-high', 'claude-openai-5-5-low',
+                      'claude-gemini-5-5-medium', 'claude-gemini-3.8-medium'):
             with self.subTest(model=model):
                 self.assert_refused(model)
 
