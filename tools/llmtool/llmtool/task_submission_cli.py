@@ -7677,6 +7677,74 @@ def _paths_overlap(status_paths, write_paths):
     return False
 
 
+# #2367 P0-B: the quota stop each progress-recording route writes (AGY and
+# Claude; task_store gates 'progress' to these two profiles), and the exact
+# progress shape developer_routes.base records for it.
+_QUOTA_STOP_ERROR_CODES = {'agy': 'AGY_QUOTA_EXHAUSTED',
+                           'claude': 'CLAUDE_QUOTA_EXHAUSTED'}
+_QUOTA_PROGRESS_FIELDS = frozenset(('state', 'head_sha', 'changed_files',
+                                    'unfinished_checks', 'session_id'))
+
+
+def _quota_progress_shows_no_change(developer):
+    """True only when a quota-stopped run's progress proves it changed no file.
+
+    The route's complete shape is required: state, head_sha, changed_files,
+    unfinished_checks and session_id, all consistent with each other and with
+    the D6: the Developer is BLOCKED with the route's own quota code, the
+    progress state is QUOTA_EXHAUSTED, head_sha is the 40-hex D6 head the run
+    started from (its recorded source_sha, so the run committed nothing),
+    changed_files is an empty list, unfinished_checks is a list of strings,
+    and session_id is a well-formed ID that equals the execution's native
+    session ID when one is recorded. A missing, partial, contradictory,
+    unreadable or non-dict record is not proof: the run still counts.
+    """
+    try:
+        progress = developer.get('progress')
+        if type(progress) is not dict or set(progress) != _QUOTA_PROGRESS_FIELDS:
+            return False
+        profile = developer.get('provider_profile')
+        if (developer.get('state') != 'BLOCKED' or type(profile) is not str or
+                _QUOTA_STOP_ERROR_CODES.get(profile) != developer.get('error_code') or
+                progress['state'] != 'QUOTA_EXHAUSTED'):
+            return False
+        source_sha, head_sha = developer.get('source_sha'), progress['head_sha']
+        if (type(source_sha) is not str or
+                re.fullmatch(r'[0-9a-f]{40}', source_sha) is None or
+                head_sha != source_sha):
+            return False
+        changed_files, checks = progress['changed_files'], progress['unfinished_checks']
+        if (type(changed_files) is not list or changed_files or
+                type(checks) is not list or
+                any(type(item) is not str for item in checks)):
+            return False
+        session_id = progress['session_id']
+        if (type(session_id) is not str or
+                re.fullmatch(r'[A-Za-z0-9_-]{8,128}', session_id) is None):
+            return False
+        execution = developer.get('execution')
+        # A quota stop is a blocked run: any other execution status (DONE,
+        # SUCCEEDED, RUNNING, a missing record) contradicts it and counts.
+        if type(execution) is not dict or execution.get('status') != 'BLOCKED':
+            return False
+        native = execution.get('native_session_id')
+        return native is None or native == session_id
+    except Exception:
+        return False
+
+
+def _is_quota_stopped_run(developer):
+    """True when the record presents itself as a quota stop or carries progress.
+
+    Such a run is judged only by _quota_progress_shows_no_change: the generic
+    clean-D6 probe never excludes it, even when its progress field is absent.
+    """
+    if type(developer) is not dict:
+        return False
+    return ('progress' in developer or
+            developer.get('error_code') in _QUOTA_STOP_ERROR_CODES.values())
+
+
 def _launched_run_did_no_work(developer, d6_unchanged=None):
     """True only when a launched run's record proves it did no work.
 
@@ -7686,7 +7754,9 @@ def _launched_run_did_no_work(developer, d6_unchanged=None):
     must also confirm that the D6 head still equals the run's recorded source
     SHA, that its tree is clean, and that no status path overlaps the run's
     write paths. Anything missing, malformed or unknown does not prove that,
-    so the run still counts.
+    so the run still counts. A quota-stopped run (progress recorded, or a
+    route quota error code) is instead judged by its progress alone
+    (_quota_progress_shows_no_change, #2367).
     """
     if type(developer) is not dict:
         return False
@@ -7718,6 +7788,12 @@ def _launched_run_did_no_work(developer, d6_unchanged=None):
     if not (type(execution) is dict and
             execution.get('cleanup_status') == 'CONFIRMED'):
         return False
+    if _is_quota_stopped_run(developer):
+        # #2367 P0-B: a quota-stopped run (progress recorded or absent) is
+        # judged by its own progress record alone. A live D6 probe cannot
+        # vouch for it (a later run moves the D6), and a missing, partial or
+        # contradictory record must never be excused by a clean tree.
+        return _quota_progress_shows_no_change(developer)
     source_sha = developer.get('source_sha')
     if (type(source_sha) is not str or
             re.fullmatch(r'[0-9a-f]{40}', source_sha) is None or
