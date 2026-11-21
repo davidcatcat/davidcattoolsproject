@@ -419,7 +419,6 @@ class HighDebugCodexHome2415Tests(unittest.TestCase):
                                         'reasoning_effort': 'high'}})
         invalid_variants = {
             'non_dict_payload': {'type': 'session_meta', 'payload': 'not-a-dict'},
-            'missing_model': {'type': 'session_meta', 'payload': {'id': thread_id}},
             'empty_model': {'type': 'session_meta', 'payload': {'id': thread_id, 'model': ''}},
             'missing_id': {'type': 'session_meta',
                            'payload': {'model': 'gpt-6.1-sol', 'reasoning_effort': 'high'}},
@@ -434,6 +433,80 @@ class HighDebugCodexHome2415Tests(unittest.TestCase):
                 self._write_lines(home / 'sessions', thread_id, [json.dumps(record), valid])
                 observed, effort = high_debug._session_observed(thread_id, codex_home=home)
                 self.assertEqual((observed, effort), ('UNKNOWN', 'UNKNOWN'))
+
+    def test_session_meta_id_with_model_in_turn_context_is_accepted(self):
+        """session_meta carries only the id; a later turn_context carries model and effort."""
+        thread_id = 'thread-case-turn-context-12345'
+        meta = json.dumps({'type': 'session_meta', 'payload': {'id': thread_id, 'cwd': '/x'}})
+        context = json.dumps({'type': 'turn_context',
+                              'payload': {'model': 'gpt-6.1-sol', 'effort': 'high'}})
+        other = json.dumps({'type': 'event_msg', 'payload': {'type': 'agent_message'}})
+        home = Path(self.temp_dir.name) / 'home_turn_context'
+        self._write_lines(home / 'sessions', thread_id, [meta, other, context, context])
+        self.assertEqual(high_debug._session_observed(thread_id, codex_home=home),
+                         ('gpt-6.1-sol', 'high'))
+
+        store = _Store()
+        self._run_debug(store, self._repo(), thread_id, codex_home=home)
+        entry = store.entries[0]
+        self.assertEqual(entry['model_observed'], 'gpt-6.1-sol')
+        self.assertEqual(entry['effort_observed'], 'high')
+
+    def test_turn_context_layout_keeps_thread_id_and_validity_checks(self):
+        """The turn_context layout still needs a matching session id and valid context records."""
+        thread_id = 'thread-case-turn-context-bad-12345'
+        meta = {'type': 'session_meta', 'payload': {'id': thread_id}}
+        context = {'type': 'turn_context', 'payload': {'model': 'gpt-6.1-sol', 'effort': 'high'}}
+        cases = {
+            'no_meta': [context],
+            'meta_without_context': [meta],
+            'other_meta_id': [{'type': 'session_meta', 'payload': {'id': 'thread-someone-else'}},
+                              context],
+            'meta_without_id': [{'type': 'session_meta', 'payload': {'cwd': '/x'}}, context],
+            'context_other_id': [meta, {'type': 'turn_context',
+                                        'payload': {'id': 'thread-someone-else',
+                                                    'model': 'gpt-6.1-sol'}}],
+            'context_without_model': [meta, {'type': 'turn_context', 'payload': {'effort': 'high'}}],
+            'context_non_dict_payload': [meta, {'type': 'turn_context', 'payload': 'x'}],
+            'context_bad_effort': [meta, {'type': 'turn_context',
+                                          'payload': {'model': 'gpt-6.1-sol', 'effort': 5}}],
+            'conflicting_models': [meta, context,
+                                   {'type': 'turn_context', 'payload': {'model': 'gpt-other',
+                                                                        'effort': 'low'}}],
+        }
+        for label, records in cases.items():
+            with self.subTest(case=label):
+                home = Path(self.temp_dir.name) / ('home_ctx_' + label)
+                self._write_lines(home / 'sessions', thread_id,
+                                  [json.dumps(record) for record in records])
+                self.assertEqual(high_debug._session_observed(thread_id, codex_home=home),
+                                 ('UNKNOWN', 'UNKNOWN'))
+
+    def test_interior_blank_line_yields_unknown_but_terminal_newline_is_allowed(self):
+        """An interior empty line is malformed JSON -> UNKNOWN; one terminal newline is fine."""
+        thread_id = 'thread-case-blank-12345'
+        valid = json.dumps({'type': 'session_meta',
+                            'payload': {'id': thread_id, 'model': 'gpt-6.1-sol',
+                                        'reasoning_effort': 'high'}})
+        for label, lines in (('interior', [valid, '', valid]),
+                             ('leading', ['', valid]),
+                             ('double_terminal', [valid, ''])):
+            with self.subTest(position=label):
+                home = Path(self.temp_dir.name) / ('home_blank_' + label)
+                self._write_lines(home / 'sessions', thread_id, lines)
+                self.assertEqual(high_debug._session_observed(thread_id, codex_home=home),
+                                 ('UNKNOWN', 'UNKNOWN'))
+
+                store = _Store()
+                self._run_debug(store, self._repo(), thread_id, codex_home=home)
+                entry = store.entries[0]
+                self.assertEqual(entry['model_observed'], 'UNKNOWN')
+                self.assertEqual(entry['effort_observed'], 'UNKNOWN')
+
+        home = Path(self.temp_dir.name) / 'home_blank_single_terminal'
+        self._write_lines(home / 'sessions', thread_id, [valid, valid])
+        self.assertEqual(high_debug._session_observed(thread_id, codex_home=home),
+                         ('gpt-6.1-sol', 'high'))
 
     def test_e_thread_id_with_no_session_file_yields_unknown(self):
         """(e) a thread id with no session file -> UNKNOWN as on main."""

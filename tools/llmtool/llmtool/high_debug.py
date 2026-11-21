@@ -329,18 +329,28 @@ def _session_observed(thread_id, sessions_dir=None, codex_home=None):
                 if len(raw) > _SESSION_READ_LIMIT:
                     return 'UNKNOWN', 'UNKNOWN'
                 matched = True
-                file_valid_meta = False
-                for line in raw.decode('utf-8', 'replace').split('\n'):
-                    if not line:
-                        continue
+                meta_seen = False
+                model_seen = False
+                lines = raw.decode('utf-8', 'replace').split('\n')
+                # A single terminal newline is allowed; any other empty line is
+                # malformed JSON and makes the whole file UNKNOWN.
+                if lines and lines[-1] == '':
+                    lines.pop()
+                for line in lines:
                     try:
                         record = json.loads(line)
                     except (TypeError, ValueError):
                         return 'UNKNOWN', 'UNKNOWN'
                     if type(record) is not dict:
                         return 'UNKNOWN', 'UNKNOWN'
-                    is_meta = record.get('type') in ('session_meta', 'session_metadata')
-                    if not is_meta:
+                    record_type = record.get('type')
+                    is_meta = record_type in ('session_meta', 'session_metadata')
+                    is_context = record_type == 'turn_context'
+                    if is_meta or is_context:
+                        payload = record.get('payload')
+                        if not isinstance(payload, dict):
+                            return 'UNKNOWN', 'UNKNOWN'
+                    else:
                         if sessions_dir is None:
                             continue
                         payload = record.get('payload')
@@ -348,10 +358,6 @@ def _session_observed(thread_id, sessions_dir=None, codex_home=None):
                             payload = record
                         if 'model' not in payload and 'model' not in record:
                             continue
-                    else:
-                        payload = record.get('payload')
-                        if not isinstance(payload, dict):
-                            return 'UNKNOWN', 'UNKNOWN'
 
                     session_id = payload.get('id') or payload.get('session_id')
                     if not session_id:
@@ -359,8 +365,10 @@ def _session_observed(thread_id, sessions_dir=None, codex_home=None):
 
                     if session_id is not None and session_id != thread_id:
                         return 'UNKNOWN', 'UNKNOWN'
-                    if sessions_dir is None and not session_id:
-                        return 'UNKNOWN', 'UNKNOWN'
+                    if is_meta:
+                        if sessions_dir is None and not session_id:
+                            return 'UNKNOWN', 'UNKNOWN'
+                        meta_seen = True
 
                     model = payload.get('model')
                     if model is None:
@@ -369,16 +377,22 @@ def _session_observed(thread_id, sessions_dir=None, codex_home=None):
                     if effort is None:
                         effort = record.get('effort', record.get('reasoning_effort'))
 
-                    if type(model) is not str or not model:
-                        return 'UNKNOWN', 'UNKNOWN'
                     if effort is not None and type(effort) is not str:
+                        return 'UNKNOWN', 'UNKNOWN'
+                    if is_meta and model is None:
+                        # The session metadata may carry only the session id; the
+                        # model and effort then come from a later turn_context.
+                        continue
+                    if type(model) is not str or not model:
                         return 'UNKNOWN', 'UNKNOWN'
 
                     models.add(model)
                     efforts.add(effort if type(effort) is str else 'UNKNOWN')
-                    file_valid_meta = True
+                    model_seen = True
 
-                if not file_valid_meta:
+                # The thread id is bound by a matching session metadata record
+                # (the explicit sessions_dir override keeps its older layout).
+                if not model_seen or (sessions_dir is None and not meta_seen):
                     return 'UNKNOWN', 'UNKNOWN'
     except OSError:
         return 'UNKNOWN', 'UNKNOWN'
