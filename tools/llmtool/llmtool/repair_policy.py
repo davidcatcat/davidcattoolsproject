@@ -53,6 +53,9 @@ OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
 #   row 13: start_retries_max (#2281 row 13, second part, basis #2188: the
 #           per-Task start retry limit; caller default
 #           llmtool.worker_dispatch.MAX_START_RETRIES_PER_TASK)
+#   row 14: committed_result_carries_max (#2281 row 14, basis #1148: the
+#           committed-result carries per Developer assignment; caller default
+#           llmtool.worker_dispatch.MAX_COMMITTED_CARRIES)
 #   row 18: developer_assignment_wait_seconds (#819: Developer assignment wait;
 #           caller default llmtool.developer_assignment_inbox.DEFAULT_WAIT_SECONDS)
 #           and developer_assignment_expiry_seconds (#819: Developer
@@ -65,7 +68,7 @@ OPTIONAL_POSITIVE_POLICY_KEYS = ('spec_preflight_large_file_lines', 'merge_train
                                  'review_packet_limit_bytes',
                                  'claude_review_envelope_limit_bytes',
                                  'review_source_limit_bytes', 'start_failures_max',
-                                 'start_retries_max')
+                                 'start_retries_max', 'committed_result_carries_max')
 # #2281 row 18 (basis #819): Developer assignment wait. The key above is
 # optional; a policy that omits it keeps the caller default, the hard-coded
 # wait at its point of use (llmtool.developer_assignment_inbox).
@@ -99,6 +102,11 @@ START_FAILURES_MAX = 2
 # default, the hard-coded limit at its point of use
 # (llmtool.worker_dispatch, MAX_START_RETRIES_PER_TASK).
 START_RETRIES_MAX = 2
+# #2281 row 14 (basis #1148): the committed-result carries per Developer
+# assignment. The key above is optional; a policy that omits it keeps the
+# caller default, the hard-coded limit at its point of use
+# (llmtool.worker_dispatch, MAX_COMMITTED_CARRIES).
+COMMITTED_RESULT_CARRIES_MAX = 1
 # #2281 L0a (design rule 3): the bound is a real technical limit, not an
 # arbitrary cap. policy.json is untrusted input, so load_policy reads at most
 # _MAX_BYTES + 1 bytes in one bounded buffer instead of the whole file. The
@@ -246,6 +254,19 @@ def start_retries_max(path=None):
     policy = load_policy(path)
     return policy.get('start_retries_max',
                       START_RETRIES_MAX)
+
+
+def committed_result_carries_max(path=None):
+    """#2281 row 14 (basis #1148): the committed-result carries per
+    Developer assignment.
+
+    The key is optional; a policy that omits it keeps the caller default,
+    the hard-coded limit at its point of use (llmtool.worker_dispatch,
+    MAX_COMMITTED_CARRIES).
+    """
+    policy = load_policy(path)
+    return policy.get('committed_result_carries_max',
+                      COMMITTED_RESULT_CARRIES_MAX)
 
 
 KINDS = ('root', 'child', 'replan')
