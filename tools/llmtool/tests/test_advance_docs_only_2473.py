@@ -66,6 +66,9 @@ class FakeStore:
     def get(self, task_id):
         return copy.deepcopy(self.record)
 
+    def task_ids(self):
+        return [self.record['task_id']]
+
 
 def check_run(name, conclusion='success', status='completed', run_id=1):
     return {'id': run_id, 'name': name, 'head_sha': HEAD, 'status': status,
@@ -105,11 +108,13 @@ class AdvanceDocsOnlyTests(unittest.TestCase):
         record = base_record() if record is None else record
         remote = Mock(return_value={})
         dispatch = Mock(return_value={'state': 'DISPATCHED'})
+        repair = Mock(return_value={'state': 'DISPATCHED'})
         with patch.object(task_advance, '_d6_snapshot', return_value=d6_snapshot()), \
                 patch.object(task_advance, '_run_remote_test', remote):
             result = task_advance.advance(
                 task_id=TASK_ID, store=FakeStore(record), pr_number=NUMBER,
-                github_get=github_get, dispatch_review_call=dispatch)
+                github_get=github_get, dispatch_review_call=dispatch,
+                repair_review_call=repair)
         return result, remote, dispatch
 
     def test_a_docs_only_skips_ec2_and_dispatches_review(self):
