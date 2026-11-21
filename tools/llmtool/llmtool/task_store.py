@@ -5325,6 +5325,21 @@ class TaskStore:
         name = '.' + self._name(chain_key) + CHAIN_LOCK_SUFFIX
         return self._exclusive_sidecar(name, 'TASK_CHAIN_LOCK')
 
+    def repair_dispatch_lock(self, repair_task_id):
+        """#2475: hold one repair Task's dispatch lock exclusively.
+
+        review_repair holds it from before a repair claim is visible (initial
+        dispatch) or from before a CLAIMED claim is replayed, across the
+        delegate call and the claim's final state write. So two callers can
+        never delegate the same continuation, and a loser cannot move a claim
+        the winner is finishing. It is a sidecar distinct from the chain lock
+        and from the direct dispatch lease the delegate takes; it is always
+        taken before those, never while holding them. A holder past the
+        bounded wait is TASK_REPAIR_DISPATCH_LOCK_BUSY.
+        """
+        name = '.' + self._name(repair_task_id) + '.repair-dispatch.lock'
+        return self._exclusive_sidecar(name, 'TASK_REPAIR_DISPATCH_LOCK')
+
     def _take_advance_lease_exclusive(self, task_id, *, busy_code='SPLIT_CHILD_ADVANCING'):
         """Take the advance lease exclusively without waiting; return its fd.
 

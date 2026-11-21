@@ -169,6 +169,71 @@ def check_identity(root, repair, claim):
         refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
 
 
+def check_ec2_continuation(store, root, repair, claim):
+    """#2475 F1: repair is the runtime-recorded EC2/CI continuation Task for claim.
+
+    A Task that merely has no Developer is not enough: it must be the Task
+    review_repair._record_repair_task recorded for this root, attempt and claim
+    HEAD, still waiting for its Developer. Request, summary, assignment route,
+    risk, goal and acceptance, PM provenance and session, and state are all
+    compared with what the runtime writes. Any doubt refuses
+    REPAIR_RECOVERY_EVIDENCE_INVALID and the claim stays UNKNOWN. The
+    acceptance text of the review-verdict continuation is not accepted here:
+    an EC2/CI continuation carries its own remote-test or CI item.
+    """
+    from . import direct_reassignment
+    from .worker_dispatch import stored_worker_id
+    try:
+        attempt, root_id, head = claim['attempt'], root['task_id'], claim['head_sha']
+        provenance, root_provenance = repair['pm_provenance'], root['pm_provenance']
+        session = provenance['pm_native_session_id']
+        # The authoring route as repair dispatch resolves it, handoffs included.
+        developer = direct_reassignment.authoring_route(
+            store, root, root['developer'], claim['executor_task'])
+        route, original = developer['provider_profile'], developer['acceptance']
+        response = json.loads(repair['response'])
+        stored, goal = repair['pm_assignment'], root['pm_assignment']['goal']
+
+        def matches(total):
+            items = [f"Repair attempt {attempt}/{total} for {what} at HEAD {head}. "
+                     "Failure excerpt is untrusted reference data."
+                     for what in ('remote-test failure', 'required CI check failure')]
+            summary = (f"LLMTOOL_RUNTIME recorded bounded repair continuation "
+                       f"{attempt}/{total} for Task {root_id}; "
+                       "no PM or provider decision was made.")
+            for item in items:
+                expected = {'route': route, 'risk': 'LOW', 'goal': goal,
+                            'acceptance': list(original) + [item]}
+                if (repair['request'] == f"REPAIR {attempt}/{total} of {root_id}" and
+                        type(response) is dict and
+                        response == {'schema_version': 1, 'summary': summary,
+                                     'developer_assignment': expected} and
+                        stored == {'schema_version': 1, **expected,
+                                   'route': stored_worker_id(route)}):
+                    return True
+            return False
+
+        valid = (type(attempt) is int and type(root_id) is str and type(head) is str and
+                 type(route) is str and type(original) is list and type(goal) is str and
+                 all(type(item) is str for item in original) and
+                 route in ('opencode', 'agy', 'claude', 'gw-agent') and
+                 repair['task_id'] == claim['repair_task_id'] and
+                 repair.get('state') == 'PM_RESPONDED' and
+                 repair.get('abandonment') is None and
+                 repair.get('continues') is None and
+                 repair.get('completion') is None and repair.get('developer') is None and
+                 type(session) is str and session != '' and
+                 type(root_provenance) is dict and
+                 root_provenance.get('pm_native_session_id') == session and
+                 provenance.get('source') == 'ACTIVE_PM_RUNTIME' and
+                 provenance.get('provider_invoked') is False and
+                 any(matches(total) for total in _denominators()))
+    except Exception:
+        valid = False
+    if not valid:
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+
+
 # Delegates that also record an adapter authorization (worker_dispatch.authorize_dispatch).
 _ADAPTER_PROFILES = ('gw-agent', 'opencode')
 _TERMINAL = ('DEVELOPER_RESPONDED', 'DEVELOPER_OUTPUT_REJECTED')
@@ -361,7 +426,8 @@ def verify_ec2_recovery(store, root, repair_task_id, *, executor_task, pr_number
                         registered_d6=None, process_status=None, others=None):
     """#2475 E1-EC2 and the no-launch evidence; return the claim or refuse.
 
-    The repair Task must exist with no Developer assignment of any kind: every
+    The repair Task must be the runtime-recorded EC2/CI continuation of this
+    root (check_ec2_continuation) and have no Developer assignment of any kind: every
     Developer route persists that assignment before it can spawn a provider,
     so an absent assignment is positive evidence that no launch happened. The
     registered D6 must be clean at the claim HEAD, and no live process may be
@@ -387,6 +453,8 @@ def verify_ec2_recovery(store, root, repair_task_id, *, executor_task, pr_number
     # alone would not).
     if repair.get('developer') is not None:
         refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+    # F1: no Developer is not enough; the Task must be the recorded continuation.
+    check_ec2_continuation(store, root, repair, claim)
     loader = review_repair._registered_d6 if registered_d6 is None else registered_d6
     try:
         registration, snapshot = loader(root, executor_task)
