@@ -56,6 +56,12 @@ SOURCE_ROW12_KEY = 'review_source_limit_bytes'
 # Like the row 12 and row 18 keys, it is omitted from the repository
 # policy.json.
 ROW13_KEY = 'start_failures_max'
+# #2281 row 13 (second part, basis #2188): the per-Task start retry limit;
+# the row 13 limit at its point of use
+# (llmtool.worker_dispatch.MAX_START_RETRIES_PER_TASK). Like the row 12 and
+# row 18 keys and the start-failure key, it is omitted from the repository
+# policy.json.
+ROW13_RETRY_KEY = 'start_retries_max'
 
 
 class PolicyLimitKeysTests(unittest.TestCase):
@@ -76,7 +82,7 @@ class PolicyLimitKeysTests(unittest.TestCase):
         self.assertEqual(set(rp.OPTIONAL_POSITIVE_POLICY_KEYS),
                          {*LIMITS, *LATER_LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY,
                           PACKET_ROW12_KEY, SOURCE_ROW12_KEY, ROW12_KEY,
-                          ROW13_KEY})
+                          ROW13_KEY, ROW13_RETRY_KEY})
         # Optional: none of them is required by the loader.
         self.assertFalse(set(LIMITS) & set(rp.POLICY_KEYS))
         self.assertFalse(set(LIMITS) & set(rp.OPTIONAL_POLICY_LIMITS))
@@ -94,7 +100,7 @@ class PolicyLimitKeysTests(unittest.TestCase):
         # Row 18 is not in the repository policy.json; the repository file is
         # still accepted because the keys are optional.
         for key in (ROW18_KEY, EXPIRY_ROW18_KEY, PACKET_ROW12_KEY,
-                    SOURCE_ROW12_KEY, ROW12_KEY, ROW13_KEY):
+                    SOURCE_ROW12_KEY, ROW12_KEY, ROW13_KEY, ROW13_RETRY_KEY):
             with self.subTest(key=key):
                 self.assertNotIn(key, policy)
 
@@ -146,10 +152,18 @@ class PolicyLimitKeysTests(unittest.TestCase):
             dict(BASE, **{ROW13_KEY: 2}))
         self.assertEqual(rp.load_policy(self._write(dict(BASE, **{ROW13_KEY: 1}))),
                          dict(BASE, **{ROW13_KEY: 1}))
+        # Row 13 (second part, the per-Task start retry limit) is optional:
+        # a policy setting it to a positive whole number is accepted, as is
+        # one omitting it.
+        self.assertEqual(
+            rp.load_policy(self._write(dict(BASE, **{ROW13_RETRY_KEY: 2}))),
+            dict(BASE, **{ROW13_RETRY_KEY: 2}))
+        self.assertEqual(rp.load_policy(self._write(dict(BASE, **{ROW13_RETRY_KEY: 1}))),
+                         dict(BASE, **{ROW13_RETRY_KEY: 1}))
 
     def test_no_upper_validation_bound(self):
         for key in (*LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY, PACKET_ROW12_KEY,
-                    SOURCE_ROW12_KEY, ROW12_KEY, ROW13_KEY):
+                    SOURCE_ROW12_KEY, ROW12_KEY, ROW13_KEY, ROW13_RETRY_KEY):
             for value in (1001, 10 ** 9):
                 with self.subTest(key=key, value=value):
                     self.assertEqual(
@@ -158,7 +172,7 @@ class PolicyLimitKeysTests(unittest.TestCase):
     # A2
     def test_invalid_value_refuses_policy_invalid(self):
         for key in (*LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY, PACKET_ROW12_KEY,
-                    SOURCE_ROW12_KEY, ROW12_KEY, ROW13_KEY):
+                    SOURCE_ROW12_KEY, ROW12_KEY, ROW13_KEY, ROW13_RETRY_KEY):
             for value in (0, -1, -2000, '5', True, False, 2.5, None, [5], {'value': 5}):
                 with self.subTest(key=key, value=value):
                     self._refuses({**BASE, **LIMITS, key: value})
@@ -187,6 +201,7 @@ class PolicyLimitKeysTests(unittest.TestCase):
         self.assertNotIn(SOURCE_ROW12_KEY, partial)
         self.assertNotIn(ROW12_KEY, partial)
         self.assertNotIn(ROW13_KEY, partial)
+        self.assertNotIn(ROW13_RETRY_KEY, partial)
 
     def test_absent_row18_key_keeps_the_current_hard_coded_wait(self):
         # The row 18 default equals the Developer assignment wait at its
@@ -292,6 +307,23 @@ class PolicyLimitKeysTests(unittest.TestCase):
                 self._write(dict(BASE, **{ROW13_KEY: 3}))),
             3)
 
+    def test_absent_row13_retry_key_keeps_the_current_hard_coded_start_retry_limit(self):
+        # The row 13 (second part) default equals the per-Task start retry
+        # limit at its point of use, so callers wired later see the
+        # unchanged value.
+        from llmtool.worker_dispatch import MAX_START_RETRIES_PER_TASK
+        self.assertEqual(rp.START_RETRIES_MAX, MAX_START_RETRIES_PER_TASK)
+        self.assertEqual(rp.start_retries_max(self._write(BASE)),
+                         MAX_START_RETRIES_PER_TASK)
+        # The repository policy.json omits the key: the reported value is
+        # the caller default.
+        self.assertEqual(rp.start_retries_max(), MAX_START_RETRIES_PER_TASK)
+        # A policy setting the key wins over the default.
+        self.assertEqual(
+            rp.start_retries_max(
+                self._write(dict(BASE, **{ROW13_RETRY_KEY: 3}))),
+            3)
+
     def test_existing_keys_and_behaviour_are_unchanged(self):
         self.assertEqual(rp.POLICY_KEYS, (
             'repair_max', 'parent_debug_max', 'group_debug_max', 'child_max',
@@ -308,6 +340,7 @@ class PolicyLimitKeysTests(unittest.TestCase):
         self.assertNotIn(SOURCE_ROW12_KEY, policy)
         self.assertNotIn(ROW12_KEY, policy)
         self.assertNotIn(ROW13_KEY, policy)
+        self.assertNotIn(ROW13_RETRY_KEY, policy)
         for key, value in LATER_LIMITS.items():
             with self.subTest(key=key):
                 self.assertEqual(policy[key], value)
