@@ -21,16 +21,24 @@ READ_SIZE = 8192
 
 
 REVIEW_ENVELOPE_LIMIT = 128 * 1024
+# CWE-400: hard technical ceiling for a configured envelope limit. The policy
+# is untrusted input; a value above this never removes the bounded resource
+# use (stdout buffer and JSON parse) and is refused as an invalid policy.
+REVIEW_ENVELOPE_LIMIT_MAX = 4 * 1024 * 1024
 
 
 def _review_envelope_limit():
     # #2281 row 12 (basis #131, #165): the Claude review envelope size limit now
     # comes from the policy key claude_review_envelope_limit_bytes. The key is
     # optional; a policy that omits it keeps this hard-coded default
-    # (REVIEW_ENVELOPE_LIMIT). An invalid policy refuses (POLICY_INVALID); it
+    # (REVIEW_ENVELOPE_LIMIT). An invalid policy, or a configured value that is
+    # not an int in 1..REVIEW_ENVELOPE_LIMIT_MAX, refuses (POLICY_INVALID); it
     # never falls back silently to REVIEW_ENVELOPE_LIMIT.
     from .. import repair_policy
-    return repair_policy.claude_review_envelope_limit_bytes()
+    value = repair_policy.claude_review_envelope_limit_bytes()
+    if type(value) is not int or not 0 < value <= REVIEW_ENVELOPE_LIMIT_MAX:
+        raise LLMToolError('POLICY_INVALID') from None
+    return value
 
 
 def decode_review_envelope(raw, *, forbidden_sessions=()):

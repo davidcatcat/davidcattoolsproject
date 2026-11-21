@@ -97,6 +97,22 @@ class ClaudeEnvelopePolicyTest(unittest.TestCase):
                 self.assertEqual(self._refusal_code(
                     lambda raw: self._apply(self._write(tmpdir, policy), raw),
                     self.ENVELOPE_OK), 'POLICY_INVALID')
+    def test_oversized_limit_fails_closed(self):
+        # CWE-400: a configured value above the hard ceiling must not lift the
+        # bound; it is refused as POLICY_INVALID, at the ceiling it is accepted.
+        cap = claude_cli.REVIEW_ENVELOPE_LIMIT_MAX
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for value in (cap + 1, 2 ** 62):
+                path = self._write(tmpdir, dict(BASE, **{self.KEY: value}))
+                with mock.patch.object(rp, 'policy_path', return_value=path):
+                    with self.assertRaises(LLMToolError):
+                        claude_cli._review_envelope_limit()
+                self.assertEqual(self._refusal_code(
+                    lambda raw: self._apply(path, raw), self.ENVELOPE_OK),
+                    'POLICY_INVALID')
+            path = self._write(tmpdir, dict(BASE, **{self.KEY: cap}))
+            with mock.patch.object(rp, 'policy_path', return_value=path):
+                self.assertEqual(claude_cli._review_envelope_limit(), cap)
     def test_live_output_path_honors_configured_limit(self):
         # F1: the live output path must not refuse a configured envelope limit
         # above the generic 1 MiB OUTPUT_LIMIT. _read_pipe now takes a per-call
