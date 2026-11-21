@@ -50,6 +50,9 @@ OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
 #   row 13: start_failures_max (#2281 row 13, first part, basis #2188: the
 #           per-Task start-failure limit; caller default
 #           llmtool.task_store.MAX_START_FAILURES)
+#   row 13: start_retries_max (#2281 row 13, second part, basis #2188: the
+#           per-Task start retry limit; caller default
+#           llmtool.worker_dispatch.MAX_START_RETRIES_PER_TASK)
 #   row 18: developer_assignment_wait_seconds (#819: Developer assignment wait;
 #           caller default llmtool.developer_assignment_inbox.DEFAULT_WAIT_SECONDS)
 #           and developer_assignment_expiry_seconds (#819: Developer
@@ -61,7 +64,8 @@ OPTIONAL_POSITIVE_POLICY_KEYS = ('spec_preflight_large_file_lines', 'merge_train
                                  'developer_assignment_expiry_seconds',
                                  'review_packet_limit_bytes',
                                  'claude_review_envelope_limit_bytes',
-                                 'review_source_limit_bytes', 'start_failures_max')
+                                 'review_source_limit_bytes', 'start_failures_max',
+                                 'start_retries_max')
 # #2281 row 18 (basis #819): Developer assignment wait. The key above is
 # optional; a policy that omits it keeps the caller default, the hard-coded
 # wait at its point of use (llmtool.developer_assignment_inbox).
@@ -90,6 +94,11 @@ REVIEW_SOURCE_LIMIT_BYTES = 128 * 1024
 # default, the hard-coded limit at its point of use (llmtool.task_store,
 # MAX_START_FAILURES).
 START_FAILURES_MAX = 2
+# #2281 row 13 (second part, basis #2188): the per-Task start retry limit.
+# The key above is optional; a policy that omits it keeps the caller
+# default, the hard-coded limit at its point of use
+# (llmtool.worker_dispatch, MAX_START_RETRIES_PER_TASK).
+START_RETRIES_MAX = 2
 # #2281 L0a (design rule 3): the bound is a real technical limit, not an
 # arbitrary cap. policy.json is untrusted input, so load_policy reads at most
 # _MAX_BYTES + 1 bytes in one bounded buffer instead of the whole file. The
@@ -224,6 +233,19 @@ def start_failures_max(path=None):
     policy = load_policy(path)
     return policy.get('start_failures_max',
                       START_FAILURES_MAX)
+
+
+def start_retries_max(path=None):
+    """#2281 row 13 (second part, basis #2188): the per-Task start retry
+    limit.
+
+    The key is optional; a policy that omits it keeps the caller default,
+    the hard-coded limit at its point of use (llmtool.worker_dispatch,
+    MAX_START_RETRIES_PER_TASK).
+    """
+    policy = load_policy(path)
+    return policy.get('start_retries_max',
+                      START_RETRIES_MAX)
 
 
 KINDS = ('root', 'child', 'replan')
