@@ -1,11 +1,13 @@
 """Bounded, event driven repair dispatch for a failed formal review."""
 
 from datetime import datetime, timezone
+import contextlib
 import hashlib
 import io
 import json
 import re
 import shutil
+import threading
 from argparse import Namespace
 
 from . import review_result, run_budget, task_completion, worker_availability, worker_dispatch
@@ -203,6 +205,92 @@ def _update_claim_state(store, task_id, claim, state):
                 review_repair_claims=claims)
             return
     _refuse('REPAIR_CLAIM_UNAVAILABLE')
+
+
+_LOCAL_DISPATCH_GUARD = threading.Lock()
+_LOCAL_DISPATCH_LOCKS = {}
+
+
+@contextlib.contextmanager
+def _local_dispatch_lock(repair_task_id):
+    """Process-local stand-in for a store that is not a TaskStore (no other process)."""
+    from .task_store import LINEAGE_LOCK_TIMEOUT_SECONDS
+    with _LOCAL_DISPATCH_GUARD:
+        lock = _LOCAL_DISPATCH_LOCKS.setdefault(repair_task_id, threading.Lock())
+    if not lock.acquire(timeout=LINEAGE_LOCK_TIMEOUT_SECONDS):
+        raise LLMToolError('REPAIR_DISPATCH_LOCK_BUSY')
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def _repair_dispatch_guard(store, repair_task_id):
+    """#2475 F2: take one repair Task's dispatch lock; return an ExitStack that releases it.
+
+    The lock is held across the delegate call and the claim's final state write,
+    so one continuation has one dispatcher at a time. A lock that cannot be
+    taken refuses REPAIR_CLAIM_UNAVAILABLE and changes nothing.
+    """
+    from .task_store import TaskStore
+    stack = contextlib.ExitStack()
+    try:
+        if isinstance(store, TaskStore):
+            stack.enter_context(store.repair_dispatch_lock(repair_task_id))
+        else:
+            stack.enter_context(_local_dispatch_lock(repair_task_id))
+    except Exception:
+        stack.close()
+        _refuse('REPAIR_CLAIM_UNAVAILABLE')
+    return stack
+
+
+def _replay_claimed_test_repair(*, store, task_id, existing, developer, packet,
+                                executor_task, profile, dispatch_adapter,
+                                delegate_callable, packet_version):
+    """Replay the delegation of one CLAIMED EC2/CI claim whose repair Task has no Developer.
+
+    #2475 F2: the dispatch lock is taken first and the claim and the repair Task
+    are read again under it. A competing caller that already took the dispatch is
+    seen as a DISPATCHED claim or a Developer assignment, and this call delegates
+    nothing; so a loser can never move a claim the winner is finishing.
+    """
+    repair_task_id = existing['repair_task_id']
+    guard = _repair_dispatch_guard(store, repair_task_id)
+    with guard:
+        try:
+            current = store.get(task_id)
+            repair_task = store.get(repair_task_id)
+        except Exception:
+            _refuse('REPAIR_CLAIM_UNAVAILABLE')
+        claims = current.get('review_repair_claims') if type(current) is dict else None
+        fresh = next((item for item in claims
+                      if type(item) is dict and item.get('repair_task_id') == repair_task_id),
+                     None) if type(claims) is list else None
+        if type(fresh) is not dict or type(repair_task) is not dict:
+            _refuse('REPAIR_CLAIM_UNAVAILABLE')
+        if fresh.get('state') != 'CLAIMED' or repair_task.get('developer') is not None:
+            dispatched = fresh.get('state') == 'DISPATCHED'
+            return {'claim': fresh, 'repair_task_id': repair_task_id,
+                    'attempt': fresh.get('attempt'), 'replayed': dispatched,
+                    'next_action': (f"review-dispatch --version {packet_version + 1}"
+                                    if dispatched else f"task delegate {repair_task_id}")}
+        adapter = dispatch_adapter
+        if adapter is None:
+            adapter = lambda **request: _delegate_repair(
+                **request, delegate=delegate_callable, store=store)
+        try:
+            result = adapter(task=repair_task, developer=developer, packet=packet,
+                             executor_task=executor_task, provider_profile=profile,
+                             model=developer.get('model'))
+        except Exception:
+            _update_claim_state(store, task_id, fresh, 'UNKNOWN')
+            raise
+        _update_claim_state(store, task_id, fresh, 'DISPATCHED')
+        claim = dict(fresh, state='DISPATCHED')
+        return {'result': result, 'attempt': claim['attempt'],
+                'repair_task_id': repair_task_id, 'claim': claim, 'replayed': True,
+                'next_action': f"review-dispatch --version {packet_version + 1}"}
 
 
 def _worker_key(profile):
@@ -862,7 +950,7 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         # assignment. The delegate serializes the old controller and handoff,
         # then applies its ordinary scope, policy, quota and D6 checks.
         repair_task = None
-        if dispatch_adapter is None:
+        if dispatch_adapter is None or (test_failure and existing.get('state') == 'CLAIMED'):
             try:
                 repair_task = store.get(existing['repair_task_id'])
             except (LLMToolError, KeyError):
@@ -898,6 +986,14 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         if auto and not test_failure:
             # v91 F1: an auto replay is decided under the chain lock too.
             existing = _auto_replay_claim(store, task, task_id, existing)
+        if (test_failure and existing.get('state') == 'CLAIMED' and
+                type(repair_task) is dict and repair_task.get('developer') is None):
+            # #2475 F2: serialized per repair Task; the claim is read again under the lock.
+            return _replay_claimed_test_repair(
+                store=store, task_id=task_id, existing=existing, developer=developer,
+                packet=packet, executor_task=executor_task, profile=profile,
+                dispatch_adapter=dispatch_adapter, delegate_callable=delegate_callable,
+                packet_version=packet_version)
         task_id_for_repair = existing.get('repair_task_id')
         dispatched = existing.get('state') == 'DISPATCHED'
         return {'claim': existing, 'repair_task_id': task_id_for_repair,
@@ -1029,11 +1125,19 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
             worker, developer.get('owner_assignment_ref'), policy_task)
         if not decision.allowed:
             _refuse_unclaimed(decision.reason_code, repair_task_id)
+        # #2475 F2: this dispatch's lock is taken before the claim is visible. The
+        # repair Task ID is new, so nobody else holds its lock and this cannot
+        # wait; a replay of the claim then waits for this dispatch to finish.
+        try:
+            dispatch_guard = _repair_dispatch_guard(store, repair_task_id)
+        except LLMToolError:
+            _refuse_unclaimed('REPAIR_CLAIM_UNAVAILABLE', repair_task_id)
         try:
             store.compare_and_update(
                 task_id, expected={'record_sha256': task['record_sha256']},
                 review_repair_claims=next_claims)
         except Exception:
+            dispatch_guard.close()
             _refuse_unclaimed('REPAIR_CLAIM_UNAVAILABLE', repair_task_id)
     finally:
         release_chain()
@@ -1044,16 +1148,19 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         adapter = lambda **request: _delegate_repair(
             **request, delegate=delegate_callable, store=store)
     try:
-        # Revalidate after recording so a D6 moved during repair Task creation
-        # cannot redirect the provider; the pre-write head check above ensures
-        # unregistered or already-moved worktrees consume no repair attempt.
-        result = adapter(task=repair_task, developer=developer, packet=packet,
-                         executor_task=executor_task, provider_profile=profile,
-                         model=developer.get('model'))
-    except Exception:
-        _update_claim_state(store, task_id, claim, 'UNKNOWN')
-        raise
-    _update_claim_state(store, task_id, claim, 'DISPATCHED')
+        try:
+            # Revalidate after recording so a D6 moved during repair Task creation
+            # cannot redirect the provider; the pre-write head check above ensures
+            # unregistered or already-moved worktrees consume no repair attempt.
+            result = adapter(task=repair_task, developer=developer, packet=packet,
+                             executor_task=executor_task, provider_profile=profile,
+                             model=developer.get('model'))
+        except Exception:
+            _update_claim_state(store, task_id, claim, 'UNKNOWN')
+            raise
+        _update_claim_state(store, task_id, claim, 'DISPATCHED')
+    finally:
+        dispatch_guard.close()
     claim['state'] = 'DISPATCHED'
     response = {'result': result, 'attempt': claim['attempt'],
                 'repair_task_id': repair_task['task_id'],
