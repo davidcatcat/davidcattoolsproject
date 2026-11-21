@@ -522,6 +522,20 @@ class WorkerEnvelopeTests(unittest.TestCase):
                     spawn.assert_not_called()
                     self.assertIsNone(provider.pending_job)
 
+    def test_policy_parser_recursion_refuses_before_spawn(self):
+        import time
+        with tempfile.TemporaryDirectory() as tmp:
+            exe=Path(tmp)/'fake-unused';exe.write_text('#!'+sys.executable+' -IB\n');exe.chmod(0o700)
+            provider=ClaudeCLIProvider({'model':REVIEW_MODEL},None)
+            with patch('llmtool.repair_policy.json.loads',side_effect=RecursionError), \
+                    patch('subprocess.Popen',side_effect=AssertionError('spawn')) as spawn, \
+                    self.assertRaises(LLMToolError) as caught:
+                provider._invoke_review_job(str(exe),'prompt',deadline=time.monotonic()+5,
+                    auth_home=tmp,launch_nonce='a'*32,runtime_pin='b'*64,forbidden_sessions=())
+            self.assertEqual(caught.exception.review_code,'POLICY_INVALID')
+            spawn.assert_not_called()
+            self.assertIsNone(provider.pending_job)
+
     def test_review_stdout_uses_policy_and_stderr_uses_generic_limit(self):
         from llmtool.providers import claude_cli
         big=claude_cli.OUTPUT_LIMIT+claude_cli.OUTPUT_LIMIT//2

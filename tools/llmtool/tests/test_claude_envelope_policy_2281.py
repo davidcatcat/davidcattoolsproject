@@ -69,6 +69,23 @@ class ClaudeEnvelopePolicyTest(unittest.TestCase):
                     claude_cli._review_envelope_limit()
                 self.assertEqual(self.code(envelope(512)), 'POLICY_INVALID')
 
+    def test_parser_recursion_is_policy_invalid(self):
+        self.policy(BASE)
+        raw = b'[' * 1100 + b']' * 1100
+        for name, patch in (('nested', mock.patch.object(rp.json, 'loads', side_effect=RecursionError)),
+                            ('raw', mock.patch.object(rp, 'policy_path', return_value=self.raw_path(raw)))):
+            with self.subTest(name), patch:
+                with self.assertRaises(LLMToolError):
+                    claude_cli._review_envelope_limit()
+                self.assertEqual(self.code(envelope(512)), 'POLICY_INVALID')
+
+    def raw_path(self, raw):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / 'policy.json'
+        path.write_bytes(raw)
+        return str(path)
+
     def test_read_pipe_honors_configured_and_generic_limits(self):
         payload = b'x' * (claude_cli.OUTPUT_LIMIT + claude_cli.OUTPUT_LIMIT // 2)
         with tempfile.TemporaryDirectory() as tmpdir:

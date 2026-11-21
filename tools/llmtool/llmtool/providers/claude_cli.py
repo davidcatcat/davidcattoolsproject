@@ -35,7 +35,12 @@ def _review_envelope_limit():
     # not an int in 1..REVIEW_ENVELOPE_LIMIT_MAX, refuses (POLICY_INVALID); it
     # never falls back silently to REVIEW_ENVELOPE_LIMIT.
     from .. import repair_policy
-    value = repair_policy.claude_review_envelope_limit_bytes()
+    try:
+        value = repair_policy.claude_review_envelope_limit_bytes()
+    except RecursionError:
+        # A policy within the loader's byte bound can still nest deeper than the
+        # JSON parser allows; that is an invalid policy, not a crash.
+        raise LLMToolError('POLICY_INVALID') from None
     if type(value) is not int or not 0 < value <= REVIEW_ENVELOPE_LIMIT_MAX:
         raise LLMToolError('POLICY_INVALID') from None
     return value
