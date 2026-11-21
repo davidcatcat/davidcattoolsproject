@@ -54,7 +54,6 @@ _REMOTE_LIMIT = 32768
 _FAILURE_EXCERPT_LIMIT = 4096
 _FAILURE_EXCERPT_LINES = 40
 _SSH_TIMEOUT = 1800
-_MAX_REMOTE_MODULES = 8
 _RECEIPT_FIELDS = frozenset((
     'result', 'exit_code', 'source_sha', 'tree', 'fetch_head', 'modules',
     'identity', 'started_at', 'ended_at', 'elapsed_s', 'ran_total', 'final',
@@ -81,7 +80,7 @@ from datetime import datetime,timezone
 sha,ref,repo,python,*mods=sys.argv[1:]
 R=re.compile(r"[0-9a-f]{40}\Z"); F=re.compile(r"(?:refs/pull/[0-9]+/head|[A-Za-z0-9][A-Za-z0-9._/-]{0,99})\Z"); M=re.compile(r"test_[a-z0-9_]{1,80}\Z")
 SENSITIVE=re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|(?:(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}\b|(?<!(?-i:[A-Za-z0-9_]))(?:AKIA|ASIA)[A-Z0-9]{16}(?=(?-i:[^\W\x00-\x7f])))|\bsk-[A-Za-z0-9_-]{12,}|\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|\bxox[abprs]-[A-Za-z0-9-]{20,}|\b(?:bearer|basic)\s+\S+|\b[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@|\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b|[\"']?\b(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|client[_-]?secret|aws_secret_access_key)[\"']?\s*[:=]",re.I)
-if not R.fullmatch(sha) or not F.fullmatch(ref) or not mods or len(mods)>8 or any(not M.fullmatch(x) for x in mods): sys.exit(40)
+if not R.fullmatch(sha) or not F.fullmatch(ref) or not mods or any(not M.fullmatch(x) for x in mods): sys.exit(40)
 started=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z"); begin=time.monotonic(); work_deadline=begin+480; deadline=begin+540; log=b""; result="FAIL"; code=1; tree=None; fetch=None; finals=[]; failures=[]; ran=0; uid=None; log_path=None; work=None
 module_results=[]
 def failure_excerpt(outputs,work,home):
@@ -230,10 +229,8 @@ try:
             package=nobody_run(work,[work+"/venv/bin/python","-m","pip","install","--no-deps","-e","tools/llmtool"],limit=180); log+=package.stdout
             if package.returncode: raise RuntimeError("package")
             stage="tests"
-            for index,mod in enumerate(mods):
-                allowance=(deadline-time.monotonic())/(len(mods)-index)-3
-                if allowance<=1: raise subprocess.TimeoutExpired(mod,0)
-                test=nobody_run(work+"/tools/llmtool",[work+"/venv/bin/python","-m","unittest","discover","-s","tests","-p",mod+".py"],limit=min(180,allowance),env={"HOME":work+"/.home","TMPDIR":work+"/.tmp"},capture_stderr=True)
+            for mod in mods:
+                test=nobody_run(work+"/tools/llmtool",[work+"/venv/bin/python","-m","unittest","discover","-s","tests","-p",mod+".py"],limit=180,env={"HOME":work+"/.home","TMPDIR":work+"/.tmp"},capture_stderr=True)
                 test_output=test.stdout+(test.stderr or b""); log+=test_output
                 lines=[x.decode("utf8","replace").strip() for x in test_output.splitlines() if b"Ran " in x or b"OK" in x or b"FAILED" in x or b"ERROR" in x]
                 final=final_line(lines)
@@ -241,7 +238,7 @@ try:
                 entry=module_result(mod,test_output,final); module_results.append(entry); ran+=entry["ran"]
                 if test.returncode==124:
                     result="TIMEOUT"; code=124; failures.append(mod); break
-                if test.returncode or not passing_final(final):
+                if test.returncode or not passing_final(final) or entry["ran"]<=entry["skipped"]:
                     result="FAIL"; code=test.returncode or 1
                     failures.append(mod); failed_outputs.extend((test.stdout,test.stderr or b""))
             if result!="TIMEOUT" and code==1 and len(failures)==0 and ran>0: result="PASS"; code=0
@@ -265,9 +262,9 @@ saver=nobody_run(log_dir,[python,"-c","import sys; open(sys.argv[1], 'wb').write
 if saver is None or saver.returncode: result="UNKNOWN"; code=1
 cleanup_stale()
 ended=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
-receipt={"result":result,"exit_code":code,"source_sha":sha,"tree":tree,"fetch_head":fetch,"modules":mods,"identity":{"uid":uid},"started_at":started,"ended_at":ended,"elapsed_s":round(time.monotonic()-begin,3),"ran_total":ran,"final":finals[-len(mods)*2:],"failures":failures[:10],"log_bytes":len(log),"log_sha256":hashlib.sha256(log).hexdigest(),"remote_log_path":log_path}
+receipt={"result":result,"exit_code":code,"source_sha":sha,"tree":tree,"fetch_head":fetch,"modules":mods,"identity":{"uid":uid},"started_at":started,"ended_at":ended,"elapsed_s":round(time.monotonic()-begin,3),"ran_total":ran,"final":finals,"failures":failures[:10],"log_bytes":len(log),"log_sha256":hashlib.sha256(log).hexdigest(),"remote_log_path":log_path}
 if result!="PASS": receipt["failure_excerpt"]=failure_excerpt(failed_outputs,work or "<REMOTE_WORKDIR>",os.path.expanduser("~"))
-if module_results: receipt["module_results"]=module_results[-len(mods)*2:]
+if module_results: receipt["module_results"]=module_results
 raw=json.dumps(receipt,separators=(",",":"),sort_keys=True).encode()
 print(raw.decode() if len(raw)<=32768 else "{}")
 os.close(lock_fd)
@@ -349,84 +346,6 @@ def _admitted_modules(task):
     return tuple(sorted(names))
 
 
-# #2457: a Task may declare more test modules than one EC2 run accepts. EC2 then
-# runs them in batches of at most _MAX_REMOTE_MODULES, each batch at the same
-# exact HEAD and recorded as its own receipt. The step is satisfied only when
-# every declared module has a PASS receipt at that HEAD after the last non-PASS
-# receipt at that HEAD, so a later PASS never hides an earlier FAIL.
-
-def remote_test_batches(modules, maximum=None):
-    """Split distinct modules, sorted, into consecutive batches of at most maximum."""
-    size = _MAX_REMOTE_MODULES if maximum is None else maximum
-    ordered = tuple(sorted(set(modules)))
-    return tuple(ordered[start:start + size] for start in range(0, len(ordered), size))
-
-
-def remote_test_batch_count(count, maximum=None):
-    """Number of EC2 batches needed for count declared modules."""
-    size = _MAX_REMOTE_MODULES if maximum is None else maximum
-    return -(-count // size) if count > 0 else 0
-
-
-def head_remote_receipts(task, executor_task, head):
-    """Digest-valid receipts of this Task, executor and exact head, oldest first."""
-    if type(task) is not dict:
-        return []
-    receipts = task.get('remote_test_receipts', [])
-    if type(receipts) is not list:
-        return []
-    kept = []
-    for receipt in receipts:
-        if (type(receipt) is not dict or
-                receipt.get('task_id') != task.get('task_id') or
-                receipt.get('run_id') != task.get('run_id') or
-                receipt.get('executor_task') != executor_task or
-                receipt.get('source_sha') != head or
-                receipt.get('result') not in ('PASS', 'FAIL', 'TIMEOUT', 'SHA_MISMATCH') or
-                type(receipt.get('modules')) is not list or not receipt['modules']):
-            continue
-        digest_input = dict(receipt)
-        claimed = digest_input.pop('receipt_digest', None)
-        try:
-            digest = hashlib.sha256(_json_bytes(digest_input)).hexdigest()
-        except Exception:
-            continue
-        if type(claimed) is not str or claimed != digest:
-            continue
-        kept.append(receipt)
-    return kept
-
-
-def batch_missing_modules(receipts, declared):
-    """Return (last_bad_index, missing) for exact-head receipts, oldest first.
-
-    last_bad_index is the position of the newest non-PASS receipt, or -1.
-    missing lists the declared modules with no PASS receipt after it.
-    """
-    last_bad = -1
-    for index, receipt in enumerate(receipts):
-        if receipt.get('result') != 'PASS':
-            last_bad = index
-    covered = set()
-    for receipt in receipts[last_bad + 1:]:
-        covered.update(item for item in receipt['modules'] if type(item) is str)
-    return last_bad, tuple(sorted(set(declared) - covered))
-
-
-def _next_batch(task, executor_task, sha, declared):
-    """The batch the next EC2 run takes: the first one with a module still missing."""
-    batches = remote_test_batches(declared)
-    _, missing = batch_missing_modules(head_remote_receipts(task, executor_task, sha), declared)
-    return next((batch for batch in batches if set(batch) & set(missing)), batches[0])
-
-
-def _superseded_by_non_pass(receipts, position, executor_task, sha):
-    """True when a later receipt of this executor at this head is not a PASS."""
-    return any(type(later) is dict and later.get('executor_task') == executor_task and
-               later.get('source_sha') == sha and later.get('result') != 'PASS'
-               for later in receipts[position + 1:])
-
-
 def _validate_remote_receipt(raw, *, sha, modules):
     if type(raw) is not bytes or not raw or len(raw) > _REMOTE_LIMIT:
         return None
@@ -482,6 +401,9 @@ def _validate_remote_receipt(raw, *, sha, modules):
     if receipt['result'] in ('FAIL', 'TIMEOUT', 'SHA_MISMATCH') and receipt['exit_code'] == 0:
         return None
     if not valid_module_results(receipt):
+        return None
+    if (receipt['result'] == 'PASS' and 'module_results' in receipt and
+            not pass_receipt_covers(receipt, modules)):
         return None
     return receipt
 
@@ -539,6 +461,27 @@ def valid_module_results(receipt):
         return True
     passing = [final.endswith('OK') or _PASSING_SKIP_FINAL.fullmatch(final) for final in finals]
     return len(entries) == len(modules) and all(passing)
+
+
+def pass_receipt_covers(receipt, required_modules):
+    """Require proof that every required module ran in this successful invocation."""
+    modules = receipt.get('modules')
+    finals = receipt.get('final')
+    if (receipt.get('result') != 'PASS' or type(modules) is not list or not modules or
+            any(type(name) is not str or not _MODULE.fullmatch(name) for name in modules) or
+            modules != sorted(set(modules)) or not set(required_modules) <= set(modules) or
+            type(finals) is not list or len(finals) != len(modules) or
+            any(type(line) is not str or not (
+                line.endswith('OK') or _PASSING_SKIP_FINAL.fullmatch(line))
+                for line in finals) or receipt.get('failures') != [] or
+            type(receipt.get('ran_total')) is not int):
+        return False
+    entries = receipt.get('module_results')
+    if entries is None:
+        # An aggregate count is attributable only to a single-module legacy run.
+        return len(modules) == 1 and receipt['ran_total'] > _final_skipped(finals[0])
+    return valid_module_results(receipt) and all(
+        entry['ran'] > entry['skipped'] for entry in entries)
 
 
 def _record_outcome(store, task_id, task, *, result, code, executor_task, sha, modules):
@@ -674,14 +617,11 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
     if pr is not None:
         store.record_published_pr(task_id, pr, recorded_head)
     admitted = _task_path_modules(task)
+    if (type(modules) not in (tuple, list, set, frozenset) or
+            any(type(module) is not str for module in modules)):
+        return denied('MODULE_NOT_ADMITTED')
     selected = tuple(sorted(set(modules or admitted)))
-    # #2457: an explicit selection stays limited to the maximum per call; with
-    # no selection, more declared modules than the maximum run in batches.
-    batch_mode = not modules and len(selected) > _MAX_REMOTE_MODULES
-    if batch_mode:
-        selected = _next_batch(task, executor_task, sha, selected)
-    if (not selected or len(selected) > _MAX_REMOTE_MODULES or
-            any(type(x) is not str or not _MODULE.fullmatch(x) or x not in admitted for x in selected)):
+    if not selected or not set(selected).issubset(admitted):
         return denied('MODULE_NOT_ADMITTED')
     if hosted:
         return _run_hosted(store, task_id, task, executor_task=executor_task,
@@ -693,19 +633,15 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         return denied('CONFIG_INVALID')
     argv = _ssh_argv(config, sha, ref, selected)
     command_digest = _command_digest(argv)
-    known_receipts = task.get('remote_test_receipts', [])
-    for position, known in enumerate(known_receipts):
-        if (known.get('executor_task') == executor_task and known.get('source_sha') == sha and
-                known.get('modules') == list(selected) and
-                known.get('command_digest') == command_digest and
-                known.get('result') in ('PASS', 'SHA_MISMATCH')):
-            # #2457: in batch mode an old PASS never stands in for a rerun after a
-            # later FAIL at the same head.
-            if (batch_mode and
-                    _superseded_by_non_pass(known_receipts, position, executor_task, sha)):
-                continue
+    for known in reversed(task.get('remote_test_receipts', [])):
+        if (known.get('executor_task') != executor_task or known.get('source_sha') != sha):
+            continue
+        if (known.get('modules') == list(selected) and known.get('command_digest') == command_digest and
+                (known.get('result') == 'SHA_MISMATCH' or pass_receipt_covers(known, selected))):
             record_remote_test_event(store, task_id, known)
             return known
+        # A newer same-head receipt supersedes older cached test evidence.
+        break
     if transport is None:
         transport = _ssh_transport
     timeout = _ssh_timeout()
@@ -728,7 +664,8 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         return _record_outcome(store, task_id, task, result='UNAVAILABLE', code='SSH_FAILED',
                                executor_task=executor_task, sha=sha, modules=selected)
     parsed = _validate_remote_receipt(stdout, sha=sha, modules=selected)
-    if parsed is None:
+    if (parsed is None or
+            (parsed['result'] == 'PASS' and not pass_receipt_covers(parsed, selected))):
         return _record_outcome(store, task_id, task, result='UNKNOWN', code='RECEIPT_INVALID',
                                executor_task=executor_task, sha=sha, modules=selected)
     receipt = dict(parsed, task_id=task_id, run_id=task['run_id'],
@@ -817,10 +754,10 @@ def run_incident_remote_test(incident_id, *, sha, modules=(), root=None,
     must be readable and still open; ``sha`` must be recorded in it (a failing
     head, the last-good head or a merge SHA in a recorded range); every module
     must be recorded as failing in it (``modules`` empty means all of them);
-    at most ``_MAX_REMOTE_MODULES`` modules.
+    at most the incident store's admitted module limit.
 
     The run is the Task remote-test session: the same fixed remote program,
-    module cap, SSH timeout, receipt validation and output screening, and the
+    SSH timeout, receipt validation and output screening, and the
     remote program's own workspace and log cleanup. Before recording, every
     output-derived receipt field (``final`` and ``failure_excerpt``) is
     screened again (``_screen_incident_receipt``): a sensitive hit records
@@ -857,7 +794,7 @@ def run_incident_remote_test(incident_id, *, sha, modules=(), root=None,
         return _incident_denied(INCIDENT_SHA_NOT_RECORDED, incident_id)
     failing = incident_store.failing_modules(record)
     selected = tuple(sorted(set(modules or failing)))
-    if len(selected) > _MAX_REMOTE_MODULES:
+    if len(selected) > incident_store.MAX_REMOTE_MODULES:
         return _incident_denied(INCIDENT_MODULE_CAP, incident_id)
     if not selected or not set(selected) <= failing:
         return _incident_denied(INCIDENT_MODULE_NOT_FAILING, incident_id)
@@ -1004,12 +941,12 @@ def _hosted_dispatch(sha, ref, modules, nonce, *, post=None):
         raise ValueError('Invalid nonce')
     if not isinstance(modules, (list, tuple)):
         raise ValueError('modules must be a sequence')
-    if not (1 <= len(modules) <= 8):
-        raise ValueError('modules must contain 1 to 8 items')
+    if not modules:
+        raise ValueError('modules must be non-empty')
     if any(type(m) is not str or not _MODULE.fullmatch(m) for m in modules):
         raise ValueError('Each module must match _MODULE')
     if list(modules) != sorted(set(modules)):
-        raise ValueError('modules must be 1 to 8 sorted distinct items')
+        raise ValueError('modules must be sorted distinct items')
 
     body = {
         'ref': 'main',
@@ -1468,7 +1405,9 @@ def _hosted_outcome(run, job, raw, *, sha, modules):
     # Only run and job conclusion success with a PASS receipt yields PASS.
     if run_conclusion == 'success' and job_conclusion == 'success':
         if receipt_result == 'PASS':
-            return ('RECEIPT', receipt)
+            if pass_receipt_covers(receipt, modules):
+                return ('RECEIPT', receipt)
+            return ('OUTCOME', 'UNKNOWN', 'RECEIPT_INVALID')
         return ('OUTCOME', 'UNKNOWN', 'RECEIPT_CONFLICT')
 
     if run_conclusion == 'failure' and job_conclusion == 'failure':

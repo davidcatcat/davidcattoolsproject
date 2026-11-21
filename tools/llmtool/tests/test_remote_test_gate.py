@@ -1,5 +1,6 @@
 import hashlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -69,16 +70,12 @@ class RemoteTestGateTests(unittest.TestCase):
         self.assertEqual(task_submission_cli._remote_receipt_test_policy(
             non_unittest, read_paths=[PATH], config_loader=lambda: {}), 'LOCAL')
 
-    def test_eligibility_caps_remote_modules_at_executor_limit(self):
-        eight_module_task, eight_module_paths = task_with_module_count(8)
-        self.assertEqual(task_submission_cli._remote_receipt_test_policy(
-            eight_module_task, read_paths=eight_module_paths,
-            config_loader=lambda: {}), 'REMOTE_RECEIPT')
-
-        nine_module_task, nine_module_paths = task_with_module_count(9)
-        self.assertEqual(task_submission_cli._remote_receipt_test_policy(
-            nine_module_task, read_paths=nine_module_paths,
-            config_loader=lambda: {}), 'REMOTE_RECEIPT')
+    def test_eligibility_does_not_depend_on_module_count(self):
+        for count in (1, 8, 9, 11, 17, 25, 100):
+            with self.subTest(count=count):
+                task, paths = task_with_module_count(count)
+                self.assertEqual(task_submission_cli._remote_receipt_test_policy(
+                    task, read_paths=paths, config_loader=lambda: {}), 'REMOTE_RECEIPT')
 
     def test_prompt_includes_remote_instruction_and_preserves_local_instruction(self):
         task = task_with_tests()
@@ -184,7 +181,7 @@ class RemoteTestGateTests(unittest.TestCase):
     def test_gate_accepts_exact_skip_summary_and_rejects_other_skip_text(self):
         task = task_with_tests()
         task.update(task_id='1' * 32, run_id='2' * 32,
-                    remote_test_receipts=[sealed_receipt(final=['OK (skipped=1)'])])
+                    remote_test_receipts=[sealed_receipt(final=['OK (skipped=1)'], ran_total=2)])
 
         receipt, code = task_submission_cli._matching_remote_test_receipt(
             task, executor_task='d6-task', source_sha=SHA, paths=[PATH])
@@ -192,13 +189,37 @@ class RemoteTestGateTests(unittest.TestCase):
         self.assertIsNone(code)
 
         task['remote_test_receipts'] = [
-            sealed_receipt(final=['OK (skipping 1)']),
             sealed_receipt(final=['OK (expected failures=1)']),
+            sealed_receipt(final=['OK (skipping 1)']),
         ]
         receipt, code = task_submission_cli._matching_remote_test_receipt(
             task, executor_task='d6-task', source_sha=SHA, paths=[PATH])
         self.assertIsNone(receipt)
         self.assertEqual(code, 'MAC_EVIDENCE_REQUIRED')
+
+    def test_gate_requires_full_current_coverage_after_module_eight(self):
+        task, paths = task_with_module_count(11)
+        task.update(task_id='1' * 32, run_id='2' * 32)
+        modules = sorted(Path(path).stem for path in paths)
+
+        def receipt(names, **changes):
+            fields = dict(modules=names, final=['OK'] * len(names), ran_total=len(names),
+                          module_results=[dict(module=name, ran=1, skipped=0, final='OK')
+                                          for name in names])
+            fields.update(changes)
+            return sealed_receipt(**fields)
+
+        full = receipt(modules)
+        self.assertIsNotNone(full)
+        for candidate in (
+                full, receipt(modules[:8]), receipt(modules, module_results=None),
+                receipt(modules, result='FAIL'), receipt(modules, result='TIMEOUT'),
+                receipt(modules, result='UNKNOWN')):
+            with self.subTest(candidate=candidate['result'], count=len(candidate['modules'])):
+                task['remote_test_receipts'] = [full, candidate]
+                match, code = task_submission_cli._matching_remote_test_receipt(
+                    task, executor_task='d6-task', source_sha=SHA, paths=paths)
+                self.assertEqual(match is not None, candidate is full, code)
 
     def test_consumer_rejects_receipt_for_sha_other_than_reviewed_head(self):
         task = task_with_tests()

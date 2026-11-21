@@ -1238,7 +1238,7 @@ def _validate_remote_test_receipts(record):
                  (type(receipt.get('pm_session')) is not str or
                   receipt['pm_session'] not in earlier_sessions)) or
                 type(receipt.get('modules')) is not list or
-                not 1 <= len(receipt['modules']) <= 32 or
+                not receipt['modules'] or
                 any(type(item) is not str or
                     re.fullmatch(r'test_[a-z0-9_]{1,80}', item) is None
                     for item in receipt['modules']) or
@@ -1255,7 +1255,6 @@ def _validate_remote_test_receipts(record):
                 not math.isfinite(receipt['elapsed_s']) or receipt['elapsed_s'] < 0 or
                 type(receipt.get('ran_total')) is not int or receipt['ran_total'] < 0 or
                 type(receipt.get('final')) is not list or
-                len(receipt['final']) > 64 or
                 any(type(item) is not str or len(item) > 512 for item in receipt['final']) or
                 type(receipt.get('failures')) is not list or len(receipt['failures']) > 10 or
                 any(item not in receipt['modules'] for item in receipt['failures']) or
@@ -1332,7 +1331,7 @@ def _valid_remote_test_dispatch_entry(entry):
     if type(executor_task) is not str or D6_TASK_ID.fullmatch(executor_task) is None:
         return False
     modules = entry.get('modules')
-    if (type(modules) is not list or not 1 <= len(modules) <= 8 or
+    if (type(modules) is not list or not modules or
             any(type(m) is not str or re.fullmatch(r'test_[a-z0-9_]{1,80}', m) is None for m in modules) or
             modules != sorted(set(modules))):
         return False

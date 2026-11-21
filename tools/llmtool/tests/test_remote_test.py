@@ -543,15 +543,37 @@ class RemoteTestTests(unittest.TestCase):
             with self.subTest(passing_summary=summary):
                 self.assertFalse(namespace['passing_final'](summary))
 
-    def test_module_admission_is_bounded(self):
-        modules = tuple(f'test_module{i}' for i in range(9))
-        self.store.task['developer']['direct_result_callback']['evidence']['tests'] = [
-            {'path': f'tools/llmtool/tests/{module}.py'} for module in modules]
-        denied = self.run_it(modules=modules)
-        self.assertEqual((denied['result'], denied['code']),
-                         ('ADMISSION_DENIED', 'MODULE_NOT_ADMITTED'))
-        self.assertTrue(denied['persisted'])
-        self.assertEqual(self.calls, [])
+    def test_single_request_runs_all_admitted_modules(self):
+        for count in (1, 8, 9, 11, 17, 25, 100):
+            with self.subTest(count=count):
+                modules = [f'test_module{i:03}' for i in range(count)]
+                self.store.task['developer']['read_paths'] = [
+                    f'tools/llmtool/tests/{module}.py' for module in modules]
+                payload = json.loads(self.receipt())
+                payload.update(modules=modules, final=['OK'] * count, ran_total=count,
+                               module_results=[dict(module=name, ran=1, skipped=0, final='OK')
+                                               for name in modules])
+                result = self.run_it(json.dumps(payload).encode(), modules=modules)
+                self.assertEqual(result['result'], 'PASS')
+                self.assertEqual(self.calls[-1][0][-count:], modules)
+                self.assertEqual([entry['module'] for entry in result['module_results']], modules)
+                _validate_remote_test_receipts(self.store.task)
+
+    def test_fresh_pass_without_complete_module_results_is_unknown(self):
+        modules = [f'test_late_{index:02}' for index in range(11)]
+        self.store.task['developer']['read_paths'] = [
+            f'tools/llmtool/tests/{module}.py' for module in modules]
+        data = json.loads(self.receipt())
+        data.update(modules=modules, final=['OK'] * len(modules), ran_total=len(modules))
+        late = [dict(module=name, ran=1, skipped=0, final='OK') for name in modules]
+        for evidence in (None, late[:8], [*late[:9], dict(late[9], ran=0), late[10]]):
+            with self.subTest(evidence=evidence is not None):
+                if evidence is not None:
+                    data['module_results'] = evidence
+                result = self.run_it(json.dumps(data).encode(), modules=modules)
+                self.assertEqual((result['result'], result['code']),
+                                 ('UNKNOWN', 'RECEIPT_INVALID'))
+                self.assertEqual(self.store.task['remote_test_receipts'], [])
 
     def test_test_failed_callback_admits_modules_without_changing_callback(self):
         callback = self.store.task['developer']['direct_result_callback']
@@ -741,6 +763,19 @@ class RemoteTestTests(unittest.TestCase):
         self.store = Store()
         self.run_it()
         self.assertIsNone(self.store.task['published_pr'])
+
+    def test_rerun_does_not_reuse_pass_superseded_by_same_head_failure(self):
+        first = self.run_it()
+        later = dict(first, result='FAIL', exit_code=1, final=['FAILED (failures=1)'],
+                     failures=['test_remote_test'])
+        later.pop('receipt_digest')
+        later['receipt_digest'] = hashlib.sha256(_json_bytes(later)).hexdigest()
+        self.store.task['remote_test_receipts'].append(later)
+
+        retried = self.run_it(self.receipt('FAIL', exit_code=1,
+                                          final=('FAILED (failures=2)',)))
+        self.assertEqual(retried['result'], 'FAIL')
+        self.assertEqual(len(self.calls), 2)
 
     def test_published_link_survives_ssh_failure_and_receipt_replay(self):
         with patch.object(remote_test, '_github_get',

@@ -234,48 +234,6 @@ def _norm_path(path: Any) -> str:
     return path.replace("\\", "/").removeprefix("./")
 
 
-# #1817: the declared test modules are the distinct test paths in the read and
-# write lists; llmtool's remote test runs at most its _MAX_REMOTE_MODULES per EC2
-# batch and batches the rest (#2457).
-TEST_MODULE_PATH = re.compile(r"tools/llmtool/tests/test_[a-z0-9_]{1,80}\.py")
-
-
-def _declared_paths(spec: dict[str, Any], field: str) -> list:
-    """The spec's own list for a field, falling back to its '<field>_paths' key."""
-    paths = spec.get(field)
-    if not isinstance(paths, list):
-        paths = spec.get(field + "_paths")
-    return paths if isinstance(paths, list) else []
-
-
-def declared_test_modules(spec: dict[str, Any]) -> set[str]:
-    """Return the distinct tools/llmtool/tests/test_*.py paths a spec declares."""
-    return {
-        _norm_path(path)
-        for field in ("read", "write")
-        for path in _declared_paths(spec, field)
-        if isinstance(path, str) and TEST_MODULE_PATH.fullmatch(_norm_path(path))
-    }
-
-
-def declared_module_batch_note(spec: dict[str, Any], maximum: int | None = None) -> str | None:
-    """#2457: report the EC2 batch count when a spec declares more modules than one run takes.
-
-    #1817 refused such a spec. EC2 now runs the declared modules in batches of at
-    most the maximum, all at the same exact HEAD, so the spec is accepted and
-    this fixed-format note (counts only, no field values) names the batches.
-    Returns None when one run is enough.
-    """
-    if maximum is None:
-        from llmtool import remote_test
-        maximum = remote_test._MAX_REMOTE_MODULES
-    count = len(declared_test_modules(spec))
-    if count <= maximum:
-        return None
-    batches = -(-count // maximum)
-    return f"test_module_batches:count={count}:max={maximum}:batches={batches}"
-
-
 def check_read_scope(spec: dict[str, Any], repo: str | Path) -> list[str]:
     """Check read scope covers acceptance paths and tests when --repo is given."""
     repo_dir = Path(repo)
@@ -431,10 +389,6 @@ def main(argv: list[str] | None = None) -> int:
     if failures:
         print("SPEC_PREFLIGHT_FAIL:" + ",".join(failures))
         return 1
-
-    batch_note = declared_module_batch_note(spec)
-    if batch_note is not None:
-        print("SPEC_PREFLIGHT_NOTE:" + batch_note, file=sys.stderr)
 
     if len(spec["acceptance"]) > REPAIR_ROOM_MAX_ACCEPTANCE:
         print("SPEC_PREFLIGHT_WARN:ACCEPTANCE_NO_REPAIR_ROOM", file=sys.stderr)

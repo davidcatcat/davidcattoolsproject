@@ -90,6 +90,8 @@ def remote_receipt(record, *, source_sha=HEAD, result='PASS', excerpt=None,
         'result': result, 'modules': ['test_task_advance'],
         'ran_total': 1, 'elapsed_s': 0.01,
     }
+    if result == 'PASS':
+        receipt.update(final=['OK'], failures=[])
     if excerpt is not None:
         receipt['failure_excerpt'] = excerpt
     receipt.update(changes)
@@ -460,6 +462,25 @@ class TaskAdvanceTests(unittest.TestCase):
         self.assertEqual(dispatched[0][0]['version'], 2)
         self.assertEqual(dispatched[0][1], new_head)
         self.assertEqual(os.getcwd(), initial_cwd)
+
+    def test_partial_pass_does_not_satisfy_large_remote_test_gate(self):
+        modules = [f'test_large_{index:02d}' for index in range(11)]
+        # A historical count denial must not skip the now-admitted test run.
+        record = base_record(developer={
+            'read_paths': [f'tools/llmtool/tests/{name}.py' for name in modules]})
+
+        def receipt(names):
+            return remote_receipt(
+                record, modules=names, final=['OK'] * len(names), ran_total=len(names),
+                module_results=[dict(module=name, ran=1, skipped=0, final='OK') for name in names])
+
+        self.assertIsNone(task_advance._remote_test_status(record, d6())[0])
+        record['remote_test_receipts'] = [receipt(modules[:8])]
+        self.assertIsNone(task_advance._remote_test_status(record, d6())[0])
+        self.assertIsNone(task_advance._remote_test_receipt_summary(record, HEAD))
+        record['remote_test_receipts'].append(receipt(modules))
+        self.assertEqual(task_advance._remote_test_status(record, d6())[0], 'PASS')
+        self.assertEqual(task_advance._remote_test_receipt_summary(record, HEAD)['modules'], modules)
 
     def test_old_head_remote_test_receipt_does_not_satisfy_gate(self):
         record = base_record(remote_test_receipts=[remote_receipt(

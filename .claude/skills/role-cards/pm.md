@@ -52,7 +52,7 @@ The Owner's binding working rules for PM runs (2026-11-16 – 2026-11-18), recor
 1. **A fresh-D6 continuation restates the whole PR acceptance**, not only the delta or the last finding.
 2. **Before a High-Debug last repair, put every file the RCA fix needs in the Task `write_paths`.** Otherwise the last repair is spent on a scope refusal.
 3. **Never PM-merge conflicts on top of a Developer result.** Use the merged result as the base of a new D6, with its own Task, Developer and review.
-4. **EC2 admits at most 8 modules, and only from `tools/llmtool/tests`.** Run anything else locally in a registered test D6.
+4. **Declare every applicable `tools/llmtool/tests` module in the Task paths.** EC2 admission checks the declared paths, and acceptance requires execution evidence for every requested test module. Run platform-specific tests on their supported platform.
 5. **PM scratch test runs include the monitor tests and `test_owner_literal_guard`.**
 6. **Write a reviewed design doc first** for concurrency and multi-Task features: locks, shared state, parallel Tasks and merge trains.
 7. **Sync the canonical repo before dispatch** with `git merge --ff-only origin/main`. Otherwise dispatch fails with `LLMTOOL_SOURCE_STALE`.

@@ -1758,26 +1758,20 @@ def _review_ec2_line(task, head):
     """Render the receipt that the advance gate accepts for this exact HEAD."""
     from . import task_advance  # task_advance imports this module at load time.
     try:
-        # #2457: a Task with more modules than one EC2 run shows every batch.
-        receipts = task_advance._remote_test_review_receipts(task, head)
-        summaries = [task_advance._remote_test_receipt_summary(
-            {'remote_test_receipts': [receipt]}, head) for receipt in receipts]
+        receipt = task_advance._remote_test_status(task, {'result_head': head})[2]
+        summary = (task_advance._remote_test_receipt_summary(
+            {'remote_test_receipts': [receipt]}, head) if receipt is not None else None)
     except Exception:
         return _REVIEW_EC2_NONE
-    if not summaries or any(summary is None for summary in summaries):
+    if summary is None:
         return _REVIEW_EC2_NONE
-    lines = []
-    for index, summary in enumerate(summaries, 1):
-        hosted_run_id = summary.get('hosted_run_id')
-        prefix = (f"remote-test (GitHub-hosted run {hosted_run_id}): result="
-                  if hosted_run_id is not None
-                  else "EC2 remote-test: result=")
-        label = f"batch {index} of {len(summaries)}: " if len(summaries) > 1 else ''
-        lines.append(f"{label}{prefix}{summary['result']}, "
-                     f"modules={','.join(summary['modules'])}, "
-                     f"tests run={summary['ran_total']}, "
-                     f"seconds={summary['elapsed_s']}, receipt={summary['receipt_digest']}")
-    return '\n'.join(lines)
+    hosted_run_id = summary.get('hosted_run_id')
+    prefix = (f"remote-test (GitHub-hosted run {hosted_run_id}): result="
+              if hosted_run_id is not None
+              else "EC2 remote-test: result=")
+    return (f"{prefix}{summary['result']}, "
+            f"modules={','.join(summary['modules'])}, tests run={summary['ran_total']}, "
+            f"seconds={summary['elapsed_s']}, receipt={summary['receipt_digest']}")
 
 
 def _review_ci_value(value):
@@ -4015,8 +4009,6 @@ def _remote_task_test_paths(task, *, read_paths=()):
                            '/' not in path[len('tools/llmtool/tests/'): ]}
         if task_test_paths and task_test_paths != set(paths):
             return ()
-    # #2457: more modules than one EC2 run take stay REMOTE_RECEIPT; EC2 runs
-    # them in batches and _matching_remote_test_receipt needs every batch PASS.
     admitted_task = dict(task)
     admitted_task['completion'] = {'evidence': {'tests': [{'path': path} for path in paths]}}
     if set(remote_test._admitted_modules(admitted_task)) != {
@@ -4032,73 +4024,29 @@ def _remote_receipt_test_policy(task, *, read_paths=(), config_loader=None):
             else 'LOCAL')
 
 
-def _passing_remote_receipt(task, receipt, executor_task, source_sha, modules):
-    """Return (usable, skipped) for one receipt as direct Developer evidence.
-
-    modules, when given, must all be in the receipt's own module list.
-    """
-    if (type(receipt) is not dict or receipt.get('result') != 'PASS' or
-            receipt.get('task_id') != task.get('task_id') or
-            receipt.get('run_id') != task.get('run_id') or
-            receipt.get('executor_task') != executor_task or
-            receipt.get('source_sha') != source_sha or
-            type(receipt.get('modules')) is not list or
-            any(type(module) is not str for module in receipt['modules']) or
-            (modules is not None and not set(modules).issubset(receipt['modules'])) or
-            type(receipt.get('ran_total')) is not int or receipt['ran_total'] <= 0 or
-            receipt.get('failures') != [] or
-            type(receipt.get('final')) is not list or
-            len(receipt['final']) < len(receipt['modules']) or
-            type(receipt.get('receipt_digest')) is not str):
-        return False, False
-    digest_input = dict(receipt)
-    claimed = digest_input.pop('receipt_digest')
-    if claimed != hashlib.sha256(_json_bytes(digest_input)).hexdigest():
-        return False, False
-    skipped = any(type(line) is str and re.search(r'\bskipp(?:ed|ing)?\b', line, re.I)
-                  for line in receipt['final'])
-    if any(type(line) is not str or not (
-            line.endswith('OK') or
-            re.fullmatch(r'OK \(skipped=[1-9][0-9]{0,5}\)', line))
-           for line in receipt['final']):
-        return False, skipped
-    return True, skipped
-
-
-def _matching_batch_remote_test_receipt(task, *, executor_task, source_sha, modules):
-    """#2457: every module needs a usable PASS receipt at this exact HEAD after the
-    newest non-PASS receipt there. One batch, a stale PASS or a PASS that follows
-    nothing but an earlier FAIL never satisfies a Task above the EC2 maximum."""
-    receipts = remote_test.head_remote_receipts(task, executor_task, source_sha)
-    last_bad, _ = remote_test.batch_missing_modules(receipts, modules)
-    covered, newest, skipped = set(), None, False
-    for receipt in receipts[last_bad + 1:]:
-        usable, was_skipped = _passing_remote_receipt(
-            task, receipt, executor_task, source_sha, None)
-        skipped = skipped or was_skipped
-        if usable:
-            covered.update(receipt['modules'])
-            newest = receipt
-    if newest is not None and set(modules).issubset(covered):
-        return newest, None
-    return None, ('MAC_EVIDENCE_REQUIRED' if skipped else 'REMOTE_TEST_RECEIPT_MISSING')
-
-
 def _matching_remote_test_receipt(task, *, executor_task, source_sha, paths):
     modules = tuple(sorted({Path(path).stem for path in paths}))
     if not modules:
         return None, 'REMOTE_TEST_RECEIPT_MISSING'
-    if len(modules) > remote_test._MAX_REMOTE_MODULES:
-        return _matching_batch_remote_test_receipt(
-            task, executor_task=executor_task, source_sha=source_sha, modules=modules)
-    skipped = False
-    for receipt in task.get('remote_test_receipts', []):
-        usable, was_skipped = _passing_remote_receipt(
-            task, receipt, executor_task, source_sha, modules)
-        skipped = skipped or was_skipped
-        if usable:
+    for receipt in reversed(task.get('remote_test_receipts', [])):
+        if (type(receipt) is not dict or receipt.get('task_id') != task.get('task_id') or
+                receipt.get('run_id') != task.get('run_id') or
+                receipt.get('executor_task') != executor_task or
+                receipt.get('source_sha') != source_sha):
+            continue
+        digest_input = dict(receipt)
+        claimed = digest_input.pop('receipt_digest', None)
+        if type(claimed) is not str or claimed != hashlib.sha256(_json_bytes(digest_input)).hexdigest():
+            break
+        if remote_test.pass_receipt_covers(receipt, modules):
             return receipt, None
-    return None, ('MAC_EVIDENCE_REQUIRED' if skipped else 'REMOTE_TEST_RECEIPT_MISSING')
+        finals = receipt.get('final')
+        if type(finals) is list and any(
+                type(line) is str and re.search(r'\bskipp(?:ed|ing)?\b', line, re.I)
+                for line in finals):
+            return None, 'MAC_EVIDENCE_REQUIRED'
+        break
+    return None, 'REMOTE_TEST_RECEIPT_MISSING'
 
 
 def _direct_result_tests(task, evidence, result, developer, *, config_loader=None):
