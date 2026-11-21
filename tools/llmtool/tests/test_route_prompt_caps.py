@@ -48,7 +48,7 @@ class RoutePromptCapsTests(unittest.TestCase):
 
     def test_loader_accepts_repository_keys(self):
         config = load_route_config()
-        self.assertEqual(config["routes"]["claude"]["max_prompt_bytes"], 65536)
+        self.assertEqual(config["routes"]["claude"]["max_prompt_bytes"], 5242880)
         self.assertEqual(config["routes"]["agy"]["max_prompt_bytes"], 5242880)
 
     def test_loader_refuses_bad_max_prompt_bytes_values(self):

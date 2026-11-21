@@ -72,8 +72,10 @@ TEXT_DEVELOPER_CONTEXT_SEPARATOR = (
     '\n\nThe model has no tools, cannot read files, and all needed file content is provided below.\n\n'
 )
 
-REQUEST_LIMIT = 64 * 1024
-RESPONSE_LIMIT = 64 * 1024
+# #2281 (Owner 2026-11-21): every AI Developer route request, response and
+# reply bound below 5 MiB is raised to 5242880 end to end.
+REQUEST_LIMIT = 5 * 1024 * 1024
+RESPONSE_LIMIT = 5 * 1024 * 1024
 _PROFILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}')
 # No production Reviewer dispatcher is installed. A future Host runtime may
 # bind this internal seam only after a separate authority/runtime grant.
@@ -5224,7 +5226,7 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
             raise LLMToolError('OpenCode changed the registered Git identity')
         changed_paths, artifact_raw = task_completion._worktree_diff(
             registration.root, snapshot.head)
-        if len(artifact_raw) > 64 * 1024:
+        if len(artifact_raw) > 5 * 1024 * 1024:
             raise LLMToolError('OpenCode diff exceeds the supported size')
         artifact = artifact_raw.decode('utf-8', 'strict')
         rejection = _developer_output_rejection(
@@ -5554,7 +5556,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         raise LLMToolError('request or response exceeds the supported size')
     card_prefix, card_prefix_sha256 = _developer_card_prefix(task, registration, 'agy')
     prompt = instructions + card_prefix + task_json
-    if len(prompt.encode('utf-8')) > min(64 * 1024 - 1, agy_max_prompt_bytes):
+    if len(prompt.encode('utf-8')) > agy_max_prompt_bytes:
         raise LLMToolError('AGY_SKILL_PROMPT_TOO_LARGE')
     provider_input_bytes = len(prompt.encode('utf-8'))
     test_policy = (direct_reassignment.test_policy(reassignment) if reassignment is not None
@@ -5872,7 +5874,7 @@ def _claude_no_changes_reason(text, sent_texts):
         if not value or not value.isprintable():
             return 'UNKNOWN'
         try:
-            _screen_text(value, 4 * 1024 * 1024)
+            _screen_text(value, 5 * 1024 * 1024)
         except LLMToolError:
             return 'UNKNOWN'
     try:
@@ -5919,8 +5921,8 @@ def _claude_no_changes_diagnosis(raw, sent_texts):
 # developer.reported.summary (Developer-reported, unverified). The bound is the
 # TaskStore limit for the reported object as ASCII JSON.
 CLAUDE_REPLY_MAX_REPORTED_BYTES = 8 * 1024
-# The whole reply is screened before any cut; Claude stdout is at most 1 MiB.
-_CLAUDE_REPLY_SCREEN_LIMIT = 1024 * 1024
+# The whole reply is screened before any cut (#2281: 5 MiB screen bound).
+_CLAUDE_REPLY_SCREEN_LIMIT = 5 * 1024 * 1024
 CLAUDE_REPLY_TRUNCATED = ' [truncated]'
 CLAUDE_REPLY_WITHHELD = ('[Developer reply withheld: it did not pass the credential '
                          'and character screen]')
@@ -6099,7 +6101,7 @@ def _claude_committed_carry(task, store, registration, snapshot, developer, comp
                              limit=4096)
         committed = task_completion._committed_changed_paths(registration.root, base, head)
         changed_paths, raw = task_completion._worktree_diff(registration.root, base)
-        if (sorted(set(changed_paths)) != committed or not raw or len(raw) > 64 * 1024 or
+        if (sorted(set(changed_paths)) != committed or not raw or len(raw) > 5 * 1024 * 1024 or
                 any(path not in write_paths for path in committed) or any(
                     (store.get(other).get('developer') or {}).get('executor_task_id') ==
                     registration.task_id and store.get(other)['developer']['state'] ==
@@ -6256,7 +6258,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
         raise LLMToolError('request or response exceeds the supported size')
     card_prefix, card_prefix_sha256 = _developer_card_prefix(task, registration, 'claude')
     prompt = instructions + card_prefix + task_json
-    if len(prompt.encode('utf-8')) > min(64 * 1024 - 1, claude_max_prompt_bytes):
+    if len(prompt.encode('utf-8')) > claude_max_prompt_bytes:
         raise LLMToolError('CLAUDE_SKILL_PROMPT_TOO_LARGE')
     provider_input_bytes = len(prompt.encode('utf-8'))
     test_policy = _remote_receipt_test_policy(task, read_paths=read_paths)

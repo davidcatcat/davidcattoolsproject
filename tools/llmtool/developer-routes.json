@@ -22,8 +22,8 @@
       "state_dirs": {"policy": "private-temp-only"},
       "default_timeout": 10800,
       "max_timeout": 18000,
-      "max_diff_bytes": 262144,
-      "max_prompt_bytes": 65536
+      "max_diff_bytes": 5242880,
+      "max_prompt_bytes": 5242880
     },
     "gw-agent": {
       "package_path": "~/.local/lib/api-agent-gateway",

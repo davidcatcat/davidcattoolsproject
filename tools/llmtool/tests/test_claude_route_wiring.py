@@ -575,8 +575,8 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                     args, store=store, route_runner=runner), 0)
             return prompts[0]
 
-        limit = min(64 * 1024 - 1, resolve_route_max_prompt_bytes('claude'))
-        self.assertLess(limit, 64 * 1024)
+        limit = resolve_route_max_prompt_bytes('claude')
+        self.assertEqual(limit, 5 * 1024 * 1024)
         room = limit - len(run(0).encode('utf-8'))
         self.assertGreater(room, 0)
         fitted = run(room)

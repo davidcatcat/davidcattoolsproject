@@ -22,7 +22,7 @@ DRIFT_SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'guidance_drift
 class ResolveRouteMaxDiffTests(unittest.TestCase):
     def test_real_file_values(self):
         self.assertEqual(resolve_route_max_diff_bytes('agy'), 5242880)
-        self.assertEqual(resolve_route_max_diff_bytes('claude'), 262144)
+        self.assertEqual(resolve_route_max_diff_bytes('claude'), 5242880)
         self.assertEqual(resolve_route_max_diff_bytes('opencode'), 5242880)
         self.assertEqual(resolve_route_max_diff_bytes('gw-agent'), 65536)
 
