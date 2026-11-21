@@ -59,6 +59,14 @@ class AgyDirectStopTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.policy_path = worker_policy_fixture.install(self)
+        # These tests exercise the launcher's stop evidence, not the Owner
+        # dispatch policy, so pin a synthetic ALLOWED AGY row (never the live
+        # file) and let the real dispatch gate decide with it.
+        self.agy_policy_path = worker_policy_fixture.write(
+            Path(self.temp.name).resolve() / 'worker-dispatch.json',
+            worker_policy_fixture.set_dispatch(
+                worker_policy_fixture.policy(), 'agy', 'ALLOWED',
+                owner_assignments=None))
         _chain_gate_fixture.pass_through_chain_gate(self)
         self.serial = 0
 
@@ -125,6 +133,8 @@ class AgyDirectStopTests(unittest.TestCase):
                 patch.object(submission_cli.task_completion, 'collect_git_snapshot',
                              return_value=snapshot), \
                 patch.object(submission_cli, '_reject_claude_reserved_d6'), \
+                patch.object(submission_cli.worker_dispatch, '_POLICY_PATH',
+                             self.agy_policy_path), \
                 patch.object(submission_cli, '_agy_developer_profile',
                              return_value=('gemini-test', 'high')), \
                 patch.object(submission_cli, '_developer_card_prefix',
