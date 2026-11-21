@@ -455,6 +455,12 @@ class ClaudeCLIProvider:
                     lifecycle.check()
                     if time.monotonic() >= work_deadline:
                         reject('REVIEW_TIMEOUT')
+                    # Resolve and validate the policy limit before any process
+                    # starts (A3); this bound is used for the whole run.
+                    try:
+                        envelope_limit = _review_envelope_limit()
+                    except LLMToolError:
+                        reject('POLICY_INVALID')
                     environment = self._child_environment()
                     environment['HOME'] = auth_home
                     argv = [executable, '--print', '--output-format', 'json',
@@ -493,11 +499,6 @@ class ClaudeCLIProvider:
                                 except BrokenPipeError:
                                     reject('REVIEW_WORKER_INPUT_INCOMPLETE')
                             else:
-                                envelope_limit = REVIEW_ENVELOPE_LIMIT
-                                try:
-                                    envelope_limit = _review_envelope_limit()
-                                except LLMToolError:
-                                    reject('POLICY_INVALID')
                                 target = output if kind == 'stdout' else errors
                                 # #2281 row 12: cap the review stdout (the
                                 # envelope) by the policy limit so a configured
