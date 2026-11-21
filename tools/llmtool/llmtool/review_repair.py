@@ -334,7 +334,10 @@ def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
         egress_basis=developer.get('egress_basis'), repair_packet=packet,
         data_class=data_class,
     )
-    return invoke(args, store=store)
+    # #2503: the repair keeps its read scope; files the findings name outside it are
+    # shown and recorded as advice. The advice never changes or blocks the repair.
+    return task_submission_cli._delegate_with_scope_advice(
+        args, store, lambda: invoke(args, store=store))
 
 
 def _record_repair_task(*, task, developer, packet, attempt, store, repair_task_id=None,

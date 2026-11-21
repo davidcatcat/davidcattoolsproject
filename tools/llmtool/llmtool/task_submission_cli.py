@@ -921,6 +921,12 @@ def add_task_submission_parsers(actions):
                                 'the route max_timeout and never above 18000)'))
     delegate.add_argument('--context-stdin', action='store_true',
                           help='codex text proposals only: read bounded, sensitive-screened context from stdin')
+    delegate.add_argument('--read-scope-reason', metavar='TEXT',
+                          help=('#2503: why this dispatch proceeds despite scope advice; '
+                                'recorded on the Task (the advice never blocks)'))
+    delegate.add_argument('--read-scope-check', action='store_true',
+                          help=('#2503: print the scope advice as JSON and exit without '
+                                'dispatching or writing anything'))
     delegate.add_argument('--pm-session',
                           help=('caller PM session (native UUID or pm- ID); must own '
                                 'the Task; default: CLAUDE_CODE_SESSION_ID or '
@@ -8512,6 +8518,85 @@ def _auto_direct_replacement(args, store):
     return replacement
 
 
+def _scope_advice_items(args, store):
+    """#2503: advisory scope items for this dispatch; any error gives [] (fail-open)."""
+    from . import read_scope_advice
+    try:
+        task = store.get(args.task_id)
+        assignment = task.get('pm_assignment') if type(task) is dict else None
+        goal = (assignment.get('goal') if type(assignment) is dict else None) or (
+            task.get('request') if type(task) is dict else None)
+        reports = []
+        high_debug_task = getattr(args, 'high_debug_task', None)
+        if type(high_debug_task) is str and re.fullmatch(r'[0-9a-f]{32}', high_debug_task):
+            try:
+                entries = store.get(high_debug_task).get('high_debug')
+            except Exception:
+                entries = None
+            if type(entries) is list:
+                reports = [item.get('report') for item in entries if type(item) is dict]
+        root = getattr(args, 'cwd', None) or os.getcwd()
+        missing = read_scope_advice.missing_read_paths(
+            texts=[goal, getattr(args, 'acceptance', None),
+                   getattr(args, 'repair_packet', None), reports],
+            read_paths=getattr(args, 'read_path', None),
+            write_paths=getattr(args, 'write_path', None),
+            exists=read_scope_advice.git_exists(root))
+        return [read_scope_advice.item(read_scope_advice.READ_MISSING, path,
+                                       'named in the spec, findings or RCA but not in read')
+                for path in missing]
+    except Exception:
+        return []
+
+
+def _record_scope_advice(args, store, items):
+    """#2503: record the advice and the PM reason on the Task; never raises."""
+    from . import read_scope_advice
+    try:
+        reason = getattr(args, 'read_scope_reason', None)
+        if not items and reason is None:
+            return
+        try:
+            head = subprocess.run(['git', 'rev-parse', 'HEAD'],
+                                  cwd=getattr(args, 'cwd', None) or os.getcwd(),
+                                  stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                  timeout=10, check=False).stdout.strip()
+        except Exception:
+            head = ''
+        source_sha = head if re.fullmatch(r'[0-9a-f]{40}', head or '') else None
+        store.append_read_scope_advice(
+            args.task_id, read_scope_advice.entry(items, reason, source_sha))
+    except Exception:
+        try:
+            print('SCOPE_ADVICE_NOT_RECORDED (#2503): the dispatch was not affected.',
+                  file=sys.stderr)
+        except Exception:
+            pass
+
+
+def _delegate_with_scope_advice(args, store, call):
+    """#2503: show scope advice, run the dispatch unchanged, then record the advice.
+
+    The advice never blocks: it is printed before the dispatch, the dispatch
+    runs exactly as without it, and the advice is recorded only after the
+    dispatch returned (so no Task write precedes the route's own checks).
+    --read-scope-check prints the advice and dispatches nothing.
+    """
+    from . import read_scope_advice
+    items = _scope_advice_items(args, store)
+    if getattr(args, 'read_scope_check', False) is True:
+        _print({'task_id': args.task_id, 'scope_advice': items}, None)
+        return 0
+    if items:
+        try:
+            print(read_scope_advice.warning(items), file=sys.stderr)
+        except Exception:
+            pass
+    result = call()
+    _record_scope_advice(args, store, items)
+    return result
+
+
 def run_task_delegate(args, *, store=None):
     store = TaskStore() if store is None else store
     if getattr(args, 'provider', None) == 'company-gw':
@@ -8864,7 +8949,8 @@ def run_task_delegate_checked(args, *, store=None):
     if code is not None:
         raise LLMToolError(f'{code}: a fresh quota observation for {worker} is FAIL; '
                            'no Task or D6 write was made')
-    return run_task_delegate(args, store=store)
+    return _delegate_with_scope_advice(
+        args, store, lambda: run_task_delegate(args, store=store))
 
 
 # #2188 design section 3: the new developer of a start retry keeps these of D.
