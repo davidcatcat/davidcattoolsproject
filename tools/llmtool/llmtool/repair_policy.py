@@ -41,9 +41,15 @@ OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
 #   row 12: review_packet_limit_bytes (#2281 row 12, first part, basis #131
 #           and #165: review packet size limit in bytes; caller default
 #           llmtool.task_review.PACKET_LIMIT)
+#   row 12: review_source_limit_bytes (#2281 row 12, basis #131 and
+#           #165: review source size limit in bytes; caller default
+#           llmtool.task_review.SOURCE_LIMIT)
 #   row 12: claude_review_envelope_limit_bytes (#2281 row 12, basis #131 and
 #           #165: Claude review envelope size limit in bytes; caller default
 #           llmtool.providers.claude_cli.REVIEW_ENVELOPE_LIMIT)
+#   row 13: start_failures_max (#2281 row 13, first part, basis #2188: the
+#           per-Task start-failure limit; caller default
+#           llmtool.task_store.MAX_START_FAILURES)
 #   row 18: developer_assignment_wait_seconds (#819: Developer assignment wait;
 #           caller default llmtool.developer_assignment_inbox.DEFAULT_WAIT_SECONDS)
 #           and developer_assignment_expiry_seconds (#819: Developer
@@ -54,7 +60,8 @@ OPTIONAL_POSITIVE_POLICY_KEYS = ('spec_preflight_large_file_lines', 'merge_train
                                  'd6_writer_lease_hours', 'developer_assignment_wait_seconds',
                                  'developer_assignment_expiry_seconds',
                                  'review_packet_limit_bytes',
-                                 'claude_review_envelope_limit_bytes')
+                                 'claude_review_envelope_limit_bytes',
+                                 'review_source_limit_bytes', 'start_failures_max')
 # #2281 row 18 (basis #819): Developer assignment wait. The key above is
 # optional; a policy that omits it keeps the caller default, the hard-coded
 # wait at its point of use (llmtool.developer_assignment_inbox).
@@ -73,6 +80,16 @@ REVIEW_PACKET_LIMIT_BYTES = 256 * 1024
 # the hard-coded limit at its point of use
 # (llmtool.providers.claude_cli.REVIEW_ENVELOPE_LIMIT).
 CLAUDE_REVIEW_ENVELOPE_LIMIT_BYTES = 128 * 1024
+# #2281 row 12 (basis #131, #165): review source size limit in bytes.
+# The key above is optional; a policy that omits it keeps the caller
+# default, the hard-coded limit at its point of use (llmtool.task_review,
+# SOURCE_LIMIT).
+REVIEW_SOURCE_LIMIT_BYTES = 128 * 1024
+# #2281 row 13 (first part, basis #2188): the per-Task start-failure limit.
+# The key above is optional; a policy that omits it keeps the caller
+# default, the hard-coded limit at its point of use (llmtool.task_store,
+# MAX_START_FAILURES).
+START_FAILURES_MAX = 2
 # #2281 L0a (design rule 3): the bound is a real technical limit, not an
 # arbitrary cap. policy.json is untrusted input, so load_policy reads at most
 # _MAX_BYTES + 1 bytes in one bounded buffer instead of the whole file. The
@@ -181,6 +198,32 @@ def claude_review_envelope_limit_bytes(path=None):
     policy = load_policy(path)
     return policy.get('claude_review_envelope_limit_bytes',
                       CLAUDE_REVIEW_ENVELOPE_LIMIT_BYTES)
+
+
+def review_source_limit_bytes(path=None):
+    """#2281 row 12 (basis #131, #165): the review source size limit, in
+    bytes.
+
+    The key is optional; a policy that omits it keeps the caller default,
+    the hard-coded limit at its point of use (llmtool.task_review,
+    SOURCE_LIMIT).
+    """
+    policy = load_policy(path)
+    return policy.get('review_source_limit_bytes',
+                      REVIEW_SOURCE_LIMIT_BYTES)
+
+
+def start_failures_max(path=None):
+    """#2281 row 13 (first part, basis #2188): the per-Task start-failure
+    limit.
+
+    The key is optional; a policy that omits it keeps the caller default,
+    the hard-coded limit at its point of use (llmtool.task_store,
+    MAX_START_FAILURES).
+    """
+    policy = load_policy(path)
+    return policy.get('start_failures_max',
+                      START_FAILURES_MAX)
 
 
 KINDS = ('root', 'child', 'replan')
