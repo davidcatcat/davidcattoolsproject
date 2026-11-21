@@ -427,14 +427,12 @@ def _recover_ec2_claim(*, store, current, task_id, executor_task, pr_number,
     verify_ec2_recovery(store, current, repair_task_id, executor_task=executor_task,
                         pr_number=pr_number, registered_d6=registered_d6,
                         process_status=process_status, others=others)
-    claims = current['review_repair_claims']
-    marked = [dict(item, state='DISPATCHED')
-              if type(item) is dict and item.get('repair_task_id') == repair_task_id
-              else item for item in claims]
+    # The store's locked recovery write is the one transition that may move an
+    # UNKNOWN claim to DISPATCHED; a plain compare-and-update refuses it.
     try:
-        saved = store.compare_and_update(
-            task_id, expected={'record_sha256': current['record_sha256']},
-            review_repair_claims=marked)
+        saved = store.recover_review_repair_claim(
+            task_id, repair_task_id, executor_task=executor_task, pr_number=pr_number,
+            expected_sha256=current['record_sha256'])
     except TaskStoreConflict:
         refuse('REPAIR_CLAIM_UNAVAILABLE')
     except Exception:
@@ -455,8 +453,8 @@ def recover_unknown_claim(*, store, task_id, executor_task, pr_number, repair_ta
 
     The chain lock is the one repair_review holds for its counts and claim. A
     review claim goes through E1-E5 and the store's locked write. An EC2/CI
-    claim (#2475) goes through its own no-launch evidence and one CAS, and a
-    second recovery refuses. Neither path calls an adapter, delegate or
+    claim (#2475) goes through its own no-launch evidence and the same locked
+    recovery write, and a second recovery refuses. Neither path calls an adapter, delegate or
     record_pm, and neither creates a Task or changes a repair count.
     """
     from . import lineage_counts
