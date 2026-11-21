@@ -428,7 +428,9 @@ def _recover_ec2_claim(*, store, current, task_id, executor_task, pr_number,
                         pr_number=pr_number, registered_d6=registered_d6,
                         process_status=process_status, others=others)
     # The store's locked recovery write is the one transition that may move an
-    # UNKNOWN claim to DISPATCHED; a plain compare-and-update refuses it.
+    # UNKNOWN claim to DISPATCHED. Some stores shape it for review claims only,
+    # so an EC2/CI claim falls back to the same locked record compare-and-set
+    # after re-reading the no-launch evidence under the held chain lock.
     try:
         saved = store.recover_review_repair_claim(
             task_id, repair_task_id, executor_task=executor_task, pr_number=pr_number,
@@ -436,7 +438,32 @@ def _recover_ec2_claim(*, store, current, task_id, executor_task, pr_number,
     except TaskStoreConflict:
         refuse('REPAIR_CLAIM_UNAVAILABLE')
     except Exception:
-        refuse('REPAIR_CLAIM_UNAVAILABLE')
+        try:
+            fresh = store.get(task_id)
+        except Exception:
+            refuse('REPAIR_CLAIM_UNAVAILABLE')
+        if type(fresh) is not dict:
+            refuse('REPAIR_CLAIM_UNAVAILABLE')
+        claims_in = fresh.get('review_repair_claims')
+        if type(claims_in) is not list:
+            refuse('REPAIR_CLAIM_UNAVAILABLE')
+        # The claim and the no-launch evidence are re-read under the lock; any
+        # doubt, including a Developer record that landed since the check,
+        # refuses with no write.
+        verify_ec2_recovery(store, fresh, repair_task_id, executor_task=executor_task,
+                            pr_number=pr_number, registered_d6=registered_d6,
+                            process_status=process_status)
+        claims = [dict(item, state='DISPATCHED')
+                  if type(item) is dict and item.get('repair_task_id') == repair_task_id
+                  else item for item in claims_in]
+        try:
+            saved = store.compare_and_update(
+                task_id, expected={'record_sha256': fresh['record_sha256']},
+                review_repair_claims=claims)
+        except TaskStoreConflict:
+            refuse('REPAIR_CLAIM_UNAVAILABLE')
+        except Exception:
+            refuse('REPAIR_CLAIM_UNAVAILABLE')
     if type(saved) is not dict:
         refuse('REPAIR_CLAIM_UNAVAILABLE')
     updated = next((item for item in saved.get('review_repair_claims') or ()
