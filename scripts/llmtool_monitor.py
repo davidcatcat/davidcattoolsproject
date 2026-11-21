@@ -5791,7 +5791,7 @@ def _claude_quota_reset_timestamp(reset_str: str, hit_time: float) -> float | No
         hit_dt = datetime.fromtimestamp(hit_time)
         hour_24, minute = parsed
         cand = hit_dt.replace(hour=hour_24, minute=minute, second=0, microsecond=0)
-        if cand < hit_dt - timedelta(hours=1):
+        if cand <= hit_dt - timedelta(minutes=1):
             cand += timedelta(days=1)
         return cand.timestamp()
     except (ValueError, OverflowError, OSError, TypeError):

@@ -79,6 +79,15 @@ class TestClaudeQuotaResetParsing(unittest.TestCase):
         expected_dt = datetime(2026, 11, 20, 4, 40, 0)
         self.assertEqual(reset_ts, expected_dt.timestamp())
 
+    def test_claude_quota_reset_timestamp_next_day_within_one_hour(self):
+        # Hit at 04:50 reporting resets 4:40am refers to the next day, not 10 minutes earlier.
+        hit_dt = datetime(2026, 11, 20, 4, 50, 0)
+        hit_ts = hit_dt.timestamp()
+        reset_ts = monitor._claude_quota_reset_timestamp("4:40am", hit_ts)
+        self.assertIsNotNone(reset_ts)
+        expected_dt = datetime(2026, 11, 21, 4, 40, 0)
+        self.assertEqual(reset_ts, expected_dt.timestamp())
+
 
 class TestLlmtoolMonitorClaudeQuotaReset(unittest.TestCase):
     """End-to-end quota_warnings tests for Claude quota reset behavior (A1-A4)."""
@@ -137,6 +146,28 @@ class TestLlmtoolMonitorClaudeQuotaReset(unittest.TestCase):
         hit_dt = datetime(2026, 11, 20, 3, 30, 0)
         hit_ts = hit_dt.timestamp()
         now_dt = datetime(2026, 11, 20, 4, 20, 0)
+        now_ts = now_dt.timestamp()
+
+        items = [
+            {
+                "timestamp": hit_ts,
+                "error": "rate_limit",
+                "message": {
+                    "content": [
+                        {"text": "Claude usage limit reached, resets 4:40am"}
+                    ]
+                },
+            }
+        ]
+        top = self._create_account_session(".claude-account3", items, mtime=now_ts)
+        warnings = monitor.quota_warnings(now_ts, claude_root=top)
+        self.assertEqual(warnings, ["Claude（.claude-account3）已到用量上限，resets 4:40am"])
+
+    def test_a2_next_day_reset_within_one_hour_still_shows(self):
+        # A2: hit at 04:50 with resets 4:40am (next day) must still show at 05:00.
+        hit_dt = datetime(2026, 11, 20, 4, 50, 0)
+        hit_ts = hit_dt.timestamp()
+        now_dt = datetime(2026, 11, 20, 5, 0, 0)
         now_ts = now_dt.timestamp()
 
         items = [
