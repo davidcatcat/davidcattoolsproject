@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 from llmtool import repair_policy as rp
+from llmtool import task_review
 from llmtool.errors import LLMToolError
 from llmtool.providers import claude_cli
 
@@ -42,11 +43,22 @@ class ClaudeEnvelopePolicyTest(unittest.TestCase):
                                lambda: rp.claude_review_envelope_limit_bytes(policy_path)), \
                 mock.patch('llmtool.task_review.screen', lambda value: None):
             return claude_cli.decode_review_envelope(raw)
-    def _refusal(self, call, raw):
-        try:
-            call(raw)
-        except LLMToolError as exc:
-            return str(exc)
+    def _refusal_code(self, call, raw):
+        # The LLMToolError message is a generic 'review rejected; details
+        # omitted' (the code is not its string form), so capture the exact code
+        # the module-level reject() (imported at call-time from task_review)
+        # was handed; that is the definitive 'clear refusal' signal.
+        seen = []
+
+        def _refuse(code):
+            seen.append(code)
+            raise LLMToolError(code)
+
+        with mock.patch.object(task_review, 'reject', side_effect=_refuse):
+            try:
+                call(raw)
+            except LLMToolError:
+                return seen[0]
         self.fail('no refusal was raised')
     def test_default_limit_unchanged_when_key_absent(self):
         self.assertEqual(rp.claude_review_envelope_limit_bytes(str(REPO_POLICY)),
@@ -58,15 +70,15 @@ class ClaudeEnvelopePolicyTest(unittest.TestCase):
             self.assertEqual(rp.claude_review_envelope_limit_bytes(path), limit)
             self.assertEqual(self._apply(path, self.ENVELOPE_OK)['content'],
                              json.dumps('ok'))
-            self.assertIn(self._refusal(
+            self.assertEqual(self._refusal_code(
                 lambda raw: self._apply(path, raw), self.ENVELOPE_BIG),
-                ('REVIEW_WORKER_OUTPUT_LIMIT', 'REVIEW_WORKER_ENVELOPE_INVALID'))
+                'REVIEW_WORKER_ENVELOPE_INVALID')
     def test_invalid_policy_refuses(self):
         missing = dict(BASE)
         del missing['review_fail_max']
         with tempfile.TemporaryDirectory() as tmpdir:
             for policy in (dict(BASE, **{self.KEY: 0}), missing):
-                self.assertEqual(self._refusal(
+                self.assertEqual(self._refusal_code(
                     lambda raw: self._apply(self._write(tmpdir, policy), raw),
                     self.ENVELOPE_OK), 'POLICY_INVALID')
 
