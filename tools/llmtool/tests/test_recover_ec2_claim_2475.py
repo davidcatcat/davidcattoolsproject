@@ -191,7 +191,7 @@ class RecoverEc2ClaimTests(unittest.TestCase):
                 mock.patch.object(worker_availability, 'fresh_quota_fail', return_value=False):
             # Ensure the root developer/completion exist for repair_review.
             self.cas(
-                developer={**saved['developer'], 'state': 'DEVELOPER_RESPONDED',
+                developer={**(saved.get('developer') or {}), 'state': 'DEVELOPER_RESPONDED',
                            'provider_profile': 'opencode', 'provider_type': 'opencode-cli',
                            'model': None,
                            'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
