@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from argparse import Namespace
 from contextlib import redirect_stdout
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -25,6 +26,19 @@ from llmtool.task_store import TaskStore, new_id
 
 import _chain_gate_fixture
 import worker_policy_fixture
+
+
+@dataclass(frozen=True)
+class _Registration:
+    """The D6 registration fields direct_reassignment needs and replaces."""
+
+    task_id: str
+    trusted_agent_id: str
+    session_ref: str
+    native_session_id: object
+    root: str
+    common_dir: str
+    branch: str
 
 
 def setUpModule():
@@ -171,7 +185,7 @@ class AgyDirectStopTests(unittest.TestCase):
             egress_basis=developer['egress_basis'],
             selection_source=developer['selection_source'],
             data_class=developer.get('data_class'))
-        registration = SimpleNamespace(
+        registration = _Registration(
             task_id='executor-d6', trusted_agent_id='agy-developer',
             session_ref='session-ref', native_session_id=None,
             root='/registered/root', common_dir='/repo/.git', branch='task-branch')
