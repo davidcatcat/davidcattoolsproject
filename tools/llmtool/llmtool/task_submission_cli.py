@@ -1072,10 +1072,11 @@ def add_task_submission_parsers(actions):
     repair.add_argument('--auto-review', action='store_true',
                         help='dispatch the next formal review after a successful repair')
     repair.add_argument('--recover-claim', metavar='REPAIR_TASK_ID',
-                        help=('#1928/#2475: mark this UNKNOWN repair claim DISPATCHED after '
-                              'its evidence checks; an EC2/CI claim is admitted only when '
-                              'its repair Task has no Developer assignment, the D6 is clean '
-                              'at the claim head and no process is bound to it; dispatches '
+                        help=('#1928/#2475: recover this UNKNOWN repair claim after its '
+                              'evidence checks; an EC2/CI claim returns to CLAIMED so the '
+                              'next advance may delegate it, and is admitted only when its '
+                              'repair Task has no Developer assignment, the D6 is clean at '
+                              'the claim head and no process is bound to it; dispatches '
                               'nothing'))
     repair.add_argument('--pm-session',
                         help=('caller PM session (native UUID or pm- ID); must own '

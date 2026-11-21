@@ -138,14 +138,15 @@ class RecoverEc2ClaimTests(unittest.TestCase):
         saved = self.store.get(self.task_id)
         updated = next(item for item in saved['review_repair_claims']
                        if item.get('repair_task_id') == self.repair)
-        self.assertEqual(updated['state'], 'DISPATCHED')
+        # The claim is live again, so the next advance may delegate its repair Task.
+        self.assertEqual(updated['state'], 'CLAIMED')
         self.assertEqual(updated['attempt'], claim['attempt'])
         self.assertEqual(updated['repair_task_id'], claim['repair_task_id'])
         # The same claim, head and attempt remain; no repair count or budget moved.
         self.assertEqual(len(saved['review_repair_claims']),
                          len(before['review_repair_claims']))
         self.assertEqual(saved.get('high_debug'), before.get('high_debug'))
-        expected = [dict(item, state='DISPATCHED')
+        expected = [dict(item, state='CLAIMED')
                     if item.get('repair_task_id') == self.repair else item
                     for item in before['review_repair_claims']]
         self.assertEqual(saved['review_repair_claims'], expected)

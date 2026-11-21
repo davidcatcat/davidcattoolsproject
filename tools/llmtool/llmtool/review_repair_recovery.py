@@ -413,7 +413,12 @@ def verify_recovery(store, root, repair_task_id, *, executor_task, pr_number):
 
 def _recover_ec2_claim(*, store, current, task_id, executor_task, pr_number,
                        repair_task_id, registered_d6, process_status):
-    """#2475: move one UNKNOWN EC2/CI claim to DISPATCHED, or refuse. Never counts."""
+    """#2475: restore one UNKNOWN EC2/CI claim to CLAIMED, or refuse. Never counts.
+
+    CLAIMED records the positive no-launch evidence: the claim is live again, so
+    the next advance may delegate the same repair Task on the same claim and
+    attempt. A second recovery refuses, because only UNKNOWN is admitted.
+    """
     from .task_store import TaskStoreConflict
     try:
         others = [store.get(other_id) for other_id in store.task_ids()]
@@ -427,68 +432,42 @@ def _recover_ec2_claim(*, store, current, task_id, executor_task, pr_number,
     verify_ec2_recovery(store, current, repair_task_id, executor_task=executor_task,
                         pr_number=pr_number, registered_d6=registered_d6,
                         process_status=process_status, others=others)
-    # The store's locked recovery write is the one transition that may move an
-    # UNKNOWN claim to DISPATCHED. Some stores shape it for review claims only,
-    # so an EC2/CI claim falls back to the same locked record compare-and-set
-    # after re-reading the no-launch evidence under the held chain lock.
-    saved = None
+    claims_in = current.get('review_repair_claims')
+    if type(claims_in) is not list:
+        refuse('REPAIR_CLAIM_UNAVAILABLE')
+    # The one write restores the claim to CLAIMED. The store's locked record
+    # compare-and-set is the same one that records claim states, so no dedicated
+    # review-only recovery writer is needed for an EC2/CI claim.
+    claims = [dict(item, state='CLAIMED')
+              if type(item) is dict and item.get('repair_task_id') == repair_task_id
+              else item for item in claims_in]
     try:
-        saved = store.recover_review_repair_claim(
-            task_id, repair_task_id, executor_task=executor_task, pr_number=pr_number,
-            expected_sha256=current['record_sha256'])
+        saved = store.compare_and_update(
+            task_id, expected={'record_sha256': current['record_sha256']},
+            review_repair_claims=claims)
     except TaskStoreConflict:
         refuse('REPAIR_CLAIM_UNAVAILABLE')
     except Exception:
-        # A store shaped for review claims may raise here; fall back to the
-        # locked record compare-and-set below.
-        saved = None
-    if type(saved) is not dict:
-        # A store shaped for review claims may also decline an EC2/CI claim by
-        # returning None instead of raising; the fallback is the same.
-        try:
-            fresh = store.get(task_id)
-        except Exception:
-            refuse('REPAIR_CLAIM_UNAVAILABLE')
-        if type(fresh) is not dict:
-            refuse('REPAIR_CLAIM_UNAVAILABLE')
-        claims_in = fresh.get('review_repair_claims')
-        if type(claims_in) is not list:
-            refuse('REPAIR_CLAIM_UNAVAILABLE')
-        # The claim and the no-launch evidence are re-read under the lock; any
-        # doubt, including a Developer record that landed since the check,
-        # refuses with no write.
-        verify_ec2_recovery(store, fresh, repair_task_id, executor_task=executor_task,
-                            pr_number=pr_number, registered_d6=registered_d6,
-                            process_status=process_status)
-        claims = [dict(item, state='DISPATCHED')
-                  if type(item) is dict and item.get('repair_task_id') == repair_task_id
-                  else item for item in claims_in]
-        try:
-            saved = store.compare_and_update(
-                task_id, expected={'record_sha256': fresh['record_sha256']},
-                review_repair_claims=claims)
-        except TaskStoreConflict:
-            refuse('REPAIR_CLAIM_UNAVAILABLE')
-        except Exception:
-            refuse('REPAIR_CLAIM_UNAVAILABLE')
+        refuse('REPAIR_CLAIM_UNAVAILABLE')
     if type(saved) is not dict:
         refuse('REPAIR_CLAIM_UNAVAILABLE')
     updated = next((item for item in saved.get('review_repair_claims') or ()
                     if type(item) is dict and item.get('repair_task_id') == repair_task_id),
                    None)
-    if type(updated) is not dict:
+    if type(updated) is not dict or updated.get('state') != 'CLAIMED':
         refuse('REPAIR_CLAIM_UNAVAILABLE')
     return {'recovered': True, 'claim': dict(updated)}
 
 
 def recover_unknown_claim(*, store, task_id, executor_task, pr_number, repair_task_id,
                           registered_d6=None, process_status=None):
-    """Recover one UNKNOWN repair claim as DISPATCHED under the chain lock.
+    """Recover one UNKNOWN repair claim under the chain lock.
 
     The chain lock is the one repair_review holds for its counts and claim. A
     review claim goes through E1-E5 and the store's locked write. An EC2/CI
-    claim (#2475) goes through its own no-launch evidence and the same locked
-    recovery write, and a second recovery refuses. Neither path calls an adapter, delegate or
+    claim (#2475) goes through its own no-launch evidence and one locked write
+    back to CLAIMED, so the next advance may delegate it, and a second recovery
+    refuses. Neither path calls an adapter, delegate or
     record_pm, and neither creates a Task or changes a repair count.
     """
     from . import lineage_counts
