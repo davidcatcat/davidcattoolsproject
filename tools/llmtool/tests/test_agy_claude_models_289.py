@@ -68,7 +68,11 @@ class AgyClaudeModelTests(unittest.TestCase):
                       'claude--5-5-medium', 'claude-sonnet--medium',
                       'claude-sonnet-5-5-', 'claude-sonnet-medium-high',
                       'claude-sonnet-low-medium', 'claude-sonnet-5-5-medium-high',
-                      'claude-sonnet-5.5.medium'):
+                      'claude-sonnet-5.5.medium',
+                      # AGY #289 review F1: the route caps the whole identifier
+                      # at 128 characters; an over-long version is malformed.
+                      'claude-sonnet-' + '9' * 108 + '-medium',   # 129 characters
+                      'claude-sonnet-' + '9' * 130 + '-medium'):  # 130-digit version
             with self.subTest(model=model):
                 self.assert_refused(model)
 

@@ -140,10 +140,16 @@ def _agy_model_ok(value):
     """
     import re
 
+    # Security repair (AGY #289 review F1): the route check caps the whole
+    # identifier at 128 characters, the same bound AgyRoute.validate_profile
+    # enforces. The pattern alone has no total length limit, so an otherwise
+    # well-formed Claude id with a very long numeric version would pass here.
+    if type(value) is not str or not 1 <= len(value) <= 128:
+        return False
     if _family_model_ok(value, _GEMINI_FAMILY_PATTERN,
                         _CLAUDE_FAMILY_MARKERS + _CODEX_FAMILY_MARKERS):
         return True
-    if type(value) is not str or re.fullmatch(_AGY_CLAUDE_FAMILY_PATTERN, value) is None:
+    if re.fullmatch(_AGY_CLAUDE_FAMILY_PATTERN, value) is None:
         return False
     # Defence in depth: no marker of another vendor's family anywhere in a
     # Claude identifier.
