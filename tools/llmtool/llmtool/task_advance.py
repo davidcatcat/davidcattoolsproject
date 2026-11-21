@@ -2272,6 +2272,42 @@ def _review_verdict_absent(claim, github_get):
     return True
 
 
+def _non_pass_receipt_status(receipt):
+    """Status, bounded excerpt and receipt for a validated non-PASS receipt."""
+    if receipt['result'] in ('TIMEOUT', 'SHA_MISMATCH'):
+        return receipt['result'], None, receipt
+    if _receipt_not_executed(receipt):
+        return 'NOT_EXECUTED', None, receipt
+    excerpt = receipt.get('failure_excerpt')
+    try:
+        valid_excerpt = (type(excerpt) is str and
+            len(excerpt.encode('utf-8')) <= 4096 and
+            len(excerpt.splitlines()) <= 40)
+    except UnicodeError:
+        valid_excerpt = False
+    if valid_excerpt:
+        return 'FAIL', excerpt, receipt
+    return 'FAIL', '', receipt
+
+
+def _batch_remote_test_status(record, executor_task, head, declared):
+    """#2457: exact-head status when the Task declares more modules than one EC2 run.
+
+    PASS only when every declared module has a PASS receipt at this head after
+    the newest non-PASS receipt at this head; that non-PASS receipt otherwise
+    decides the state, so a later PASS never hides an earlier FAIL. With no
+    non-PASS receipt and a module still missing, return None (run the next batch).
+    """
+    from . import remote_test
+    receipts = remote_test.head_remote_receipts(record, executor_task, head)
+    last_bad, missing = remote_test.batch_missing_modules(receipts, declared)
+    if not missing:
+        return 'PASS', None, receipts[-1]
+    if last_bad < 0:
+        return None
+    return _non_pass_receipt_status(receipts[last_bad])
+
+
 def _remote_test_status(record, d6):
     """Return exact-head remote-test state, bounded excerpt, and validated receipt."""
     head = d6.get('result_head') if type(d6) is dict else None
@@ -2279,7 +2315,15 @@ def _remote_test_status(record, d6):
     executor_task = completion.get('executor_task_id') if type(completion) is dict else None
     if type(head) is not str or type(executor_task) is not str:
         return None, None, None
-    receipts = record.get('remote_test_receipts', [])
+    from . import remote_test
+    declared = remote_test._task_path_modules(record)
+    if len(declared) > remote_test._MAX_REMOTE_MODULES:
+        batch_status = _batch_remote_test_status(record, executor_task, head, declared)
+        if batch_status is not None:
+            return batch_status
+        receipts = []
+    else:
+        receipts = record.get('remote_test_receipts', [])
     if type(receipts) is not list:
         receipts = []
     for receipt in reversed(receipts):
@@ -2298,21 +2342,7 @@ def _remote_test_status(record, d6):
             continue
         if receipt['result'] == 'PASS':
             return 'PASS', None, receipt
-        if receipt['result'] in ('TIMEOUT', 'SHA_MISMATCH'):
-            return receipt['result'], None, receipt
-        if receipt['result'] == 'FAIL':
-            if _receipt_not_executed(receipt):
-                return 'NOT_EXECUTED', None, receipt
-            excerpt = receipt.get('failure_excerpt')
-            try:
-                valid_excerpt = (type(excerpt) is str and
-                    len(excerpt.encode('utf-8')) <= 4096 and
-                    len(excerpt.splitlines()) <= 40)
-            except UnicodeError:
-                valid_excerpt = False
-            if valid_excerpt:
-                return 'FAIL', excerpt, receipt
-            return 'FAIL', '', receipt
+        return _non_pass_receipt_status(receipt)
     outcomes = record.get('remote_test_outcomes', [])
     if type(outcomes) is not list:
         outcomes = []
