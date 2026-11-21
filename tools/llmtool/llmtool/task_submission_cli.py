@@ -898,6 +898,14 @@ def add_task_submission_parsers(actions):
                           help='run a direct Codex or OpenCode Developer in a detached child')
     delegate.add_argument('--reassign-from', metavar='ASSIGNMENT_ID',
                           help='replace a verified AGY or OpenCode assignment in its existing D6')
+    delegate.add_argument('--void-historical-ref', metavar='OWNER_RELAY_URL',
+                          help=('Owner-approved void of a pre-#2440 AGY or OpenCode assignment '
+                                'that has no launch record (#2447): the canonical Issue comment '
+                                'link of the PM relay that carries the Owner decision for this '
+                                'exact repair Task and explicitly approves the void; use with '
+                                '--void-historical-task'))
+    delegate.add_argument('--void-historical-task', metavar='TASK_ID',
+                          help='the repair Task ID the Owner decision names; must equal TASK_ID')
     delegate.add_argument('--selection-source', required=True, choices=('PM', 'USER'))
     delegate.add_argument('--executor-task', required=True,
                           help='registered D6 Executor task id; root/source/identity are read from its record')
@@ -6946,6 +6954,33 @@ def _same_direct_response(fresh, previous, args):
             type(completion) is dict and completion.get('executor_task_id') == args.executor_task)
 
 
+def _void_historical_direct_dispatch(args, task, store, binding):
+    """#2447: void a pre-boundary assignment only on an explicit Owner relay.
+
+    Missing launch evidence never proves "not started". This runs only when the
+    PM passed --void-historical-ref and --void-historical-task. Any unmet
+    condition keeps the old refusal, DIRECT_CHILD_LAUNCH_EVIDENCE_MISSING; a bad
+    or misplaced relay URL names its own code so the PM can correct it. A void
+    ends this call; the next ordinary delegate (#2440) starts the new
+    assignment on the same repair claim.
+    """
+    registration, snapshot = binding
+    try:
+        direct_reassignment.void_historical(
+            store, task, registration, snapshot, executor_task=args.executor_task,
+            owner_ref=args.void_historical_ref, owner_task=args.void_historical_task)
+    except LLMToolError as exc:
+        if str(exc).startswith('DIRECT_HISTORICAL_VOID_OWNER_'):
+            raise LLMToolError(str(exc)) from None
+        raise LLMToolError('DIRECT_CHILD_LAUNCH_EVIDENCE_MISSING') from None
+    except Exception:
+        raise LLMToolError('DIRECT_CHILD_LAUNCH_EVIDENCE_MISSING') from None
+    raise LLMToolError(
+        'DIRECT_HISTORICAL_DISPATCH_VOIDED: the old assignment is recorded as voided on the '
+        'Owner relay (no launch proof is claimed); run task delegate again to start a new '
+        'assignment')
+
+
 def _recover_direct_child_dispatch(args, task, developer, store, *, expected_agent):
     identity = direct_reassignment.AGENTS.get(developer.get('provider_profile'))
     if (identity is None or identity != expected_agent or
@@ -6966,6 +7001,9 @@ def _recover_direct_child_dispatch(args, task, developer, store, *, expected_age
             raise LLMToolError('DIRECT_CHILD_SPAWN_NOT_AUTHORIZED')
         if phase == 'STARTING':
             raise LLMToolError('DIRECT_CHILD_SPAWN_OUTCOME_UNVERIFIED')
+        if (direct_reassignment.historical_candidate(developer) and
+                getattr(args, 'void_historical_ref', None) is not None):
+            _void_historical_direct_dispatch(args, fresh, store, first_binding)
         raise LLMToolError('DIRECT_CHILD_LAUNCH_EVIDENCE_MISSING')
     fresh = store.get(args.task_id)
     if _same_direct_response(fresh, task, args):
@@ -8430,6 +8468,16 @@ def run_task_delegate(args, *, store=None):
             getattr(args, 'selection_source', None) != 'PM' or
             getattr(args, 'data_class', None) is not None):
         raise LLMToolError('DIRECT_REASSIGN_ROUTE_REFUSED')
+    void_ref = getattr(args, 'void_historical_ref', None)
+    void_task = getattr(args, 'void_historical_task', None)
+    if (void_ref is not None or void_task is not None) and (
+            void_ref is None or void_task is None or
+            selected_route not in direct_reassignment.AGENTS or
+            getattr(args, 'background', False) or
+            getattr(args, 'reassign_from', None) is not None):
+        raise LLMToolError('DIRECT_HISTORICAL_VOID_ARGUMENTS_REFUSED: --void-historical-ref and '
+                           '--void-historical-task go together, on a direct AGY or OpenCode '
+                           'delegate without --reassign-from or --background')
     if selected_route in TIMEOUT_ROUTES:
         _delegate_timeout(args, selected_route)
     elif getattr(args, 'timeout', None) is not None:

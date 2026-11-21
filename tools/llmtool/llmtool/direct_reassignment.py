@@ -47,6 +47,441 @@ def replacement_candidate(developer):
             (state == 'DEVELOPER_OUTCOME_UNKNOWN' and phase == 'STOPPED'))
 
 
+# #2447 (Owner decision A on #2413): llmtool never infers "not started" from
+# missing launch evidence, and it uses no date cutoff. A direct assignment
+# recorded before launch-boundary recording (#2440) carries no dispatch_boundary
+# and no launch record; that absence proves nothing. It is voided only by an
+# explicit command that carries an Owner relay URL for that exact repair Task,
+# and only when every other check below also holds.
+_LSOF_PATHS = ('/usr/sbin/lsof', '/usr/bin/lsof')
+_PS_PATHS = ('/bin/ps', '/usr/bin/ps')
+_TASK_ID = re.compile(r'[0-9a-f]{32}\Z')
+# The PM relay marker of an Owner decision (common-core rule 7: ``actor=PM``).
+# The relayed comment must also name this exact repair Task id and explicitly
+# approve this void, so an ordinary PM progress comment or an unanswered Owner
+# request never authorises one. The repository's activity marker is
+# ``<!-- activity: key=value ... -->``; an Owner answer is either an
+# ``owner_*`` decision or the established ``pm_progress`` relay, whose status
+# or decision is an approval and whose text affirmatively approves this void.
+_OWNER_RELAY_MARKER = re.compile(
+    r'(?<![A-Za-z0-9_=-])actor=PM(?![A-Za-z0-9_=-])')
+_ACTIVITY_MARKER = re.compile(r'<!--\s*activity:\s*([^>]*?)\s*-->')
+_ACTIVITY_ATTRIBUTE = re.compile(r'([a-z_][a-z0-9_]*)=([^\s>]+)')
+_OWNER_APPROVAL_STATUSES = frozenset((
+    'APPROVED', 'APPROVAL', 'ACCEPTED', 'ANSWERED', 'VOID', 'VOID_APPROVED',
+    'APPROVED_VOID'))
+_OWNER_APPROVAL_DECISIONS = frozenset((
+    'APPROVE', 'APPROVED', 'ACCEPT', 'ACCEPTED', 'VOID', 'VOID_APPROVED',
+    'APPROVED_VOID', 'VOID_HISTORICAL_DISPATCH'))
+# The documented PM relay of an Owner answer may use a plain progress type
+# rather than an owner_* activity type; it is accepted only with an explicit
+# approval of this void in its quoted decision.
+_PM_RELAY_TYPES = frozenset(('pm_progress', 'pm_relay'))
+# A denial, rejection or explicit non-approval never authorises a void, even
+# when an approval marker or the reason token also occurs.
+_OWNER_DENIAL_STATUSES = frozenset((
+    'DENIED', 'DENY', 'REJECTED', 'REJECT', 'DECLINED', 'DECLINE', 'REFUSED',
+    'REFUSE', 'DISAPPROVED', 'NOT_APPROVED', 'NO'))
+_OWNER_DENIAL_DECISIONS = frozenset((
+    'DENY', 'DENIED', 'REJECT', 'REJECTED', 'DECLINE', 'DECLINED', 'REFUSE',
+    'REFUSED', 'DISAPPROVE', 'DISAPPROVED', 'NOT_APPROVED', 'NO'))
+_OWNER_DENIAL = re.compile(
+    r'(?i)(?<![A-Za-z0-9_])(?:'
+    r'den(?:y|ies|ied|ying)|'
+    r'reject(?:s|ed|ing)?|'
+    r'declin(?:e|es|ed|ing)|'
+    r'refus(?:e|es|ed|ing)|'
+    r'disapprov(?:e|es|ed|al|ing)|'
+    r'unapprov(?:ed)?|'
+    r'not\s+(?:be(?:en)?\s+)?(?:approv(?:e|ed|es|al)|grant(?:ed|s)?)|'
+    r"(?:cannot|can't|cant)\s+(?:approv(?:e|ed)|grant(?:ed)?)|"
+    r'(?:did|do|does|has|have|had|is|are|was|were|will|would)\s+not\s+'
+    r'(?:approv(?:e|ed)|grant(?:ed)?)|'
+    r'never\s+(?:approv(?:e|ed)|grant(?:ed)?)|'
+    r'no\s+approval|without\s+approval|'
+    r'approval\s+(?:is|was|has\s+been)?\s*(?:not|never)\s+given|'
+    r'(?:do|does|did|must|should|shall|will|would)\s+not\s+(?:be\s+)?void|'
+    r'not\s+(?:be\s+)?authori[sz]ed|unauthori[sz]ed|'
+    r'withh(?:eld|old)|'
+    r'(?:no|not|never)\s+owner_approved_void'
+    r')(?![A-Za-z0-9_])')
+# The approval must be an affirmative decision about this void, not merely the
+# word "void" somewhere in the comment.
+_VOID_APPROVAL = re.compile(
+    r'(?i)(?<![A-Za-z0-9_])(?:'
+    r'approv(?:e|es|ed|al)\s+(?:(?:of|for)\s+)?(?:the\s+|this\s+|a\s+|an\s+)?'
+    r'(?:historical\s+|counted\s+)?void(?:ing|ed|s)?|'
+    r'approv(?:e|es|ed)\s+(?:the\s+|this\s+|a\s+|an\s+)?'
+    r'(?:request|proposal|decision)\s+to\s+void(?:ing|ed)?|'
+    r'approv(?:e|es|ed)\s+to\s+void(?:ing|ed)?|'
+    r'void(?:ing|ed|s)?\s+(?:is|was|has\s+been|be)\s+(?:explicitly\s+)?approved|'
+    r'approval\s+(?:of|for)\s+(?:the\s+|this\s+)?(?:historical\s+)?void'
+    r')(?![A-Za-z0-9_])')
+# The explicit reason token an Owner approval may carry instead of an activity
+# marker. It is the stored void reason, not an ordinary PM progress word.
+_OWNER_VOID_TOKEN = re.compile(
+    r'(?i)(?<![A-Za-z0-9_])OWNER_APPROVED_VOID(?![A-Za-z0-9_])')
+_VOID_DIRECTIVE = re.compile(
+    r'(?i)(?<![A-Za-z0-9_])void(?:e[ds]|ing)?(?![A-Za-z0-9_])')
+_PATH_CHAR_BEFORE = r'(?<![A-Za-z0-9._@+%/-])'
+_PATH_CHAR_AFTER = r'(?![A-Za-z0-9._@+%-])'
+# Result or recovery fields a never-launched historical assignment cannot carry.
+_VOID_FORBIDDEN_FIELDS = frozenset((
+    'reported', 'changed_files', 'progress', 'final_answer', 'result_status',
+    'normalizations', 'rejection_detail', 'rejected_output_capture',
+    'no_changes_diagnosis', 'claude_failure_evidence', 'direct_handoffs',
+    'voided_assignments', 'dispatch_boundary'))
+
+
+def historical_candidate(developer):
+    """True for a direct DISPATCHING record that has no boundary and no launch.
+
+    Only a hint: void_historical decides, and a missing launch record alone
+    never proves that nothing started.
+    """
+    return (type(developer) is dict and developer.get('provider_profile') in AGENTS and
+            developer.get('state') == 'DEVELOPER_DISPATCHING' and
+            'dispatch_boundary' not in developer and developer.get('execution') is None)
+
+
+def _capture(argv):
+    """Run one read-only listing; return (stdout text, own child pid). Fails closed."""
+    import subprocess
+    try:
+        child = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, env={'PATH': '/usr/bin:/bin'})
+        try:
+            output, _ = child.communicate(timeout=30)
+        except BaseException:
+            child.kill()
+            child.wait()
+            raise
+    except (OSError, subprocess.SubprocessError):
+        _refuse('DIRECT_HISTORICAL_VOID_PROCESS_UNVERIFIED')
+    if child.returncode != 0 or type(output) is not bytes:
+        _refuse('DIRECT_HISTORICAL_VOID_PROCESS_UNVERIFIED')
+    return output.decode('utf-8', 'surrogateescape'), child.pid
+
+
+def d6_processes(root):
+    """PIDs of processes bound to the D6 at root by cwd, open file or command line.
+
+    Two listings, both required (fails closed on a missing tool, a failing tool
+    or an unreadable answer):
+
+    - lsof lists every open file of this user's processes: the working
+      directory, executables, mapped files and every open descriptor. Any name
+      inside root counts, so a process with another cwd that holds a D6 file
+      open is found.
+    - ps lists every process's full command line. Any argument naming root
+      (also as ``--dir=ROOT``) counts, so a provider started against the D6
+      from elsewhere is found.
+
+    The caller's own process and the listing children are not counted.
+    """
+    lsof = next((path for path in _LSOF_PATHS if os.access(path, os.X_OK)), None)
+    ps = next((path for path in _PS_PATHS if os.access(path, os.X_OK)), None)
+    if (lsof is None or ps is None or type(root) is not str or not os.path.isabs(root)):
+        _refuse('DIRECT_HISTORICAL_VOID_PROCESS_UNVERIFIED')
+    base = os.path.realpath(root)
+    names = {base.rstrip('/'), root.rstrip('/')}
+    named = re.compile('|'.join(
+        _PATH_CHAR_BEFORE + re.escape(name) + _PATH_CHAR_AFTER
+        for name in sorted(names) if name))
+    files, lsof_child = _capture(
+        [lsof, '-w', '-n', '-P', '-a', '-u', str(os.getuid()), '-Fpn'])
+    commands, ps_child = _capture([ps, '-ww', '-A', '-o', 'pid=,args='])
+    ignored = {os.getpid(), lsof_child, ps_child}
+    pids = []
+    pid = None
+    for line in files.splitlines():
+        if line.startswith('p') and line[1:].isdigit():
+            pid = int(line[1:])
+        elif line.startswith('n') and pid is not None:
+            where = os.path.realpath(line[1:]) if line[1:].startswith('/') else line[1:]
+            if (where == base or where.startswith(base.rstrip('/') + '/')) and pid not in ignored:
+                pids.append(pid)
+    for line in commands.splitlines():
+        fields = line.split(None, 1)
+        if len(fields) != 2 or not fields[0].isdigit():
+            continue
+        if int(fields[0]) not in ignored and named.search(fields[1]):
+            pids.append(int(fields[0]))
+    return sorted(set(pids))
+
+
+def _check_no_process(root, process_probe):
+    try:
+        pids = (process_probe or d6_processes)(root)
+    except LLMToolError:
+        raise
+    except Exception:
+        _refuse('DIRECT_HISTORICAL_VOID_PROCESS_UNVERIFIED')
+    if type(pids) is not list:
+        _refuse('DIRECT_HISTORICAL_VOID_PROCESS_UNVERIFIED')
+    if pids:
+        _refuse('DIRECT_HISTORICAL_VOID_PROCESS_LIVE')
+
+
+def owner_relay_pattern():
+    """The one accepted Owner relay URL shape on this repository."""
+    from . import trust
+
+    try:
+        slug = trust.load_trust().repository['slug']
+    except Exception:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_REF_INVALID')
+    if type(slug) is not str:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_REF_INVALID')
+    return re.compile(r'https://github\.com/' + re.escape(slug) +
+                      r'/issues/([1-9][0-9]*)#issuecomment-([1-9][0-9]*)\Z')
+
+
+def _read_owner_comment(owner_ref):
+    """Read the linked Issue comment body; every read failure refuses.
+
+    llmtool reads the comment itself instead of trusting a PM-supplied body.
+    gh talks to this repository only. The returned canonical comment URL and
+    issue URL must be exactly the ones ``owner_ref`` names, so a URL that
+    aliases another issue with the same comment id is refused; the reservation
+    is therefore always bound to one canonical comment identity. A missing
+    comment (HTTP 404) is reported as such; any other failure is unverified.
+    The body is untrusted data: it is only searched for the PM relay marker,
+    this Task id and an explicit void approval.
+    """
+    import subprocess
+
+    from . import trust
+
+    match = (owner_relay_pattern().fullmatch(owner_ref)
+             if type(owner_ref) is str else None)
+    if match is None:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_REF_INVALID')
+    issue_number, comment_id = match.group(1), match.group(2)
+    try:
+        slug = trust.load_trust().repository['slug']
+    except Exception:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
+    if type(slug) is not str:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
+    try:
+        completed = subprocess.run(
+            ['gh', 'api', f'repos/{slug}/issues/comments/{comment_id}',
+             '--jq', '{body: .body, html_url: .html_url, issue_url: .issue_url}'],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False, timeout=30,
+            env={'PATH': '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',
+                 'HOME': os.path.expanduser('~'), 'LC_ALL': 'C', 'LANG': 'C',
+                 'GH_PROMPT_DISABLED': '1', 'GH_NO_UPDATE_NOTIFIER': '1'})
+    except (OSError, subprocess.SubprocessError):
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
+    if type(completed.stdout) is not bytes:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
+    if completed.returncode != 0:
+        error = completed.stderr if type(completed.stderr) is bytes else b''
+        if b'Not Found' in error or b'HTTP 404' in error:
+            _refuse('DIRECT_HISTORICAL_VOID_OWNER_COMMENT_MISSING')
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
+    try:
+        value = json.loads(completed.stdout.decode('utf-8'))
+    except (UnicodeDecodeError, ValueError):
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
+    if (type(value) is not dict or
+            set(value) != {'body', 'html_url', 'issue_url'} or
+            type(value['body']) is not str or
+            type(value['html_url']) is not str or
+            type(value['issue_url']) is not str):
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
+    canonical = (f'https://github.com/{slug}/issues/{issue_number}'
+                 f'#issuecomment-{comment_id}')
+    api_issue = f'https://api.github.com/repos/{slug}/issues/{issue_number}'
+    if (value['html_url'].lower() != canonical.lower() or
+            value['issue_url'].lower() != api_issue.lower()):
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_REF_INVALID')
+    return value['body']
+
+
+def _owner_void_approved(body):
+    """True only for an unambiguous affirmative Owner approval of this void.
+
+    A relay marker or the reason token alone is not enough: a denial,
+    rejection or explicit non-approval anywhere in the relay refuses the void,
+    even if an approval marker or ``OWNER_APPROVED_VOID`` also occurs. An
+    activity marker must also carry an affirmative decision about this void,
+    not merely the word "void" somewhere in the body.
+    """
+    if _OWNER_DENIAL.search(body) is not None:
+        return False
+    for match in _ACTIVITY_MARKER.finditer(body):
+        attributes = dict(_ACTIVITY_ATTRIBUTE.findall(match.group(1)))
+        if ((attributes.get('status') or '').upper() in _OWNER_DENIAL_STATUSES or
+                (attributes.get('decision') or '').upper() in _OWNER_DENIAL_DECISIONS):
+            return False
+    if _OWNER_VOID_TOKEN.search(body) is not None:
+        return True
+    if _VOID_DIRECTIVE.search(body) is None or _VOID_APPROVAL.search(body) is None:
+        return False
+    for match in _ACTIVITY_MARKER.finditer(body):
+        attributes = dict(_ACTIVITY_ATTRIBUTE.findall(match.group(1)))
+        kind = (attributes.get('type') or '').lower()
+        status = (attributes.get('status') or '').upper()
+        decision = (attributes.get('decision') or '').upper()
+        if (attributes.get('actor') == 'PM' and
+                (kind.startswith('owner_') or kind in _PM_RELAY_TYPES) and
+                (status in _OWNER_APPROVAL_STATUSES or
+                 decision in _OWNER_APPROVAL_DECISIONS)):
+            return True
+    return False
+
+
+def _relay_used_elsewhere(store, task_id, owner_ref):
+    """True when this relay URL is already recorded on another Task's void."""
+    for other_id in store.task_ids():
+        if other_id == task_id:
+            continue
+        developer = store.get(other_id).get('developer')
+        for entry in (developer or {}).get('voided_assignments') or []:
+            if type(entry) is dict and entry.get('owner_ref') == owner_ref:
+                return True
+    return False
+
+
+def check_owner_relay(store, task, owner_ref, owner_task):
+    """The Owner decision named by the PM must be for this exact repair Task.
+
+    llmtool reads the linked Issue comment from this repository itself: it must
+    exist, carry the PM relay marker of an Owner decision (``actor=PM``), name
+    this exact Task id and explicitly approve this void. The URL must be the
+    canonical Issue comment link it names, and a URL already recorded for
+    another Task's void is never reused. Any read failure, mismatch or prior
+    reservation refuses.
+    """
+    task_id = task.get('task_id')
+    if (type(owner_task) is not str or _TASK_ID.fullmatch(owner_task) is None or
+            owner_task != task_id):
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_TASK_MISMATCH')
+    if type(owner_ref) is not str or owner_relay_pattern().fullmatch(owner_ref) is None:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_REF_INVALID')
+    try:
+        body = _read_owner_comment(owner_ref)
+    except LLMToolError:
+        raise
+    except Exception:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
+    if type(body) is not str:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
+    if re.search(r'(?<![0-9a-f])' + re.escape(task_id) + r'(?![0-9a-f])',
+                 body) is None:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_TASK_MISMATCH')
+    if _OWNER_RELAY_MARKER.search(body) is None:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_MARKER_MISSING')
+    if not _owner_void_approved(body):
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_APPROVAL_MISSING')
+    if _relay_used_elsewhere(store, task_id, owner_ref):
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_TASK_MISMATCH')
+
+
+def _check_void(store, task, registration, snapshot, executor_task, process_probe,
+                owner_ref, owner_task):
+    """Every void condition on one stored record; any miss refuses."""
+    check_owner_relay(store, task, owner_ref, owner_task)
+    developer = task.get('developer')
+    if not historical_candidate(developer):
+        _refuse('DIRECT_HISTORICAL_VOID_NOT_HISTORICAL')
+    profile = developer['provider_profile']
+    identity = AGENTS[profile]
+    # No execution (checked above), artifact, usage, error, report or recovery trail.
+    if (_VOID_FORBIDDEN_FIELDS & set(developer) or
+            any(developer.get(field) is not None for field in (
+                'artifact', 'artifact_sha256', 'usage', 'error_code'))):
+        _refuse('DIRECT_HISTORICAL_VOID_RESULT_PRESENT')
+    # No completion result, completion event or result callback.
+    completion = task.get('completion') or {}
+    evidence = completion.get('evidence') or {}
+    callback = developer.get('direct_result_callback')
+    callback_evidence = (callback or {}).get('evidence') or {}
+    if (task.get('state') != 'PM_RESPONDED' or
+            completion.get('state') != 'WAITING_EXECUTOR' or
+            completion.get('reviewer_task_id') is not None or
+            completion.get('pm_dispatch') != 'NOT_STARTED' or
+            completion.get('pm_response') is not None or
+            completion.get('missing_gates') != [] or
+            evidence.get('result_head') is not None or
+            task.get('completion_events') or task.get('completion_event_tombstones') or
+            (callback is not None and
+             (type(callback) is not dict or callback.get('state') != 'WAITING_EXECUTOR' or
+              callback.get('pm_dispatch') != 'NOT_STARTED' or
+              callback.get('pm_response') is not None or
+              {'review_handoff', 'review_return'} & set(callback) or
+              callback_evidence.get('result_head') is not None or
+              callback_evidence.get('verification_state') != 'NOT_STARTED'))):
+        _refuse('DIRECT_HISTORICAL_VOID_RESULT_PRESENT')
+    # No provider session evidence anywhere in the record or the D6 registration.
+    if (evidence.get('executor_native_session_id') not in (None, 'UNKNOWN') or
+            evidence.get('executor_native_session') == 'VERIFIED' or
+            registration.native_session_id not in (None, 'UNKNOWN') or
+            callback_evidence.get('executor_native_session_id') not in (None, 'UNKNOWN')):
+        _refuse('DIRECT_HISTORICAL_VOID_SESSION_EVIDENCE')
+    # The D6 is the one the record names, at its source_sha, with a clean tree.
+    if (completion.get('executor_task_id') != executor_task or
+            registration.task_id != executor_task or
+            registration.trusted_agent_id != identity or
+            evidence.get('executor_identity') != identity or
+            evidence.get('executor_session_ref') != registration.session_ref or
+            evidence.get('root') != registration.root or
+            evidence.get('common_dir') != registration.common_dir or
+            evidence.get('branch') != registration.branch or
+            snapshot.head != developer.get('source_sha') or snapshot.clean is not True):
+        _refuse('DIRECT_HISTORICAL_VOID_D6_UNVERIFIED')
+    # The same counted repair claim, if any, is still intact.
+    _repair_packet(store, task, developer, registration)
+    _check_no_process(registration.root, process_probe)
+
+
+def void_historical(store, task, registration, snapshot, *, executor_task,
+                    owner_ref, owner_task, process_probe=None):
+    """Void one historical DISPATCHING assignment on an explicit Owner approval.
+
+    This is the Owner's decision, not a finding that the provider never ran:
+    the record keeps the Owner relay URL and states no launch proof. The
+    assignment stays in the Task record (voided_assignments and the PREPARED
+    boundary); the repair claim, family, attempt and counts are not touched. The
+    ordinary #2440 reassignment then creates the new assignment. Any unmet
+    condition refuses; a second or concurrent void refuses
+    DIRECT_HISTORICAL_VOID_CONFLICT.
+
+    A store-wide lock wraps the relay read, the cross-Task reservation check and
+    the commit, so one relay URL can reserve at most one Task even when two
+    different Tasks are voided at once.
+    """
+    from .task_store import TaskStoreConflict
+
+    lock = getattr(store, 'direct_historical_void_lock', None)
+    if not callable(lock):
+        _refuse('DIRECT_HISTORICAL_VOID_LOCK_UNAVAILABLE')
+    with lock():
+        _check_void(store, task, registration, snapshot, executor_task, process_probe,
+                    owner_ref, owner_task)
+
+        def verify():
+            # Under the shared reservation lock and the Task lock: relay, D6
+            # and processes now.
+            check_owner_relay(store, task, owner_ref, owner_task)
+            if task_completion.bind_executor_task(
+                    registration.task_id, expected_common_dir=registration.common_dir,
+                    root=registration.root) != (registration, snapshot):
+                _refuse('DIRECT_HISTORICAL_VOID_D6_UNVERIFIED')
+            _check_no_process(registration.root, process_probe)
+            return True
+
+        try:
+            return store.void_historical_direct_dispatch(
+                task['task_id'], current=task, owner_ref=owner_ref, verify=verify)
+        except TaskStoreConflict:
+            _refuse('DIRECT_HISTORICAL_VOID_CONFLICT')
+
+
 def _checked_scope(args, developer, read_paths, write_paths):
     if (read_paths != developer.get('read_paths') or write_paths != developer.get('write_paths') or
             args.acceptance != developer.get('acceptance') or
