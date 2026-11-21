@@ -1971,6 +1971,58 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertEqual(task['developer']['reported'],
                          {'summary': task_submission_cli.CLAUDE_REPLY_WITHHELD})
 
+    # #2503: the gw-agent client's stderr (when it has any) is kept for the PM.
+
+    def _stderr_runner(self, stderr, *, error=None):
+        from llmtool.developer_routes.base import run_route
+
+        def runner(route, request, **kwargs):
+            result = run_route(route, request, **kwargs)
+            if error is not None:
+                error.stderr_excerpt = stderr
+                raise error
+            return dataclasses.replace(result, stderr_excerpt=stderr)
+        return runner
+
+    def test_stderr_is_kept_on_a_recorded_result(self):
+        code, task = self._delegate('gw-agent-stderr.md',
+                                    route_runner=self._stderr_runner(b'gateway: retried once\n'))
+        self.assertEqual(code, 0)
+        self.assertEqual(task['developer']['stderr_excerpt'], 'gateway: retried once')
+
+    def test_empty_stderr_adds_no_field(self):
+        code, task = self._delegate('gw-agent-no-stderr.md',
+                                    route_runner=self._stderr_runner(b''))
+        self.assertEqual(code, 0)
+        self.assertNotIn('stderr_excerpt', task['developer'])
+
+    def test_oversized_stderr_keeps_the_tail(self):
+        code, task = self._delegate('gw-agent-stderr-long.md', route_runner=self._stderr_runner(
+            b'retry\n' * 2000 + b'LAST: upstream 503'))
+        self.assertEqual(code, 0)
+        excerpt = task['developer']['stderr_excerpt']
+        self.assertTrue(excerpt.endswith('LAST: upstream 503'))
+        self.assertLessEqual(len(excerpt.encode('utf-8')), 4 * 1024)
+
+    def test_unsafe_stderr_is_withheld(self):
+        sentinel = 'SCREEN-REFUSED-SENTINEL-2503'
+        from llmtool import developer_stderr
+        with patch.object(developer_stderr, '_emitted_sensitive',
+                          side_effect=lambda text: sentinel in text):
+            code, task = self._delegate('gw-agent-stderr-unsafe.md',
+                                        route_runner=self._stderr_runner(sentinel.encode()))
+        self.assertEqual(code, 0)
+        self.assertEqual(task['developer']['stderr_excerpt'], developer_stderr.WITHHELD)
+
+    def test_route_failure_keeps_its_stderr(self):
+        code, task = self._delegate(
+            'gw-agent-stderr-fail.md', route_runner=self._stderr_runner(
+                b'gateway: HTTP 429 from upstream\n',
+                error=RouteError('GW_AGENT_EXIT_NONZERO')))
+        self.assertEqual(code, 1)
+        self.assertEqual(task['developer']['error_code'], 'DEVELOPER_GW_AGENT_EXIT_NONZERO')
+        self.assertEqual(task['developer']['stderr_excerpt'], 'gateway: HTTP 429 from upstream')
+
     def test_docs_success_persists_and_reaches_the_active_pm(self):
         target = 'gw-agent-synthetic.md'
         code, task = self._delegate(target)

@@ -22,6 +22,7 @@ import tempfile
 import time
 
 from .errors import LLMToolError
+from . import developer_stderr
 from . import worker_dispatch
 from .opencode_worker import _observe_exit_without_reap, _path
 from .providers.cli_lifecycle import CLIProcessLifecycle
@@ -75,7 +76,7 @@ class DirectOpenCodeError(LLMToolError):
                  source_bytes=None, source_file_count=None,
                  source_manifest_sha256=None, task_id=None, run_id=None,
                  started_at=None, ended_at=None, native_session_id=None,
-                 provider_evidence=None):
+                 provider_evidence=None, stderr_excerpt=None):
         super().__init__('OpenCode Developer execution unavailable; details omitted')
         self.direct_opencode_code = code
         self.attempted = attempted
@@ -95,6 +96,9 @@ class DirectOpenCodeError(LLMToolError):
         self.stopped_before_prompt = False
         # Set only from parsed CLI events (design c6876861575 items 1-2).
         self.provider_evidence = provider_evidence
+        # #2503: the screened, bounded stderr tail (developer_stderr) once the
+        # process ran; never the raw stream.
+        self.stderr_excerpt = stderr_excerpt
 
 
 @dataclass(frozen=True)
@@ -117,6 +121,8 @@ class DirectResult:
     ended_at: str | None = None
     event_summary: dict | None = None
     provider_evidence: dict | None = None
+    # #2503: the screened, bounded stderr tail (see DirectOpenCodeError.stderr_excerpt).
+    stderr_excerpt: str | None = None
 
 
 def _reject(code):
@@ -1074,6 +1080,7 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
         except DirectOpenCodeError as exc:
             cleanup = 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN'
             exc.cleanup_status = cleanup
+            exc.stderr_excerpt = developer_stderr.safe_excerpt(bytes(stderr))
             exc.attempted = process is not None
             exc.process_exit_code = (process.returncode if process is not None and
                                      process.returncode is not None else None)
@@ -1127,7 +1134,8 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                                   source_manifest_sha256=source_manifest_sha256,
                                   task_id=dispatch_task_id, run_id=run_id,
                                   started_at=started_at, ended_at=ended_at,
-                                  native_session_id=_observed_native_session(raw))
+                                  native_session_id=_observed_native_session(raw),
+                                  stderr_excerpt=developer_stderr.safe_excerpt(bytes(stderr)))
         raise exc
     if process is None or process.returncode is None:
         raise DirectOpenCodeError('OPENCODE_EXIT_UNKNOWN', attempted=process is not None,
@@ -1138,7 +1146,8 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                                   source_manifest_sha256=source_manifest_sha256,
                                   task_id=dispatch_task_id, run_id=run_id,
                                   started_at=started_at, ended_at=ended_at,
-                                  native_session_id=_observed_native_session(raw))
+                                  native_session_id=_observed_native_session(raw),
+                                  stderr_excerpt=developer_stderr.safe_excerpt(bytes(stderr)))
     if process.returncode != 0:
         failure_code = (_classify_provider_error(raw, stderr=bytes(stderr)) or
                         'OPENCODE_PROVIDER_FAILED')
@@ -1153,12 +1162,14 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                                   source_manifest_sha256=source_manifest_sha256,
                                   task_id=dispatch_task_id, run_id=run_id,
                                   started_at=started_at, ended_at=ended_at,
-                                  native_session_id=_observed_native_session(raw))
+                                  native_session_id=_observed_native_session(raw),
+                                  stderr_excerpt=developer_stderr.safe_excerpt(bytes(stderr)))
     try:
         session_id, text, usage = parse_json_events(raw, step_limit=steps)
     except DirectOpenCodeError as exc:
         exc.attempted = True
         exc.cleanup_status = cleanup
+        exc.stderr_excerpt = developer_stderr.safe_excerpt(bytes(stderr))
         exc.process_exit_code = process.returncode
         exc.stdout_sha256 = hashlib.sha256(raw).hexdigest()
         exc.event_summary = summarize_events(raw, step_limit=steps)
@@ -1178,4 +1189,5 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                         source_bytes, source_file_count, source_manifest_sha256,
                         dispatch_task_id, run_id, started_at, ended_at,
                         event_summary=summarize_events(raw, step_limit=steps),
-                        provider_evidence=step_usage_evidence(_json_event_prefix(raw)[0]))
+                        provider_evidence=step_usage_evidence(_json_event_prefix(raw)[0]),
+                        stderr_excerpt=developer_stderr.safe_excerpt(bytes(stderr)))

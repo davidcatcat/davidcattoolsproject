@@ -29,6 +29,7 @@ from . import file_ops
 from . import repair_policy, run_budget
 from . import start_failure
 from .opencode_direct_developer import is_free_model, is_valid_model
+from .developer_stderr import DEVELOPER_STDERR_EXCERPT_MAX_BYTES
 from .role_config import _NAME
 from .task_verification import parse_task_contract
 from .test_output_excerpts import _emitted_sensitive
@@ -411,9 +412,13 @@ CLAUDE_FAILURE_EXIT_CODE_RANGE = (-255, 255)
 _DIRECT_DISPATCH_PROFILES = frozenset(('opencode', 'agy'))
 _DIRECT_DISPATCH_BOUNDARY = 'dispatch_boundary'
 _DIRECT_HANDOFF_HISTORY = 'direct_handoffs'
+# #2503: optional bounded, screened tail of the Developer CLI's stderr
+# (Developer-runtime, unverified), kept for the PM on any recorded outcome.
+_DEVELOPER_STDERR_FIELDS = frozenset(('stderr_excerpt',))
 _DEVELOPER_OPTIONAL_FIELDS = (frozenset((_DIRECT_DISPATCH_BOUNDARY, _DIRECT_HANDOFF_HISTORY)) |
                               _DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS |
-                              _DEVELOPER_CLAUDE_FAILURE_EVIDENCE_FIELDS)
+                              _DEVELOPER_CLAUDE_FAILURE_EVIDENCE_FIELDS |
+                              _DEVELOPER_STDERR_FIELDS)
 
 
 def _valid_direct_handoffs(entries):
@@ -2819,6 +2824,10 @@ def _validate(record, *, strict=True):
                 _fail()
             if ('claude_failure_evidence' in developer and
                     not valid_claude_failure_evidence_record(developer)):
+                _fail()
+            if ('stderr_excerpt' in developer and
+                    not _valid_reported_text(developer['stderr_excerpt'],
+                                             DEVELOPER_STDERR_EXCERPT_MAX_BYTES)):
                 _fail()
             if ('data_class' in developer and
                     (developer.get('provider_profile') != 'gw-agent' or

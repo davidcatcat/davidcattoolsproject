@@ -1151,6 +1151,23 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertIsNotNone(error.started_at)
         self.assertIsNotNone(error.ended_at)
 
+    def test_stderr_tail_is_screened_into_the_result_and_the_error(self):
+        # #2503: run() keeps only the screened, bounded stderr excerpt, never the raw stream.
+        body = '\n'.join((self.event('step_start'), self.event('text', text='done'),
+                          self.event('step_finish'))) + '\n'
+        cli = self.fake_cli(body, stderr_body='warn: model is slow\n')
+        result = self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+            write_paths=['source.py'], prompt='bounded task prompt',
+            timeout_seconds=5, executable=cli)
+        self.assertEqual(result.stderr_excerpt, 'warn: model is slow')
+        cli = self.fake_cli(self.event('step_start') + '\n', exit_code=7,
+                            stderr_body='Error: provider refused\n')
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                write_paths=['source.py'], prompt='bounded task prompt',
+                timeout_seconds=5, executable=cli)
+        self.assertEqual(caught.exception.stderr_excerpt, 'Error: provider refused')
+
     def test_nonzero_stderr_truncation_has_distinct_code(self):
         cli = self.fake_cli(self.event('step_start') + '\n', exit_code=7,
                             stderr_body='Session.StepFailedError: Response still truncated')

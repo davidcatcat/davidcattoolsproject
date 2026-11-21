@@ -21,6 +21,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from llmtool import developer_stderr
 from llmtool import skill_ledger
 from llmtool import skill_manifest
 from llmtool import task_submission_cli as submission_cli
@@ -221,9 +222,43 @@ class OpenCodeRouteWiringTests(unittest.TestCase):
 
     # #2503: OpenCode's own text is kept for the PM as developer.reported.
 
-    def _text_result(self, text):
+    def _text_result(self, text, stderr_excerpt=None):
         return DirectResult(0, _SESSION, text, None, 'UNKNOWN', 'a' * 64, 32,
-                            'CONFIRMED', 'opencode v2.0.32', 10, 1, 'b' * 64)
+                            'CONFIRMED', 'opencode v2.0.32', 10, 1, 'b' * 64,
+                            stderr_excerpt=stderr_excerpt)
+
+    # #2503: OpenCode's stderr tail is kept for the PM as developer.stderr_excerpt.
+
+    def test_stderr_is_kept_on_a_responded_result(self):
+        run = self._run(outcome=self._text_result('done', 'warn: provider slow'))
+        self.assertEqual(run.store.task['developer']['stderr_excerpt'], 'warn: provider slow')
+
+    def test_empty_stderr_adds_no_field(self):
+        run = self._run(outcome=self._text_result('done', None))
+        self.assertNotIn('stderr_excerpt', run.store.task['developer'])
+
+    def test_oversized_stderr_is_bounded_again_when_stored(self):
+        run = self._run(outcome=self._text_result('done', 'line\n' * 3000 + 'LAST'))
+        excerpt = run.store.task['developer']['stderr_excerpt']
+        self.assertTrue(excerpt.endswith('LAST'))
+        self.assertLessEqual(len(excerpt.encode('utf-8')), 4 * 1024)
+
+    def test_unsafe_stderr_is_withheld(self):
+        sentinel = 'SCREEN-REFUSED-SENTINEL-2503'
+        with patch.object(developer_stderr, '_emitted_sensitive',
+                          side_effect=lambda text: sentinel in text):
+            run = self._run(outcome=self._text_result('done', 'auth ' + sentinel))
+        self.assertEqual(run.store.task['developer']['stderr_excerpt'],
+                         developer_stderr.WITHHELD)
+
+    def test_provider_failure_keeps_its_stderr(self):
+        error = DirectOpenCodeError('OPENCODE_PROVIDER_FAILED', attempted=True,
+                                    cleanup_status='CONFIRMED', process_exit_code=1,
+                                    stderr_excerpt='Error: free model limit reached')
+        run = self._run(outcome=error)
+        developer = run.store.task['developer']
+        self.assertEqual(developer['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(developer['stderr_excerpt'], 'Error: free model limit reached')
 
     def test_reply_text_is_kept_for_the_pm_on_a_responded_result(self):
         text = 'Updated src.py. BLOCKED on item 2: it needs other.py outside read_paths.'
