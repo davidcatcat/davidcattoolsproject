@@ -29,6 +29,8 @@ from .errors import LLMToolError
 from .task_store import ASSIGNMENT_EXPIRY_MAX_SECONDS, PM_NATIVE_SESSION_ID
 
 DEFAULT_EXPIRY_SECONDS = 600
+# #2281 row 18 (basis #819): the inbox default assignment wait when the
+# policy key developer_assignment_wait_seconds is absent (see repair_policy).
 DEFAULT_WAIT_SECONDS = 540
 MAX_WAIT_SECONDS = 600
 POLL_SECONDS = 2.0
@@ -199,9 +201,20 @@ def pending_assignments(store, worker, *, now=None):
             if item['worker'] == worker and _live(item, now)]
 
 
-def wait_assignments(store, worker, *, wait=False, timeout=DEFAULT_WAIT_SECONDS,
-                     poll=POLL_SECONDS, clock=time.monotonic, sleep=time.sleep, now=None):
-    """List live assignments; with ``wait`` sleep-poll until one exists or the bound passes."""
+def wait_assignments(store, worker, *, wait=False, timeout=None,
+                     poll=POLL_SECONDS, clock=time.monotonic, sleep=time.sleep, now=None,
+                     policy_path=None):
+    """List live assignments; with ``wait`` sleep-poll until one exists or the bound passes.
+
+    #2281 row 18 (basis #819): an omitted ``timeout`` comes from the policy key
+    ``developer_assignment_wait_seconds`` (the same default when the key is
+    absent); an explicit ``timeout`` is always kept as given. A configured
+    value above ``MAX_WAIT_SECONDS`` or an unreadable policy refuses; nothing
+    falls back silently to ``DEFAULT_WAIT_SECONDS``.
+    """
+    if timeout is None:
+        from . import repair_policy
+        timeout = repair_policy.assignment_wait_seconds(policy_path)
     if type(timeout) is not int or not 0 <= timeout <= MAX_WAIT_SECONDS:
         raise AssignmentRefused('ASSIGNMENT_WAIT_TIMEOUT_INVALID')
     deadline = clock() + timeout
