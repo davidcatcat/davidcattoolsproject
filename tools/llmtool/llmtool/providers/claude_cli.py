@@ -177,14 +177,14 @@ class ClaudeCLIProvider:
         return "\n\n".join(parts)
 
     @staticmethod
-    def _read_pipe(stream, output):
+    def _read_pipe(stream, output, limit=OUTPUT_LIMIT):
         try:
             chunk = os.read(stream.fileno(), READ_SIZE)
         except BlockingIOError:
             return False
         if not chunk:
             return True
-        if len(output) + len(chunk) > OUTPUT_LIMIT:
+        if len(output) + len(chunk) > limit:
             return "limit"
         output.extend(chunk)
         return False
@@ -481,13 +481,18 @@ class ClaudeCLIProvider:
                                 except BrokenPipeError:
                                     reject('REVIEW_WORKER_INPUT_INCOMPLETE')
                             else:
-                                target = output if kind == 'stdout' else errors
-                                result = self._read_pipe(stream, target)
                                 envelope_limit = REVIEW_ENVELOPE_LIMIT
                                 try:
                                     envelope_limit = _review_envelope_limit()
                                 except LLMToolError:
                                     reject('POLICY_INVALID')
+                                target = output if kind == 'stdout' else errors
+                                # #2281 row 12: cap the review stdout (the
+                                # envelope) by the policy limit so a configured
+                                # value above the generic 1 MiB OUTPUT_LIMIT can
+                                # take effect; stderr keeps the generic limit.
+                                result = self._read_pipe(stream, target,
+                                    envelope_limit if kind == 'stdout' else OUTPUT_LIMIT)
                                 if result == 'limit' or len(output) > envelope_limit:
                                     reject('REVIEW_WORKER_OUTPUT_LIMIT')
                                 if result:

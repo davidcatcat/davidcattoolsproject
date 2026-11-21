@@ -94,6 +94,34 @@ class ClaudeEnvelopePolicyTest(unittest.TestCase):
                 self.assertEqual(self._refusal_code(
                     lambda raw: self._apply(self._write(tmpdir, policy), raw),
                     self.ENVELOPE_OK), 'POLICY_INVALID')
+    def test_live_output_path_honors_configured_limit(self):
+        # F1: the live output path must not refuse a configured envelope limit
+        # above the generic 1 MiB OUTPUT_LIMIT. _read_pipe now takes a per-call
+        # limit: a 1.5 MiB payload (above OUTPUT_LIMIT) is read to completion
+        # under the 2 MiB configured limit, but is refused ('limit') under the
+        # generic default -- so the CLI limit is preserved and the configured
+        # value can take effect.
+        payload = b'x' * (1536 * 1024)  # 1.5 MiB, above OUTPUT_LIMIT (1 MiB)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = Path(tmpdir) / 'out.bin'
+            src.write_bytes(payload)
+            for limit, done_expected in ((2 * 1024 * 1024, True),
+                                         (claude_cli.OUTPUT_LIMIT, False)):
+                out = bytearray()
+                done = False
+                with open(src, 'rb') as stream:
+                    while not done:
+                        r = claude_cli.ClaudeCLIProvider._read_pipe(
+                            stream, out, limit)
+                        if r == 'limit':
+                            break
+                        if r:
+                            done = True
+                self.assertEqual(done, done_expected)
+                if done_expected:
+                    self.assertEqual(len(out), len(payload))
+                else:
+                    self.assertLess(len(out), len(payload))
 
 
 if __name__ == '__main__':
