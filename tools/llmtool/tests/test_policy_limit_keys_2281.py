@@ -2,14 +2,15 @@
 
 A1: the repository policy.json has one key per limit at the value recorded in
     the #2281 limit table, and load_policy accepts them. Row 18 is omitted
-    from the repository policy.json; its key is optional, and load_policy
-    accepts a policy that sets it to a positive whole number.
+    from the repository policy.json; its keys are optional, and load_policy
+    accepts a policy that sets one to a positive whole number.
 A2: a present key of the wrong type, zero or negative refuses POLICY_INVALID;
     nothing falls back silently.
-A3: an absent key keeps the caller default; the row 18 default (the Developer
-    assignment wait) equals
-    developer_assignment_inbox.DEFAULT_WAIT_SECONDS at its point of use;
-    existing keys and repair_policy behaviour are unchanged.
+A3: an absent key keeps the caller default; the row 18 defaults (the Developer
+    assignment wait and the assignment expiry) equal
+    developer_assignment_inbox.DEFAULT_WAIT_SECONDS and
+    DEFAULT_EXPIRY_SECONDS at their point of use; existing keys and
+    repair_policy behaviour are unchanged.
 """
 
 import json
@@ -34,6 +35,9 @@ LIMITS = {'spec_preflight_large_file_lines': 2000, 'merge_train_members_max': 6,
 LATER_LIMITS = {'d6_writer_lease_hours': 24}
 # #2281 row 18 (basis #819): Developer assignment wait in seconds.
 ROW18_KEY = 'developer_assignment_wait_seconds'
+# #2281 row 18 (basis #819): Developer assignment expiry in seconds (how long
+# an assignment stays valid); a further limit of the same row.
+EXPIRY_ROW18_KEY = 'developer_assignment_expiry_seconds'
 
 
 class PolicyLimitKeysTests(unittest.TestCase):
@@ -52,12 +56,14 @@ class PolicyLimitKeysTests(unittest.TestCase):
     # A1
     def test_keys_are_the_optional_positive_keys(self):
         self.assertEqual(set(rp.OPTIONAL_POSITIVE_POLICY_KEYS),
-                         {*LIMITS, *LATER_LIMITS, ROW18_KEY})
+                         {*LIMITS, *LATER_LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY})
         # Optional: none of them is required by the loader.
         self.assertFalse(set(LIMITS) & set(rp.POLICY_KEYS))
         self.assertFalse(set(LIMITS) & set(rp.OPTIONAL_POLICY_LIMITS))
-        self.assertNotIn(ROW18_KEY, rp.POLICY_KEYS)
-        self.assertNotIn(ROW18_KEY, rp.OPTIONAL_POLICY_LIMITS)
+        for key in (ROW18_KEY, EXPIRY_ROW18_KEY):
+            with self.subTest(key=key):
+                self.assertNotIn(key, rp.POLICY_KEYS)
+                self.assertNotIn(key, rp.OPTIONAL_POLICY_LIMITS)
 
     def test_repository_policy_has_each_limit_at_its_table_value(self):
         policy = rp.load_policy()
@@ -66,8 +72,10 @@ class PolicyLimitKeysTests(unittest.TestCase):
                 self.assertIs(type(policy[key]), int)
                 self.assertEqual(policy[key], value)
         # Row 18 is not in the repository policy.json; the repository file is
-        # still accepted because the key is optional.
-        self.assertNotIn(ROW18_KEY, policy)
+        # still accepted because the keys are optional.
+        for key in (ROW18_KEY, EXPIRY_ROW18_KEY):
+            with self.subTest(key=key):
+                self.assertNotIn(key, policy)
 
     def test_loader_accepts_the_keys(self):
         self.assertEqual(rp.load_policy(self._write(dict(BASE, **LIMITS))), dict(BASE, **LIMITS))
@@ -81,9 +89,16 @@ class PolicyLimitKeysTests(unittest.TestCase):
             dict(BASE, **{ROW18_KEY: 540}))
         self.assertEqual(rp.load_policy(self._write(dict(BASE, **{ROW18_KEY: 1}))),
                          dict(BASE, **{ROW18_KEY: 1}))
+        # The expiry is a further limit of the same row 18.
+        self.assertEqual(
+            rp.load_policy(self._write(dict(BASE, **{EXPIRY_ROW18_KEY: 600}))),
+            dict(BASE, **{EXPIRY_ROW18_KEY: 600}))
+        self.assertEqual(
+            rp.load_policy(self._write(dict(BASE, **{EXPIRY_ROW18_KEY: 1}))),
+            dict(BASE, **{EXPIRY_ROW18_KEY: 1}))
 
     def test_no_upper_validation_bound(self):
-        for key in (*LIMITS, ROW18_KEY):
+        for key in (*LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY):
             for value in (1001, 10 ** 9):
                 with self.subTest(key=key, value=value):
                     self.assertEqual(
@@ -91,7 +106,7 @@ class PolicyLimitKeysTests(unittest.TestCase):
 
     # A2
     def test_invalid_value_refuses_policy_invalid(self):
-        for key in (*LIMITS, ROW18_KEY):
+        for key in (*LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY):
             for value in (0, -1, -2000, '5', True, False, 2.5, None, [5], {'value': 5}):
                 with self.subTest(key=key, value=value):
                     self._refuses({**BASE, **LIMITS, key: value})
@@ -114,6 +129,8 @@ class PolicyLimitKeysTests(unittest.TestCase):
         partial = rp.load_policy(self._write(dict(BASE, revert_scope_prs_max=7)))
         self.assertEqual(partial['revert_scope_prs_max'], 7)
         self.assertNotIn('merge_train_members_max', partial)
+        self.assertNotIn(ROW18_KEY, partial)
+        self.assertNotIn(EXPIRY_ROW18_KEY, partial)
 
     def test_absent_row18_key_keeps_the_current_hard_coded_wait(self):
         # The row 18 default equals the Developer assignment wait at its
@@ -129,6 +146,29 @@ class PolicyLimitKeysTests(unittest.TestCase):
         self.assertEqual(
             rp.assignment_wait_seconds(self._write(dict(BASE, **{ROW18_KEY: 600}))),
             600)
+
+    def test_absent_row18_key_keeps_the_current_hard_coded_expiry(self):
+        # The expiry default equals the Developer assignment expiry at its
+        # point of use, so callers wired later see the unchanged value.
+        from llmtool.developer_assignment_inbox import (
+            DEFAULT_EXPIRY_SECONDS, DEFAULT_WAIT_SECONDS)
+        self.assertEqual(rp.DEVELOPER_ASSIGNMENT_EXPIRY_SECONDS, DEFAULT_EXPIRY_SECONDS)
+        # The expiry bound in the inbox (ASSIGNMENT_EXPIRY_MAX_SECONDS) is a
+        # separate maximum and is untouched by the policy key.
+        self.assertEqual(rp.assignment_expiry_seconds(self._write(BASE)),
+                         DEFAULT_EXPIRY_SECONDS)
+        # The repository policy.json omits the key: the reported value is the
+        # caller default.
+        self.assertEqual(rp.assignment_expiry_seconds(), DEFAULT_EXPIRY_SECONDS)
+        # A policy setting the key wins over the default.
+        self.assertEqual(
+            rp.assignment_expiry_seconds(self._write(dict(BASE, **{EXPIRY_ROW18_KEY: 900}))),
+            900)
+        # The assignment wait piece from PR #2478 is unchanged.
+        self.assertEqual(rp.DEVELOPER_ASSIGNMENT_WAIT_SECONDS, DEFAULT_WAIT_SECONDS)
+        self.assertEqual(rp.assignment_wait_seconds(self._write(BASE)),
+                         DEFAULT_WAIT_SECONDS)
+        self.assertEqual(rp.assignment_wait_seconds(), DEFAULT_WAIT_SECONDS)
 
     def test_existing_keys_and_behaviour_are_unchanged(self):
         self.assertEqual(rp.POLICY_KEYS, (
