@@ -406,7 +406,7 @@ kind is covered without a new rule.
 |---|---|---|
 | `DEBUG_NOT_LAUNCHED` | One `high_debug` entry | `_debug_entry_used` treats it as not used. One fresh Debug may be admitted on the same head. |
 | `CI_GATE_FAULT` | One `-ec2` repair claim built from a CI check | The claim is left out of `test_fails`, and one bounded re-run of the bound check is allowed (see below). |
-| `REVIEW_RESULT_LOST` | One review claim on one PR, head and version | The claim becomes eligible for the existing single REVIEW_REDISPATCH, as if it had a failure reason. |
+| `REVIEW_RESULT_LOST` | One review claim on one PR, head and version | Only with proof that the original dispatch and session have ended, the claim becomes eligible for the existing single REVIEW_REDISPATCH, as if it had a failure reason. |
 
 Each kind refuses unless its evidence below holds. The evidence must show
 that the gate caused the item. A shape that a Developer fault or a real
@@ -566,10 +566,43 @@ exception to INV-7. The Owner must approve it as part of the policy:
   `main`. That step would change the PUBLISH rule above, needs its own Owner
   decision, and is not part of this proposal.
 
-**`REVIEW_RESULT_LOST` evidence.** The claim state is CLAIMED or UNKNOWN. A
-complete paginated comment read of the PR shows no verdict-shaped comment
-(by `_may_be_review_verdict`) for that head and version. The other
-evidence a REVIEW_REDISPATCH needs today stays required.
+**`REVIEW_RESULT_LOST` evidence.** A claim state of CLAIMED or UNKNOWN does
+not show that the original Reviewer has stopped. A claim is written as
+CLAIMED before the Reviewer is started and stays CLAIMED while the dispatch
+runs. An UNKNOWN claim can also still hold a native session ID. If the fault
+were recorded during an active dispatch, a second Reviewer could start on
+the same head, which is the Reviewer shopping that INV-8 forbids. So an
+absent verdict alone is never enough. All of the following must hold, and
+any doubt refuses:
+
+1. **Positive proof that the original dispatch and its session have
+   ended.** The record must bind the claim's dispatch identity and, where
+   one exists, its native session ID, and show that the dispatch process is
+   no longer running and that the session is closed or cannot return a
+   result. Age is not evidence: a claim older than the Reviewer timeout may
+   still have a live run. A claim with no stored process or session
+   identity gives no such proof. What `review_dispatch` and `review_result`
+   store for this (process ID, session ID, start or end marker, heartbeat)
+   and whether the native session state can be queried: UNKNOWN (those
+   files were not read). Where the stored data cannot give the proof, this
+   kind needs new write-ahead and end evidence in the same way as
+   `DEBUG_NOT_LAUNCHED` (section 6.4 item 2): `review_dispatch` would
+   record a dispatch-ended marker, written under the chain lock after the
+   Reviewer process exits, and a claim without that marker stays
+   ineligible. Claims written before the marker exists stay ineligible.
+2. **A late result is fenced out.** Once the record exists, any later
+   result or verdict from the original dispatch for that head and version
+   is not accepted as a second result. How `review_result` would enforce
+   this is UNKNOWN and is a design point for the follow-up Task.
+3. A complete paginated comment read of the PR shows no verdict-shaped
+   comment (by `_may_be_review_verdict`) for that head and version. This is
+   read again at the moment of recording and again at the redispatch.
+4. The other evidence a REVIEW_REDISPATCH needs today stays required.
+
+Until item 1 can be met, `REVIEW_RESULT_LOST` is left out of the mechanism,
+and a CLAIMED claim with no ended-dispatch proof stays at
+REVIEW_OUTCOME_UNKNOWN. The narrow fix in section 6.4 item 4, which names
+the actor and the evidence to collect, still applies.
 
 **Who may invoke it.**
 
@@ -599,8 +632,9 @@ evidence a REVIEW_REDISPATCH needs today stays required.
     names and conclusions of each of those jobs (names and conclusions
     only, never output), the steps found as the failure origin, and the EC2
     receipt identity;
-  - Review: PR, head, version and claim state, and the comment count of the
-    complete read;
+  - Review: PR, head, version and claim state, the claim's dispatch
+    identity and native session ID (where one exists), the dispatch-ended
+    evidence, and the comment count of the complete read;
 - the llmtool `main` commit that produced the fault;
 - the Owner ref, and a required fix-Issue ref for the gate defect;
 - a recorded-at time.
@@ -657,7 +691,8 @@ evidence a REVIEW_REDISPATCH needs today stays required.
   them: a Debug that write-ahead evidence shows never launched, a CI failure
   whose origin is a listed gate-only step while every test-executing step
   in the check's dependency jobs passed, on a head whose suite also passed
-  on EC2, or a review claim with no verdict on a complete read. Matching identifiers
+  on EC2, or a review claim whose original dispatch and session are proven ended and
+  that has no verdict on a complete read. Matching identifiers
   alone never qualify. RCA outcomes, findings, launched Debugs and executed
   or hanging tests are excluded by precondition.
 - Each record needs an Owner decision and names a fix Issue. The store-wide
@@ -720,6 +755,10 @@ Task, tests and review.
   known from the test file.
 - Whether `review_dispatch` / `review_result` offer a claim reconcile
   command: UNKNOWN.
+- What `review_dispatch` / `review_result` store that could prove an
+  original Reviewer dispatch and its native session have ended (process
+  identity, session ID, end marker), and whether a late result can be
+  fenced out: UNKNOWN. `REVIEW_RESULT_LOST` depends on this.
 - What `owner_exception.verify` checks: UNKNOWN. From `task_advance` it is
   known only that it replaces the review PASS and that `_merge_checks` still
   runs.
