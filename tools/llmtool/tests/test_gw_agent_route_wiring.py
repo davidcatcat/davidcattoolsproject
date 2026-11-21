@@ -1955,9 +1955,17 @@ class GwAgentRealStoreTests(unittest.TestCase):
 
     def test_unsafe_final_reply_is_withheld_and_the_result_still_saved(self):
         target = 'gw-agent-reply-unsafe.md'
-        marker = 'pass' + 'word'
-        code, task = self._delegate(
-            target, finish_summary='done ' + marker + ' = "' + 'q7' * 12 + '"')
+        # The reply screen refuses a harmless sentinel; other texts keep the real screen.
+        sentinel = 'SCREEN-REFUSED-SENTINEL-2503'
+        real_screen = task_submission_cli._screen_text
+
+        def screen(value, *args, **kwargs):
+            if type(value) is str and sentinel in value:
+                raise task_submission_cli.LLMToolError('screen refused')
+            return real_screen(value, *args, **kwargs)
+
+        with patch.object(task_submission_cli, '_screen_text', side_effect=screen):
+            code, task = self._delegate(target, finish_summary='done ' + sentinel)
         self.assertEqual(code, 0)
         self.assertEqual(task['developer']['state'], 'DEVELOPER_RESPONDED')
         self.assertEqual(task['developer']['reported'],

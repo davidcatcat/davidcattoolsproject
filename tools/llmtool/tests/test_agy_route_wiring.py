@@ -686,10 +686,19 @@ class AgyRouteWiringTests(unittest.TestCase):
                              task_submission_cli.CLAUDE_REPLY_MAX_REPORTED_BYTES)
 
     def test_agy_unsafe_reply_is_withheld_and_the_record_still_saved(self):
-        marker = 'pass' + 'word'
-        reply = 'BLOCKED. ' + marker + ' = "' + 'q7' * 12 + '"'
-        _status, task, _events = self._run_agy_real_store(
-            diff_bytes=b'', changed_paths=[], summary=reply)
+        # The reply screen refuses a harmless sentinel, so no credential-shaped
+        # fixture is needed; every other text still goes through the real screen.
+        sentinel = 'SCREEN-REFUSED-SENTINEL-2503'
+        real_screen = task_submission_cli._screen_text
+
+        def screen(value, *args, **kwargs):
+            if type(value) is str and sentinel in value:
+                raise task_submission_cli.LLMToolError('screen refused')
+            return real_screen(value, *args, **kwargs)
+
+        with patch.object(task_submission_cli, '_screen_text', side_effect=screen):
+            _status, task, _events = self._run_agy_real_store(
+                diff_bytes=b'', changed_paths=[], summary='BLOCKED. ' + sentinel)
         self.assertEqual(task['developer']['reported'],
                          {'summary': task_submission_cli.CLAUDE_REPLY_WITHHELD})
 
