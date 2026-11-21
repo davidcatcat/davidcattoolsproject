@@ -69,6 +69,14 @@ class AgyDirectStopTests(unittest.TestCase):
         # dispatch policy, so pin an ALLOWED decision (never the live policy).
         # The dispatch gate itself is covered by the route-wiring tests.
         _chain_gate_fixture.pass_through_chain_gate(self)
+        # Store writes reach the same authorization seam directly, without the
+        # delegate's chain gate; keep it deterministic for these STOPPED-record
+        # tests (the gate's decisions are covered by the route-wiring tests).
+        authorization = patch.object(
+            submission_cli.worker_dispatch, 'authorize_task_store_change',
+            return_value=None)
+        authorization.start()
+        self.addCleanup(authorization.stop)
         self.serial = 0
 
     def _store(self):
