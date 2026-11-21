@@ -248,7 +248,7 @@ class DelegateHookTest(unittest.TestCase):
 
 class TaskStoreAppendTest(unittest.TestCase):
     def test_append_on_a_real_store(self):
-        from tests.task_fixtures import pm_responded_task
+        from task_fixtures import pm_responded_task
         with tempfile.TemporaryDirectory() as tmp:
             store = task_store.TaskStore(Path(tmp))
             task = pm_responded_task(route='agy')
