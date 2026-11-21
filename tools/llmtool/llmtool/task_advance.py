@@ -2471,9 +2471,89 @@ def derive_repair_state(repair_record):
     return 'UNKNOWN'
 
 
-def _pre_review_action(record, d6, pr, related, result_head):
-    """Return the gate action before a Reviewer may start on this head."""
-    remote_status, _, _ = _remote_test_status(record, d6)
+def _pr_open_for_head(pr, number, head):
+    """Return True only when pr is an open, unmerged PR for number at head."""
+    pr_head = pr.get('head') if type(pr) is dict else None
+    return (type(pr_head) is dict and pr_head.get('sha') == head and
+            pr.get('number') == number and
+            pr.get('state') == 'open' and pr.get('merged') is False)
+
+
+# GitHub's pull request files statuses; a rename or copy must also name its old
+# path, or the file list cannot prove every changed path is documentation.
+_PR_FILE_STATUSES = frozenset(('added', 'removed', 'modified', 'renamed',
+                               'copied', 'changed', 'unchanged'))
+_PR_RENAME_STATUSES = frozenset(('renamed', 'copied'))
+
+
+def _pr_docs_only(number, head, github_get):
+    """#2473: True only when GitHub proves every changed path of the PR is documentation.
+
+    The complete file list is read for this PR number, both paths of every
+    rename are classified with the CI path classifier, the list must match the
+    PR's own file count, and the PR must be open and unmerged at the exact head
+    both before and after the read. Any doubt returns False, which keeps the EC2
+    decision.
+    """
+    try:
+        if type(number) is not int or type(head) is not str or _HEX40.fullmatch(head) is None:
+            return False
+        before = github_get(f'pulls/{number}')
+        if not _pr_open_for_head(before, number, head):
+            return False
+        count = before.get('changed_files')
+        files, files_code = _pr_files(number, github_get)
+        if files_code is not None or type(files) is not list or not files:
+            return False
+        if type(count) is not int or isinstance(count, bool) or count != len(files):
+            return False
+        names, seen = [], set()
+        for item in files:
+            if type(item) is not dict:
+                return False
+            path, status = item.get('filename'), item.get('status')
+            if (type(path) is not str or not path or path in seen or
+                    type(status) is not str or status not in _PR_FILE_STATUSES):
+                return False
+            seen.add(path)
+            names.append(path)
+            previous = item.get('previous_filename')
+            if status in _PR_RENAME_STATUSES and type(previous) is not str:
+                return False
+            if previous is not None:
+                if (type(previous) is not str or not previous or previous in seen):
+                    return False
+                seen.add(previous)
+                names.append(previous)
+        if any('\0' in name for name in names):
+            return False
+        classify = _ci_path_classes().classify_path
+        if any(classify(name) != 'docs' for name in names):
+            return False
+        after = github_get(f'pulls/{number}')
+        if not _pr_open_for_head(after, number, head):
+            return False
+        after_count = after.get('changed_files')
+        return (type(after_count) is int and not isinstance(after_count, bool) and
+                after_count == len(files))
+    except Exception:
+        return False
+
+
+# #2473: steps the pre-review EC2 record can produce; a docs-only PR re-decides them.
+_EC2_DERIVED_STEPS = frozenset((
+    'RUN_REMOTE_TEST', 'REPAIR_REVIEW', 'NEEDS_ATTENTION', 'WAITING_REPAIR',
+    'REPAIR_RETRY', 'DEVELOPER_START_FAILED', 'REPAIR_OUTCOME_UNKNOWN'))
+
+
+def _pre_review_action(record, d6, pr, related, result_head, docs_only=False):
+    """Return the gate action before a Reviewer may start on this head.
+
+    docs_only (#2473) is set only after _pr_docs_only proved the PR changes
+    documentation alone: no EC2 result is required, and the review path's
+    exact-head check (docs) gate still runs before any Reviewer is dispatched.
+    """
+    remote_status, _, _ = (None, None, None) if docs_only else _remote_test_status(record, d6)
     if remote_status == 'TIMEOUT':
         if _remote_test_timeout_count(record, d6) == 1:
             return 'RUN_REMOTE_TEST'
@@ -2484,15 +2564,15 @@ def _pre_review_action(record, d6, pr, related, result_head):
         return 'NEEDS_ATTENTION'
     if remote_status == 'FAIL':
         return _remote_fail_action(related, result_head)
-    if remote_status not in ('PASS', 'ADMISSION_DENIED'):
-        return 'RUN_REMOTE_TEST'
     if type(pr) is dict and pr.get('merged') is True:
-        # The code is already merged; a Reviewer must never start for it.
+        # The code is already merged; a Reviewer or EC2 run must never start for it.
         return 'PR_MERGED_NO_REVIEW'
+    if not docs_only and remote_status not in ('PASS', 'ADMISSION_DENIED'):
+        return 'RUN_REMOTE_TEST'
     return 'DISPATCH_REVIEW'
 
 
-def decide(record, d6, pr, related):
+def decide(record, d6, pr, related, docs_only=False):
     """Return the next action name using only supplied snapshots."""
     if type(record) is not dict:
         return 'DEVELOPER_ATTENTION'
@@ -2524,14 +2604,14 @@ def decide(record, d6, pr, related):
     matching = [claim for claim in claims if type(claim) is dict and
                 claim.get('pr') == chosen_pr and claim.get('head_sha') == result_head]
     if not matching:
-        return _pre_review_action(record, d6, pr, related, result_head)
+        return _pre_review_action(record, d6, pr, related, result_head, docs_only)
     claim = max(matching, key=lambda item: item.get('version', 0))
     if claim.get('state') == 'UNKNOWN' and _failure_reason(claim.get('failure_reason')):
         # One head gets one redispatch: any earlier claim on it has spent that.
         if sum(type(item) is dict and item.get('head_sha') == result_head
                for item in claims) > 1:
             return 'REVIEW_UNUSABLE_STOPPED'
-        action = _pre_review_action(record, d6, pr, related, result_head)
+        action = _pre_review_action(record, d6, pr, related, result_head, docs_only)
         return 'REVIEW_REDISPATCH' if action == 'DISPATCH_REVIEW' else action
     if claim.get('state') in ('CLAIMED', 'UNKNOWN'):
         return 'REVIEW_OUTCOME_UNKNOWN'
@@ -3403,6 +3483,12 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             {'task_id': task_id, 'step': 'D6_BINDING_UNAVAILABLE', 'result': None,
              'next': 'D6_BINDING_UNAVAILABLE', 'codes': [code]}, record, store, None)
     step = decide(record, d6, pr, related)
+    if step in _EC2_DERIVED_STEPS and _pr_docs_only(number, d6['result_head'], get):
+        # #2473: a docs-only PR needs no EC2 result, whatever the EC2 record
+        # says (none, FAIL, TIMEOUT, SHA_MISMATCH). The check (docs) gate below
+        # still runs before any Reviewer is dispatched. A head with a Reviewer
+        # claim decides identically with docs_only, so those steps are unchanged.
+        step = decide(record, d6, pr, related, docs_only=True)
     # A crash after GitHub creates the PR can leave the Task without its binding.
     # Only an exact-head open PR recovered from this D6 branch may fill it.
     if (recovered_pr and step not in ('PUBLISH', 'DEVELOPER_ATTENTION') and
