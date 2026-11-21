@@ -71,9 +71,9 @@ class _Store:
     def record_developer_assignment(self, *, worker, d6_task_id, common_dir,
                                     pm_session_id, task_id, owner_assignment_ref,
                                     assigned_at, expires_at, gate):
-        entry, denied = gate()
-        if denied is not None:
-            raise denied
+        # ``assign``'s gate raises on denial and returns one payload dict on
+        # success (the (entry, denied) tuple protocol is ``claim``'s).
+        gate()
         record = {'worker': worker, 'd6_task_id': d6_task_id,
                   'assigned_at': assigned_at, 'expires_at': expires_at,
                   'state': 'ASSIGNED'}
