@@ -6979,8 +6979,7 @@ def _void_historical_direct_dispatch(args, task, store, binding):
             store, task, registration, snapshot, executor_task=args.executor_task,
             owner_ref=args.void_historical_ref, owner_task=args.void_historical_task)
     except LLMToolError as exc:
-        if str(exc) in ('DIRECT_HISTORICAL_VOID_OWNER_REF_INVALID',
-                        'DIRECT_HISTORICAL_VOID_OWNER_TASK_MISMATCH'):
+        if str(exc).startswith('DIRECT_HISTORICAL_VOID_OWNER_'):
             raise LLMToolError(str(exc)) from None
         raise LLMToolError('DIRECT_CHILD_LAUNCH_EVIDENCE_MISSING') from None
     except Exception:

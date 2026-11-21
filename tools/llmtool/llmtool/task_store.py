@@ -414,6 +414,8 @@ _DIRECT_VOID_REASON = 'OWNER_APPROVED_VOID'
 _DIRECT_VOID_REF = re.compile(
     r'https://github\.com/[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}'
     r'/issues/[1-9][0-9]*#issuecomment-[1-9][0-9]*\Z')
+# #2447: one store-wide lock reserves an Owner relay URL for at most one Task.
+DIRECT_HISTORICAL_VOID_LOCK_NAME = '.direct-historical-void.lock'
 _DEVELOPER_OPTIONAL_FIELDS = (frozenset((_DIRECT_DISPATCH_BOUNDARY, _DIRECT_HANDOFF_HISTORY,
                                          _DIRECT_VOID_HISTORY)) |
                               _DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS |
@@ -5349,6 +5351,16 @@ class TaskStore:
         """
         name = '.' + self._name(chain_key) + CHAIN_LOCK_SUFFIX
         return self._exclusive_sidecar(name, 'TASK_CHAIN_LOCK')
+
+    def direct_historical_void_lock(self):
+        """#2447: hold the store-wide historical-void reservation lock.
+
+        Every historical void reads the Owner relay, checks that no other Task
+        recorded it and commits under this one lock, so a relay URL reserves at
+        most one Task even across concurrent voids of different Tasks.
+        """
+        return self._exclusive_sidecar(DIRECT_HISTORICAL_VOID_LOCK_NAME,
+                                       'DIRECT_HISTORICAL_VOID')
 
     def _take_advance_lease_exclusive(self, task_id, *, busy_code='SPLIT_CHILD_ADVANCING'):
         """Take the advance lease exclusively without waiting; return its fd.

@@ -57,6 +57,10 @@ def replacement_candidate(developer):
 _LSOF_PATHS = ('/usr/sbin/lsof', '/usr/bin/lsof')
 _PS_PATHS = ('/bin/ps', '/usr/bin/ps')
 _TASK_ID = re.compile(r'[0-9a-f]{32}\Z')
+# The PM relay marker of an Owner decision (common-core rule 7: ``actor=PM``).
+# The relayed comment must also name this exact repair Task id.
+_OWNER_RELAY_MARKER = re.compile(
+    r'(?<![A-Za-z0-9_=-])actor=PM(?![A-Za-z0-9_=-])')
 _PATH_CHAR_BEFORE = r'(?<![A-Za-z0-9._@+%/-])'
 _PATH_CHAR_AFTER = r'(?![A-Za-z0-9._@+%-])'
 # Result or recovery fields a never-launched historical assignment cannot carry.
@@ -169,7 +173,53 @@ def owner_relay_pattern():
     if type(slug) is not str:
         _refuse('DIRECT_HISTORICAL_VOID_OWNER_REF_INVALID')
     return re.compile(r'https://github\.com/' + re.escape(slug) +
-                      r'/issues/[1-9][0-9]*#issuecomment-[1-9][0-9]*\Z')
+                      r'/issues/([1-9][0-9]*)#issuecomment-([1-9][0-9]*)\Z')
+
+
+def _read_owner_comment(owner_ref):
+    """Read the linked Issue comment body; every read failure refuses.
+
+    llmtool reads the comment itself instead of trusting a PM-supplied body.
+    gh talks to this repository only. A missing comment (HTTP 404) is reported
+    as such; any other failure is unverified. The body is untrusted data: it is
+    only searched for the PM relay marker and this Task id.
+    """
+    import subprocess
+
+    from . import trust
+
+    match = (owner_relay_pattern().fullmatch(owner_ref)
+             if type(owner_ref) is str else None)
+    if match is None:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_REF_INVALID')
+    try:
+        slug = trust.load_trust().repository['slug']
+    except Exception:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
+    if type(slug) is not str:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
+    try:
+        completed = subprocess.run(
+            ['gh', 'api', f'repos/{slug}/issues/comments/{match.group(2)}',
+             '--jq', '.body'],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False, timeout=30,
+            env={'PATH': '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',
+                 'HOME': os.path.expanduser('~'), 'LC_ALL': 'C', 'LANG': 'C',
+                 'GH_PROMPT_DISABLED': '1', 'GH_NO_UPDATE_NOTIFIER': '1'})
+    except (OSError, subprocess.SubprocessError):
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
+    if type(completed.stdout) is not bytes:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
+    if completed.returncode != 0:
+        error = completed.stderr if type(completed.stderr) is bytes else b''
+        if b'Not Found' in error or b'HTTP 404' in error:
+            _refuse('DIRECT_HISTORICAL_VOID_OWNER_COMMENT_MISSING')
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
+    try:
+        return completed.stdout.decode('utf-8')
+    except UnicodeDecodeError:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
 
 
 def _relay_used_elsewhere(store, task_id, owner_ref):
@@ -187,11 +237,11 @@ def _relay_used_elsewhere(store, task_id, owner_ref):
 def check_owner_relay(store, task, owner_ref, owner_task):
     """The Owner decision named by the PM must be for this exact repair Task.
 
-    llmtool cannot read the comment body (no network). It binds the URL to the
-    one Task the PM names: the named Task must be this Task, the URL must be an
-    Issue comment link on this repository, and a URL already recorded for
-    another Task's void is never reused. The PM states in the relay body which
-    repair Task the Owner approved.
+    llmtool reads the linked Issue comment from this repository itself: it must
+    exist, carry the PM relay marker of an Owner decision (``actor=PM``) and
+    name this exact Task id. The URL must be an Issue comment link on this
+    repository, and a URL already recorded for another Task's void is never
+    reused. Any read failure, mismatch or prior reservation refuses.
     """
     task_id = task.get('task_id')
     if (type(owner_task) is not str or _TASK_ID.fullmatch(owner_task) is None or
@@ -199,6 +249,19 @@ def check_owner_relay(store, task, owner_ref, owner_task):
         _refuse('DIRECT_HISTORICAL_VOID_OWNER_TASK_MISMATCH')
     if type(owner_ref) is not str or owner_relay_pattern().fullmatch(owner_ref) is None:
         _refuse('DIRECT_HISTORICAL_VOID_OWNER_REF_INVALID')
+    try:
+        body = _read_owner_comment(owner_ref)
+    except LLMToolError:
+        raise
+    except Exception:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
+    if type(body) is not str:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
+    if re.search(r'(?<![0-9a-f])' + re.escape(task_id) + r'(?![0-9a-f])',
+                 body) is None:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_TASK_MISMATCH')
+    if _OWNER_RELAY_MARKER.search(body) is None:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_MARKER_MISSING')
     if _relay_used_elsewhere(store, task_id, owner_ref):
         _refuse('DIRECT_HISTORICAL_VOID_OWNER_TASK_MISMATCH')
 
@@ -271,27 +334,36 @@ def void_historical(store, task, registration, snapshot, *, executor_task,
     ordinary #2440 reassignment then creates the new assignment. Any unmet
     condition refuses; a second or concurrent void refuses
     DIRECT_HISTORICAL_VOID_CONFLICT.
+
+    A store-wide lock wraps the relay read, the cross-Task reservation check and
+    the commit, so one relay URL can reserve at most one Task even when two
+    different Tasks are voided at once.
     """
     from .task_store import TaskStoreConflict
 
-    _check_void(store, task, registration, snapshot, executor_task, process_probe,
-                owner_ref, owner_task)
+    lock = getattr(store, 'direct_historical_void_lock', None)
+    if not callable(lock):
+        _refuse('DIRECT_HISTORICAL_VOID_LOCK_UNAVAILABLE')
+    with lock():
+        _check_void(store, task, registration, snapshot, executor_task, process_probe,
+                    owner_ref, owner_task)
 
-    def verify():
-        # Under the Task lock, after the CAS read: the relay, D6 and processes now.
-        check_owner_relay(store, task, owner_ref, owner_task)
-        if task_completion.bind_executor_task(
-                registration.task_id, expected_common_dir=registration.common_dir,
-                root=registration.root) != (registration, snapshot):
-            _refuse('DIRECT_HISTORICAL_VOID_D6_UNVERIFIED')
-        _check_no_process(registration.root, process_probe)
-        return True
+        def verify():
+            # Under the shared reservation lock and the Task lock: relay, D6
+            # and processes now.
+            check_owner_relay(store, task, owner_ref, owner_task)
+            if task_completion.bind_executor_task(
+                    registration.task_id, expected_common_dir=registration.common_dir,
+                    root=registration.root) != (registration, snapshot):
+                _refuse('DIRECT_HISTORICAL_VOID_D6_UNVERIFIED')
+            _check_no_process(registration.root, process_probe)
+            return True
 
-    try:
-        return store.void_historical_direct_dispatch(
-            task['task_id'], current=task, owner_ref=owner_ref, verify=verify)
-    except TaskStoreConflict:
-        _refuse('DIRECT_HISTORICAL_VOID_CONFLICT')
+        try:
+            return store.void_historical_direct_dispatch(
+                task['task_id'], current=task, owner_ref=owner_ref, verify=verify)
+        except TaskStoreConflict:
+            _refuse('DIRECT_HISTORICAL_VOID_CONFLICT')
 
 
 def _checked_scope(args, developer, read_paths, write_paths):

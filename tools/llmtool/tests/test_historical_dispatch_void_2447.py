@@ -87,6 +87,16 @@ def _fake_popen(lsof=b'', ps=b'', lsof_code=0, ps_code=0):
     return popen
 
 
+def _relay_body(*task_ids, marker=True):
+    """Synthetic PM relay text: plain labels only, never a credential."""
+    text = 'PM relayed the Owner decision: void the historical direct assignment.'
+    if task_ids:
+        text += ' Task ' + ', '.join(task_ids) + '.'
+    if marker:
+        text += ' actor=PM'
+    return text
+
+
 class HistoricalDispatchVoidTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -182,13 +192,17 @@ class HistoricalDispatchVoidTests(unittest.TestCase):
         return task['task_id']
 
     def _void(self, task_id, *, registration=None, snapshot=None, probe=_no_process,
-              task=None, owner_ref=OWNER_REF, owner_task=None, executor_task=EXECUTOR):
+              task=None, owner_ref=OWNER_REF, owner_task=None, executor_task=EXECUTOR,
+              read_comment=None):
         registration = registration or self.registration
         snapshot = snapshot or self.snapshot
         task = self.store.get(task_id) if task is None else task
         owner_task = task_id if owner_task is None else owner_task
-        with patch.object(task_completion, 'bind_executor_task',
-                          return_value=(registration, snapshot)):
+        reader = read_comment or (lambda _ref: _relay_body(task_id))
+        with patch.object(direct_reassignment, '_read_owner_comment',
+                          side_effect=reader), \
+                patch.object(task_completion, 'bind_executor_task',
+                             return_value=(registration, snapshot)):
             return direct_reassignment.void_historical(
                 self.store, task, registration, snapshot, executor_task=executor_task,
                 owner_ref=owner_ref, owner_task=owner_task, process_probe=probe)
@@ -200,15 +214,18 @@ class HistoricalDispatchVoidTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), code)
         self.assertEqual(self.store.get(task_id), before)
 
-    def _delegate(self, task_id, **flags):
+    def _delegate(self, task_id, *, read_comment=None, **flags):
         """The real recovery path of `task delegate`, with the D6 and process stubs."""
         args = SimpleNamespace(task_id=task_id, executor_task=EXECUTOR, **flags)
         task = self.store.get(task_id)
+        reader = read_comment or (lambda _ref: _relay_body(task_id))
         with patch.object(task_submission_cli, '_delegate_d6_binding',
                           return_value=(self.registration, self.snapshot)), \
                 patch.object(task_completion, 'bind_executor_task',
                              return_value=(self.registration, self.snapshot)), \
-                patch.object(direct_reassignment, 'd6_processes', return_value=[]):
+                patch.object(direct_reassignment, 'd6_processes', return_value=[]), \
+                patch.object(direct_reassignment, '_read_owner_comment',
+                             side_effect=reader):
             return task_submission_cli._recover_direct_child_dispatch(
                 args, task, task['developer'], self.store, expected_agent='agy-developer')
 
@@ -477,8 +494,10 @@ class HistoricalDispatchVoidTests(unittest.TestCase):
         task_id = self._historical()
         before = self.store.get(task_id)
         moved = _snapshot(head='f' * 40)
-        with patch.object(task_completion, 'bind_executor_task',
-                          return_value=(self.registration, moved)):
+        with patch.object(direct_reassignment, '_read_owner_comment',
+                          side_effect=lambda _ref: _relay_body(task_id)), \
+                patch.object(task_completion, 'bind_executor_task',
+                             return_value=(self.registration, moved)):
             with self.assertRaises(LLMToolError) as caught:
                 direct_reassignment.void_historical(
                     self.store, before, self.registration, self.snapshot,
@@ -611,8 +630,10 @@ class HistoricalDispatchVoidTests(unittest.TestCase):
             except LLMToolError as exc:
                 outcomes.append(str(exc))
 
-        with patch.object(task_completion, 'bind_executor_task',
-                          return_value=(self.registration, self.snapshot)):
+        with patch.object(direct_reassignment, '_read_owner_comment',
+                          side_effect=lambda _ref: _relay_body(task_id)), \
+                patch.object(task_completion, 'bind_executor_task',
+                             return_value=(self.registration, self.snapshot)):
             runners = [threading.Thread(target=request) for _ in range(2)]
             for runner in runners:
                 runner.start()
@@ -718,6 +739,113 @@ class HistoricalDispatchVoidTests(unittest.TestCase):
                     self.store.void_historical_direct_dispatch(
                         task_id, current=before, owner_ref=ref, verify=lambda: True)
                 self.assertEqual(self.store.get(task_id), before)
+
+    # --- (k)-(n) the linked Owner relay is read and authenticated --------------
+
+    def test_k_a_missing_comment_is_refused(self):
+        task_id = self._historical()
+
+        def missing(_ref):
+            raise LLMToolError('DIRECT_HISTORICAL_VOID_OWNER_COMMENT_MISSING')
+
+        self._refused('DIRECT_HISTORICAL_VOID_OWNER_COMMENT_MISSING', task_id,
+                      read_comment=missing)
+        with self.assertRaises(LLMToolError) as caught:
+            self._delegate(task_id, void_historical_ref=OWNER_REF,
+                           void_historical_task=task_id, read_comment=missing)
+        self.assertEqual(str(caught.exception),
+                         'DIRECT_HISTORICAL_VOID_OWNER_COMMENT_MISSING')
+
+    def test_l_a_comment_that_does_not_name_this_task_is_refused(self):
+        task_id = self._historical()
+        self._refused('DIRECT_HISTORICAL_VOID_OWNER_TASK_MISMATCH', task_id,
+                      read_comment=lambda _ref: _relay_body('d' * 32))
+        # A longer hex string containing the Task id is not this exact Task id.
+        self._refused('DIRECT_HISTORICAL_VOID_OWNER_TASK_MISMATCH', task_id,
+                      read_comment=lambda _ref: _relay_body('e' + task_id))
+
+    def test_m_a_comment_without_the_owner_relay_marker_is_refused(self):
+        task_id = self._historical()
+        self._refused('DIRECT_HISTORICAL_VOID_OWNER_MARKER_MISSING', task_id,
+                      read_comment=lambda _ref: _relay_body(task_id, marker=False))
+        # The marker is a standalone PM relay token, not a prefix.
+        self._refused('DIRECT_HISTORICAL_VOID_OWNER_MARKER_MISSING', task_id,
+                      read_comment=lambda _ref: _relay_body(task_id).replace(
+                          'actor=PM', 'actor=PM-not'))
+
+    def test_n_a_failed_github_read_is_refused(self):
+        task_id = self._historical()
+
+        def failed(_ref):
+            raise LLMToolError('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
+
+        self._refused('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED', task_id,
+                      read_comment=failed)
+
+    def test_n_the_real_reader_refuses_a_failed_or_missing_comment(self):
+        for name, completed, code in (
+                ('read failed', SimpleNamespace(
+                    returncode=1, stdout=b'', stderr=b'HTTP 500'),
+                 'DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED'),
+                ('comment missing', SimpleNamespace(
+                    returncode=1, stdout=b'', stderr=b'Not Found (HTTP 404)'),
+                 'DIRECT_HISTORICAL_VOID_OWNER_COMMENT_MISSING')):
+            with self.subTest(name=name):
+                with patch('subprocess.run', return_value=completed):
+                    with self.assertRaises(LLMToolError) as caught:
+                        direct_reassignment._read_owner_comment(OWNER_REF)
+                self.assertEqual(str(caught.exception), code)
+        succeeded = SimpleNamespace(returncode=0, stdout=b'actor=PM body', stderr=b'')
+        with patch('subprocess.run', return_value=succeeded):
+            self.assertEqual(direct_reassignment._read_owner_comment(OWNER_REF),
+                             'actor=PM body')
+
+    # --- (o) one relay URL reserves exactly one Task ---------------------------
+
+    def test_o_two_concurrent_voids_for_different_tasks_void_exactly_one(self):
+        first = self._historical()
+        second = self._historical(registration=_registration(task_id=OTHER_EXECUTOR))
+        first_stale = self.store.get(first)
+        second_stale = self.store.get(second)
+        # One relay body satisfies the per-Task name check for both requests;
+        # only the store-wide reservation may decide the winner.
+        body = _relay_body(first, second)
+        start = threading.Barrier(2)
+        outcomes = []
+
+        def request(task_id, record, registration, executor):
+            start.wait(timeout=10)
+            try:
+                direct_reassignment.void_historical(
+                    TaskStore(self.root), copy.deepcopy(record), registration,
+                    self.snapshot, executor_task=executor, owner_ref=OWNER_REF,
+                    owner_task=task_id, process_probe=_no_process)
+                outcomes.append((task_id, 'voided'))
+            except LLMToolError as exc:
+                outcomes.append((task_id, str(exc)))
+
+        def bind(task_id, **_kwargs):
+            return _registration(task_id=task_id), self.snapshot
+
+        with patch.object(direct_reassignment, '_read_owner_comment',
+                          side_effect=lambda _ref: body), \
+                patch.object(task_completion, 'bind_executor_task', side_effect=bind):
+            runners = [
+                threading.Thread(target=request, args=(
+                    first, first_stale, self.registration, EXECUTOR)),
+                threading.Thread(target=request, args=(
+                    second, second_stale,
+                    _registration(task_id=OTHER_EXECUTOR), OTHER_EXECUTOR)),
+            ]
+            for runner in runners:
+                runner.start()
+            for runner in runners:
+                runner.join(timeout=30)
+        self.assertEqual(sum(1 for _task, outcome in outcomes if outcome == 'voided'), 1)
+        reserved = [task_id for task_id in (first, second)
+                    if self.store.get(task_id)['developer'].get('voided_assignments')]
+        self.assertEqual(reserved, [next(task_id for task_id, outcome in outcomes
+                                         if outcome == 'voided')])
 
     # --- (j) no date cutoff ----------------------------------------------------
 
