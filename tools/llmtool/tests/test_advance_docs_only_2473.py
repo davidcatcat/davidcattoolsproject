@@ -76,15 +76,22 @@ def check_run(name, conclusion='success', status='completed', run_id=1):
 
 
 def make_github(files, *, runs, changed_files=None, pr=None, files_error=False,
-                second_pr=None):
+                second_pr=None, third_pr=None):
     """Return a github_get answering the PR, its files and its check runs."""
+    default_count = len(files) if changed_files is None else changed_files
     pr = pr_snapshot() if pr is None else pr
-    pr = dict(pr, changed_files=len(files) if changed_files is None else changed_files)
+    pr = dict(pr, changed_files=default_count)
+    if second_pr is not None and 'changed_files' not in second_pr:
+        second_pr = dict(second_pr, changed_files=default_count)
+    if third_pr is not None and 'changed_files' not in third_pr:
+        third_pr = dict(third_pr, changed_files=default_count)
     pulls_reads = []
 
     def get(path):
         if path == f'pulls/{NUMBER}':
             pulls_reads.append(path)
+            if third_pr is not None and len(pulls_reads) > 2:
+                return third_pr
             if second_pr is not None and len(pulls_reads) > 1:
                 return second_pr
             return pr
@@ -163,6 +170,20 @@ class AdvanceDocsOnlyTests(unittest.TestCase):
             self.assertEqual(
                 task_advance.decide(record, d6_snapshot(), pr, {}, docs_only=True),
                 'PUBLISH')
+        # Closing or merging at the same HEAD between the initial snapshot and
+        # the docs-only rechecks must not bypass EC2 or dispatch a Reviewer.
+        for label, kwargs in (
+            ('closed before files', {'second_pr': closed}),
+            ('merged before files', {'second_pr': merged}),
+            ('closed after files', {'third_pr': closed}),
+            ('merged after files', {'third_pr': merged}),
+        ):
+            with self.subTest(transition=label):
+                get = make_github(docs_files(), runs=[check_run(DOCS_CHECK)], **kwargs)
+                result, remote, dispatch = self._advance(get)
+                self.assertEqual(result['step'], 'RUN_REMOTE_TEST')
+                remote.assert_called_once()
+                dispatch.assert_not_called()
 
     def test_e_docs_plus_python_or_test_change_keeps_ec2(self):
         for extra in ('tools/llmtool/llmtool/task_advance.py',

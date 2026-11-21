@@ -2471,21 +2471,28 @@ def derive_repair_state(repair_record):
     return 'UNKNOWN'
 
 
+def _pr_open_for_head(pr, number, head):
+    """Return True only when pr is an open, unmerged PR for number at head."""
+    pr_head = pr.get('head') if type(pr) is dict else None
+    return (type(pr_head) is dict and pr_head.get('sha') == head and
+            pr.get('number', number) == number and
+            pr.get('state') == 'open' and pr.get('merged') is not True)
+
+
 def _pr_docs_only(number, head, github_get):
     """#2473: True only when GitHub proves every changed path of the PR is documentation.
 
     The complete file list is read for this PR number, both paths of every
     rename are classified with the CI path classifier, the list must match the
-    PR's own file count, and the PR head must be the exact head both before and
-    after the read. Any doubt returns False, which keeps the EC2 decision.
+    PR's own file count, and the PR must be open and unmerged at the exact head
+    both before and after the read. Any doubt returns False, which keeps the EC2
+    decision.
     """
     try:
         if type(number) is not int or type(head) is not str or _HEX40.fullmatch(head) is None:
             return False
         before = github_get(f'pulls/{number}')
-        before_head = before.get('head') if type(before) is dict else None
-        if (type(before_head) is not dict or before_head.get('sha') != head or
-                before.get('number', number) != number):
+        if not _pr_open_for_head(before, number, head):
             return False
         count = before.get('changed_files')
         files, files_code = _pr_files(number, github_get)
@@ -2510,9 +2517,7 @@ def _pr_docs_only(number, head, github_get):
         if any(classify(name) != 'docs' for name in names):
             return False
         after = github_get(f'pulls/{number}')
-        after_head = after.get('head') if type(after) is dict else None
-        return (type(after_head) is dict and after_head.get('sha') == head and
-                after.get('number', number) == number)
+        return _pr_open_for_head(after, number, head)
     except Exception:
         return False
 
