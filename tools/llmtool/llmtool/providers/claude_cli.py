@@ -1,5 +1,6 @@
 """Plain-text provider backed by the user's local Claude CLI installation."""
 
+import json
 import os
 import selectors
 import shutil
@@ -20,6 +21,29 @@ READ_SIZE = 8192
 
 
 REVIEW_ENVELOPE_LIMIT = 128 * 1024
+# CWE-400: hard technical ceiling for a configured envelope limit. The policy
+# is untrusted input; a value above this never removes the bounded resource
+# use (stdout buffer and JSON parse) and is refused as an invalid policy.
+REVIEW_ENVELOPE_LIMIT_MAX = 4 * 1024 * 1024
+
+
+def _review_envelope_limit():
+    # #2281 row 12 (basis #131, #165): the Claude review envelope size limit now
+    # comes from the policy key claude_review_envelope_limit_bytes. The key is
+    # optional; a policy that omits it keeps this hard-coded default
+    # (REVIEW_ENVELOPE_LIMIT). An invalid policy, or a configured value that is
+    # not an int in 1..REVIEW_ENVELOPE_LIMIT_MAX, refuses (POLICY_INVALID); it
+    # never falls back silently to REVIEW_ENVELOPE_LIMIT.
+    from .. import repair_policy
+    try:
+        value = repair_policy.claude_review_envelope_limit_bytes()
+    except RecursionError:
+        # A policy within the loader's byte bound can still nest deeper than the
+        # JSON parser allows; that is an invalid policy, not a crash.
+        raise LLMToolError('POLICY_INVALID') from None
+    if type(value) is not int or not 0 < value <= REVIEW_ENVELOPE_LIMIT_MAX:
+        raise LLMToolError('POLICY_INVALID') from None
+    return value
 
 
 def decode_review_envelope(raw, *, forbidden_sessions=()):
@@ -31,10 +55,16 @@ def decode_review_envelope(raw, *, forbidden_sessions=()):
     Usage is allowlisted CLI_REPORTED data, never measured billing or identity.
     """
     from ..task_review import load_json, screen, reject, VERDICT_LIMIT
+    # An invalid policy refuses (POLICY_INVALID) before any envelope data is
+    # consumed; it never falls back silently to REVIEW_ENVELOPE_LIMIT.
+    try:
+        limit = _review_envelope_limit()
+    except LLMToolError:
+        reject('POLICY_INVALID')
     try:
         if type(raw) is bytes:
             raw = raw.decode('utf-8')
-        value = load_json(raw, REVIEW_ENVELOPE_LIMIT)
+        value = load_json(raw, limit)
         required = {'type', 'subtype', 'is_error', 'session_id', 'result'}
         # Only this documented subset is consumed. Unknown top-level data is
         # rejected rather than reflected into diagnostics or interpreted as pins.
@@ -160,14 +190,18 @@ class ClaudeCLIProvider:
         return "\n\n".join(parts)
 
     @staticmethod
-    def _read_pipe(stream, output):
+    def _read_pipe(stream, output, limit=None):
+        # Resolve the generic limit at call time (not as a definition-time
+        # default) so a patched OUTPUT_LIMIT still bounds the plain path.
+        if limit is None:
+            limit = OUTPUT_LIMIT
         try:
             chunk = os.read(stream.fileno(), READ_SIZE)
         except BlockingIOError:
             return False
         if not chunk:
             return True
-        if len(output) + len(chunk) > OUTPUT_LIMIT:
+        if len(output) + len(chunk) > limit:
             return "limit"
         output.extend(chunk)
         return False
@@ -426,6 +460,12 @@ class ClaudeCLIProvider:
                     lifecycle.check()
                     if time.monotonic() >= work_deadline:
                         reject('REVIEW_TIMEOUT')
+                    # Resolve and validate the policy limit before any process
+                    # starts (A3); this bound is used for the whole run.
+                    try:
+                        envelope_limit = _review_envelope_limit()
+                    except LLMToolError:
+                        reject('POLICY_INVALID')
                     environment = self._child_environment()
                     environment['HOME'] = auth_home
                     argv = [executable, '--print', '--output-format', 'json',
@@ -465,8 +505,13 @@ class ClaudeCLIProvider:
                                     reject('REVIEW_WORKER_INPUT_INCOMPLETE')
                             else:
                                 target = output if kind == 'stdout' else errors
-                                result = self._read_pipe(stream, target)
-                                if result == 'limit' or len(output) > REVIEW_ENVELOPE_LIMIT:
+                                # #2281 row 12: cap the review stdout (the
+                                # envelope) by the policy limit so a configured
+                                # value above the generic 1 MiB OUTPUT_LIMIT can
+                                # take effect; stderr keeps the generic limit.
+                                result = self._read_pipe(stream, target,
+                                    envelope_limit if kind == 'stdout' else OUTPUT_LIMIT)
+                                if result == 'limit' or len(output) > envelope_limit:
                                     reject('REVIEW_WORKER_OUTPUT_LIMIT')
                                 if result:
                                     selector.unregister(stream); stream.close()

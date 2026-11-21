@@ -67,6 +67,10 @@ ROW13_RETRY_KEY = 'start_retries_max'
 # (llmtool.worker_dispatch.MAX_COMMITTED_CARRIES). Like the row 12 and
 # row 13 keys, it is omitted from the repository policy.json.
 ROW14_KEY = 'committed_result_carries_max'
+# #2281 row 19 (second part, basis #2188 and #1502 D11): the AI Debug excerpt
+# size limit in characters; omitted from the repository policy.json like the
+# row 12, 13 and 14 keys.
+ROW19_KEY = 'ai_debug_excerpt_max_chars'
 
 
 class PolicyLimitKeysTests(unittest.TestCase):
@@ -87,7 +91,7 @@ class PolicyLimitKeysTests(unittest.TestCase):
         self.assertEqual(set(rp.OPTIONAL_POSITIVE_POLICY_KEYS),
                          {*LIMITS, *LATER_LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY,
                           PACKET_ROW12_KEY, SOURCE_ROW12_KEY, ROW12_KEY,
-                          ROW13_KEY, ROW13_RETRY_KEY, ROW14_KEY})
+                          ROW13_KEY, ROW13_RETRY_KEY, ROW14_KEY, ROW19_KEY})
         # Optional: none of them is required by the loader.
         self.assertFalse(set(LIMITS) & set(rp.POLICY_KEYS))
         self.assertFalse(set(LIMITS) & set(rp.OPTIONAL_POLICY_LIMITS))
