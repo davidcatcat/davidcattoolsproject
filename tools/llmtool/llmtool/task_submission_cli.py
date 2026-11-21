@@ -3962,14 +3962,21 @@ _AGY_STOP_EXECUTION_FACTS = frozenset((
     'process_exit_code', 'stdout_sha256', 'elapsed_ms', 'cleanup_status'))
 
 
-def _verified_agy_stop(exc, expected_developer):
+def _verified_agy_stop(exc, expected_developer, *, launcher=None):
     """The STOPPED execution of an AGY child reaped before any prompt, else None.
 
-    Only the route launcher's own pre-prompt stop signal, a spawned running
-    child, confirmed cleanup, no provider session and no output, and a non-zero
-    exit qualify. Anything else keeps the route's existing failure handling.
+    Only the route launcher's own evidence of the pre-prompt boundary, a
+    spawned running child, confirmed cleanup, no provider session and no
+    output, and a non-zero exit qualify. Anything else keeps the route's
+    existing failure handling. The launcher evidence is authoritative on the
+    production path; the exception flag remains only for a direct unit caller.
     """
-    if getattr(exc, 'stopped_before_prompt', False) is not True:
+    if launcher is not None:
+        if not (launcher.get('authorized') is True and
+                launcher.get('child') is True and
+                launcher.get('prompt_delivered') is not True):
+            return None
+    elif getattr(exc, 'stopped_before_prompt', False) is not True:
         return None
     code = getattr(exc, 'code', None)
     if (type(code) is not str or re.fullmatch(r'[A-Z0-9_]{1,64}', code) is None or
@@ -5659,6 +5666,11 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     except TaskStoreConflict:
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
     owner_gate_denied = False
+    # Launcher-owned boundary evidence. The launcher marks the prompt delivered
+    # only when the route returns a provider result. Until then the spawned
+    # child has no observed prompt consumption, so a reap with no provider
+    # output or session is the pre-prompt stop, exactly as for OpenCode.
+    launcher = {'authorized': False, 'child': False, 'prompt_delivered': False}
     expected_developer = copy.deepcopy(store.get(task['task_id'])['developer'])
     try:
         developer.update(state='DEVELOPER_DISPATCHING', provider_type='agy-cli', model=model)
@@ -5673,6 +5685,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                 task['task_id'], expected_developer=expected_developer)
             expected_developer = copy.deepcopy(saved['developer'])
             developer['dispatch_boundary'] = 'STARTING'
+            launcher['authorized'] = True
 
         def record_agy_child(pid):
             nonlocal expected_developer
@@ -5680,6 +5693,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                 task['task_id'], assignment_id=developer['assignment_id'], pid=pid,
                 start_time=codex_direct_developer.process_start_time(pid), pgid=os.getpgid(pid))
             expected_developer = copy.deepcopy(saved['developer'])
+            launcher['child'] = True
 
         def validate_binding():
             current = store.get(task['task_id'])
@@ -5727,6 +5741,9 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             'state_dirs': (),
         }, gate=route_gate, boundary=GatedBoundary(),
            snapshot=capture_snapshot, on_launch=authorize_agy_spawn, on_child=record_agy_child)
+        # The route returned a provider result, so the launcher observed the
+        # prompt pass the pre-prompt boundary.
+        launcher['prompt_delivered'] = True
         _record_skill_delivery(task, registration, snapshot, 'agy', result.model,
                                card_prefix_sha256, result)
         after_registration = task_completion.read_d6_registration(
@@ -5778,7 +5795,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                     evidence['executor_native_session'] = 'VERIFIED'
     except RouteError as exc:
         stopped = (None if owner_gate_denied
-                   else _verified_agy_stop(exc, expected_developer))
+                   else _verified_agy_stop(exc, expected_developer, launcher=launcher))
         if stopped is not None:
             developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
                              provider_type='agy-cli', model=model,

@@ -56,22 +56,15 @@ def _stop_facts(*, exit_code=1, stdout_sha256=None, cleanup_status='CONFIRMED',
 
 
 def _stopped_error(facts=None, *, native_session_id=None):
-    """A RouteError carrying the launcher's pre-prompt stop signal."""
-    class _LauncherStopped(RouteError):
-        stopped_before_prompt = True
-        execution_facts = facts
-        session_id = native_session_id
-
+    """A RouteError carrying only the facts the route observed, never a flag."""
+    class _LauncherFactsError(RouteError):
         def __init__(self):
             super().__init__('AGY_EXIT_NONZERO')
-            # Set the launcher's own evidence after the base initializer, so
-            # the stop signal is present whatever defaults RouteError applies.
-            self.stopped_before_prompt = True
             self.execution_facts = facts
             self.native_session_id = native_session_id
             self.session_id = native_session_id
 
-    return _LauncherStopped()
+    return _LauncherFactsError()
 
 
 class AgyDirectStopTests(unittest.TestCase):
@@ -122,7 +115,7 @@ class AgyDirectStopTests(unittest.TestCase):
             executor_task='executor-d6', read_path=['src.py'], write_path=['src.py'],
             repair_packet=None, reassign_from=None, timeout=None)
 
-    def _run_agy_stop(self, error):
+    def _run_agy_stop(self, error, *, launch=True, child=True):
         store = self._store()
         task = self._make_task(store)
         snapshot = SimpleNamespace(root='/registered/root', common_dir='/repo/.git',
@@ -143,8 +136,10 @@ class AgyDirectStopTests(unittest.TestCase):
                                              'policy_sha256': 'a' * 64})
 
         def runner(_route, _request, *, on_launch, on_child, **_kwargs):
-            on_launch()
-            on_child(321)
+            if launch:
+                on_launch()
+            if child:
+                on_child(321)
             raise error
 
         with patch.dict('os.environ', {'HOME': str(self.temp.name)}), \
@@ -236,7 +231,7 @@ class AgyDirectStopTests(unittest.TestCase):
 
     def test_no_launcher_evidence_is_not_stopped(self):
         status, _task, saved, _store = self._run_agy_stop(
-            RouteError('AGY_EXIT_NONZERO'))
+            RouteError('AGY_EXIT_NONZERO'), launch=False, child=False)
         self.assertEqual(status, 1)
         developer = saved['developer']
         self.assertNotEqual(developer.get('dispatch_boundary'), 'STOPPED')
