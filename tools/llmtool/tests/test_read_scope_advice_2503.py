@@ -250,7 +250,7 @@ class TaskStoreAppendTest(unittest.TestCase):
     def test_append_on_a_real_store(self):
         from task_fixtures import pm_responded_task
         with tempfile.TemporaryDirectory() as tmp:
-            store = task_store.TaskStore(Path(tmp))
+            store = task_store.TaskStore(Path(tmp).resolve() / "tasks")
             task = pm_responded_task(route='agy')
             store.create(task)
             first = store.append_read_scope_advice(task['task_id'], _entry())
