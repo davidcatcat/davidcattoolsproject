@@ -14,16 +14,25 @@ from llmtool.providers import claude_cli
 
 REPO_POLICY = Path(__file__).resolve().parent.parent / 'policy.json'
 BASE = json.loads(REPO_POLICY.read_text('utf-8'))
+_SESSION = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'
+
+
+def _envelope(result):
+    # Outer Claude SDK result/success envelope; the inner ``result`` is itself
+    # a JSON document (decode_review_envelope runs load_json(value['result'])).
+    return json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                       'session_id': _SESSION, 'result': result}).encode('utf-8')
 
 
 class ClaudeEnvelopePolicyTest(unittest.TestCase):
     KEY = 'claude_review_envelope_limit_bytes'
-    ENVELOPE_OK = (b'{"type": "result", "subtype": "success", "is_error": false, '
-                   b'"session_id": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", '
-                   b'"result": "ok"}')
-    ENVELOPE_BIG = (b'{"type": "result", "subtype": "success", "is_error": false, '
-                    b'"session_id": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", '
-                    b'"result": "' + b'z' * 2000 + b'"}')
+    # The inner ``result`` must be a valid JSON document (the decoder runs
+    # load_json(value['result'], ...) at claude_cli.py:87); built via the
+    # module-level _envelope()/json.dumps so escaping is always correct.
+    # ENVELOPE_OK is small (within the limit); ENVELOPE_BIG's outer body is
+    # > 2048 bytes so the envelope gate (load_json(raw, limit)) trips first.
+    ENVELOPE_OK = _envelope(json.dumps('ok'))
+    ENVELOPE_BIG = _envelope(json.dumps('z' * 2200))
     def _write(self, tmpdir, policy):
         path = Path(tmpdir) / 'policy.json'
         path.write_bytes(json.dumps(policy).encode('utf-8'))
@@ -47,7 +56,8 @@ class ClaudeEnvelopePolicyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = self._write(tmpdir, dict(BASE, **{self.KEY: limit}))
             self.assertEqual(rp.claude_review_envelope_limit_bytes(path), limit)
-            self.assertEqual(self._apply(path, self.ENVELOPE_OK)['content'], 'ok')
+            self.assertEqual(self._apply(path, self.ENVELOPE_OK)['content'],
+                             json.dumps('ok'))
             self.assertIn(self._refusal(
                 lambda raw: self._apply(path, raw), self.ENVELOPE_BIG),
                 ('REVIEW_WORKER_OUTPUT_LIMIT', 'REVIEW_WORKER_ENVELOPE_INVALID'))
