@@ -49,7 +49,7 @@ import argparse
 import ctypes
 from collections import deque
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import math
 import os
 import platform
@@ -5765,6 +5765,59 @@ def _quota_timestamp(value):
     return None
 
 
+def _parse_reset_time(text: str) -> tuple[int, int] | None:
+    if not isinstance(text, str):
+        return None
+    m = re.fullmatch(r"([0-9]{1,2})(?::([0-9]{2}))?\s*(am|pm)", text.strip(), re.I)
+    if not m:
+        return None
+    hour = int(m.group(1))
+    minute = int(m.group(2)) if m.group(2) is not None else 0
+    if not (1 <= hour <= 12 and 0 <= minute <= 59):
+        return None
+    meridiem = m.group(3).lower()
+    if meridiem == "am":
+        hour_24 = 0 if hour == 12 else hour
+    else:
+        hour_24 = 12 if hour == 12 else hour + 12
+    return (hour_24, minute)
+
+
+def _claude_quota_reset_timestamp(reset_str: str, hit_time: float,
+                                  zone_name: str | None = None) -> float | None:
+    """The epoch time of a Claude "resets 4:40am" notice, or None when it is not
+    readable. The clock time is read in the zone the notice names, e.g.
+    "(Asia/Taipei)"; a notice without one is read in local time. A named zone
+    that cannot be resolved is not readable: guessing local time could drop a
+    limit that is still active.
+
+    The notice always names a future reset, so a clock time that is not later
+    than the hit itself (same minute included) is the next day's. There is no
+    tolerance window: reading "resets 4:40am" at a 04:40:30 hit as 04:40 today
+    would drop a still-active warning a minute later (#2412 formal v2 F1). A
+    wrong next-day reading only keeps the warning until the existing 5-hour
+    expiry in quota_warnings, which is the safe side."""
+    parsed = _parse_reset_time(reset_str)
+    if parsed is None:
+        return None
+    zone = None
+    if zone_name:
+        try:
+            from zoneinfo import ZoneInfo
+            zone = ZoneInfo(zone_name)
+        except (ImportError, KeyError, ValueError, OSError):
+            return None
+    try:
+        hit_dt = datetime.fromtimestamp(hit_time, tz=zone)
+        hour_24, minute = parsed
+        cand = hit_dt.replace(hour=hour_24, minute=minute, second=0, microsecond=0)
+        if cand <= hit_dt:
+            cand += timedelta(days=1)
+        return cand.timestamp()
+    except (ValueError, OverflowError, OSError, TypeError):
+        return None
+
+
 def read_codex_quota(now, path=None) -> dict:
     """Read ~/.local/state/llmtool/codex-quota.json.
 
@@ -5959,7 +6012,12 @@ def quota_warnings(now, codex_root=None, claude_root=None, codex_quota_path=None
         message = latest[1].get("message")
         content = message.get("content") if type(message) is dict else None
         first = content[0].get("text") if type(content) is list and content and type(content[0]) is dict else ""
-        reset = re.search(r"resets ([0-9:]{1,5}(?:am|pm))", first, re.I) if type(first) is str else None
+        reset = (re.search(r"resets ([0-9:]{1,5}(?:am|pm))(?:\s*\(([^()\s]{1,64})\))?", first, re.I)
+                 if type(first) is str else None)
+        if reset:
+            reset_ts = _claude_quota_reset_timestamp(reset.group(1), latest[0], reset.group(2))
+            if reset_ts is not None and now >= reset_ts:
+                continue
         config_name = os.path.basename(os.path.dirname(top))
         suffix = f"，resets {reset.group(1)}" if reset else ""
         out.append(f"Claude（{config_name}）已到用量上限{suffix}")
