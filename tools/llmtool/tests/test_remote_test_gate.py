@@ -78,7 +78,7 @@ class RemoteTestGateTests(unittest.TestCase):
         nine_module_task, nine_module_paths = task_with_module_count(9)
         self.assertEqual(task_submission_cli._remote_receipt_test_policy(
             nine_module_task, read_paths=nine_module_paths,
-            config_loader=lambda: {}), 'LOCAL')
+            config_loader=lambda: {}), 'REMOTE_RECEIPT')
 
     def test_prompt_includes_remote_instruction_and_preserves_local_instruction(self):
         task = task_with_tests()

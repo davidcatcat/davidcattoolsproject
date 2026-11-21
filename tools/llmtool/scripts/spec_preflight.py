@@ -235,7 +235,8 @@ def _norm_path(path: Any) -> str:
 
 
 # #1817: the declared test modules are the distinct test paths in the read and
-# write lists; llmtool's remote test admits at most its _MAX_REMOTE_MODULES.
+# write lists; llmtool's remote test runs at most its _MAX_REMOTE_MODULES per EC2
+# batch and batches the rest (#2457).
 TEST_MODULE_PATH = re.compile(r"tools/llmtool/tests/test_[a-z0-9_]{1,80}\.py")
 
 
@@ -257,15 +258,22 @@ def declared_test_modules(spec: dict[str, Any]) -> set[str]:
     }
 
 
-def check_test_module_count(spec: dict[str, Any], maximum: int | None = None) -> list[str]:
-    """#1817: refuse more declared modules than llmtool's remote test accepts."""
+def declared_module_batch_note(spec: dict[str, Any], maximum: int | None = None) -> str | None:
+    """#2457: report the EC2 batch count when a spec declares more modules than one run takes.
+
+    #1817 refused such a spec. EC2 now runs the declared modules in batches of at
+    most the maximum, all at the same exact HEAD, so the spec is accepted and
+    this fixed-format note (counts only, no field values) names the batches.
+    Returns None when one run is enough.
+    """
     if maximum is None:
         from llmtool import remote_test
         maximum = remote_test._MAX_REMOTE_MODULES
     count = len(declared_test_modules(spec))
-    if count > maximum:
-        return [f"test_module_count_exceeds_max:count={count}:max={maximum}"]
-    return []
+    if count <= maximum:
+        return None
+    batches = -(-count // maximum)
+    return f"test_module_batches:count={count}:max={maximum}:batches={batches}"
 
 
 def check_read_scope(spec: dict[str, Any], repo: str | Path) -> list[str]:
@@ -419,11 +427,14 @@ def main(argv: list[str] | None = None) -> int:
         print(EDITS_FORBIDDEN_MESSAGE, file=sys.stderr)
         return 2
 
-    failures = (check(spec) + check_ascii(spec) + check_open_bracket_ends(spec)
-                + check_test_module_count(spec))
+    failures = check(spec) + check_ascii(spec) + check_open_bracket_ends(spec)
     if failures:
         print("SPEC_PREFLIGHT_FAIL:" + ",".join(failures))
         return 1
+
+    batch_note = declared_module_batch_note(spec)
+    if batch_note is not None:
+        print("SPEC_PREFLIGHT_NOTE:" + batch_note, file=sys.stderr)
 
     if len(spec["acceptance"]) > REPAIR_ROOM_MAX_ACCEPTANCE:
         print("SPEC_PREFLIGHT_WARN:ACCEPTANCE_NO_REPAIR_ROOM", file=sys.stderr)

@@ -22,22 +22,22 @@ def modules(count):
     return [f"{MODULE_DIR}test_case_{index}.py" for index in range(count)]
 
 
+# #1817 refused a spec that declares more modules than one EC2 run takes. #2457
+# accepts it: EC2 runs the modules in batches, so preflight now reports the count.
 class DeclaredTestModuleCountTests(unittest.TestCase):
-    def test_eight_distinct_modules_are_not_a_new_failure(self):
+    def test_eight_distinct_modules_need_no_batch_note(self):
         spec = {"read": modules(8)}
-        self.assertEqual(spec_preflight.check_test_module_count(spec, maximum=8), [])
+        self.assertIsNone(spec_preflight.declared_module_batch_note(spec, maximum=8))
 
-    def test_nine_modules_are_refused_naming_count_and_maximum(self):
-        failures = spec_preflight.check_test_module_count({"read": modules(9)}, maximum=8)
-        self.assertEqual(len(failures), 1)
-        self.assertIn("9", failures[0])
-        self.assertIn("8", failures[0])
+    def test_nine_modules_are_accepted_and_report_count_maximum_and_batches(self):
+        note = spec_preflight.declared_module_batch_note({"read": modules(9)}, maximum=8)
+        self.assertEqual(note, "test_module_batches:count=9:max=8:batches=2")
 
     def test_same_module_in_read_and_write_counts_once(self):
         path = MODULE_DIR + "test_same.py"
         spec = {"read": [path], "write": [path]}
         self.assertEqual(spec_preflight.declared_test_modules(spec), {path})
-        self.assertEqual(spec_preflight.check_test_module_count(spec, maximum=1), [])
+        self.assertIsNone(spec_preflight.declared_module_batch_note(spec, maximum=1))
 
     def test_non_test_and_outside_paths_are_not_counted(self):
         spec = {
@@ -51,17 +51,15 @@ class DeclaredTestModuleCountTests(unittest.TestCase):
         }
         self.assertEqual(spec_preflight.declared_test_modules(spec),
                          {MODULE_DIR + "test_real.py"})
-        self.assertEqual(spec_preflight.check_test_module_count(spec, maximum=1), [])
+        self.assertIsNone(spec_preflight.declared_module_batch_note(spec, maximum=1))
 
-    def test_check_follows_the_remote_test_maximum(self):
+    def test_note_follows_the_remote_test_maximum(self):
         with mock.patch.object(remote_test, "_MAX_REMOTE_MODULES", 2):
-            self.assertEqual(spec_preflight.check_test_module_count({"read": modules(2)}), [])
-            failures = spec_preflight.check_test_module_count({"read": modules(3)})
-        self.assertEqual(len(failures), 1)
-        self.assertIn("3", failures[0])
-        self.assertIn("2", failures[0])
+            self.assertIsNone(spec_preflight.declared_module_batch_note({"read": modules(2)}))
+            note = spec_preflight.declared_module_batch_note({"read": modules(3)})
+        self.assertEqual(note, "test_module_batches:count=3:max=2:batches=2")
 
-    def test_preflight_refuses_nine_modules(self):
+    def test_preflight_accepts_nine_modules_and_reports_two_batches(self):
         spec = {
             "request": "request text",
             "summary": "summary text",
@@ -72,12 +70,14 @@ class DeclaredTestModuleCountTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             spec_path = Path(directory) / "spec.json"
             spec_path.write_text(json.dumps(spec), encoding="utf-8")
-            output = io.StringIO()
-            with mock.patch.object(remote_test, "_MAX_REMOTE_MODULES", 8):
-                with contextlib.redirect_stdout(output):
+            output, errors = io.StringIO(), io.StringIO()
+            with mock.patch.object(remote_test, "_MAX_REMOTE_MODULES", 8), \
+                    mock.patch.object(spec_preflight, "large_file_lines", return_value=2000):
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
                     code = spec_preflight.main([str(spec_path)])
-        self.assertEqual(code, 1)
-        self.assertIn("test_module_count_exceeds_max:count=9:max=8", output.getvalue())
+        self.assertEqual(code, 0)
+        self.assertNotIn("test_module_count_exceeds_max", output.getvalue())
+        self.assertIn("test_module_batches:count=9:max=8:batches=2", errors.getvalue())
 
 
 if __name__ == "__main__":

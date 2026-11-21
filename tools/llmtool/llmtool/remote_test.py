@@ -349,6 +349,84 @@ def _admitted_modules(task):
     return tuple(sorted(names))
 
 
+# #2457: a Task may declare more test modules than one EC2 run accepts. EC2 then
+# runs them in batches of at most _MAX_REMOTE_MODULES, each batch at the same
+# exact HEAD and recorded as its own receipt. The step is satisfied only when
+# every declared module has a PASS receipt at that HEAD after the last non-PASS
+# receipt at that HEAD, so a later PASS never hides an earlier FAIL.
+
+def remote_test_batches(modules, maximum=None):
+    """Split distinct modules, sorted, into consecutive batches of at most maximum."""
+    size = _MAX_REMOTE_MODULES if maximum is None else maximum
+    ordered = tuple(sorted(set(modules)))
+    return tuple(ordered[start:start + size] for start in range(0, len(ordered), size))
+
+
+def remote_test_batch_count(count, maximum=None):
+    """Number of EC2 batches needed for count declared modules."""
+    size = _MAX_REMOTE_MODULES if maximum is None else maximum
+    return -(-count // size) if count > 0 else 0
+
+
+def head_remote_receipts(task, executor_task, head):
+    """Digest-valid receipts of this Task, executor and exact head, oldest first."""
+    if type(task) is not dict:
+        return []
+    receipts = task.get('remote_test_receipts', [])
+    if type(receipts) is not list:
+        return []
+    kept = []
+    for receipt in receipts:
+        if (type(receipt) is not dict or
+                receipt.get('task_id') != task.get('task_id') or
+                receipt.get('run_id') != task.get('run_id') or
+                receipt.get('executor_task') != executor_task or
+                receipt.get('source_sha') != head or
+                receipt.get('result') not in ('PASS', 'FAIL', 'TIMEOUT', 'SHA_MISMATCH') or
+                type(receipt.get('modules')) is not list or not receipt['modules']):
+            continue
+        digest_input = dict(receipt)
+        claimed = digest_input.pop('receipt_digest', None)
+        try:
+            digest = hashlib.sha256(_json_bytes(digest_input)).hexdigest()
+        except Exception:
+            continue
+        if type(claimed) is not str or claimed != digest:
+            continue
+        kept.append(receipt)
+    return kept
+
+
+def batch_missing_modules(receipts, declared):
+    """Return (last_bad_index, missing) for exact-head receipts, oldest first.
+
+    last_bad_index is the position of the newest non-PASS receipt, or -1.
+    missing lists the declared modules with no PASS receipt after it.
+    """
+    last_bad = -1
+    for index, receipt in enumerate(receipts):
+        if receipt.get('result') != 'PASS':
+            last_bad = index
+    covered = set()
+    for receipt in receipts[last_bad + 1:]:
+        covered.update(item for item in receipt['modules'] if type(item) is str)
+    return last_bad, tuple(sorted(set(declared) - covered))
+
+
+def _next_batch(task, executor_task, sha, declared):
+    """The batch the next EC2 run takes: the first one with a module still missing."""
+    batches = remote_test_batches(declared)
+    _, missing = batch_missing_modules(head_remote_receipts(task, executor_task, sha), declared)
+    return next((batch for batch in batches if set(batch) & set(missing)), batches[0])
+
+
+def _superseded_by_non_pass(receipts, position, executor_task, sha):
+    """True when a later receipt of this executor at this head is not a PASS."""
+    return any(type(later) is dict and later.get('executor_task') == executor_task and
+               later.get('source_sha') == sha and later.get('result') != 'PASS'
+               for later in receipts[position + 1:])
+
+
 def _validate_remote_receipt(raw, *, sha, modules):
     if type(raw) is not bytes or not raw or len(raw) > _REMOTE_LIMIT:
         return None
@@ -597,6 +675,11 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         store.record_published_pr(task_id, pr, recorded_head)
     admitted = _task_path_modules(task)
     selected = tuple(sorted(set(modules or admitted)))
+    # #2457: an explicit selection stays limited to the maximum per call; with
+    # no selection, more declared modules than the maximum run in batches.
+    batch_mode = not modules and len(selected) > _MAX_REMOTE_MODULES
+    if batch_mode:
+        selected = _next_batch(task, executor_task, sha, selected)
     if (not selected or len(selected) > _MAX_REMOTE_MODULES or
             any(type(x) is not str or not _MODULE.fullmatch(x) or x not in admitted for x in selected)):
         return denied('MODULE_NOT_ADMITTED')
@@ -610,11 +693,17 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         return denied('CONFIG_INVALID')
     argv = _ssh_argv(config, sha, ref, selected)
     command_digest = _command_digest(argv)
-    for known in task.get('remote_test_receipts', []):
+    known_receipts = task.get('remote_test_receipts', [])
+    for position, known in enumerate(known_receipts):
         if (known.get('executor_task') == executor_task and known.get('source_sha') == sha and
                 known.get('modules') == list(selected) and
                 known.get('command_digest') == command_digest and
                 known.get('result') in ('PASS', 'SHA_MISMATCH')):
+            # #2457: in batch mode an old PASS never stands in for a rerun after a
+            # later FAIL at the same head.
+            if (batch_mode and
+                    _superseded_by_non_pass(known_receipts, position, executor_task, sha)):
+                continue
             record_remote_test_event(store, task_id, known)
             return known
     if transport is None:
