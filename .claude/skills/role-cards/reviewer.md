@@ -56,9 +56,8 @@ No findings.
 <!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->
 Verdict: PASS | Version: v91 | HEAD: 0123456789abcdef0123456789abcdef01234567
 LLMTOOL-REVIEW-BINDING v1 task=0123456789abcdef0123456789abcdef run=fedcba9876543210fedcba9876543210 contract=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef head=0123456789abcdef0123456789abcdef01234567
-FORMAL SECURITY/FUNCTIONAL/QA ACCEPT
 
-No findings.
+Security review only; functional and QA gates not covered. No findings.
 ```
 
 ## Re-review

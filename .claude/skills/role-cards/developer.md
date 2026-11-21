@@ -6,7 +6,7 @@ Read this card, including its output-format section, before starting.
 
 **Convergence rule:** a format failure (such as Issue #2423 Task d1decb30 `CLAUDE_OUTPUT_INVALID`) is fixed in this card's format section so it matches what llmtool accepts, and the PM records it.
 
-This card holds only Developer rules. The common core (authority, D6, privacy, the test data rule, sensitive-screen refusal, evidence honesty, Owner channel, Git limit) stays in [AGENTS.md](../../../AGENTS.md) and [CLAUDE.md](../../../CLAUDE.md) and binds you too. Since #1822 (Claude Developer, AGY) and #1878 (OpenCode) this card is delivered from the `main` manifest commit, bound by digest. `gw-agent` runs still record `NOT_DELIVERED`; their dispatch spec states the card rules.
+This card holds only Developer rules. The common core stays in [AGENTS.md](../../../AGENTS.md) and [CLAUDE.md](../../../CLAUDE.md) and binds you too. Since #1822 (Claude Developer, AGY) and #1878 (OpenCode) this card is delivered from the `main` manifest commit, bound by digest. `gw-agent` runs still record `NOT_DELIVERED`; their dispatch spec states the card rules.
 
 ## Scope
 
@@ -48,137 +48,29 @@ Stop and return BLOCKED, without retrying or rewording, on any of:
 
 ### Route execution contract and reply shapes
 
-Backed by `tools/llmtool/llmtool/developer_routes/base.py` function `run_route`:
-- **Shared execution contract (all routes):**
-  - Process exit code must be `0` (`code == 0`, checked after `validate_exit`, `quota_exhausted`, `validate_status`, and `verified_model`).
-  - Git state must remain clean and unmodified (`_git_state_difference`, `_git_signature`, and `capture_snapshot` check `head`, `branch`, `branch_ref`, `git_dir`, `index`, `stash`, `pointer`, `config_worktree`, `config_common`, and `refs`).
-  - All modified, newly created, or untracked/ignored files in the worktree must strictly be in `write_paths`, with no symlink changes (`_changed_files`, `_git_status_paths`, and `_changed_symlink`). Any edit outside `write_paths` raises `<ROUTE>_WRITE_SCOPE_VIOLATION`.
-  - Model verification (`verified_model`) must return a non-`None` string equal to the requested model (`value['model']`).
-  - **No-change and `SPEC_MISMATCH` replies:** When returning `SPEC_MISMATCH` or when no changes are made, the Developer modifies `0` files in the worktree (`changed_files` is empty `()`), leaves Git state clean, exits `0` with route success status, and puts the `SPEC_MISMATCH` statement and evidence (or no-change reason) in the summary/result field.
+- **Shared (`tools/llmtool/llmtool/developer_routes/base.py`, `run_route`):** Exit `0`; Git state unmodified (`_git_state_difference`, `_git_signature`, `capture_snapshot`); all changed/untracked/ignored paths strictly in `write_paths` with no symlinks or `.git` edits (`_changed_files`, `_git_status_paths`, `_changed_symlink`, else `<ROUTE>_WRITE_SCOPE_VIOLATION` / `BLOCKED_WRITE_ISOLATION`); `verified_model` equals requested model (or `served_model` for `gw-agent`). For `SPEC_MISMATCH` or no-change, modify `0` files (`changed_files` `()`), keep Git clean, exit `0`, and state `SPEC_MISMATCH` + evidence in the summary/result (`run_route` accepts `()`, while `task_submission_cli` direct-route wrappers may block empty diffs).
+- **Claude (`tools/llmtool/llmtool/developer_routes/claude.py`, `ClaudeRoute.parse_output`, `validate_status`, `verified_model`, `_normalized_usage`):** CLI wraps your final text in one strict UTF-8 JSON object (`_unique_pairs`, `_reject_constant`): `"type":"result"`, `"subtype":"success"`, `"is_error":false`, `"session_id"` (RFC 4122 UUID), optional `"result"` (first 4000 chars), `"usage"` (`input_tokens`, `output_tokens`), `"modelUsage"` (`"claude-*"` -> `{"outputTokens":>0}`).
+- **AGY (`tools/llmtool/llmtool/developer_routes/agy.py`, `AgyRoute.parse_output`, `verified_model`, `provider_basis`, `quota_exhausted`):** CLI wraps your final text in one strict UTF-8 JSON object: `"conversation_id"` (`[A-Za-z0-9_-]{8,128}`), `"status":"SUCCESS"`, optional `"response"`/`"result"` (first 4000 chars), optional `"usage"`. `verified_model` reads `model_resolver...Resolving model <name>` from `--log-file`.
+- **`gw-agent` (`tools/llmtool/llmtool/developer_routes/gw_agent.py`, `GwAgentRoute.collect`, `parse_output`, `validate_exit`, `validate_status`, `verified_model`, `_normalize_gw_agent_usage`):** Gateway writes `result.json` (<= 1 MiB, `0600`) and `audit.jsonl` (<= 4 MiB, `0600`) in private `tmpdir`. `result.json` requires 13 keys: `schema_version:1`, `status` (`DONE`:0, `BLOCKED`:3, `MODEL_ERROR`:4, `POLICY_REFUSED`:5, `BUDGET_EXCEEDED`:6), `code` (`null` on `DONE`, else `[A-Z0-9_]{1,64}`), `run_id` (`[0-9a-f]{24}`), `session_id`, `task_id`, `changed_paths` (relative POSIX), `summary`, `served_model` (not `UNKNOWN`/`gw` on `DONE`), `usage`, `turns`, `budget_used`, `audit_sha256`.
+- **OpenCode:** Shares `base.py` `run_route`; route-specific stdout schema is `UNKNOWN` (outside `read_paths`).
 
-- **Claude Developer route (`claude-developer`):**
-  - Backed by `tools/llmtool/llmtool/developer_routes/claude.py` functions `ClaudeRoute.parse_output`, `ClaudeRoute.validate_status`, `ClaudeRoute.verified_model`, and `ClaudeRoute._normalized_usage`.
-  - Stdout must be a single UTF-8 JSON object with unique keys and standard constants (`_unique_pairs`, `_reject_constant`). Required fields:
-    - `"type"`: `"result"`
-    - `"subtype"`: string; must be `"success"` (with `"is_error": false`) to yield status `'DONE'`
-    - `"is_error"`: boolean `false`
-    - `"session_id"`: canonical RFC 4122 UUID string (`_is_canonical_uuid`)
-    - `"result"`: string summary (optional in `parse_output`, defaults to `""`; first 4000 characters used as `summary`; holds the `SPEC_MISMATCH` statement and evidence when applicable)
-    - `"usage"`: dict with non-negative int `"input_tokens"` and `"output_tokens"` (optional `"cache_read_input_tokens"`, `"cache_creation_input_tokens"`) for `CLI_USAGE` evidence
-    - `"modelUsage"`: non-empty dict mapping `"claude-*"` model names to dicts with positive int `"outputTokens"` (checked by `verified_model`)
+### Minimal valid examples
 
-- **AGY Developer route (`agy`):**
-  - Backed by `tools/llmtool/llmtool/developer_routes/agy.py` functions `AgyRoute.parse_output`, `AgyRoute.verified_model`, `AgyRoute.provider_basis`, and `AgyRoute.quota_exhausted`.
-  - Stdout must be a single UTF-8 JSON object with unique keys and standard constants. Required fields:
-    - `"conversation_id"`: string matching `[A-Za-z0-9_-]{8,128}`
-    - `"status"`: string; `"SUCCESS"` for normal completion (`provider_basis` returns `'AGY_STATUS'` only when `status == 'SUCCESS'` and `conversation_id` is valid; `"RESOURCE_EXHAUSTED"` or quota regex in `status`/`error`/stderr triggers `AGY_QUOTA_EXHAUSTED`)
-    - `"response"` or `"result"`: optional string (`response` takes precedence over `result`; first 4000 characters used as `summary`)
-    - `"usage"`: optional dict of `str -> int` entries
-  - Model verification (`verified_model`) reads `model_resolver...Resolving model <name>` from the CLI `--log-file` (`log_text`), not stdout JSON.
-
-- **Home LLM `gw-agent` route (`gw`):**
-  - Backed by `tools/llmtool/llmtool/developer_routes/gw_agent.py` functions `GwAgentRoute.collect`, `GwAgentRoute.parse_output`, `GwAgentRoute.validate_exit`, `GwAgentRoute.validate_status`, `GwAgentRoute.verified_model`, and `_normalize_gw_agent_usage`.
-  - `gw-agent` does not parse CLI stdout JSON; `collect` reads `result.json` (<= 1 MiB, mode `0600`) and `audit.jsonl` (<= 4 MiB, mode `0600`) from the private `tmpdir`.
-  - `result.json` must be a strict JSON object with unique keys and standard constants, containing all 13 required keys:
-    - `"schema_version"`: `1` (int)
-    - `"status"`: `"DONE"` (exit `0`), `"BLOCKED"` (exit `3`), `"MODEL_ERROR"` (exit `4`), `"POLICY_REFUSED"` (exit `5`), or `"BUDGET_EXCEEDED"` (exit `6`); process exit code must match (`validate_exit`)
-    - `"code"`: `null` when `status == "DONE"`; non-empty string matching `[A-Z0-9_]{1,64}` when `status != "DONE"`
-    - `"run_id"`: 24-char lowercase hex string (`[0-9a-f]{24}`)
-    - `"session_id"`: string or `null`
-    - `"task_id"`: string matching `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` and equal to the requested `task['task_id']`
-    - `"changed_paths"`: list of relative POSIX path strings (no leading `/`, `\`, or `.`/`..`/empty segments)
-    - `"summary"`: string (first 4000 characters used as `summary`)
-    - `"served_model"`: string matching `[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}`, not `"UNKNOWN"` and not `"gw"` when `status == "DONE"`
-    - `"usage"`: dict (either `{"prompt_tokens", "completion_tokens", "total_tokens"}` or `{"status": "REPORTED", "input_tokens", "output_tokens"}` with non-negative ints `<= 50000000` for `GATEWAY_USAGE`)
-    - `"turns"`: int
-    - `"budget_used"`: dict or `null`
-    - `"audit_sha256"`: 64-char lowercase hex string matching `audit.verify(audit.jsonl)`
-
-- **OpenCode Developer route (`opencode`):**
-  - Shares the common execution contract enforced by `tools/llmtool/llmtool/developer_routes/base.py` function `run_route`.
-  - Route-specific stdout/output parsing for OpenCode is implemented in modules outside the authorized `read_paths` of this Task, so its route-specific stdout schema is `UNKNOWN`.
-
-### Minimal valid Claude Developer completion example
-
+Claude completion:
 ```json
-{
-  "type": "result",
-  "subtype": "success",
-  "is_error": false,
-  "session_id": "00000000-0000-0000-0000-000000000000",
-  "result": "Implemented requested changes in authorized write paths.",
-  "usage": {
-    "input_tokens": 100,
-    "output_tokens": 50
-  },
-  "modelUsage": {
-    "claude-sonnet-5-5": {
-      "outputTokens": 50
-    }
-  }
-}
+{"type":"result","subtype":"success","is_error":false,"session_id":"00000000-0000-0000-0000-000000000000","result":"Implemented requested changes.","usage":{"input_tokens":100,"output_tokens":50},"modelUsage":{"claude-opus-5-5":{"outputTokens":50}}}
 ```
-
-### Minimal valid AGY Developer completion example
-
+AGY completion:
 ```json
-{
-  "conversation_id": "conv_0123456789abcdef",
-  "status": "SUCCESS",
-  "response": "Implemented requested changes in authorized write paths.",
-  "usage": {
-    "input_tokens": 100,
-    "output_tokens": 50
-  }
-}
+{"conversation_id":"conv_0123456789abcdef","status":"SUCCESS","response":"Implemented requested changes.","usage":{"input_tokens":100,"output_tokens":50}}
 ```
-
-### Minimal valid `gw-agent` `result.json` completion example
-
+`gw-agent` `result.json` completion:
 ```json
-{
-  "schema_version": 1,
-  "status": "DONE",
-  "code": null,
-  "run_id": "0123456789abcdef01234567",
-  "session_id": "0123456789abcdef0123456789abcdef",
-  "task_id": "task-1",
-  "changed_paths": [],
-  "summary": "Implemented requested changes in authorized write paths.",
-  "served_model": "qwen3-coder-30b",
-  "usage": {
-    "prompt_tokens": 100,
-    "completion_tokens": 50,
-    "total_tokens": 150
-  },
-  "turns": 2,
-  "budget_used": {},
-  "audit_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-}
+{"schema_version":1,"status":"DONE","code":null,"run_id":"0123456789abcdef01234567","session_id":"0123456789abcdef0123456789abcdef","task_id":"task-1","changed_paths":["src.py"],"summary":"Implemented requested changes.","served_model":"deepseek-v4.1-flash-free","usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150},"turns":2,"budget_used":{},"audit_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
 ```
-
-### Minimal valid SPEC_MISMATCH / no-change example (Claude Developer)
-
-Worktree state: `0` files modified (working tree clean, `changed_files` empty `()`), exit code `0`.
-
-Stdout JSON:
+`SPEC_MISMATCH` / no-change (Claude, `0` files modified, Git clean, exit `0`):
 ```json
-{
-  "type": "result",
-  "subtype": "success",
-  "is_error": false,
-  "session_id": "00000000-0000-0000-0000-000000000000",
-  "result": "SPEC_MISMATCH: The spec contradicts existing code in tools/llmtool/llmtool/developer_routes/base.py; no changes made.",
-  "usage": {
-    "input_tokens": 100,
-    "output_tokens": 50
-  },
-  "modelUsage": {
-    "claude-sonnet-5-5": {
-      "outputTokens": 50
-    }
-  }
-}
+{"type":"result","subtype":"success","is_error":false,"session_id":"00000000-0000-0000-0000-000000000000","result":"SPEC_MISMATCH: Contradicts tools/llmtool/llmtool/developer_routes/base.py; no changes made.","usage":{"input_tokens":100,"output_tokens":50},"modelUsage":{"claude-opus-5-5":{"outputTokens":50}}}
 ```
 
 ## Route appendix
