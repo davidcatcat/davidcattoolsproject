@@ -8,6 +8,7 @@ other AGY end keeps its existing state, so the #2440 reassignment refuses it.
 import hashlib
 import io
 import tempfile
+import time
 import unittest
 from argparse import Namespace
 from contextlib import redirect_stdout
@@ -20,6 +21,7 @@ from llmtool import direct_reassignment
 from llmtool import task_store as task_store_module
 from llmtool import task_submission_cli as submission_cli
 from llmtool.developer_routes import RouteError
+from llmtool.developer_routes import base as developer_route_base
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore, new_id
 
@@ -49,17 +51,18 @@ def tearDownModule():
     worker_policy_fixture.stop_module()
 
 
-def _stop_facts(*, exit_code=1, stdout_sha256=None, cleanup_status='CONFIRMED',
-                elapsed_ms=10):
+def _stop_facts(*, exit_code=1, stdout_sha256=None, stderr_sha256=None,
+                cleanup_status='CONFIRMED', elapsed_ms=10):
     return {'process_exit_code': exit_code, 'stdout_sha256': stdout_sha256,
+            'stderr_sha256': stderr_sha256,
             'elapsed_ms': elapsed_ms, 'cleanup_status': cleanup_status}
 
 
-def _stopped_error(facts=None, *, native_session_id=None):
+def _stopped_error(facts=None, *, native_session_id=None, code='AGY_EXIT_NONZERO'):
     """A RouteError carrying only the facts the route observed, never a flag."""
     class _LauncherFactsError(RouteError):
         def __init__(self):
-            super().__init__('AGY_EXIT_NONZERO')
+            super().__init__(code)
             self.execution_facts = facts
             self.native_session_id = native_session_id
             self.session_id = native_session_id
@@ -115,7 +118,7 @@ class AgyDirectStopTests(unittest.TestCase):
             executor_task='executor-d6', read_path=['src.py'], write_path=['src.py'],
             repair_packet=None, reassign_from=None, timeout=None)
 
-    def _run_agy_stop(self, error, *, launch=True, child=True):
+    def _run_agy_stop(self, error, *, launch=True, child=True, prompt=False):
         store = self._store()
         task = self._make_task(store)
         snapshot = SimpleNamespace(root='/registered/root', common_dir='/repo/.git',
@@ -135,11 +138,13 @@ class AgyDirectStopTests(unittest.TestCase):
             verify=lambda *_args, **_kwargs: {'verified': True,
                                              'policy_sha256': 'a' * 64})
 
-        def runner(_route, _request, *, on_launch, on_child, **_kwargs):
+        def runner(_route, _request, *, on_launch, on_child, on_prompt=None, **_kwargs):
             if launch:
                 on_launch()
             if child:
                 on_child(321)
+            if prompt and on_prompt is not None:
+                on_prompt()
             raise error
 
         with patch.dict('os.environ', {'HOME': str(self.temp.name)}), \
@@ -236,6 +241,60 @@ class AgyDirectStopTests(unittest.TestCase):
         developer = saved['developer']
         self.assertNotEqual(developer.get('dispatch_boundary'), 'STOPPED')
         self.assertFalse(direct_reassignment.replacement_candidate(developer))
+
+    def test_prompt_delivered_before_the_error_is_not_stopped(self):
+        # AGY carries the prompt in the child's command line: once the launcher
+        # reports delivery at spawn, a later exit is never a pre-prompt stop.
+        status, _task, saved, _store = self._run_agy_stop(
+            _stopped_error(_stop_facts()), prompt=True)
+        self.assertEqual(status, 1)
+        developer = saved['developer']
+        self.assertNotEqual(developer.get('dispatch_boundary'), 'STOPPED')
+        self.assertFalse(direct_reassignment.replacement_candidate(developer))
+
+    def test_empty_result_error_is_not_stopped(self):
+        # #2468 keeps its own handling; an empty successful result is not
+        # evidence that the child stopped before the prompt.
+        status, _task, saved, _store = self._run_agy_stop(
+            _stopped_error(_stop_facts(), code='AGY_EMPTY_RESULT'))
+        self.assertEqual(status, 1)
+        developer = saved['developer']
+        self.assertNotEqual(developer.get('dispatch_boundary'), 'STOPPED')
+        self.assertFalse(direct_reassignment.replacement_candidate(developer))
+
+    def test_stderr_output_is_not_stopped(self):
+        status, _task, saved, _store = self._run_agy_stop(
+            _stopped_error(_stop_facts(stderr_sha256='b' * 64)))
+        self.assertEqual(status, 1)
+        developer = saved['developer']
+        self.assertNotEqual(developer.get('dispatch_boundary'), 'STOPPED')
+        self.assertFalse(direct_reassignment.replacement_candidate(developer))
+
+    def test_missing_stderr_evidence_is_not_stopped(self):
+        facts = _stop_facts()
+        facts.pop('stderr_sha256')
+        status, _task, saved, _store = self._run_agy_stop(_stopped_error(facts))
+        self.assertEqual(status, 1)
+        developer = saved['developer']
+        self.assertNotEqual(developer.get('dispatch_boundary'), 'STOPPED')
+        self.assertFalse(direct_reassignment.replacement_candidate(developer))
+
+    def test_real_runner_empty_stream_facts_have_no_digest(self):
+        # F1: the real launcher must not hash empty bytes into a non-null
+        # SHA-256, or a genuine empty-output reap can never satisfy STOPPED.
+        execute = SimpleNamespace(last_cleanup_status='CONFIRMED')
+        started = time.monotonic()
+        empty = developer_route_base._post_run_execution_facts(
+            1, b'', b'', started, execute)
+        self.assertIsNone(empty['stdout_sha256'])
+        self.assertIsNone(empty['stderr_sha256'])
+        self.assertEqual(empty['cleanup_status'], 'CONFIRMED')
+        output = developer_route_base._post_run_execution_facts(
+            1, b'out', b'err', started, execute)
+        self.assertEqual(output['stdout_sha256'],
+                         hashlib.sha256(b'out').hexdigest())
+        self.assertEqual(output['stderr_sha256'],
+                         hashlib.sha256(b'err').hexdigest())
 
     def test_opencode_stopped_record_is_unchanged(self):
         store = self._store()

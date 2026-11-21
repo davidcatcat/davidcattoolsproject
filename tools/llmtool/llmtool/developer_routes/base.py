@@ -941,10 +941,19 @@ def _exit_diagnostic(code, stderr):
     return reason
 
 
-def _post_run_execution_facts(code, stdout, started, execute):
+def _post_run_execution_facts(code, stdout, stderr, started, execute):
+    """Launcher-observed facts of a finished run; an empty stream has no digest.
+
+    v93: a reaped child with no stdout or stderr reports None, never the SHA-256
+    of empty bytes, so the stop predicate sees the same empty evidence the
+    launcher actually observed.
+    """
     return {
         'process_exit_code': code if type(code) is int else None,
-        'stdout_sha256': hashlib.sha256(stdout).hexdigest() if type(stdout) is bytes else None,
+        'stdout_sha256': (hashlib.sha256(stdout).hexdigest()
+                          if type(stdout) is bytes and stdout else None),
+        'stderr_sha256': (hashlib.sha256(stderr).hexdigest()
+                          if type(stderr) is bytes and stderr else None),
         'elapsed_ms': int((time.monotonic() - started) * 1000),
         'cleanup_status': 'CONFIRMED' if getattr(execute, 'last_cleanup_status', None) == 'CONFIRMED' else 'UNKNOWN',
     }
@@ -964,7 +973,7 @@ def _fire_delivered(route, on_delivered):
 
 def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
               runner=None, boundary, snapshot, on_launch=None, on_delivered=None,
-              on_child=None):
+              on_child=None, on_prompt=None):
     """Run one route only after dispatch, D6, and OS write-boundary checks.
 
     ``on_launch`` (optional, no arguments) is called once at the launch
@@ -973,6 +982,13 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
     starts. No refusal before that point calls it. ``on_child`` runs only for
     the managed provider process once the lifecycle owns it. Boundary probes
     never receive the callback.
+
+    ``on_prompt`` (optional, no arguments) is called once the launcher has
+    handed the prompt to the owned child. Routes that pass the prompt in the
+    command line (AGY) reach it at spawn; it is never called for a process the
+    lifecycle does not own, so a prompt-delivered claim is always launcher
+    observed. It is refused with a caller-supplied runner, which owns that
+    boundary itself.
 
     ``on_delivered`` (optional, no arguments) is called once at the delivery
     boundary (#1502 WP-F design section 2.2 step 5): after every
@@ -988,6 +1004,8 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
     if on_launch is not None and not callable(on_launch):
         raise RouteError(_route_code(route, 'REQUEST_INVALID'))
     if on_child is not None and (not callable(on_child) or runner is not None):
+        raise RouteError(_route_code(route, 'REQUEST_INVALID'))
+    if on_prompt is not None and (not callable(on_prompt) or runner is not None):
         raise RouteError(_route_code(route, 'REQUEST_INVALID'))
     if on_delivered is not None and not callable(on_delivered):
         raise RouteError(_route_code(route, 'REQUEST_INVALID'))
@@ -1120,12 +1138,19 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         shutil.rmtree(private_tmp, ignore_errors=True)
         raise RouteError(_route_code(route, 'REQUEST_INVALID')) from None
     execute = runner or _default_runner
+    if on_prompt is not None:
+        def child_then_prompt(pid):
+            if on_child is not None:
+                on_child(pid)
+            on_prompt()
+    else:
+        child_then_prompt = on_child
     try:
         runner_args = (argv, value['root'], env, value['timeout'])
-        if on_child is None:
+        if child_then_prompt is None:
             code, stdout, stderr = execute(*runner_args)
         else:
-            code, stdout, stderr = execute(*runner_args, on_child=on_child)
+            code, stdout, stderr = execute(*runner_args, on_child=child_then_prompt)
     except TimeoutError:
         shutil.rmtree(private_tmp, ignore_errors=True)
         raise RouteError(_route_code(route, 'TIMEOUT')) from None
@@ -1265,5 +1290,6 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
             raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
     except RouteError as exc:
         if exc.execution_facts is None:
-            exc.execution_facts = _post_run_execution_facts(code, stdout, started, execute)
+            exc.execution_facts = _post_run_execution_facts(
+                code, stdout, stderr, started, execute)
         raise

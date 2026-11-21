@@ -3932,17 +3932,29 @@ def _condition_execution(evidence, provider_profile, status):
     }
 
 
+_POST_RUN_EXECUTION_FACTS = frozenset((
+    'process_exit_code', 'stdout_sha256', 'elapsed_ms', 'cleanup_status'))
+_AGY_STOP_EXECUTION_FACTS = _POST_RUN_EXECUTION_FACTS | frozenset(('stderr_sha256',))
+# Only a child that ended with a non-zero exit (including a signal end) may be
+# the pre-prompt stop. A successful exit with empty output (AGY_EMPTY_RESULT)
+# and every other route error keep their existing handling.
+_AGY_STOP_CODES = frozenset(('AGY_EXIT_NONZERO', 'AGY_INTERRUPTED'))
+
+
+def _valid_sha256_or_none(value):
+    return value is None or (type(value) is str and
+                             re.fullmatch(r'[0-9a-f]{64}', value) is not None)
+
+
 def _route_failure_execution(exc, condition):
     facts = getattr(exc, 'execution_facts', None)
     if not (type(facts) is dict and
-            set(facts) == {'process_exit_code', 'stdout_sha256',
-                           'elapsed_ms', 'cleanup_status'} and
+            set(facts) in (_POST_RUN_EXECUTION_FACTS, _AGY_STOP_EXECUTION_FACTS) and
             (facts['process_exit_code'] is None or
              (type(facts['process_exit_code']) is int and
               not isinstance(facts['process_exit_code'], bool))) and
-            (facts['stdout_sha256'] is None or
-             (type(facts['stdout_sha256']) is str and
-              re.fullmatch(r'[0-9a-f]{64}', facts['stdout_sha256']) is not None)) and
+            _valid_sha256_or_none(facts['stdout_sha256']) and
+            _valid_sha256_or_none(facts.get('stderr_sha256')) and
             (type(facts['elapsed_ms']) is int and
              not isinstance(facts['elapsed_ms'], bool) and
              0 <= facts['elapsed_ms'] <= 86400000) and
@@ -3954,12 +3966,9 @@ def _route_failure_execution(exc, condition):
         'usage_source': 'UNKNOWN', 'source_bytes': None, 'source_file_count': None,
         'source_manifest_sha256': None,
     }
-    base.update(facts)
+    base.update({key: value for key, value in facts.items()
+                 if key != 'stderr_sha256'})
     return base
-
-
-_AGY_STOP_EXECUTION_FACTS = frozenset((
-    'process_exit_code', 'stdout_sha256', 'elapsed_ms', 'cleanup_status'))
 
 
 def _verified_agy_stop(exc, expected_developer, *, launcher=None):
@@ -3974,12 +3983,12 @@ def _verified_agy_stop(exc, expected_developer, *, launcher=None):
     if launcher is not None:
         if not (launcher.get('authorized') is True and
                 launcher.get('child') is True and
-                launcher.get('prompt_delivered') is not True):
+                launcher.get('prompt_delivered') is False):
             return None
     elif getattr(exc, 'stopped_before_prompt', False) is not True:
         return None
     code = getattr(exc, 'code', None)
-    if (type(code) is not str or re.fullmatch(r'[A-Z0-9_]{1,64}', code) is None or
+    if (type(code) is not str or code not in _AGY_STOP_CODES or
             type(expected_developer) is not dict or
             expected_developer.get('provider_profile') != 'agy'):
         return None
@@ -3988,12 +3997,17 @@ def _verified_agy_stop(exc, expected_developer, *, launcher=None):
         return None
     facts = getattr(exc, 'execution_facts', None)
     if type(facts) is not dict or set(facts) != _AGY_STOP_EXECUTION_FACTS:
-        # Some launchers carry the same four facts as individual attributes.
-        facts = {name: getattr(exc, name, None)
+        # Some launchers carry the same five facts as individual attributes.
+        # A missing observation is not empty evidence: refuse it.
+        missing = object()
+        facts = {name: getattr(exc, name, missing)
                  for name in _AGY_STOP_EXECUTION_FACTS}
+        if any(value is missing for value in facts.values()):
+            return None
     if (type(facts['cleanup_status']) is not str or
             facts['cleanup_status'] != 'CONFIRMED' or
             facts['stdout_sha256'] is not None or
+            facts['stderr_sha256'] is not None or
             type(facts['process_exit_code']) is not int or
             isinstance(facts['process_exit_code'], bool) or
             facts['process_exit_code'] == 0 or
@@ -5666,10 +5680,10 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     except TaskStoreConflict:
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
     owner_gate_denied = False
-    # Launcher-owned boundary evidence. The launcher marks the prompt delivered
-    # only when the route returns a provider result. Until then the spawned
-    # child has no observed prompt consumption, so a reap with no provider
-    # output or session is the pre-prompt stop, exactly as for OpenCode.
+    # Launcher-owned boundary evidence. AGY carries the prompt in the child's
+    # command line, so the launcher marks it delivered at spawn, before any
+    # exit is known; a child that exited before that point never exists. The
+    # post-result mark is a fail-closed second guard, never the delivery proof.
     launcher = {'authorized': False, 'child': False, 'prompt_delivered': False}
     expected_developer = copy.deepcopy(store.get(task['task_id'])['developer'])
     try:
@@ -5694,6 +5708,9 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                 start_time=codex_direct_developer.process_start_time(pid), pgid=os.getpgid(pid))
             expected_developer = copy.deepcopy(saved['developer'])
             launcher['child'] = True
+
+        def record_agy_prompt():
+            launcher['prompt_delivered'] = True
 
         def validate_binding():
             current = store.get(task['task_id'])
@@ -5740,9 +5757,10 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             'prompt': prompt, 'log_path': 'agy.log', 'timeout': timeout,
             'state_dirs': (),
         }, gate=route_gate, boundary=GatedBoundary(),
-           snapshot=capture_snapshot, on_launch=authorize_agy_spawn, on_child=record_agy_child)
-        # The route returned a provider result, so the launcher observed the
-        # prompt pass the pre-prompt boundary.
+           snapshot=capture_snapshot, on_launch=authorize_agy_spawn,
+           on_child=record_agy_child, on_prompt=record_agy_prompt)
+        # A returned provider result also means the prompt was delivered; keep
+        # this as a second fail-closed guard, not as the delivery evidence.
         launcher['prompt_delivered'] = True
         _record_skill_delivery(task, registration, snapshot, 'agy', result.model,
                                card_prefix_sha256, result)
