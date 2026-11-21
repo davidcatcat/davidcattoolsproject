@@ -190,21 +190,23 @@ class RecoverEc2ClaimTests(unittest.TestCase):
                                       allowed=True, reason_code='OWNER_POLICY_ALLOWED')), \
                 mock.patch.object(worker_availability, 'fresh_quota_fail', return_value=False):
             # Ensure the root developer/completion exist for repair_review.
-            self.cas(
-                developer={**(saved.get('developer') or {}), 'state': 'DEVELOPER_RESPONDED',
-                           'provider_profile': 'opencode', 'provider_type': 'opencode-cli',
-                           'model': None,
-                           'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
-                           'read_paths': ['a.py'], 'write_paths': ['a.py'],
-                           'acceptance': ['fix'], 'egress_basis': 'test'},
-                completion={**(saved.get('completion') or {}),
-                            'state': 'WAITING_EXECUTOR', 'executor_task_id': EXECUTOR,
-                            'reviewer_task_id': None,
-                            'evidence': {**((saved.get('completion') or {}).get('evidence') or {}),
-                                         'common_dir': '/repo/.git'},
-                            'missing_gates': [], 'pm_dispatch': 'NOT_STARTED',
-                            'pm_response': None, 'pm_recommendation': None,
-                            'pm_usage': None, 'pm_error_code': None})
+            with mock.patch.object(worker_dispatch, 'authorize_task_store_change',
+                                   return_value=None):
+                self.cas(
+                    developer={**(saved.get('developer') or {}), 'state': 'DEVELOPER_RESPONDED',
+                               'provider_profile': 'opencode', 'provider_type': 'opencode-cli',
+                               'model': None,
+                               'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+                               'read_paths': ['a.py'], 'write_paths': ['a.py'],
+                               'acceptance': ['fix'], 'egress_basis': 'test'},
+                    completion={**(saved.get('completion') or {}),
+                                'state': 'WAITING_EXECUTOR', 'executor_task_id': EXECUTOR,
+                                'reviewer_task_id': None,
+                                'evidence': {**((saved.get('completion') or {}).get('evidence') or {}),
+                                             'common_dir': '/repo/.git'},
+                                'missing_gates': [], 'pm_dispatch': 'NOT_STARTED',
+                                'pm_response': None, 'pm_recommendation': None,
+                                'pm_usage': None, 'pm_error_code': None})
             # Bind the receipt packet sha to the recovered claim's packet_sha256.
             with mock.patch.object(review_repair.hashlib, 'sha256',
                                    return_value=types.SimpleNamespace(
