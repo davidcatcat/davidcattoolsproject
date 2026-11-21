@@ -38,6 +38,9 @@ OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
 #   row 16: revert_scope_prs_max
 #   row 17: d6_writer_lease_hours (#2281 L7: D6 writer lease length in hours,
 #           read by scripts/d6_worktree_lifecycle.py, which has no default)
+#   row 12: claude_review_envelope_limit_bytes (#2281 row 12, basis #131 and
+#           #165: Claude review envelope size limit in bytes; caller default
+#           llmtool.providers.claude_cli.REVIEW_ENVELOPE_LIMIT)
 #   row 18: developer_assignment_wait_seconds (#819: Developer assignment wait;
 #           caller default llmtool.developer_assignment_inbox.DEFAULT_WAIT_SECONDS)
 #           and developer_assignment_expiry_seconds (#819: Developer
@@ -46,7 +49,8 @@ OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
 OPTIONAL_POSITIVE_POLICY_KEYS = ('spec_preflight_large_file_lines', 'merge_train_members_max',
                                  'merge_train_files_per_pr_max', 'revert_scope_prs_max',
                                  'd6_writer_lease_hours', 'developer_assignment_wait_seconds',
-                                 'developer_assignment_expiry_seconds')
+                                 'developer_assignment_expiry_seconds',
+                                 'claude_review_envelope_limit_bytes')
 # #2281 row 18 (basis #819): Developer assignment wait. The key above is
 # optional; a policy that omits it keeps the caller default, the hard-coded
 # wait at its point of use (llmtool.developer_assignment_inbox).
@@ -55,6 +59,11 @@ DEVELOPER_ASSIGNMENT_WAIT_SECONDS = 540
 # optional; a policy that omits it keeps the caller default, the hard-coded
 # expiry at its point of use (llmtool.developer_assignment_inbox).
 DEVELOPER_ASSIGNMENT_EXPIRY_SECONDS = 600
+# #2281 row 12 (basis #131, #165): Claude review envelope size limit in bytes.
+# The key above is optional; a policy that omits it keeps the caller default,
+# the hard-coded limit at its point of use
+# (llmtool.providers.claude_cli.REVIEW_ENVELOPE_LIMIT).
+CLAUDE_REVIEW_ENVELOPE_LIMIT_BYTES = 128 * 1024
 # #2281 L0a (design rule 3): the bound is a real technical limit, not an
 # arbitrary cap. policy.json is untrusted input, so load_policy reads at most
 # _MAX_BYTES + 1 bytes in one bounded buffer instead of the whole file. The
@@ -138,6 +147,19 @@ def assignment_expiry_seconds(path=None):
     policy = load_policy(path)
     return policy.get('developer_assignment_expiry_seconds',
                       DEVELOPER_ASSIGNMENT_EXPIRY_SECONDS)
+
+
+def claude_review_envelope_limit_bytes(path=None):
+    """#2281 row 12 (basis #131, #165): the Claude review envelope size limit,
+    in bytes.
+
+    The key is optional; a policy that omits it keeps the caller default, the
+    hard-coded limit at its point of use (llmtool.providers.claude_cli,
+    REVIEW_ENVELOPE_LIMIT).
+    """
+    policy = load_policy(path)
+    return policy.get('claude_review_envelope_limit_bytes',
+                      CLAUDE_REVIEW_ENVELOPE_LIMIT_BYTES)
 
 
 KINDS = ('root', 'child', 'replan')
