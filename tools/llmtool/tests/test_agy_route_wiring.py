@@ -117,7 +117,7 @@ class AgyRouteWiringTests(unittest.TestCase):
                           bind_result='BOUND', initial_native_session_id=None,
                           bound_registration_mutation=False, audit=None,
                           store=None, verified_model='gemini-test', card_git=None,
-                          ledger_record=None, pin_dispatch=None,
+                          ledger_record=None, pin_dispatch=None, summary='',
                           owner_ref=('https://github.com/davidcatcat/davidcattoolsproject/'
                                      'issues/289#issuecomment-1')):
         # #1502 WP-F: role cards go through the real build_role_cards(); only
@@ -209,7 +209,7 @@ class AgyRouteWiringTests(unittest.TestCase):
             task, registration, snapshot.head, test_policy='LOCAL')
         usage = ({'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5}
                  if usage is None else usage)
-        result = SimpleNamespace(session_id=session_id, model=verified_model, exit_code=0, summary='',
+        result = SimpleNamespace(session_id=session_id, model=verified_model, exit_code=0, summary=summary,
             stdout_sha256='e' * 64, elapsed_ms=42, cleanup_status='CONFIRMED', usage=usage)
         allowed = SimpleNamespace(allowed=True, reason_code='OWNER_ASSIGNMENT_MATCHED')
         denied = SimpleNamespace(allowed=False, reason_code='OWNER_ASSIGNMENT_MISMATCH')
@@ -632,6 +632,81 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertEqual(developer['execution']['process_exit_code'], 0)
         self.assertEqual(developer['execution']['stdout_sha256'], 'e' * 64)
         self.assertEqual(events, [])
+
+    # #2503: AGY's own final reply is kept for the PM as developer.reported.
+
+    def _run_agy_real_store(self, **kwargs):
+        decision = worker_dispatch.PolicyDecision(
+            worker_key='agy', allowed=True, reason_code='OWNER_POLICY_ALLOWED',
+            policy_sha256='f' * 64)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve() / 'tasks'
+            with patch.object(task_submission_cli, '_agy_developer_profile',
+                              return_value=('gemini-test', 'high')):
+                status, task, events, _ = self._run_agy_delegate(
+                    store=TaskStore(root), decisions=(decision,) * 4, **kwargs)
+            # The reply never blocks persisting: the stored record is the returned one.
+            self.assertEqual(task, TaskStore(root).get('a' * 32))
+        return status, task, events
+
+    def test_agy_blocked_reply_without_changes_is_kept_for_the_pm(self):
+        reply = ('BLOCKED\n\nFinding F2 needs files outside read_paths:\n'
+                 '- tools/llmtool/llmtool/developer_routes/agy.py\n')
+        _status, task, _events = self._run_agy_real_store(
+            diff_bytes=b'', changed_paths=[], summary=reply)
+        developer = task['developer']
+        self.assertEqual(developer['reported'], {'summary': reply.strip()})
+        self.assertFalse(developer['artifact'])
+        self.assertEqual(developer['execution']['stdout_sha256'], 'e' * 64)
+
+    def test_agy_partial_change_with_blocked_reply_reaches_the_pm_packet(self):
+        reply = 'Fixed F1. BLOCKED on F2: needs review_result.py outside read_paths.'
+        _status, task, _events = self._run_agy_real_store(summary=reply)
+        developer = task['developer']
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(developer['reported'], {'summary': reply})
+        evidence = {'result': {'source_sha': 'd' * 40, 'changed_paths': ['src.py'],
+                               'diff_sha256': '0' * 64},
+                    'executor_identity': 'agy-developer', 'executor_session_ref': 'ref',
+                    'executor_native_session': 'VERIFIED', 'tests': [],
+                    'review_pr_ci': 'NOT_STARTED'}
+        packet = task_submission_cli._direct_result_packet(
+            task, developer, 'executor-d6', evidence)
+        self.assertEqual(packet['developer_reported'],
+                         {'label': 'Developer-reported, unverified', 'summary': reply})
+
+    def test_agy_oversized_reply_is_cut_with_a_marker_and_still_saved(self):
+        reply = 'BLOCKED ' + 'x' * (20 * 1024)
+        _status, task, _events = self._run_agy_real_store(
+            diff_bytes=b'', changed_paths=[], summary=reply)
+        summary = task['developer']['reported']['summary']
+        self.assertTrue(summary.startswith('BLOCKED '))
+        self.assertTrue(summary.endswith(task_submission_cli.CLAUDE_REPLY_TRUNCATED))
+        self.assertLessEqual(task_submission_cli._reported_size({'summary': summary}),
+                             task_submission_cli.CLAUDE_REPLY_MAX_REPORTED_BYTES)
+
+    def test_agy_unsafe_reply_is_withheld_and_the_record_still_saved(self):
+        # The reply screen refuses a harmless sentinel, so no credential-shaped
+        # fixture is needed; every other text still goes through the real screen.
+        sentinel = 'SCREEN-REFUSED-SENTINEL-2503'
+        real_screen = task_submission_cli._screen_text
+
+        def screen(value, *args, **kwargs):
+            if type(value) is str and sentinel in value:
+                raise task_submission_cli.LLMToolError('screen refused')
+            return real_screen(value, *args, **kwargs)
+
+        with patch.object(task_submission_cli, '_screen_text', side_effect=screen):
+            _status, task, _events = self._run_agy_real_store(
+                diff_bytes=b'', changed_paths=[], summary='BLOCKED. ' + sentinel)
+        self.assertEqual(task['developer']['reported'],
+                         {'summary': task_submission_cli.CLAUDE_REPLY_WITHHELD})
+
+    def test_agy_empty_reply_adds_no_reported_field(self):
+        _status, task, _events = self._run_agy_real_store(
+            diff_bytes=b'', changed_paths=[], summary='   ')
+        self.assertEqual(task['developer']['error_code'], 'AGY_EMPTY_RESULT')
+        self.assertNotIn('reported', task['developer'])
 
     def test_agy_screened_diff_is_reported_as_sensitive_output(self):
         marker = 'pass' + 'word'
