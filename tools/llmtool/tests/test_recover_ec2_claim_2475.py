@@ -192,11 +192,17 @@ class RecoverEc2ClaimTests(unittest.TestCase):
             # Ensure the root developer/completion exist for repair_review.
             with mock.patch.object(worker_dispatch, 'authorize_task_store_change',
                                    return_value=None):
+                diff = 'diff\n'
+                base_dev = {k: v for k, v in (saved.get('developer') or {}).items()
+                            if k != 'execution'}
                 self.cas(
-                    developer={**(saved.get('developer') or {}), 'state': 'DEVELOPER_RESPONDED',
-                               'provider_profile': 'opencode', 'provider_type': 'opencode-cli',
-                               'model': None,
+                    developer={**base_dev, 'state': 'DEVELOPER_RESPONDED',
+                               'provider_profile': 'agy', 'provider_type': 'agy-cli',
+                               'model': None, 'owner_assignment_ref': None,
                                'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+                               'max_tokens': None, 'artifact': diff,
+                               'artifact_sha256': hashlib.sha256(diff.encode('utf-8')).hexdigest(),
+                               'error_code': None,
                                'read_paths': ['a.py'], 'write_paths': ['a.py'],
                                'acceptance': ['fix'], 'egress_basis': 'test'},
                     completion={**(saved.get('completion') or {}),
