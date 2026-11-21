@@ -61,6 +61,9 @@ OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
 #           and developer_assignment_expiry_seconds (#819: Developer
 #           assignment expiry, how long an assignment stays valid; caller
 #           default llmtool.developer_assignment_inbox.DEFAULT_EXPIRY_SECONDS)
+#   row 19: ai_debug_excerpt_max_chars (#2281 row 19, second part, basis #2188
+#           and #1502 D11: the AI Debug excerpt size limit in characters;
+#           caller default llmtool.start_failure.HIGH_DEBUG_EXCERPT_MAX_CHARS)
 OPTIONAL_POSITIVE_POLICY_KEYS = ('spec_preflight_large_file_lines', 'merge_train_members_max',
                                  'merge_train_files_per_pr_max', 'revert_scope_prs_max',
                                  'd6_writer_lease_hours', 'developer_assignment_wait_seconds',
@@ -68,7 +71,8 @@ OPTIONAL_POSITIVE_POLICY_KEYS = ('spec_preflight_large_file_lines', 'merge_train
                                  'review_packet_limit_bytes',
                                  'claude_review_envelope_limit_bytes',
                                  'review_source_limit_bytes', 'start_failures_max',
-                                 'start_retries_max', 'committed_result_carries_max')
+                                 'start_retries_max', 'committed_result_carries_max',
+                                 'ai_debug_excerpt_max_chars')
 # #2281 row 18 (basis #819): Developer assignment wait. The key above is
 # optional; a policy that omits it keeps the caller default, the hard-coded
 # wait at its point of use (llmtool.developer_assignment_inbox).
@@ -107,6 +111,11 @@ START_RETRIES_MAX = 2
 # caller default, the hard-coded limit at its point of use
 # (llmtool.worker_dispatch, MAX_COMMITTED_CARRIES).
 COMMITTED_RESULT_CARRIES_MAX = 1
+# #2281 row 19 (second part, basis #2188 and #1502 D11): the AI Debug excerpt
+# size limit, in characters. The key above is optional; a policy that omits it
+# keeps the caller default, the hard-coded limit at its point of use
+# (llmtool.start_failure, HIGH_DEBUG_EXCERPT_MAX_CHARS).
+AI_DEBUG_EXCERPT_MAX_CHARS = 6000
 # #2281 L0a (design rule 3): the bound is a real technical limit, not an
 # arbitrary cap. policy.json is untrusted input, so load_policy reads at most
 # _MAX_BYTES + 1 bytes in one bounded buffer instead of the whole file. The
@@ -267,6 +276,19 @@ def committed_result_carries_max(path=None):
     policy = load_policy(path)
     return policy.get('committed_result_carries_max',
                       COMMITTED_RESULT_CARRIES_MAX)
+
+
+def ai_debug_excerpt_max_chars(path=None):
+    """#2281 row 19 (second part, basis #2188 and #1502 D11): the AI Debug
+    excerpt size limit, in characters.
+
+    The key is optional; a policy that omits it keeps the caller default, the
+    hard-coded limit at its point of use (llmtool.start_failure,
+    HIGH_DEBUG_EXCERPT_MAX_CHARS).
+    """
+    policy = load_policy(path)
+    return policy.get('ai_debug_excerpt_max_chars',
+                      AI_DEBUG_EXCERPT_MAX_CHARS)
 
 
 KINDS = ('root', 'child', 'replan')
