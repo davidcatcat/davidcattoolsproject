@@ -3958,6 +3958,55 @@ def _route_failure_execution(exc, condition):
     return base
 
 
+_AGY_STOP_EXECUTION_FACTS = frozenset((
+    'process_exit_code', 'stdout_sha256', 'elapsed_ms', 'cleanup_status'))
+
+
+def _verified_agy_stop(exc, expected_developer):
+    """The STOPPED execution of an AGY child reaped before any prompt, else None.
+
+    Only the route launcher's own pre-prompt stop signal, a spawned running
+    child, confirmed cleanup, no provider session and no output, and a non-zero
+    exit qualify. Anything else keeps the route's existing failure handling.
+    """
+    if getattr(exc, 'stopped_before_prompt', False) is not True:
+        return None
+    code = getattr(exc, 'code', None)
+    if (type(code) is not str or re.fullmatch(r'[A-Z0-9_]{1,64}', code) is None or
+            type(expected_developer) is not dict or
+            expected_developer.get('provider_profile') != 'agy'):
+        return None
+    execution = expected_developer.get('execution')
+    if not (type(execution) is dict and execution.get('status') == 'RUNNING'):
+        return None
+    facts = getattr(exc, 'execution_facts', None)
+    if type(facts) is not dict or set(facts) != _AGY_STOP_EXECUTION_FACTS:
+        # Some launchers carry the same four facts as individual attributes.
+        facts = {name: getattr(exc, name, None)
+                 for name in _AGY_STOP_EXECUTION_FACTS}
+    if (type(facts['cleanup_status']) is not str or
+            facts['cleanup_status'] != 'CONFIRMED' or
+            facts['stdout_sha256'] is not None or
+            type(facts['process_exit_code']) is not int or
+            isinstance(facts['process_exit_code'], bool) or
+            facts['process_exit_code'] == 0 or
+            type(facts['elapsed_ms']) is not int or
+            isinstance(facts['elapsed_ms'], bool) or
+            not 0 <= facts['elapsed_ms'] <= 86_400_000):
+        return None
+    for name in ('native_session_id', 'session_id'):
+        if getattr(exc, name, None) not in (None, '', 'UNKNOWN'):
+            return None
+    return {
+        'status': 'UNKNOWN', 'native_session_id': None,
+        'process_exit_code': facts['process_exit_code'],
+        'stdout_sha256': None, 'elapsed_ms': facts['elapsed_ms'],
+        'cleanup_status': 'CONFIRMED', 'usage_source': 'UNKNOWN',
+        'source_bytes': None, 'source_file_count': None,
+        'source_manifest_sha256': None,
+    }
+
+
 def _direct_execution(result, *, status='SUCCEEDED', evidence=False):
     execution = {
         'status': status,
@@ -5728,6 +5777,19 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                     evidence['executor_native_session_id'] = registration.native_session_id
                     evidence['executor_native_session'] = 'VERIFIED'
     except RouteError as exc:
+        stopped = (None if owner_gate_denied
+                   else _verified_agy_stop(exc, expected_developer))
+        if stopped is not None:
+            developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
+                             provider_type='agy-cli', model=model,
+                             error_code=exc.code, artifact=None,
+                             artifact_sha256=None, usage=None,
+                             execution=stopped)
+            saved = store.record_direct_stop(
+                task['task_id'], expected_developer=expected_developer,
+                developer=developer)
+            _print(_task_view(saved))
+            return 1
         error_code = ('AGY_DISPATCH_DENIED' if owner_gate_denied else exc.code)
         developer.update(state='BLOCKED', provider_type='agy-cli', model=model,
                          error_code=error_code, artifact=None, artifact_sha256=None)

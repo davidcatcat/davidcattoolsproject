@@ -2797,7 +2797,7 @@ def _validate(record, *, strict=True):
                 _fail('DIRECT_DISPATCH_BOUNDARY_INVALID')
             if developer.get(_DIRECT_DISPATCH_BOUNDARY) == 'STOPPED':
                 execution = developer.get('execution')
-                if (developer.get('provider_profile') != 'opencode' or
+                if (developer.get('provider_profile') not in ('opencode', 'agy') or
                         developer.get('state') != 'DEVELOPER_OUTCOME_UNKNOWN' or
                         type(execution) is not dict or execution.get('cleanup_status') != 'CONFIRMED' or
                         execution.get('native_session_id') is not None or
@@ -6051,7 +6051,7 @@ class TaskStore:
                     execution = new.get('execution') or {}
                     valid = (before == 'STARTING' and after == 'STOPPED' and
                              old.get('state') == 'DEVELOPER_DISPATCHING' and
-                             old.get('provider_profile') == 'opencode' and
+                             old.get('provider_profile') in ('opencode', 'agy') and
                              (old.get('execution') or {}).get('status') == 'RUNNING' and
                              new.get('assignment_id') == old.get('assignment_id') and
                              new.get('state') == 'DEVELOPER_OUTCOME_UNKNOWN' and
