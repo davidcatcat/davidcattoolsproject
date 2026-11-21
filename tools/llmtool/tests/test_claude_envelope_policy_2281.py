@@ -39,8 +39,10 @@ class ClaudeEnvelopePolicyTest(unittest.TestCase):
         path.write_bytes(json.dumps(policy).encode('utf-8'))
         return str(path)
     def _apply(self, policy_path, raw):
-        with mock.patch.object(claude_cli, '_review_envelope_limit',
-                               lambda: rp.claude_review_envelope_limit_bytes(policy_path)), \
+        # Exercise the provider's REAL _review_envelope_limit -> loader lookup:
+        # only the policy path is redirected to the temp file, so the provider
+        # cannot be bypassed by a regression to its old hard-coded constant.
+        with mock.patch.object(rp, 'policy_path', return_value=policy_path), \
                 mock.patch('llmtool.task_review.screen', lambda value: None):
             return claude_cli.decode_review_envelope(raw)
     def _refusal_code(self, call, raw):
@@ -61,13 +63,24 @@ class ClaudeEnvelopePolicyTest(unittest.TestCase):
                 return seen[0]
         self.fail('no refusal was raised')
     def test_default_limit_unchanged_when_key_absent(self):
-        self.assertEqual(rp.claude_review_envelope_limit_bytes(str(REPO_POLICY)),
-                         claude_cli.REVIEW_ENVELOPE_LIMIT)
+        # A1: the key is absent in the repo policy. The provider's REAL
+        # _review_envelope_limit (unmocked; only the policy path is redirected)
+        # returns the hard-coded default, and an in-limit envelope is accepted
+        # through that real lookup -- pinning A1 to the provider, not just the
+        # loader (a regression to a bypass of the policy would fail this).
+        with mock.patch.object(rp, 'policy_path', return_value=str(REPO_POLICY)):
+            self.assertEqual(claude_cli._review_envelope_limit(),
+                             claude_cli.REVIEW_ENVELOPE_LIMIT)
+        self.assertEqual(self._apply(str(REPO_POLICY), self.ENVELOPE_OK)['content'],
+                         json.dumps('ok'))
     def test_configured_limit_applies(self):
         limit = 2048
         with tempfile.TemporaryDirectory() as tmpdir:
             path = self._write(tmpdir, dict(BASE, **{self.KEY: limit}))
-            self.assertEqual(rp.claude_review_envelope_limit_bytes(path), limit)
+            # A2: the provider's REAL _review_envelope_limit (unmocked; only the
+            # policy path redirected) reads the configured value from policy.
+            with mock.patch.object(rp, 'policy_path', return_value=path):
+                self.assertEqual(claude_cli._review_envelope_limit(), limit)
             self.assertEqual(self._apply(path, self.ENVELOPE_OK)['content'],
                              json.dumps('ok'))
             self.assertEqual(self._refusal_code(
