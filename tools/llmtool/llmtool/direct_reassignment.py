@@ -58,9 +58,27 @@ _LSOF_PATHS = ('/usr/sbin/lsof', '/usr/bin/lsof')
 _PS_PATHS = ('/bin/ps', '/usr/bin/ps')
 _TASK_ID = re.compile(r'[0-9a-f]{32}\Z')
 # The PM relay marker of an Owner decision (common-core rule 7: ``actor=PM``).
-# The relayed comment must also name this exact repair Task id.
+# The relayed comment must also name this exact repair Task id and explicitly
+# approve this void, so an ordinary PM progress comment or an unanswered Owner
+# request never authorises one. The repository's activity marker is
+# ``<!-- activity: key=value ... -->``; an Owner answer is an ``owner_*``
+# decision whose status or decision is an approval.
 _OWNER_RELAY_MARKER = re.compile(
     r'(?<![A-Za-z0-9_=-])actor=PM(?![A-Za-z0-9_=-])')
+_ACTIVITY_MARKER = re.compile(r'<!--\s*activity:\s*([^>]*?)\s*-->')
+_ACTIVITY_ATTRIBUTE = re.compile(r'([a-z_][a-z0-9_]*)=([^\s>]+)')
+_OWNER_APPROVAL_STATUSES = frozenset((
+    'APPROVED', 'APPROVAL', 'ACCEPTED', 'ANSWERED', 'VOID', 'VOID_APPROVED',
+    'APPROVED_VOID'))
+_OWNER_APPROVAL_DECISIONS = frozenset((
+    'APPROVE', 'APPROVED', 'ACCEPT', 'ACCEPTED', 'VOID', 'VOID_APPROVED',
+    'APPROVED_VOID', 'VOID_HISTORICAL_DISPATCH'))
+# The explicit reason token an Owner approval may carry instead of an activity
+# marker. It is the stored void reason, not an ordinary PM progress word.
+_OWNER_VOID_TOKEN = re.compile(
+    r'(?i)(?<![A-Za-z0-9_])OWNER_APPROVED_VOID(?![A-Za-z0-9_])')
+_VOID_DIRECTIVE = re.compile(
+    r'(?i)(?<![A-Za-z0-9_])void(?:e[ds]|ing)?(?![A-Za-z0-9_])')
 _PATH_CHAR_BEFORE = r'(?<![A-Za-z0-9._@+%/-])'
 _PATH_CHAR_AFTER = r'(?![A-Za-z0-9._@+%-])'
 # Result or recovery fields a never-launched historical assignment cannot carry.
@@ -180,9 +198,13 @@ def _read_owner_comment(owner_ref):
     """Read the linked Issue comment body; every read failure refuses.
 
     llmtool reads the comment itself instead of trusting a PM-supplied body.
-    gh talks to this repository only. A missing comment (HTTP 404) is reported
-    as such; any other failure is unverified. The body is untrusted data: it is
-    only searched for the PM relay marker and this Task id.
+    gh talks to this repository only. The returned canonical comment URL and
+    issue URL must be exactly the ones ``owner_ref`` names, so a URL that
+    aliases another issue with the same comment id is refused; the reservation
+    is therefore always bound to one canonical comment identity. A missing
+    comment (HTTP 404) is reported as such; any other failure is unverified.
+    The body is untrusted data: it is only searched for the PM relay marker,
+    this Task id and an explicit void approval.
     """
     import subprocess
 
@@ -192,6 +214,7 @@ def _read_owner_comment(owner_ref):
              if type(owner_ref) is str else None)
     if match is None:
         _refuse('DIRECT_HISTORICAL_VOID_OWNER_REF_INVALID')
+    issue_number, comment_id = match.group(1), match.group(2)
     try:
         slug = trust.load_trust().repository['slug']
     except Exception:
@@ -200,8 +223,8 @@ def _read_owner_comment(owner_ref):
         _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
     try:
         completed = subprocess.run(
-            ['gh', 'api', f'repos/{slug}/issues/comments/{match.group(2)}',
-             '--jq', '.body'],
+            ['gh', 'api', f'repos/{slug}/issues/comments/{comment_id}',
+             '--jq', '{body: .body, html_url: .html_url, issue_url: .issue_url}'],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, check=False, timeout=30,
             env={'PATH': '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',
@@ -217,9 +240,45 @@ def _read_owner_comment(owner_ref):
             _refuse('DIRECT_HISTORICAL_VOID_OWNER_COMMENT_MISSING')
         _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
     try:
-        return completed.stdout.decode('utf-8')
-    except UnicodeDecodeError:
+        value = json.loads(completed.stdout.decode('utf-8'))
+    except (UnicodeDecodeError, ValueError):
         _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
+    if (type(value) is not dict or
+            set(value) != {'body', 'html_url', 'issue_url'} or
+            type(value['body']) is not str or
+            type(value['html_url']) is not str or
+            type(value['issue_url']) is not str):
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
+    canonical = (f'https://github.com/{slug}/issues/{issue_number}'
+                 f'#issuecomment-{comment_id}')
+    api_issue = f'https://api.github.com/repos/{slug}/issues/{issue_number}'
+    if (value['html_url'].lower() != canonical.lower() or
+            value['issue_url'].lower() != api_issue.lower()):
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_REF_INVALID')
+    return value['body']
+
+
+def _owner_void_approved(body):
+    """True only for an explicit Owner approval of this historical void.
+
+    A plain PM relay marker is not enough: an ordinary PM progress comment or
+    an unanswered Owner request also carries the Task id. The body must carry
+    either the explicit ``OWNER_APPROVED_VOID`` reason token or an established
+    activity marker naming an ``owner_*`` decision with an approved status,
+    and it must direct a void.
+    """
+    if _OWNER_VOID_TOKEN.search(body) is not None:
+        return True
+    if _VOID_DIRECTIVE.search(body) is None:
+        return False
+    for match in _ACTIVITY_MARKER.finditer(body):
+        attributes = dict(_ACTIVITY_ATTRIBUTE.findall(match.group(1)))
+        if (attributes.get('actor') == 'PM' and
+                attributes.get('type', '').startswith('owner_') and
+                (attributes.get('status') in _OWNER_APPROVAL_STATUSES or
+                 attributes.get('decision') in _OWNER_APPROVAL_DECISIONS)):
+            return True
+    return False
 
 
 def _relay_used_elsewhere(store, task_id, owner_ref):
@@ -238,10 +297,11 @@ def check_owner_relay(store, task, owner_ref, owner_task):
     """The Owner decision named by the PM must be for this exact repair Task.
 
     llmtool reads the linked Issue comment from this repository itself: it must
-    exist, carry the PM relay marker of an Owner decision (``actor=PM``) and
-    name this exact Task id. The URL must be an Issue comment link on this
-    repository, and a URL already recorded for another Task's void is never
-    reused. Any read failure, mismatch or prior reservation refuses.
+    exist, carry the PM relay marker of an Owner decision (``actor=PM``), name
+    this exact Task id and explicitly approve this void. The URL must be the
+    canonical Issue comment link it names, and a URL already recorded for
+    another Task's void is never reused. Any read failure, mismatch or prior
+    reservation refuses.
     """
     task_id = task.get('task_id')
     if (type(owner_task) is not str or _TASK_ID.fullmatch(owner_task) is None or
@@ -262,6 +322,8 @@ def check_owner_relay(store, task, owner_ref, owner_task):
         _refuse('DIRECT_HISTORICAL_VOID_OWNER_TASK_MISMATCH')
     if _OWNER_RELAY_MARKER.search(body) is None:
         _refuse('DIRECT_HISTORICAL_VOID_OWNER_MARKER_MISSING')
+    if not _owner_void_approved(body):
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_APPROVAL_MISSING')
     if _relay_used_elsewhere(store, task_id, owner_ref):
         _refuse('DIRECT_HISTORICAL_VOID_OWNER_TASK_MISMATCH')
 

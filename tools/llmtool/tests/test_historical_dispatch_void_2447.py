@@ -1,8 +1,9 @@
 """#2447: an Owner-approved void of a historical DISPATCHING assignment.
 
 llmtool never infers "not started" from missing launch evidence (Owner decision
-A on #2413). The void runs only through the explicit command with an Owner relay
-URL for that exact repair Task, and only when every other check also holds.
+A on #2413). The void runs only through the explicit command with the canonical
+Owner relay URL for that exact repair Task, whose comment explicitly approves
+the void, and only when every other check also holds.
 
 Every row runs through a real TaskStore. The D6 registration, Git snapshot and
 process probe are injected stand-ins: the void checks are real, only what they
@@ -12,6 +13,7 @@ URLs are plain labels.
 import copy
 import hashlib
 import inspect
+import json
 import os
 import tempfile
 import threading
@@ -87,14 +89,29 @@ def _fake_popen(lsof=b'', ps=b'', lsof_code=0, ps_code=0):
     return popen
 
 
-def _relay_body(*task_ids, marker=True):
+def _relay_body(*task_ids, marker=True, approval=True):
     """Synthetic PM relay text: plain labels only, never a credential."""
-    text = 'PM relayed the Owner decision: void the historical direct assignment.'
+    actor = 'PM' if marker else 'Owner'
+    text = ''
+    if approval:
+        text = ('<!-- activity: type=owner_decision actor=' + actor +
+                ' target=Owner status=APPROVED -->\n')
+    text += ('PM relayed the Owner decision: approve the void of the historical '
+             'direct assignment.')
     if task_ids:
         text += ' Task ' + ', '.join(task_ids) + '.'
-    if marker:
+    if marker and not approval:
         text += ' actor=PM'
     return text
+
+
+def _comment_json(body, *, ref=OWNER_REF, issue=2413):
+    """The exact fields llmtool reads from one GitHub issue comment."""
+    return json.dumps({
+        'body': body, 'html_url': ref,
+        'issue_url': ('https://api.github.com/repos/davidcatcat/davidcattoolsproject'
+                      f'/issues/{issue}'),
+    }).encode('utf-8')
 
 
 class HistoricalDispatchVoidTests(unittest.TestCase):
@@ -795,10 +812,85 @@ class HistoricalDispatchVoidTests(unittest.TestCase):
                     with self.assertRaises(LLMToolError) as caught:
                         direct_reassignment._read_owner_comment(OWNER_REF)
                 self.assertEqual(str(caught.exception), code)
-        succeeded = SimpleNamespace(returncode=0, stdout=b'actor=PM body', stderr=b'')
+        succeeded = SimpleNamespace(
+            returncode=0, stdout=_comment_json('actor=PM body'), stderr=b'')
         with patch('subprocess.run', return_value=succeeded):
             self.assertEqual(direct_reassignment._read_owner_comment(OWNER_REF),
                              'actor=PM body')
+
+    # --- (q)-(s) only an explicit Owner void approval authorises the void ------
+
+    def test_q_a_relay_without_an_explicit_void_approval_is_refused(self):
+        task_id = self._historical()
+        bodies = {
+            'pm progress': (
+                '<!-- activity: type=pm_progress actor=PM target=Owner status=NOTICE -->\n'
+                f'PM progress: Task {task_id}; void is not approved.'),
+            'owner notice': (
+                '<!-- activity: type=owner_decision actor=PM target=Owner status=NOTICE -->\n'
+                f'Owner decision for Task {task_id}; void approval is pending.'),
+            'owner request': (
+                '<!-- activity: type=owner_request actor=PM target=Owner status=QUESTION -->\n'
+                f'Owner asks whether to void Task {task_id}.'),
+            'no void directive': (
+                '<!-- activity: type=owner_decision actor=PM target=Owner status=APPROVED -->\n'
+                f'Owner decision for Task {task_id}.'),
+        }
+        for name, body in bodies.items():
+            with self.subTest(name=name):
+                self._refused('DIRECT_HISTORICAL_VOID_OWNER_APPROVAL_MISSING', task_id,
+                              read_comment=lambda _ref, body=body: body)
+        # The explicit reason token is itself an approval and admits the void.
+        self._void(task_id, read_comment=lambda _ref: (
+            f'Owner approved OWNER_APPROVED_VOID for Task {task_id}. actor=PM'))
+        self.assertEqual(
+            self.store.get(task_id)['developer']['dispatch_boundary'], 'PREPARED')
+
+    def test_r_an_owner_approval_activity_marker_admits_the_void(self):
+        task_id = self._historical()
+        body = (
+            '<!-- activity: type=owner_approval actor=PM target=Owner status=ANSWERED -->\n'
+            f'Owner approved the void of Task {task_id}.')
+        self._void(task_id, read_comment=lambda _ref: body)
+        self.assertEqual(
+            self.store.get(task_id)['developer']['voided_assignments'][0]['owner_ref'],
+            OWNER_REF)
+
+    # --- (s) the comment URL must be its canonical comment identity ------------
+
+    def test_s_an_aliased_comment_url_is_refused_by_the_real_reader(self):
+        task_id = self._historical()
+        canonical = SimpleNamespace(
+            returncode=0, stdout=_comment_json(_relay_body(task_id)), stderr=b'')
+        alias = ('https://github.com/davidcatcat/davidcattoolsproject/issues/9999'
+                 '#issuecomment-7058210840')
+        # The alias names a different issue but the same comment id, so gh
+        # returns the same body; the returned canonical URL must reject it.
+        with patch('subprocess.run', return_value=canonical):
+            with self.assertRaises(LLMToolError) as caught:
+                direct_reassignment._read_owner_comment(alias)
+        self.assertEqual(str(caught.exception),
+                         'DIRECT_HISTORICAL_VOID_OWNER_REF_INVALID')
+        # The canonical URL reads the same comment and accepts its body.
+        with patch('subprocess.run', return_value=canonical):
+            self.assertEqual(direct_reassignment._read_owner_comment(OWNER_REF),
+                             _relay_body(task_id))
+        # The API issue URL must also name the same issue as the comment URL.
+        wrong_issue = SimpleNamespace(
+            returncode=0, stdout=_comment_json(_relay_body(task_id), issue=9999),
+            stderr=b'')
+        with patch('subprocess.run', return_value=wrong_issue):
+            with self.assertRaises(LLMToolError) as caught:
+                direct_reassignment._read_owner_comment(OWNER_REF)
+        self.assertEqual(str(caught.exception),
+                         'DIRECT_HISTORICAL_VOID_OWNER_REF_INVALID')
+        # A malformed API answer fails closed, never authorising a void.
+        malformed = SimpleNamespace(returncode=0, stdout=b'not-json', stderr=b'')
+        with patch('subprocess.run', return_value=malformed):
+            with self.assertRaises(LLMToolError) as caught:
+                direct_reassignment._read_owner_comment(OWNER_REF)
+        self.assertEqual(str(caught.exception),
+                         'DIRECT_HISTORICAL_VOID_OWNER_READ_FAILED')
 
     # --- (o) one relay URL reserves exactly one Task ---------------------------
 

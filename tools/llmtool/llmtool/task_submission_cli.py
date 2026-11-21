@@ -900,9 +900,10 @@ def add_task_submission_parsers(actions):
                           help='replace a verified AGY or OpenCode assignment in its existing D6')
     delegate.add_argument('--void-historical-ref', metavar='OWNER_RELAY_URL',
                           help=('Owner-approved void of a pre-#2440 AGY or OpenCode assignment '
-                                'that has no launch record (#2447): the Issue comment link of the '
-                                'PM relay that carries the Owner decision for this exact repair '
-                                'Task; use with --void-historical-task'))
+                                'that has no launch record (#2447): the canonical Issue comment '
+                                'link of the PM relay that carries the Owner decision for this '
+                                'exact repair Task and explicitly approves the void; use with '
+                                '--void-historical-task'))
     delegate.add_argument('--void-historical-task', metavar='TASK_ID',
                           help='the repair Task ID the Owner decision names; must equal TASK_ID')
     delegate.add_argument('--selection-source', required=True, choices=('PM', 'USER'))
