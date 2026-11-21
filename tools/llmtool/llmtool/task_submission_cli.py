@@ -8444,17 +8444,37 @@ def _scope_advice_items(args, store):
             if type(entries) is list:
                 reports = [item.get('report') for item in entries if type(item) is dict]
         root = getattr(args, 'cwd', None) or os.getcwd()
-        missing = read_scope_advice.missing_read_paths(
-            texts=[goal, getattr(args, 'acceptance', None),
-                   getattr(args, 'repair_packet', None), reports],
-            read_paths=getattr(args, 'read_path', None),
-            write_paths=getattr(args, 'write_path', None),
-            exists=read_scope_advice.git_exists(root))
-        return [read_scope_advice.item(read_scope_advice.READ_MISSING, path,
-                                       'named in the spec, findings or RCA but not in read')
-                for path in missing]
     except Exception:
         return []
+    read_paths = getattr(args, 'read_path', None)
+    write_paths = getattr(args, 'write_path', None)
+    items = []
+
+    def add(check):
+        # Each check is fail-open on its own; one failure never hides the others.
+        try:
+            items.extend(check())
+        except Exception:
+            pass
+
+    add(lambda: [read_scope_advice.item(read_scope_advice.READ_MISSING, path,
+                                        'named in the spec, findings or RCA but not in read')
+                 for path in read_scope_advice.missing_read_paths(
+                     texts=[goal, getattr(args, 'acceptance', None),
+                            getattr(args, 'repair_packet', None), reports],
+                     read_paths=read_paths, write_paths=write_paths,
+                     exists=read_scope_advice.git_exists(root))])
+    add(lambda: read_scope_advice.companion_items(
+        read_paths=read_paths, write_paths=write_paths))
+    add(lambda: read_scope_advice.referencing_tests(
+        root=root, commit='HEAD', read_paths=read_paths, write_paths=write_paths))
+    seen, unique = set(), []
+    for value in items:
+        key = (value['kind'], value['path'])
+        if key not in seen:
+            seen.add(key)
+            unique.append(value)
+    return unique[:read_scope_advice.MAX_ITEMS]
 
 
 def _record_scope_advice(args, store, items):
