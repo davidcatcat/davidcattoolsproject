@@ -4410,7 +4410,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(parent_stat.st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(file_stat.st_mode), 0o600)
         raw = path.read_bytes()
-        self.assertLessEqual(len(raw), RESPONSE_LIMIT)
+        self.assertLessEqual(len(raw), submission_cli.REJECTED_OUTPUT_CAPTURE_MAX_BYTES)
         self.assertNotIn(secret.encode(), raw)
         self.assertIn(b'[REDACTED]', raw)
         self.assertIn(b'[TRUNCATED]', raw)
