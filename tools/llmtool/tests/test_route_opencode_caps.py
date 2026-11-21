@@ -50,13 +50,14 @@ class RouteOpenCodeCapsTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_validators_ok(self):
-        for valid in (1, 100, 65536, 1048576, 2097152, 10_000_000):
+        for valid in (1, 100, 65536, 1048576, 2097152, 5242880):
             with self.subTest(valid=valid):
                 self.assertTrue(max_prompt_bytes_ok(valid))
                 self.assertTrue(max_source_file_bytes_ok(valid))
                 self.assertTrue(max_source_total_bytes_ok(valid))
 
-        for invalid in (0, -1, -500, True, False, "1048576", 1048576.0, None, [], {}):
+        for invalid in (0, -1, -500, True, False, "1048576", 1048576.0, None, [], {},
+                        5242881):
             with self.subTest(invalid=invalid):
                 self.assertFalse(max_source_file_bytes_ok(invalid))
                 self.assertFalse(max_source_total_bytes_ok(invalid))
@@ -64,9 +65,9 @@ class RouteOpenCodeCapsTests(unittest.TestCase):
     def test_loader_accepts_repository_keys(self):
         config = load_route_config()
         opencode = config["routes"]["opencode"]
-        self.assertEqual(opencode["max_prompt_bytes"], 65536)
-        self.assertEqual(opencode["max_source_file_bytes"], 1048576)
-        self.assertEqual(opencode["max_source_total_bytes"], 2097152)
+        self.assertEqual(opencode["max_prompt_bytes"], 5242880)
+        self.assertEqual(opencode["max_source_file_bytes"], 5242880)
+        self.assertEqual(opencode["max_source_total_bytes"], 5242880)
 
     def test_loader_refuses_bad_source_and_prompt_bytes_values(self):
         base_config = load_route_config()
@@ -224,9 +225,9 @@ class RouteOpenCodeCapsTests(unittest.TestCase):
             # #2281 (Owner 2026-11-19): the shipped opencode limits.
             "default_timeout": 10800,
             "max_timeout": 18000,
-            "max_prompt_bytes": 65536,
-            "max_source_file_bytes": 1048576,
-            "max_source_total_bytes": 2097152,
+            "max_prompt_bytes": 5242880,
+            "max_source_file_bytes": 5242880,
+            "max_source_total_bytes": 5242880,
         }
         self.assertEqual(schema.errors(valid_entry, "route"), [])
 
@@ -257,9 +258,9 @@ class RouteOpenCodeCapsTests(unittest.TestCase):
             "developer_routes.load_route_config = lambda path=None: orig_load(substitute_path if path is None else path)\n"
             "assert 'llmtool.opencode_direct_developer' not in sys.modules\n"
             "from llmtool import opencode_direct_developer\n"
-            "assert opencode_direct_developer.DEFAULT_MAX_PROMPT_BYTES == 65536\n"
-            "assert opencode_direct_developer.DEFAULT_MAX_SOURCE_FILE_BYTES == 1048576\n"
-            "assert opencode_direct_developer.DEFAULT_MAX_SOURCE_TOTAL_BYTES == 2097152\n"
+            "assert opencode_direct_developer.DEFAULT_MAX_PROMPT_BYTES == 5242880\n"
+            "assert opencode_direct_developer.DEFAULT_MAX_SOURCE_FILE_BYTES == 5242880\n"
+            "assert opencode_direct_developer.DEFAULT_MAX_SOURCE_TOTAL_BYTES == 5242880\n"
             "try:\n"
             "    opencode_direct_developer.resolved_max_prompt_bytes()\n"
             "    sys.exit(101)\n"
