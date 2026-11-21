@@ -21,6 +21,7 @@ The Owner's binding working rules for PM runs (2026-11-16 – 2026-11-18), recor
 - home LLM 測試一次跑一張 (Owner date: 2026-11-17, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
 - 沒有依據的上限全部改成可調，放進設定檔並記錄依據 (Owner date: 2026-11-17, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
 - 以後我定新規則，就同步更新規則卡 (Owner date: 2026-11-18, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
+- A `task advance` `RUN_REMOTE_TEST` result of `ADMISSION_DENIED` / `MODULE_NOT_ADMITTED` is the recorded step result when the Task declares no admissible EC2 module, not a refusal. A PR is blocked only when a step is `STOPPED` or `REFUSED` or the next `task advance` refuses. After an unfamiliar code, the PM runs the next `task advance` once and reads its next step before calling a PR blocked. A blocked board row quotes the refused next-step code. (Owner date: 2026-11-22, evidence links: [#2413 c7065960759](https://github.com/davidcatcat/davidcattoolsproject/issues/2413#issuecomment-7065960759), [#2413 c7065982671](https://github.com/davidcatcat/davidcattoolsproject/issues/2413#issuecomment-7065982671))
 
 ## Dispatch
 
