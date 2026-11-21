@@ -1287,15 +1287,19 @@ class AgyRouteWiringTests(unittest.TestCase):
             self.assertEqual(status, 0)
             return prompts[0]
 
-        limit = min(64 * 1024 - 1, resolve_route_max_prompt_bytes('agy'))
-        self.assertEqual(limit, 64 * 1024 - 1)
-        room = limit - len(run(0).encode('utf-8'))
-        self.assertGreater(room, 0)
-        fitted = run(room)
-        self.assertEqual(len(fitted.encode('utf-8')), limit)
-        self.assertEqual(_sent_prefix(fitted), _wrapped(_CARDS))
-        self._assert_skill_refusal('AGY_SKILL_PROMPT_TOO_LARGE',
-                                   goal='AGY goal' + padding(room + 1))
+        limit = min(5 * 1024 * 1024 - 1, resolve_route_max_prompt_bytes('agy'))
+        self.assertEqual(limit, 5 * 1024 * 1024 - 1)
+        # The generic request screen is an unrelated, lower bound. This test is
+        # about the AGY route prompt bound, so give that screen one MiB of
+        # headroom for the synthetic prompt; its real function is still called.
+        with patch.object(task_submission_cli, 'REQUEST_LIMIT', limit + 1024 * 1024):
+            room = limit - len(run(0).encode('utf-8'))
+            self.assertGreater(room, 0)
+            fitted = run(room)
+            self.assertEqual(len(fitted.encode('utf-8')), limit)
+            self.assertEqual(_sent_prefix(fitted), _wrapped(_CARDS))
+            self._assert_skill_refusal('AGY_SKILL_PROMPT_TOO_LARGE',
+                                       goal='AGY goal' + padding(room + 1))
 
     def test_generic_record_still_refuses_controller_delivered(self):
         with tempfile.TemporaryDirectory() as temp:

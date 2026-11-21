@@ -10,8 +10,8 @@
       "state_dirs": {"policy": "private-temp-only"},
       "default_timeout": 10800,
       "max_timeout": 18000,
-      "max_diff_bytes": 262144,
-      "max_prompt_bytes": 524288
+      "max_diff_bytes": 5242880,
+      "max_prompt_bytes": 5242880
     },
     "claude": {
       "executable": "claude",
@@ -61,10 +61,10 @@
       "default_effort": "high",
       "default_timeout": 10800,
       "max_timeout": 18000,
-      "max_diff_bytes": 262144,
-      "max_prompt_bytes": 65536,
-      "max_source_file_bytes": 1048576,
-      "max_source_total_bytes": 2097152
+      "max_diff_bytes": 5242880,
+      "max_prompt_bytes": 5242880,
+      "max_source_file_bytes": 5242880,
+      "max_source_total_bytes": 5242880
     }
   },
   "roles": {
