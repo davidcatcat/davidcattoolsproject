@@ -23,6 +23,7 @@ from typing import Any, Mapping
 
 from ..errors import LLMToolError
 from ..providers.cli_lifecycle import CLIProcessLifecycle
+from .. import authorization_workflow_grant
 from .. import task_completion
 
 MAX_STDOUT_BYTES = 1024 * 1024
@@ -126,6 +127,100 @@ class RouteError(LLMToolError):
         self.provider_evidence = (dict(provider_evidence)
                                   if provider_evidence is not None else None)
         self.execution_facts = None
+
+
+# #2281 W3: a workflow path is accepted only when the merged W1 grant module
+# returns GRANTED for the exact Task Issue, mode and file path.
+WORKFLOW_GRANT_REFUSED = 'WORKFLOW_GRANT_REFUSED'
+
+
+def _is_workflow_path(path):
+    """Return True when any adjacent components are .github/workflows.
+
+    Case-varied, nested, absolute and dot-segment spellings are included so
+    they reach the grant evaluator and are refused rather than slipping past.
+    """
+    parts = path.replace('\\', '/').split('/')
+    return any(parts[index].casefold() == '.github' and
+               parts[index + 1].casefold() == 'workflows'
+               for index in range(len(parts) - 1))
+
+
+def _request_grant_field(value, name):
+    """Return the request/task values of ``name``; both must agree.
+
+    An absent value returns None. A conflicting top-level and task value is
+    refused, so a request cannot present two different grant identities.
+    """
+    found = []
+    if value.get(name) is not None:
+        found.append(value[name])
+    task = value.get('task')
+    if isinstance(task, Mapping) and task.get(name) is not None:
+        found.append(task[name])
+    if not found:
+        return None
+    if any(item != found[0] for item in found[1:]):
+        raise RouteError(WORKFLOW_GRANT_REFUSED,
+                         facts={'workflow_grant_code': 'GRANT_ISSUE_INVALID'
+                                if name == 'issue' else 'GRANT_BASE_COMMIT_INVALID'})
+    return found[0]
+
+
+def _request_workflow_paths(value):
+    """Return unique (mode, path) pairs under .github/workflows in a request."""
+    task = value.get('task') if isinstance(value.get('task'), Mapping) else {}
+    sources = (
+        ('read', value.get('read_paths')),
+        ('write', value.get('write_paths')),
+        ('read', task.get('read_paths')),
+        ('write', task.get('write_paths')),
+    )
+    pairs = []
+    seen = set()
+    for mode, paths in sources:
+        if type(paths) not in (tuple, list):
+            continue
+        for path in paths:
+            if type(path) is not str or (mode, path) in seen:
+                continue
+            seen.add((mode, path))
+            if _is_workflow_path(path):
+                pairs.append((mode, path))
+    return pairs
+
+
+def validate_workflow_grants(value):
+    """Refuse any ungranted .github/workflows read or write path.
+
+    This runs during request validation, before the dispatch gate and before
+    any process launch. The Task Issue and base commit come from ``issue`` and
+    ``base_commit`` in the request or its ``task`` record; the base commit
+    defaults to ``expected_head``. The grant answer comes only from the W1
+    module, which reads the reviewed rule file at that commit from the Git
+    object store. Paths outside .github/workflows are left untouched.
+    """
+    pairs = _request_workflow_paths(value)
+    if not pairs:
+        return
+    issue = _request_grant_field(value, 'issue')
+    base_commit = _request_grant_field(value, 'base_commit')
+    if base_commit is None:
+        base_commit = value.get('expected_head')
+    for mode, path in pairs:
+        try:
+            decision = authorization_workflow_grant.evaluate_workflow_grant(
+                base_commit=base_commit, issue=issue, path=path, mode=mode,
+                root=value.get('root'))
+            code = getattr(decision.code, 'value', decision.code)
+        except Exception:
+            raise RouteError(
+                WORKFLOW_GRANT_REFUSED,
+                facts={'workflow_grant_code': 'GRANT_SOURCE_UNAVAILABLE'}) from None
+        if decision.allowed is not True:
+            raise RouteError(
+                WORKFLOW_GRANT_REFUSED,
+                facts={'workflow_grant_code': code})
 
 
 # Design c6876861575 items 1-2: the evidence a route may return from its own
@@ -281,6 +376,7 @@ class DeveloperRoute(ABC):
                              facts={'timeout_refusal': exc.code}) from None
         value.update(root=str(root), model=model, effort=effort, timeout=timeout,
                      write_paths=tuple(paths))
+        validate_workflow_grants(value)
         return value
 
 
