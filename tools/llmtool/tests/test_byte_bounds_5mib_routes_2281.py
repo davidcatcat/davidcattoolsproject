@@ -21,7 +21,10 @@ from llmtool.developer_routes import (
 )
 from llmtool.developer_routes import agy as agy_route
 from llmtool.developer_routes import claude as claude_route
-from llmtool.developer_routes.base import DEFAULT_CLAUDE_MAX_PROMPT_BYTES
+from llmtool.developer_routes.base import (
+    DEFAULT_CLAUDE_MAX_PROMPT_BYTES,
+    MAX_STDOUT_BYTES,
+)
 from llmtool.errors import LLMToolError
 from llmtool.opencode_direct_developer import (
     DEFAULT_MAX_PROMPT_BYTES as OPENCODE_DEFAULT_PROMPT_BYTES,
@@ -109,6 +112,7 @@ class ByteBounds5MiBRoutes2281Tests(unittest.TestCase):
                     self.assertEqual(RESOLVERS[key](route), BYTE_LIMIT)
                     self.assertTrue(VALIDATORS[key](BYTE_LIMIT))
         self.assertEqual(DEFAULT_CLAUDE_MAX_PROMPT_BYTES, BYTE_LIMIT)
+        self.assertEqual(MAX_STDOUT_BYTES, BYTE_LIMIT)
         self.assertEqual(claude_route.MAX_PROMPT_BYTES, BYTE_LIMIT)
         self.assertEqual(agy_route.MAX_PROMPT_BYTES, BYTE_LIMIT)
         self.assertEqual(OPENCODE_DEFAULT_PROMPT_BYTES, BYTE_LIMIT)

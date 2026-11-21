@@ -25,7 +25,10 @@ from ..errors import LLMToolError
 from ..providers.cli_lifecycle import CLIProcessLifecycle
 from .. import task_completion
 
-MAX_STDOUT_BYTES = 1024 * 1024
+# #2281 (Owner 2026-11-21): the provider reply travels on stdout; like every
+# other AI Developer route byte bound below 5 MiB, it is raised to 5242880.
+MAX_STDOUT_BYTES = 5 * 1024 * 1024
+# Stderr stays a small diagnostic bound; it is never the Developer reply.
 MAX_STDERR_BYTES = 64 * 1024
 # Route timeouts come from developer-routes.json (default_timeout and
 # max_timeout per route). A route without registry limits keeps the former
@@ -431,7 +434,7 @@ def resolve_route_max_prompt_bytes(route: Any, *,
     route is a registered route name or a DeveloperRoute; config is a
     load_route_config() result (None loads the repository file). A route
     without max_prompt_bytes returns today's default for that route
-    (65536 for claude, 5242880 for agy and opencode). An invalid value, unknown
+    (5242880 for claude, agy and opencode, #2281). An invalid value, unknown
     str route or bad config raises RouteError('ROUTE_CONFIG_INVALID').
     """
     if isinstance(route, DeveloperRoute):

@@ -157,7 +157,9 @@ def _background_read(fd):
             raise LLMToolError('background Developer exited before its launch receipt')
         header.extend(chunk)
     size = int.from_bytes(header, 'big')
-    if size > 1024 * 1024:
+    # #2281 (Owner 2026-11-21): the background Developer's result travels on
+    # this channel, so its 1 MiB bound is raised with every other reply bound.
+    if size > RESPONSE_LIMIT:
         raise LLMToolError('background Developer startup result exceeded its limit')
     raw = bytearray()
     while len(raw) < size:
