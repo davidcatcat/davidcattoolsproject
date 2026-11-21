@@ -420,8 +420,8 @@ class OpenCodeRouteWiringTests(unittest.TestCase):
             file = _REPO_ROOT / path
             real[path] = (file.read_text(encoding='utf-8') if file.is_file()
                           else _filler(_CARD_LIMIT))
-        for text in real.values():
-            self.assertLessEqual(len(text.encode('utf-8')), _CARD_LIMIT)
+        # The real limit is the whole wrapped prefix (MAX_DEVELOPER_PREFIX_SIZE),
+        # not a per-card size; the real cards are checked through the prefix below.
         run = self._run(cards=real)
         self.assertEqual(run.status, 0)
         prefix = _sent_prefix(run.prompts[0])

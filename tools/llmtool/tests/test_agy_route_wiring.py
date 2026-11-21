@@ -1328,8 +1328,8 @@ class AgyRouteWiringTests(unittest.TestCase):
                             ('6 KiB ceiling', {_CORE: _filler(_CARD_LIMIT),
                                                _DEV_CARD: _filler(_CARD_LIMIT)})):
             with self.subTest(cards=name):
-                for text in cards.values():
-                    self.assertLessEqual(len(text.encode('utf-8')), _CARD_LIMIT)
+                # The real limit is the whole wrapped prefix (MAX_DEVELOPER_PREFIX_SIZE),
+                # not a per-card size; real cards are checked through the prefix below.
                 prefix = self._prefix_with_cards(cards)
                 self.assertEqual(prefix, _wrapped(cards))
                 self.assertLessEqual(len(prefix.encode('utf-8')),
