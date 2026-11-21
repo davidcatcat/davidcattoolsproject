@@ -30,6 +30,23 @@ The Owner's binding working rules for PM runs (2026-11-16 – 2026-11-18), recor
 - Follow [dispatch hygiene](../ai-team-delivery/pm-continuation.md#dispatch-hygiene). A sent dispatch counts only once there is a start receipt ([Transition record](../ai-team-delivery/pm-continuation.md#transition-record)).
 - A sub-agent dispatch includes the text of the role card that sub-agent needs.
 
+## Dispatch spec format (#2423)
+
+Authority: `task_submission_cli._read_pm_record_input` (`task record-pm`) and `tools/llmtool/scripts/spec_preflight.py` `check`. `spec_lint` is a PM helper outside the repository; its rules are UNKNOWN here.
+
+- `record-pm` reads one strict JSON object with exactly `request` (string, at most 64 KiB) and `response` (string, at most 64 KiB).
+- `response` is one JSON object: `schema_version: 1`, `summary` (preflight: at most 2048 bytes) and `developer_assignment` with exactly `route`, `risk`, `goal`, `acceptance`. `record-pm` needs `risk: "LOW"` and `route` one of `gw-agent`, `opencode`, `codex`, `agy`, `claude`; `acceptance` has 1 to 16 strings.
+- `spec_preflight` refuses a spec with an `edits` key, and for `gw-agent` non-ASCII `goal`/`acceptance` text and quoted lines that end inside an open bracket.
+- `task delegate --acceptance` must equal the recorded `acceptance`, and `write_paths` must be inside `read_paths`.
+
+Example `response` (illustration):
+
+```json
+{"schema_version":1,"summary":"#1234 fix X","developer_assignment":{"route":"claude","risk":"LOW","goal":"<problem and outcome>","acceptance":["<observable result>"]}}
+```
+
+A format refusal is fixed here so the card matches llmtool, and recorded (#2423).
+
 ## Review, disputes and Debug
 
 - Pick a Reviewer from a different family: `codex-reviewer` for Claude-authored work and `claude-reviewer` for other work. It works in a separate read-only context with its own D6 record. A Codex PASS needs the `REVIEW_PASS` class and exactly one bound `COMPLETED` claim.

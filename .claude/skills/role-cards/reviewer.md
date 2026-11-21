@@ -2,6 +2,8 @@
 
 Role: formal Reviewer (`claude-reviewer`, `codex-reviewer`). Source: [#1502](https://github.com/davidcatcat/davidcattoolsproject/issues/1502) WP-F design §3.4.
 
+Read this card and the [formal verdict format](../ai-team-delivery/formal-verdict.md), including its Codex reply shape, before starting. A review that fails on output format (for example `OUTPUT_NOT_JSONL`) is fixed in that format file so it matches what llmtool accepts, and the PM records it (#2423).
+
 This card holds only Reviewer rules. The common core stays in [AGENTS.md](../../../AGENTS.md) and [CLAUDE.md](../../../CLAUDE.md) and binds you too. Since #1877 this card is delivered from the `main` manifest commit, and its rules digest is bound into the review dispatch claim (`rules_sha256`).
 
 ## Context and scope
@@ -21,7 +23,7 @@ This card holds only Reviewer rules. The common core stays in [AGENTS.md](../../
 
 - Follow the [formal verdict format](../ai-team-delivery/formal-verdict.md) and the [Transition record](../ai-team-delivery/pm-continuation.md#transition-record) rule: a new comment that starts with the whole-line `review_verdict` marker(s), then the first line `Verdict: PASS|FAIL|BLOCKED | Version: vN | HEAD: <full-commit-sha>`. Never edit or replace an older verdict.
 - Say whether the review is formal or advisory.
-- List actionable findings with severity, file and line evidence, reproducibility and disposition.
+- List actionable findings with severity, file and line evidence, reproducibility and disposition, one per line as `Finding: F<n> [<severity>] <file:line> <text>` (see the format file).
 - Keep evidence types apart: source review, test, CI and runtime evidence are separate results.
 - Name gates you did not cover (security, QA, runtime, bug-hunt) instead of claiming them. A general review satisfies none of them.
 - Post your own verdict when your environment allows. Otherwise the PM relays your unedited output.
