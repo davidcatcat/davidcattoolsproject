@@ -490,6 +490,53 @@ class WorkerEnvelopeTests(unittest.TestCase):
                 self.assertEqual(len(launched),1)
                 self.assertEqual(launched[0][launched[0].index('--model')+1],model)
 
+    def _run_review_job(self,tmp,stdout_size,stderr_size,limit):
+        # #2281 row 12: fake executable; the policy limit is injected, screen mocked.
+        import time
+        head=json.dumps(dict(type='result',subtype='success',is_error=False,
+            session_id='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',result='{}'))
+        exe=Path(tmp)/'fake-envelope'
+        exe.write_text('#!'+sys.executable+' -IB\nimport sys\nsys.stdin.read()\n'
+            'sys.stderr.write("e"*%d)\nsys.stderr.flush()\n'
+            'sys.stdout.write(%r+" "*%d)\n'%(stderr_size,head,stdout_size-len(head)))
+        exe.chmod(0o700)
+        provider=ClaudeCLIProvider({'model':REVIEW_MODEL},None)
+        with patch('llmtool.repair_policy.claude_review_envelope_limit_bytes',return_value=limit), \
+                patch('llmtool.task_review.screen',lambda value:None):
+            return provider._invoke_review_job(str(exe),'prompt',deadline=time.monotonic()+30,
+                auth_home=tmp,launch_nonce='a'*32,runtime_pin='b'*64,forbidden_sessions=())
+
+    def test_invalid_envelope_policy_refuses_before_spawn(self):
+        import time
+        with tempfile.TemporaryDirectory() as tmp:
+            exe=Path(tmp)/'fake-unused';exe.write_text('#!'+sys.executable+' -IB\n');exe.chmod(0o700)
+            for limit in (0,-1,True,'1024',4*1024*1024+1,2**62):
+                with self.subTest(limit=limit):
+                    provider=ClaudeCLIProvider({'model':REVIEW_MODEL},None)
+                    with patch('llmtool.repair_policy.claude_review_envelope_limit_bytes',return_value=limit), \
+                            patch('subprocess.Popen',side_effect=AssertionError('spawn')) as spawn, \
+                            self.assertRaises(LLMToolError) as caught:
+                        provider._invoke_review_job(str(exe),'prompt',deadline=time.monotonic()+5,
+                            auth_home=tmp,launch_nonce='a'*32,runtime_pin='b'*64,forbidden_sessions=())
+                    self.assertEqual(caught.exception.review_code,'POLICY_INVALID')
+                    spawn.assert_not_called()
+                    self.assertIsNone(provider.pending_job)
+
+    def test_review_stdout_uses_policy_and_stderr_uses_generic_limit(self):
+        from llmtool.providers import claude_cli
+        big=claude_cli.OUTPUT_LIMIT+claude_cli.OUTPUT_LIMIT//2
+        with tempfile.TemporaryDirectory() as tmp:
+            parsed=self._run_review_job(tmp,big,16,2*1024*1024)
+            self.assertEqual(parsed['content'],'{}')
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(LLMToolError) as caught:
+                self._run_review_job(tmp,big,16,claude_cli.OUTPUT_LIMIT)
+            self.assertEqual(caught.exception.review_code,'REVIEW_WORKER_OUTPUT_LIMIT')
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(LLMToolError) as caught:
+                self._run_review_job(tmp,512,claude_cli.OUTPUT_LIMIT+1024,2*1024*1024)
+            self.assertEqual(caught.exception.review_code,'REVIEW_WORKER_OUTPUT_LIMIT')
+
 
 if __name__ == "__main__":
     unittest.main()

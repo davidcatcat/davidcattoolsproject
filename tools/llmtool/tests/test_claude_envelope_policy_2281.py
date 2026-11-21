@@ -1,7 +1,7 @@
 """#2281 row 12: the Claude CLI review envelope limit follows the policy key
 claude_review_envelope_limit_bytes (A1 absent -> unchanged, A2 configured
-value applies, A3 invalid or oversized -> POLICY_INVALID). Screen mocked;
-temp policy file; no network, no Claude process."""
+value applies, A3 invalid or oversized -> POLICY_INVALID). Real policy loader
+and decoder on a temp policy file; screen mocked; no network, no Claude process."""
 
 import json
 import tempfile
@@ -12,54 +12,76 @@ from llmtool import repair_policy as rp
 from llmtool.errors import LLMToolError
 from llmtool.providers import claude_cli
 
-REPO_POLICY = Path(__file__).resolve().parent.parent / 'policy.json'
-BASE = json.loads(REPO_POLICY.read_text('utf-8'))
+BASE = json.loads((Path(__file__).resolve().parent.parent / 'policy.json').read_text('utf-8'))
 KEY = 'claude_review_envelope_limit_bytes'
+CAP = claude_cli.REVIEW_ENVELOPE_LIMIT_MAX
+DEFAULT = claude_cli.REVIEW_ENVELOPE_LIMIT
+SESSION = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+MISSING = {k: v for k, v in BASE.items() if k != 'review_fail_max'}
+
+
+def envelope(size):
+    """A valid envelope padded with trailing whitespace to exactly size bytes."""
+    text = json.dumps(dict(type='result', subtype='success', is_error=False,
+                           session_id=SESSION, result='{}'))
+    return (text + ' ' * (size - len(text))).encode('utf-8')
 
 
 class ClaudeEnvelopePolicyTest(unittest.TestCase):
-    def _limit(self, policy):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / 'policy.json'
-            path.write_text(json.dumps(policy), 'utf-8')
-            with mock.patch.object(rp, 'policy_path', return_value=str(path)):
-                return claude_cli._review_envelope_limit()
+    def policy(self, policy):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / 'policy.json'
+        path.write_text(json.dumps(policy), 'utf-8')
+        patches = (mock.patch.object(rp, 'policy_path', return_value=str(path)),
+                   mock.patch('llmtool.task_review.screen', lambda value: None))
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
 
-    def test_default_unchanged_when_key_absent(self):
+    def code(self, raw):
+        with self.assertRaises(LLMToolError) as caught:
+            claude_cli.decode_review_envelope(raw)
+        return caught.exception.review_code
+
+    def test_decoder_policy_boundaries(self):
         self.assertNotIn(KEY, BASE)
-        self.assertEqual(self._limit(BASE), claude_cli.REVIEW_ENVELOPE_LIMIT)
+        for policy, limit in ((BASE, DEFAULT), (dict(BASE, **{KEY: 2048}), 2048),
+                              (dict(BASE, **{KEY: 2 * 1024 * 1024}), 2 * 1024 * 1024)):
+            with self.subTest(limit=limit):
+                self.policy(policy)
+                self.assertEqual(claude_cli._review_envelope_limit(), limit)
+                result = claude_cli.decode_review_envelope(envelope(limit))
+                self.assertEqual(result['runtime_session_id'], SESSION)
+                self.assertEqual(self.code(envelope(limit + 1)), 'REVIEW_WORKER_ENVELOPE_INVALID')
+        self.policy(dict(BASE, **{KEY: 2048}))
+        self.assertEqual(claude_cli.decode_review_envelope(envelope(1500))['content'], '{}')
+        self.policy(dict(BASE, **{KEY: 1024}))
+        self.assertEqual(self.code(envelope(1500)), 'REVIEW_WORKER_ENVELOPE_INVALID')
 
-    def test_configured_limit_applies(self):
-        self.assertEqual(self._limit(dict(BASE, **{KEY: 2048})), 2048)
-        cap = claude_cli.REVIEW_ENVELOPE_LIMIT_MAX
-        self.assertEqual(self._limit(dict(BASE, **{KEY: cap})), cap)
+    def test_invalid_policy_has_exact_decoder_code(self):
+        for policy in (dict(BASE, **{KEY: 0}), dict(BASE, **{KEY: -1}), dict(BASE, **{KEY: True}),
+                       dict(BASE, **{KEY: '2048'}), dict(BASE, **{KEY: CAP + 1}),
+                       dict(BASE, **{KEY: 2 ** 62}), MISSING):
+            with self.subTest(policy=policy.get(KEY)):
+                self.policy(policy)
+                with self.assertRaises(LLMToolError):
+                    claude_cli._review_envelope_limit()
+                self.assertEqual(self.code(envelope(512)), 'POLICY_INVALID')
 
-    def test_invalid_or_oversized_policy_refuses(self):
-        cap = claude_cli.REVIEW_ENVELOPE_LIMIT_MAX
-        missing = {k: v for k, v in BASE.items() if k != 'review_fail_max'}
-        for policy in (dict(BASE, **{KEY: 0}), dict(BASE, **{KEY: cap + 1}),
-                       dict(BASE, **{KEY: 2 ** 62}), missing):
-            with self.assertRaises(LLMToolError):
-                self._limit(policy)
-
-    def test_decoder_refuses_before_reading_on_invalid_policy(self):
-        with mock.patch.object(claude_cli, '_review_envelope_limit',
-                               side_effect=LLMToolError('POLICY_INVALID')), \
-                mock.patch('llmtool.task_review.screen', lambda value: None):
-            with self.assertRaises(LLMToolError):
-                claude_cli.decode_review_envelope(b'{}')
-
-    def test_read_pipe_uses_per_call_limit(self):
-        payload = b'x' * (claude_cli.OUTPUT_LIMIT + 1024)
+    def test_read_pipe_honors_configured_and_generic_limits(self):
+        payload = b'x' * (claude_cli.OUTPUT_LIMIT + claude_cli.OUTPUT_LIMIT // 2)
         with tempfile.TemporaryDirectory() as tmpdir:
             src = Path(tmpdir) / 'out.bin'
             src.write_bytes(payload)
-            with open(src, 'rb') as stream:
-                out, result = bytearray(), None
-                while not result:
-                    result = claude_cli.ClaudeCLIProvider._read_pipe(
-                        stream, out, claude_cli.OUTPUT_LIMIT)
-            self.assertEqual(result, 'limit')
+            for limit, expected in ((2 * 1024 * 1024, True), (None, 'limit')):
+                with self.subTest(limit=limit), open(src, 'rb') as stream:
+                    out, result = bytearray(), False
+                    while not result:
+                        result = claude_cli.ClaudeCLIProvider._read_pipe(stream, out, limit)
+                    self.assertEqual(result, expected)
+                    if expected is True:
+                        self.assertEqual(bytes(out), payload)
 
 
 if __name__ == '__main__':
