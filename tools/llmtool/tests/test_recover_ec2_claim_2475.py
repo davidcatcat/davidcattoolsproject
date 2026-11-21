@@ -23,7 +23,8 @@ from llmtool.task_store import TaskStore, _json_bytes, new_id
 
 EXECUTOR, PR, HEAD = 'e-1', 17, 'a' * 40
 EC2_HEAD = 'b' * 40
-PM_SESSION = 'pm-native-session-1'
+# The store accepts only a UUID-shaped native PM session id (PM_NATIVE_SESSION_ID).
+PM_SESSION = '3f2b8c1e-4d5a-4e6f-8a7b-9c0d1e2f3a4b'
 
 
 def _record_pm(args, *, store, task_id, input_stream, return_record):
