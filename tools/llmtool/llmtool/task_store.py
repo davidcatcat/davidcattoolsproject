@@ -4184,10 +4184,30 @@ class TaskStore:
         return self._update(task_id, expected={'record_sha256': expected_sha256}, changes={},
                             claim_recovery=(repair_task_id, executor_task, pr_number))
 
+    def recover_ec2_repair_claim(self, task_id, repair_task_id, *, executor_task, pr_number,
+                                 expected_sha256, registered_d6=None, process_status=None):
+        """#2475: one CAS setting one UNKNOWN EC2/CI repair claim CLAIMED.
+
+        review_repair_recovery.verify_ec2_recovery runs inside the locked update
+        on the record read there; a failed check refuses and nothing is written.
+        """
+        return self._update(
+            task_id, expected={'record_sha256': expected_sha256}, changes={},
+            ec2_claim_recovery=(repair_task_id, executor_task, pr_number,
+                                registered_d6, process_status))
+
     @staticmethod
     def _claim_recovered(old, new, recovery):
         """#1928: under a claim recovery the one change is UNKNOWN -> DISPATCHED."""
         if recovery and (old.get('state') != 'UNKNOWN' or new.get('state') != 'DISPATCHED' or
+                         set(old) != set(new)):
+            _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
+        return recovery
+
+    @staticmethod
+    def _ec2_claim_recovered(old, new, recovery):
+        """#2475: under an EC2 claim recovery the one change is UNKNOWN -> CLAIMED."""
+        if recovery and (old.get('state') != 'UNKNOWN' or new.get('state') != 'CLAIMED' or
                          set(old) != set(new)):
             _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
         return recovery
@@ -5847,7 +5867,8 @@ class TaskStore:
                        trusted_split=None, split_child_max=None, high_debug_finalize=None,
                        trusted_file_ops_evidence=False, trusted_file_ops_reservation=False,
                        d6_unchanged=None, direct_dispatch_boundary=None,
-                       direct_reassign_verify=None, direct_claim_recovery=None):
+                       direct_reassign_verify=None, direct_claim_recovery=None,
+                       ec2_claim_recovery=None):
         # Refused here, not by the writable-field check: the dispatch gate
         # before that check can write its audit to the record.
         if _D6_CLAIM_ARGUMENTS & set(changes):
@@ -5865,8 +5886,8 @@ class TaskStore:
         if 'file_ops_reservation' in changes and (
                 not trusted_file_ops_reservation or set(changes) != {'file_ops_reservation'}):
             _fail('TASK_FILE_OPS_RESERVATION_FORBIDDEN')
-        if claim_recovery is not None and changes:
-            # #1928: a claim recovery builds its one change under the lock.
+        if (claim_recovery is not None or ec2_claim_recovery is not None) and changes:
+            # #1928/#2475: a claim recovery builds its one change under the lock.
             _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
         if (trusted_split is not None or split_child_max is not None) and (
                 trusted_split not in SPLIT_ACTIONS or set(changes) != {'lineage'} or
@@ -5984,6 +6005,16 @@ class TaskStore:
                     self, current, repair_id, executor_task=executor, pr_number=pr_number)
                 changes = {'review_repair_claims': [
                     dict(item, state='DISPATCHED') if item.get('repair_task_id') == repair_id
+                    else item for item in current['review_repair_claims']]}
+            if ec2_claim_recovery is not None:
+                # #2475: E1-EC2 + no-launch evidence on the record read under this lock.
+                from . import review_repair_recovery
+                repair_id, executor, pr_number, registered_d6, process_status = ec2_claim_recovery
+                review_repair_recovery.verify_ec2_recovery(
+                    self, current, repair_id, executor_task=executor, pr_number=pr_number,
+                    registered_d6=registered_d6, process_status=process_status)
+                changes = {'review_repair_claims': [
+                    dict(item, state='CLAIMED') if item.get('repair_task_id') == repair_id
                     else item for item in current['review_repair_claims']]}
             if direct_claim_recovery is not None:
                 from . import direct_reassignment, start_failure
@@ -6246,7 +6277,10 @@ class TaskStore:
                     recovered = self._claim_recovered(
                         old, new, claim_recovery is not None or
                         (direct_claim_recovery is not None and old.get('state') == 'UNKNOWN'))
-                    if (not (recovered or (old.get('state') == 'CLAIMED' and
+                    ec2_recovered = self._ec2_claim_recovered(
+                        old, new, ec2_claim_recovery is not None)
+                    if (not (recovered or ec2_recovered or
+                             (old.get('state') == 'CLAIMED' and
                               new.get('state') in ('DISPATCHED', 'UNKNOWN')) or
                              (old.get('state') == 'DISPATCHED' and
                               new.get('state') == 'FAILED')) or
