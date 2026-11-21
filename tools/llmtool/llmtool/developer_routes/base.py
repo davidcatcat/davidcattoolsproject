@@ -40,9 +40,9 @@ MAX_TIMEOUT_SECONDS = DEFAULT_TIMEOUT_SECONDS
 TIMEOUT_KEYS = frozenset({'default_timeout', 'max_timeout'})
 DEFAULT_MAX_DIFF_BYTES = 64 * 1024
 MIN_MAX_DIFF_BYTES = 1024
-# #1815: the TaskStore artifact limit (task_store.MAX_ARTIFACT_BYTES). It is
-# kept here for the store binding; #2281 child 2 raises the store bound later.
-HARD_MAX_DIFF_BYTES = 512 * 1024
+# #1815: the TaskStore artifact limit (task_store.MAX_ARTIFACT_BYTES). #2281
+# (Owner 2026-11-21) raises it with the route ceiling to 5 MiB.
+HARD_MAX_DIFF_BYTES = 5 * 1024 * 1024
 # #2281 (Owner 2026-11-21): 5 MiB is the hard ceiling for every route-level
 # byte bound in developer-routes.json. A larger value is refused at load.
 HARD_MAX_BYTE_BOUND = 5 * 1024 * 1024

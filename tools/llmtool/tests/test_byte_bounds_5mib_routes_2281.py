@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from llmtool import task_store
 from llmtool import task_submission_cli
 from llmtool.developer_routes import (
     RouteError,
@@ -23,6 +24,7 @@ from llmtool.developer_routes import agy as agy_route
 from llmtool.developer_routes import claude as claude_route
 from llmtool.developer_routes.base import (
     DEFAULT_CLAUDE_MAX_PROMPT_BYTES,
+    HARD_MAX_DIFF_BYTES,
     MAX_STDOUT_BYTES,
 )
 from llmtool.errors import LLMToolError
@@ -118,6 +120,11 @@ class ByteBounds5MiBRoutes2281Tests(unittest.TestCase):
         self.assertEqual(OPENCODE_DEFAULT_PROMPT_BYTES, BYTE_LIMIT)
         self.assertEqual(OPENCODE_DEFAULT_SOURCE_FILE_BYTES, BYTE_LIMIT)
         self.assertEqual(OPENCODE_DEFAULT_SOURCE_TOTAL_BYTES, BYTE_LIMIT)
+        self.assertEqual(task_submission_cli.REQUEST_LIMIT, BYTE_LIMIT)
+        self.assertEqual(task_submission_cli.RESPONSE_LIMIT, BYTE_LIMIT)
+        self.assertEqual(task_store.REPAIR_PACKET_MAX_BYTES, BYTE_LIMIT)
+        self.assertEqual(task_store.MAX_ARTIFACT_BYTES, BYTE_LIMIT)
+        self.assertEqual(HARD_MAX_DIFF_BYTES, BYTE_LIMIT)
         self.assertEqual(
             guidance_drift_check.RULE_SCHEMAS["developer-routes.json"].errors(
                 json.loads(ROUTES_FILE.read_text(encoding="utf-8")), "$"),

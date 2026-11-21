@@ -76,6 +76,9 @@ TEXT_DEVELOPER_CONTEXT_SEPARATOR = (
 # reply bound below 5 MiB is raised to 5242880 end to end.
 REQUEST_LIMIT = 5 * 1024 * 1024
 RESPONSE_LIMIT = 5 * 1024 * 1024
+# #2281: the rejected-output capture keeps its own private 64 KiB bound; the
+# wider provider request/reply limits do not widen this owner-private file.
+REJECTED_OUTPUT_CAPTURE_MAX_BYTES = 64 * 1024
 _PROFILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}')
 # No production Reviewer dispatcher is installed. A future Host runtime may
 # bind this internal seam only after a separate authority/runtime grant.
@@ -3408,10 +3411,10 @@ def _capture_rejected_output(store, task_id, value):
     """Persist a bounded owner-private, redacted diagnostic capture; return ref and digest."""
     text = _redact_rejected_output(value)
     raw = text.encode('utf-8', 'replace')
-    truncated = len(raw) > RESPONSE_LIMIT
+    truncated = len(raw) > REJECTED_OUTPUT_CAPTURE_MAX_BYTES
     if truncated:
         marker = b'\n[TRUNCATED]\n'
-        prefix = raw[:RESPONSE_LIMIT - len(marker)].decode('utf-8', 'ignore').encode('utf-8')
+        prefix = raw[:REJECTED_OUTPUT_CAPTURE_MAX_BYTES - len(marker)].decode('utf-8', 'ignore').encode('utf-8')
         raw = prefix + marker
     store._ensure_root()
     parent = store.root / 'rejected-developer-output'
@@ -4385,7 +4388,7 @@ def _store_accepts_direct_execution(developer):
             execution['cleanup_status'] != 'CONFIRMED' or
             type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None or
             not _bounded_int(execution['elapsed_ms'], 0, 86_400_000) or
-            not _bounded_int(execution['source_bytes'], 0, 2 * 1024 * 1024) or
+            not _bounded_int(execution['source_bytes'], 0, 5 * 1024 * 1024) or
             not _bounded_int(execution['source_file_count'], 1, 32) or
             (manifest is not None and
              (type(manifest) is not str or

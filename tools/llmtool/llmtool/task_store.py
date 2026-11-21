@@ -54,9 +54,12 @@ def _added_diff_content(value):
     return '\n'.join(added)
 
 SCHEMA_VERSION = 2
-MAX_RECORD_BYTES = 1024 * 1024
-# #1815: a Developer diff is stored whole; the 1 MiB record limit is the ceiling, so artifacts stay at or below half of it. Same value as developer_routes.base.HARD_MAX_DIFF_BYTES.
-MAX_ARTIFACT_BYTES = 512 * 1024
+# #2281 (Owner 2026-11-21): the record ceiling holds the 5 MiB request, reply,
+# diff and repair-packet bounds even at the worst-case 2x JSON escaping.
+MAX_RECORD_BYTES = 48 * 1024 * 1024
+# #2281: a Developer diff is stored whole at the 5 MiB route ceiling. Same
+# value as developer_routes.base.HARD_MAX_DIFF_BYTES.
+MAX_ARTIFACT_BYTES = 5 * 1024 * 1024
 TASK_ID = re.compile(r'[0-9a-f]{32}')
 D6_TASK_ID = re.compile(r'[a-z0-9][a-z0-9-]{0,95}')
 SESSION_ID = re.compile(r'pm-[a-z0-9-]{1,60}')
@@ -115,10 +118,9 @@ _START_FAILURE_ENTRY_FIELDS = frozenset((
     'failed_developer', 'record_sha256', 'retry_assignment_id', 'd6_head',
     'retried_at', 'pm_session_id'))
 # #2188 design section 4: the persisted repair packet is the ASCII string
-# start_failure.canonical(P). It admits every packet a Claude delegate accepts
-# today: canonical(P) is a strict substring of the prompt, which is at most
-# developer_routes.claude.MAX_PROMPT_BYTES (65536) bytes.
-REPAIR_PACKET_MAX_BYTES = 65536
+# start_failure.canonical(P). #2281 (Owner 2026-11-21) raises its byte bound
+# to the same 5 MiB ceiling as the Claude prompt it is copied into.
+REPAIR_PACKET_MAX_BYTES = 5 * 1024 * 1024
 # Owner-exception merge evidence (#1253, #1519). Only this one exception type
 # is persisted; its evidence is the exact owner_exception.verify() result.
 _REVIEW_EXCEPTION_TYPE = 'OWNER_EXCEPTION_DETERMINISTIC_REDACTION'
@@ -2670,14 +2672,14 @@ def _validate(record, *, strict=True):
             request_size = len(request.encode('utf-8'))
         except (AttributeError, UnicodeError):
             _fail()
-        if type(request) is not str or request_size > 64 * 1024:
+        if type(request) is not str or request_size > 5 * 1024 * 1024:
             _fail()
     if response is not None:
         try:
             response_size = len(response.encode('utf-8'))
         except (AttributeError, UnicodeError):
             _fail()
-        if type(response) is not str or response_size > 64 * 1024:
+        if type(response) is not str or response_size > 5 * 1024 * 1024:
             _fail()
     if any(_emitted_sensitive(text) for text in (request, response) if text is not None):
         _fail()
@@ -2706,11 +2708,11 @@ def _validate(record, *, strict=True):
                     assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'claude', 'none') or
                     assignment['risk'] not in ('LOW', 'OTHER') or
                     type(assignment['goal']) is not str or not assignment['goal'] or
-                    len(assignment['goal'].encode('utf-8')) > 64 * 1024 or
+                    len(assignment['goal'].encode('utf-8')) > 5 * 1024 * 1024 or
                     _emitted_sensitive(assignment['goal']) or
                     type(assignment['acceptance']) is not list or
                     not 1 <= len(assignment['acceptance']) <= 16 or
-                    any(type(item) is not str or not item or len(item.encode('utf-8')) > 64 * 1024 or
+                    any(type(item) is not str or not item or len(item.encode('utf-8')) > 5 * 1024 * 1024 or
                         _emitted_sensitive(item) for item in assignment['acceptance'])):
                 _fail()
         if 'pm_provenance' in record:
@@ -2867,7 +2869,7 @@ def _validate(record, *, strict=True):
                     not developer['egress_basis'] or len(developer['egress_basis'].encode('utf-8')) > 512 or
                     _emitted_sensitive(developer['egress_basis']) or
                     type(developer['input_bytes']) is not int or
-                    not 1 <= developer['input_bytes'] <= 64 * 1024 or
+                    not 1 <= developer['input_bytes'] <= 5 * 1024 * 1024 or
                     (developer['max_tokens'] is not None and
                      (type(developer['max_tokens']) is not int or
                       not 1 <= developer['max_tokens'] <= 1_000_000)) or
@@ -3069,7 +3071,7 @@ def _validate(record, *, strict=True):
                               not 0 <= execution['elapsed_ms'] <= 86_400_000)) or
                             (execution['source_bytes'] is not None and
                              (type(execution['source_bytes']) is not int or
-                              not 0 <= execution['source_bytes'] <= 2 * 1024 * 1024)) or
+                              not 0 <= execution['source_bytes'] <= 5 * 1024 * 1024)) or
                             (execution['source_file_count'] is not None and
                              (type(execution['source_file_count']) is not int or
                               not 1 <= execution['source_file_count'] <= 32)) or
@@ -3139,7 +3141,7 @@ def _validate(record, *, strict=True):
                 _fail()
             acceptance = developer['acceptance']
             if (type(acceptance) is not list or not 1 <= len(acceptance) <= 16 or
-                    any(type(item) is not str or not item or len(item.encode('utf-8')) > 64 * 1024
+                    any(type(item) is not str or not item or len(item.encode('utf-8')) > 5 * 1024 * 1024
                         for item in acceptance)):
                 _fail()
             artifact = developer['artifact']
