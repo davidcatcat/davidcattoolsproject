@@ -79,6 +79,7 @@ class ReplyExcerptReceiptTests(unittest.TestCase):
         self.assertEqual(diagnostic['bytes'], len(reply.encode('utf-8')))
         self.assertEqual(diagnostic['lines'], 1)
         self.assertIs(diagnostic['truncated'], False)
+        self.assertIn(diagnostic['cause'], review_dispatch.REPLY_CAUSE_CATEGORIES)
         self._assert_no_text(receipt)
 
     def test_jsonl_stream_with_bad_line_keeps_content_free_diagnostic(self):
@@ -197,9 +198,10 @@ class ReplyExcerptReceiptTests(unittest.TestCase):
         self.assertIs(type(diagnostic['bytes']), int)
         self.assertIs(type(diagnostic['lines']), int)
         self.assertIs(type(diagnostic['truncated']), bool)
+        self.assertIn(diagnostic['cause'], review_dispatch.REPLY_CAUSE_CATEGORIES)
         self.assertEqual(set(diagnostic) - {
             'kind', 'first', 'bytes', 'lines', 'truncated', 'keys',
-            'status_words', 'verdict_marker', 'binding_line'}, set())
+            'status_words', 'verdict_marker', 'binding_line', 'cause'}, set())
         for word in diagnostic.get('status_words', ()):
             self.assertIn(word, _FIXED_STATUS)
 

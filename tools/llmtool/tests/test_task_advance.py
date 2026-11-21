@@ -4991,8 +4991,16 @@ class TaskAdvanceRepeatedVerdictPostTests(unittest.TestCase):
 class TaskAdvanceUnusableReviewTests(unittest.TestCase):
     """#1105: one safe redispatch on the same head, then a named stop."""
 
+    def setUp(self):
+        # The real receipt store survives between advances, so the fake one must
+        # too; otherwise every advance looks like the refusal's first re-run.
+        self.reruns = {}
+
     def _advance(self, store, *, comments=(), pr=PR, dispatch=None):
         dispatched, reads = [], []
+        contract = 'd' * 64
+        store.record.setdefault('task_binding', {'contract_digest': contract})
+        reruns = self.reruns
 
         def github_get(path):
             reads.append(path)
@@ -5002,6 +5010,22 @@ class TaskAdvanceUnusableReviewTests(unittest.TestCase):
                 return list(comments)
             return green_linux_ci(path, pr)
 
+        def read_receipt(*, store, task_id, claim):
+            receipt = {'task_id': task_id, 'pr': claim.get('pr'),
+                       'head': claim.get('head_sha'), 'version': claim.get('version'),
+                       'reviewer_task': claim.get('reviewer_task'),
+                       'failure_reason': claim.get('failure_reason'),
+                       'not_a_verdict': True, 'contract_digest': contract}
+            if claim.get('version') in reruns:
+                receipt['rerun'] = {'version': reruns[claim['version']], 'at': 'then'}
+            elif reruns:
+                receipt['automatic_rerun'] = True
+            return receipt
+
+        def mark_rerun(*, store, task_id, claim, contract_digest, rerun_version):
+            reruns[claim['version']] = rerun_version
+            return True
+
         def default_dispatch(**kwargs):
             return {'state': 'COMPLETED', 'verdict': 'FAIL'}
 
@@ -5010,7 +5034,11 @@ class TaskAdvanceUnusableReviewTests(unittest.TestCase):
             return (dispatch or default_dispatch)(**kwargs)
 
         with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
-             patch.object(task_advance, '_review_outcomes', return_value=[]):
+             patch.object(task_advance, '_review_outcomes', return_value=[]), \
+             patch.object(review_dispatch, 'read_refusal_receipt',
+                          side_effect=read_receipt), \
+             patch.object(review_dispatch, 'mark_refusal_rerun',
+                          side_effect=mark_rerun):
             result = task_advance.advance(task_id=TASK, store=store, pr_number=17,
                                           github_get=github_get,
                                           dispatch_review_call=record_dispatch)
@@ -5100,7 +5128,9 @@ class TaskAdvanceUnusableReviewTests(unittest.TestCase):
         self.assertEqual(again, [])
         self.assertEqual(second['step'], 'REVIEW_UNUSABLE_STOPPED')
         self.assertEqual(second['next'], 'REVIEW_UNUSABLE_STOPPED')
-        self.assertEqual(second['codes'], ['REVIEW_UNUSABLE_STOPPED', 'VERDICT_NOT_JSON'])
+        self.assertEqual(second['codes'], ['REVIEW_UNUSABLE_STOPPED',
+                                           task_advance.REVIEW_RERUN_ALREADY_DONE,
+                                           'VERDICT_NOT_JSON'])
         self.assertFalse(any(path.startswith('issues/') for path in reads))
 
 
