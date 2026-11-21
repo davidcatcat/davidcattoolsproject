@@ -1,9 +1,13 @@
 # #2486: why a formal review is refused OUTPUT_NOT_JSONL with a one-line reply
 
 Status: read-only investigation note, revised after formal review v1 of PR #2511
-(findings F1, F2, F3). No code was changed and nothing was run.
+(findings F1, F2, F3), then fact-checked and corrected by the independent
+development line (Owner 2026-11-22) against main `ed7caa45`, the stored refusal
+receipts and the stored review claims. No code was changed and no Reviewer or
+Codex run was made for this note.
 Every statement marked **Source** comes from reading the files listed under
-"Files read". Anything not decidable from those files is marked **UNKNOWN**.
+"Files read". Values quoted from receipts and claims are fixed words, numbers
+and identifiers only. Anything not decidable is marked **UNKNOWN**.
 
 ## Question
 
@@ -16,18 +20,30 @@ evidence, and what is the most likely cause?
 
 ## Evidence as given in the Task
 
-- Issue #2486 comments c7068744797, c7068531229, c7066903506. They were not
-  available to this investigation; only the Task text was.
-- Refusal receipts: PR #2495 (task 93f385d0, head 28be5945, version 2) and
-  PR #2508 (task f6e1b8bd, head 4c99af82, version 1). Both show
-  `reply_diagnostic` with `cause=other`, `kind=text`, `lines=1`.
-- Successful formal reviews in the same hours on PRs #2490, #2498, #2500, #2496.
+- Issue #2486 comments c7068744797, c7068531229, c7066903506 (read in the
+  fact-check revision).
+- Refusal receipts (`review-refusals/<task>-<head>-<version>.json`, fixed fields
+  only):
 
-Not given, so UNKNOWN: the receipt's `excerpt` value, the `first` value, the
-exact `bytes` per receipt, whether the version 2 receipt of #2495 is an
-automatic re-run, the claim's `account_mode` and `account`, which Reviewer route
-(Codex or Claude) the four successful reviews used, and the environment, flags
-and working directory of the direct `codex exec` that worked.
+| PR | Task | Head | Version | Recorded | `excerpt` | `reply_diagnostic` | `automatic_rerun` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| #2495 | 93f385d0 | e115bc90 | 1 | 18:32:16Z | `REPLY_SHAPE bytes=198 lines=1 first=letter` | `kind=text lines=1 bytes=198 first=letter` (no `cause`; written before the cause field existed) | absent |
+| #2495 | 93f385d0 | 28be5945 | 2 | 20:21:15Z | `REPLY_SHAPE bytes=189 lines=1 first=letter` | `kind=text lines=1 bytes=189 first=letter cause=other` | absent |
+| #2508 | f6e1b8bd | 4c99af82 | 1 | 21:35:22Z | `REPLY_SHAPE bytes=200 lines=1 first=letter` | `kind=text lines=1 bytes=200 first=letter cause=other` | absent |
+
+- Version 2 of #2495 is not an automatic re-run (no `automatic_rerun`); it is a
+  fresh review of a new head after the branch was updated with main.
+- Review claims in the same window (all `review_kind=formal`,
+  `account_mode=ROLES`, `account=codex2`): refused, state `UNKNOWN` with
+  `failure_reason=OUTPUT_NOT_JSONL`: #2490 v4 (17:52Z), #2495 v1 (18:30Z),
+  #2498 v1 (19:47Z), #2495 v2 (20:19Z), #2508 v1 (21:33Z). Completed Codex
+  reviews with a stored verdict: #2490 v3 (17:17Z) and v5 (20:20Z), #2496 v1
+  (19:37Z), #2500 v1 (20:02Z), #2498 v2 (20:16Z), v3 (20:48Z) and v4 (21:27Z).
+  Refusals and successes interleave within minutes on the same role and
+  account.
+
+Still UNKNOWN: the environment, flags and working directory of the direct
+`codex exec` that worked.
 
 ## Files read
 
@@ -114,8 +130,8 @@ These facts hold for every candidate below.
    (`unauthorized`, `authentication`, `auth failed`, `not logged in`,
    `log in`, `login`, `401`, `403`, `invalid api key`, `missing api key`,
    `credential`) and model unavailable (`model unavailable`, `model not found`,
-   `no such model`, `overloaded`, `service unavailable`, `502`, `503`,
-   `capacity`). So `other` rules out those exact words. It does not rule out
+   `model not available`, `no such model`, `overloaded`, `service unavailable`,
+   `502`, `503`, `capacity`). So `other` rules out those exact words. It does not rule out
    the same meaning in other words, for example "limit" alone, "credits",
    "plan", "upgrade", "exceeded", "sign in", "expired", "try again later",
    "trusted directory" or "not a git repository". The cause is computed only
@@ -136,6 +152,9 @@ These facts hold for every candidate below.
    `review_dispatch.dispatch_review` with `refusal_rerun=True`. The re-run's
    receipt carries `automatic_rerun`; the first receipt gets a `rerun` key.
    `review_dispatch.mark_refusal_rerun` writes it before the re-run starts.
+   A receipt that already has `rerun` or `automatic_rerun` is never re-run, and
+   a changed Task contract stops the re-run with
+   `REVIEW_RERUN_CONTRACT_CHANGED`.
 10. **Which route runs.** `review_dispatch._select_reviewer` picks the Codex
     Reviewer when the Developer family is Claude and the Claude Reviewer
     otherwise. Only the Codex route has a stdout parser. A Codex claim ends
@@ -158,7 +177,7 @@ Codex is known from the source.
 | Variables not passed | `USER`, `LOGNAME`, `LANG`, `LC_CTYPE`, `TMPDIR`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, proxy settings, any `OPENAI_*` or other `CODEX_*` setting | Present if the shell sets them | The Codex provider in `providers.codex_cli` does forward `USER`, `LOGNAME`, `LANG`, `LC_CTYPE`, `SSL_CERT_*` and sets `TMPDIR`; the reviewer path forwards none of them. UNKNOWN whether Codex needs them. |
 | Account directory | `CODEX_HOME` is set to the role's `config_dir` when the role has one (`account_mode=ROLES`), else not set (`account_mode=CODEX_CLI`), so the default Codex home applies | The caller's `CODEX_HOME` or the default | Login or usage state in a different directory can differ from the direct run, even for "the same account". The claim keeps `account_mode` and `account` as fixed fields. |
 | Locale | `LC_ALL=C` forced, no `LANG` | The user's locale | Effect on Codex output UNKNOWN. |
-| GitHub and Git variables | `github_identity.ai_github_env` drops every name starting `GH_`, `GITHUB_`, `SSH_`, `GIT_TRACE` and several `GIT_*` names, then sets `GH_CONFIG_DIR` to the AI account's config directory and `GIT_CONFIG_COUNT=3` with a credential helper `!gh auth git-credential` and a URL rewrite | Caller's own | It touches no Codex-specific name (the base has none to drop). The credential helper needs `gh` on a `PATH` that holds only the `codex` directory, `/usr/bin` and `/bin`; whether it is found is UNKNOWN. It can only matter to Git calls the model makes, so it is an unlikely source of a reply before any event. |
+| GitHub and Git variables | `github_identity.ai_github_env` drops every name starting `GH_`, `GITHUB_`, `SSH_`, `GIT_TRACE` and several `GIT_*` names, then sets `GH_CONFIG_DIR` to the AI account's config directory and `GIT_CONFIG_COUNT=3` with a credential helper `!gh auth git-credential` and a URL rewrite | Caller's own | It touches no Codex-specific name (the base has none to drop). The credential helper needs `gh` on a `PATH` that holds only the `codex` directory, `/usr/bin` and `/bin`. On the Owner Mac at the fact-check, `codex` resolves to a Node launcher in the nvm `bin` directory (with `node` beside it) and `gh` is in `/usr/local/bin`, so `gh` is not on the child `PATH` there. This is the same for every Codex review, so it cannot by itself separate refused from successful reviews. |
 | `dispatch_review` environment | `dispatch_review` builds a copy of the caller's `os.environ` with `CLAUDE_CONFIG_DIR` handled, but that copy is used only by the Claude route. The Codex runner builds its own environment | n/a | The copy does not reach the Codex child. |
 | Flags | `--no-daemon`, `--ask-for-approval never`, `exec`, `--ignore-user-config`, `--ignore-rules`, `--ephemeral`, `--strict-config`, `--color never`, `--json`, `--model`, `-c model_reasoning_effort=...`, `-s read-only`, `--cd <Reviewer D6>`, prompt on stdin (`-`) | Probably a plain `codex exec "..."` | "Works through a direct `codex exec`" does not say the same flags worked. `--ignore-user-config` makes the user's Codex config unused, `--json` changes the stdout format to events, and `--strict-config` is a stricter parse. Their effects are UNKNOWN. The provider path in `providers.codex_cli` additionally passes `--skip-git-repo-check`; the reviewer path does not. |
 | Working directory | The Reviewer D6, a fresh Git worktree made per review by the lifecycle script | The caller's directory | Whether Codex reacts to a fresh worktree is UNKNOWN. |
@@ -174,12 +193,16 @@ What this does for the evidence:
   changes), and the state held in the Codex home (login, token refresh, usage
   window), which changes with time and use.
 - A static difference (a dropped variable, a flag) would fail every Codex
-  review. The Task reports successful reviews in the same hours, but their
-  route is UNKNOWN (fact 10). If those were Codex runs with the same role, static
-  differences are contradicted as the sole cause, and a difference in time-
-  or input-dependent state remains.
-- Nothing in the receipt separates these, so the differences are **candidates**
-  (C2, C6), not findings.
+  review. The stored claims show the successful reviews in the same window
+  were Codex runs (`COMPLETED` with a verdict) with the same `account_mode`
+  and `account` as the refused ones. Static differences are therefore
+  **contradicted as the sole cause**.
+- Refusals and successes interleave within minutes on that same account
+  (for example #2498 v2 succeeded at 20:16Z, #2495 v2 was refused at 20:19Z,
+  #2490 v5 succeeded at 20:20Z). A Codex-home state that changes with time
+  (login, usage window) is therefore also unlikely as the sole cause.
+- What still varies per review is the input: the PR, its head and the rendered
+  prompt (C3).
 
 ## Candidate paths
 
@@ -195,13 +218,12 @@ and whether the evidence confirms, contradicts or cannot decide it.
   `letter`.
 - **Model-run state:** UNKNOWN. The source shows only that this text was on
   stdout.
-- **Match to evidence:** consistent with every receipt field given: exit 0,
-  one line, no newline, screen passed, `cause=other`. It needs no other
-  assumption about stdout. Fact 5 notes that a notice without a trailing
-  newline is slightly less natural than one with it; UNKNOWN.
-- **Verdict:** **cannot decide.** The receipts are compatible with it, but
-  they do not show the text, so nothing in them proves the process, not the
-  parser, produced the line. The wording must avoid the listed cause words.
+- **Match to evidence:** the diagnostic fields alone (exit 0, one line, no
+  newline, screen passed, `cause=other`) would fit, but the `excerpt` prefix
+  does not (see the verdict).
+- **Verdict:** **contradicted by the receipts.** All three stored receipts
+  have an `excerpt` beginning `REPLY_SHAPE`, which only branch B writes
+  (fact 4). Branch A would have written `OUTPUT_SHAPE`.
 
 ### C2. Environment, flags or account differ between the llmtool child and the direct run
 
@@ -217,9 +239,11 @@ and whether the evidence confirms, contradicts or cannot decide it.
   "same account" in the Task may not hold for the child. A purely static
   difference fails every Codex review; a Codex-home state difference can vary
   with time.
-- **Verdict:** **cannot decide.** Contradicted as a sole static cause only if
-  the successful reviews were Codex runs with the same role. The cheap test is
-  the stored claim fields (see the check).
+- **Verdict:** **contradicted as the sole cause.** The stored claims show the
+  successful reviews were Codex runs with the same `account_mode=ROLES` and
+  `account=codex2`, interleaved within minutes with the refusals, so neither a
+  static difference nor a time-varying account state explains which reviews
+  fail. A difference can still be a necessary condition together with C3.
 
 ### C3. The input is PR-dependent: a stdin prompt the CLI answers with a one-line notice
 
@@ -229,10 +253,13 @@ and whether the evidence confirms, contradicts or cannot decide it.
   size is not stored in the claim or the receipt.
 - **Shape:** one-line CLI notice, as in C1. The input-size word list would
   catch common size wording, but not every wording.
-- **Match to evidence:** the pattern "PRs #2495 and #2508 refused, PRs #2490,
-  #2498, #2500, #2496 succeeded" is what an input-dependent cause predicts and
-  a static one does not. It is also what a time-dependent cause predicts.
-- **Verdict:** **cannot decide.** Nothing recorded separates input from time.
+- **Match to evidence:** #2495 was refused on two different heads (e115bc90
+  and 28be5945) about two hours apart, while other PRs on the same account
+  passed in between. #2490 and #2498 were each refused once and then passed on
+  later heads. This follows the PR and its input more than the time.
+- **Verdict:** **most consistent with the records**, but not proven: the
+  prompt and its size are not stored, so which input property triggers it is
+  UNKNOWN.
 
 ### C4. A readable stream with an agent message, followed by one bad line (branch B)
 
@@ -253,8 +280,12 @@ and whether the evidence confirms, contradicts or cannot decide it.
   source does not say why a non-JSON line appeared. A clean stream with a
   plain final message would instead end as `VERDICT_NOT_JSON`, not
   `OUTPUT_NOT_JSONL`.
-- **Verdict:** **cannot decide** from the Task text; the receipt `excerpt`
-  settles which branch applies (see the check below).
+- **Verdict:** **confirmed as the form** by the stored receipts: every
+  `excerpt` begins `REPLY_SHAPE`, so stdout held a readable stream whose last
+  agent message was one plain-text line (189-200 bytes, starting with a
+  letter, matching none of the cause word lists), followed by a line that is
+  not JSON. Why that line appeared, and why the message was one line, is
+  UNKNOWN. The model-run state stays UNKNOWN (F2).
 
 ### C5. A genuine one-line JSON event rejected by the strict reader
 
@@ -278,8 +309,9 @@ and whether the evidence confirms, contradicts or cannot decide it.
 - **Match to evidence:** the same lookup serves the successful reviews, so a
   fixed wrong executable would fail them too (if they used Codex). A caller
   whose `PATH` varies between runs would not.
-- **Verdict:** **cannot decide**, contradicted as a sole cause under the same
-  condition as C2.
+- **Verdict:** **contradicted as a fixed cause**: the successful reviews are
+  Codex runs through the same lookup. A caller `PATH` that varies between
+  `task advance` calls is UNKNOWN but not indicated by any record.
 
 ### Paths that the evidence excludes
 
@@ -309,37 +341,30 @@ and whether the evidence confirms, contradicts or cannot decide it.
   classifies posted comments and never reads Codex stdout; `github_identity`
   only builds the environment (see the table). Neither produces reply text.
 - **`task_advance` itself:** it only re-runs the same dispatch (fact 9) and
-  produces no reply text. If #2495 version 2 is an automatic re-run (UNKNOWN),
-  its repeat means the same prompt gave the same refusal again, which favours
-  C3, a persistent C2 state or a persistent account state over a one-off.
+  produces no reply text. The #2495 version 2 receipt has no
+  `automatic_rerun`, so it is a fresh review of a new head, not a re-run; the
+  same PR failing on two heads favours C3 over a one-off.
 
 ## Most likely cause
 
-**The Codex child, run with the llmtool-specific environment, flags, working
-directory and prompt, wrote one plain-text line to stdout and exited 0 instead
-of emitting a JSONL event stream (C1).** This is an inference, not a source
-fact. The source cannot say whether a model ran (F2).
+**Form (from the records): branch B, C4.** Each refused review's stdout was a
+readable Codex event stream whose last agent message was one plain-text line
+(189-200 bytes, starting with a letter, no cause word matched), followed by a
+line that is not JSON. The parser then refuses `OUTPUT_NOT_JSONL` at that line.
 
-Reasons:
+**Trigger (inference, not a source fact): input-dependent (C3).** The
+successful reviews in the same window ran the same route, role and account
+with the same environment and flags, interleaved within minutes, so neither a
+static difference (C2 static part, C6) nor a time-varying account state
+explains which reviews fail. What differs per review is the PR and its rendered
+prompt. #2495 failed on two heads; #2490 and #2498 failed once and then passed
+on later heads.
 
-- It is the candidate that needs the fewest assumptions beyond the receipt
-  fields: exit 0, a decodable text that the screen passed, no JSON structure.
-- C4 needs an extra condition (a stray non-JSON line inside a valid stream) and
-  a one-line plain agent message, and the receipt `excerpt` is not known to fit
-  it. C5 needs a one-event, unterminated stream. C2, C3 and C6 are not rivals
-  of C1 so much as possible reasons why the process prints the line.
-- Because the direct run works and the llmtool child differs from it in the
-  environment, flags and input (the table), the trigger is most plausibly in
-  one of those differences or in the Codex-home state they select. Which one
-  is **UNKNOWN**: a static difference would also have failed the successful
-  reviews if they were Codex runs, so a time-dependent state (login, usage
-  window) or a PR-dependent input (C3) fits the pattern better than a fixed
-  dropped variable.
-
-What the source cannot give: the text, why Codex printed it, and whether the
-trigger is account, environment, input or time. The word lists leave most
-limit, plan and sign-in wordings in `other`, so `cause=other` does not show the
-line is unrelated to a limit or login problem.
+What the records and source cannot give: the text of the one-line message, the
+content of the non-JSON line, why the stream contained that line, whether a
+model produced the message (F2), and which property of the input triggers it.
+The word lists leave most limit, plan and sign-in wordings in `other`, so
+`cause=other` does not show the line is unrelated to a limit or login problem.
 
 ## Smallest observable check
 
@@ -347,18 +372,10 @@ No step below displays, copies, logs or stores any Reviewer or Codex output,
 and none puts text from it in a comment, receipt or note (F1). Steps 2 and 3
 reuse only the closed, fixed-word diagnostic the dispatch already builds.
 
-1. **No new run: read the stored fixed fields first.** The two receipts hold
-   only fixed words and numbers, and so does the claim.
-   - `excerpt` begins `OUTPUT_SHAPE`: branch A (C1, C2, C3, C5). It begins
-     `REPLY_SHAPE`: branch B (C4).
-   - `first` is `brace` points to C5. `letter` fits C1.
-   - Presence of `automatic_rerun` on the version 2 receipt of #2495 shows
-     whether the same head failed twice.
-   - On the claims of the two refused reviews and the four successful ones,
-     compare `account_mode` and `account` (tests the account row of the
-     table) and the claim `state` (`COMPLETED` is the Codex route, fact 10).
-     If the four successes are not Codex runs, C2 and C6 are not contradicted
-     by them.
+1. **No new run: read the stored fixed fields first. Done in the fact-check
+   revision** (see "Evidence"): every `excerpt` begins `REPLY_SHAPE` (branch B,
+   C4); no receipt has `automatic_rerun`; all refused and successful claims are
+   Codex formal reviews with `account_mode=ROLES`, `account=codex2`.
 2. **One content-free replay by the PM, with the output captured, never shown.**
    Run the command `review_dispatch._codex_argv` builds for the refused head,
    with the environment `_dispatch_codex` builds, with `stdout` and `stderr`
@@ -372,7 +389,10 @@ reuse only the closed, fixed-word diagnostic the dispatch already builds.
      all obtained through the same screen gate as
      `review_dispatch._reply_diagnostic_for_raw`; a screen refusal is reported
      as `REVIEW_OUTPUT_WITHHELD` and nothing else.
-   If it gives the same shape with exit 0, C1 is confirmed as the form. The
+   Add the `OUTPUT_SHAPE` words of the first bad line (`_jsonl_shape`), which
+   give its position (`line=N of M`), byte count and `first` class without any
+   text, so the place of the non-JSON line in the stream becomes visible. If it
+   gives the same `REPLY_SHAPE` form with exit 0, the refusal reproduces. The
    replay is one more Reviewer run on the same prompt, so it is a PM decision
    that touches quota and sends the same private prompt as the review did.
 3. **Separate the sub-causes without reading text.** If step 2 reproduces it,
@@ -389,10 +409,10 @@ reuse only the closed, fixed-word diagnostic the dispatch already builds.
    `.local/state/llmtool/codex-quota.json` under the user's home
    (`_record_codex_quota`) keeps the newest `used_percent`, `window_minutes`
    and `resets_at` seen in any JSONL stream. Compare its `read_time` and
-   numbers with the two refusal times. A plain one-line stdout writes nothing
-   to it (no event is parsed), so a stale file is expected for a refused run.
-   Whether Codex emits those figures is UNKNOWN, so an absent file decides
-   nothing.
+   numbers with the refusal times. `_record_codex_quota` runs before parsing,
+   and a branch B stream contains parsable events, so a refused run may update
+   the file. Whether Codex emits those figures is UNKNOWN, so an absent or
+   stale file decides nothing.
 
 Follow-up (not done here, outside this Task's write scope): the receipt could
 store the child's exit status and the stdout and stderr byte counts, and a
@@ -402,13 +422,12 @@ answers step 2 without a replay and without anyone reading output.
 
 ## Not decidable from the source (UNKNOWN)
 
-- What Codex prints on stdout, instead of JSONL events, and when it does so
-  with exit 0.
+- The text of the one-line agent message, the content and position of the
+  non-JSON line, and why the stream contained it with exit 0.
 - Whether a Codex model run took place in any refused review.
 - What `--ephemeral`, `--strict-config`, `--ignore-user-config` and `--json`
   do inside Codex, and what Codex does for a fresh Git worktree, a pipe-only
   terminal or `LC_ALL=C`.
 - What the rendered review prompt (from `task_submission_cli`) adds to stdin.
-- The Reviewer route of the four successful reviews, the claims'
-  `account_mode` and `account`, and the environment, flags and directory of the
-  direct `codex exec` that worked.
+- Which property of the PR or rendered prompt triggers the refusal (C3).
+- The environment, flags and directory of the direct `codex exec` that worked.
