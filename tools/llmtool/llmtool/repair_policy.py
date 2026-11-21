@@ -1,6 +1,6 @@
 """#1502 WP-D: limits for review repair, AI Debug, split, REPLAN and test failures.
 
-#2281 row 18 limits (basis #819): Developer assignment wait.
+#2281 row 18 limits (basis #819): Developer assignment wait and expiry.
 
 The numbers live only in tools/llmtool/policy.json (spec section 5); no caller
 overrides them. The functions here are pure: callers pass counts derived from
@@ -40,13 +40,21 @@ OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
 #           read by scripts/d6_worktree_lifecycle.py, which has no default)
 #   row 18: developer_assignment_wait_seconds (#819: Developer assignment wait;
 #           caller default llmtool.developer_assignment_inbox.DEFAULT_WAIT_SECONDS)
+#           and developer_assignment_expiry_seconds (#819: Developer
+#           assignment expiry, how long an assignment stays valid; caller
+#           default llmtool.developer_assignment_inbox.DEFAULT_EXPIRY_SECONDS)
 OPTIONAL_POSITIVE_POLICY_KEYS = ('spec_preflight_large_file_lines', 'merge_train_members_max',
                                  'merge_train_files_per_pr_max', 'revert_scope_prs_max',
-                                 'd6_writer_lease_hours', 'developer_assignment_wait_seconds')
+                                 'd6_writer_lease_hours', 'developer_assignment_wait_seconds',
+                                 'developer_assignment_expiry_seconds')
 # #2281 row 18 (basis #819): Developer assignment wait. The key above is
 # optional; a policy that omits it keeps the caller default, the hard-coded
 # wait at its point of use (llmtool.developer_assignment_inbox).
 DEVELOPER_ASSIGNMENT_WAIT_SECONDS = 540
+# #2281 row 18 (basis #819): Developer assignment expiry. The key above is
+# optional; a policy that omits it keeps the caller default, the hard-coded
+# expiry at its point of use (llmtool.developer_assignment_inbox).
+DEVELOPER_ASSIGNMENT_EXPIRY_SECONDS = 600
 # #2281 L0a (design rule 3): the bound is a real technical limit, not an
 # arbitrary cap. policy.json is untrusted input, so load_policy reads at most
 # _MAX_BYTES + 1 bytes in one bounded buffer instead of the whole file. The
@@ -119,6 +127,17 @@ def assignment_wait_seconds(path=None):
     policy = load_policy(path)
     return policy.get('developer_assignment_wait_seconds',
                       DEVELOPER_ASSIGNMENT_WAIT_SECONDS)
+
+
+def assignment_expiry_seconds(path=None):
+    """#2281 row 18 (basis #819): the Developer assignment expiry, in seconds.
+
+    The key is optional; a policy that omits it keeps the caller default, the
+    hard-coded expiry at its point of use (llmtool.developer_assignment_inbox).
+    """
+    policy = load_policy(path)
+    return policy.get('developer_assignment_expiry_seconds',
+                      DEVELOPER_ASSIGNMENT_EXPIRY_SECONDS)
 
 
 KINDS = ('root', 'child', 'replan')
