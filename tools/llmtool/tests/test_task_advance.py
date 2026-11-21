@@ -88,8 +88,10 @@ def remote_receipt(record, *, source_sha=HEAD, result='PASS', excerpt=None,
         'task_id': record['task_id'], 'run_id': record['run_id'],
         'executor_task': executor_task, 'source_sha': source_sha,
         'result': result, 'modules': ['test_task_advance'],
-        'ran_total': 1, 'elapsed_s': 0.01, 'final': ['OK'], 'failures': [],
+        'ran_total': 1, 'elapsed_s': 0.01,
     }
+    if result == 'PASS':
+        receipt.update(final=['OK'], failures=[])
     if excerpt is not None:
         receipt['failure_excerpt'] = excerpt
     receipt.update(changes)
