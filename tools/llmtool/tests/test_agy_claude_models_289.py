@@ -66,7 +66,9 @@ class AgyClaudeModelTests(unittest.TestCase):
                       'CLAUDE-SONNET-5-5-MEDIUM', 'claude/sonnet/5/5/medium',
                       'claude-sonnet-5-5-medium/..', '../claude-sonnet-5-5-medium',
                       'claude--5-5-medium', 'claude-sonnet--medium',
-                      'claude-sonnet-5-5-'):
+                      'claude-sonnet-5-5-', 'claude-sonnet-medium-high',
+                      'claude-sonnet-low-medium', 'claude-sonnet-5-5-medium-high',
+                      'claude-sonnet-5.5.medium'):
             with self.subTest(model=model):
                 self.assert_refused(model)
 

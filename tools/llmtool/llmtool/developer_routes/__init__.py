@@ -118,8 +118,12 @@ _GEMINI_FAMILY_PATTERN = r'gemini-[a-z0-9][a-z0-9.-]{0,120}'
 # (agy models lists claude-sonnet-5-5-{low,medium,high} and
 # claude-opus-5-5-{low,medium,high}). The effort suffix is mandatory, so a
 # bare Claude id stays refused on this route.
+# The version is one or more numeric groups (for example 5-5 or 5.5), so an
+# effort word can never stand in for it: 'claude-sonnet-medium-high' and
+# 'claude-sonnet-5-5-medium-high' are malformed and stay refused.
 _AGY_CLAUDE_FAMILY_PATTERN = (
-    r'claude-[a-z][a-z0-9]*-[a-z0-9]+(?:[.-][a-z0-9]+)*-(?:low|medium|high)')
+    r'claude-[a-z][a-z0-9]*-[0-9]+(?:\.[0-9]+)*(?:-[0-9]+(?:\.[0-9]+)*)*'
+    r'-(?:low|medium|high)')
 # Owner #289: the Gemini family that shares the AGY route. A Claude id that
 # names it is another family's identifier, so it stays refused (symmetry with
 # the Gemini branch, which refuses Claude and Codex markers).
@@ -130,9 +134,9 @@ def _agy_model_ok(value):
     """An AGY route model: a Gemini id, or a Claude id with a served effort.
 
     Owner #289: the Claude ids AGY serves (claude-<name>-<version>-<effort>)
-    are admitted alongside Gemini ids. Codex/GPT ids, Gemini ids, other
-    families, bare Claude ids without an effort suffix and malformed ids stay
-    refused. No owner override relaxes this check (route_has_family_check).
+    are admitted alongside Gemini ids. Codex/GPT ids, other families, bare
+    Claude ids without a numeric version and effort suffix, and malformed ids
+    stay refused. No owner override relaxes this check (route_has_family_check).
     """
     import re
 
