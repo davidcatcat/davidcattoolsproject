@@ -1149,7 +1149,9 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
     if log_path is not None:
         try:
             raw_log = Path(log_path).read_bytes()
-            if len(raw_log) > 4 * 1024 * 1024:
+            # #2281: the route log is read on the Developer result path, so it
+            # follows the same 5 MiB ceiling as every other route byte bound.
+            if len(raw_log) > HARD_MAX_BYTE_BOUND:
                 raise RouteError(_route_code(route, 'MODEL_UNVERIFIED'))
             log_text = raw_log.decode('utf-8')
         except RouteError:
