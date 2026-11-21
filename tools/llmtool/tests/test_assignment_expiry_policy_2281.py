@@ -166,27 +166,28 @@ class AssignmentExpiryPolicyTest(unittest.TestCase):
     def test_invalid_policy_refuses(self):
         # A configured value that is not a positive whole number...
         bad = dict(BASE, **{ROW18_KEY: 0})
-        with self.assertRaises(LLMToolError) as caught:
-            self._assign_refused_bad(bad)
-        self.assertEqual(str(caught.exception), 'POLICY_INVALID')
+        exc = self._assign_refused_bad(bad)
+        self.assertEqual(str(exc), 'POLICY_INVALID')
         # ...as is a policy that misses a required key; neither falls back
         # to the old hard-coded expiry.
         missing = dict(BASE)
         del missing['review_fail_max']
-        with self.assertRaises(LLMToolError) as caught:
-            self._assign_refused_bad(dict(missing, **{ROW18_KEY: 300}))
-        self.assertEqual(str(caught.exception), 'POLICY_INVALID')
+        exc = self._assign_refused_bad(dict(missing, **{ROW18_KEY: 300}))
+        self.assertEqual(str(exc), 'POLICY_INVALID')
 
     def _assign_refused_bad(self, policy):
+        """Assign with an invalid policy; returns the refusal, and the store
+        must stay empty (nothing written, nothing fell back silently)."""
         store = _Store()
         path = self._write(policy)
         first, second = _gates()
         with first, second:
-            with self.assertRaises(LLMToolError):
+            with self.assertRaises(LLMToolError) as caught:
                 assign(store, worker='w', d6_task_id='D6-1',
                        common_dir='/tmp/git', pm_session_key='pm',
                        policy_path=path, now=_NOW)
         self.assertEqual(store.records, [])
+        return caught.exception
 
     # A4
     def test_explicit_expiry_keeps_its_value(self):
