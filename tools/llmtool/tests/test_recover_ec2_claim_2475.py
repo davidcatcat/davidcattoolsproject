@@ -267,6 +267,37 @@ class RecoverEc2ClaimTests(unittest.TestCase):
         self.assertEqual(caught.exception.review_repair_code,
                          'REPAIR_RECOVERY_EVIDENCE_INVALID')
 
+    def test_d2_active_d6_developer_without_process_evidence_refuses(self):
+        # A D6-bound Developer that is still active but has no recorded process
+        # (provider launch in progress, PID not yet written) is UNKNOWN, not absent.
+        root = self._make_ec2()
+        _root, claim = self._root_and_claim()
+        for state in ('DEVELOPER_DISPATCHING', 'DEVELOPER_PENDING',
+                      'DEVELOPER_OUTCOME_UNKNOWN'):
+            for execution in (None, {}):
+                live = {
+                    'task_id': 'd' * 32,
+                    'developer': {'executor_task_id': EXECUTOR, 'state': state,
+                                  'execution': execution},
+                }
+                view = _StoreView(self.store, live['task_id'], live,
+                                  extra_ids=[live['task_id']])
+                self.assertEqual(rec._d6_process_status(view, EXECUTOR), 'UNKNOWN')
+                with self.subTest(state=state, execution=execution), \
+                        self.assertRaises(LLMToolError) as caught:
+                    rec.verify_ec2_recovery(
+                        view, root, self.repair, executor_task=EXECUTOR, pr_number=PR,
+                        registered_d6=_clean_d6(claim['head_sha']))
+                self.assertEqual(caught.exception.review_repair_code,
+                                 'REPAIR_RECOVERY_EVIDENCE_INVALID')
+        # A terminal Developer holds no process, so it does not block recovery.
+        done = {'task_id': 'd' * 32,
+                'developer': {'executor_task_id': EXECUTOR,
+                              'state': 'DEVELOPER_RESPONDED', 'execution': None}}
+        only = types.SimpleNamespace(task_ids=lambda: [done['task_id']],
+                                     get=lambda task_id: done)
+        self.assertEqual(rec._d6_process_status(only, EXECUTOR), 'NONE')
+
     def test_e_non_unknown_other_pr_or_executor_refuses(self):
         for kwargs, code in (
                 ({'pr_number': PR + 1}, 'REPAIR_RECOVERY_CLAIM_INVALID'),

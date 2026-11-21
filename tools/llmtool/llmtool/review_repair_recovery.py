@@ -323,6 +323,12 @@ def _d6_process_status(store, executor_task):
         status = _execution_process_status(
             developer.get('execution') if type(developer) is dict else None)
         if status is None:
+            # No verifiable process evidence. A terminal Developer holds no process;
+            # an active one (for example DEVELOPER_DISPATCHING before its PID is
+            # recorded) may be launching a provider now, so it is UNKNOWN, not absent.
+            if (type(developer) is dict and developer_d6 == executor_task and
+                    developer.get('state') not in _TERMINAL):
+                uncertain = True
             continue
         seen = True
         if status == 'ALIVE':
