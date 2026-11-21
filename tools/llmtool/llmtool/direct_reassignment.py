@@ -61,8 +61,9 @@ _TASK_ID = re.compile(r'[0-9a-f]{32}\Z')
 # The relayed comment must also name this exact repair Task id and explicitly
 # approve this void, so an ordinary PM progress comment or an unanswered Owner
 # request never authorises one. The repository's activity marker is
-# ``<!-- activity: key=value ... -->``; an Owner answer is an ``owner_*``
-# decision whose status or decision is an approval.
+# ``<!-- activity: key=value ... -->``; an Owner answer is either an
+# ``owner_*`` decision or the established ``pm_progress`` relay, whose status
+# or decision is an approval and whose text affirmatively approves this void.
 _OWNER_RELAY_MARKER = re.compile(
     r'(?<![A-Za-z0-9_=-])actor=PM(?![A-Za-z0-9_=-])')
 _ACTIVITY_MARKER = re.compile(r'<!--\s*activity:\s*([^>]*?)\s*-->')
@@ -73,6 +74,50 @@ _OWNER_APPROVAL_STATUSES = frozenset((
 _OWNER_APPROVAL_DECISIONS = frozenset((
     'APPROVE', 'APPROVED', 'ACCEPT', 'ACCEPTED', 'VOID', 'VOID_APPROVED',
     'APPROVED_VOID', 'VOID_HISTORICAL_DISPATCH'))
+# The documented PM relay of an Owner answer may use a plain progress type
+# rather than an owner_* activity type; it is accepted only with an explicit
+# approval of this void in its quoted decision.
+_PM_RELAY_TYPES = frozenset(('pm_progress', 'pm_relay'))
+# A denial, rejection or explicit non-approval never authorises a void, even
+# when an approval marker or the reason token also occurs.
+_OWNER_DENIAL_STATUSES = frozenset((
+    'DENIED', 'DENY', 'REJECTED', 'REJECT', 'DECLINED', 'DECLINE', 'REFUSED',
+    'REFUSE', 'DISAPPROVED', 'NOT_APPROVED', 'NO'))
+_OWNER_DENIAL_DECISIONS = frozenset((
+    'DENY', 'DENIED', 'REJECT', 'REJECTED', 'DECLINE', 'DECLINED', 'REFUSE',
+    'REFUSED', 'DISAPPROVE', 'DISAPPROVED', 'NOT_APPROVED', 'NO'))
+_OWNER_DENIAL = re.compile(
+    r'(?i)(?<![A-Za-z0-9_])(?:'
+    r'den(?:y|ies|ied|ying)|'
+    r'reject(?:s|ed|ing)?|'
+    r'declin(?:e|es|ed|ing)|'
+    r'refus(?:e|es|ed|ing)|'
+    r'disapprov(?:e|es|ed|al|ing)|'
+    r'unapprov(?:ed)?|'
+    r'not\s+(?:be(?:en)?\s+)?(?:approv(?:e|ed|es|al)|grant(?:ed|s)?)|'
+    r"(?:cannot|can't|cant)\s+(?:approv(?:e|ed)|grant(?:ed)?)|"
+    r'(?:did|do|does|has|have|had|is|are|was|were|will|would)\s+not\s+'
+    r'(?:approv(?:e|ed)|grant(?:ed)?)|'
+    r'never\s+(?:approv(?:e|ed)|grant(?:ed)?)|'
+    r'no\s+approval|without\s+approval|'
+    r'approval\s+(?:is|was|has\s+been)?\s*(?:not|never)\s+given|'
+    r'(?:do|does|did|must|should|shall|will|would)\s+not\s+(?:be\s+)?void|'
+    r'not\s+(?:be\s+)?authori[sz]ed|unauthori[sz]ed|'
+    r'withh(?:eld|old)|'
+    r'(?:no|not|never)\s+owner_approved_void'
+    r')(?![A-Za-z0-9_])')
+# The approval must be an affirmative decision about this void, not merely the
+# word "void" somewhere in the comment.
+_VOID_APPROVAL = re.compile(
+    r'(?i)(?<![A-Za-z0-9_])(?:'
+    r'approv(?:e|es|ed|al)\s+(?:(?:of|for)\s+)?(?:the\s+|this\s+|a\s+|an\s+)?'
+    r'(?:historical\s+|counted\s+)?void(?:ing|ed|s)?|'
+    r'approv(?:e|es|ed)\s+(?:the\s+|this\s+|a\s+|an\s+)?'
+    r'(?:request|proposal|decision)\s+to\s+void(?:ing|ed)?|'
+    r'approv(?:e|es|ed)\s+to\s+void(?:ing|ed)?|'
+    r'void(?:ing|ed|s)?\s+(?:is|was|has\s+been|be)\s+(?:explicitly\s+)?approved|'
+    r'approval\s+(?:of|for)\s+(?:the\s+|this\s+)?(?:historical\s+)?void'
+    r')(?![A-Za-z0-9_])')
 # The explicit reason token an Owner approval may carry instead of an activity
 # marker. It is the stored void reason, not an ordinary PM progress word.
 _OWNER_VOID_TOKEN = re.compile(
@@ -259,24 +304,34 @@ def _read_owner_comment(owner_ref):
 
 
 def _owner_void_approved(body):
-    """True only for an explicit Owner approval of this historical void.
+    """True only for an unambiguous affirmative Owner approval of this void.
 
-    A plain PM relay marker is not enough: an ordinary PM progress comment or
-    an unanswered Owner request also carries the Task id. The body must carry
-    either the explicit ``OWNER_APPROVED_VOID`` reason token or an established
-    activity marker naming an ``owner_*`` decision with an approved status,
-    and it must direct a void.
+    A relay marker or the reason token alone is not enough: a denial,
+    rejection or explicit non-approval anywhere in the relay refuses the void,
+    even if an approval marker or ``OWNER_APPROVED_VOID`` also occurs. An
+    activity marker must also carry an affirmative decision about this void,
+    not merely the word "void" somewhere in the body.
     """
-    if _OWNER_VOID_TOKEN.search(body) is not None:
-        return True
-    if _VOID_DIRECTIVE.search(body) is None:
+    if _OWNER_DENIAL.search(body) is not None:
         return False
     for match in _ACTIVITY_MARKER.finditer(body):
         attributes = dict(_ACTIVITY_ATTRIBUTE.findall(match.group(1)))
+        if ((attributes.get('status') or '').upper() in _OWNER_DENIAL_STATUSES or
+                (attributes.get('decision') or '').upper() in _OWNER_DENIAL_DECISIONS):
+            return False
+    if _OWNER_VOID_TOKEN.search(body) is not None:
+        return True
+    if _VOID_DIRECTIVE.search(body) is None or _VOID_APPROVAL.search(body) is None:
+        return False
+    for match in _ACTIVITY_MARKER.finditer(body):
+        attributes = dict(_ACTIVITY_ATTRIBUTE.findall(match.group(1)))
+        kind = (attributes.get('type') or '').lower()
+        status = (attributes.get('status') or '').upper()
+        decision = (attributes.get('decision') or '').upper()
         if (attributes.get('actor') == 'PM' and
-                attributes.get('type', '').startswith('owner_') and
-                (attributes.get('status') in _OWNER_APPROVAL_STATUSES or
-                 attributes.get('decision') in _OWNER_APPROVAL_DECISIONS)):
+                (kind.startswith('owner_') or kind in _PM_RELAY_TYPES) and
+                (status in _OWNER_APPROVAL_STATUSES or
+                 decision in _OWNER_APPROVAL_DECISIONS)):
             return True
     return False
 

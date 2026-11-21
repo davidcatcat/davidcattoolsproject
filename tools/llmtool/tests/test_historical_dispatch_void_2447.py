@@ -856,6 +856,42 @@ class HistoricalDispatchVoidTests(unittest.TestCase):
             self.store.get(task_id)['developer']['voided_assignments'][0]['owner_ref'],
             OWNER_REF)
 
+    def test_r_a_pm_progress_relay_of_an_approved_owner_answer_admits_the_void(self):
+        task_id = self._historical()
+        body = (
+            '<!-- activity: type=pm_progress actor=PM target=Owner status=ANSWERED -->\n'
+            f'PM relayed the Owner answer: the Owner approved the void of Task {task_id}.')
+        self._void(task_id, read_comment=lambda _ref: body)
+        self.assertEqual(
+            self.store.get(task_id)['developer']['voided_assignments'][0]['owner_ref'],
+            OWNER_REF)
+
+    def test_q_a_denied_void_is_refused_even_with_an_answered_approval_marker(self):
+        task_id = self._historical()
+        bodies = {
+            'owner denied the request': (
+                '<!-- activity: type=owner_approval actor=PM target=Owner '
+                'status=ANSWERED -->\n'
+                f'Owner denied the request to void Task {task_id}.'),
+            'pm relay of a denial': (
+                '<!-- activity: type=pm_progress actor=PM target=Owner '
+                'status=ANSWERED -->\n'
+                'PM relayed the Owner answer: the Owner did not approve the void '
+                f'of Task {task_id}.'),
+            'token denied': (
+                f'Owner did not approve OWNER_APPROVED_VOID for Task {task_id}. '
+                'actor=PM'),
+            'denied activity status': (
+                '<!-- activity: type=owner_decision actor=PM target=Owner '
+                'status=DENIED -->\n'
+                f'Owner approved nothing; OWNER_APPROVED_VOID for Task {task_id}. '
+                'actor=PM'),
+        }
+        for name, body in bodies.items():
+            with self.subTest(name=name):
+                self._refused('DIRECT_HISTORICAL_VOID_OWNER_APPROVAL_MISSING', task_id,
+                              read_comment=lambda _ref, body=body: body)
+
     # --- (s) the comment URL must be its canonical comment identity ------------
 
     def test_s_an_aliased_comment_url_is_refused_by_the_real_reader(self):
