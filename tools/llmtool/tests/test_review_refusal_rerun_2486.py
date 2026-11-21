@@ -12,6 +12,7 @@ import test_review_dispatch as base
 from test_review_dispatch import HEAD, setUpModule, tearDownModule  # noqa: F401
 
 TASK = 'a' * 32
+RUN = 'b' * 32
 CONTRACT = 'd' * 64
 OTHER_HEAD = 'c' * 40
 PR = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'merged': False}
