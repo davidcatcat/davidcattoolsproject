@@ -409,7 +409,11 @@ _DIRECT_HANDOFF_HISTORY = 'direct_handoffs'
 # #2447: the audit trail of a historical direct assignment that was voided.
 _DIRECT_VOID_HISTORY = 'voided_assignments'
 _DIRECT_VOID_BOUNDARY = 'HISTORICAL_VOID'
-_DIRECT_VOID_REASON = 'HISTORICAL_NO_LAUNCH_EVIDENCE'
+# The reason is the Owner's decision. It claims no proof that nothing launched.
+_DIRECT_VOID_REASON = 'OWNER_APPROVED_VOID'
+_DIRECT_VOID_REF = re.compile(
+    r'https://github\.com/[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}'
+    r'/issues/[1-9][0-9]*#issuecomment-[1-9][0-9]*\Z')
 _DEVELOPER_OPTIONAL_FIELDS = (frozenset((_DIRECT_DISPATCH_BOUNDARY, _DIRECT_HANDOFF_HISTORY,
                                          _DIRECT_VOID_HISTORY)) |
                               _DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS |
@@ -418,10 +422,13 @@ _DEVELOPER_OPTIONAL_FIELDS = (frozenset((_DIRECT_DISPATCH_BOUNDARY, _DIRECT_HAND
 
 def _valid_voided_assignments(entries):
     fields = {'assignment_id', 'provider_profile', 'source_sha', 'created_at',
-              'record_sha256', 'reason', 'recorded_at'}
+              'record_sha256', 'reason', 'recorded_at', 'task_id', 'owner_ref'}
     return (type(entries) is list and 0 < len(entries) <= 8 and
             all(type(entry) is dict and set(entry) == fields and
                 _safe_identifier(entry['assignment_id'], TASK_ID) and
+                _safe_identifier(entry['task_id'], TASK_ID) and
+                type(entry['owner_ref']) is str and len(entry['owner_ref']) <= 256 and
+                _DIRECT_VOID_REF.fullmatch(entry['owner_ref']) is not None and
                 entry['provider_profile'] in _DIRECT_DISPATCH_PROFILES and
                 type(entry['source_sha']) is str and
                 re.fullmatch(r'[0-9a-f]{40}', entry['source_sha']) is not None and
@@ -4573,23 +4580,25 @@ class TaskStore:
             changes={'developer': replacement, 'completion': completion},
             direct_reassign_verify=verify_binding)
 
-    def void_historical_direct_dispatch(self, task_id, *, current, verify):
+    def void_historical_direct_dispatch(self, task_id, *, current, owner_ref, verify):
         """#2447: void one historical direct assignment, once, keeping it in history.
 
-        The record is written under the Task lock only when ``verify`` (the live
-        D6 and process checks) returns True and the stored record is exactly
-        ``current``. The assignment, claim and counts are untouched; the record
-        gains the PREPARED boundary and one voided_assignments entry, so only
-        the #2440 reassignment can follow. A second or concurrent void sees a
-        changed record and raises TaskStoreConflict.
+        The record is written under the Task lock only when ``verify`` (the
+        Owner relay, live D6 and process checks) returns True and the stored
+        record is exactly ``current``. The assignment, claim and counts are
+        untouched; the record gains the PREPARED boundary and one
+        voided_assignments entry naming the Task and the Owner relay URL, so
+        only the #2440 reassignment can follow. A second or concurrent void sees
+        a changed record and raises TaskStoreConflict.
         """
         old = current.get('developer')
-        if type(old) is not dict:
+        if type(old) is not dict or current.get('task_id') != task_id:
             _fail('DIRECT_HISTORICAL_VOID_EVIDENCE_INVALID')
         entry = {
             'assignment_id': old.get('assignment_id'),
             'provider_profile': old.get('provider_profile'),
             'source_sha': old.get('source_sha'), 'created_at': old.get('created_at'),
+            'task_id': task_id, 'owner_ref': owner_ref,
             'record_sha256': current['record_sha256'], 'reason': _DIRECT_VOID_REASON,
             'recorded_at': datetime.now(timezone.utc).strftime(_UTC_SECONDS),
         }
@@ -6112,6 +6121,7 @@ class TaskStore:
                              entry['provider_profile'] == old.get('provider_profile') and
                              entry['source_sha'] == old.get('source_sha') and
                              entry['created_at'] == old.get('created_at') and
+                             entry['task_id'] == task_id and
                              entry['record_sha256'] == current.get('record_sha256') and
                              direct_historical_void() is True)
                 elif direct_dispatch_boundary == 'PREPARED':

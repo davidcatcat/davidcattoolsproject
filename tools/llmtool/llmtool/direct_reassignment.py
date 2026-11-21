@@ -1,6 +1,5 @@
 """Recover the single writer of a clean direct-Developer worktree."""
 from dataclasses import dataclass, replace
-from datetime import datetime
 import hashlib
 import json
 import os
@@ -49,15 +48,17 @@ def replacement_candidate(developer):
             (state == 'DEVELOPER_OUTCOME_UNKNOWN' and phase == 'STOPPED'))
 
 
-# #2447: a direct assignment recorded before launch-boundary recording (#2440)
-# carries no dispatch_boundary. Every record created on or after this instant
-# is written by code that records the boundary, so a missing boundary there is
-# never proof of "never launched". The exact #2440 deployment instant is not
-# recorded in the repository (UNKNOWN); this later bound is safe because new
-# code always writes the boundary, and the other void conditions still apply.
-HISTORICAL_BOUNDARY_CUTOFF = '2026-11-21T00:00:00Z'
-_UTC_SECONDS = '%Y-%m-%dT%H:%M:%SZ'
+# #2447 (Owner decision A on #2413): llmtool never infers "not started" from
+# missing launch evidence, and it uses no date cutoff. A direct assignment
+# recorded before launch-boundary recording (#2440) carries no dispatch_boundary
+# and no launch record; that absence proves nothing. It is voided only by an
+# explicit command that carries an Owner relay URL for that exact repair Task,
+# and only when every other check below also holds.
 _LSOF_PATHS = ('/usr/sbin/lsof', '/usr/bin/lsof')
+_PS_PATHS = ('/bin/ps', '/usr/bin/ps')
+_TASK_ID = re.compile(r'[0-9a-f]{32}\Z')
+_PATH_CHAR_BEFORE = r'(?<![A-Za-z0-9._@+%/-])'
+_PATH_CHAR_AFTER = r'(?![A-Za-z0-9._@+%-])'
 # Result or recovery fields a never-launched historical assignment cannot carry.
 _VOID_FORBIDDEN_FIELDS = frozenset((
     'reported', 'changed_files', 'progress', 'final_answer', 'result_status',
@@ -77,22 +78,13 @@ def historical_candidate(developer):
             'dispatch_boundary' not in developer and developer.get('execution') is None)
 
 
-def d6_processes(root):
-    """PIDs of this user's processes whose working directory is inside root.
-
-    Fails closed: a missing or failing lsof, or an unreadable answer, refuses.
-    The caller's own process and the lsof child are not counted.
-    """
-    tool = next((path for path in _LSOF_PATHS if os.access(path, os.X_OK)), None)
-    if tool is None or type(root) is not str or not os.path.isabs(root):
-        _refuse('DIRECT_HISTORICAL_VOID_PROCESS_UNVERIFIED')
+def _capture(argv):
+    """Run one read-only listing; return (stdout text, own child pid). Fails closed."""
     import subprocess
     try:
-        base = os.path.realpath(root)
         child = subprocess.Popen(
-            [tool, '-w', '-n', '-P', '-a', '-u', str(os.getuid()), '-d', 'cwd', '-Fpn'],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            env={'PATH': '/usr/bin:/bin'})
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, env={'PATH': '/usr/bin:/bin'})
         try:
             output, _ = child.communicate(timeout=30)
         except BaseException:
@@ -101,19 +93,56 @@ def d6_processes(root):
             raise
     except (OSError, subprocess.SubprocessError):
         _refuse('DIRECT_HISTORICAL_VOID_PROCESS_UNVERIFIED')
-    if child.returncode != 0:
+    if child.returncode != 0 or type(output) is not bytes:
         _refuse('DIRECT_HISTORICAL_VOID_PROCESS_UNVERIFIED')
-    ignored = {os.getpid(), child.pid}
+    return output.decode('utf-8', 'surrogateescape'), child.pid
+
+
+def d6_processes(root):
+    """PIDs of processes bound to the D6 at root by cwd, open file or command line.
+
+    Two listings, both required (fails closed on a missing tool, a failing tool
+    or an unreadable answer):
+
+    - lsof lists every open file of this user's processes: the working
+      directory, executables, mapped files and every open descriptor. Any name
+      inside root counts, so a process with another cwd that holds a D6 file
+      open is found.
+    - ps lists every process's full command line. Any argument naming root
+      (also as ``--dir=ROOT``) counts, so a provider started against the D6
+      from elsewhere is found.
+
+    The caller's own process and the listing children are not counted.
+    """
+    lsof = next((path for path in _LSOF_PATHS if os.access(path, os.X_OK)), None)
+    ps = next((path for path in _PS_PATHS if os.access(path, os.X_OK)), None)
+    if (lsof is None or ps is None or type(root) is not str or not os.path.isabs(root)):
+        _refuse('DIRECT_HISTORICAL_VOID_PROCESS_UNVERIFIED')
+    base = os.path.realpath(root)
+    names = {base.rstrip('/'), root.rstrip('/')}
+    named = re.compile('|'.join(
+        _PATH_CHAR_BEFORE + re.escape(name) + _PATH_CHAR_AFTER
+        for name in sorted(names) if name))
+    files, lsof_child = _capture(
+        [lsof, '-w', '-n', '-P', '-a', '-u', str(os.getuid()), '-Fpn'])
+    commands, ps_child = _capture([ps, '-ww', '-A', '-o', 'pid=,args='])
+    ignored = {os.getpid(), lsof_child, ps_child}
     pids = []
     pid = None
-    for line in output.decode('utf-8', 'surrogateescape').splitlines():
+    for line in files.splitlines():
         if line.startswith('p') and line[1:].isdigit():
             pid = int(line[1:])
         elif line.startswith('n') and pid is not None:
             where = os.path.realpath(line[1:]) if line[1:].startswith('/') else line[1:]
             if (where == base or where.startswith(base.rstrip('/') + '/')) and pid not in ignored:
                 pids.append(pid)
-    return pids
+    for line in commands.splitlines():
+        fields = line.split(None, 1)
+        if len(fields) != 2 or not fields[0].isdigit():
+            continue
+        if int(fields[0]) not in ignored and named.search(fields[1]):
+            pids.append(int(fields[0]))
+    return sorted(set(pids))
 
 
 def _check_no_process(root, process_probe):
@@ -129,25 +158,60 @@ def _check_no_process(root, process_probe):
         _refuse('DIRECT_HISTORICAL_VOID_PROCESS_LIVE')
 
 
-def _before_cutoff(developer, cutoff):
-    created = developer.get('created_at')
+def owner_relay_pattern():
+    """The one accepted Owner relay URL shape on this repository."""
+    from . import trust
+
     try:
-        stamp = datetime.strptime(created, _UTC_SECONDS)
-        bound = datetime.strptime(cutoff, _UTC_SECONDS)
-    except (TypeError, ValueError):
-        _refuse('DIRECT_HISTORICAL_VOID_NOT_HISTORICAL')
-    if stamp.strftime(_UTC_SECONDS) != created or stamp >= bound:
-        _refuse('DIRECT_HISTORICAL_VOID_NOT_HISTORICAL')
+        slug = trust.load_trust().repository['slug']
+    except Exception:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_REF_INVALID')
+    if type(slug) is not str:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_REF_INVALID')
+    return re.compile(r'https://github\.com/' + re.escape(slug) +
+                      r'/issues/[1-9][0-9]*#issuecomment-[1-9][0-9]*\Z')
 
 
-def _check_void(store, task, registration, snapshot, executor_task, process_probe, cutoff):
+def _relay_used_elsewhere(store, task_id, owner_ref):
+    """True when this relay URL is already recorded on another Task's void."""
+    for other_id in store.task_ids():
+        if other_id == task_id:
+            continue
+        developer = store.get(other_id).get('developer')
+        for entry in (developer or {}).get('voided_assignments') or []:
+            if type(entry) is dict and entry.get('owner_ref') == owner_ref:
+                return True
+    return False
+
+
+def check_owner_relay(store, task, owner_ref, owner_task):
+    """The Owner decision named by the PM must be for this exact repair Task.
+
+    llmtool cannot read the comment body (no network). It binds the URL to the
+    one Task the PM names: the named Task must be this Task, the URL must be an
+    Issue comment link on this repository, and a URL already recorded for
+    another Task's void is never reused. The PM states in the relay body which
+    repair Task the Owner approved.
+    """
+    task_id = task.get('task_id')
+    if (type(owner_task) is not str or _TASK_ID.fullmatch(owner_task) is None or
+            owner_task != task_id):
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_TASK_MISMATCH')
+    if type(owner_ref) is not str or owner_relay_pattern().fullmatch(owner_ref) is None:
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_REF_INVALID')
+    if _relay_used_elsewhere(store, task_id, owner_ref):
+        _refuse('DIRECT_HISTORICAL_VOID_OWNER_TASK_MISMATCH')
+
+
+def _check_void(store, task, registration, snapshot, executor_task, process_probe,
+                owner_ref, owner_task):
     """Every void condition on one stored record; any miss refuses."""
+    check_owner_relay(store, task, owner_ref, owner_task)
     developer = task.get('developer')
     if not historical_candidate(developer):
         _refuse('DIRECT_HISTORICAL_VOID_NOT_HISTORICAL')
     profile = developer['provider_profile']
     identity = AGENTS[profile]
-    _before_cutoff(developer, cutoff)
     # No execution (checked above), artifact, usage, error, report or recovery trail.
     if (_VOID_FORBIDDEN_FIELDS & set(developer) or
             any(developer.get(field) is not None for field in (
@@ -197,21 +261,25 @@ def _check_void(store, task, registration, snapshot, executor_task, process_prob
 
 
 def void_historical(store, task, registration, snapshot, *, executor_task,
-                    process_probe=None, cutoff=HISTORICAL_BOUNDARY_CUTOFF):
-    """Void one historical DISPATCHING assignment that provably never started.
+                    owner_ref, owner_task, process_probe=None):
+    """Void one historical DISPATCHING assignment on an explicit Owner approval.
 
-    The assignment stays in the Task record (voided_assignments and the
-    PREPARED boundary); the repair claim, family, attempt and counts are not
-    touched. The ordinary #2440 reassignment then creates the new assignment.
-    Any unmet condition refuses; a second or concurrent void refuses
+    This is the Owner's decision, not a finding that the provider never ran:
+    the record keeps the Owner relay URL and states no launch proof. The
+    assignment stays in the Task record (voided_assignments and the PREPARED
+    boundary); the repair claim, family, attempt and counts are not touched. The
+    ordinary #2440 reassignment then creates the new assignment. Any unmet
+    condition refuses; a second or concurrent void refuses
     DIRECT_HISTORICAL_VOID_CONFLICT.
     """
     from .task_store import TaskStoreConflict
 
-    _check_void(store, task, registration, snapshot, executor_task, process_probe, cutoff)
+    _check_void(store, task, registration, snapshot, executor_task, process_probe,
+                owner_ref, owner_task)
 
     def verify():
-        # Under the Task lock, after the CAS read: the D6 and its processes now.
+        # Under the Task lock, after the CAS read: the relay, D6 and processes now.
+        check_owner_relay(store, task, owner_ref, owner_task)
         if task_completion.bind_executor_task(
                 registration.task_id, expected_common_dir=registration.common_dir,
                 root=registration.root) != (registration, snapshot):
@@ -221,7 +289,7 @@ def void_historical(store, task, registration, snapshot, *, executor_task,
 
     try:
         return store.void_historical_direct_dispatch(
-            task['task_id'], current=task, verify=verify)
+            task['task_id'], current=task, owner_ref=owner_ref, verify=verify)
     except TaskStoreConflict:
         _refuse('DIRECT_HISTORICAL_VOID_CONFLICT')
 
