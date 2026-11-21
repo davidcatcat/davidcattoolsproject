@@ -213,6 +213,10 @@ class AdvanceDocsOnlyTests(unittest.TestCase):
         renamed_from_code = [{'filename': 'docs/moved.md', 'status': 'renamed',
                               'previous_filename': 'src/module.py'}]
         renamed_no_data = [{'filename': 'docs/moved.md', 'status': 'renamed'}]
+        missing_status = [{'filename': 'docs/moved.md'}]
+        unknown_status = [{'filename': 'docs/moved.md', 'status': 'mystery'}]
+        duplicate_paths = [{'filename': 'docs/moved.md', 'status': 'modified'},
+                           {'filename': 'docs/moved.md', 'status': 'modified'}]
         cases = {
             'read fails': make_github(docs, runs=runs, files_error=True),
             'short of count': make_github(docs, runs=runs, changed_files=3),
@@ -220,6 +224,11 @@ class AdvanceDocsOnlyTests(unittest.TestCase):
             'empty list': make_github([], runs=runs, changed_files=0),
             'rename from code': make_github(renamed_from_code, runs=runs),
             'rename without data': make_github(renamed_no_data, runs=runs),
+            'missing status': make_github(missing_status, runs=runs),
+            'unknown status': make_github(unknown_status, runs=runs),
+            'duplicate paths': make_github(duplicate_paths, runs=runs, changed_files=2),
+            'unknown merged state': make_github(docs, runs=runs,
+                                                second_pr=pr_snapshot(merged=None)),
             'head races': make_github(docs, runs=runs,
                                       second_pr=pr_snapshot(head={'sha': OTHER_HEAD})),
             'count races after files': make_github(docs, runs=runs,

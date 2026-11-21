@@ -2475,8 +2475,15 @@ def _pr_open_for_head(pr, number, head):
     """Return True only when pr is an open, unmerged PR for number at head."""
     pr_head = pr.get('head') if type(pr) is dict else None
     return (type(pr_head) is dict and pr_head.get('sha') == head and
-            pr.get('number', number) == number and
-            pr.get('state') == 'open' and pr.get('merged') is not True)
+            pr.get('number') == number and
+            pr.get('state') == 'open' and pr.get('merged') is False)
+
+
+# GitHub's pull request files statuses; a rename or copy must also name its old
+# path, or the file list cannot prove every changed path is documentation.
+_PR_FILE_STATUSES = frozenset(('added', 'removed', 'modified', 'renamed',
+                               'copied', 'changed', 'unchanged'))
+_PR_RENAME_STATUSES = frozenset(('renamed', 'copied'))
 
 
 def _pr_docs_only(number, head, github_get):
@@ -2500,18 +2507,25 @@ def _pr_docs_only(number, head, github_get):
             return False
         if type(count) is not int or isinstance(count, bool) or count != len(files):
             return False
-        names = []
+        names, seen = [], set()
         for item in files:
-            if type(item) is not dict or type(item.get('filename')) is not str:
+            if type(item) is not dict:
                 return False
-            names.append(item['filename'])
-            if 'previous_filename' in item:
-                if type(item['previous_filename']) is not str:
+            path, status = item.get('filename'), item.get('status')
+            if (type(path) is not str or not path or path in seen or
+                    type(status) is not str or status not in _PR_FILE_STATUSES):
+                return False
+            seen.add(path)
+            names.append(path)
+            previous = item.get('previous_filename')
+            if status in _PR_RENAME_STATUSES and type(previous) is not str:
+                return False
+            if previous is not None:
+                if (type(previous) is not str or not previous or previous in seen):
                     return False
-                names.append(item['previous_filename'])
-            elif item.get('status') == 'renamed':
-                return False
-        if any(not name or '\0' in name for name in names):
+                seen.add(previous)
+                names.append(previous)
+        if any('\0' in name for name in names):
             return False
         classify = _ci_path_classes().classify_path
         if any(classify(name) != 'docs' for name in names):
