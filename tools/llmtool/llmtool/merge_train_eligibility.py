@@ -9,12 +9,19 @@ When GitHub has not yet computed a PR's ``mergeable`` (not a bool), the check
 waits once and reads the PR once more; every later gate judges that second read.
 The EC2 remote-test rule follows the PR route: docs-only and scripts-only PRs
 need no receipt, every other PR needs an exact-head PASS receipt.
+
+#2281 row 15b: the per-PR file maximum comes from policy.json's
+``merge_train_files_per_pr_max`` through the repair_policy loader; an absent key
+keeps ``MAX_PR_FILES`` and a policy the loader refuses refuses ``POLICY_INVALID``.
+The whole page sequence is read, so a configured value above the 100-entry page
+size is the effective limit end to end.
 """
 
 import re
 import time
 
-from . import merge_train_store, sensitive_paths, task_advance, task_completion
+from . import merge_train_store, repair_policy, sensitive_paths, task_advance, task_completion
+from .errors import LLMToolError
 
 TRAIN_MEMBER_RECORD_UNAVAILABLE = 'TRAIN_MEMBER_RECORD_UNAVAILABLE'
 TRAIN_MEMBER_NOT_READY = 'TRAIN_MEMBER_NOT_READY'
@@ -27,6 +34,9 @@ TRAIN_MEMBER_REMOTE_TEST_MISSING = 'TRAIN_MEMBER_REMOTE_TEST_MISSING'
 TRAIN_MEMBER_IN_LIVE_TRAIN = 'TRAIN_MEMBER_IN_LIVE_TRAIN'
 TRAIN_MEMBER_MERGEABLE_UNKNOWN = 'TRAIN_MEMBER_MERGEABLE_UNKNOWN'
 TRAIN_STORE_UNAVAILABLE = 'TRAIN_STORE_UNAVAILABLE'
+# #2281 row 15b: policy.json refuses or cannot be read, so the file maximum is
+# unknown; the member is refused rather than judged against a guessed default.
+POLICY_INVALID = 'POLICY_INVALID'
 # An exact-head success run whose id is not a positive int: the check data is
 # malformed, reported with the existing merge-gate code.
 _CHECKS_UNAVAILABLE = 'MERGE_CHECKS_UNAVAILABLE'
@@ -36,6 +46,11 @@ READY_STATE = 'PM_EVIDENCE_READY'
 LINUX_CHECK = 'check (Linux 3.14)'
 MACOS_CHECK = 'check (macOS 3.13)'
 MAX_PR_FILES = 100
+# GitHub returns a PR's file list in pages of at most 100 entries. This is the
+# page size used while reading the complete list; it is not itself a file
+# limit. The only file limit is the configured `merge_train_files_per_pr_max`
+# (#2281 limit table row 15: "merge train, 100 files per PR").
+FILES_PAGE = 100
 # One bounded wait before the single PR re-read when mergeable is not yet known.
 MERGEABLE_WAIT_SECONDS = 5.0
 
@@ -152,9 +167,51 @@ def _ci_gate(record, pr, head, pull, github_get):
     return None, (linux, macos)
 
 
-def _rule_file_code(files):
-    """Refuse a PR whose file list touches a rule file; an unreadable list is unavailable."""
-    if type(files) is not list or len(files) >= MAX_PR_FILES:
+def _max_pr_files(policy_path=None):
+    """The configured per-PR file maximum, or None when the policy is invalid.
+
+    #2281 row 15b: policy.json's merge_train_files_per_pr_max through the one
+    loader. An absent key keeps MAX_PR_FILES, the table value; a policy the
+    loader refuses gives None, so the caller refuses and never falls back.
+    """
+    try:
+        policy = repair_policy.load_policy(policy_path)
+    except LLMToolError:
+        return None
+    return policy.get('merge_train_files_per_pr_max', MAX_PR_FILES)
+
+
+def _read_pr_files(pr, max_files, get):
+    """Read the complete PR file list, or None when a page cannot be read.
+
+    Pages of ``FILES_PAGE`` entries are read until a short page ends the list.
+    Reading also stops once more than ``max_files`` entries are known, which is
+    already a refusal; that bounds the reads by the configured maximum, so no
+    fixed page count becomes a hidden limit. A configured maximum above the page
+    size therefore reads every page the list has.
+    """
+    files = []
+    page = 1
+    while len(files) <= max_files:
+        path = f'pulls/{pr}/files?per_page={FILES_PAGE}'
+        if page > 1:
+            path += f'&page={page}'
+        try:
+            items = get(path)
+        except Exception:
+            return None
+        if type(items) is not list:
+            return None
+        files.extend(items)
+        if len(items) < FILES_PAGE:
+            break
+        page += 1
+    return files
+
+
+def _rule_file_code(files, max_files=MAX_PR_FILES):
+    """Refuse a PR whose complete file list is unreadable, over the maximum, or a rule file."""
+    if type(files) is not list or len(files) > max_files:
         return TRAIN_MEMBER_PR_UNAVAILABLE
     for item in files:
         filename = item.get('filename') if type(item) is dict else None
@@ -228,7 +285,8 @@ def _live_train_code(task_id, pr, train_root):
     return None
 
 
-def member_check(store, task_id, pr, github_get, train_root=None, sleep=None):
+def member_check(store, task_id, pr, github_get, train_root=None, sleep=None,
+                 policy_path=None):
     """Return whether Task ``task_id`` with PR ``pr`` may join a merge train.
 
     Returns ``{'eligible': True, 'code': None, 'member': {...}}`` with exactly
@@ -236,7 +294,8 @@ def member_check(store, task_id, pr, github_get, train_root=None, sleep=None):
     'member': None}``. ``train_root`` is the TaskStore root whose sibling
     ``merge-trains`` directory holds the train records. ``sleep`` is called
     at most once, with MERGEABLE_WAIT_SECONDS, before the one PR re-read;
-    it defaults to ``time.sleep``.
+    it defaults to ``time.sleep``. ``policy_path`` overrides the policy.json
+    that sets the per-PR file maximum; it defaults to the policy loader's path.
     """
     get = _Snapshot(task_completion._github_get if github_get is None else github_get)
 
@@ -299,12 +358,18 @@ def member_check(store, task_id, pr, github_get, train_root=None, sleep=None):
         return _refused(code)
     linux_run_id, macos_run_id = run_ids
 
-    # 8. Rule files never ride a train.
-    try:
-        files = get(f'pulls/{pr}/files?per_page=100')
-    except Exception:
+    # 8. Rule files never ride a train. The per-PR file maximum is the
+    # configurable #2281 row 15 limit; an invalid policy refuses the member
+    # rather than falling back to the default (fail closed). The complete page
+    # sequence is read before the configured maximum is applied, so a value
+    # above the 100-entry page size is the effective limit.
+    max_files = _max_pr_files(policy_path)
+    if max_files is None:
+        return _refused(POLICY_INVALID)
+    files = _read_pr_files(pr, max_files, get)
+    if files is None:
         return _refused(TRAIN_MEMBER_PR_UNAVAILABLE)
-    code = _rule_file_code(files)
+    code = _rule_file_code(files, max_files)
     if code is not None:
         return _refused(code)
 
