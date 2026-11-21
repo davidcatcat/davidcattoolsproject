@@ -5251,6 +5251,9 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
             artifact, write_paths, normalize=False, allow_new_files=True,
             sources=_revision_sources(registration.root, snapshot.head))
         execution = _direct_execution(result, evidence=True)
+        # #2503: keep OpenCode's own text for the PM. It is the whole run's text
+        # stream, so the end (the final answer) is kept when it must be cut.
+        _attach_developer_reply(developer, getattr(result, 'text', None), keep_end=True)
         if rejection is not None:
             saved = _persist_developer_output_rejection(
                 store, task['task_id'], developer, rejection, result.usage, artifact,
@@ -5813,7 +5816,8 @@ class _DiagnosedClaudeRoute(ClaudeRoute):
     """#1824: ClaudeRoute that keeps its run's parsed CLI result object.
 
     Parsing, validation and errors stay ClaudeRoute's. Only a parsed object of
-    type "result" is kept, and only for the CLAUDE_NO_CHANGES diagnosis."""
+    type "result" is kept: for the CLAUDE_NO_CHANGES diagnosis, and (#2324,
+    #2503) for the Developer's final reply kept as developer.reported."""
 
     parsed_cli_result = None
 
@@ -5969,13 +5973,15 @@ def _claude_no_change_reply(raw):
     return _bounded_developer_reply(raw.get('result') if type(raw) is dict else None)
 
 
-def _bounded_developer_reply(text):
+def _bounded_developer_reply(text, *, keep_end=False):
     """#2324/#2503: {'summary': text} from a Developer's final reply text, else None.
 
     No reply (not a string, or blank) gives None. The whole reply is screened
     first, so a cut can never split credential material past the screen; a
     reply that is too long is then cut at the end, marked ' [truncated]', and
-    screened again. Any screen refusal keeps only the fixed
+    screened again. keep_end (#2503, for a run's whole text stream whose final
+    answer comes last) cuts the start instead, marked with
+    DEVELOPER_REPLY_EARLIER_TRUNCATED. Any screen refusal keeps only the fixed
     CLAUDE_REPLY_WITHHELD text: the reply is never reworded or reshaped to pass
     the screen."""
     if type(text) is not str or not text.strip():
@@ -5986,20 +5992,30 @@ def _bounded_developer_reply(text):
         return {'summary': CLAUDE_REPLY_WITHHELD}
     summary = text.strip()
     if not _claude_reply_fits(summary):
-        # The ASCII-JSON size only grows with the prefix length.
+        # The ASCII-JSON size only grows with the kept length.
         low, high = 0, len(summary)
         while low < high:
             middle = (low + high + 1) // 2
-            if _claude_reply_fits(summary[:middle].rstrip() + CLAUDE_REPLY_TRUNCATED):
+            if _claude_reply_fits(_cut_reply(summary, middle, keep_end)):
                 low = middle
             else:
                 high = middle - 1
-        summary = summary[:low].rstrip() + CLAUDE_REPLY_TRUNCATED
+        summary = _cut_reply(summary, low, keep_end)
     try:
         _screen_text(summary, CLAUDE_REPLY_MAX_REPORTED_BYTES)
     except LLMToolError:
         return {'summary': CLAUDE_REPLY_WITHHELD}
     return {'summary': summary}
+
+
+DEVELOPER_REPLY_EARLIER_TRUNCATED = '[earlier text truncated] '
+
+
+def _cut_reply(summary, kept, keep_end):
+    """Keep `kept` characters from the start (marked at the end) or the end (marked at the start)."""
+    if keep_end:
+        return DEVELOPER_REPLY_EARLIER_TRUNCATED + summary[len(summary) - kept:].lstrip()
+    return summary[:kept].rstrip() + CLAUDE_REPLY_TRUNCATED
 
 
 def _claude_attach_no_change_reply(developer, raw):
@@ -6011,7 +6027,7 @@ def _claude_attach_no_change_reply(developer, raw):
         pass
 
 
-def _attach_developer_reply(developer, text):
+def _attach_developer_reply(developer, text, *, keep_end=False):
     """#2503: keep a Developer's final reply as developer.reported.summary.
 
     Developer-reported and unverified (the PM packet labels it so). It is
@@ -6019,7 +6035,7 @@ def _attach_developer_reply(developer, text):
     so the reply can never block persisting the Developer record. No reply
     text leaves the record unchanged."""
     try:
-        _store_reported_reply(developer, _bounded_developer_reply(text))
+        _store_reported_reply(developer, _bounded_developer_reply(text, keep_end=keep_end))
     except Exception:
         pass
 
@@ -6447,6 +6463,11 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None},
                 getattr(result, 'provider_evidence', None), 'claude'), usage=usage)
+        # #2503: keep Claude's final reply for the PM when it changed files too
+        # (a partial result can say what it did not do).
+        parsed_reply = getattr(route, 'parsed_cli_result', None)
+        _attach_developer_reply(
+            developer, parsed_reply.get('result') if type(parsed_reply) is dict else None)
     except _ClaudeCommittedCarry:
         return run_task_direct_result_event(task['task_id'], registration.task_id, store=store)
     except RouteError as exc:
