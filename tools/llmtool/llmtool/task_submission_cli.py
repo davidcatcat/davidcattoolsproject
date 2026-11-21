@@ -4031,6 +4031,32 @@ def _remote_receipt_test_policy(task, *, read_paths=(), config_loader=None):
             else 'LOCAL')
 
 
+def _docs_only_completion_tests(pr_number, git_evidence, github_get=None):
+    """#2473: the NOT_APPLICABLE_DOCS_ONLY test record for a proven docs-only PR, else None.
+
+    Both proofs must hold: the Developer-attributed result paths are Markdown
+    the CI classifier calls docs (the shape TaskStore accepts for this
+    status), and task_advance._pr_docs_only proves from GitHub's complete file
+    list that the open, unmerged PR at this exact head changes documentation
+    only. Any doubt returns None, which keeps the EC2 receipt requirement.
+    """
+    try:
+        from . import task_advance  # task_advance imports this module at load time
+        head = git_evidence.get('result_head') if type(git_evidence) is dict else None
+        paths = _attributed_paths(git_evidence) if type(head) is str else None
+        if (type(pr_number) is not int or type(paths) is not list or not paths or
+                any(type(path) is not str or not path.endswith('.md') for path in paths) or
+                not task_completion._docs_only_ci(paths)):
+            return None
+        get = task_completion._github_get if github_get is None else github_get
+        if not task_advance._pr_docs_only(pr_number, head, get):
+            return None
+        return [{'status': 'NOT_APPLICABLE_DOCS_ONLY', 'changed_paths': list(paths),
+                 'source_sha': head, 'docs_only': True}]
+    except Exception:
+        return None
+
+
 def _matching_remote_test_receipt(task, *, executor_task, source_sha, paths):
     modules = tuple(sorted({Path(path).stem for path in paths}))
     if not modules:
@@ -9882,8 +9908,17 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
         direct_callback = developer.get('direct_result_callback')
         callback_evidence = (direct_callback.get('evidence')
                              if type(direct_callback) is dict else None)
-        if (claude_route or (type(callback_evidence) is dict and
-                callback_evidence.get('test_policy') == 'REMOTE_RECEIPT')):
+        remote_receipt_route = (claude_route or (type(callback_evidence) is dict and
+                                callback_evidence.get('test_policy') == 'REMOTE_RECEIPT'))
+        docs_only_tests = (_docs_only_completion_tests(args.pr, git_evidence)
+                           if remote_receipt_route and not executor_result_only else None)
+        if docs_only_tests:
+            # #2473: a PR GitHub proves docs-only needs no EC2 receipt. The
+            # NOT_APPLICABLE_DOCS_ONLY record is not a receipt; the GitHub
+            # evidence below still requires exact-head check (docs) and the
+            # formal Reviewer PASS.
+            tests = docs_only_tests
+        elif remote_receipt_route:
             paths = _remote_task_test_paths(task, read_paths=developer['read_paths'])
             receipt, receipt_gate = _matching_remote_test_receipt(
                 task, executor_task=args.executor_task,
