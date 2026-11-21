@@ -43,9 +43,8 @@ class AgyClaudeModelTests(unittest.TestCase):
     def test_b_claude_opus_5_5_high_is_accepted(self):
         self.assert_admitted('claude-opus-5-5-high')
 
-    def test_c_gemini_3_8_flash_medium_is_accepted_as_on_main(self):
-        self.assert_admitted('gemini-3.8-flash-medium')
-
+    def test_c_gemini_4_hydrogen_medium_is_accepted_as_on_main(self):
+        self.assert_admitted('gemini-4-hydrogen-medium')
     def test_d_other_family_ids_are_refused(self):
         for model in ('gpt-6-sol', 'gpt-6.1-sol', 'codex-example-b',
                       'openai/gpt-6-sol', 'claude-gpt-5-5-medium',
@@ -118,7 +117,7 @@ class AgyDisputeArbiterFamilyTests(unittest.TestCase):
         self.assertEqual(arbiter['family'], 'codex')
 
     def test_b_agy_gemini_developer_keeps_the_main_choice(self):
-        developer = {'provider_profile': 'agy', 'model': 'gemini-3.8-flash-medium'}
+        developer = {'provider_profile': 'agy', 'model': 'gemini-4-hydrogen-medium'}
         self.assertEqual(developer_family(developer), 'gemini')
         arbiter = choose_arbiter(developer_family=developer_family(developer),
                                  first_reviewer='codex-reviewer',
@@ -151,7 +150,7 @@ class AgyDisputeArbiterFamilyTests(unittest.TestCase):
     def test_e_agy_route_admission_rows_still_pass(self):
         config = load_route_config()
         for model in ('claude-sonnet-5-5-medium', 'claude-opus-5-5-high',
-                      'gemini-3.8-flash-medium'):
+                      'gemini-4-hydrogen-medium'):
             with self.subTest(model=model):
                 self.assertEqual(check_route_model(config, 'agy', model), model)
                 self.assertEqual(check_route_model_family('agy', model), model)
