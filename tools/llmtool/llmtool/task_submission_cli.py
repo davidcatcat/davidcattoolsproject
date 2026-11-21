@@ -5447,6 +5447,22 @@ def _optional_agy_owner_ref(args):
     return owner_ref
 
 
+def _agy_evidence_fields(excerpt, resolved_model):
+    """#2469: the AGY Developer-record evidence, re-checked by the store's own rules.
+
+    A value that is not a valid bounded, screened excerpt or model name is
+    replaced by the fixed withheld marker; the text itself is never stored.
+    """
+    from .task_store import (
+        AGY_EVIDENCE_WITHHELD, valid_agy_resolved_model, valid_agy_response_excerpt)
+    return {
+        'agy_response_excerpt': (excerpt if valid_agy_response_excerpt(excerpt)
+                                 else AGY_EVIDENCE_WITHHELD),
+        'agy_resolved_model': (resolved_model if valid_agy_resolved_model(resolved_model)
+                               else AGY_EVIDENCE_WITHHELD),
+    }
+
+
 @_serialize_direct_dispatch
 def run_task_agy_delegate(args, *, store, route_runner=None):
     """Run the provider-neutral AGY adapter against its registered D6 task."""
@@ -5699,7 +5715,9 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                 'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None},
-                getattr(result, 'provider_evidence', None), 'agy'), usage=usage)
+                getattr(result, 'provider_evidence', None), 'agy'), usage=usage,
+            **_agy_evidence_fields(getattr(result, 'response_excerpt', None),
+                                   getattr(result, 'resolved_model', None)))
         if (type(result.session_id) is str and
                 AGY_CONVERSATION.fullmatch(result.session_id)):
             binding = _bind_codex_native_session(registration, result.session_id)
@@ -5724,6 +5742,13 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             developer['blocked_reason'] = exc.blocked_reason
         if exc.progress is not None:
             developer['progress'] = exc.progress
+        observed = getattr(exc, 'observed_facts', None)
+        if (not owner_gate_denied and type(observed) is dict and
+                ('resolved_model' in observed or 'response_excerpt' in observed)):
+            # #2469: the run reached its output; keep the screened evidence of it.
+            developer.update(_agy_evidence_fields(
+                observed.get('response_excerpt', ''),
+                observed.get('resolved_model', 'UNKNOWN')))
         if not (owner_gate_denied or developer.get('execution') is not None):
             execution = _route_failure_execution(
                 exc, _condition_execution(getattr(exc, 'provider_evidence', None),

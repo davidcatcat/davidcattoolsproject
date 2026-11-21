@@ -403,12 +403,43 @@ CLAUDE_CLI_SUBTYPES = frozenset((
 CLAUDE_FAILURE_MAX_TURNS = _NO_CHANGES_MAX_TURNS
 CLAUDE_FAILURE_MAX_DURATION_MS = 86_400_000
 CLAUDE_FAILURE_EXIT_CODE_RANGE = (-255, 255)
+# #2469: an AGY run keeps a bounded, screened response excerpt and the model its
+# resolver reported. Optional, AGY only, always both together; legacy records omit them.
+_DEVELOPER_AGY_EVIDENCE_FIELDS = frozenset(('agy_response_excerpt', 'agy_resolved_model'))
+AGY_EVIDENCE_WITHHELD = '[withheld]'
+AGY_RESPONSE_EXCERPT_MAX_CHARS = 1024
+_AGY_RESOLVED_MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}')
+
+
+def valid_agy_response_excerpt(value):
+    """True for a one-line printable-ASCII excerpt of at most 1024 chars that passes the screen."""
+    return (type(value) is str and len(value) <= AGY_RESPONSE_EXCERPT_MAX_CHARS and
+            all(' ' <= char <= '~' for char in value) and not _emitted_sensitive(value))
+
+
+def valid_agy_resolved_model(value):
+    """True for UNKNOWN, MISMATCH, the withheld marker or one screened model name."""
+    if type(value) is not str:
+        return False
+    if value in ('UNKNOWN', 'MISMATCH', AGY_EVIDENCE_WITHHELD):
+        return True
+    return _AGY_RESOLVED_MODEL.fullmatch(value) is not None and not _emitted_sensitive(value)
+
+
+def _valid_agy_evidence_record(developer):
+    return (developer.get('provider_profile') == 'agy' and
+            _DEVELOPER_AGY_EVIDENCE_FIELDS <= set(developer) and
+            valid_agy_response_excerpt(developer['agy_response_excerpt']) and
+            valid_agy_resolved_model(developer['agy_resolved_model']))
+
+
 _DIRECT_DISPATCH_PROFILES = frozenset(('opencode', 'agy'))
 _DIRECT_DISPATCH_BOUNDARY = 'dispatch_boundary'
 _DIRECT_HANDOFF_HISTORY = 'direct_handoffs'
 _DEVELOPER_OPTIONAL_FIELDS = (frozenset((_DIRECT_DISPATCH_BOUNDARY, _DIRECT_HANDOFF_HISTORY)) |
                               _DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS |
-                              _DEVELOPER_CLAUDE_FAILURE_EVIDENCE_FIELDS)
+                              _DEVELOPER_CLAUDE_FAILURE_EVIDENCE_FIELDS |
+                              _DEVELOPER_AGY_EVIDENCE_FIELDS)
 
 
 def _valid_direct_handoffs(entries):
@@ -2814,6 +2845,9 @@ def _validate(record, *, strict=True):
                 _fail()
             if ('claude_failure_evidence' in developer and
                     not valid_claude_failure_evidence_record(developer)):
+                _fail()
+            if (_DEVELOPER_AGY_EVIDENCE_FIELDS & set(developer) and
+                    not _valid_agy_evidence_record(developer)):
                 _fail()
             if ('data_class' in developer and
                     (developer.get('provider_profile') != 'gw-agent' or

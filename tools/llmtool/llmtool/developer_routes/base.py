@@ -171,6 +171,10 @@ class RouteResult:
 
 
 MAX_RESPONSE_EXCERPT_CHARS = 1024
+# #2469: the fixed marker stored instead of any text that failed a bound or the screen.
+WITHHELD_MARKER = '[withheld]'
+RESOLVED_MODEL_PATTERN = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}')
+_RESOLVED_MODEL_WORDS = frozenset(('UNKNOWN', 'MISMATCH'))
 
 
 def response_excerpt(text):
@@ -181,17 +185,22 @@ def response_excerpt(text):
     from ..test_output_excerpts import _emitted_sensitive
     try:
         if _emitted_sensitive(text[:4000]):
-            return '[withheld]'
+            return WITHHELD_MARKER
         shown = _redact_rejected_output(text[:4000])
         shown = ''.join(c for c in shown.replace('\n', ' | ') if ' ' <= c <= '~')
         shown = shown[:MAX_RESPONSE_EXCERPT_CHARS]
-        return '[withheld]' if _emitted_sensitive(shown) else shown
+        return WITHHELD_MARKER if _emitted_sensitive(shown) else shown
     except Exception:
-        return '[withheld]'
+        return WITHHELD_MARKER
 
 
 def resolved_model_label(route, log_text, requested):
-    """#2469: the resolver's model name, 'MISMATCH' for conflicting names, else 'UNKNOWN'."""
+    """#2469: the one model name the resolver lines agree on.
+
+    'MISMATCH' when they differ, 'UNKNOWN' when absent. Log text is untrusted:
+    a name that is overlong, has other characters, collides with a state word
+    or fails the sensitive screen is never returned; the fixed marker is.
+    """
     try:
         verified = route.verified_model(log_text, requested)
     except Exception:
@@ -200,7 +209,16 @@ def resolved_model_label(route, log_text, requested):
         return 'UNKNOWN'
     if verified == '\0':
         return 'MISMATCH'
-    return verified if type(verified) is str else 'UNKNOWN'
+    if (type(verified) is not str or RESOLVED_MODEL_PATTERN.fullmatch(verified) is None or
+            verified in _RESOLVED_MODEL_WORDS):
+        return WITHHELD_MARKER
+    from ..test_output_excerpts import _emitted_sensitive
+    try:
+        if _emitted_sensitive(verified):
+            return WITHHELD_MARKER
+    except Exception:
+        return WITHHELD_MARKER
+    return verified
 
 
 class DeveloperRoute(ABC):
@@ -261,11 +279,6 @@ class DeveloperRoute(ABC):
     def validate_status(self, parsed: Mapping[str, Any]) -> None:
         """Optional hook, default accepts: map a consistent provider status to route errors."""
         return None
-
-    def empty_delivery(self, parsed: Mapping[str, Any],
-                       changed_paths: tuple[str, ...]) -> bool:
-        """Optional hook, default False (#2469): a reported success delivered nothing."""
-        return False
 
     def provider_basis(self, parsed: Mapping[str, Any]) -> str | None:
         """Optional hook, default none: the evidence basis proven by parsed output."""
@@ -1207,6 +1220,9 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         except (OSError, UnicodeError, TypeError):
             log_text = ''
     shutil.rmtree(private_tmp, ignore_errors=True)
+    if route.name == 'agy':
+        # #2469: recorded before any later refusal so early failures keep it too.
+        agy_evidence['resolved_model'] = resolved_model_label(route, log_text, value['model'])
     try:
         if (type(code) is not int or type(stdout) is not bytes or type(stderr) is not bytes or
                 len(stdout) > MAX_STDOUT_BYTES or len(stderr) > MAX_STDERR_BYTES):
@@ -1244,8 +1260,6 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         if not isinstance(parsed, Mapping):
             raise RouteError(_route_code(route, 'OUTPUT_INVALID'))
         if route.name == 'agy':
-            agy_evidence['resolved_model'] = resolved_model_label(
-                route, log_text, value['model'])
             agy_evidence['response_excerpt'] = response_excerpt(parsed.get('summary', ''))
         try:
             route.validate_exit(code, parsed)
@@ -1298,13 +1312,6 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         if code != 0:
             raise RouteError(_route_code(route, 'EXIT_NONZERO'), blocked_reason=(
                 _exit_diagnostic(code, stderr) if route.name == 'agy' else None))
-        try:
-            empty = route.empty_delivery(parsed, changed_paths) is True
-        except Exception:
-            empty = False
-        if empty:
-            raise RouteError(_route_code(route, 'EMPTY_RESULT'),
-                             facts={'changed_files': []})
         # Delivery boundary: every provider-result check above has passed.
         _fire_delivered(route, on_delivered)
         try:

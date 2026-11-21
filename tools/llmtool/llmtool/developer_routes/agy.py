@@ -103,12 +103,6 @@ class AgyRoute(DeveloperRoute):
             return None
         return names[0] if all(name == names[0] for name in names) else '\0'
 
-    def empty_delivery(self, parsed, changed_paths):
-        """#2469: SUCCESS with an empty response and an unchanged D6 is no delivery."""
-        raw = parsed.get('raw')
-        return (type(raw) is dict and raw.get('status') == 'SUCCESS' and
-                not str(parsed.get('summary', '')).strip() and not changed_paths)
-
     def provider_basis(self, parsed):
         """AGY_STATUS only for parsed status SUCCESS with a valid conversation_id."""
         raw = parsed.get('raw')
