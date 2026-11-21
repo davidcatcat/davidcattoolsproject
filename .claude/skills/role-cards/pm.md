@@ -36,29 +36,31 @@ The Owner's binding working rules for PM runs (2026-11-16 – 2026-11-18), recor
 
 ### Dispatch spec format and preflight limits
 
-Every format statement is backed by `tools/llmtool/scripts/spec_preflight.py` functions `main`, `check`, `has_edits_field`, `check_ascii`, `check_open_bracket_ends`, and `check_read_scope`.
+Every format statement is backed by `tools/llmtool/scripts/spec_preflight.py` functions `main`, `check`, `has_edits_field`, `check_ascii`, `check_open_bracket_ends`, `check_read_scope`, `large_file_lines`, and `spec_tier`, together with `tools/llmtool/llmtool/task_submission_cli.py` functions `_strict_json_object`, `_screen_text`, `_read_pm_record_input`, and `_pm_assignment`.
 
-- **Strict JSON structure (`main`):** The spec must be a strict JSON object with unique keys and standard JSON values.
-- **Required fields and limits (`check`):**
-  - `"request"`: string, screened with `_screen_text` up to `REQUEST_LIMIT` (65536 bytes).
-  - `"summary"`: string, screened with `_screen_text` up to 2048 bytes.
-  - `"goal"`: string, screened with `_screen_text` up to `RESPONSE_LIMIT` (65536 bytes).
-  - `"acceptance"`: list of strings, count between 1 and 16 (`acceptance_count`); warning emitted if count > 15 (`REPAIR_ROOM_MAX_ACCEPTANCE`). Each string item is screened with `_screen_text` up to `RESPONSE_LIMIT` (65536 bytes).
+- **Strict JSON structure (`main`, `_strict_json_object`):** The spec must be a strict JSON object with unique keys and standard JSON values (no `NaN`/`Infinity`).
+- **Required fields and limits (`main`, `check`, `_screen_text`, `_read_pm_record_input`):**
+  - `"request"`: non-empty UTF-8 string, screened with `_screen_text` (no unsupported control chars or recognizable credentials) up to `REQUEST_LIMIT` (65536 bytes).
+  - `"summary"`: non-empty UTF-8 string, screened with `_screen_text` up to 2048 bytes.
+  - `"goal"`: non-empty UTF-8 string, screened with `_screen_text` up to `RESPONSE_LIMIT` (65536 bytes).
+  - `"acceptance"`: list of non-empty UTF-8 strings, count between 1 and 16 (`acceptance_count`); warning `SPEC_PREFLIGHT_WARN:ACCEPTANCE_NO_REPAIR_ROOM` emitted to stderr if count > 15 (`REPAIR_ROOM_MAX_ACCEPTANCE`). Each string item is screened with `_screen_text` up to `RESPONSE_LIMIT` (65536 bytes).
+  - Combined envelope (`check`, `_read_pm_record_input`): the synthesized `response` JSON (`schema_version`, `summary`, `developer_assignment`) must be `<= 65536` bytes UTF-8, and the `{"request", "response"}` envelope must be `<= 132096` bytes UTF-8 (`REQUEST_LIMIT + RESPONSE_LIMIT + 1024`).
 - **Forbidden field (`has_edits_field`):**
-  - `"edits"`: forbidden. Having an `"edits"` key fails with `SPEC_PREFLIGHT_INVALID:EDITS_FORBIDDEN` (#1502 WP-G subtraction: specs must not carry answer text).
-- **Optional and conditional fields (`main`, `check_ascii`, `check_open_bracket_ends`, `check_read_scope`):**
-  - `"route"`: optional string (defaults to `"codex"`).
-  - `"risk"`: optional string (defaults to `"LOW"`).
-  - `"read"` or `"read_paths"`: list of strings.
-  - `"write"` or `"write_paths"`: list of strings.
+  - `"edits"`: forbidden. Having an `"edits"` key (even `null` or empty) fails with `SPEC_PREFLIGHT_INVALID:EDITS_FORBIDDEN` (#1502 WP-G subtraction: specs must not carry answer text).
+- **Optional and conditional fields (`main`, `check`, `check_ascii`, `check_open_bracket_ends`, `check_read_scope`, `spec_tier`):**
+  - `"route"`: optional string (defaults to `"codex"`); `_read_pm_record_input` accepts only `'gw-agent'`, `'opencode'`, `'codex'`, `'agy'`, `'claude'`.
+  - `"risk"`: optional string (defaults to `"LOW"`); `_read_pm_record_input` accepts only `'LOW'`.
+  - `"read"` or `"read_paths"`: list of strings (`main`/`spec_tier` read `"read"`, while `check_read_scope` falls back to `"read_paths"`).
+  - `"write"` or `"write_paths"`: list of strings (`main`/`spec_tier` read `"write"`, while `check_read_scope` falls back to `"write_paths"`).
   - `"provider"`: string. When `"gw-agent"`:
     - `"goal"` and `"acceptance"` items must be pure ASCII (`check_ascii`).
     - Quoted string lines in `"acceptance"` items must not end inside open brackets `([{` (`check_open_bracket_ends`).
-    - Target files in `"write"` must not exceed `large_file_lines()` threshold (default 2000 lines).
+    - Existing target files in `"write"` must have `< large_file_lines()` newlines (default 2000; `>= large_file_limit` fails with `SPEC_PREFLIGHT_INVALID:EDIT_LINE_HINT_MISSING:-1` in `main`).
   - `--repo` validation (`check_read_scope`):
-    - Python code writes under `tools/` or `scripts/` require a test module in `read` (`tools/llmtool/tests/test_*.py` or `scripts/test_*.py`).
-    - Every repo file path mentioned in `"acceptance"` must be present in `read` or `write`.
+    - Python code writes under `tools/` or `scripts/` (excluding `tools/llmtool/tests/`) require a test module in `read` (`tools/llmtool/tests/test_*.py`, or `scripts/test_*.py` when all code writes are under `scripts/`).
+    - Every repo file path (`tools|scripts|docs|.claude` ending in `.py`/`.md`/`.json`) mentioned in `"acceptance"` must be present in `read` or `write`.
     - Every path in `read` (except those in `write`) must exist in the repository.
+  - `--ladder` validation (`spec_tier`, `ladder_tier`): checks `write` count, `context_file` bytes, and (for `gw-agent`) `turns = len(reads) + 2 * len(writes) + 1` against `LADDER_SIZES` (T1..T6; non-existent `write` files require at least `NEW_FILE_MIN_TIER = 4`).
 
 #### Minimal valid dispatch spec example
 

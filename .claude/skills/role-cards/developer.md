@@ -50,24 +50,53 @@ Stop and return BLOCKED, without retrying or rewording, on any of:
 
 Backed by `tools/llmtool/llmtool/developer_routes/base.py` function `run_route`:
 - **Shared execution contract (all routes):**
-  - Process exit code must be 0 (`validate_exit`).
-  - Git state must remain clean and unmodified (`_git_state_changed` and `_git_state_difference` check HEAD, branch, branch_ref, index, stash, refs, and git config).
-  - All modified or newly created files in the worktree must strictly be in `write_paths` (`_changed_files` and `_git_status_paths`). Any edit outside `write_paths` raises `WRITE_SCOPE_VIOLATION`.
-  - **No-change and SPEC_MISMATCH replies:** When returning `SPEC_MISMATCH` or when no changes are made, the Developer modifies 0 files in the worktree (`changed_files` is empty `()`), leaving all files untouched. This satisfies write scope validation.
+  - Process exit code must be `0` (`code == 0`, checked after `validate_exit`, `quota_exhausted`, `validate_status`, and `verified_model`).
+  - Git state must remain clean and unmodified (`_git_state_difference`, `_git_signature`, and `capture_snapshot` check `head`, `branch`, `branch_ref`, `git_dir`, `index`, `stash`, `pointer`, `config_worktree`, `config_common`, and `refs`).
+  - All modified, newly created, or untracked/ignored files in the worktree must strictly be in `write_paths`, with no symlink changes (`_changed_files`, `_git_status_paths`, and `_changed_symlink`). Any edit outside `write_paths` raises `<ROUTE>_WRITE_SCOPE_VIOLATION`.
+  - Model verification (`verified_model`) must return a non-`None` string equal to the requested model (`value['model']`).
+  - **No-change and `SPEC_MISMATCH` replies:** When returning `SPEC_MISMATCH` or when no changes are made, the Developer modifies `0` files in the worktree (`changed_files` is empty `()`), leaves Git state clean, exits `0` with route success status, and puts the `SPEC_MISMATCH` statement and evidence (or no-change reason) in the summary/result field.
+
 - **Claude Developer route (`claude-developer`):**
-  - Backed by `tools/llmtool/llmtool/developer_routes/claude.py` function `parse_output`.
-  - Stdout must be valid JSON with unique keys and standard constants. Required fields:
-    - `"type"`: must be `"result"`
-    - `"subtype"`: must be `"success"` (to yield status `'DONE'`)
+  - Backed by `tools/llmtool/llmtool/developer_routes/claude.py` functions `ClaudeRoute.parse_output`, `ClaudeRoute.validate_status`, `ClaudeRoute.verified_model`, and `ClaudeRoute._normalized_usage`.
+  - Stdout must be a single UTF-8 JSON object with unique keys and standard constants (`_unique_pairs`, `_reject_constant`). Required fields:
+    - `"type"`: `"result"`
+    - `"subtype"`: string; must be `"success"` (with `"is_error": false`) to yield status `'DONE'`
     - `"is_error"`: boolean `false`
-    - `"session_id"`: canonical UUID string (RFC 4122)
-    - `"result"`: string summary (first 4000 characters used as `summary`; holds the `SPEC_MISMATCH` statement and evidence when applicable)
-    - `"usage"`: token mapping (`input_tokens`, `output_tokens`)
-    - `"modelUsage"`: dictionary containing token usage for the requested model
-- **Other routes (AGY, OpenCode, `gw-agent`):**
-  - Backed by `tools/llmtool/llmtool/developer_routes/base.py` function `run_route`.
-  - Specific CLI stdout parsing for AGY, OpenCode, and `gw-agent` is implemented in route adapter modules outside the authorized read paths of this task; per rule A5, their specific stdout schema is UNKNOWN.
-  - All routes share the common execution rules enforced by `run_route`: exit code 0, writes strictly inside `write_paths` (or 0 files modified for no-change / SPEC_MISMATCH), no Git mutations, and adapter returning status `'DONE'`.
+    - `"session_id"`: canonical RFC 4122 UUID string (`_is_canonical_uuid`)
+    - `"result"`: string summary (optional in `parse_output`, defaults to `""`; first 4000 characters used as `summary`; holds the `SPEC_MISMATCH` statement and evidence when applicable)
+    - `"usage"`: dict with non-negative int `"input_tokens"` and `"output_tokens"` (optional `"cache_read_input_tokens"`, `"cache_creation_input_tokens"`) for `CLI_USAGE` evidence
+    - `"modelUsage"`: non-empty dict mapping `"claude-*"` model names to dicts with positive int `"outputTokens"` (checked by `verified_model`)
+
+- **AGY Developer route (`agy`):**
+  - Backed by `tools/llmtool/llmtool/developer_routes/agy.py` functions `AgyRoute.parse_output`, `AgyRoute.verified_model`, `AgyRoute.provider_basis`, and `AgyRoute.quota_exhausted`.
+  - Stdout must be a single UTF-8 JSON object with unique keys and standard constants. Required fields:
+    - `"conversation_id"`: string matching `[A-Za-z0-9_-]{8,128}`
+    - `"status"`: string; `"SUCCESS"` for normal completion (`provider_basis` returns `'AGY_STATUS'` only when `status == 'SUCCESS'` and `conversation_id` is valid; `"RESOURCE_EXHAUSTED"` or quota regex in `status`/`error`/stderr triggers `AGY_QUOTA_EXHAUSTED`)
+    - `"response"` or `"result"`: optional string (`response` takes precedence over `result`; first 4000 characters used as `summary`)
+    - `"usage"`: optional dict of `str -> int` entries
+  - Model verification (`verified_model`) reads `model_resolver...Resolving model <name>` from the CLI `--log-file` (`log_text`), not stdout JSON.
+
+- **Home LLM `gw-agent` route (`gw`):**
+  - Backed by `tools/llmtool/llmtool/developer_routes/gw_agent.py` functions `GwAgentRoute.collect`, `GwAgentRoute.parse_output`, `GwAgentRoute.validate_exit`, `GwAgentRoute.validate_status`, `GwAgentRoute.verified_model`, and `_normalize_gw_agent_usage`.
+  - `gw-agent` does not parse CLI stdout JSON; `collect` reads `result.json` (<= 1 MiB, mode `0600`) and `audit.jsonl` (<= 4 MiB, mode `0600`) from the private `tmpdir`.
+  - `result.json` must be a strict JSON object with unique keys and standard constants, containing all 13 required keys:
+    - `"schema_version"`: `1` (int)
+    - `"status"`: `"DONE"` (exit `0`), `"BLOCKED"` (exit `3`), `"MODEL_ERROR"` (exit `4`), `"POLICY_REFUSED"` (exit `5`), or `"BUDGET_EXCEEDED"` (exit `6`); process exit code must match (`validate_exit`)
+    - `"code"`: `null` when `status == "DONE"`; non-empty string matching `[A-Z0-9_]{1,64}` when `status != "DONE"`
+    - `"run_id"`: 24-char lowercase hex string (`[0-9a-f]{24}`)
+    - `"session_id"`: string or `null`
+    - `"task_id"`: string matching `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` and equal to the requested `task['task_id']`
+    - `"changed_paths"`: list of relative POSIX path strings (no leading `/`, `\`, or `.`/`..`/empty segments)
+    - `"summary"`: string (first 4000 characters used as `summary`)
+    - `"served_model"`: string matching `[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}`, not `"UNKNOWN"` and not `"gw"` when `status == "DONE"`
+    - `"usage"`: dict (either `{"prompt_tokens", "completion_tokens", "total_tokens"}` or `{"status": "REPORTED", "input_tokens", "output_tokens"}` with non-negative ints `<= 50000000` for `GATEWAY_USAGE`)
+    - `"turns"`: int
+    - `"budget_used"`: dict or `null`
+    - `"audit_sha256"`: 64-char lowercase hex string matching `audit.verify(audit.jsonl)`
+
+- **OpenCode Developer route (`opencode`):**
+  - Shares the common execution contract enforced by `tools/llmtool/llmtool/developer_routes/base.py` function `run_route`.
+  - Route-specific stdout/output parsing for OpenCode is implemented in modules outside the authorized `read_paths` of this Task, so its route-specific stdout schema is `UNKNOWN`.
 
 ### Minimal valid Claude Developer completion example
 
@@ -90,11 +119,49 @@ Backed by `tools/llmtool/llmtool/developer_routes/base.py` function `run_route`:
 }
 ```
 
-### Minimal valid SPEC_MISMATCH / no-change example
+### Minimal valid AGY Developer completion example
 
-Worktree state: 0 files modified (working tree clean, `changed_files` empty).
+```json
+{
+  "conversation_id": "conv_0123456789abcdef",
+  "status": "SUCCESS",
+  "response": "Implemented requested changes in authorized write paths.",
+  "usage": {
+    "input_tokens": 100,
+    "output_tokens": 50
+  }
+}
+```
 
-Stdout summary / result:
+### Minimal valid `gw-agent` `result.json` completion example
+
+```json
+{
+  "schema_version": 1,
+  "status": "DONE",
+  "code": null,
+  "run_id": "0123456789abcdef01234567",
+  "session_id": "0123456789abcdef0123456789abcdef",
+  "task_id": "task-1",
+  "changed_paths": [],
+  "summary": "Implemented requested changes in authorized write paths.",
+  "served_model": "qwen3-coder-30b",
+  "usage": {
+    "prompt_tokens": 100,
+    "completion_tokens": 50,
+    "total_tokens": 150
+  },
+  "turns": 2,
+  "budget_used": {},
+  "audit_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
+```
+
+### Minimal valid SPEC_MISMATCH / no-change example (Claude Developer)
+
+Worktree state: `0` files modified (working tree clean, `changed_files` empty `()`), exit code `0`.
+
+Stdout JSON:
 ```json
 {
   "type": "result",
