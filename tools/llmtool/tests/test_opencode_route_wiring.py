@@ -401,7 +401,7 @@ class OpenCodeRouteWiringTests(unittest.TestCase):
             return (' goal rule' * (size // 10 + 1))[:size]
 
         limit = submission_cli.REQUEST_LIMIT
-        self.assertEqual(limit, 64 * 1024)
+        self.assertEqual(limit, 5 * 1024 * 1024)
         base = self._run().prompts[0]
         room = limit - len(base.encode('utf-8'))
         self.assertGreater(room, 0)

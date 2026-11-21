@@ -256,7 +256,8 @@ class RunRouteConfirmsPreSpawnCodesTests(unittest.TestCase):
         self.assertEqual(self._run(config, model='other-model'), 'CLAUDE_PROFILE_INVALID')
         self.assertEqual(self._run(config, executable='relative-name'),
                          'CLAUDE_REQUEST_INVALID')
-        self.assertEqual(self._run(config, prompt='x' * 65537), 'CLAUDE_REQUEST_INVALID')
+        self.assertEqual(self._run(config, prompt='x' * (5 * 1024 * 1024 + 1)),
+                         'CLAUDE_REQUEST_INVALID')
         self.assertEqual(self._run({}), 'CLAUDE_CONFIG_INVALID')
         self.assertEqual(self._run({'executable': '/usr/bin/true',
                                     'config_dir': 'relative-dir'}),
