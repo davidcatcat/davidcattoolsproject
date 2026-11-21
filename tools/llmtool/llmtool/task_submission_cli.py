@@ -4031,6 +4031,32 @@ def _remote_receipt_test_policy(task, *, read_paths=(), config_loader=None):
             else 'LOCAL')
 
 
+def _docs_only_completion_tests(pr_number, git_evidence, github_get=None):
+    """#2473: the NOT_APPLICABLE_DOCS_ONLY test record for a proven docs-only PR, else None.
+
+    Both proofs must hold: the Developer-attributed result paths are Markdown
+    the CI classifier calls docs (the shape TaskStore accepts for this
+    status), and task_advance._pr_docs_only proves from GitHub's complete file
+    list that the open, unmerged PR at this exact head changes documentation
+    only. Any doubt returns None, which keeps the EC2 receipt requirement.
+    """
+    try:
+        from . import task_advance  # task_advance imports this module at load time
+        head = git_evidence.get('result_head') if type(git_evidence) is dict else None
+        paths = _attributed_paths(git_evidence) if type(head) is str else None
+        if (type(pr_number) is not int or type(paths) is not list or not paths or
+                any(type(path) is not str or not path.endswith('.md') for path in paths) or
+                not task_completion._docs_only_ci(paths)):
+            return None
+        get = task_completion._github_get if github_get is None else github_get
+        if not task_advance._pr_docs_only(pr_number, head, get):
+            return None
+        return [{'status': 'NOT_APPLICABLE_DOCS_ONLY', 'changed_paths': list(paths),
+                 'source_sha': head, 'docs_only': True}]
+    except Exception:
+        return None
+
+
 def _matching_remote_test_receipt(task, *, executor_task, source_sha, paths):
     modules = tuple(sorted({Path(path).stem for path in paths}))
     if not modules:
@@ -5225,6 +5251,9 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
             artifact, write_paths, normalize=False, allow_new_files=True,
             sources=_revision_sources(registration.root, snapshot.head))
         execution = _direct_execution(result, evidence=True)
+        # #2503: keep OpenCode's own text for the PM. It is the whole run's text
+        # stream, so the end (the final answer) is kept when it must be cut.
+        _attach_developer_reply(developer, getattr(result, 'text', None), keep_end=True)
         if rejection is not None:
             saved = _persist_developer_output_rejection(
                 store, task['task_id'], developer, rejection, result.usage, artifact,
@@ -5787,7 +5816,8 @@ class _DiagnosedClaudeRoute(ClaudeRoute):
     """#1824: ClaudeRoute that keeps its run's parsed CLI result object.
 
     Parsing, validation and errors stay ClaudeRoute's. Only a parsed object of
-    type "result" is kept, and only for the CLAUDE_NO_CHANGES diagnosis."""
+    type "result" is kept: for the CLAUDE_NO_CHANGES diagnosis, and (#2324,
+    #2503) for the Developer's final reply kept as developer.reported."""
 
     parsed_cli_result = None
 
@@ -5943,13 +5973,15 @@ def _claude_no_change_reply(raw):
     return _bounded_developer_reply(raw.get('result') if type(raw) is dict else None)
 
 
-def _bounded_developer_reply(text):
+def _bounded_developer_reply(text, *, keep_end=False):
     """#2324/#2503: {'summary': text} from a Developer's final reply text, else None.
 
     No reply (not a string, or blank) gives None. The whole reply is screened
     first, so a cut can never split credential material past the screen; a
     reply that is too long is then cut at the end, marked ' [truncated]', and
-    screened again. Any screen refusal keeps only the fixed
+    screened again. keep_end (#2503, for a run's whole text stream whose final
+    answer comes last) cuts the start instead, marked with
+    DEVELOPER_REPLY_EARLIER_TRUNCATED. Any screen refusal keeps only the fixed
     CLAUDE_REPLY_WITHHELD text: the reply is never reworded or reshaped to pass
     the screen."""
     if type(text) is not str or not text.strip():
@@ -5960,20 +5992,30 @@ def _bounded_developer_reply(text):
         return {'summary': CLAUDE_REPLY_WITHHELD}
     summary = text.strip()
     if not _claude_reply_fits(summary):
-        # The ASCII-JSON size only grows with the prefix length.
+        # The ASCII-JSON size only grows with the kept length.
         low, high = 0, len(summary)
         while low < high:
             middle = (low + high + 1) // 2
-            if _claude_reply_fits(summary[:middle].rstrip() + CLAUDE_REPLY_TRUNCATED):
+            if _claude_reply_fits(_cut_reply(summary, middle, keep_end)):
                 low = middle
             else:
                 high = middle - 1
-        summary = summary[:low].rstrip() + CLAUDE_REPLY_TRUNCATED
+        summary = _cut_reply(summary, low, keep_end)
     try:
         _screen_text(summary, CLAUDE_REPLY_MAX_REPORTED_BYTES)
     except LLMToolError:
         return {'summary': CLAUDE_REPLY_WITHHELD}
     return {'summary': summary}
+
+
+DEVELOPER_REPLY_EARLIER_TRUNCATED = '[earlier text truncated] '
+
+
+def _cut_reply(summary, kept, keep_end):
+    """Keep `kept` characters from the start (marked at the end) or the end (marked at the start)."""
+    if keep_end:
+        return DEVELOPER_REPLY_EARLIER_TRUNCATED + summary[len(summary) - kept:].lstrip()
+    return summary[:kept].rstrip() + CLAUDE_REPLY_TRUNCATED
 
 
 def _claude_attach_no_change_reply(developer, raw):
@@ -5985,7 +6027,7 @@ def _claude_attach_no_change_reply(developer, raw):
         pass
 
 
-def _attach_developer_reply(developer, text):
+def _attach_developer_reply(developer, text, *, keep_end=False):
     """#2503: keep a Developer's final reply as developer.reported.summary.
 
     Developer-reported and unverified (the PM packet labels it so). It is
@@ -5993,7 +6035,7 @@ def _attach_developer_reply(developer, text):
     so the reply can never block persisting the Developer record. No reply
     text leaves the record unchanged."""
     try:
-        _store_reported_reply(developer, _bounded_developer_reply(text))
+        _store_reported_reply(developer, _bounded_developer_reply(text, keep_end=keep_end))
     except Exception:
         pass
 
@@ -6421,6 +6463,11 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None},
                 getattr(result, 'provider_evidence', None), 'claude'), usage=usage)
+        # #2503: keep Claude's final reply for the PM when it changed files too
+        # (a partial result can say what it did not do).
+        parsed_reply = getattr(route, 'parsed_cli_result', None)
+        _attach_developer_reply(
+            developer, parsed_reply.get('result') if type(parsed_reply) is dict else None)
     except _ClaudeCommittedCarry:
         return run_task_direct_result_event(task['task_id'], registration.task_id, store=store)
     except RouteError as exc:
@@ -9911,8 +9958,17 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
         direct_callback = developer.get('direct_result_callback')
         callback_evidence = (direct_callback.get('evidence')
                              if type(direct_callback) is dict else None)
-        if (claude_route or (type(callback_evidence) is dict and
-                callback_evidence.get('test_policy') == 'REMOTE_RECEIPT')):
+        remote_receipt_route = (claude_route or (type(callback_evidence) is dict and
+                                callback_evidence.get('test_policy') == 'REMOTE_RECEIPT'))
+        docs_only_tests = (_docs_only_completion_tests(args.pr, git_evidence)
+                           if remote_receipt_route and not executor_result_only else None)
+        if docs_only_tests:
+            # #2473: a PR GitHub proves docs-only needs no EC2 receipt. The
+            # NOT_APPLICABLE_DOCS_ONLY record is not a receipt; the GitHub
+            # evidence below still requires exact-head check (docs) and the
+            # formal Reviewer PASS.
+            tests = docs_only_tests
+        elif remote_receipt_route:
             paths = _remote_task_test_paths(task, read_paths=developer['read_paths'])
             receipt, receipt_gate = _matching_remote_test_receipt(
                 task, executor_task=args.executor_task,
