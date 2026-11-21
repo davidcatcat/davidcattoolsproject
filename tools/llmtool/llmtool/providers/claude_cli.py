@@ -177,7 +177,11 @@ class ClaudeCLIProvider:
         return "\n\n".join(parts)
 
     @staticmethod
-    def _read_pipe(stream, output, limit=OUTPUT_LIMIT):
+    def _read_pipe(stream, output, limit=None):
+        # Resolve the generic limit at call time (not as a definition-time
+        # default) so a patched OUTPUT_LIMIT still bounds the plain path.
+        if limit is None:
+            limit = OUTPUT_LIMIT
         try:
             chunk = os.read(stream.fileno(), READ_SIZE)
         except BlockingIOError:
