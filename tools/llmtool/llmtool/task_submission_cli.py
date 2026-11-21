@@ -6439,6 +6439,10 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
                                             completion, result, write_paths, test_policy)
             if carry is None:
                 raise RouteError('CLAUDE_NO_CHANGES')
+            # #2503: the carried result keeps this run's final reply for the PM too.
+            carried_reply = getattr(route, 'parsed_cli_result', None)
+            _attach_developer_reply(
+                carry[0], carried_reply.get('result') if type(carried_reply) is dict else None)
             try:
                 store.compare_and_update(task['task_id'], expected={'developer': developer},
                                          developer=carry[0], completion=carry[1])
@@ -6494,6 +6498,10 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
             # #2324: the Developer's final reply (screened, bounded, unverified), so
             # a SPEC_MISMATCH answer is not stored like a silent no-op.
             _claude_attach_no_change_reply(developer, parsed_cli_result)
+        elif type(parsed_cli_result) is dict and not owner_gate_denied:
+            # #2503: any other failure keeps the run's final reply when the CLI
+            # produced one (output invalid, model or exit checks, scope, size ...).
+            _attach_developer_reply(developer, parsed_cli_result.get('result'))
         if not owner_gate_denied:
             # #2275: structured run evidence; kept only when the store accepts it.
             _claude_attach_failure_evidence(developer, route, exc, result)
@@ -6522,6 +6530,10 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
             developer.update(execution=execution, usage=usage)
             if execution is not None and not owner_gate_denied:
                 _claude_attach_failure_evidence(developer, route, exc, result)
+        parsed_cli_result = getattr(route, 'parsed_cli_result', None)
+        if type(parsed_cli_result) is dict and not owner_gate_denied:
+            # #2503: an unexpected failure after the run keeps its final reply too.
+            _attach_developer_reply(developer, parsed_cli_result.get('result'))
         store.update(task['task_id'], developer=developer)
         _print(_task_view(store.get(task['task_id'])))
         return 1
