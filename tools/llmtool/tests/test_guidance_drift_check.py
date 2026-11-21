@@ -271,21 +271,19 @@ class GuidanceDriftCheckTests(unittest.TestCase):
         repository = Path(__file__).resolve().parents[3]
         self.assertEqual(check(repository), [])
 
-    def test_claude_md_agy_model_is_same_family_as_route_default(self):
-        # #2302: CLAUDE.md need not name the exact AGY route default, so a
-        # same-family switch by configuration needs no rule-file change; it
-        # must still name a model of the route default's family.
+    def test_claude_md_agy_line_names_no_model(self):
+        # Owner #289 (2026-11-22): the CLAUDE.md AGY line names no model and
+        # says the AGY model comes from the configuration, so a model switch
+        # by configuration needs no rule-file change.
         repository = Path(__file__).resolve().parents[3]
         claude_md = (repository / "CLAUDE.md").read_text(encoding="utf-8")
-        agy_lines = [line for line in claude_md.splitlines() if line.startswith("  - AGY: use `")]
+        agy_lines = [line for line in claude_md.splitlines() if line.startswith("  - AGY: ")]
         self.assertEqual(len(agy_lines), 1)
-        model = agy_lines[0].split("`", 2)[1]
-        routes_path = repository / "tools" / "llmtool" / "developer-routes.json"
-        with routes_path.open(encoding="utf-8") as routes_file:
-            data = json.load(routes_file)
-        family = guidance_drift_check._model_family(data["routes"]["agy"]["default_model"])
-        self.assertIsNotNone(family)
-        self.assertEqual(guidance_drift_check._model_family(model), family)
+        line = agy_lines[0]
+        self.assertIn("model comes from the configuration", line)
+        self.assertNotIn("gemini", line.lower())
+        self.assertNotIn("flash", line.lower())
+        self.assertNotIn("hydrogen", line.lower())
 
     def test_same_family_model_switch_passes_full_check(self):
         # #2302: docs name a same-family model that is not the route default
@@ -924,7 +922,7 @@ class ModelNameTests(unittest.TestCase):
     def test_same_family_passes_without_allowed_models(self):
         # #2302: families come from default_model when allowed_models is absent.
         (self.repo / "tools" / "llmtool" / "developer-routes.json").write_text(json.dumps(fixture_routes(
-            ("gemini-3.8-flash-medium",), allowed=False,
+            ("gemini-4-hydrogen-medium",), allowed=False,
             roles={"claude-reviewer": {"default_model": "claude-sonnet-5-5"},
                    "codex-reviewer": {"default_model": "gpt-6.1-sol", "allowed_models": ["gpt-6.1-sol"]}})),
             encoding="utf-8")

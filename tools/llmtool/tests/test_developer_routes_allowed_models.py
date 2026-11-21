@@ -71,7 +71,7 @@ class AllowedModelsConfigTests(unittest.TestCase):
     def test_shipped_file_lists_only_each_default_model(self):
         config = load_route_config()
         self.assertEqual(config['routes']['agy']['allowed_models'],
-                         ['gemini-3.8-flash-medium'])
+                         ['gemini-4-hydrogen-medium'])
         self.assertEqual(config['routes']['claude']['allowed_models'], ['claude-opus-5-5'])
         # #1502 WP-E: gw-agent lists today's actual served default model.
         self.assertEqual(config['routes']['gw-agent']['allowed_models'], ['gw'])
@@ -267,7 +267,7 @@ class AllowedModelsConfigTests(unittest.TestCase):
         config = load_route_config()
         config['routes']['agy']['allowed_models'].append('gemini-example-b')
         self.assertEqual(load_route_config()['routes']['agy']['allowed_models'],
-                         ['gemini-3.8-flash-medium'])
+                         ['gemini-4-hydrogen-medium'])
 
 
 class OpenCodeRouteTests(unittest.TestCase):

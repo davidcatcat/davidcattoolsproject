@@ -224,8 +224,8 @@ class OpenCodeModelValidatorTests(unittest.TestCase):
 
     def test_other_routes_model_checks_remain_unchanged(self):
         # A3: AGY, Claude, gw-agent and Codex roles keep their checks.
-        self.assertEqual(check_route_model(self.config, 'agy', 'gemini-3.8-flash-medium'),
-                         'gemini-3.8-flash-medium')
+        self.assertEqual(check_route_model(self.config, 'agy', 'gemini-4-hydrogen-medium'),
+                         'gemini-4-hydrogen-medium')
         for bad_model in ('claude-opus-5-5', 'gpt-6.1-sol', 'opencode/paid-model'):
             with self.subTest(route='agy', model=bad_model):
                 with self.assertRaises(RouteError) as caught:

@@ -93,7 +93,9 @@ class AgyRoute(DeveloperRoute):
         summary = obj.get('response', obj.get('result', ''))
         if type(summary) is not str:
             summary = ''
-        return {'status': obj['status'], 'summary': summary[:4000],
+        # #2503: the reply is kept for the PM; task_submission_cli bounds it to 8 KiB
+        # with a truncation marker, so only a generous parse-time cut applies here.
+        return {'status': obj['status'], 'summary': summary[:64 * 1024],
                 'session_id': obj['conversation_id'], 'usage': usage or None,
                 'raw': obj}
 
