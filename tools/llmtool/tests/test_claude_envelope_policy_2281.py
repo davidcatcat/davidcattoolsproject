@@ -32,7 +32,7 @@ class ClaudeEnvelopePolicyTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         path = Path(tmp.name) / 'policy.json'
-        path.write_text(json.dumps(policy), 'utf-8')
+        path.write_bytes(policy if type(policy) is bytes else json.dumps(policy).encode('utf-8'))
         patches = (mock.patch.object(rp, 'policy_path', return_value=str(path)),
                    mock.patch('llmtool.task_review.screen', lambda value: None))
         for patch in patches:
@@ -70,21 +70,15 @@ class ClaudeEnvelopePolicyTest(unittest.TestCase):
                 self.assertEqual(self.code(envelope(512)), 'POLICY_INVALID')
 
     def test_parser_recursion_is_policy_invalid(self):
-        self.policy(BASE)
-        raw = b'[' * 1100 + b']' * 1100
-        for name, patch in (('nested', mock.patch.object(rp.json, 'loads', side_effect=RecursionError)),
-                            ('raw', mock.patch.object(rp, 'policy_path', return_value=self.raw_path(raw)))):
-            with self.subTest(name), patch:
+        # Formal v4 F1: the reviewer's file repro, plus RecursionError injected
+        # at the loader only (CPython may parse the file without recursing).
+        self.policy(b'[' * 1100 + b']' * 1100)
+        for patch in (mock.patch.object(rp, 'policy_path', wraps=rp.policy_path),
+                      mock.patch.object(rp, 'load_policy', side_effect=RecursionError)):
+            with self.subTest(patch=patch.attribute), patch:
                 with self.assertRaises(LLMToolError):
                     claude_cli._review_envelope_limit()
                 self.assertEqual(self.code(envelope(512)), 'POLICY_INVALID')
-
-    def raw_path(self, raw):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        path = Path(tmp.name) / 'policy.json'
-        path.write_bytes(raw)
-        return str(path)
 
     def test_read_pipe_honors_configured_and_generic_limits(self):
         payload = b'x' * (claude_cli.OUTPUT_LIMIT + claude_cli.OUTPUT_LIMIT // 2)

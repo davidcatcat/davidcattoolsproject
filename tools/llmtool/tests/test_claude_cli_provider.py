@@ -526,8 +526,11 @@ class WorkerEnvelopeTests(unittest.TestCase):
         import time
         with tempfile.TemporaryDirectory() as tmp:
             exe=Path(tmp)/'fake-unused';exe.write_text('#!'+sys.executable+' -IB\n');exe.chmod(0o700)
+            # Formal v4 F1: RecursionError from the policy loader only. Not a
+            # global json.loads patch: JSON reads before the policy lookup (the
+            # role model check) must still work.
             provider=ClaudeCLIProvider({'model':REVIEW_MODEL},None)
-            with patch('llmtool.repair_policy.json.loads',side_effect=RecursionError), \
+            with patch('llmtool.repair_policy.load_policy',side_effect=RecursionError), \
                     patch('subprocess.Popen',side_effect=AssertionError('spawn')) as spawn, \
                     self.assertRaises(LLMToolError) as caught:
                 provider._invoke_review_job(str(exe),'prompt',deadline=time.monotonic()+5,
