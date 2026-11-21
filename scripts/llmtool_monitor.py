@@ -5789,7 +5789,14 @@ def _claude_quota_reset_timestamp(reset_str: str, hit_time: float,
     readable. The clock time is read in the zone the notice names, e.g.
     "(Asia/Taipei)"; a notice without one is read in local time. A named zone
     that cannot be resolved is not readable: guessing local time could drop a
-    limit that is still active."""
+    limit that is still active.
+
+    The notice always names a future reset, so a clock time that is not later
+    than the hit itself (same minute included) is the next day's. There is no
+    tolerance window: reading "resets 4:40am" at a 04:40:30 hit as 04:40 today
+    would drop a still-active warning a minute later (#2412 formal v2 F1). A
+    wrong next-day reading only keeps the warning until the existing 5-hour
+    expiry in quota_warnings, which is the safe side."""
     parsed = _parse_reset_time(reset_str)
     if parsed is None:
         return None
@@ -5804,7 +5811,7 @@ def _claude_quota_reset_timestamp(reset_str: str, hit_time: float,
         hit_dt = datetime.fromtimestamp(hit_time, tz=zone)
         hour_24, minute = parsed
         cand = hit_dt.replace(hour=hour_24, minute=minute, second=0, microsecond=0)
-        if cand <= hit_dt - timedelta(minutes=1):
+        if cand <= hit_dt:
             cand += timedelta(days=1)
         return cand.timestamp()
     except (ValueError, OverflowError, OSError, TypeError):

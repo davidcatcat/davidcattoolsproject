@@ -70,14 +70,20 @@ class TestClaudeQuotaResetParsing(unittest.TestCase):
         expected_dt = datetime(2026, 11, 20, 4, 40, 0)
         self.assertEqual(reset_ts, expected_dt.timestamp())
 
-    def test_claude_quota_reset_timestamp_already_passed_same_hour(self):
-        # Clock skew where hit is recorded slightly past reset time (e.g. 04:40:05 hit, resets 4:40am)
-        hit_dt = datetime(2026, 11, 20, 4, 40, 5)
-        hit_ts = hit_dt.timestamp()
+    def test_claude_quota_reset_timestamp_same_minute_is_next_day(self):
+        # #2412 formal v2 F1: a hit at 04:40:30 (or 04:40:05) saying "resets
+        # 4:40am" names the next day's reset; no one-minute tolerance.
+        for second in (0, 5, 30, 59):
+            with self.subTest(second=second):
+                hit_ts = datetime(2026, 11, 20, 4, 40, second).timestamp()
+                reset_ts = monitor._claude_quota_reset_timestamp("4:40am", hit_ts)
+                self.assertEqual(reset_ts, datetime(2026, 11, 21, 4, 40, 0).timestamp())
+
+    def test_claude_quota_reset_timestamp_one_minute_later_is_same_day(self):
+        # A reset clock time later than the hit stays on the hit's day.
+        hit_ts = datetime(2026, 11, 20, 4, 39, 59).timestamp()
         reset_ts = monitor._claude_quota_reset_timestamp("4:40am", hit_ts)
-        self.assertIsNotNone(reset_ts)
-        expected_dt = datetime(2026, 11, 20, 4, 40, 0)
-        self.assertEqual(reset_ts, expected_dt.timestamp())
+        self.assertEqual(reset_ts, datetime(2026, 11, 20, 4, 40, 0).timestamp())
 
     def test_claude_quota_reset_timestamp_next_day_within_one_hour(self):
         # Hit at 04:50 reporting resets 4:40am refers to the next day, not 10 minutes earlier.
@@ -185,6 +191,17 @@ class TestLlmtoolMonitorClaudeQuotaReset(_SessionFixture, unittest.TestCase):
                 },
             }
         ]
+        top = self._create_account_session(".claude-account3", items, mtime=now_ts)
+        warnings = monitor.quota_warnings(now_ts, claude_root=top)
+        self.assertEqual(warnings, ["Claude（.claude-account3）已到用量上限，resets 4:40am"])
+
+    def test_a2_same_minute_reset_still_shows_a_minute_later(self):
+        # #2412 formal v2 F1: hit at 04:40:30 saying resets 4:40am means the
+        # next day's reset, so at 04:41 the warning must still show.
+        hit_ts = datetime(2026, 11, 20, 4, 40, 30).timestamp()
+        now_ts = datetime(2026, 11, 20, 4, 41, 0).timestamp()
+        items = [{"timestamp": hit_ts, "error": "rate_limit",
+                  "message": {"content": [{"text": "Claude usage limit reached, resets 4:40am"}]}}]
         top = self._create_account_session(".claude-account3", items, mtime=now_ts)
         warnings = monitor.quota_warnings(now_ts, claude_root=top)
         self.assertEqual(warnings, ["Claude（.claude-account3）已到用量上限，resets 4:40am"])
