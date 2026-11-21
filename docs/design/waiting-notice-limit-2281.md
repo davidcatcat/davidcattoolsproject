@@ -42,10 +42,9 @@ it is missing or invalid, and what the value is used for.
 - There is no default or fallback value for this key in the read scope:
   `waiting_notice_due` in `tools/llmtool/llmtool/repair_policy.py` reads
   `policy['waiting_notify_after_hours']` from the policy dict it was given and
-  has no fallback for a missing key. A malformed reason or time in
-  `waiting_notice_due` makes it notify at once; a malformed or missing key in
-  the policy is instead refused by `load_policy` before any such dict is
-  produced.
+  has no fallback for a missing key. A malformed reason or time makes
+  `waiting_notice_due` return `True`; a malformed or missing key in the policy
+  is instead refused by `load_policy` before any such dict is produced.
 - For contrast, the function `repair_attempts_max` in
   `tools/llmtool/llmtool/repair_policy.py` fails closed (returns 0) when
   `load_policy` refuses, but it does not read
@@ -57,18 +56,20 @@ it is missing or invalid, and what the value is used for.
 - The only place in the read scope that uses the key is the function
   `waiting_notice_due` in `tools/llmtool/llmtool/repair_policy.py`, with
   signature `waiting_notice_due(*, reason, waiting_since, now, policy)`.
-- It returns `True` (the notice is due) when the reason is `'AUTH'`, because
-  AUTH WAITING notifies at once.
+- It returns `True` when the reason is `'AUTH'`.
 - It returns `True` when the reason is not a member of the constant
   `WAITING_REASONS` in `tools/llmtool/llmtool/repair_policy.py` (the values
   `AUTH`, `QUOTA`, `ROUTE_UNAVAILABLE`, `NO_REVIEWER`, `DISPUTE`, `ENV`), or
   when `waiting_since` or `now` cannot be parsed with the format
   `%Y-%m-%dT%H:%M:%SZ`.
-- Otherwise, for a valid non-AUTH reason and valid times, it returns `True`
-  exactly when the difference `now - waiting_since` is at least
+- Otherwise, for a valid non-AUTH reason and both timestamps parsed, it
+  returns `True` exactly when the difference between the supplied `now` and
+  the supplied `waiting_since` is at least
   `timedelta(hours=policy['waiting_notify_after_hours'])`. With the current
-  value 24 from `tools/llmtool/policy.json`, the notice is due 24 hours after
-  the Task entered WAITING.
+  value 24 from `tools/llmtool/policy.json`, that difference must be at least
+  24 hours for the function to return `True`. The read-scope files return only
+  this due boolean; when a value is recorded, and whether it corresponds to
+  the moment a Task entered WAITING, is outside the read scope.
 
 ## Basis check against row 21
 
