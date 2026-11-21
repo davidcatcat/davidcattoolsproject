@@ -598,22 +598,22 @@ class RolesCommandTests(AccountBase):
         # Owner #2302 r3: the user-config model and the one-shot env override
         # take effect; with neither set the route's repo default applies.
         with self.subTest(source='roles'):
-            self.save({'roles': {'agy-developer': {'model': 'gemini-3.8-flash-medium'}}})
+            self.save({'roles': {'agy-developer': {'model': 'gemini-4-hydrogen-medium'}}})
             self.env = {}
             status, lines = self.run_roles()
             self.assertEqual(status, 0)
             rows = {line.split('\t')[0]: line.split('\t') for line in lines}
             self.assertEqual(rows['agy-developer'],
-                             ['agy-developer', 'agy', '-', 'gemini-3.8-flash-medium',
+                             ['agy-developer', 'agy', '-', 'gemini-4-hydrogen-medium',
                               'medium', 'roles', 'roles'])
         with self.subTest(source='env'):
             self.save({})
-            self.env = {'LLMTOOL_ROLE_AGY_DEVELOPER_MODEL': 'gemini-3.8-flash-medium'}
+            self.env = {'LLMTOOL_ROLE_AGY_DEVELOPER_MODEL': 'gemini-4-hydrogen-medium'}
             status, lines = self.run_roles()
             self.assertEqual(status, 0)
             rows = {line.split('\t')[0]: line.split('\t') for line in lines}
             self.assertEqual(rows['agy-developer'],
-                             ['agy-developer', 'agy', '-', 'gemini-3.8-flash-medium',
+                             ['agy-developer', 'agy', '-', 'gemini-4-hydrogen-medium',
                               'medium', 'env', 'env'])
         with self.subTest(source='repo_default'):
             self.save({})
@@ -622,7 +622,7 @@ class RolesCommandTests(AccountBase):
             self.assertEqual(status, 0)
             rows = {line.split('\t')[0]: line.split('\t') for line in lines}
             self.assertEqual(rows['agy-developer'],
-                             ['agy-developer', 'agy', '-', 'gemini-3.8-flash-medium',
+                             ['agy-developer', 'agy', '-', 'gemini-4-hydrogen-medium',
                               'medium', 'repo_default', 'repo_default'])
 
     def test_lists_extra_configured_roles_and_reports_refusals(self):
