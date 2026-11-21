@@ -4991,11 +4991,16 @@ class TaskAdvanceRepeatedVerdictPostTests(unittest.TestCase):
 class TaskAdvanceUnusableReviewTests(unittest.TestCase):
     """#1105: one safe redispatch on the same head, then a named stop."""
 
+    def setUp(self):
+        # The real receipt store survives between advances, so the fake one must
+        # too; otherwise every advance looks like the refusal's first re-run.
+        self.reruns = {}
+
     def _advance(self, store, *, comments=(), pr=PR, dispatch=None):
         dispatched, reads = [], []
         contract = 'd' * 64
         store.record.setdefault('task_binding', {'contract_digest': contract})
-        reruns = {}
+        reruns = self.reruns
 
         def github_get(path):
             reads.append(path)
