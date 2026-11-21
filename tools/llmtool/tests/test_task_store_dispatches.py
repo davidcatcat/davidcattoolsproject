@@ -173,7 +173,6 @@ class TaskStoreDispatchesTests(unittest.TestCase):
             dict(valid, modules=['test_UPPER']),
             dict(valid, modules=['test_b', 'test_a']),  # unsorted
             dict(valid, modules=['test_a', 'test_a']),  # duplicate
-            dict(valid, modules=[f'test_mod_{i}' for i in range(9)]),  # > 8
             dict(valid, modules='test_module_a'),  # not a list
             # Dispatched_at violations
             dict(valid, dispatched_at='2026-11-09'),
@@ -213,6 +212,12 @@ class TaskStoreDispatchesTests(unittest.TestCase):
         self.assertEqual(saved2, entry2)
         current = self.store.get(self.task_id)
         self.assertEqual(current['remote_test_dispatches'], [entry, entry2])
+
+    def test_dispatch_persists_the_complete_module_list(self):
+        names = [f'test_mod_{index:03d}' for index in range(100)]
+        entry = dispatch_entry(modules=names)
+        self.assertEqual(self.store.append_remote_test_dispatch(self.task_id, entry), entry)
+        self.assertEqual(self.store.get(self.task_id)['remote_test_dispatches'][0]['modules'], names)
 
     def test_append_requires_dispatched_state_and_null_run_id(self):
         cases = (

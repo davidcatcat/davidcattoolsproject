@@ -761,7 +761,11 @@ class BootstrapSourceAllowanceTests(unittest.TestCase):
             "task_id": "task-publish-1",
             "recorded_result_head": "0" * 40,
         }
-        # Fake runners
+        # Fake runners. #2367 (M1): publish bounds the added commits by the
+        # remote's own main tip (a missing base fails closed with
+        # PUBLISH_BINDING_UNAVAILABLE), records the result first and never
+        # fetches or merges main, so the fake answers the main ls-remote and
+        # offers no fetch or merge.
         git_outputs = {
             ("rev-parse", "--show-toplevel"): str(self.source) + "\n",
             ("branch", "--show-current"): "feature-branch\n",
@@ -769,37 +773,50 @@ class BootstrapSourceAllowanceTests(unittest.TestCase):
             ("diff", "--no-renames", "--name-only", "-z", "HEAD"): "",
             ("ls-files", "--others", "--exclude-standard", "-z"): "",
             ("ls-remote", "--heads", "origin", "refs/heads/feature-branch"): "",
+            ("ls-remote", "--heads", "origin", "refs/heads/main"):
+                f"{self.base}\trefs/heads/main\n",
+            ("cat-file", "-e", f"{self.base}^{{commit}}"): "",
+            ("--no-replace-objects", "rev-list", "--parents", "HEAD", "--not", self.base): "",
             ("rev-parse", "--verify", "HEAD"): self.base + "\n",
-            ("fetch", "origin", "main"): "",
+            ("push", "origin", "HEAD:refs/heads/feature-branch"): "",
         }
+        events = []
+        branch_ref = ("ls-remote", "--heads", "origin", "refs/heads/feature-branch")
+        push_args = ("push", "origin", "HEAD:refs/heads/feature-branch")
 
         def fake_git(root, args):
             key = tuple(args)
+            events.append(("git", key))
+            if key == push_args:
+                git_outputs[branch_ref] = f"{self.base}\trefs/heads/feature-branch\n"
             if key in git_outputs:
                 return subprocess.CompletedProcess(args, 0, git_outputs[key], "")
-            if args[:2] == ["merge-base", "--is-ancestor"]:
-                return subprocess.CompletedProcess(args, 0, "", "")
-            return subprocess.CompletedProcess(args, 0, "", "")
+            # Any other command (for example a main fetch or merge) fails.
+            return subprocess.CompletedProcess(args, 1, "", "")
 
         recorded_calls = []
 
         def fake_record_result(**kwargs):
             recorded_calls.append(kwargs)
+            events.append(("record",))
             return self.base
 
         d6_binding["branch"] = "feature-branch"
-        with patch.object(task_advance, "_open_pr_present", return_value=True), \
-                patch.object(task_advance, "_publish_pr", return_value=99):
-            task_advance._publish_task(
+        with patch.object(task_advance, "_publish_pr", return_value=99):
+            published = task_advance._publish_task(
                 record, d6_binding, "task-publish-1",
-                pre_pr_gate=lambda _h, _b: None,
                 git_runner=fake_git,
                 gh_runner=lambda *_a: subprocess.CompletedProcess([], 0, b"", b""),
                 record_result_call=fake_record_result)
 
+        self.assertEqual(published, {"pr": 99, "head": self.base})
         self.assertEqual(len(recorded_calls), 1)
         self.assertEqual(recorded_calls[0]["write_paths"], write_paths)
         self.assertEqual(recorded_calls[0]["task_id"], "task-publish-1")
+        # The result is recorded before the push, and main is never fetched or merged.
+        self.assertLess(events.index(("record",)), events.index(("git", push_args)))
+        self.assertFalse(any(event[0] == "git" and event[1][:1] in (("fetch",), ("merge",))
+                             for event in events))
 
     def test_record_d6_result_forwards_write_paths(self):
         called = {}

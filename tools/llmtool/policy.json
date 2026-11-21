@@ -1,12 +1,17 @@
 {
   "schema_version": 1,
-  "repair_max": 2,
-  "parent_debug_max": 1,
-  "group_debug_max": 1,
+  "repair_max": 5,
+  "parent_debug_max": 3,
+  "group_debug_max": 3,
   "child_max": 3,
   "replan_max": 1,
-  "test_fail_max": 2,
-  "review_fail_max": 3,
+  "test_fail_max": 5,
+  "review_fail_max": 6,
   "waiting_notify_after_hours": 24,
-  "timeout_continuation_max": 1
+  "timeout_continuation_max": 1,
+  "spec_preflight_large_file_lines": 2000,
+  "merge_train_members_max": 6,
+  "merge_train_files_per_pr_max": 100,
+  "revert_scope_prs_max": 5,
+  "d6_writer_lease_hours": 24
 }

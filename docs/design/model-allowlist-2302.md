@@ -1,6 +1,6 @@
 # #2302 inventory: per-model allow-list gating
 
-Read-only inventory and split proposal for Owner #2302. This is not a review or acceptance. Source: main at dd18d0fd9534fd536bc0a2c976fd5748bdcdb570. Unless noted otherwise, all paths are under `tools/llmtool/`. This note changes no code; it records call-site facts, findings and a P1-P6 split so the later Developers can work from the repository.
+Read-only inventory and split proposal for Owner #2302. This is not a review or acceptance. Source: main at dd18d0fd9534fd536bc0a2c976fd5748bdcdb570. Unless noted otherwise, all paths are under `tools/llmtool/`. This note changes no code; it records call-site facts, findings and a P1-P6 split so the later Developers can work from the repository. Status: the design note (PR #2306), P5 (PR #2305), req 3 (PR #2309), P1 (PR #2313), P2 (#2354) and the OpenCode route now accepting any configured model (#2384) are merged on main; the other parts of the split (P3, P4 and P6) are still open.
 
 ## 1. Gate core
 

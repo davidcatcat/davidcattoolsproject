@@ -315,10 +315,9 @@ def member_check(store, task_id, pr, github_get, train_root=None, sleep=None):
     if _receipt_optional(paths) and not _has_head_receipt(record, head):
         digest = None
     else:
-        summary = task_advance._remote_test_receipt_summary(record, head)
+        status, _, receipt = task_advance._remote_test_status(record, {'result_head': head})
         digest = _receipt_digest(record, head)
-        if (type(summary) is not dict or summary.get('result') != 'PASS' or
-                digest is None or summary.get('receipt_digest') != digest[:8]):
+        if status != 'PASS' or digest is None or receipt['receipt_digest'] != digest:
             return _refused(TRAIN_MEMBER_REMOTE_TEST_MISSING)
 
     # 10. Not already in a live train.

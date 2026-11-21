@@ -252,9 +252,10 @@ class HighDebugTests(unittest.TestCase):
                 self.assertEqual((entry['status'], entry['report'], entry['d6']),
                                  ('RUN_FAILED', code, created[0]))
                 (root / 'unexpected.txt').unlink(missing_ok=True)
+                store.entries.extend([dict(entry), dict(entry)])
                 self.assertEqual(self._failing_case(store, root),
                                  ('HIGH_DEBUG_DEBUG_PARENT_USED', []))
-                self.assertEqual(len(store.entries), 1)
+                self.assertEqual(len(store.entries), 3)
                 self.assertEqual(store.events, [])
 
     def _failed_report(self, report):
@@ -626,6 +627,7 @@ class HighDebugTests(unittest.TestCase):
                          [(status, report, name) for _create, name, status, report in expected])
         self.assertEqual([high_debug._debug_entry_used(entry) for entry in store.entries],
                          [False, False, True])
+        store.entries.extend([dict(store.entries[-1]), dict(store.entries[-1])])
         self.assertEqual(self._failing_case(store, root, create=leaves_nothing),
                          ('HIGH_DEBUG_DEBUG_PARENT_USED', []))
 
@@ -668,18 +670,21 @@ class HighDebugTests(unittest.TestCase):
                           return_value=registration):
             return invoke(), invoke, store
 
-    def test_happy_path_records_report_and_replay_event_once(self):
+    def test_identical_reports_on_one_head_get_distinct_events(self):
         report = ''.join('## ' + heading + '\nDetails.\n' for heading in high_debug.REPORT_SECTIONS)
         report += 'RCA_CONFIRMED'
         (result, invoke, store) = self._run_case(report)
         self.assertEqual(len(store.entries), 1)
         self.assertEqual(store.entries[0]['status'], 'RCA_CONFIRMED')
         self.assertEqual(len(store.events), 1)
-        # #1502 WP-D (O2): a second Debug on the same ROOT Task is refused.
+        self.assertIsNone(invoke())
+        self.assertIsNone(invoke())
         with self.assertRaises(LLMToolError) as caught:
             invoke()
         self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_DEBUG_PARENT_USED')
-        self.assertEqual((len(store.entries), len(store.events)), (1, 1))
+        self.assertEqual((len(store.entries), len(store.events)), (3, 3))
+        self.assertEqual(len({event['event_id'] for event in store.events}), 3)
+        self.assertEqual(len({item['report_sha256'] for item in store.entries}), 1)
 
     def test_a_failed_launch_does_not_use_up_the_parent_debug(self):
         report = ''.join('## ' + heading + '\nDetails.\n' for heading in high_debug.REPORT_SECTIONS)
@@ -689,6 +694,8 @@ class HighDebugTests(unittest.TestCase):
         self.assertIsNone(invoke())
         self.assertEqual([entry['status'] for entry in store.entries],
                          ['RUN_FAILED', 'RCA_UNCONFIRMED'])
+        self.assertIsNone(invoke())
+        self.assertIsNone(invoke())
         with self.assertRaises(LLMToolError) as caught:
             invoke()
         self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_DEBUG_PARENT_USED')
@@ -2190,7 +2197,8 @@ class HighDebugTests(unittest.TestCase):
         self.assertIn('--model', argv)
         self.assertEqual(argv[argv.index('--model') + 1], 'claude-opus-5-5')
         self.assertIn('--strict-mcp-config', argv)
-        self.assertEqual(kwargs['timeout'], 1800)
+        # #2281 (Owner 2026-11-19): the claude-debug role defaults to 10800 s.
+        self.assertEqual(kwargs['timeout'], 10800)
         self.assertFalse(kwargs['check'])
         self.assertEqual(kwargs['stdin'], subprocess.DEVNULL)
         self.assertEqual(env['CLAUDE_CONFIG_DIR'], directory)

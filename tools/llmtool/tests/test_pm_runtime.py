@@ -1604,14 +1604,18 @@ class PMRuntimeTests(unittest.TestCase):
 
     def _attempt(self, bounds=None, process=None):
         """An Owner send consumed by a thread, as the TUI worker does."""
+        scoped = None
         if bounds:
             patcher = patch.multiple(pm_runtime, **bounds)
             patcher.start()
-            self.addCleanup(patcher.stop)
+            scoped = {'patcher': patcher, 'stopped': False}
+            self._scoped_bounds = [*getattr(self, '_scoped_bounds', []), scoped]
+            self.addCleanup(self._stop_bounds, scoped)
         process = process or LiveProcess(auto_accept=False)
         runtime = self.runtime(process)
         runtime.open()
-        run = {'runtime': runtime, 'process': process, 'events': [], 'error': None}
+        run = {'runtime': runtime, 'process': process, 'events': [], 'error': None,
+               'bounds': scoped}
         stream = runtime.send('回報進度')
         run['attempt'] = runtime._attempt
         run['uuid'] = process.users()[0]['uuid'] if process.users() else None
@@ -1654,6 +1658,20 @@ class PMRuntimeTests(unittest.TestCase):
         else:
             raise AssertionError(token)
 
+    def _stop_bounds(self, scoped):
+        """Undo one run's shortened bounds, newest first so stacked patches unwind in
+        order. A run that ends is the only user of its bounds: the next run of the same
+        test (a loop of subtests) must see the real ones, not the previous run's."""
+        if scoped is None or scoped['stopped']:
+            return
+        stack = getattr(self, '_scoped_bounds', [])
+        if stack and stack[-1] is scoped:
+            stack.pop()
+            scoped['stopped'] = True
+            scoped['patcher'].stop()
+        elif scoped not in stack:
+            scoped['stopped'] = True
+
     def _phase(self, run, expected):
         deadline = time.monotonic() + 3
         while run['attempt']['phase'] != expected and time.monotonic() < deadline:
@@ -1668,6 +1686,7 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual(len(run['process'].users()), 1)   # written once, never again
         self.assertFalse(run['runtime'].turn_active())
         run['runtime'].close(timeout=0)   # the next case opens its own driver
+        self._stop_bounds(run.get('bounds'))   # and its own bounds
         return owner[0]
 
     def _trace(self, tokens, bounds=None, process=None):

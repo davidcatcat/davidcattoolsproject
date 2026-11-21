@@ -49,8 +49,12 @@ class RoleTimeoutLoaderTests(unittest.TestCase):
         self.assertNotIn('remote_test_timeout', config)
         for role in ('codex-reviewer', 'claude-reviewer', 'codex-debug', 'claude-debug'):
             self.assertNotIn('timeout', config['roles'][role])
-            self.assertEqual(role_timeout(role, self.path), 1800)
-            self.assertEqual(role_timeout(role), 1800)
+            # #2281 (Owner 2026-11-19): Reviewer and AI Debug default to 3 hours.
+            self.assertEqual(role_timeout(role, self.path), 10800)
+            self.assertEqual(role_timeout(role), 10800)
+        self.assertEqual(DEFAULT_ROLE_TIMEOUT_SECONDS, 10800)
+        # The EC2 remote test timeout is not an AI run and is unchanged.
+        self.assertEqual(DEFAULT_REMOTE_TEST_TIMEOUT_SECONDS, 1800)
         self.assertEqual(remote_test_timeout(self.path), 1800)
         self.assertEqual(remote_test_timeout(), 1800)
 
@@ -60,10 +64,12 @@ class RoleTimeoutLoaderTests(unittest.TestCase):
         self.load(data)
         self.assertEqual(role_timeout('codex-reviewer', self.path), 1)
 
-        data = copy.deepcopy(self.shipped)
-        data['roles']['codex-reviewer']['timeout'] = 3600
-        self.load(data)
-        self.assertEqual(role_timeout('codex-reviewer', self.path), 3600)
+        for value in (3600, 10800, 18000):
+            with self.subTest(role_timeout=value):
+                data = copy.deepcopy(self.shipped)
+                data['roles']['codex-reviewer']['timeout'] = value
+                self.load(data)
+                self.assertEqual(role_timeout('codex-reviewer', self.path), value)
 
         data = copy.deepcopy(self.shipped)
         data['remote_test_timeout'] = 3600
@@ -84,12 +90,14 @@ class RoleTimeoutLoaderTests(unittest.TestCase):
 
         cases = [
             ('role timeout 0', mutate_role_timeout(0)),
-            ('role timeout 3601', mutate_role_timeout(3601)),
+            ('role timeout 18001', mutate_role_timeout(18001)),
             ('role timeout True', mutate_role_timeout(True)),
             ("role timeout '600'", mutate_role_timeout('600')),
             ('role timeout 1.5', mutate_role_timeout(1.5)),
             ('remote_test_timeout 0', mutate_remote_test_timeout(0)),
+            # The remote test ceiling stays 3600: it is not an AI run (#2281).
             ('remote_test_timeout 3601', mutate_remote_test_timeout(3601)),
+            ('remote_test_timeout 18000', mutate_remote_test_timeout(18000)),
             ('remote_test_timeout False', mutate_remote_test_timeout(False)),
             ('unknown top-level key', lambda data: data.update(unexpected_key=1800)),
         ]
@@ -132,7 +140,7 @@ class ReviewDispatchTimeoutTests(unittest.TestCase):
                     head='a' * 40,
                 )
             self.assertEqual(getattr(caught.exception, 'review_dispatch_code', None), 'REVIEWER_TIMEOUT')
-            self.assertEqual(recorded_timeout, [1800])
+            self.assertEqual(recorded_timeout, [10800])
 
         with patch.object(developer_routes, 'role_timeout', side_effect=RouteError('ROUTE_CONFIG_INVALID')), \
                 patch.object(review_dispatch.subprocess, 'run') as mock_run:
@@ -171,7 +179,7 @@ class DriftSchemaTimeoutTests(unittest.TestCase):
         self.assertEqual(self.schema.errors(self.shipped, '$'), [])
 
         valid = copy.deepcopy(self.shipped)
-        valid['roles']['codex-reviewer']['timeout'] = 1800
+        valid['roles']['codex-reviewer']['timeout'] = 18000
         valid['remote_test_timeout'] = 1800
         self.assertEqual(self.schema.errors(valid, '$'), [])
 
@@ -179,13 +187,18 @@ class DriftSchemaTimeoutTests(unittest.TestCase):
         invalid_0['roles']['codex-reviewer']['timeout'] = 0
         self.assertTrue(bool(self.schema.errors(invalid_0, '$')))
 
-        invalid_3601 = copy.deepcopy(self.shipped)
-        invalid_3601['roles']['codex-reviewer']['timeout'] = 3601
-        self.assertTrue(bool(self.schema.errors(invalid_3601, '$')))
+        invalid_18001 = copy.deepcopy(self.shipped)
+        invalid_18001['roles']['codex-reviewer']['timeout'] = 18001
+        self.assertTrue(bool(self.schema.errors(invalid_18001, '$')))
 
         invalid_remote_0 = copy.deepcopy(self.shipped)
         invalid_remote_0['remote_test_timeout'] = 0
         self.assertTrue(bool(self.schema.errors(invalid_remote_0, '$')))
+
+        # The remote test ceiling stays 3600 (not an AI run, #2281).
+        invalid_remote_3601 = copy.deepcopy(self.shipped)
+        invalid_remote_3601['remote_test_timeout'] = 3601
+        self.assertTrue(bool(self.schema.errors(invalid_remote_3601, '$')))
 
 
 if __name__ == '__main__':

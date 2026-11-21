@@ -333,6 +333,190 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(updated['review_repair_claims'][1]['high_debug_report_sha256'],
                          entry['report_sha256'])
 
+    def test_2405_to_2422_inherited_rca_is_validated_at_claim_write_and_replay(self):
+        from llmtool import high_debug, start_failure, task_submission_cli
+        from test_task_delegate_repair_cap import _entry
+
+        def work(pr, executor, head, finding, predecessor=None):
+            task = self._codex_dispatch_task()
+            if predecessor is not None:
+                task['continues'] = predecessor
+            task['completion'] = {
+                'state': 'WAITING_EXECUTOR', 'executor_task_id': executor,
+                'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
+                'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+                'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+            }
+            at = '2026-11-04T00:00:00Z'
+            task['review_dispatch_claim'] = [{
+                'executor_task': executor, 'pr': pr, 'head_sha': head, 'version': 1,
+                'state': 'COMPLETED', 'review_kind': 'formal', 'reviewer_task': f'reviewer-{pr}',
+                'native_session_id': f'review-{pr}', 'account_mode': 'CODEX_CLI',
+                'claimed_at': at, 'updated_at': at,
+                'review_result': {'task_id': task['task_id'], 'run_id': task['run_id'],
+                                  'contract_digest': task['task_binding']['contract_digest'],
+                                  'head': head, 'verdict': 'FAIL', 'review_text': finding},
+            }]
+            return self.store.create(task)
+
+        source_executor = 'claude-predecessor'
+        target_executor = 'agy-successor'
+        source_head, target_head = 'b' * 40, 'a' * 40
+        finding = 'Finding: F1 [High] guard.py:19 missing principal check'
+        source = work(2405, source_executor, source_head, finding)
+        target = work(2422, target_executor, target_head, finding, predecessor=source['task_id'])
+        entry = _entry(executor_task=source_executor, examined_sha=source_head, family='pr-2405')
+        self.store.append_high_debug(source['task_id'], entry)
+        sha = entry['report_sha256']
+        self.store.record_completion_event(
+            source['task_id'], event_id=high_debug.completion_event_id(
+                source['task_id'], source_head, sha, entry['d6']),
+            run_id=source['run_id'], session_id='high-debug-' + entry['d6'],
+            source='HIGH_DEBUG', source_sha=source_head, sequence=0,
+            payload_sha256=hashlib.sha256(sha.encode()).hexdigest())
+        packet = {'task': target['task_id'], 'executor_task': target_executor,
+                  'pr': 2422, 'failed_head': target_head, 'version': 1, 'verdict_comment_id': 55,
+                  'findings_count': 1, 'reviewer_text_excerpt_untrusted_data': finding}
+        packet_sha = hashlib.sha256(start_failure.canonical(packet).encode()).hexdigest()
+        packet.update(high_debug_report_sha256=sha, high_debug_report_untrusted_data=entry['report'])
+        claim = {'executor_task': target_executor, 'pr': 2422, 'head_sha': target_head,
+                 'family': 'pr-2422', 'attempt': 1, 'version': 1, 'comment_id': 55,
+                 'state': 'CLAIMED', 'repair_task_id': new_id(), 'packet_sha256': packet_sha,
+                 'claimed_at': '2026-11-05T00:00:00Z', 'high_debug_report_sha256': sha,
+                 'high_debug_source_task': source['task_id']}
+
+        for bad in (dict(claim, high_debug_source_task=new_id()),
+                    dict(claim, high_debug_report_sha256='0' * 64),
+                    dict(claim, version=2)):
+            with self.assertRaises(LLMToolError):
+                self.store.compare_and_update(target['task_id'],
+                    expected={'record_sha256': target['record_sha256']}, review_repair_claims=[bad])
+            self.assertEqual(self.store.get(target['task_id']), target)
+        saved = self.store.compare_and_update(target['task_id'],
+            expected={'record_sha256': target['record_sha256']}, review_repair_claims=[claim])
+        self.assertEqual(saved['review_repair_claims'], [claim])
+        task_submission_cli._check_repair_packet_rca(
+            packet, self.store, target_executor, claim['repair_task_id'])
+        with self.assertRaises(LLMToolError):
+            task_submission_cli._check_repair_packet_rca(
+                dict(packet, reviewer_text_excerpt_untrusted_data='changed'),
+                self.store, target_executor, claim['repair_task_id'])
+
+    def test_review_repair_claims_fourth_and_later_bind_the_covering_debug(self):
+        # #2367: claims follow the policy bound (5 repairs plus one retry claim);
+        # one RCA_CONFIRMED of the family covers the later claims.
+        from llmtool import high_debug, run_budget
+        from llmtool.task_store import REPAIR_CLAIMS_PER_FAMILY_MAX
+        self.assertEqual(REPAIR_CLAIMS_PER_FAMILY_MAX, run_budget.MAX_REPAIR_ATTEMPTS + 1)
+        self.assertEqual(REPAIR_CLAIMS_PER_FAMILY_MAX, 6)
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        entry = dict(high_debug._failed_entry(
+            family='pr-17', head='a' * 40, d6='executor-1-hd1-aaaaaaa',
+            code='HIGH_DEBUG_RUN_FAILED', observed='UNKNOWN', effort='UNKNOWN',
+            usage={'input': 1, 'cached': 0, 'output': 1, 'reasoning': 0},
+            recorded_at='2026-10-27T00:00:30Z', failed_corrections=None,
+            early_reason='review FAIL 2'), status='RCA_CONFIRMED')
+        self.store.append_high_debug(task['task_id'], entry)
+        digest = entry['report_sha256']
+        heads = ['b' * 40, 'a' * 40, 'c' * 40, 'd' * 40, 'e' * 40, 'f' * 40, '1' * 40]
+
+        def claim(attempt, **extra):
+            item = {'executor_task': 'executor-1', 'pr': 17, 'head_sha': heads[attempt - 1],
+                    'version': attempt, 'attempt': attempt, 'family': 'pr-17',
+                    'state': 'CLAIMED', 'repair_task_id': new_id(), 'comment_id': 9,
+                    'packet_sha256': 'b' * 64,
+                    'claimed_at': f'2026-10-27T00:0{attempt}:00Z'}
+            item.update(extra)
+            return item
+
+        def write(claims):
+            saved = self.store.get(task['task_id'])
+            return self.store.compare_and_update(
+                task['task_id'], expected={'record_sha256': saved['record_sha256']},
+                review_repair_claims=claims)
+
+        def refused(claims, code):
+            before = self.store.get(task['task_id'])
+            with self.assertRaises(LLMToolError) as caught:
+                write(claims)
+            self.assertEqual(caught.exception.task_store_error_code, code)
+            self.assertEqual(self.store.get(task['task_id']), before)
+
+        claims = [claim(1)]
+        write(claims)
+        claims.append(claim(2, high_debug_report_sha256=digest))
+        write(claims)
+        claims.append(claim(3))
+        write(claims)
+        for attempt in (4, 5, 6):
+            # A later review claim must bind a Debug (no new one is needed) ...
+            refused(claims + [claim(attempt)], 'REVIEW_REPAIR_CLAIM_INVALID')
+            refused(claims + [claim(attempt, high_debug_report_sha256='0' * 64)],
+                    'REVIEW_REPAIR_CLAIM_INVALID')
+            # ... and the family's RCA_CONFIRMED on an earlier HEAD covers it.
+            claims.append(claim(attempt, high_debug_report_sha256=digest))
+            saved = write(claims)
+        self.assertEqual([item['attempt'] for item in saved['review_repair_claims']],
+                         [1, 2, 3, 4, 5, 6])
+        refused(claims + [claim(7, high_debug_report_sha256=digest)],
+                'REVIEW_REPAIR_CLAIM_LIMIT_REACHED')
+
+    def test_ec2_claims_three_to_five_need_no_debug(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        ec2 = [{'executor_task': 'executor-1', 'pr': 17, 'head_sha': str(n) * 40,
+                'version': 1, 'attempt': n, 'family': 'pr-17-ec2', 'state': 'CLAIMED',
+                'repair_task_id': new_id(), 'comment_id': None, 'packet_sha256': 'b' * 64,
+                'claimed_at': '2026-10-27T00:00:00Z'} for n in range(1, 6)]
+        for count in range(1, 6):
+            saved = self.store.get(task['task_id'])
+            saved = self.store.compare_and_update(
+                task['task_id'], expected={'record_sha256': saved['record_sha256']},
+                review_repair_claims=ec2[:count])
+        self.assertEqual(len(saved['review_repair_claims']), 5)
+
+    def test_old_three_claim_record_with_a_fresh_debug_stays_valid(self):
+        # A family written under the old bound: the third claim bound a new
+        # Debug on its own HEAD, recorded after the second claim. #2367 reads
+        # it unchanged.
+        from llmtool import high_debug
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+
+        def debug(head, recorded_at):
+            return dict(high_debug._failed_entry(
+                family='pr-17', head=head, d6='executor-1-hd1-' + head[:7],
+                code='HIGH_DEBUG_RUN_FAILED', observed='UNKNOWN', effort='UNKNOWN',
+                usage={'input': 1, 'cached': 0, 'output': 1, 'reasoning': 0},
+                recorded_at=recorded_at, failed_corrections=None,
+                early_reason='review FAIL ' + head[:1]), status='RCA_CONFIRMED',
+                report='Synthetic report ' + head[:1] + '.',
+                report_sha256=hashlib.sha256(
+                    ('Synthetic report ' + head[:1] + '.').encode()).hexdigest())
+        second_debug = debug('a' * 40, '2026-10-27T00:00:30Z')
+        third_debug = debug('c' * 40, '2026-10-27T00:02:30Z')
+        self.store.append_high_debug(task['task_id'], second_debug)
+        self.store.append_high_debug(task['task_id'], third_debug)
+        base = {'executor_task': 'executor-1', 'pr': 17, 'family': 'pr-17',
+                'state': 'CLAIMED', 'comment_id': 9, 'packet_sha256': 'b' * 64}
+        claims = [
+            dict(base, head_sha='b' * 40, version=1, attempt=1, repair_task_id=new_id(),
+                 claimed_at='2026-10-27T00:00:00Z'),
+            dict(base, head_sha='a' * 40, version=2, attempt=2, repair_task_id=new_id(),
+                 claimed_at='2026-10-27T00:01:00Z',
+                 high_debug_report_sha256=second_debug['report_sha256']),
+            dict(base, head_sha='c' * 40, version=3, attempt=3, repair_task_id=new_id(),
+                 claimed_at='2026-10-27T00:03:00Z',
+                 high_debug_report_sha256=third_debug['report_sha256'])]
+        for count in (1, 2, 3):
+            saved = self.store.get(task['task_id'])
+            saved = self.store.compare_and_update(
+                task['task_id'], expected={'record_sha256': saved['record_sha256']},
+                review_repair_claims=claims[:count])
+        self.assertEqual(saved['review_repair_claims'], claims)
+        self.assertEqual(self.store.get(task['task_id'])['review_repair_claims'], claims)
+
     def test_lineage_is_optional_and_strictly_validated(self):
         # #1502 WP-D (spec 3-2, 7): an old Task has no lineage and is its own ROOT.
         root = self._codex_dispatch_task()
@@ -1464,6 +1648,34 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(saved['developer']['account'], 'codex-developer')
         self.assertNotIn('/private', repr(saved['developer']))
 
+    def test_developer_scope_of_33_and_1024_paths_is_stored_and_1025_refused_2281(self):
+        # #2281 (Owner 2026-11-19): a Developer Task lists up to 1024 read and
+        # 1024 write paths; the store bound matches the delegate check.
+        self.assertEqual(task_store_module.DEVELOPER_TASK_MAX_PATHS, 1024)
+        names = [f'src/file{i:04d}.py' for i in range(1025)]
+        for count in (33, 1024):
+            with self.subTest(count=count):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                developer = self._developer_assignment()
+                developer['read_paths'] = names[:count]
+                developer['write_paths'] = names[:count]
+                saved = self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None}, developer=developer)
+                self.assertEqual(saved['developer']['read_paths'], names[:count])
+                self.assertEqual(saved['developer']['write_paths'], names[:count])
+        for reads, writes in ((1025, 1), (1025, 1025)):
+            with self.subTest(reads=reads, writes=writes):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                developer = self._developer_assignment()
+                developer['read_paths'] = names[:reads]
+                developer['write_paths'] = names[:writes]
+                with self.assertRaises(LLMToolError):
+                    self.store.compare_and_update(
+                        task['task_id'], expected={'developer': None}, developer=developer)
+                self.assertIsNone(self.store.get(task['task_id'])['developer'])
+
     def test_developer_account_rejects_path_like_and_invalid_names(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
@@ -1476,6 +1688,54 @@ class TaskStoreTests(unittest.TestCase):
                         task['task_id'], expected={'developer': None},
                         developer=developer)
 
+    def test_goal_and_acceptance_items_over_512_bytes_are_stored(self):
+        # #2281 limit row 8: no own byte cap on the PM goal, a PM acceptance item
+        # or a Developer acceptance item.
+        goal = 'Keep the whole goal in plain prose. ' * 40
+        item = 'The focused regression test passes. ' * 40
+        self.assertGreater(len(goal.encode('utf-8')), 1024)
+        self.assertGreater(len(item.encode('utf-8')), 1024)
+        task = self._codex_dispatch_task()
+        self.assertEqual(task['schema_version'], 2)
+        task['pm_assignment'] = dict(task['pm_assignment'], goal=goal,
+                                     acceptance=[item, 'A short item.'])
+        created = self.store.create(task)
+        self.assertEqual(created['pm_assignment']['goal'], goal)
+        self.assertEqual(created['pm_assignment']['acceptance'], [item, 'A short item.'])
+        developer = dict(self._developer_assignment(), acceptance=[item])
+        saved = self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=developer)
+        self.assertEqual(saved['developer']['acceptance'], [item])
+        self.assertEqual(self.store.get(task['task_id']), saved)
+
+    def test_long_goal_and_items_still_screened_and_bounded(self):
+        # #2281 limit row 8: the sensitive screen still runs on the goal and each
+        # item (screen mocked, per the test data rule); the 64 KiB bound stays.
+        long_goal = 'Keep the whole goal in plain prose. ' * 40
+        flagged = 'Text the mocked screen is told to flag.'
+        cases = (
+            ('goal_screen', {'goal': long_goal + flagged}),
+            ('item_screen', {'acceptance': [long_goal + flagged]}),
+            ('goal_bound', {'goal': 'a' * (64 * 1024 + 1)}),
+            ('item_bound', {'acceptance': ['a' * (64 * 1024 + 1)]}),
+        )
+        for name, change in cases:
+            with self.subTest(case=name):
+                task = self._codex_dispatch_task()
+                task['pm_assignment'] = dict(task['pm_assignment'], **change)
+                with patch.object(task_store_module, '_emitted_sensitive',
+                                  side_effect=lambda text: (isinstance(text, str) and
+                                                            flagged in text)), \
+                        self.assertRaises(LLMToolError):
+                    self.store.create(task)
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        developer = dict(self._developer_assignment(),
+                         acceptance=['a' * (64 * 1024 + 1)])
+        with self.assertRaises(LLMToolError):
+            self.store.compare_and_update(
+                task['task_id'], expected={'developer': None}, developer=developer)
+
     def test_developer_timeout_seconds_is_optional_and_bounded(self):
         # #1815: legacy records without the field stay valid.
         task = self._codex_dispatch_task()
@@ -1484,7 +1744,8 @@ class TaskStoreTests(unittest.TestCase):
             task['task_id'], expected={'developer': None},
             developer=self._developer_assignment())
         self.assertNotIn('timeout_seconds', saved['developer'])
-        for timeout in (1, 600, 1200, 1800, 3600):
+        # #2281: up to the 18000 s route hard cap, including the 10800 s default.
+        for timeout in (1, 600, 1200, 1800, 3600, 3601, 10800, 18000):
             with self.subTest(timeout=timeout):
                 task = self._codex_dispatch_task()
                 self.store.create(task)
@@ -1511,13 +1772,55 @@ class TaskStoreTests(unittest.TestCase):
     def test_developer_timeout_seconds_rejects_invalid_values(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
-        for timeout in (0, -1, 3601, True, 600.0, '600', None):
+        for timeout in (0, -1, 18001, True, 600.0, '600', '10800', 10800.0, None):
             with self.subTest(timeout=timeout):
                 developer = dict(self._developer_assignment(), timeout_seconds=timeout)
                 with self.assertRaises(LLMToolError):
                     self.store.compare_and_update(
                         task['task_id'], expected={'developer': None},
                         developer=developer)
+        self.assertIsNone(self.store.get(task['task_id'])['developer'])
+
+    def test_developer_timeout_ceiling_is_the_route_hard_cap(self):
+        # #2281: one source; the store reads developer_routes, no second copy.
+        from llmtool import developer_routes
+        self.assertEqual(developer_routes.HARD_TIMEOUT_CAP_SECONDS, 18000)
+        self.assertEqual(task_store_module._developer_timeout_max_seconds(),
+                         developer_routes.HARD_TIMEOUT_CAP_SECONDS)
+        self.assertFalse(hasattr(task_store_module, '_DEVELOPER_TIMEOUT_MAX_SECONDS'))
+
+    def test_route_resolved_developer_timeouts_persist_in_real_store(self):
+        # #2281 (Codex security v91 on PR #2385): a route's resolved timeout is
+        # recorded before launch, so the real store must admit the 10800 s
+        # default and a requested 18000 s; 18001 s is refused by the resolver
+        # with its existing code and by the store.
+        from llmtool.developer_routes import RouteError, resolve_route_timeout
+        for route in ('agy', 'claude', 'gw-agent', 'opencode'):
+            for requested, expected in ((None, 10800), (18000, 18000)):
+                with self.subTest(route=route, requested=requested):
+                    resolved = resolve_route_timeout(route, requested)
+                    self.assertEqual(resolved, expected)
+                    task = self._codex_dispatch_task()
+                    self.store.create(task)
+                    developer = dict(self._developer_assignment(),
+                                     timeout_seconds=resolved)
+                    saved = self.store.compare_and_update(
+                        task['task_id'], expected={'developer': None},
+                        developer=developer)
+                    self.assertEqual(saved['developer']['timeout_seconds'], expected)
+                    self.assertEqual(
+                        self.store.get(task['task_id'])['developer']['timeout_seconds'],
+                        expected)
+            with self.subTest(route=route, requested=18001):
+                with self.assertRaises(RouteError) as caught:
+                    resolve_route_timeout(route, 18001)
+                self.assertEqual(caught.exception.code, 'TIMEOUT_OVER_HARD_CAP')
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        developer = dict(self._developer_assignment(), timeout_seconds=18001)
+        with self.assertRaises(LLMToolError):
+            self.store.compare_and_update(
+                task['task_id'], expected={'developer': None}, developer=developer)
         self.assertIsNone(self.store.get(task['task_id'])['developer'])
 
     def _gw_agent_dispatch_task(self):
@@ -3131,6 +3434,70 @@ class TaskStoreTests(unittest.TestCase):
             start_time='123456', pgid=123)
         self.assertEqual(saved['developer']['execution'], launch['execution'])
 
+    def test_direct_spawn_boundary_is_durable_and_consumed_once(self):
+        for profile, model in (('agy', 'gemini-test'), ('opencode', 'opencode/test-free')):
+            with self.subTest(profile=profile):
+                task = self._codex_dispatch_task()
+                task_id = task['task_id']
+                pending = self._developer_assignment(provider=profile)
+                pending.update(backend_session_semantics='CLI_REPORTED_SESSION_ID',
+                               execution=None)
+                if profile == 'agy':
+                    pending['owner_assignment_ref'] = None
+                self.store.create(task)
+                self.store.compare_and_update(
+                    task_id, expected={'developer': None}, developer=pending)
+                dispatching = dict(pending, state='DEVELOPER_DISPATCHING',
+                                   provider_type=profile + '-cli', model=model,
+                                   max_tokens=4096 if profile == 'opencode' else None)
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.update(task_id, developer=dict(dispatching,
+                                                               dispatch_boundary='PREPARED'))
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'DIRECT_DISPATCH_BOUNDARY_FORBIDDEN')
+                prepared = self.store.prepare_direct_dispatch(
+                    task_id, expected_developer=pending, developer=dispatching)['developer']
+                reopened = TaskStore(self.root)
+                self.assertEqual(reopened.get(task_id)['developer'], prepared)
+                self.assertEqual(prepared['dispatch_boundary'], 'PREPARED')
+                self.assertIsNone(prepared['execution'])
+                if profile == 'opencode':
+                    with self.assertRaises(LLMToolError) as caught:
+                        reopened.record_opencode_launch(
+                            task_id, assignment_id=pending['assignment_id'],
+                            pid=123, start_time='123456', pgid=123)
+                    self.assertEqual(caught.exception.task_store_error_code,
+                                     'DIRECT_DISPATCH_SPAWN_NOT_AUTHORIZED')
+
+                contender = threading.Barrier(2)
+                outcomes = []
+
+                def acquire():
+                    contender.wait(timeout=5)
+                    try:
+                        reopened.authorize_direct_spawn(task_id, expected_developer=prepared)
+                    except TaskStoreConflict:
+                        outcomes.append('conflict')
+                    else:
+                        outcomes.append('authorized')
+
+                runners = [threading.Thread(target=acquire) for _ in range(2)]
+                for runner in runners:
+                    runner.start()
+                for runner in runners:
+                    runner.join(timeout=10)
+                self.assertCountEqual(outcomes, ['authorized', 'conflict'])
+                after = reopened.get(task_id)['developer']
+                self.assertEqual(after['dispatch_boundary'], 'STARTING')
+                self.assertIsNone(after['execution'])
+                with self.assertRaises(LLMToolError):
+                    reopened.update(task_id, developer=prepared)
+                recorder = (reopened.record_agy_launch if profile == 'agy'
+                            else reopened.record_opencode_launch)
+                observed = recorder(task_id, assignment_id=pending['assignment_id'],
+                                    pid=123, start_time='123456', pgid=123)
+                self.assertEqual(observed['developer']['execution']['child_pid'], 123)
+
     def test_opencode_child_identity_is_profile_checked_and_trusted(self):
         task = self._codex_dispatch_task()
         task['pm_assignment']['route'] = 'opencode'
@@ -3162,6 +3529,110 @@ class TaskStoreTests(unittest.TestCase):
             store.record_opencode_launch(
                 task['task_id'], assignment_id=pending['assignment_id'], pid=124,
                 start_time='123457', pgid=124)
+
+    def test_opencode_models_persisted_across_states_and_malformed_refused(self):
+        # Owner #289 / #2302: OpenCode models (paid, other provider, free) persist
+        # across all developer states; malformed model strings stay refused.
+        artifact = ('diff --git a/src.py b/src.py\n'
+                    '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')
+        opencode_execution = {
+            'status': 'SUCCEEDED', 'native_session_id': 'ses_abcdefgh12345678',
+            'process_exit_code': 0, 'stdout_sha256': 'c' * 64,
+            'elapsed_ms': 12, 'cleanup_status': 'CONFIRMED',
+            'usage_source': 'UNKNOWN', 'source_bytes': 10,
+            'source_file_count': 1, 'source_manifest_sha256': 'd' * 64,
+        }
+        admitted_models = (
+            'opencode/paid-model',
+            'opencode/paid-model#high',
+            'opencode-go/deepseek-v4.1-flash#high',
+            'other/name-free',
+            'opencode/deepseek-v4.1-flash-free',
+        )
+        for model in admitted_models:
+            with self.subTest(admitted_model=model):
+                task = self._codex_dispatch_task()
+                task['pm_assignment']['route'] = 'opencode'
+                self.store.create(task)
+                pending = self._developer_assignment(provider='opencode', max_tokens=128)
+                pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+                pending['execution'] = None
+                self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None}, developer=pending)
+
+                # DEVELOPER_DISPATCHING
+                dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                               'provider_type': 'opencode-cli', 'model': model}
+                self.store.update(task['task_id'], developer=dispatching)
+                self.assertEqual(self.store.get(task['task_id'])['developer']['model'], model)
+                self.assertEqual(self.store.get(task['task_id'])['developer']['state'],
+                                 'DEVELOPER_DISPATCHING')
+
+                # DEVELOPER_RESPONDED
+                responded = {
+                    **dispatching, 'state': 'DEVELOPER_RESPONDED', 'artifact': artifact,
+                    'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
+                    'execution': opencode_execution,
+                }
+                self.store.update(task['task_id'], developer=responded)
+                self.assertEqual(self.store.get(task['task_id'])['developer']['model'], model)
+                self.assertEqual(self.store.get(task['task_id'])['developer']['state'],
+                                 'DEVELOPER_RESPONDED')
+
+                # DEVELOPER_OUTCOME_UNKNOWN (on another task)
+                task2 = self._codex_dispatch_task()
+                task2['pm_assignment']['route'] = 'opencode'
+                self.store.create(task2)
+                self.store.compare_and_update(
+                    task2['task_id'], expected={'developer': None}, developer=pending)
+                self.store.update(task2['task_id'], developer=dispatching)
+                unknown_execution = {
+                    'status': 'UNKNOWN', 'native_session_id': 'ses_unknown12345678',
+                    'process_exit_code': 1, 'stdout_sha256': 'c' * 64,
+                    'elapsed_ms': 12, 'cleanup_status': 'CONFIRMED',
+                    'usage_source': 'UNKNOWN', 'source_bytes': 10,
+                    'source_file_count': 1, 'source_manifest_sha256': 'd' * 64,
+                }
+                unknown = {
+                    **dispatching, 'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                    'error_code': 'OPENCODE_EXECUTION_FAILED',
+                    'execution': unknown_execution,
+                }
+                self.store.update(task2['task_id'], developer=unknown)
+                self.assertEqual(self.store.get(task2['task_id'])['developer']['model'], model)
+                self.assertEqual(self.store.get(task2['task_id'])['developer']['state'],
+                                 'DEVELOPER_OUTCOME_UNKNOWN')
+
+        # Malformed models stay refused in store validation
+        malformed_models = (
+            'opencode/a/b-free',
+            'opencode/-free',
+            'bare-model',
+            'opencode/..',
+            'https://example.invalid/m',
+            '',
+            '   ',
+            'opencode/' + 'a' * 125,
+            'opencode/example-free#HIGH',
+            'opencode/example-free#x#y',
+            'opencode/model\n',
+        )
+        task = self._codex_dispatch_task()
+        task['pm_assignment']['route'] = 'opencode'
+        self.store.create(task)
+        pending = self._developer_assignment(provider='opencode', max_tokens=128)
+        pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        pending['execution'] = None
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+
+        for malformed in malformed_models:
+            with self.subTest(malformed_model=malformed):
+                invalid_dispatch = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                                    'provider_type': 'opencode-cli', 'model': malformed}
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.update(task['task_id'], developer=invalid_dispatch)
+                self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_INVALID')
 
     def test_codex_direct_success_persists_native_thread_and_usage(self):
         task = self._codex_dispatch_task()

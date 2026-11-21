@@ -25,9 +25,9 @@ from llmtool.errors import LLMToolError
 
 
 _POLICY = repair_policy.load_policy()
-# Prior review runs on a D6 when the next run is repair #2, the last one the
-# review limit allows (1 + repair_max runs in total).
-_REPAIR_TWO = _POLICY['repair_max']
+# The original run and three repairs precede the first required RCA.
+_FIRST_RCA_REPAIR = 4
+# #2367: prior review runs at the review limit (1 + repair_max runs in total).
 _REVIEW_LIMIT = 1 + _POLICY['repair_max']
 _TEST_FAIL_MAX = _POLICY['test_fail_max']
 
@@ -243,6 +243,11 @@ class PolicyLimitTests(unittest.TestCase):
                 task_submission_cli._check_delegate_repair_cap(_args(), store)
             self.assertEqual(store.writes, [])
 
+    def test_repository_policy_allows_five_review_and_five_test_repairs(self):
+        # #2367 (Owner 2026-11-19).
+        self.assertEqual((_POLICY['repair_max'], _POLICY['test_fail_max']), (5, 5))
+        self.assertEqual(_REVIEW_LIMIT, 6)
+
     def test_ec2_limit_follows_test_fail_max(self):
         policy = dict(_POLICY, test_fail_max=1)
         current = _ec2_claim(_CURRENT_TASK)
@@ -259,8 +264,8 @@ class DelegateRepairCapTests(unittest.TestCase):
     def setUp(self):
         _patch_trust_and_binding(self)
 
-    def _at_repair_two(self, **kwargs):
-        return _Store(count=_REPAIR_TWO, **kwargs)
+    def _at_first_rca_repair(self, **kwargs):
+        return _Store(count=_FIRST_RCA_REPAIR, **kwargs)
 
     def test_original_run_and_repair_one_ignore_high_debug_options(self):
         for count in (0, 1):
@@ -269,6 +274,20 @@ class DelegateRepairCapTests(unittest.TestCase):
                 task_submission_cli._check_delegate_repair_cap(
                     _args(high_debug_task='invalid', high_debug_ref='bad'), store)
             self.assertEqual(store.writes, [])
+
+    def test_three_repairs_before_a_required_diagnosis(self):
+        for count in range(4):
+            with self.subTest(prior_runs=count):
+                task_submission_cli._check_delegate_repair_cap(
+                    _no_high_debug(), _Store(count=count))
+        for count in (4, 5):
+            with self.subTest(prior_runs=count), self.assertRaisesRegex(
+                    LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_REQUIRED$'):
+                task_submission_cli._check_delegate_repair_cap(
+                    _no_high_debug(), _Store(count=count))
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_REPAIR_LIMIT_REACHED$'):
+            task_submission_cli._check_delegate_repair_cap(
+                _no_high_debug(), _Store(count=6))
 
     def test_unrelated_unreadable_record_does_not_refuse(self):
         store = _Store(count=1, unreadable=True)
@@ -315,13 +334,13 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertEqual(store.writes, [])
 
     def test_repair_two_without_any_high_debug_is_task_required(self):
-        store = self._at_repair_two(diagnosis=_diagnosis([_entry()]))
+        store = self._at_first_rca_repair(diagnosis=_diagnosis([_entry()]))
         with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_REQUIRED$'):
             task_submission_cli._check_delegate_repair_cap(_no_high_debug(), store)
         self.assertEqual(store.writes, [])
 
     def test_missing_high_debug_task_is_refused(self):
-        store = self._at_repair_two(diagnosis=_diagnosis([_entry()]))
+        store = self._at_first_rca_repair(diagnosis=_diagnosis([_entry()]))
 
         with self.assertRaisesRegex(LLMToolError, 'DELEGATE_HIGH_DEBUG_TASK_REQUIRED'):
             task_submission_cli._check_delegate_repair_cap(
@@ -329,7 +348,7 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertEqual(store.writes, [])
 
     def test_unreadable_high_debug_task_is_refused(self):
-        store = self._at_repair_two(diagnosis=None, unreadable=True)
+        store = self._at_first_rca_repair(diagnosis=None, unreadable=True)
 
         with self.assertRaisesRegex(
                 LLMToolError, 'DELEGATE_HIGH_DEBUG_TASK_INVALID'):
@@ -337,26 +356,26 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertEqual(store.writes, [])
 
     def test_task_without_high_debug_entry_is_refused(self):
-        store = self._at_repair_two(diagnosis=_diagnosis([]))
+        store = self._at_first_rca_repair(diagnosis=_diagnosis([]))
 
         with self.assertRaisesRegex(LLMToolError, 'DELEGATE_HIGH_DEBUG_TASK_INVALID'):
             task_submission_cli._check_delegate_repair_cap(_args(), store)
 
     def test_last_high_debug_entry_must_be_confirmed(self):
-        store = self._at_repair_two(diagnosis=_diagnosis([
+        store = self._at_first_rca_repair(diagnosis=_diagnosis([
             _entry(), _entry(status='RUN_FAILED')]))
 
         with self.assertRaisesRegex(LLMToolError, 'DELEGATE_HIGH_DEBUG_TASK_INVALID'):
             task_submission_cli._check_delegate_repair_cap(_args(), store)
 
     def test_high_debug_entry_must_derive_from_repair_executor(self):
-        store = self._at_repair_two(diagnosis=_diagnosis([_entry(executor_task='other-d6')]))
+        store = self._at_first_rca_repair(diagnosis=_diagnosis([_entry(executor_task='other-d6')]))
 
         with self.assertRaisesRegex(LLMToolError, 'DELEGATE_HIGH_DEBUG_TASK_INVALID'):
             task_submission_cli._check_delegate_repair_cap(_args(), store)
 
     def test_confirmed_high_debug_allows_repair_two_and_records_nothing(self):
-        store = self._at_repair_two(diagnosis=_diagnosis([_entry()]))
+        store = self._at_first_rca_repair(diagnosis=_diagnosis([_entry()]))
 
         self.assertIsNone(task_submission_cli._check_delegate_repair_cap(_args(), store))
 
@@ -382,7 +401,7 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertEqual(store.writes, [])
 
     def test_refusal_order_checks_reference_before_task(self):
-        store = self._at_repair_two(diagnosis=_diagnosis([_entry()]))
+        store = self._at_first_rca_repair(diagnosis=_diagnosis([_entry()]))
         with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_REQUIRED$'):
             task_submission_cli._check_delegate_repair_cap(
                 _args(high_debug_ref=None, high_debug_task=None), store)
@@ -401,11 +420,11 @@ class DelegateRepairCapTests(unittest.TestCase):
         cases = (
             (_entry(examined_sha='b' * 40), 'DELEGATE_HIGH_DEBUG_HEAD_MOVED', 'pr-938'),
             (_entry(family='other'), 'DELEGATE_HIGH_DEBUG_TASK_INVALID', 'pr-938'),
-            (_entry(recorded_at='2026-11-04T00:00:00Z'), 'DELEGATE_HIGH_DEBUG_TASK_INVALID', 'pr-938'),
+            (_entry(recorded_at='2026-11-04T00:00:00Z'), 'DELEGATE_HIGH_DEBUG_TIME_MISMATCH', 'pr-938'),
             (_entry(recorded_at='bad'), 'DELEGATE_HIGH_DEBUG_TASK_INVALID', 'pr-938'),
         )
         for entry, code, family in cases:
-            store = self._at_repair_two(diagnosis=_diagnosis([entry]))
+            store = self._at_first_rca_repair(diagnosis=_diagnosis([entry]))
             with self.subTest(entry=entry), self.assertRaisesRegex(LLMToolError, code):
                 task_submission_cli._check_delegate_repair_cap(
                     _args(high_debug_family=family), store)
@@ -413,28 +432,28 @@ class DelegateRepairCapTests(unittest.TestCase):
 
     def test_family_syntax_and_reuse_after_new_assignment_are_rejected(self):
         invalid_family = _entry(family='Bad Family')
-        store = self._at_repair_two(diagnosis=_diagnosis([invalid_family]))
+        store = self._at_first_rca_repair(diagnosis=_diagnosis([invalid_family]))
         with self.assertRaisesRegex(LLMToolError, 'DELEGATE_HIGH_DEBUG_TASK_INVALID'):
             task_submission_cli._check_delegate_repair_cap(
                 _args(high_debug_family='Bad Family'), store)
         self.assertEqual(store.writes, [])
 
-        store = self._at_repair_two(diagnosis=_diagnosis([_entry()]))
+        store = self._at_first_rca_repair(diagnosis=_diagnosis([_entry()]))
         store.records['00000000000000000000000000000000']['developer']['created_at'] = (
             '2026-11-04T00:00:02Z')
-        with self.assertRaisesRegex(LLMToolError, 'DELEGATE_HIGH_DEBUG_TASK_INVALID'):
+        with self.assertRaisesRegex(LLMToolError, 'DELEGATE_HIGH_DEBUG_TIME_MISMATCH'):
             task_submission_cli._check_delegate_repair_cap(_args(), store)
         self.assertEqual(store.writes, [])
 
     def test_malformed_assignment_time_is_count_unavailable(self):
-        store = self._at_repair_two(diagnosis=_diagnosis([_entry()]))
+        store = self._at_first_rca_repair(diagnosis=_diagnosis([_entry()]))
         store.records['00000000000000000000000000000000']['developer']['created_at'] = 'bad'
         with self.assertRaisesRegex(LLMToolError, 'DELEGATE_REPAIR_COUNT_UNAVAILABLE'):
             task_submission_cli._check_delegate_repair_cap(_args(), store)
         self.assertEqual(store.writes, [])
 
     def test_d6_binding_failure_has_distinct_error(self):
-        store = self._at_repair_two(diagnosis=_diagnosis([_entry()]))
+        store = self._at_first_rca_repair(diagnosis=_diagnosis([_entry()]))
         with patch.object(task_submission_cli, '_delegate_d6_binding',
                           side_effect=OSError('unavailable')):
             with self.assertRaisesRegex(
@@ -445,7 +464,7 @@ class DelegateRepairCapTests(unittest.TestCase):
     def test_head_moved_refuses_with_prefix_and_records_nothing(self):
         examined = 'b' * 40
         entry = _entry(examined_sha=examined)
-        store = self._at_repair_two(diagnosis=_diagnosis([entry]))
+        store = self._at_first_rca_repair(diagnosis=_diagnosis([entry]))
         with self.assertRaises(LLMToolError) as caught:
             task_submission_cli._check_delegate_repair_cap(_args(), store)
         message = str(caught.exception)
@@ -458,7 +477,7 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertEqual(store.writes, [])
 
     def test_invalid_ref_names_accepted_forms_without_echoing_link(self):
-        store = self._at_repair_two(diagnosis=_diagnosis([_entry()]))
+        store = self._at_first_rca_repair(diagnosis=_diagnosis([_entry()]))
         bad_ref = 'https://example.com/not-a-valid-link'
         with self.assertRaises(LLMToolError) as caught:
             task_submission_cli._check_delegate_repair_cap(
@@ -472,7 +491,7 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertEqual(store.writes, [])
 
     def test_pull_request_comment_link_is_refused(self):
-        store = self._at_repair_two(diagnosis=_diagnosis([_entry()]))
+        store = self._at_first_rca_repair(diagnosis=_diagnosis([_entry()]))
         pr_ref = 'https://github.com/example/project/pull/12#issuecomment-34'
         with self.assertRaises(LLMToolError) as caught:
             task_submission_cli._check_delegate_repair_cap(
@@ -506,10 +525,30 @@ class RepairPacketHighDebugTests(unittest.TestCase):
     def setUp(self):
         _patch_trust_and_binding(self)
 
-    def _store(self, entries, *, count=_REPAIR_TWO):
-        # The packet's Task is the original Task on the D6, the first counted run.
+    def _claim(self, packet, *, attempt=2, repair_task_id=_CURRENT_TASK):
+        base = {key: value for key, value in packet.items()
+                if not key.startswith('high_debug_')}
+        digest = hashlib.sha256(
+            task_submission_cli.start_failure.canonical(base).encode()).hexdigest()
+        return {'repair_task_id': repair_task_id, 'state': 'CLAIMED',
+                'executor_task': _EXECUTOR_TASK, 'pr': packet['pr'],
+                'head_sha': packet['failed_head'], 'family': f"pr-{packet['pr']}",
+                'version': packet['version'], 'attempt': attempt,
+                'comment_id': packet['verdict_comment_id'], 'packet_sha256': digest,
+                'high_debug_report_sha256': packet['high_debug_report_sha256']}
+
+    def _store(self, entries, *, count=2):
         store = _Store(count=count)
-        store.records[_ROOT_TASK].update(task_id=_ROOT_TASK, high_debug=entries)
+        events = []
+        for entry in entries:
+            event = _event(entry, task_id=_ROOT_TASK, sequence=len(events) + 1)
+            event['event_id'] = hashlib.sha256(
+                ('HIGH_DEBUG\0' + _ROOT_TASK + '\0' + entry['examined_sha'] + '\0' +
+                 entry['report_sha256']).encode()).hexdigest()[:32]
+            events.append(event)
+        store.records[_ROOT_TASK].update(
+            task_id=_ROOT_TASK, high_debug=entries, completion_events=events,
+            review_repair_claims=[self._claim(_packet())])
         return store
 
     def _check(self, store, packet):
@@ -520,6 +559,21 @@ class RepairPacketHighDebugTests(unittest.TestCase):
         with self.assertRaisesRegex(LLMToolError, code):
             self._check(store, packet)
         self.assertEqual(store.writes, [])
+
+    def test_packet_must_bind_claim_and_committed_debug_event(self):
+        entry = _entry()
+        packet = _packet()
+        store = self._store([entry])
+        record = store.records[_ROOT_TASK]
+        claim = record['review_repair_claims'][0]
+        self.assertIsNone(self._check(store, packet))
+        self._refuses(store, dict(packet, high_debug_report_untrusted_data='unbound text'))
+        self._refuses(store, dict(packet, version=3))
+        claim['repair_task_id'] = '1' * 32
+        self._refuses(store, packet)
+        claim['repair_task_id'] = _CURRENT_TASK
+        record['completion_events'] = []
+        self._refuses(store, packet)
 
     def test_matching_rca_entry_passes_and_records_nothing(self):
         store = self._store([_entry(status='RUN_FAILED', report_sha256='0' * 64),
@@ -564,7 +618,7 @@ class RepairPacketHighDebugTests(unittest.TestCase):
         packet = _packet()
         del packet['high_debug_report_sha256']
         del packet['high_debug_report_untrusted_data']
-        self._refuses(self._store([_entry()]), packet,
+        self._refuses(self._store([_entry()], count=4), packet,
                       '^DELEGATE_HIGH_DEBUG_TASK_REQUIRED$')
 
     def test_packet_over_the_limit_refuses(self):
@@ -578,6 +632,131 @@ class RepairPacketHighDebugTests(unittest.TestCase):
         store = self._store([], count=1)
         self.assertIsNone(self._check(store, packet))
         self.assertEqual(store.writes, [])
+
+    def test_later_repair_packet_binds_the_covering_rca_through_its_claim(self):
+        # #2367 A2: from repair #3 on, review_repair binds the family's
+        # RCA_CONFIRMED from an earlier HEAD; the stored claim at the packet's
+        # failed HEAD carries the same digest.
+        new_head = 'd' * 40
+        # Repair #2's claim on the Debug's HEAD, then the later claim.
+        second = self._claim(_packet(), repair_task_id='2' * 32)
+        claim = self._claim(_packet(failed_head=new_head, version=3), attempt=3)
+        for count in (3, 4, 5):
+            with self.subTest(count=count):
+                store = self._store([_entry()], count=count)
+                store.records[_ROOT_TASK]['review_repair_claims'] = [second, claim]
+                self.assertIsNone(self._check(store, _packet(failed_head=new_head, version=3)))
+                self.assertEqual(store.writes, [])
+        # Without a claim at that HEAD binding the digest, an older entry is refused.
+        for claims in ([], [second], [second, dict(claim, high_debug_report_sha256='0' * 64)],
+                       [second, dict(claim, head_sha='e' * 40)]):
+            with self.subTest(claims=claims):
+                store = self._store([_entry()], count=3)
+                store.records[_ROOT_TASK]['review_repair_claims'] = claims
+                self._refuses(store, _packet(failed_head=new_head, version=3))
+        # The entry must still be on a HEAD of the Task's claims.
+        store = self._store([_entry(examined_sha='f' * 40)], count=3)
+        store.records[_ROOT_TASK]['review_repair_claims'] = [second, claim]
+        self._refuses(store, _packet(failed_head=new_head, version=3))
+        store = self._store([_entry()], count=_REVIEW_LIMIT)
+        store.records[_ROOT_TASK]['review_repair_claims'] = [second, claim]
+        self._refuses(store, _packet(failed_head=new_head, version=3), '^DELEGATE_REPAIR_LIMIT_REACHED$')
+
+
+class CoveredRepairTests(unittest.TestCase):
+    """#2367 A2: repairs 3 to 5 reuse the High Debug taken before repair #2."""
+
+    _OLD_HEAD = 'b' * 40
+
+    def setUp(self):
+        _patch_trust_and_binding(self)
+
+    def _store(self, count, *, recorded_at='2026-11-04T00:00:01Z'):
+        # Runs 0 and 1 asked for the Debug; it is recorded after run 1 and
+        # before the later repair runs, examined on an earlier HEAD.
+        store = _Store(count=count, diagnosis=_diagnosis([
+            _entry(examined_sha=self._OLD_HEAD, recorded_at=recorded_at)]))
+        for number in range(2, count):
+            store.records[f'{number:032x}']['developer']['created_at'] = (
+                '2026-11-04T00:00:02Z')
+        return store
+
+    def test_repair_three_admits_without_root_cause(self):
+        store = self._store(3)
+        self.assertIsNone(task_submission_cli._check_delegate_repair_cap(_no_high_debug(), store))
+        self.assertEqual(store.writes, [])
+
+    def test_repair_four_refuses_an_unbound_earlier_head(self):
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_HEAD_MOVED'):
+            task_submission_cli._check_delegate_repair_cap(_args(), self._store(4))
+
+    def test_repair_five_refuses_an_earlier_head_without_matching_findings(self):
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED$'):
+            task_submission_cli._check_delegate_repair_cap(_args(), self._store(5))
+
+    def test_the_sixth_repair_is_refused_even_with_the_covering_debug(self):
+        store = self._store(_REVIEW_LIMIT)
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_REPAIR_LIMIT_REACHED$'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.writes, [])
+
+    def test_a_debug_older_than_the_run_that_asked_for_it_does_not_cover(self):
+        store = self._store(5, recorded_at='2026-11-03T00:00:00Z')
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED$'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+
+    def test_later_repairs_still_name_the_covering_debug(self):
+        # No new Debug is needed, but the root cause is still bound.
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_REQUIRED$'):
+            task_submission_cli._check_delegate_repair_cap(_no_high_debug(), self._store(4))
+
+
+class StartFailureRepairCountTests(unittest.TestCase):
+    """#2367 A4: a recorded Developer start failure (#2188 evidence) is not a run."""
+
+    def setUp(self):
+        _patch_trust_and_binding(self)
+
+    def _store(self):
+        # Evidence shape #2302 (Claude D6): the first round stopped in 27 s
+        # before its provider started; the second round really ran.
+        store = _Store(count=_FIRST_RCA_REPAIR)
+        self.failed = store.records[f'{0:032x}']
+        self.failed['developer'] = {'state': 'BLOCKED', 'provider_profile': 'claude',
+                                    'error_code': 'CLAUDE_START_FAILED',
+                                    'created_at': '2026-11-04T00:00:00Z'}
+        return store
+
+    def _checks(self, proved):
+        def record_checks(record):
+            if proved == 'error':
+                raise ValueError('unreadable')
+            return SimpleNamespace(start_failure=proved and record is self.failed)
+        return patch.object(task_submission_cli.start_failure, 'record_checks',
+                            side_effect=record_checks)
+
+    def test_recorded_start_failure_does_not_count_as_a_round(self):
+        store = self._store()
+        with self._checks(True):
+            # Only three real runs before it, so no root cause is required.
+            self.assertIsNone(task_submission_cli._check_delegate_repair_cap(
+                _no_high_debug(), store))
+        self.assertEqual(store.writes, [])
+
+    def test_unproved_or_unreadable_start_failure_still_counts(self):
+        for proved in (False, 'error'):
+            store = self._store()
+            with self.subTest(proved=proved), self._checks(proved):
+                with self.assertRaisesRegex(
+                        LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_REQUIRED$'):
+                    task_submission_cli._check_delegate_repair_cap(_no_high_debug(), store)
+
+    def test_only_a_blocked_record_is_checked(self):
+        store = self._store()
+        self.failed['developer']['state'] = 'DEVELOPER_RESPONDED'
+        with self._checks(True):
+            with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_REQUIRED$'):
+                task_submission_cli._check_delegate_repair_cap(_no_high_debug(), store)
 
 
 def _record_id(number):
@@ -633,7 +812,7 @@ class SplitRepairCountTests(unittest.TestCase):
 
     def test_ec2_runs_leave_every_review_round_available(self):
         self._passes(_split_store(ec2_runs=_TEST_FAIL_MAX))
-        self._needs_root_cause(_split_store(review_runs=_REPAIR_TWO - 1,
+        self._needs_root_cause(_split_store(review_runs=_FIRST_RCA_REPAIR - 1,
                                             ec2_runs=_TEST_FAIL_MAX))
         self._refuses(_split_store(review_runs=_REVIEW_LIMIT - 1,
                                    ec2_runs=_TEST_FAIL_MAX))
@@ -695,11 +874,11 @@ class SplitRepairCountTests(unittest.TestCase):
 
     def test_ec2_repair_never_needs_a_root_cause(self):
         # The review count is at repair #2, but an EC2 repair is not a review repair.
-        self._passes(_split_store(review_runs=_REPAIR_TWO - 1,
+        self._passes(_split_store(review_runs=_FIRST_RCA_REPAIR - 1,
                                   current=_ec2_claim(_CURRENT_TASK)))
 
     def test_review_repair_two_beside_ec2_runs_takes_high_debug(self):
-        store = _split_store(review_runs=_REPAIR_TWO - 1, ec2_runs=_TEST_FAIL_MAX,
+        store = _split_store(review_runs=_FIRST_RCA_REPAIR - 1, ec2_runs=_TEST_FAIL_MAX,
                              diagnosis=_diagnosis([_entry()]))
         self._passes(store, args=_args())
 
@@ -759,8 +938,8 @@ class LegacyDataTests(unittest.TestCase):
                               '^DELEGATE_REPAIR_LIMIT_REACHED$')
 
     def test_legacy_override_fields_do_not_skip_the_root_cause(self):
-        store = _Store(count=_REPAIR_TWO, diagnosis=_diagnosis([_entry()]))
-        _add_legacy_overrides(store, _CURRENT_TASK, *map(_record_id, range(_REPAIR_TWO)))
+        store = _Store(count=_FIRST_RCA_REPAIR, diagnosis=_diagnosis([_entry()]))
+        _add_legacy_overrides(store, _CURRENT_TASK, *map(_record_id, range(_FIRST_RCA_REPAIR)))
         self._refuses(store, _no_high_debug(), '^DELEGATE_HIGH_DEBUG_TASK_REQUIRED$')
 
     def test_legacy_override_fields_do_not_raise_the_test_fail_limit(self):
@@ -887,8 +1066,9 @@ class LaunchedNoWorkRepairCountTests(unittest.TestCase):
         self.addCleanup(started_status.stop)
 
     def _store(self, developer, *, count=_REVIEW_LIMIT):
-        # One record more than repair #2: skipping it leaves repair #2, which a
-        # valid High Debug passes; counting it reaches the limit.
+        # At the review limit: skipping one record leaves the last repair
+        # (#2367: repair #5), which a valid High Debug passes; counting it
+        # reaches the limit.
         store = _Store(count=count, diagnosis=_diagnosis([_entry()]))
         store.records[self._NEWEST]['developer'] = developer
         return store
@@ -1017,7 +1197,7 @@ class LaunchedNoWorkRepairCountTests(unittest.TestCase):
         self.assertEqual(store.writes, [])
 
     def test_skip_can_bring_count_below_repair_two(self):
-        store = _Store(count=_REPAIR_TWO)
+        store = _Store(count=_FIRST_RCA_REPAIR)
         store.records[self._NEWEST]['developer'] = _no_work()
         task_submission_cli._check_delegate_repair_cap(_no_high_debug(), store)
         self.assertEqual(store.writes, [])
@@ -1042,14 +1222,14 @@ class HighDebugRunBindingTests(unittest.TestCase):
         _patch_trust_and_binding(self)
 
     def _refuses(self, diagnosis):
-        store = _Store(count=_REPAIR_TWO, diagnosis=diagnosis)
+        store = _Store(count=_FIRST_RCA_REPAIR, diagnosis=diagnosis)
         with self.assertRaisesRegex(
                 LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_INVALID$'):
             task_submission_cli._check_delegate_repair_cap(_args(), store)
         self.assertEqual(store.writes, [])
 
     def _passes(self, diagnosis):
-        store = _Store(count=_REPAIR_TWO, diagnosis=diagnosis)
+        store = _Store(count=_FIRST_RCA_REPAIR, diagnosis=diagnosis)
         self.assertIsNone(task_submission_cli._check_delegate_repair_cap(_args(), store))
         self.assertEqual(store.writes, [])
 
@@ -1334,7 +1514,7 @@ class CommentCannotPassRepairCapTests(unittest.TestCase):
         _patch_trust_and_binding(self)
 
     def _refuses(self, diagnosis, **overrides):
-        store = _Store(count=_REPAIR_TWO, diagnosis=diagnosis)
+        store = _Store(count=_FIRST_RCA_REPAIR, diagnosis=diagnosis)
         with self.assertRaisesRegex(
                 LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_INVALID$'):
             task_submission_cli._check_delegate_repair_cap(_args(**overrides), store)
@@ -1423,7 +1603,7 @@ class DelegateRequiresHighDebugTaskTests(unittest.TestCase):
         )
         for route, route_args in routes:
             for ref in _COMMENT_REFS:
-                store = _Store(count=_REPAIR_TWO,
+                store = _Store(count=_FIRST_RCA_REPAIR,
                                diagnosis=_diagnosis([_entry()]))
                 args = _args(high_debug_ref=ref, high_debug_task=None, **route_args)
                 with self.subTest(route=route, ref=ref), \
@@ -1564,8 +1744,7 @@ class ChainGateTests(unittest.TestCase):
         self.assertEqual(self._gate(store), 'CLAIMED')
 
     def test_root_cause_required_by_the_chain_count(self):
-        _use_policy(self, repair_max=2)
-        store = _chain_store(_OTHER_D6, 'third-d6')
+        store = _chain_store(_OTHER_D6, 'third-d6', 'fourth-d6', 'fifth-d6')
         store.records[_HIGH_DEBUG_TASK] = _diagnosis([_entry()])
         task_submission_cli._check_delegate_repair_cap(_no_high_debug(), store, _binding())
         self._refuses(store, '^DELEGATE_HIGH_DEBUG_TASK_REQUIRED$')
@@ -1574,7 +1753,7 @@ class ChainGateTests(unittest.TestCase):
         # D6 makes the High Debug stale.
         self.claims = []
         store.records[_record_id(0x101)]['developer']['created_at'] = '2026-11-04T00:00:02Z'
-        self._refuses(store, '^DELEGATE_HIGH_DEBUG_TASK_INVALID$', args=_args())
+        self._refuses(store, '^DELEGATE_HIGH_DEBUG_TIME_MISMATCH$', args=_args())
 
     def test_unknown_view_refuses_count_unavailable(self):
         unavailable = '^DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task '

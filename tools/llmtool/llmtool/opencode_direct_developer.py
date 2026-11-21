@@ -31,8 +31,10 @@ from .test_output_excerpts import _emitted_sensitive
 MODEL = 'opencode/deepseek-v4.1-flash-free#high'
 AGENT = 'llmtool-direct-developer'
 # #1815: each run's bound is resolve_route_timeout('opencode', requested) from
-# developer-routes.json; this is only the absolute ceiling no run may exceed.
-MAX_WALL_CLOCK_SECONDS = 3600
+# developer-routes.json; MAX_WALL_CLOCK_SECONDS is only the absolute ceiling no
+# run may exceed. #2281: it is developer_routes.HARD_TIMEOUT_CAP_SECONDS, read
+# on access (module __getattr__ below) so there is no second hard-coded copy
+# and this module keeps importing developer_routes lazily.
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 MAX_STDERR_BYTES = 64 * 1024
 # #2281: default bound from developer-routes.json (resolved_max_prompt_bytes).
@@ -49,15 +51,21 @@ MAX_SOURCE_FILE_BYTES = DEFAULT_MAX_SOURCE_FILE_BYTES
 DEFAULT_MAX_SOURCE_TOTAL_BYTES = 2 * 1024 * 1024
 MAX_SOURCE_TOTAL_BYTES = DEFAULT_MAX_SOURCE_TOTAL_BYTES
 MAX_VERSION_OUTPUT_BYTES = 4096
+# #2281 (Owner 2026-11-19): read and write path counts of a Developer Task scope.
+MAX_TASK_PATHS = 1024
 VERSION_TIMEOUT_SECONDS = 5
 _SESSION = re.compile(r'ses_[A-Za-z0-9]{1,100}\Z')
 # Any well-formed release is accepted; event compatibility is enforced by the
 # strict JSON event parser rather than by pinning one CLI version.
 _VERSION = re.compile(r'opencode v[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}'
                       r'(?:-[0-9A-Za-z.-]{1,64})?(?:\+[0-9A-Za-z.-]{1,64})?\Z')
-# Only OpenCode-hosted free models; a paid model is never selected or a fallback.
+# OpenCode-hosted free models.
 _FREE_MODEL = re.compile(
     r'opencode/[A-Za-z0-9][A-Za-z0-9._-]{0,94}-free(?:#[a-z]{1,16})?\Z')
+# Owner #289: any well-formed OpenCode model id (free or paid, any provider
+# prefix OpenCode supports, with or without a #variant).
+_OPENCODE_MODEL = re.compile(
+    r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}/[A-Za-z0-9][A-Za-z0-9._-]{0,94}(?:#[a-z]{1,16})?\Z')
 
 
 class DirectOpenCodeError(LLMToolError):
@@ -85,6 +93,7 @@ class DirectOpenCodeError(LLMToolError):
         self.ended_at = ended_at
         self.native_session_id = native_session_id
         self.event_summary = None
+        self.stopped_before_prompt = False
         # Set only from parsed CLI events (design c6876861575 items 1-2).
         self.provider_evidence = provider_evidence
 
@@ -150,6 +159,18 @@ def step_usage_evidence(events):
     return None
 
 
+def _max_wall_clock_seconds():
+    """Return the absolute run ceiling, developer_routes.HARD_TIMEOUT_CAP_SECONDS."""
+    from .developer_routes import HARD_TIMEOUT_CAP_SECONDS
+    return HARD_TIMEOUT_CAP_SECONDS
+
+
+def __getattr__(name):
+    if name == 'MAX_WALL_CLOCK_SECONDS':
+        return _max_wall_clock_seconds()
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+
+
 def resolved_timeout(requested=None):
     """Return the OpenCode run bound from developer-routes.json (#1815).
 
@@ -162,7 +183,7 @@ def resolved_timeout(requested=None):
         value = resolve_route_timeout('opencode', requested)
     except RouteError as exc:
         raise DirectOpenCodeError(exc.code) from None
-    if type(value) is not int or not 1 <= value <= MAX_WALL_CLOCK_SECONDS:
+    if type(value) is not int or not 1 <= value <= _max_wall_clock_seconds():
         _reject('OPENCODE_BUDGET_INVALID')
     return value
 
@@ -198,8 +219,15 @@ def is_free_model(model):
     return type(model) is str and _FREE_MODEL.match(model) is not None
 
 
+def is_valid_model(model):
+    return (type(model) is str and 1 <= len(model) <= 128 and
+            '://' not in model and '..' not in model and
+            '\n' not in model and '\r' not in model and
+            _OPENCODE_MODEL.match(model) is not None)
+
+
 def validate_model(model):
-    if not is_free_model(model):
+    if not is_valid_model(model):
         _reject('OPENCODE_MODEL_INVALID')
     return model
 
@@ -433,7 +461,8 @@ def _workflow_grant_allows(root, name, mode, *, base_commit, issue):
 def _valid_paths(root, read_paths, write_paths, *, workflow_grant_base_commit=None,
                  workflow_grant_issue=None):
     if (type(read_paths) is not list or type(write_paths) is not list or
-            not read_paths or len(read_paths) > 32 or len(write_paths) > 32 or
+            not read_paths or len(read_paths) > MAX_TASK_PATHS or
+            len(write_paths) > MAX_TASK_PATHS or
             read_paths != sorted(set(read_paths)) or
             write_paths != sorted(set(write_paths)) or
             not set(write_paths).issubset(read_paths)):
@@ -580,6 +609,17 @@ def configuration(*, read_paths, write_paths, model=MODEL,
                  for path in write_paths)
     provider, model = selected.split('/', 1)
     model = model.split('#', 1)[0]
+    policies = [
+        {'action': 'provider.use', 'resource': '*', 'effect': 'deny'},
+        {'action': 'provider.use', 'resource': 'opencode', 'effect': 'allow'},
+    ]
+    if provider != 'opencode':
+        policies.append({'action': 'provider.use', 'resource': provider, 'effect': 'allow'})
+    policies.append({'action': 'integration.use', 'resource': '*', 'effect': 'deny'})
+    # #1605 Owner A: OpenCode 2.2.6+ routes the free model via this one.
+    policies.append({'action': 'integration.use', 'resource': 'opencode#*', 'effect': 'allow'})
+    if provider != 'opencode':
+        policies.append({'action': 'integration.use', 'resource': f'{provider}#*', 'effect': 'allow'})
     return {
         'model': selected,
         'default_agent': AGENT,
@@ -596,13 +636,7 @@ def configuration(*, read_paths, write_paths, model=MODEL,
         'instructions': [],
         'mcp': {'servers': {}},
         'permissions': rules,
-        'policies': [
-            {'action': 'provider.use', 'resource': '*', 'effect': 'deny'},
-            {'action': 'provider.use', 'resource': 'opencode', 'effect': 'allow'},
-            {'action': 'integration.use', 'resource': '*', 'effect': 'deny'},
-            # #1605 Owner A: OpenCode 2.2.6+ routes the free model via this one.
-            {'action': 'integration.use', 'resource': 'opencode#*', 'effect': 'allow'},
-        ],
+        'policies': policies,
         'agents': {
             # Read then edit need two tool-capable rounds before the final summary.
             AGENT: {'mode': 'primary', 'model': selected, 'steps': steps,
@@ -876,14 +910,14 @@ def _fire_delivered(delivered_callback):
 
 def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
         dispatch_store=None, dispatch_task_id=None,
-        launch_callback=None, delivered_callback=None,
+        launch_callback=None, delivered_callback=None, spawn_authorization=None,
         timeout_seconds=None, executable=None, model=MODEL,
         steps=DEFAULT_AGENT_STEPS,
         workflow_grant_base_commit=None, workflow_grant_issue=None):
     """Invoke one bounded OpenCode run in the existing D6 task worktree.
 
     timeout_seconds None uses the opencode route default_timeout; a given value
-    must pass resolve_route_timeout (route max_timeout, hard cap 3600). A
+    must pass resolve_route_timeout (route max_timeout, hard cap 18000). A
     refusal raises the resolver code before any provider process starts.
 
     workflow_grant_base_commit and workflow_grant_issue carry the Task base
@@ -941,6 +975,7 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
     work_deadline = started + timeout_seconds
     cleanup_deadline = work_deadline + 3
     stdout, stderr = bytearray(), bytearray()
+    offset = 0
     process = None
     cleanup = 'UNKNOWN'
     with tempfile.TemporaryDirectory(prefix='llmtool-opencode-config-') as config_dir:
@@ -974,6 +1009,11 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                     except worker_dispatch.WorkerDispatchDenied as exc:
                         raise DirectOpenCodeError(exc.dispatch_code) from None
                     run_id = _observed_run_id(dispatch_store, dispatch_task_id)
+                    if spawn_authorization is not None:
+                        try:
+                            spawn_authorization()
+                        except Exception:
+                            _reject('OPENCODE_SPAWN_AUTHORIZATION_REFUSED')
                     try:
                         process = subprocess.Popen(argv, cwd=str(root), env=env,
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -997,7 +1037,6 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                         selector.register(stream, selectors.EVENT_READ, name)
                     os.set_blocking(process.stdin.fileno(), False)
                     selector.register(process.stdin, selectors.EVENT_WRITE, 'stdin')
-                    offset = 0
                     delivered = False
                     denial_line_start = 0
                     while selector.get_map():
@@ -1088,6 +1127,10 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
             exc.started_at = started_at
             exc.ended_at = _utc_now() if started_at is not None else None
             exc.native_session_id = _observed_native_session(bytes(stdout))
+            exc.stopped_before_prompt = (
+                exc.attempted and cleanup == 'CONFIRMED' and
+                type(exc.process_exit_code) is int and exc.process_exit_code != 0 and
+                offset == 0 and not stdout and not stderr)
             raise
         except BaseException as exc:
             cleanup = 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN'

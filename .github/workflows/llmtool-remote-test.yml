@@ -13,7 +13,7 @@ on:
         required: true
         type: string
       modules:
-        description: 'Space-separated llmtool test module names (1 to 8)'
+        description: 'Space-separated llmtool test module names'
         required: true
         type: string
       nonce:
@@ -35,7 +35,6 @@ jobs:
       && (github.actor == 'davidcatcat' || github.actor == 'ddavidccatssun')
       && (github.triggering_actor == 'davidcatcat' || github.triggering_actor == 'ddavidccatssun')
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
     steps:
       - name: Check hosted runner boundary
         shell: bash
@@ -69,8 +68,8 @@ jobs:
           [[ "$INPUT_REF" =~ ^(refs/pull/[0-9]+/head|[A-Za-z0-9][A-Za-z0-9._/-]{0,99})$ ]] || fail "ref does not match _REF"
           [[ "$INPUT_NONCE" =~ ^[0-9a-f]{32}$ ]] || fail "nonce must be 32 lowercase hex"
           read -r -a mods <<< "$INPUT_MODULES"
-          if [ "${#mods[@]}" -lt 1 ] || [ "${#mods[@]}" -gt 8 ]; then
-            fail "modules must contain 1 to 8 words"
+          if [ "${#mods[@]}" -lt 1 ]; then
+            fail "modules must contain at least one word"
           fi
           seen=" "
           for mod in "${mods[@]}"; do

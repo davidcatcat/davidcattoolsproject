@@ -112,11 +112,6 @@ class HostedDispatchTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     remote_test._hosted_dispatch(_SHA, _REF, bad_type, _NONCE, post=fake_post)
 
-        # > 8 modules
-        nine_modules = [f'test_mod_{i}' for i in range(9)]
-        with self.assertRaises(ValueError):
-            remote_test._hosted_dispatch(_SHA, _REF, nine_modules, _NONCE, post=fake_post)
-
         # module name invalid
         for bad_module in ('not_a_test', 'test_UPPER', 'test-hyphen', '', 123):
             with self.subTest(bad_module=bad_module):
@@ -132,6 +127,16 @@ class HostedDispatchTests(unittest.TestCase):
             remote_test._hosted_dispatch(_SHA, _REF, ['test_a', 'test_a'], _NONCE, post=fake_post)
 
         self.assertEqual(calls, [])
+
+    def test_one_dispatch_transmits_every_module(self):
+        for count in (1, 8, 9, 11, 17, 25, 100):
+            with self.subTest(count=count):
+                names = [f'test_mod_{i:03d}' for i in range(count)]
+                calls = []
+                remote_test._hosted_dispatch(
+                    _SHA, _REF, names, _NONCE, post=lambda path, body: calls.append(body))
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0]['inputs']['modules'].split(), names)
 
     def test_exact_dispatch_path_and_body_single_module(self):
         calls = []

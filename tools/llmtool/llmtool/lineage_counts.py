@@ -276,24 +276,79 @@ def chain_review_repairs(store, task):
     return count
 
 
-def chain_debug_used(store, task, entries, is_used):
-    """O7: (used, used) over entries and the other chain Tasks' high_debug; doubt is UNKNOWN."""
-    if type(task) is not dict or type(entries) is not list or store is None:
-        return UNKNOWN, UNKNOWN
+def debug_lineage_key(store, task):
+    """Return the continuation root of the original work."""
     records = chain_records(store, task)
     if records is None:
+        return None
+    oldest = records[-1]
+    line = oldest.get('lineage', {})
+    if type(line) is not dict:
+        return None
+    if line.get('kind') in ('child', 'replan'):
+        root_id = line.get('lineage_id')
+        try:
+            root = store.get(root_id)
+        except Exception:
+            return None
+        if (type(root) is not dict or root.get('task_id') != root_id or
+                root.get('lineage', {}).get('kind') != 'root'):
+            return None
+        oldest = root
+    roots = chain_records(store, oldest)
+    return roots[-1].get('task_id') if roots else None
+
+
+def debug_lineage_members(store, task):
+    """Return the original work members from a complete, unambiguous snapshot."""
+    if type(task) is not dict:
+        return None
+    records = store_records(store)
+    key = debug_lineage_key(store, task)
+    if (records is None or key is None or task.get('task_id') not in records or
+            any('lineage' in record and type(record['lineage']) is not dict
+                for record in records.values())):
+        return None
+    root_chain = chain_in(records, key)
+    if root_chain is None:
+        return None
+    members = set(root_chain[0])
+    for root_id in root_chain[0]:
+        line = records[root_id].get('lineage', {})
+        if type(line) is not dict:
+            return None
+        related = {other_id for other_id, other in records.items()
+                   if type(other.get('lineage')) is dict and
+                   other['lineage'].get('kind') in ('child', 'replan') and
+                   other['lineage'].get('lineage_id') == root_id}
+        for split in line.get('splits', ()):
+            if type(split) is not dict or type(split.get('children')) is not list:
+                return None
+            if not set(split['children']) <= related:
+                return None
+        for member in related:
+            chain = chain_in(records, member)
+            if chain is None:
+                return None
+            members.update(chain[0])
+    if task['task_id'] not in members:
+        return None
+    return {member: records[member] for member in sorted(members)}
+
+
+def chain_debug_used(store, task, entries, is_used):
+    """Count reservations and used Debugs once across the original work."""
+    if type(entries) is not list:
         return UNKNOWN, UNKNOWN
-    later = successor_records(store, task, {record.get('task_id') for record in records})
-    if later is None or len(records) + len(later) > MAX_CHAIN:
+    members = debug_lineage_members(store, task)
+    if members is None:
         return UNKNOWN, UNKNOWN
     used = 0
-    for items in [entries] + [record.get('high_debug', []) for record in records[1:] + later]:
+    for member, record in members.items():
+        items = entries if member == task['task_id'] else record.get('high_debug', [])
         if type(items) is not list:
             return UNKNOWN, UNKNOWN
-        try:
-            used += sum(1 for item in items if is_used(item))
-        except Exception:
-            return UNKNOWN, UNKNOWN
+        used += sum(1 for item in items if is_used(item))
     return used, used
 
 

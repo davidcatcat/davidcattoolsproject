@@ -33,12 +33,19 @@ BUDGET_LIMITS = {
     'max_tool_result_bytes': (256, 1_048_576),
     'max_sent_bytes': (1024, 512 * 1024 * 1024),
 }
+# #2281: old callers may still send token budgets, but the loop never enforces them.
+TOKEN_BUDGETS = frozenset(('max_input_tokens', 'max_output_tokens'))
+REQUIRED_BUDGETS = frozenset(BUDGET_LIMITS) - TOKEN_BUDGETS
 TASK_KEYS = frozenset((
     'schema_version', 'task_id', 'source_sha', 'goal', 'acceptance', 'read_paths',
     'write_paths', 'egress_basis', 'data_class', 'budgets', 'findings',
 ))
 SCOPE_KEYS = ('read_paths', 'write_paths', 'egress_basis', 'data_class', 'budgets')
 MAX_SESSION_EXPIRY_HOURS = 72
+# #2281 (Owner 2026-11-19): an AI run may last up to 5 hours. The llmtool
+# gw-agent route serializes its profile timeout (default 10800 s) into the
+# gateway profile, so the profile accepts the same 18000 s hard cap.
+MAX_PROFILE_TIMEOUT_SECONDS = 18000
 MAX_JSON_FILE = 1024 * 1024
 _TASK_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
 _SHA = re.compile(r'[0-9a-f]{40}|[0-9a-f]{64}')
@@ -142,10 +149,13 @@ def parse_task(obj: Any, raw: bytes) -> Task:
         write_paths = _strs(obj.get('write_paths', []), max_items=500, max_len=1024)
         findings = _strs(obj.get('findings', []), max_items=50, max_len=8000)
         budgets_in = obj['budgets']
-        if not isinstance(budgets_in, dict) or set(budgets_in) != set(BUDGET_LIMITS):
+        if (not isinstance(budgets_in, dict) or not REQUIRED_BUDGETS <= set(budgets_in)
+                or set(budgets_in) - set(BUDGET_LIMITS)):
             raise ValueError
         budgets = {}
         for key, (low, high) in BUDGET_LIMITS.items():
+            if key not in budgets_in:
+                continue
             value = budgets_in[key]
             if type(value) is not int or not low <= value <= high:
                 raise ValueError
@@ -261,7 +271,7 @@ def parse_profile(profiles: Any, name: str) -> Profile:
         if type(expiry) is not int or not 1 <= expiry <= MAX_SESSION_EXPIRY_HOURS:
             raise bad('PROFILE_EXPIRY_INVALID')
         timeout = p.get('timeout_seconds', 120)
-        if type(timeout) is not int or not 1 <= timeout <= 3600:
+        if type(timeout) is not int or not 1 <= timeout <= MAX_PROFILE_TIMEOUT_SECONDS:
             raise ValueError
         tool_choice = p.get('tool_choice', 'auto')
         if tool_choice not in ('auto', 'required'):

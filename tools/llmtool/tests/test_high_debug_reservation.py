@@ -130,9 +130,9 @@ class ReservationCase(unittest.TestCase):
             ids.append(self.task(continues=ids[-1]))
         return ids
 
-    def split(self):
+    def split(self, count=2):
         root, op = self.task(), new_id()
-        children = [self.task(), self.task()]
+        children = [self.task() for _ in range(count)]
 
         def line(kind, state, **extra):
             return dict({'lineage_id': root, 'kind': kind,
@@ -217,43 +217,56 @@ class ReservationCase(unittest.TestCase):
         self.eq(self.debug(task_id, runner, create=create, **kwargs)[0], CREATE)
         return task_id, runner
 
+    def spend_two_slots(self, task_id, store=None):
+        store = store or self.store
+        store.append_high_debug(task_id, entry('RCA_CONFIRMED'))
+        store.append_high_debug(task_id, entry('RCA_UNCONFIRMED'))
+
     def assert_reserved(self, task_id, runner):
         self.eq(self.last_error.high_debug_detail, 'reservation=RESERVED')
         self.eq(self.statuses(task_id), ['RESERVED'])
+        self.spend_two_slots(task_id)
         self.eq(self.debug(task_id, runner), (PARENT, []))
         runner.assert_not_called()
 
 
 class AtomicAdmissionTests(ReservationCase):
     def test_a_chain_race_for_the_last_slot_has_one_winner(self):
-        first, second = self.chain(2)
-        self.eq(self.race(first, second), [0, PARENT])
-        self.eq(self.statuses(first) + self.statuses(second), ['RESERVED'])
+        first, second, third, fourth = self.chain(4)
+        self.eq(self.reserve(first), 0)
+        self.eq(self.reserve(second), 0)
+        self.eq(self.race(third, fourth), [0, PARENT])
+        self.eq(self.statuses(third) + self.statuses(fourth), ['RESERVED'])
 
     def test_b_chain_and_split_group_share_a_cap(self):
         first, second, third = self.chain(3)
-        self.eq(self.reserve(second), 0)
+        for index in range(3):
+            self.eq(self.reserve(second), index)
         for task_id in (first, third):
             self.eq(self.refused(task_id), PARENT)
             self.eq(self.entries(task_id), [])
-        one, two = self.split()
-        self.eq(self.reserve(one), 0)
-        self.eq(self.refused(two), 'HIGH_DEBUG_DEBUG_GROUP_USED')
-        self.eq(self.entries(two), [])
+        # Split children share a three-slot limit.
+        *within, over = self.split(4)
+        for child in within:
+            self.eq(self.reserve(child), 0)
+        self.eq(self.refused(within[0]), 'HIGH_DEBUG_DEBUG_GROUP_USED')
+        self.eq(self.statuses(within[0]), ['RESERVED'])
+        self.eq(self.refused(over), 'HIGH_DEBUG_DEBUG_GROUP_USED')
+        self.eq(self.entries(over), [])
 
     def test_c_used_chain_refuses(self):
         first, second = self.chain(2)
         self.store.append_high_debug(first, entry('RCA_CONFIRMED'))
+        self.spend_two_slots(first)
         for task_id in (first, second):
             self.eq(self.refused(task_id), PARENT)
-        self.eq((len(self.entries(first)), self.entries(second)), (1, []))
+        self.eq((len(self.entries(first)), self.entries(second)), (3, []))
 
     def test_e_repeated_requests_leave_one_entry(self):
         task_id = self.task()
         again = lambda: high_debug._reserve_debug(self.store, task_id, [], entry())  # noqa: E731
         self.eq(again(), 0)
         self.eq(code(again), 'HIGH_DEBUG_BUSY')
-        self.eq(self.refused(task_id), PARENT)
         self.eq(len(self.entries(task_id)), 1)
         other = self.task()
         winner, loser = self.race(other, other)
@@ -281,12 +294,13 @@ class AtomicAdmissionTests(ReservationCase):
                 pair = self.chain(2)
                 spent, asking = pair if spent_on_first else pair[::-1]
                 self.store.append_high_debug(spent, entry('RCA_CONFIRMED'))
+                self.spend_two_slots(spent)
                 self.eq(self.refused(asking), PARENT)
         orphan = self.task(continues=new_id())
         self.eq(lineage_counts.chain_debug_used(
             self.store, self.store.get(orphan), [], high_debug._debug_entry_used),
             (UNKNOWN, UNKNOWN))
-        self.eq(self.refused(orphan), PARENT)
+        self.eq(self.refused(orphan), 'HIGH_DEBUG_CHAIN_LOCK_UNAVAILABLE')
         self.eq(self.entries(orphan), [])
 
     def test_h_finalize_only_once_in_place(self):
@@ -321,6 +335,7 @@ class RunTests(ReservationCase):
         task_id, runner = self.task(True), Mock()
         self.eq(self.debug(task_id, raises(subprocess.TimeoutExpired, 'codex', 1800))[0], RUN)
         self.eq(self.pairs(task_id), [('RUN_FAILED', RUN)])
+        self.spend_two_slots(task_id)
         self.eq(self.debug(task_id, runner), (PARENT, []))
         runner.assert_not_called()
 
@@ -330,6 +345,7 @@ class RunTests(ReservationCase):
             self.debug(task_id, raises(Crash))
         restarted = TaskStore(self.base / 'tasks')
         self.eq(self.statuses(task_id, restarted), ['RESERVED'])
+        self.spend_two_slots(task_id, restarted)
         self.eq(self.debug(task_id, Mock(), store=restarted), (PARENT, []))
         self.eq(self.refused(task_id, restarted), PARENT)
 
@@ -424,10 +440,11 @@ class RunTests(ReservationCase):
 
     def test_g_failed_codex_finalize_refuses_claude(self):
         task_id, runner = self.task(True), Mock(return_value=exits(1, LIMIT)())
+        self.spend_two_slots(task_id)
         with unfinalized():
             self.eq(self.debug(task_id, runner, fallback=True)[0], PARENT)
         self.eq(runner.call_count, 1)
-        self.eq(self.statuses(task_id), ['RESERVED'])
+        self.eq(self.statuses(task_id), ['RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'RESERVED'])
 
 
 if __name__ == '__main__':

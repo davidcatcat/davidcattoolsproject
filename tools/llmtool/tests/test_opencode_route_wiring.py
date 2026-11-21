@@ -78,6 +78,10 @@ class _Store:
     def d6_bind_compare_and_update(self, _task_id, *, executor_task_id, expected, **updates):
         return self._write('d6_bind_compare_and_update', updates)
 
+    def prepare_direct_dispatch(self, task_id, *, expected_developer, developer):
+        return self.compare_and_update(task_id, expected={'developer': expected_developer},
+                                       developer=dict(developer, dispatch_boundary='PREPARED'))
+
     def compare_and_update(self, _task_id, *, expected, **updates):
         return self._write('compare_and_update', updates)
 
@@ -214,6 +218,42 @@ class OpenCodeRouteWiringTests(unittest.TestCase):
         self.assertEqual(run.prompts, [])
         run.mocks['provider'].assert_not_called()
         return run
+
+    # #2503: OpenCode's own text is kept for the PM as developer.reported.
+
+    def _text_result(self, text):
+        return DirectResult(0, _SESSION, text, None, 'UNKNOWN', 'a' * 64, 32,
+                            'CONFIRMED', 'opencode v2.0.32', 10, 1, 'b' * 64)
+
+    def test_reply_text_is_kept_for_the_pm_on_a_responded_result(self):
+        text = 'Updated src.py. BLOCKED on item 2: it needs other.py outside read_paths.'
+        run = self._run(outcome=self._text_result(text))
+        developer = run.store.task['developer']
+        self.assertEqual(run.status, 0)
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(developer['reported'], {'summary': text})
+
+    def test_reply_text_is_kept_on_a_rejected_output(self):
+        text = 'Wrote a partial diff; item 2 is not done.'
+        run = self._run(outcome=self._text_result(text), extra={
+            'rejection': patch.object(submission_cli, '_developer_output_rejection',
+                                      return_value='DEVELOPER_OUTPUT_INVALID_TEXT')})
+        developer = run.store.task['developer']
+        self.assertEqual(developer['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(developer['reported'], {'summary': text})
+
+    def test_long_text_keeps_the_final_answer_at_the_end(self):
+        text = 'Step notes ' + 'n' * (20 * 1024) + ' FINAL: BLOCKED on item 2.'
+        run = self._run(outcome=self._text_result(text))
+        summary = run.store.task['developer']['reported']['summary']
+        self.assertTrue(summary.startswith(submission_cli.DEVELOPER_REPLY_EARLIER_TRUNCATED))
+        self.assertTrue(summary.endswith('FINAL: BLOCKED on item 2.'))
+        self.assertLessEqual(submission_cli._reported_size({'summary': summary}),
+                             submission_cli.CLAUDE_REPLY_MAX_REPORTED_BYTES)
+
+    def test_no_text_adds_no_reported_field(self):
+        run = self._run(outcome=self._text_result(None))
+        self.assertNotIn('reported', run.store.task['developer'])
 
     def test_prompt_holds_exactly_the_pinned_cards_between_instructions_and_packet(self):
         run = self._run()

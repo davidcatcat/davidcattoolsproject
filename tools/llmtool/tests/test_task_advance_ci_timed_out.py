@@ -52,19 +52,33 @@ class TaskAdvanceCiTimedOutTests(unittest.TestCase):
         result, dispatched, calls, repaired, gh_calls = self.helper.linux('timed_out', record=rec)
         self.assertEqual(len(repaired), 0)
 
-    def test_owner_case_4_used_up_test_count_stops(self):
-        used = [
+    @staticmethod
+    def used_test_claims(count):
+        return [
             {'executor_task': 'executor-1', 'pr': 17, 'head_sha': 'b' * 40,
              'version': n, 'attempt': n, 'family': 'pr-17-ec2', 'state': 'FAILED',
              'repair_task_id': f'{n:032x}', 'comment_id': None,
              'packet_sha256': 'f' * 64, 'claimed_at': f'2026-11-13T0{n}:00:00Z'}
-            for n in (1, 2)
+            for n in range(1, count + 1)
         ]
-        rec = tta.base_record(review_repair_claims=used)
+
+    def test_owner_case_4_used_up_test_count_stops(self):
+        # #2367: test_fail_max is 5 effective EC2/CI repairs; the 5th used stops.
+        rec = tta.base_record(review_repair_claims=self.used_test_claims(5))
         result, dispatched, calls, repaired, gh_calls = self.helper.linux('timed_out', record=rec)
         self.assertEqual(result['step'], 'STOPPED')
         self.assertEqual(result['codes'], ['TEST_FAIL_LIMIT_REACHED'])
         self.assertEqual(len(repaired), 0)
+
+    def test_owner_case_4_below_the_test_limit_still_repairs(self):
+        # #2367: 2 to 4 used test repairs no longer stop; the failure is repaired.
+        for count in (2, 4):
+            with self.subTest(used=count):
+                rec = tta.base_record(review_repair_claims=self.used_test_claims(count))
+                result, dispatched, calls, repaired, gh_calls = self.helper.linux(
+                    'timed_out', record=rec)
+                self.assertEqual(result['step'], 'CI_FAILED')
+                self.assertEqual(len(repaired), 1)
 
     def test_owner_case_5_mac_capacity_exemption_never_applies_to_timed_out(self):
         with patch.object(task_advance, '_mac_capacity_cancel', Mock()) as mock_cancel:
