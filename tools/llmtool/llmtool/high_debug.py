@@ -251,14 +251,39 @@ def _usage_from_events(events_raw):
     return fields
 
 
-def _session_observed(thread_id, sessions_dir=None):
+def _session_observed(thread_id, sessions_dir=None, codex_home=None):
     """Read only model/effort metadata from bounded, regular rollout files."""
     if type(thread_id) is not str or not thread_id:
         return 'UNKNOWN', 'UNKNOWN'
-    root = Path(sessions_dir) if sessions_dir is not None else Path.home() / '.codex' / 'sessions'
+    if sessions_dir is not None:
+        root = Path(sessions_dir)
+    else:
+        home = codex_home if codex_home is not None else os.environ.get('CODEX_HOME')
+        if home and isinstance(home, (str, Path)) and (not isinstance(home, str) or home.strip()):
+            home_dir = Path(os.path.expanduser(home))
+        else:
+            home_dir = Path.home() / '.codex'
+        root = home_dir / 'sessions'
+
+    # The Codex home path (and every ancestor) must contain no symlink, with no
+    # exempt directories. The explicit sessions_dir override is test-only (the
+    # launch path refuses it), so only its own root is checked below.
+    if sessions_dir is None:
+        check_path = root
+        while True:
+            try:
+                st = check_path.lstat()
+                if stat.S_ISLNK(st.st_mode):
+                    return 'UNKNOWN', 'UNKNOWN'
+            except OSError:
+                return 'UNKNOWN', 'UNKNOWN'
+            if check_path.parent == check_path:
+                break
+            check_path = check_path.parent
+
     try:
         root_stat = root.lstat()
-        if root.is_symlink() or not stat.S_ISDIR(root_stat.st_mode):
+        if not stat.S_ISDIR(root_stat.st_mode):
             return 'UNKNOWN', 'UNKNOWN'
     except OSError:
         return 'UNKNOWN', 'UNKNOWN'
@@ -267,8 +292,14 @@ def _session_observed(thread_id, sessions_dir=None):
     matched = False
     try:
         for current, dirs, files in os.walk(root, followlinks=False):
-            dirs[:] = [name for name in dirs
-                       if not (Path(current) / name).is_symlink()]
+            for name in dirs:
+                dir_path = Path(current) / name
+                try:
+                    if dir_path.is_symlink():
+                        return 'UNKNOWN', 'UNKNOWN'
+                except OSError:
+                    return 'UNKNOWN', 'UNKNOWN'
+
             for name in files:
                 if not (name.startswith('rollout-') and
                         name.endswith('-' + thread_id + '.jsonl')):
@@ -298,23 +329,71 @@ def _session_observed(thread_id, sessions_dir=None):
                 if len(raw) > _SESSION_READ_LIMIT:
                     return 'UNKNOWN', 'UNKNOWN'
                 matched = True
-                for line in raw.decode('utf-8', 'replace').split('\n'):
+                meta_seen = False
+                model_seen = False
+                lines = raw.decode('utf-8', 'replace').split('\n')
+                # A single terminal newline is allowed; any other empty line is
+                # malformed JSON and makes the whole file UNKNOWN.
+                if lines and lines[-1] == '':
+                    lines.pop()
+                for line in lines:
                     try:
                         record = json.loads(line)
                     except (TypeError, ValueError):
-                        continue
+                        return 'UNKNOWN', 'UNKNOWN'
                     if type(record) is not dict:
+                        return 'UNKNOWN', 'UNKNOWN'
+                    record_type = record.get('type')
+                    is_meta = record_type in ('session_meta', 'session_metadata')
+                    is_context = record_type == 'turn_context'
+                    if is_meta or is_context:
+                        payload = record.get('payload')
+                        if not isinstance(payload, dict):
+                            return 'UNKNOWN', 'UNKNOWN'
+                    else:
+                        if sessions_dir is None:
+                            continue
+                        payload = record.get('payload')
+                        if not isinstance(payload, dict):
+                            payload = record
+                        if 'model' not in payload and 'model' not in record:
+                            continue
+
+                    session_id = payload.get('id') or payload.get('session_id')
+                    if not session_id:
+                        session_id = record.get('id') or record.get('session_id')
+
+                    if session_id is not None and session_id != thread_id:
+                        return 'UNKNOWN', 'UNKNOWN'
+                    if is_meta:
+                        if sessions_dir is None and not session_id:
+                            return 'UNKNOWN', 'UNKNOWN'
+                        meta_seen = True
+
+                    model = payload.get('model')
+                    if model is None:
+                        model = record.get('model')
+                    effort = payload.get('effort', payload.get('reasoning_effort'))
+                    if effort is None:
+                        effort = record.get('effort', record.get('reasoning_effort'))
+
+                    if effort is not None and type(effort) is not str:
+                        return 'UNKNOWN', 'UNKNOWN'
+                    if is_meta and model is None:
+                        # The session metadata may carry only the session id; the
+                        # model and effort then come from a later turn_context.
                         continue
-                    containers = [record]
-                    if type(record.get('payload')) is dict:
-                        containers.append(record['payload'])
-                    for container in containers:
-                        model = container.get('model')
-                        effort = container.get('effort', container.get('reasoning_effort'))
-                        if type(model) is str:
-                            models.add(model)
-                        if type(effort) is str:
-                            efforts.add(effort)
+                    if type(model) is not str or not model:
+                        return 'UNKNOWN', 'UNKNOWN'
+
+                    models.add(model)
+                    efforts.add(effort if type(effort) is str else 'UNKNOWN')
+                    model_seen = True
+
+                # The thread id is bound by a matching session metadata record
+                # (the explicit sessions_dir override keeps its older layout).
+                if not model_seen or (sessions_dir is None and not meta_seen):
+                    return 'UNKNOWN', 'UNKNOWN'
     except OSError:
         return 'UNKNOWN', 'UNKNOWN'
     if not matched:
@@ -1056,7 +1135,7 @@ def _launch_settings(role, model):
         raise refused from None
 
 
-def _run_codex(*, prompt, cwd, output_path, model=_CODEX_MODEL):
+def _run_codex(*, prompt, cwd, output_path, model=_CODEX_MODEL, codex_home=None):
     from . import codex_direct_developer
     model, timeout = _launch_settings('codex-debug', model)
     argv =['codex', 'exec', '--ignore-user-config', '--ignore-rules',
@@ -1067,8 +1146,11 @@ def _run_codex(*, prompt, cwd, output_path, model=_CODEX_MODEL):
         argv.extend(('-c', setting))
     argv.extend(('-s', 'read-only', '--json', '-o', output_path, '-'))
     with tempfile.TemporaryDirectory(prefix='llmtool-high-debug-tmp-') as tmpdir:
+        env = codex_direct_developer._environment(tmpdir)
+        if codex_home is not None:
+            env['CODEX_HOME'] = str(codex_home)
         return subprocess.run(argv, input=prompt.encode('utf-8'), cwd=cwd,
-            env=codex_direct_developer._environment(tmpdir), stdout=subprocess.PIPE,
+            env=env, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, check=False, timeout=timeout)
 
 
@@ -1595,7 +1677,7 @@ _CODEX_ATTEMPT_UNCONFIRMED_DETAIL = (_CLAUDE_ROUTE_REFUSED_DETAIL +
 def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_number=None, family,
                    failed_corrections=None, early_reason=None, evidence=None,
                    runner=None, create_d6=None, repo_root=None,
-                   read_registration=None, sessions_dir=None,
+                   read_registration=None, sessions_dir=None, codex_home=None,
                    route='codex', claude_fallback=None, codex_attempt=None):
     # PR #2222 v91 (CWE-862): the Claude route needs this run's recorded Codex
     # quota or login failure (a grant from run_high_debug_with_fallback). The
@@ -1604,6 +1686,8 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
         if not _consume_claude_grant(claude_fallback, task_id):
             _refuse(CLAUDE_ROUTE_REFUSED, _CLAUDE_ROUTE_REFUSED_DETAIL)
     elif claude_fallback is not None:
+        _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
+    if runner is None and sessions_dir is not None:
         _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
     # PR #2222 v92: an attempt record is only for the Codex route, belongs to
     # this Task and starts empty; only the Codex attempt below fills it in.
@@ -1839,7 +1923,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
             actual_runner = functools.partial(_run_claude, config_dir=config_dir,
                                               model=debug_model)
         else:
-            actual_runner = functools.partial(_run_codex, model=debug_model)
+            actual_runner = functools.partial(_run_codex, model=debug_model, codex_home=codex_home)
         result = actual_runner(prompt=prompt, cwd=diagnosis_root or d6, output_path=output_path)
         if route == 'codex':
             if result.returncode != 0:
@@ -1855,7 +1939,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
                 raise _AttemptFailed('HIGH_DEBUG_RUN_FAILED')
             raw = Path(output_path).read_bytes()
             thread_id = _thread_id_from_events(events_raw)
-            observed, effort = _session_observed(thread_id, sessions_dir)
+            observed, effort = _session_observed(thread_id, sessions_dir, codex_home=codex_home)
             usage = _usage_from_events(events_raw)
             report = raw.decode('utf-8')
         else:
