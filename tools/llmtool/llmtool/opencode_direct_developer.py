@@ -90,6 +90,7 @@ class DirectOpenCodeError(LLMToolError):
         self.ended_at = ended_at
         self.native_session_id = native_session_id
         self.event_summary = None
+        self.stopped_before_prompt = False
         # Set only from parsed CLI events (design c6876861575 items 1-2).
         self.provider_evidence = provider_evidence
 
@@ -875,7 +876,7 @@ def _fire_delivered(delivered_callback):
 
 def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
         dispatch_store=None, dispatch_task_id=None,
-        launch_callback=None, delivered_callback=None,
+        launch_callback=None, delivered_callback=None, spawn_authorization=None,
         timeout_seconds=None, executable=None, model=MODEL,
         steps=DEFAULT_AGENT_STEPS):
     """Invoke one bounded OpenCode run in the existing D6 task worktree.
@@ -932,6 +933,7 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
     work_deadline = started + timeout_seconds
     cleanup_deadline = work_deadline + 3
     stdout, stderr = bytearray(), bytearray()
+    offset = 0
     process = None
     cleanup = 'UNKNOWN'
     with tempfile.TemporaryDirectory(prefix='llmtool-opencode-config-') as config_dir:
@@ -965,6 +967,11 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                     except worker_dispatch.WorkerDispatchDenied as exc:
                         raise DirectOpenCodeError(exc.dispatch_code) from None
                     run_id = _observed_run_id(dispatch_store, dispatch_task_id)
+                    if spawn_authorization is not None:
+                        try:
+                            spawn_authorization()
+                        except Exception:
+                            _reject('OPENCODE_SPAWN_AUTHORIZATION_REFUSED')
                     try:
                         process = subprocess.Popen(argv, cwd=str(root), env=env,
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -988,7 +995,6 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                         selector.register(stream, selectors.EVENT_READ, name)
                     os.set_blocking(process.stdin.fileno(), False)
                     selector.register(process.stdin, selectors.EVENT_WRITE, 'stdin')
-                    offset = 0
                     delivered = False
                     denial_line_start = 0
                     while selector.get_map():
@@ -1079,6 +1085,10 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
             exc.started_at = started_at
             exc.ended_at = _utc_now() if started_at is not None else None
             exc.native_session_id = _observed_native_session(bytes(stdout))
+            exc.stopped_before_prompt = (
+                exc.attempted and cleanup == 'CONFIRMED' and
+                type(exc.process_exit_code) is int and exc.process_exit_code != 0 and
+                offset == 0 and not stdout and not stderr)
             raise
         except BaseException as exc:
             cleanup = 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN'

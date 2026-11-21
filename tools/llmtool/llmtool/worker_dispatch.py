@@ -875,7 +875,8 @@ def worker_key_for(provider_profile):
     return None
 
 
-def authorize_task_store_change(current, changes, expected=None, d6_unchanged=None):
+def authorize_task_store_change(current, changes, expected=None, d6_unchanged=None,
+                                recovered_reassign=False):
     """Atomically audit every policy result before a TaskStore transition."""
     attempts = task_store_attempts(current, changes)
     if not attempts:
@@ -1012,7 +1013,15 @@ def authorize_task_store_change(current, changes, expected=None, d6_unchanged=No
         if action == 'REASSIGN':
             bound = (type(expected) is dict and 'developer' in expected and
                      expected['developer'] == old_developer)
-            if old_developer.get('state') != 'DEVELOPER_PENDING' or not bound:
+            pending = old_developer.get('state') == 'DEVELOPER_PENDING'
+            recovered = (recovered_reassign is True and
+                         ((old_developer.get('state') == 'DEVELOPER_DISPATCHING' and
+                           old_developer.get('dispatch_boundary') == 'PREPARED' and
+                           old_developer.get('execution') is None) or
+                          (old_developer.get('state') == 'DEVELOPER_OUTCOME_UNKNOWN' and
+                           old_developer.get('dispatch_boundary') == 'STOPPED')) and
+                         new_developer.get('state') == 'DEVELOPER_PENDING')
+            if not (bound and (pending or recovered)):
                 decision = PolicyDecision(worker_key, False,
                                           'WORKER_REASSIGN_PRECONDITION',
                                           decision.policy_sha256)

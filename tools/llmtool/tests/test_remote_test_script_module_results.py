@@ -83,7 +83,7 @@ class ScriptModuleResultTests(unittest.TestCase):
         self.assertIn('entry=module_result(mod,test_output,final)', script)
         self.assertIn('module_results.append(entry); ran+=entry["ran"]', script)
         self.assertIn('module_results=[]\ndef failure_excerpt', script)
-        emit = 'if module_results: receipt["module_results"]=module_results[-len(mods)*2:]'
+        emit = 'if module_results: receipt["module_results"]=module_results'
         self.assertIn(emit, script)
         self.assertNotIn('\nreceipt["module_results"]=', script)
         self.assertNotIn('ran+=int(re.search(rb"Ran', script)
@@ -100,7 +100,7 @@ class ScriptModuleResultTests(unittest.TestCase):
         exec(emit, namespace)
         return namespace['receipt'], namespace['ran']
 
-    def test_script_statements_emit_validator_consistent_module_results(self):
+    def test_script_statements_preserve_skipped_module_evidence(self):
         runs = [('test_a', b'Ran 1 tests in 0.1s\nRan 4 tests in 0.2s\n\nOK\n', 'OK')]
         runs.append(('test_b', b'Ran 0 tests in 0.0s\n\nOK (skipped=1)\n', 'OK (skipped=1)'))
         receipt, ran = self.run_emission(runs)
@@ -115,6 +115,10 @@ class ScriptModuleResultTests(unittest.TestCase):
         body['module_results'] = receipt['module_results']
         raw = json.dumps(body, separators=(',', ':')).encode()
         parsed = rt._validate_remote_receipt(raw, sha=SHA, modules=('test_a', 'test_b'))
+        self.assertIsNone(parsed)
+        body.update(result='FAIL', exit_code=1, failures=['test_b'])
+        parsed = rt._validate_remote_receipt(
+            json.dumps(body, separators=(',', ':')).encode(), sha=SHA, modules=('test_a', 'test_b'))
         self.assertEqual(parsed['module_results'], receipt['module_results'])
 
     def test_script_statements_omit_the_field_when_no_module_ran(self):

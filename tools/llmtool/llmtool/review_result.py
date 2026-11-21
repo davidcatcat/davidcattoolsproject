@@ -182,6 +182,58 @@ def blocking_findings(body):
                   key=lambda fid: int(fid[1:]))
 
 
+def diagnosis_review_body(task, head, executor, *, before=None, pr=None, version=None,
+                          excerpt=None):
+    """Return the completed formal FAIL's bound text, if it matches the target."""
+    claims = task.get('review_dispatch_claim', [])
+    if type(claims) is dict:
+        claims = [claims]
+    if type(claims) is not list:
+        return None
+    matching = []
+    for claim in claims:
+        if (type(claim) is not dict or review_kind(claim) != 'formal' or
+                claim.get('head_sha') != head or claim.get('executor_task') != executor or
+                (pr is not None and claim.get('pr') != pr) or
+                (version is not None and claim.get('version') != version)):
+            continue
+        at = claim.get('updated_at')
+        if type(at) is not str:
+            return None
+        if before is None or at <= before:
+            matching.append(claim)
+    if not matching:
+        return None
+    latest = max(matching, key=lambda item: (item['updated_at'], item['version']))
+    result = latest.get('review_result') or {}
+    if (latest.get('state') != 'COMPLETED' or result.get('verdict') != 'FAIL' or
+            result.get('head') != head or result.get('task_id') != task.get('task_id')):
+        return None
+    text = result.get('review_text')
+    if excerpt is not None:
+        from .review_repair import MAX_EXCERPT_CHARS
+        if type(text) is not str or text[:MAX_EXCERPT_CHARS] != excerpt:
+            return None
+    return text if type(text) is str else None
+
+
+def diagnosis_findings(task, head, executor, *, before=None, pr=None, version=None,
+                       excerpt=None):
+    """Return the exact blocking finding descriptions in a bound formal FAIL."""
+    text = diagnosis_review_body(task, head, executor, before=before, pr=pr,
+                                 version=version, excerpt=excerpt)
+    blocking = blocking_findings(text)
+    if not blocking:
+        return None
+    descriptions = []
+    for line in text.splitlines():
+        line = line.strip()
+        match = _FINDING_ID.match(line)
+        if match and match.group(1) in blocking:
+            descriptions.append(match.group(2) + ' ' + line.split('] ', 1)[1])
+    return tuple(sorted(descriptions)) if len(descriptions) == len(blocking) else None
+
+
 def review_kind(item):
     """Return 'formal', 'security', or None (malformed/ambiguous)."""
     if not isinstance(item, dict):
