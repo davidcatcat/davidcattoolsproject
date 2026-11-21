@@ -924,7 +924,7 @@ class ModelNameTests(unittest.TestCase):
     def test_same_family_passes_without_allowed_models(self):
         # #2302: families come from default_model when allowed_models is absent.
         (self.repo / "tools" / "llmtool" / "developer-routes.json").write_text(json.dumps(fixture_routes(
-            ("gemini-3.8-flash-medium",), allowed=False,
+            ("gemini-4-hydrogen-medium",), allowed=False,
             roles={"claude-reviewer": {"default_model": "claude-sonnet-5-5"},
                    "codex-reviewer": {"default_model": "gpt-6.1-sol", "allowed_models": ["gpt-6.1-sol"]}})),
             encoding="utf-8")
