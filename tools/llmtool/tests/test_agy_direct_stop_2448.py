@@ -50,6 +50,12 @@ def _stopped_error(facts=None, *, native_session_id=None):
 
         def __init__(self):
             super().__init__('AGY_EXIT_NONZERO')
+            # Set the launcher's own evidence after the base initializer, so
+            # the stop signal is present whatever defaults RouteError applies.
+            self.stopped_before_prompt = True
+            self.execution_facts = facts
+            self.native_session_id = native_session_id
+            self.session_id = native_session_id
 
     return _LauncherStopped()
 
@@ -217,6 +223,13 @@ class AgyDirectStopTests(unittest.TestCase):
     def test_opencode_stopped_record_is_unchanged(self):
         store = self._store()
         task = self._make_task(store, route='opencode')
+        registration = SimpleNamespace(
+            task_id='executor-d6', trusted_agent_id='opencode-developer',
+            session_ref='session-ref', native_session_id=None,
+            root='/registered/root', common_dir='/repo/.git',
+            branch='task-branch')
+        callback = submission_cli._direct_result_callback(
+            task, registration, 'a' * 40, test_policy='LOCAL')
         developer = {
             'assignment_id': new_id(), 'selection_source': 'PM',
             'state': 'DEVELOPER_PENDING', 'provider_profile': 'opencode',
@@ -230,29 +243,51 @@ class AgyDirectStopTests(unittest.TestCase):
             'max_tokens': None, 'artifact_format': 'unified_diff', 'artifact': None,
             'artifact_sha256': None, 'usage': None, 'error_code': None,
             'execution': None, 'created_at': '2026-11-20T00:00:00Z',
+            'timeout_seconds': 600, 'direct_result_callback': callback,
         }
-        store.compare_and_update(task['task_id'], expected={'developer': None},
-                                 developer=developer)
+        completion = {
+            'state': 'WAITING_EXECUTOR', 'executor_task_id': 'executor-d6',
+            'reviewer_task_id': None,
+            'evidence': {
+                'task_id': task['task_id'], 'run_id': task['run_id'],
+                'contract_digest': task['task_binding']['contract_digest'],
+                'executor_identity': 'opencode-developer',
+                'executor_session_ref': 'session-ref',
+                'executor_native_session_id': None,
+                'executor_native_session': 'UNKNOWN',
+                'execution_mode': 'DIRECT_D6', 'root': '/registered/root',
+                'common_dir': '/repo/.git', 'branch': 'task-branch',
+                'source_sha': 'a' * 40, 'result_head': None},
+            'missing_gates': [], 'pm_dispatch': 'NOT_STARTED',
+            'pm_response': None, 'pm_recommendation': None,
+            'pm_usage': None, 'pm_error_code': None,
+        }
+        # Use the store's D6-bound dispatch path, as the OpenCode delegate
+        # does, so the worker-dispatch gate sees the real assignment.
+        bound = store.d6_bind_compare_and_update(
+            task['task_id'], executor_task_id='executor-d6',
+            expected={'developer': None, 'completion': None},
+            developer=developer, completion=completion)
         dispatching = dict(developer, state='DEVELOPER_DISPATCHING',
                            provider_type='opencode-cli',
                            model='opencode/test-free', max_tokens=4096)
         prepared = store.prepare_direct_dispatch(
-            task['task_id'], expected_developer=developer, developer=dispatching)
+            task['task_id'], expected_developer=bound['developer'],
+            developer=dispatching)
         starting = store.authorize_direct_spawn(
             task['task_id'], expected_developer=prepared['developer'])
         launched = store.record_opencode_launch(
             task['task_id'], assignment_id=developer['assignment_id'], pid=321,
             start_time='123456', pgid=321)
         running = launched['developer']
+        execution = {key: value for key, value in running['execution'].items()
+                     if not key.startswith('child_')}
+        execution.update(status='UNKNOWN', cleanup_status='CONFIRMED',
+                         process_exit_code=1)
         stopped = dict(
             running, state='DEVELOPER_OUTCOME_UNKNOWN',
             error_code='OPENCODE_STOPPED_BEFORE_PROMPT', usage=None,
-            execution={
-                'status': 'UNKNOWN', 'native_session_id': None,
-                'process_exit_code': 1, 'stdout_sha256': None, 'elapsed_ms': 10,
-                'cleanup_status': 'CONFIRMED', 'usage_source': 'UNKNOWN',
-                'source_bytes': None, 'source_file_count': None,
-                'source_manifest_sha256': None})
+            execution=execution)
         saved = store.record_direct_stop(
             task['task_id'], expected_developer=running, developer=stopped)
         self.assertEqual(saved['developer']['dispatch_boundary'], 'STOPPED')
