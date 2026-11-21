@@ -7,6 +7,12 @@ check (section 2 check 6) is the caller's injected ``d6_unchanged`` probe.
 Every check fails closed: a value that is unknown, malformed or failing makes
 the record "not a start failure", and a packet that cannot be bound does not
 match.
+
+#2310 adds the gw-agent pre-model failure (gw_agent_record_checks) and the
+route dispatchers restart_record_checks and classify_restart; the Claude
+checks (record_checks, classify) are unchanged. #2310 F1 extends the gw-agent
+checks to a failure after the DISPATCHING write persisted but before the
+provider was launched, proven by the dispatch audit or the code.
 """
 
 from __future__ import annotations
@@ -140,6 +146,219 @@ def record_checks(record):
         if value is not None and not (type(value) is list and not value):
             return _not(5)
     return _START_FAILURE
+
+
+# #2310: a gw-agent result also carries these; a pre-model record has none.
+_GW_AGENT_ABSENT_RESULT_FIELDS = _ABSENT_RESULT_FIELDS + (
+    'audit_sha256', 'audit_copy_path_sha256',
+)
+
+# #2310 F1: the route identity the gw-agent DISPATCHING write binds
+# (worker_dispatch._PROVIDER_TYPES['gw-agent']).
+_GW_AGENT_PROVIDER_TYPE = 'gw-agent-cli'
+
+# #2310 F1: the codes run_task_gw_agent_delegate writes after its DISPATCHING
+# write persisted and before it calls the route, when building GwAgentRoute or
+# its validate_profile raises (the RouteError and Exception handlers right
+# after authorize_dispatch), or authorize_dispatch raises something that is
+# not a refusal (the same Exception handler). Nothing the route raises after
+# the gateway starts has either code: GwAgentRoute raises
+# GW_AGENT_CONFIG_INVALID only while it is built (gw_agent.py:181-244) or
+# writes its input files (gw_agent.py:359), and its post-launch codes are
+# GW_AGENT_<status> (gw_agent.py:553, statuses at :45), GW_AGENT_OUTPUT_INVALID,
+# GW_AGENT_MODEL_UNVERIFIED and GW_AGENT_TASK_ID_MISMATCH[_<gateway code>],
+# each stored with the DEVELOPER_ prefix.
+#
+# #2310 F1 repair 2: the boundary is the provider launch, not the route call.
+# DEVELOPER_DISPATCH_DENIED is written only from the delegate's route_gate
+# branch (owner_gate_denied): run_route calls that gate before it launches the
+# gateway (its on_launch callback runs "at the launch boundary after every
+# refusal check"), the gate denies only while on_launch has not run, and the
+# refusal then stores no execution and no provider evidence. A gate refusal
+# after a launch keeps the route's own DEVELOPER_GW_AGENT_* code instead, which
+# is not listed here. All three codes are also listed as pre-launch in
+# task_submission_cli._POST_RUN_NO_WORK_GW_AGENT_REFUSALS and
+# _PRELAUNCH_REPAIR_REFUSALS.
+GW_AGENT_PRE_ROUTE_CODES = frozenset((
+    'DEVELOPER_GW_AGENT_CONFIG_INVALID', 'DEVELOPER_DISPATCH_FAILED',
+    'DEVELOPER_DISPATCH_DENIED',
+))
+
+
+def _gw_agent_dispatch_audit(audit, assignment_id):
+    """#2310 F1: the DISPATCH audit of one gw-agent assignment.
+
+    Returns ``(transitions, adapter_allowed, refused_codes)`` or None. An
+    entry without an assignment counts as this one. ``transitions`` counts
+    ALLOWED DISPATCH entries without an ``authorization_id``: the store gate's
+    entry for the PENDING to DISPATCHING write. ``adapter_allowed`` counts
+    ALLOWED DISPATCH entries with one: worker_dispatch.authorize_dispatch
+    saves that entry before it returns, and the delegate calls the route only
+    after it returned. ``refused_codes`` holds ``DEVELOPER_<reason_code>`` of
+    every BLOCKED DISPATCH entry, as the delegate stores a refusal. None when
+    the audit is unreadable, or when an ALLOWED entry of any other action but
+    START_RETRY names the assignment (fail closed).
+    """
+    if type(audit) is not list:
+        return None
+    transitions = adapter_allowed = 0
+    refused_codes = set()
+    for entry in audit:
+        if type(entry) is not dict:
+            return None
+        if entry.get('assignment_id') not in (None, assignment_id):
+            continue
+        action, decision = entry.get('action'), entry.get('decision')
+        if action == 'START_RETRY':
+            continue
+        if decision == 'BLOCKED':
+            reason = entry.get('reason_code')
+            if action == 'DISPATCH' and type(reason) is str:
+                refused_codes.add(('DEVELOPER_' + reason)[:64])
+            continue
+        if action != 'DISPATCH' or decision != 'ALLOWED':
+            return None
+        if 'authorization_id' in entry:
+            adapter_allowed += 1
+        else:
+            transitions += 1
+    return transitions, adapter_allowed, frozenset(refused_codes)
+
+
+def gw_agent_record_checks(record):
+    """#2310: checks 1-5 for a gw-agent developer refused before any model call.
+
+    The gw-agent delegate (task_submission_cli.run_task_gw_agent_delegate)
+    runs the route only after its DISPATCHING write has persisted, and that
+    write is the one that records ``provider_type`` and ``model``. The store
+    never lets those identity fields go back to None (worker_dispatch REASSIGN
+    needs a PENDING developer). Two records are admitted:
+
+    - Unbound: both identity fields still None. The failure was persisted
+      from the DISPATCHING write's own refusal (the Owner gate or a rejected
+      write), so the route never ran. No ALLOWED DISPATCH entry exists.
+    - Bound (#2310 F1): the DISPATCHING write persisted (``gw-agent-cli`` and
+      a model), with exactly its one ALLOWED transition entry, and a failure
+      proven to come before the provider launch: either the adapter gate
+      refused (its BLOCKED DISPATCH entry gives the stored code, and no
+      adapter authorization was saved for the assignment), or the code is in
+      GW_AGENT_PRE_ROUTE_CODES, with at most the one adapter authorization
+      the delegate makes before it builds the route. That includes the final
+      dispatch refusal inside run_route (DEVELOPER_DISPATCH_DENIED), which
+      comes after that authorization and before the launch.
+
+    Any other gw-agent record is refused, so a run that reached the provider
+    (any model call) is never a start failure.
+    """
+    if type(record) is not dict:
+        return _not(1)
+    developer = record.get('developer')
+    # Check 1: a gw-agent CLI developer that ended DEVELOPER_UNAVAILABLE.
+    if not (type(developer) is dict and
+            developer.get('provider_profile') == 'gw-agent' and
+            developer.get('backend_session_semantics') == 'CLI_REPORTED_SESSION_ID' and
+            developer.get('state') == 'DEVELOPER_UNAVAILABLE'):
+        return _not(1)
+    # Check 2: a code the gw-agent delegate writes (DEVELOPER_*), and either no
+    # route identity (the DISPATCHING write never persisted), or the bound
+    # identity with a failure that is shown to be before the provider launch.
+    code = developer.get('error_code')
+    assignment_id = developer.get('assignment_id')
+    audit = _gw_agent_dispatch_audit(record.get('dispatch_audit', []), assignment_id)
+    unbound = ('provider_type' in developer and developer['provider_type'] is None and
+               'model' in developer and developer['model'] is None)
+    bound = (developer.get('provider_type') == _GW_AGENT_PROVIDER_TYPE and
+             type(developer.get('model')) is str and bool(developer['model']))
+    pre_route = type(code) is str and code in GW_AGENT_PRE_ROUTE_CODES
+    adapter_refused = (type(code) is str and audit is not None and code in audit[2])
+    if not (type(code) is str and code.startswith('DEVELOPER_') and
+            (unbound or (bound and (pre_route or adapter_refused)))):
+        return _not(2)
+    # Check 3: no result, progress, diagnosis or gateway audit.
+    if not _no_result(developer, _GW_AGENT_ABSENT_RESULT_FIELDS):
+        return _not(3)
+    # Check 4: no execution at all, and only the dispatch audit that check 2's
+    # case allows for this assignment: refusals and the START_RETRY that
+    # created it always; unbound, no ALLOWED DISPATCH entry; bound, the one
+    # ALLOWED transition, plus one adapter authorization only for a
+    # GW_AGENT_PRE_ROUTE_CODES failure. An entry without an assignment counts
+    # as this one.
+    if ('execution' not in developer or developer['execution'] is not None or
+            type(assignment_id) is not str or audit is None):
+        return _not(4)
+    transitions, adapter_allowed, _refused = audit
+    if unbound:
+        if transitions or adapter_allowed:
+            return _not(4)
+    elif not (transitions == 1 and
+              (adapter_allowed == 0 or (adapter_allowed == 1 and pre_route))):
+        return _not(4)
+    # Check 5: as for Claude.
+    if not _still_waiting(record):
+        return _not(5)
+    return _START_FAILURE
+
+
+def restart_record_checks(record):
+    """#2310: the record checks of the stored developer's own route.
+
+    A gw-agent developer takes gw_agent_record_checks; every other record takes
+    the #2188 Claude record_checks, unchanged.
+    """
+    developer = record.get('developer') if type(record) is dict else None
+    if type(developer) is dict and developer.get('provider_profile') == 'gw-agent':
+        return gw_agent_record_checks(record)
+    return record_checks(record)
+
+
+def _no_result(developer, absent_fields):
+    """Section 2 check 3 with the route's list of fields that must be absent."""
+    changed_files_empty = ('changed_files' not in developer or
+                           (type(developer['changed_files']) is list and
+                            not developer['changed_files']))
+    return (all(field in developer and developer[field] is None
+                for field in _EMPTY_RESULT_FIELDS) and
+            not any(field in developer for field in absent_fields) and
+            changed_files_empty)
+
+
+def _still_waiting(record):
+    """Section 2 check 5: the completion waits with no result, nothing later started."""
+    completion = record.get('completion')
+    evidence = completion.get('evidence') if type(completion) is dict else None
+    if not (type(completion) is dict and completion.get('state') == 'WAITING_EXECUTOR' and
+            type(evidence) is dict and 'result_head' in evidence and
+            evidence['result_head'] is None):
+        return False
+    for field in _NO_PROGRESS_RECORD_FIELDS:
+        value = record.get(field)
+        if value is not None and not (type(value) is list and not value):
+            return False
+    return True
+
+
+def _probe_d6(record, d6_unchanged):
+    """Section 2 check 6 on a record that passed checks 1-5."""
+    developer = record['developer']
+    try:
+        unchanged = d6_unchanged(developer.get('source_sha'),
+                                 write_paths=developer.get('write_paths'))
+    except Exception:
+        return _not(6)
+    if unchanged is not True:
+        return _not(6)
+    return _START_FAILURE
+
+
+def classify_restart(record, d6_unchanged):
+    """#2310: restart_record_checks, then the live D6 check 6; returns a Verdict.
+
+    For a Claude record this is exactly ``classify``.
+    """
+    verdict = restart_record_checks(record)
+    if not verdict.start_failure:
+        return verdict
+    return _probe_d6(record, d6_unchanged)
 
 
 def classify(record, d6_unchanged):

@@ -109,7 +109,8 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'review_exception', 'lineage', 'review_disputes', 'waiting', 'continues',
     'file_ops', 'file_ops_evidence', 'file_ops_reservation',
     'start_failures', 'repair_packet'))
-# #2188 design section 3: the append-only archive of failed Claude starts.
+# #2188 design section 3: the append-only archive of failed Claude starts and
+# (#2310) of gw-agent starts refused before any model call.
 MAX_START_FAILURES = 2
 _START_FAILURE_ENTRY_FIELDS = frozenset((
     'failed_developer', 'record_sha256', 'retry_assignment_id', 'd6_head',
@@ -2144,6 +2145,25 @@ def _validate_file_ops_reservation(record):
             _fail('TASK_FILE_OPS_RESERVATION_INVALID')
 
 
+def _archived_start_failure(failed):
+    """#2188 a BLOCKED Claude start, or #2310 a gw-agent start refused before any model call."""
+    if type(failed) is not dict:
+        return False
+    if failed.get('provider_profile') == 'claude':
+        return failed.get('state') == 'BLOCKED'
+    if not (failed.get('provider_profile') == 'gw-agent' and
+            failed.get('state') == 'DEVELOPER_UNAVAILABLE' and
+            'provider_type' in failed and 'model' in failed):
+        return False
+    # Refused before its DISPATCHING write persisted (no route identity), or,
+    # #2310 F1, after it and before the route call (the identity that write
+    # bound). The dispatch gate (start_failure.gw_agent_record_checks) decides
+    # which records may be archived; this keeps only the stored shape.
+    return ((failed['provider_type'] is None and failed['model'] is None) or
+            (failed['provider_type'] == 'gw-agent-cli' and
+             type(failed['model']) is str and bool(failed['model'])))
+
+
 def _validate_start_failures(record):
     """#2188 design section 3: 1..MAX_START_FAILURES exact archive entries."""
     entries = record.get('start_failures')
@@ -2154,8 +2174,7 @@ def _validate_start_failures(record):
         failed = item.get('failed_developer') if type(item) is dict else None
         if (type(item) is not dict or set(item) != _START_FAILURE_ENTRY_FIELDS or
                 type(failed) is not dict or
-                failed.get('provider_profile') != 'claude' or
-                failed.get('state') != 'BLOCKED' or
+                not _archived_start_failure(failed) or
                 not _hex32(failed.get('assignment_id')) or
                 type(item['record_sha256']) is not str or
                 re.fullmatch(r'[0-9a-f]{64}', item['record_sha256']) is None or
@@ -2206,8 +2225,10 @@ def _check_start_failures_write(current, changes):
             proposed[-1].get('failed_developer') != current['developer'] or
             type(new_developer) is not dict or
             proposed[-1].get('retry_assignment_id') != new_developer.get('assignment_id') or
-            ('claude-developer', 'START_RETRY') not in
-            worker_dispatch.task_store_attempts(current, changes)):
+            # #2310: a gw-agent start refused before any model call is the
+            # other START_RETRY the dispatch gate admits.
+            not {('claude-developer', 'START_RETRY'), ('gw-agent', 'START_RETRY')} &
+            set(worker_dispatch.task_store_attempts(current, changes))):
         _fail('START_RETRY_INVALID')
 
 
