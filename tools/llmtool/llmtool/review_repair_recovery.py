@@ -248,12 +248,27 @@ def check_d6(root, repair, claim, *, registered_d6, is_ancestor):
         refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
 
 
+def _group_status(pgid):
+    """DEAD only on positive group absence; a live member is ALIVE; doubt is UNKNOWN.
+
+    A leader can exit while a descendant stays alive in its process group, so a
+    gone or replaced leader proves nothing until the recorded group is also absent.
+    """
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return 'DEAD'
+    except OSError:
+        return 'UNKNOWN'
+    return 'ALIVE'
+
+
 def _pid_status(pid, start_time, pgid):
     """ALIVE, DEAD or UNKNOWN for one recorded process; any doubt is UNKNOWN."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return 'DEAD'
+        return _group_status(pgid)
     except PermissionError:
         pass
     except OSError:
@@ -266,10 +281,10 @@ def _pid_status(pid, start_time, pgid):
     if current_start is None:
         return 'UNKNOWN'
     if current_start != start_time:
-        return 'DEAD'
+        return _group_status(pgid)
     try:
         if os.getpgid(pid) != pgid:
-            return 'DEAD'
+            return _group_status(pgid)
     except (ProcessLookupError, PermissionError, OSError):
         return 'UNKNOWN'
     return 'ALIVE'

@@ -267,6 +267,33 @@ class RecoverEc2ClaimTests(unittest.TestCase):
         self.assertEqual(caught.exception.review_repair_code,
                          'REPAIR_RECOVERY_EVIDENCE_INVALID')
 
+    def test_d3_exited_leader_needs_positive_group_absence(self):
+        # The leader is gone, but a descendant may live on in its process group.
+        gone = ProcessLookupError()
+        with mock.patch.object(rec.os, 'kill', side_effect=gone):
+            with mock.patch.object(rec.os, 'killpg', return_value=None) as killpg:
+                self.assertEqual(rec._pid_status(4242, 'start', 4242), 'ALIVE')
+                killpg.assert_called_once_with(4242, 0)
+            with mock.patch.object(rec.os, 'killpg', side_effect=ProcessLookupError()):
+                self.assertEqual(rec._pid_status(4242, 'start', 4242), 'DEAD')
+            for error in (PermissionError(), OSError()):
+                with mock.patch.object(rec.os, 'killpg', side_effect=error):
+                    self.assertEqual(rec._pid_status(4242, 'start', 4242), 'UNKNOWN')
+        # A reused pid or a leader that left the group is also checked by group.
+        with mock.patch.object(rec.os, 'kill', return_value=None), \
+                mock.patch.object(codex_direct_developer, 'process_start_time',
+                                  return_value='other'):
+            with mock.patch.object(rec.os, 'killpg', return_value=None):
+                self.assertEqual(rec._pid_status(4242, 'start', 4242), 'ALIVE')
+            with mock.patch.object(rec.os, 'killpg', side_effect=ProcessLookupError()):
+                self.assertEqual(rec._pid_status(4242, 'start', 4242), 'DEAD')
+        with mock.patch.object(rec.os, 'kill', return_value=None), \
+                mock.patch.object(codex_direct_developer, 'process_start_time',
+                                  return_value='start'), \
+                mock.patch.object(rec.os, 'getpgid', return_value=1), \
+                mock.patch.object(rec.os, 'killpg', return_value=None):
+            self.assertEqual(rec._pid_status(4242, 'start', 4242), 'ALIVE')
+
     def test_d2_active_d6_developer_without_process_evidence_refuses(self):
         # A D6-bound Developer that is still active but has no recorded process
         # (provider launch in progress, PID not yet written) is UNKNOWN, not absent.
