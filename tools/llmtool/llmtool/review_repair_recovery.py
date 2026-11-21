@@ -420,34 +420,17 @@ def _recover_ec2_claim(*, store, current, task_id, executor_task, pr_number,
     attempt. A second recovery refuses, because only UNKNOWN is admitted.
     """
     from .task_store import TaskStoreConflict
-    try:
-        others = [store.get(other_id) for other_id in store.task_ids()]
-    except Exception:
-        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
     found = [item for item in current.get('review_repair_claims') or ()
              if type(item) is dict and item.get('repair_task_id') == repair_task_id]
     # A second recovery is refused, not repeated: the first one is the record.
     if len(found) != 1 or found[0].get('state') != 'UNKNOWN':
         refuse('REPAIR_RECOVERY_CLAIM_INVALID')
-    verify_ec2_recovery(store, current, repair_task_id, executor_task=executor_task,
-                        pr_number=pr_number, registered_d6=registered_d6,
-                        process_status=process_status, others=others)
-    claims_in = current.get('review_repair_claims')
-    if type(claims_in) is not list:
-        refuse('REPAIR_CLAIM_UNAVAILABLE')
-    # The one write restores the claim to CLAIMED. The store's locked record
-    # compare-and-set is the same one that records claim states, so no dedicated
-    # review-only recovery writer is needed for an EC2/CI claim.
-    claims = [dict(item, state='CLAIMED')
-              if type(item) is dict and item.get('repair_task_id') == repair_task_id
-              else item for item in claims_in]
     try:
-        saved = store.compare_and_update(
-            task_id, expected={'record_sha256': current['record_sha256']},
-            review_repair_claims=claims)
+        saved = store.recover_ec2_repair_claim(
+            task_id, repair_task_id, executor_task=executor_task, pr_number=pr_number,
+            expected_sha256=current['record_sha256'],
+            registered_d6=registered_d6, process_status=process_status)
     except TaskStoreConflict:
-        refuse('REPAIR_CLAIM_UNAVAILABLE')
-    except Exception:
         refuse('REPAIR_CLAIM_UNAVAILABLE')
     if type(saved) is not dict:
         refuse('REPAIR_CLAIM_UNAVAILABLE')

@@ -1,4 +1,5 @@
 """#2475: recover an UNKNOWN EC2/CI claim with positive no-launch evidence."""
+import hashlib
 import io
 import json
 import os
@@ -7,9 +8,11 @@ import unittest
 from unittest import mock
 
 import test_task_store_claim_recovery as base
-from llmtool import codex_direct_developer, review_repair_recovery as rec, task_submission_cli
+from llmtool import (codex_direct_developer, review_repair,
+                     review_repair_recovery as rec, task_advance,
+                     task_submission_cli, worker_availability, worker_dispatch)
 from llmtool.errors import LLMToolError
-from llmtool.task_store import new_id
+from llmtool.task_store import _json_bytes, new_id
 
 EXECUTOR, PR, HEAD = 'e-1', 17, 'a' * 40
 EC2_HEAD = 'b' * 40
@@ -153,6 +156,74 @@ class RecoverEc2ClaimTests(unittest.TestCase):
         # The same repair Task remains the one the next step may delegate.
         self.assertIsNone(self.store.get(self.repair).get('developer'))
         self.assertEqual(result['claim']['repair_task_id'], self.repair)
+        # Next task advance delegates the same repair Task on the same claim and attempt.
+        receipt = {
+            'task_id': saved['task_id'], 'run_id': saved['run_id'],
+            'executor_task': EXECUTOR, 'result': 'FAIL',
+            'source_sha': EC2_HEAD, 'modules': ['test_x'],
+            'failure_excerpt': 'test_a failed',
+        }
+        receipt['receipt_digest'] = hashlib.sha256(_json_bytes(receipt)).hexdigest()
+        packet = {
+            'task': saved['task_id'], 'pr': PR, 'executor_task': EXECUTOR,
+            'failed_head': EC2_HEAD, 'version': 0,
+            'verdict_comment_id': 0, 'findings_count': 0,
+            'reviewer_text_excerpt_untrusted_data': 'test_a failed',
+        }
+        delegated = []
+        d6_info = {'root': '/d6', 'common_dir': '/repo/.git', 'task_id': EXECUTOR,
+                   'branch': 'branch', 'result_head': EC2_HEAD,
+                   'recorded_result_head': EC2_HEAD, 'dirty': False, 'state': 'CLEAN'}
+        with mock.patch.object(task_advance, '_d6_snapshot', return_value=d6_info), \
+                mock.patch.object(task_advance, '_pr_snapshot',
+                                  return_value={'number': PR, 'state': 'open',
+                                                'head': {'sha': EC2_HEAD}}), \
+                mock.patch.object(task_advance, '_remote_test_status',
+                                  return_value=('FAIL', 'test_a failed', receipt)), \
+                mock.patch.object(review_repair, '_registered_d6',
+                                  return_value=(types.SimpleNamespace(
+                                      root='/d6', branch='branch', result_sha=EC2_HEAD), None)), \
+                mock.patch.object(review_repair, '_current_d6_head', return_value=EC2_HEAD), \
+                mock.patch.object(review_repair, '_remote_test_failure', return_value=packet), \
+                mock.patch.object(worker_dispatch, 'evaluate',
+                                  return_value=types.SimpleNamespace(
+                                      allowed=True, reason_code='OWNER_POLICY_ALLOWED')), \
+                mock.patch.object(worker_availability, 'fresh_quota_fail', return_value=False):
+            # Ensure the root developer/completion exist for repair_review.
+            self.cas(
+                developer={**saved['developer'], 'state': 'DEVELOPER_RESPONDED',
+                           'provider_profile': 'opencode', 'provider_type': 'opencode-cli',
+                           'model': None,
+                           'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+                           'read_paths': ['a.py'], 'write_paths': ['a.py'],
+                           'acceptance': ['fix'], 'egress_basis': 'test'},
+                completion={**(saved.get('completion') or {}),
+                            'state': 'WAITING_EXECUTOR', 'executor_task_id': EXECUTOR,
+                            'reviewer_task_id': None,
+                            'evidence': {**((saved.get('completion') or {}).get('evidence') or {}),
+                                         'common_dir': '/repo/.git'},
+                            'missing_gates': [], 'pm_dispatch': 'NOT_STARTED',
+                            'pm_response': None, 'pm_recommendation': None,
+                            'pm_usage': None, 'pm_error_code': None})
+            # Bind the receipt packet sha to the recovered claim's packet_sha256.
+            with mock.patch.object(review_repair.hashlib, 'sha256',
+                                   return_value=types.SimpleNamespace(
+                                       hexdigest=lambda: updated['packet_sha256'])):
+                adv = task_advance.advance(
+                    task_id=self.task_id, store=self.store, pr_number=PR,
+                    repair_review_call=lambda **kw: review_repair.repair_review(
+                        **kw, delegate_callable=lambda args, store=None: delegated.append(
+                            args.task_id) or {'delegated': args.task_id}))
+        self.assertEqual(delegated, [self.repair])
+        self.assertEqual(adv['step'], 'REPAIR_REVIEW')
+        self.assertEqual(adv['result']['repair_task_id'], self.repair)
+        self.assertEqual(adv['result']['claim']['attempt'], claim['attempt'])
+        after_adv = self.store.get(self.task_id)
+        self.assertEqual(len(after_adv['review_repair_claims']),
+                         len(before['review_repair_claims']))
+        self.assertEqual(next(item for item in after_adv['review_repair_claims']
+                              if item.get('repair_task_id') == self.repair)['state'],
+                         'DISPATCHED')
 
     def test_b_any_developer_record_refuses(self):
         for state in ('DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING', 'STARTING',
