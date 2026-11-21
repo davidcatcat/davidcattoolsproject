@@ -9,8 +9,10 @@ from unittest import mock
 import test_task_store_claim_recovery as base
 from llmtool import codex_direct_developer, review_repair_recovery as rec, task_submission_cli
 from llmtool.errors import LLMToolError
+from llmtool.task_store import new_id
 
 EXECUTOR, PR, HEAD = 'e-1', 17, 'a' * 40
+EC2_HEAD = 'b' * 40
 
 
 def _clean_d6(head, clean=True):
@@ -42,10 +44,10 @@ class RecoverEc2ClaimTests(unittest.TestCase):
     setUp = base.ClaimRecoveryStoreTests.setUp
     cas = base.ClaimRecoveryStoreTests.cas
 
-    def _ensure_repair(self):
-        """Make sure the repair Task named by the base claim exists, with no Developer."""
+    def _ensure_repair(self, repair_task_id):
+        """Make sure the given repair Task exists, with no Developer."""
         try:
-            repair = self.store.get(self.repair)
+            repair = self.store.get(repair_task_id)
         except Exception:
             repair = None
         if type(repair) is dict:
@@ -61,11 +63,11 @@ class RecoverEc2ClaimTests(unittest.TestCase):
         }, separators=(',', ':'))
         args = types.SimpleNamespace(pm_session_id=None, pm_runtime=None, pm_cwd=None)
         task_submission_cli.run_task_record_pm(
-            args, store=self.store, task_id=self.repair,
+            args, store=self.store, task_id=repair_task_id,
             input_stream=io.StringIO(json.dumps({
                 'request': 'repair evidence fixture', 'response': response})),
             return_record=True)
-        return self.store.get(self.repair)
+        return self.store.get(repair_task_id)
 
     def _root_and_claim(self):
         root = self.store.get(self.task_id)
@@ -74,15 +76,36 @@ class RecoverEc2ClaimTests(unittest.TestCase):
         return root, claim
 
     def _make_ec2(self):
-        """The base fixture's UNKNOWN claim, reshaped as one '-ec2' claim."""
-        self._ensure_repair()
+        """Append one UNKNOWN '-ec2' claim, written as the production path writes it.
+
+        The store allows a claim to be appended and its state to change, but
+        not for its family or comment id to be rewritten. So the EC2 claim is
+        a new claim on its own head: it is appended as CLAIMED and then moved
+        to UNKNOWN, exactly as a failed provider launch records it.
+        """
+        repair_task_id = getattr(self, '_ec2_repair_id', None)
+        if repair_task_id is not None:
+            return self.store.get(self.task_id)
+        repair_task_id = new_id()
+        self._ensure_repair(repair_task_id)
         root = self.store.get(self.task_id)
-        claims = [dict(item, family=f'pr-{PR}-ec2', comment_id=None)
-                  if item.get('repair_task_id') == self.repair else dict(item)
+        source = next(item for item in root['review_repair_claims']
+                      if item.get('repair_task_id') == self.repair)
+        claim = dict(source, repair_task_id=repair_task_id, family=f'pr-{PR}-ec2',
+                     comment_id=None, state='CLAIMED', head_sha=EC2_HEAD,
+                     attempt=1, version=1)
+        self.store.compare_and_update(
+            self.task_id, expected={'record_sha256': root['record_sha256']},
+            review_repair_claims=[dict(item) for item in root['review_repair_claims']] + [claim])
+        root = self.store.get(self.task_id)
+        claims = [dict(item, state='UNKNOWN')
+                  if item.get('repair_task_id') == repair_task_id else dict(item)
                   for item in root['review_repair_claims']]
         self.store.compare_and_update(
             self.task_id, expected={'record_sha256': root['record_sha256']},
             review_repair_claims=claims)
+        self.repair = repair_task_id
+        self._ec2_repair_id = repair_task_id
         return self.store.get(self.task_id)
 
     def _recover(self, **kwargs):
