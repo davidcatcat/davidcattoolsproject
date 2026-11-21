@@ -2546,11 +2546,11 @@ def _pre_review_action(record, d6, pr, related, result_head, docs_only=False):
         return 'NEEDS_ATTENTION'
     if remote_status == 'FAIL':
         return _remote_fail_action(related, result_head)
+    if type(pr) is dict and pr.get('merged') is True:
+        # The code is already merged; a Reviewer or EC2 run must never start for it.
+        return 'PR_MERGED_NO_REVIEW'
     if not docs_only and remote_status not in ('PASS', 'ADMISSION_DENIED'):
         return 'RUN_REMOTE_TEST'
-    if type(pr) is dict and pr.get('merged') is True:
-        # The code is already merged; a Reviewer must never start for it.
-        return 'PR_MERGED_NO_REVIEW'
     return 'DISPATCH_REVIEW'
 
 
