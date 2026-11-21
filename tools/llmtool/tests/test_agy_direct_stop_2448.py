@@ -60,13 +60,8 @@ class AgyDirectStopTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.policy_path = worker_policy_fixture.install(self)
         # These tests exercise the launcher's stop evidence, not the Owner
-        # dispatch policy, so pin a synthetic ALLOWED AGY row (never the live
-        # file) and let the real dispatch gate decide with it.
-        self.agy_policy_path = worker_policy_fixture.write(
-            Path(self.temp.name).resolve() / 'worker-dispatch.json',
-            worker_policy_fixture.set_dispatch(
-                worker_policy_fixture.policy(), 'agy', 'ALLOWED',
-                owner_assignments=None))
+        # dispatch policy, so pin an ALLOWED decision (never the live policy).
+        # The dispatch gate itself is covered by the route-wiring tests.
         _chain_gate_fixture.pass_through_chain_gate(self)
         self.serial = 0
 
@@ -133,8 +128,11 @@ class AgyDirectStopTests(unittest.TestCase):
                 patch.object(submission_cli.task_completion, 'collect_git_snapshot',
                              return_value=snapshot), \
                 patch.object(submission_cli, '_reject_claude_reserved_d6'), \
-                patch.object(submission_cli.worker_dispatch, '_POLICY_PATH',
-                             self.agy_policy_path), \
+                patch.object(submission_cli.worker_dispatch, 'evaluate',
+                             return_value=SimpleNamespace(
+                                 worker_key='agy', allowed=True,
+                                 reason_code='OWNER_POLICY_ALLOWED',
+                                 policy_sha256='a' * 64)), \
                 patch.object(submission_cli, '_agy_developer_profile',
                              return_value=('gemini-test', 'high')), \
                 patch.object(submission_cli, '_developer_card_prefix',
