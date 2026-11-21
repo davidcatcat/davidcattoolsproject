@@ -14,8 +14,10 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
+import time
 from urllib.parse import urlsplit
 
 from .base import DeveloperRoute, RouteError, usage_reported
@@ -1098,5 +1100,157 @@ def read_session_binding(home, *args, executor_task_id=None):
         raise
     except Exception:
         raise RouteError('GW_AGENT_SESSION_UNAVAILABLE') from None
+
+
+# #2367 (Owner 2026-11-19): one minimal availability probe through the same
+# gateway run path real gw-agent Tasks use. The route's own prepare_files,
+# build_argv and build_env carry the authorization file and the credential
+# exactly as for a Task; nothing here reads, builds or stores a credential or
+# a header. The probe works in a fresh private temp directory outside any Git
+# repository, never resumes a session, never touches a Task record and never
+# keeps any provider or endpoint text: only fixed status names are reported.
+
+PROBE_PASS = 'PASS'
+PROBE_FAIL = 'FAIL'
+PROBE_UNKNOWN = 'UNKNOWN'
+PROBE_OUTCOMES = frozenset(('PASS', 'INFRASTRUCTURE', 'AUTHORIZATION', 'RATE_LIMITED', 'UNKNOWN'))
+_PROBE_FILE = 'probe.txt'
+_PROBE_RESULT_MAX_BYTES = 1024 * 1024
+# Statuses the gateway reports only after the model answered at least once.
+_PROBE_MODEL_STATUSES = frozenset(('DONE', 'BLOCKED', 'BUDGET_EXCEEDED'))
+_PROBE_HTTP_CODE = re.compile(r'HTTP_([1-5][0-9][0-9])\Z')
+_PROBE_AUTH_HTTP = frozenset(('401', '403'))
+_PROBE_INVALID = object()
+
+
+def probe_budgets(budgets):
+    """Return the configured route budgets with the gateway's minimum turn count."""
+    if type(budgets) is not dict or set(budgets) != set(_GATEWAY_BUDGETS):
+        raise RouteError('GW_AGENT_PROBE_CONFIG_INVALID')
+    for field, (minimum, maximum) in _GATEWAY_BUDGETS.items():
+        amount = budgets[field]
+        if type(amount) is not int or not minimum <= amount <= maximum:
+            raise RouteError('GW_AGENT_PROBE_CONFIG_INVALID')
+    value = dict(budgets)
+    value['max_turns'] = _GATEWAY_BUDGETS['max_turns'][0]
+    return value
+
+
+def _probe_report(outcome, tcp, auth, inference, retry_after=None):
+    return {'outcome': outcome, 'tcp': tcp, 'auth': auth, 'inference': inference,
+            'retry_after_seconds': retry_after}
+
+
+def classify_probe_result(result, returncode):
+    """Map one gateway probe result to TCP, auth and inference statuses.
+
+    None means the gateway left no result (it did not start, failed or timed
+    out): an infrastructure failure. A result that cannot be trusted reads
+    UNKNOWN. Only fixed names come out; no result text is kept.
+    """
+    if result is None:
+        return _probe_report('INFRASTRUCTURE', PROBE_UNKNOWN, PROBE_UNKNOWN, PROBE_FAIL)
+    if type(result) is not dict:
+        return _probe_report('UNKNOWN', PROBE_UNKNOWN, PROBE_UNKNOWN, PROBE_UNKNOWN)
+    status, code = result.get('status'), result.get('code')
+    if (status not in _STATUS_EXIT or
+            (code is not None and (type(code) is not str or
+                                   re.fullmatch(r'[A-Z0-9_]{1,64}', code) is None)) or
+            type(returncode) is not int or returncode != _STATUS_EXIT[status]):
+        return _probe_report('UNKNOWN', PROBE_UNKNOWN, PROBE_UNKNOWN, PROBE_UNKNOWN)
+    if status in _PROBE_MODEL_STATUSES:
+        turns = result.get('turns')
+        if type(turns) is int and turns >= 1:
+            return _probe_report('PASS', PROBE_PASS, PROBE_PASS, PROBE_PASS)
+        return _probe_report('UNKNOWN', PROBE_UNKNOWN, PROBE_UNKNOWN, PROBE_UNKNOWN)
+    if status == 'POLICY_REFUSED':
+        return _probe_report('AUTHORIZATION', PROBE_UNKNOWN, PROBE_FAIL, PROBE_UNKNOWN)
+    http = _PROBE_HTTP_CODE.fullmatch(code) if type(code) is str else None
+    if http is None:
+        # MODEL_ERROR without an HTTP status: network, connect or read failure.
+        return _probe_report('INFRASTRUCTURE', PROBE_UNKNOWN, PROBE_UNKNOWN, PROBE_FAIL)
+    if http.group(1) in _PROBE_AUTH_HTTP:
+        return _probe_report('AUTHORIZATION', PROBE_PASS, PROBE_FAIL, PROBE_UNKNOWN)
+    if http.group(1) == '429':
+        retry = result.get('retry_after_seconds')
+        retry = retry if type(retry) is int and retry > 0 else None
+        return _probe_report('RATE_LIMITED', PROBE_PASS, PROBE_PASS, PROBE_FAIL, retry)
+    return _probe_report('INFRASTRUCTURE', PROBE_PASS, PROBE_UNKNOWN, PROBE_FAIL)
+
+
+def _read_probe_result(path, probe_id):
+    """None when the gateway wrote no result; _PROBE_INVALID when it is not trusted."""
+    if not os.path.lexists(path):
+        return None
+    try:
+        raw = private_read(path, max_bytes=_PROBE_RESULT_MAX_BYTES)
+        value = json.loads(raw.decode('utf-8'), object_pairs_hook=_unique_pairs,
+                           parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+    except (OSError, UnicodeError, ValueError, RecursionError):
+        return _PROBE_INVALID
+    if type(value) is not dict or value.get('task_id') != probe_id:
+        return _PROBE_INVALID
+    return value
+
+
+def probe_availability(route, budgets, *, runner=None, timeout=None):
+    """Make one minimal gateway run and report TCP, auth and inference status.
+
+    The call is exactly one ``api_agent_gateway run``: no retry, no session
+    resume and no loop. Returns the classify_probe_result report plus
+    checked_at (UTC) and elapsed_ms. Writes only inside its own temp directory,
+    which is removed before returning.
+    """
+    if not isinstance(route, GwAgentRoute):
+        raise RouteError('GW_AGENT_PROBE_CONFIG_INVALID')
+    budgets = probe_budgets(budgets)
+    if timeout is None:
+        timeout = budgets['max_wall_seconds']
+    if (type(timeout) is not int or
+            not _GATEWAY_BUDGETS['max_wall_seconds'][0] <= timeout <=
+            _GATEWAY_BUDGETS['max_wall_seconds'][1]):
+        raise RouteError('GW_AGENT_PROBE_CONFIG_INVALID')
+    run = subprocess.run if runner is None else runner
+    probe_id = 'gw-agent-probe-' + os.urandom(16).hex()
+    checked_at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix='llmtool-gw-agent-probe-') as parent:
+        base = Path(parent).resolve(strict=True)
+        os.chmod(base, 0o700)
+        work, scratch = base / 'work', base / 'route'
+        work.mkdir(mode=0o700)
+        scratch.mkdir(mode=0o700)
+        if _is_inside_git(work):
+            raise RouteError('GW_AGENT_PROBE_UNSAFE')
+        (work / _PROBE_FILE).write_bytes(b'gw-agent availability probe\n')
+        task = {
+            'schema_version': 1, 'task_id': probe_id, 'source_sha': '0' * 40,
+            'goal': ('Availability probe. Call finish once now with the summary "ok". '
+                     'Do not list, read or edit any file.'),
+            'acceptance': ['finish is called once with the summary ok'],
+            'read_paths': [_PROBE_FILE], 'write_paths': [_PROBE_FILE],
+            'egress_basis': ('gw-agent availability probe: fixed synthetic text only, '
+                             'no repository content.'),
+            'data_class': 'SYNTHETIC', 'budgets': budgets, 'findings': [],
+        }
+        request = {'root': str(work), 'task': task, '_route_tmpdir': str(scratch)}
+        route.prepare_files(str(scratch), request)
+        argv = route.build_argv(sys.executable, request)
+        env = route.build_env(str(scratch))
+        returncode = None
+        try:
+            completed = run(argv, env=env, cwd=str(scratch), stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            timeout=timeout)
+            returncode = getattr(completed, 'returncode', None)
+        except (subprocess.TimeoutExpired, OSError):
+            returncode = None
+        finally:
+            env = None
+        result = _read_probe_result(scratch / 'result.json', probe_id)
+    report = classify_probe_result(result, returncode)
+    report['checked_at'] = checked_at
+    report['elapsed_ms'] = max(0, int((time.monotonic() - started) * 1000))
+    return report
 
 

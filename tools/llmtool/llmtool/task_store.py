@@ -3820,9 +3820,13 @@ class TaskStore:
             if fd is not None:
                 os.close(fd)
 
-    @staticmethod
-    def _open_component(fd, part, flags, create, chain):
-        """Open part under the validated parent fd; None only for a confirmed absence."""
+    @classmethod
+    def _open_component(cls, fd, part, flags, create, chain):
+        """Open part under the validated parent fd; None only for a confirmed absence.
+
+        #2367: the absence check runs through ``cls``, never the module-level
+        name, so a rebound name can never stand in for it.
+        """
         try:
             return os.open(part, flags, dir_fd=fd)
         except FileNotFoundError:
@@ -3830,7 +3834,7 @@ class TaskStore:
         except OSError:
             _fail('TASK_STORE_UNAVAILABLE')
         if not create:
-            if not TaskStore._absent_under(fd, part, chain):
+            if not cls._absent_under(fd, part, chain):
                 _fail('TASK_STORE_UNAVAILABLE')
             return None
         try:
@@ -5369,10 +5373,15 @@ class TaskStore:
             _fail(code)
         return record
 
-    @staticmethod
-    def _lock_worker_availability(directory, *, exclusive):
-        return TaskStore._lock_sidecar(directory, WORKER_AVAILABILITY_LOCK_NAME,
-                                       exclusive=exclusive, code='WORKER_AVAILABILITY')
+    # #2367: the worker availability helpers resolve their helpers through
+    # ``cls`` (the class they run on), never through the module-level name
+    # ``TaskStore``. A caller that rebinds that name (a test substituting the
+    # store factory) must not swap the lock or the expiry parse for a stand-in:
+    # a stand-in lock is no lock, and a stand-in expiry cannot be compared.
+    @classmethod
+    def _lock_worker_availability(cls, directory, *, exclusive):
+        return cls._lock_sidecar(directory, WORKER_AVAILABILITY_LOCK_NAME,
+                                 exclusive=exclusive, code='WORKER_AVAILABILITY')
 
     @staticmethod
     def _write_sidecar_at(directory, name, raw, *, code):
@@ -5409,8 +5418,14 @@ class TaskStore:
                                code='WORKER_AVAILABILITY')
         return value
 
-    @staticmethod
-    def _worker_availability_view(record, *, now=None):
+    @classmethod
+    def _worker_availability_view(cls, record, *, now=None):
+        """Every worker/layer; a stored observation past its expiry reads UNKNOWN.
+
+        Every stored observation has a validated ``fresh_until`` (a hold
+        included: it keeps its fixed marker after expiry, see
+        worker_availability._hold_marker), so the expiry is always a UTC time.
+        """
         now = now or datetime.now(timezone.utc)
         persisted = {(item['worker_key'], item['layer']): dict(item)
                      for item in record['observations']}
@@ -5426,7 +5441,7 @@ class TaskStore:
                         'evidence_sha256': None,
                     }
                     continue
-                expiry = TaskStore._worker_timestamp(
+                expiry = cls._worker_timestamp(
                     item['fresh_until'], allow_future=True)
                 if expiry <= now:
                     item['status'] = 'UNKNOWN'

@@ -191,11 +191,28 @@ def _store_implements(store, name):
         return False
 
 
-def _with_quota_observation(store, task_id, call):
+GW_AGENT_AVAILABILITY_UNRECORDED = 'GW_AGENT_AVAILABILITY_UNRECORDED'
+
+
+def _with_quota_observation(store, task_id, call, *, fail_closed=False):
     """#1816: run one delegate, then record its outcome in the quota layer.
 
     Only a Developer record this run changed is observed. Recording is evidence
-    only; its failure never changes the delegate's result or exception.
+    only; for other routes its failure never changes the delegate's result or
+    exception.
+
+    #2367: a gw-agent outcome that sets or advances a hold (security,
+    infrastructure, model capability, quota/rate; see
+    worker_availability.holds_admission) fails closed: when its write fails,
+    the delegate's result is replaced by GW_AGENT_AVAILABILITY_UNRECORDED (the
+    delegate's own exception stays chained), never silently dropped. An
+    interruption still reaches the caller unchanged.
+
+    With fail_closed (the gw-agent route) an observation that cannot be read
+    fails closed too, since its outcome may be a hold: a failed read before
+    the run refuses the delegation before the delegate is called (no gateway
+    call), and a failed read of the outcome after the run is reported as
+    GW_AGENT_AVAILABILITY_UNRECORDED, never suppressed.
 
     It adds no Task read, so the route's own validations (a supplied owner ref
     first) still come before any store read. A TaskStore reports in memory the
@@ -211,23 +228,49 @@ def _with_quota_observation(store, task_id, call):
                   else _developer_of(store, task_id))
         observable = True
     except Exception:
+        before = _UNREAD
         observable = False
-    try:
-        return call()
-    finally:
+    if fail_closed and (not observable or before is _UNREAD):
+        raise LLMToolError(GW_AGENT_AVAILABILITY_UNRECORDED)
+
+    def observe_outcome():
+        if not observable:
+            return
+        record = None
         try:
-            if not observable:
-                pass
-            elif counted:
+            if counted:
                 count, record = store.developer_write(task_id)
-                if count != before and type(record) is dict:
-                    worker_availability.observe(store, record)
+                if count == before:
+                    return
             else:
                 record = store.get(task_id)
-                if type(record) is dict and record.get('developer') != before:
-                    worker_availability.observe(store, record)
+                if type(record) is dict and record.get('developer') == before:
+                    return
+            if type(record) is not dict:
+                raise LLMToolError('Developer outcome is unreadable')
+            worker_availability.observe(store, record)
+        except Exception:
+            # An unreadable outcome may be a hold: the gw-agent route fails closed.
+            if ((fail_closed and type(record) is not dict) or
+                    worker_availability.holds_admission(record)):
+                raise LLMToolError(GW_AGENT_AVAILABILITY_UNRECORDED) from None
+
+    try:
+        result = call()
+    except Exception as exc:
+        try:
+            observe_outcome()
+        except LLMToolError as unrecorded:
+            raise unrecorded from exc
+        raise
+    except BaseException:
+        try:
+            observe_outcome()
         except Exception:
             pass
+        raise
+    observe_outcome()
+    return result
 
 
 def _run_background_delegate(args, *, provider, store, d6_binding):
@@ -6469,58 +6512,15 @@ def _gw_agent_endpoint():
     return provider, {'max_tokens': gateway['max_output_tokens']}
 
 
-def run_task_gw_agent_delegate(args, *, store, route_runner=None):
-    """Run the company Gw Agent Gateway route against its registered D6 task."""
-    from . import gw_agent_sessions
-    gw_agent_sessions.sweep_quietly(store)
-    if getattr(args, 'mode', None) != 'direct':
-        raise LLMToolError('--provider gw-agent requires --mode direct')
-    if getattr(args, 'context_stdin', False):
-        raise LLMToolError('gw-agent direct reads only its registered D6 task scope')
-    timeout = _delegate_timeout(args, 'gw-agent')
-    egress_basis = _screen_text(getattr(args, 'egress_basis', None), 512)
-    data_class = getattr(args, 'data_class', None)
-    if type(data_class) is not str or not data_class:
-        raise LLMToolError('--provider gw-agent requires --data-class')
-    task = store.get(args.task_id)
-    previous = task.get('developer')
-    if (type(previous) is dict and previous.get('provider_profile') == 'gw-agent' and
-            previous.get('state') == 'DEVELOPER_DISPATCHING'):
-        raise LLMToolError('gw-agent outcome is ambiguous; replay refused')
-    if (task.get('state') != 'PM_RESPONDED' or not task.get('response') or
-            task.get('schema_version') != 2):
-        raise LLMToolError('task has no successful PM response')
-    if task.get('developer') is not None:
-        raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
-    binding = task.get('task_binding')
-    task_completion.validate_task_binding(
-        stored_binding=binding, task_id=task.get('task_id'), run_id=task.get('run_id'),
-        contract_digest=binding.get('contract_digest') if type(binding) is dict else None)
-    assignment = task.get('pm_assignment')
-    if (type(assignment) is not dict or assignment.get('route') != 'gw-agent' or
-            assignment.get('risk') != 'LOW' or args.acceptance != assignment.get('acceptance')):
-        raise LLMToolError('no matching low-risk gw-agent recommendation from the selected PM route')
-    registration, snapshot = _delegate_d6_binding(args)
-    _reject_claude_reserved_d6(registration)
-    read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
-    if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
-        raise LLMToolError('developer acceptance scope is invalid')
-    acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
-    request = _screen_text(task['request'], REQUEST_LIMIT)
-    _screen_text(task['response'], RESPONSE_LIMIT)
-    route_config = load_route_config()['routes'].get('gw-agent')
-    route_profile = (route_config.get('profile')
-                     if type(route_config) is dict else None)
-    data_class_map = (route_profile.get('data_class_map')
-                      if type(route_profile) is dict else None)
-    if data_class_map is None:
-        data_class_map = _GATEWAY_DATA_CLASS
-    gateway_data_class = (data_class_map.get(data_class)
-                          if type(data_class_map) is dict and
-                          data_class_map == _GATEWAY_DATA_CLASS else None)
-    if (type(route_config) is not dict or gateway_data_class is None or
-            gateway_data_class not in route_config.get('allowed_data_classes', [])):
-        raise LLMToolError('gw-agent data class is not allowed by its profile')
+def _gw_agent_route_parts(route_config):
+    """Return (route_config, model, effort, budgets) for one gw-agent gateway run.
+
+    The one composition of the gw-agent route: Task dispatch and the #2367
+    availability probe (gw_agent_probe_route) both use it, so the probe runs
+    with the same gateway profile, role model check and per-Task budgets as a
+    real Task. It reads gateway profile settings only; the credential is read
+    later by GwAgentRoute itself, exactly as for a Task.
+    """
     # The gateway block below replaces route_config with an edited copy; the
     # role check uses this original repo route config.
     role_route_config = route_config
@@ -6608,6 +6608,111 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     route_config['default_model'] = model
     route_config['expected_served_model'] = model
     route_config['profile']['model'] = model
+    budgets = {'max_turns': max_turns,
+               'max_input_tokens': max_input_tokens_budget,
+               'max_output_tokens': max_output_tokens_budget,
+               'max_wall_seconds': max_wall_seconds,
+               'max_tool_result_bytes': max_tool_result_bytes,
+               'max_sent_bytes': max_sent_bytes}
+    return route_config, model, effort, budgets
+
+
+# The availability probe sends only fixed synthetic text (developer_routes.gw_agent).
+_GW_AGENT_PROBE_DATA_CLASS = 'SYNTHETIC'
+
+
+def gw_agent_probe_route():
+    """#2367: (route, budgets) for one gw-agent availability probe.
+
+    Built by _gw_agent_route_parts, the same composition Task dispatch uses,
+    and GwAgentRoute, the same route class: the probe reuses the existing
+    gateway authentication and call path and adds no credential reading,
+    header building or passing of its own. The probe sends synthetic text
+    only, so the route must allow that data class. The Owner policy is read
+    first: only a worker the Owner policy ALLOWS is probed. A paused worker,
+    an OWNER_ASSIGNMENT_ONLY worker (a probe carries no Owner assignment
+    reference) and an unreadable policy are never probed; run_gw_agent_probe
+    reads the policy again at the call. Nothing here writes a Task, a D6 or
+    the repository.
+    """
+    if not worker_availability.probe_policy_allows():
+        raise LLMToolError('GW_AGENT_PROBE_DISPATCH_DENIED')
+    try:
+        route_config = load_route_config()['routes'].get('gw-agent')
+    except Exception:
+        raise LLMToolError('GW_AGENT_PROBE_CONFIG_INVALID') from None
+    profile = route_config.get('profile') if type(route_config) is dict else None
+    data_class_map = profile.get('data_class_map') if type(profile) is dict else None
+    if data_class_map is None:
+        data_class_map = _GATEWAY_DATA_CLASS
+    gateway_data_class = (data_class_map.get(_GW_AGENT_PROBE_DATA_CLASS)
+                          if type(data_class_map) is dict and
+                          data_class_map == _GATEWAY_DATA_CLASS else None)
+    if (type(route_config) is not dict or gateway_data_class is None or
+            gateway_data_class not in route_config.get('allowed_data_classes', [])):
+        raise LLMToolError('GW_AGENT_PROBE_CONFIG_INVALID')
+    try:
+        route_config, model, effort, budgets = _gw_agent_route_parts(route_config)
+        route = GwAgentRoute(route_config)
+        route.validate_profile(model, effort)
+    except LLMToolError:
+        raise LLMToolError('GW_AGENT_PROBE_CONFIG_INVALID') from None
+    return route, budgets
+
+
+def run_task_gw_agent_delegate(args, *, store, route_runner=None):
+    """Run the company Gw Agent Gateway route against its registered D6 task."""
+    from . import gw_agent_sessions
+    gw_agent_sessions.sweep_quietly(store)
+    if getattr(args, 'mode', None) != 'direct':
+        raise LLMToolError('--provider gw-agent requires --mode direct')
+    if getattr(args, 'context_stdin', False):
+        raise LLMToolError('gw-agent direct reads only its registered D6 task scope')
+    timeout = _delegate_timeout(args, 'gw-agent')
+    egress_basis = _screen_text(getattr(args, 'egress_basis', None), 512)
+    data_class = getattr(args, 'data_class', None)
+    if type(data_class) is not str or not data_class:
+        raise LLMToolError('--provider gw-agent requires --data-class')
+    task = store.get(args.task_id)
+    previous = task.get('developer')
+    if (type(previous) is dict and previous.get('provider_profile') == 'gw-agent' and
+            previous.get('state') == 'DEVELOPER_DISPATCHING'):
+        raise LLMToolError('gw-agent outcome is ambiguous; replay refused')
+    if (task.get('state') != 'PM_RESPONDED' or not task.get('response') or
+            task.get('schema_version') != 2):
+        raise LLMToolError('task has no successful PM response')
+    if task.get('developer') is not None:
+        raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
+    binding = task.get('task_binding')
+    task_completion.validate_task_binding(
+        stored_binding=binding, task_id=task.get('task_id'), run_id=task.get('run_id'),
+        contract_digest=binding.get('contract_digest') if type(binding) is dict else None)
+    assignment = task.get('pm_assignment')
+    if (type(assignment) is not dict or assignment.get('route') != 'gw-agent' or
+            assignment.get('risk') != 'LOW' or args.acceptance != assignment.get('acceptance')):
+        raise LLMToolError('no matching low-risk gw-agent recommendation from the selected PM route')
+    registration, snapshot = _delegate_d6_binding(args)
+    _reject_claude_reserved_d6(registration)
+    read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
+    if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
+        raise LLMToolError('developer acceptance scope is invalid')
+    acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
+    request = _screen_text(task['request'], REQUEST_LIMIT)
+    _screen_text(task['response'], RESPONSE_LIMIT)
+    route_config = load_route_config()['routes'].get('gw-agent')
+    route_profile = (route_config.get('profile')
+                     if type(route_config) is dict else None)
+    data_class_map = (route_profile.get('data_class_map')
+                      if type(route_profile) is dict else None)
+    if data_class_map is None:
+        data_class_map = _GATEWAY_DATA_CLASS
+    gateway_data_class = (data_class_map.get(data_class)
+                          if type(data_class_map) is dict and
+                          data_class_map == _GATEWAY_DATA_CLASS else None)
+    if (type(route_config) is not dict or gateway_data_class is None or
+            gateway_data_class not in route_config.get('allowed_data_classes', [])):
+        raise LLMToolError('gw-agent data class is not allowed by its profile')
+    route_config, model, effort, task_budgets = _gw_agent_route_parts(route_config)
     prompt_packet = {
         'task_id': task['task_id'], 'run_id': task['run_id'],
         'task_contract_digest': binding['contract_digest'], 'source_sha': snapshot.head,
@@ -6630,12 +6735,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         'goal': assignment['goal'], 'acceptance': acceptance + [TEST_DATA_RULE],
         'read_paths': read_paths, 'write_paths': write_paths,
         # Per-Task budgets come from the gw-agent route in developer-routes.json (#2281 L9).
-        'budgets': {'max_turns': max_turns,
-                    'max_input_tokens': max_input_tokens_budget,
-                    'max_output_tokens': max_output_tokens_budget,
-                    'max_wall_seconds': max_wall_seconds,
-                    'max_tool_result_bytes': max_tool_result_bytes,
-                    'max_sent_bytes': max_sent_bytes},
+        'budgets': task_budgets,
         'egress_basis': egress_basis, 'data_class': gateway_data_class,
         'findings': [],
     }
@@ -8527,7 +8627,8 @@ def run_task_delegate(args, *, store=None):
             raise LLMToolError('--provider gw-agent requires --mode direct')
         _check_delegate_repair_cap(args, store)
         return _with_quota_observation(
-            store, args.task_id, lambda: run_task_gw_agent_delegate(args, store=store))
+            store, args.task_id, lambda: run_task_gw_agent_delegate(args, store=store),
+            fail_closed=True)
     _validate_acceptance_scope(getattr(args, 'acceptance', None))
     if getattr(args, 'mode', 'proposal') == 'direct':
         if provider != 'codex':
