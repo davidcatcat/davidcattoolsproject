@@ -48,13 +48,16 @@ Stop and return BLOCKED, without retrying or rewording, on any of:
 
 ### Route execution contract and reply shapes
 
-- **Shared (`tools/llmtool/llmtool/developer_routes/base.py`, `run_route`):** Exit `0`; Git state unmodified (`_git_state_difference`, `_git_signature`, `capture_snapshot`); all changed/untracked/ignored paths strictly in `write_paths` with no symlinks or `.git` edits (`_changed_files`, `_git_status_paths`, `_changed_symlink`, else `<ROUTE>_WRITE_SCOPE_VIOLATION` / `BLOCKED_WRITE_ISOLATION`); `verified_model` equals requested model (or `served_model` for `gw-agent`). For `SPEC_MISMATCH` or no-change, modify `0` files (`changed_files` `()`), keep Git clean, exit `0`, and state `SPEC_MISMATCH` + evidence in the summary/result (`run_route` accepts `()`, while `task_submission_cli` direct-route wrappers may block empty diffs).
+- **Shared by Claude, AGY and `gw-agent` (`tools/llmtool/llmtool/developer_routes/base.py`, `run_route`):** Exit `0`; Git state unmodified (`_git_state_difference`, `_git_signature`, `capture_snapshot`); all changed/untracked/ignored paths strictly in `write_paths` with no symlinks or `.git` edits (`_changed_files`, `_git_status_paths`, `_changed_symlink`, else `<ROUTE>_WRITE_SCOPE_VIOLATION` / `BLOCKED_WRITE_ISOLATION`); `verified_model` equals requested model (or `served_model` for `gw-agent`).
 - **Claude (`tools/llmtool/llmtool/developer_routes/claude.py`, `ClaudeRoute.parse_output`, `validate_status`, `verified_model`, `_normalized_usage`):** CLI wraps your final text in one strict UTF-8 JSON object (`_unique_pairs`, `_reject_constant`): `"type":"result"`, `"subtype":"success"`, `"is_error":false`, `"session_id"` (RFC 4122 UUID), optional `"result"` (first 4000 chars), `"usage"` (`input_tokens`, `output_tokens`), `"modelUsage"` (`"claude-*"` -> `{"outputTokens":>0}`).
 - **AGY (`tools/llmtool/llmtool/developer_routes/agy.py`, `AgyRoute.parse_output`, `verified_model`, `provider_basis`, `quota_exhausted`):** CLI wraps your final text in one strict UTF-8 JSON object: `"conversation_id"` (`[A-Za-z0-9_-]{8,128}`), `"status":"SUCCESS"`, optional `"response"`/`"result"` (first 4000 chars), optional `"usage"`. `verified_model` reads `model_resolver...Resolving model <name>` from `--log-file`.
 - **`gw-agent` (`tools/llmtool/llmtool/developer_routes/gw_agent.py`, `GwAgentRoute.collect`, `parse_output`, `validate_exit`, `validate_status`, `verified_model`, `_normalize_gw_agent_usage`):** Gateway writes `result.json` (<= 1 MiB, `0600`) and `audit.jsonl` (<= 4 MiB, `0600`) in private `tmpdir`. `result.json` requires 13 keys: `schema_version:1`, `status` (`DONE`:0, `BLOCKED`:3, `MODEL_ERROR`:4, `POLICY_REFUSED`:5, `BUDGET_EXCEEDED`:6), `code` (`null` on `DONE`, else `[A-Z0-9_]{1,64}`), `run_id` (`[0-9a-f]{24}`), `session_id`, `task_id`, `changed_paths` (relative POSIX), `summary`, `served_model` (not `UNKNOWN`/`gw` on `DONE`), `usage`, `turns`, `budget_used`, `audit_sha256`.
-- **OpenCode:** Shares `base.py` `run_route`; route-specific stdout schema is `UNKNOWN` (outside `read_paths`).
+- **OpenCode (`tools/llmtool/llmtool/opencode_direct_developer.py`, `run`):** does not use `run_route`; llmtool reads the OpenCode CLI JSON event stream itself. You write no envelope: your final assistant text is the reply.
+- **No change or `SPEC_MISMATCH` is never a successful delivery**, even though the route JSON above is valid and its status says success. Modify `0` files, keep Git clean, and state `SPEC_MISMATCH` (or the reason) with evidence in your final text. The Task outcome is: Claude, Developer `BLOCKED` with `CLAUDE_NO_CHANGES` (`task_submission_cli.run_task_claude_delegate`); AGY, Developer `BLOCKED` with `AGY_EMPTY_RESULT` when the reply is also empty (`run_task_agy_delegate`); in every other case an uncommitted empty result cannot complete, because `task_completion._worktree_snapshot` refuses an empty worktree with `WORKTREE_SCOPE_MISMATCH`. Your reply text is kept for the PM as `developer.reported.summary` (Developer-reported, unverified), so the stated reason reaches the PM.
 
-### Minimal valid examples
+### Route reply shapes (illustrations)
+
+The CLI or gateway writes these envelopes; you only write your final text. Placeholder IDs and digests are illustrations, not values to copy.
 
 Claude completion:
 ```json
@@ -64,11 +67,11 @@ AGY completion:
 ```json
 {"conversation_id":"conv_0123456789abcdef","status":"SUCCESS","response":"Implemented requested changes.","usage":{"input_tokens":100,"output_tokens":50}}
 ```
-`gw-agent` `result.json` completion:
+`gw-agent` `result.json` completion (`audit_sha256` must be the SHA-256 of that run's own `audit.jsonl`; the route verifies it and refuses a mismatch with `GW_AGENT_AUDIT_INVALID`, so the value below is only a placeholder):
 ```json
 {"schema_version":1,"status":"DONE","code":null,"run_id":"0123456789abcdef01234567","session_id":"0123456789abcdef0123456789abcdef","task_id":"task-1","changed_paths":["src.py"],"summary":"Implemented requested changes.","served_model":"deepseek-v4.1-flash-free","usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150},"turns":2,"budget_used":{},"audit_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
 ```
-`SPEC_MISMATCH` / no-change (Claude, `0` files modified, Git clean, exit `0`):
+`SPEC_MISMATCH` / no-change reply (Claude, `0` files modified, Git clean, exit `0`). The JSON is valid, but the Task records `CLAUDE_NO_CHANGES` and the Developer result is blocked; it is not a success:
 ```json
 {"type":"result","subtype":"success","is_error":false,"session_id":"00000000-0000-0000-0000-000000000000","result":"SPEC_MISMATCH: Contradicts tools/llmtool/llmtool/developer_routes/base.py; no changes made.","usage":{"input_tokens":100,"output_tokens":50},"modelUsage":{"claude-opus-5-5":{"outputTokens":50}}}
 ```

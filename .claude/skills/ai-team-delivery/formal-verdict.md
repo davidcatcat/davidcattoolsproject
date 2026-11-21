@@ -12,7 +12,7 @@ which also governs the marker and `Verdict:` line used here.
 Backed by `tools/llmtool/llmtool/review_dispatch.py` functions `_parse_codex_review_inner` and `_preflight`, and `tools/llmtool/llmtool/review_result.py` functions `_comment_verdict`, `_codex_formal_pass`, `finding_ids`, and `record_review_result`:
 - **Formal verdict:** version integer must be in range `1 <= version <= 90` (`Version: v1` .. `Version: v90`).
 - **Security verdict:** version integer must be in range `91 <= version <= 9999` (`Version: v91` .. `Version: v9999`). Note that `dispatch_review` in `tools/llmtool/llmtool/review_dispatch.py` and `record_review_result` in `tools/llmtool/llmtool/review_result.py` currently enforce `kind == 'formal'`, refusing other kinds with `REVIEW_KIND_UNSUPPORTED`, while kind-aware version validation in `_preflight` retains the security version range.
-- **Claude PASS internals:** `review_result._comment_verdict` delegates Claude PASS verification to `is_formal_claude_pass` in `tools/llmtool/llmtool/task_completion.py` (outside this Task's read paths), so any additional checks inside `is_formal_claude_pass` are `UNKNOWN`.
+- **Claude PASS checks:** `review_result._comment_verdict` delegates Claude PASS verification to `is_formal_claude_pass` in `tools/llmtool/llmtool/task_completion.py`: the marker line with `actor=Claude` and `status=PASS`, then `Verdict: PASS | Version: vN | HEAD: <result HEAD>`, and both the exact `FORMAL SECURITY/FUNCTIONAL/QA ACCEPT` line and the exact binding line for that Task, run, contract and HEAD.
 
 ## PR comment shape
 
@@ -40,7 +40,9 @@ FORMAL SECURITY/FUNCTIONAL/QA ACCEPT
 No findings.
 ```
 
-### Minimal valid security verdict example
+### Security verdict comment shape (v91 and later; not dispatchable)
+
+`dispatch_review` (`review_dispatch.py`) and `record_review_result` (`review_result.py`) accept only `kind='formal'` and refuse any other kind with `REVIEW_KIND_UNSUPPORTED`, so llmtool cannot dispatch or record this as a review. `_preflight` keeps the `v91`-`v9999` range, and the shape below is what the PR-comment readers parse:
 
 ```text
 <!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->

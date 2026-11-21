@@ -29,7 +29,7 @@ This card holds only Reviewer rules. The common core stays in [AGENTS.md](../../
   - Line 0 (first non-empty line): `<!-- activity: type=review_verdict actor=<Actor> target=PM status=<MarkerStatus> -->` where `actor` is `Claude` or `Codex`, and `MarkerStatus` is `PASS` (for `PASS`) or `FIX` (for `FAIL`, `FIX`, `BLOCKED`).
   - Line 1: `Verdict: <DisplayedStatus> | Version: v<N> | HEAD: <40-hex HEAD>` where `DisplayedStatus` is `PASS` (for `PASS`) or `FAIL` (for non-`PASS`).
   - Binding line anywhere in lines: `LLMTOOL-REVIEW-BINDING v1 task=<32-hex task_id> run=<32-hex run_id> contract=<64-hex contract_digest> head=<40-hex HEAD>`.
-  - For formal `PASS`: includes `FORMAL SECURITY/FUNCTIONAL/QA ACCEPT` (required by `review_result._codex_formal_pass` for Codex; Claude PASS checks delegate to `is_formal_claude_pass` in `tools/llmtool/llmtool/task_completion.py`, whose internals outside `review_result.py` are `UNKNOWN` from this Task's read paths).
+  - For formal `PASS`: includes `FORMAL SECURITY/FUNCTIONAL/QA ACCEPT` (required by `review_result._codex_formal_pass` for Codex). A Claude PASS is checked by `task_completion.is_formal_claude_pass`: first non-empty line is the marker with `actor=Claude` and `status=PASS`, the next is `Verdict: PASS | Version: vN | HEAD: <result HEAD>`, and the exact `FORMAL SECURITY/FUNCTIONAL/QA ACCEPT` line and the exact binding line for that Task, run, contract and HEAD are both present.
 - **Version ranges:**
   - Formal review: `Version: v1` .. `Version: v90` (`1 <= version <= 90` checked by `tools/llmtool/llmtool/review_dispatch.py` function `_preflight`).
   - Security review: `Version: v91` .. `Version: v9999` (`91 <= version <= 9999` checked by `tools/llmtool/llmtool/review_dispatch.py` function `_preflight`). Note: `dispatch_review` in `tools/llmtool/llmtool/review_dispatch.py` and `record_review_result` in `tools/llmtool/llmtool/review_result.py` currently accept only `kind='formal'`, refusing other kinds with `REVIEW_KIND_UNSUPPORTED`, while `_preflight` retains version validation for security reviews.
@@ -50,7 +50,9 @@ FORMAL SECURITY/FUNCTIONAL/QA ACCEPT
 No findings.
 ```
 
-### Minimal valid security verdict example
+### Security verdict comment shape (v91 and later; not dispatchable)
+
+`dispatch_review` (`review_dispatch.py`) and `record_review_result` (`review_result.py`) accept only `kind='formal'` and refuse any other kind with `REVIEW_KIND_UNSUPPORTED`, so llmtool cannot dispatch or record this as a review. `_preflight` keeps the `v91`-`v9999` range, and the shape below is what the PR-comment readers parse:
 
 ```text
 <!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->
