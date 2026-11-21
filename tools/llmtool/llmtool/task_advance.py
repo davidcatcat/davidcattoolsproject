@@ -721,11 +721,15 @@ def _review_ci_gate(number, head, github_get, latest_out=None):
     required_checks = _required_linux_checks(paths, old_paths)
     if required_checks is None:
         return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
-    # Every required check must pass (a docs + ai-loop PR needs both). A
-    # malformed run beats a failure, and a failure beats a pending check.
+    # Any required check failure routes to CI_FAILED
     failed = None
     pending = False
-    for required_name in required_checks:
+    all_required = list(required_checks)
+    requires_macos = _mac_ci_runs(paths + old_paths)
+    if requires_macos:
+        all_required.append('check (macOS 3.13)')
+    # #2337: CI repair path needs to cover all required checks
+    for required_name in all_required:
         candidates = [item for item in runs if item.get('head_sha') == head and
                       item.get('name') == required_name]
         for item in candidates:
@@ -741,8 +745,10 @@ def _review_ci_gate(number, head, github_get, latest_out=None):
             continue
         if type(latest.get('conclusion')) is not str:
             return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
-        if latest['conclusion'] != 'success' and failed is None:
+        # #2337: CI repair path handles any failed required check
+        if latest['conclusion'] != 'success':
             failed = latest
+            break
     if failed is not None:
         if type(latest_out) is dict:
             latest_out.update(failed)
@@ -762,6 +768,7 @@ _CI_ENV_CONCLUSIONS = ('cancelled', 'startup_failure')
 
 def _ci_excerpt(run):
     """Bounded untrusted excerpt from the check run output title and summary only."""
+    from . import task_submission_cli
     output = run.get('output')
     parts = []
     if type(output) is dict:
@@ -771,7 +778,8 @@ def _ci_excerpt(run):
                 parts.append(value)
     lines = '\n'.join(parts).splitlines()[:review_repair.CI_EXCERPT_MAX_LINES]
     raw = '\n'.join(lines).encode('utf-8', errors='replace')
-    return raw[:review_repair.CI_EXCERPT_MAX_BYTES].decode('utf-8', errors='ignore')
+    excerpt = raw[:review_repair.CI_EXCERPT_MAX_BYTES].decode('utf-8', errors='ignore')
+    return task_submission_cli._screen_text(excerpt, review_repair.CI_EXCERPT_MAX_BYTES + 1024)
 
 
 def _read_check_run(head, name, run_id, github_get):
@@ -3464,18 +3472,19 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             step = gate_step
             if ci_code is not None:
                 codes.append(ci_code)
-        if (step == 'CI_FAILED' and gate_latest.get('name') == _LINUX_CHECK and
+        failed_name = gate_latest.get('name')
+        if (step == 'CI_FAILED' and failed_name in _LINUX_FLAG_CHECKS and
                 gate_latest.get('conclusion') in ('failure', 'timed_out', *_CI_ENV_CONCLUSIONS)):
-            # #1502 WP-D D11: route the newest exact-head Linux run before review.
-            linux_run = _read_check_run(d6['result_head'], _LINUX_CHECK,
+            # #1502 WP-D D11, #2337: route the newest exact-head required check run before review.
+            check_run = _read_check_run(d6['result_head'], failed_name,
                                         gate_latest.get('id'), get)
-            if linux_run is None:
+            if check_run is None:
                 codes.append('CI_CHECK_RUN_UNAVAILABLE')
             else:
                 routed = _route_ci_failure(
                     store=store, record=record, task_id=task_id,
                     executor_task=executor_task, number=number, d6=d6, related=related,
-                    run=linux_run, fail_code='LINUX_CI_FAILED', github_get=get,
+                    run=check_run, fail_code='LINUX_CI_FAILED', github_get=get,
                     repair_review_call=repair_review_call)
                 if routed is not None:
                     step, codes, result = routed[0], list(routed[1]), routed[2]
