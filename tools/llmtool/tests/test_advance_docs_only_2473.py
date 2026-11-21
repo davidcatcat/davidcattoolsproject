@@ -222,6 +222,10 @@ class AdvanceDocsOnlyTests(unittest.TestCase):
             'rename without data': make_github(renamed_no_data, runs=runs),
             'head races': make_github(docs, runs=runs,
                                       second_pr=pr_snapshot(head={'sha': OTHER_HEAD})),
+            'count races after files': make_github(docs, runs=runs,
+                                                   third_pr=pr_snapshot(changed_files=3)),
+            'invalid count after files': make_github(docs, runs=runs,
+                                                     third_pr=pr_snapshot(changed_files='2')),
         }
         for label, get in cases.items():
             with self.subTest(label=label):

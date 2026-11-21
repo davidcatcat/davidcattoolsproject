@@ -2517,7 +2517,11 @@ def _pr_docs_only(number, head, github_get):
         if any(classify(name) != 'docs' for name in names):
             return False
         after = github_get(f'pulls/{number}')
-        return _pr_open_for_head(after, number, head)
+        if not _pr_open_for_head(after, number, head):
+            return False
+        after_count = after.get('changed_files')
+        return (type(after_count) is int and not isinstance(after_count, bool) and
+                after_count == len(files))
     except Exception:
         return False
 
