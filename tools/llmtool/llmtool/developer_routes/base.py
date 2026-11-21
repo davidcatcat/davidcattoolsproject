@@ -163,6 +163,44 @@ class RouteResult:
     cleanup_status: str
     boundary: Mapping[str, Any]
     provider_evidence: Mapping[str, Any] | None = None
+    # #2469: bounded, screened response excerpt and the model the resolver
+    # reported (UNKNOWN or MISMATCH when it did not name the requested one).
+    # Only AGY runs fill these; other routes keep None.
+    response_excerpt: str | None = None
+    resolved_model: str | None = None
+
+
+MAX_RESPONSE_EXCERPT_CHARS = 1024
+
+
+def response_excerpt(text):
+    """#2469: a bounded, sensitive-screened, one-line excerpt; never raw secrets."""
+    if type(text) is not str:
+        return ''
+    from ..task_submission_cli import _redact_rejected_output
+    from ..test_output_excerpts import _emitted_sensitive
+    try:
+        if _emitted_sensitive(text[:4000]):
+            return '[withheld]'
+        shown = _redact_rejected_output(text[:4000])
+        shown = ''.join(c for c in shown.replace('\n', ' | ') if ' ' <= c <= '~')
+        shown = shown[:MAX_RESPONSE_EXCERPT_CHARS]
+        return '[withheld]' if _emitted_sensitive(shown) else shown
+    except Exception:
+        return '[withheld]'
+
+
+def resolved_model_label(route, log_text, requested):
+    """#2469: the resolver's model name, 'MISMATCH' for conflicting names, else 'UNKNOWN'."""
+    try:
+        verified = route.verified_model(log_text, requested)
+    except Exception:
+        return 'UNKNOWN'
+    if verified is None:
+        return 'UNKNOWN'
+    if verified == '\0':
+        return 'MISMATCH'
+    return verified if type(verified) is str else 'UNKNOWN'
 
 
 class DeveloperRoute(ABC):
@@ -223,6 +261,11 @@ class DeveloperRoute(ABC):
     def validate_status(self, parsed: Mapping[str, Any]) -> None:
         """Optional hook, default accepts: map a consistent provider status to route errors."""
         return None
+
+    def empty_delivery(self, parsed: Mapping[str, Any],
+                       changed_paths: tuple[str, ...]) -> bool:
+        """Optional hook, default False (#2469): a reported success delivered nothing."""
+        return False
 
     def provider_basis(self, parsed: Mapping[str, Any]) -> str | None:
         """Optional hook, default none: the evidence basis proven by parsed output."""
@@ -985,6 +1028,7 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
     way no RouteResult is returned.
     """
     started = time.monotonic()
+    agy_evidence = {}
     if on_launch is not None and not callable(on_launch):
         raise RouteError(_route_code(route, 'REQUEST_INVALID'))
     if on_child is not None and (not callable(on_child) or runner is not None):
@@ -1199,6 +1243,10 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
             raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
         if not isinstance(parsed, Mapping):
             raise RouteError(_route_code(route, 'OUTPUT_INVALID'))
+        if route.name == 'agy':
+            agy_evidence['resolved_model'] = resolved_model_label(
+                route, log_text, value['model'])
+            agy_evidence['response_excerpt'] = response_excerpt(parsed.get('summary', ''))
         try:
             route.validate_exit(code, parsed)
         except RouteError:
@@ -1250,6 +1298,13 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         if code != 0:
             raise RouteError(_route_code(route, 'EXIT_NONZERO'), blocked_reason=(
                 _exit_diagnostic(code, stderr) if route.name == 'agy' else None))
+        try:
+            empty = route.empty_delivery(parsed, changed_paths) is True
+        except Exception:
+            empty = False
+        if empty:
+            raise RouteError(_route_code(route, 'EMPTY_RESULT'),
+                             facts={'changed_files': []})
         # Delivery boundary: every provider-result check above has passed.
         _fire_delivered(route, on_delivered)
         try:
@@ -1260,10 +1315,14 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
                                verified, value['effort'], parsed.get('usage'), changed,
                                code, stdout_hash, elapsed,
                                getattr(execute, 'last_cleanup_status', 'UNKNOWN'), dict(proof),
-                               _result_evidence(route, parsed))
+                               _result_evidence(route, parsed),
+                               agy_evidence.get('response_excerpt'),
+                               agy_evidence.get('resolved_model'))
         except Exception:
             raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
     except RouteError as exc:
+        for key, item in agy_evidence.items():
+            exc.observed_facts.setdefault(key, item)
         if exc.execution_facts is None:
             exc.execution_facts = _post_run_execution_facts(code, stdout, started, execute)
         raise
