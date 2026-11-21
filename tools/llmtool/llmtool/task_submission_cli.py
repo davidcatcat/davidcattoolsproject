@@ -1072,8 +1072,11 @@ def add_task_submission_parsers(actions):
     repair.add_argument('--auto-review', action='store_true',
                         help='dispatch the next formal review after a successful repair')
     repair.add_argument('--recover-claim', metavar='REPAIR_TASK_ID',
-                        help=('#1928: set this UNKNOWN review repair claim DISPATCHED after '
-                              'the E1-E5 evidence checks; dispatches nothing'))
+                        help=('#1928/#2475: mark this UNKNOWN repair claim DISPATCHED after '
+                              'its evidence checks; an EC2/CI claim is admitted only when '
+                              'its repair Task has no Developer assignment, the D6 is clean '
+                              'at the claim head and no process is bound to it; dispatches '
+                              'nothing'))
     repair.add_argument('--pm-session',
                         help=('caller PM session (native UUID or pm- ID); must own '
                               'the Task; default: CLAUDE_CODE_SESSION_ID or '

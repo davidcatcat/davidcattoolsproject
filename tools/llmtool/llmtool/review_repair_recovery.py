@@ -1,9 +1,15 @@
-"""#1928: evidence checks to recover one UNKNOWN review repair claim.
+"""#1928/#2475: evidence checks to recover one UNKNOWN repair claim.
 
 Pure checks on records the caller read. Nothing here writes, dispatches or
 records a Task; any failed check refuses and the claim stays UNKNOWN.
+
+The #1928 review path needs a launched Developer and a formal result. The
+#2475 EC2/CI path covers the narrower case where the claim was left UNKNOWN
+before any Developer assignment existed: that is recoverable only from
+positive evidence that no launch could have happened.
 """
 import json
+import os
 import re
 
 from .errors import LLMToolError
@@ -79,6 +85,52 @@ def _valid_claim(claim, executor_task, pr_number):
         claim['pr'] == pr_number and _HEX40.fullmatch(head) and _HEX64.fullmatch(packet) and
         _STAMP.fullmatch(stamp) and _FAMILY.fullmatch(family) and
         not family.endswith(EC2_FAMILY_SUFFIX))
+
+
+def _valid_ec2_claim(claim, executor_task, pr_number):
+    """#2475: one UNKNOWN EC2/CI claim (a '-ec2' family, no verdict comment)."""
+    text = [claim.get(key) for key in ('head_sha', 'packet_sha256', 'claimed_at', 'family')]
+    if any(type(value) is not str for value in text):
+        return False
+    head, packet, stamp, family = text
+    return bool(
+        claim.get('state') == 'UNKNOWN' and claim.get('executor_task') == executor_task and
+        'comment_id' in claim and claim['comment_id'] is None and
+        all(type(claim.get(key)) is int and low <= claim[key] <= high
+            for key, (low, high) in _RANGES.items() if key != 'comment_id') and
+        claim['pr'] == pr_number and _HEX40.fullmatch(head) and _HEX64.fullmatch(packet) and
+        _STAMP.fullmatch(stamp) and _FAMILY.fullmatch(family) and
+        family.endswith(EC2_FAMILY_SUFFIX))
+
+
+def _is_ec2_claim(claim):
+    """True for an EC2/CI family claim; anything else is a #1928 review claim."""
+    family = claim.get('family') if type(claim) is dict else None
+    return type(family) is str and family.endswith(EC2_FAMILY_SUFFIX)
+
+
+def check_ec2_claim(root, repair_task_id, *, executor_task, pr_number, others):
+    """E1-EC2: return the one UNKNOWN EC2/CI claim of root naming repair_task_id."""
+    if (type(repair_task_id) is not str or not _HEX32.fullmatch(repair_task_id) or
+            type(executor_task) is not str or not executor_task or
+            type(pr_number) is not int or pr_number < 1):
+        refuse('REPAIR_RECOVERY_ARGUMENT_INVALID')
+    if type(root) is not dict or type(root.get('task_id')) is not str:
+        refuse('REPAIR_RECOVERY_CLAIM_INVALID')
+    for other in others:
+        if type(other) is not dict:
+            refuse('REPAIR_RECOVERY_CLAIM_INVALID')
+        if other.get('task_id') == root['task_id']:
+            continue
+        named = {item.get('repair_task_id') for item in _claims(other)}
+        if root['task_id'] in named:
+            refuse('REPAIR_ROOT_TASK_REQUIRED')
+        if repair_task_id in named:
+            refuse('REPAIR_RECOVERY_CLAIM_INVALID')
+    found = [item for item in _claims(root) if item.get('repair_task_id') == repair_task_id]
+    if len(found) != 1 or not _valid_ec2_claim(found[0], executor_task, pr_number):
+        refuse('REPAIR_RECOVERY_CLAIM_INVALID')
+    return dict(found[0])
 
 
 def check_identity(root, repair, claim):
@@ -196,6 +248,143 @@ def check_d6(root, repair, claim, *, registered_d6, is_ancestor):
         refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
 
 
+def _pid_status(pid, start_time, pgid):
+    """ALIVE, DEAD or UNKNOWN for one recorded process; any doubt is UNKNOWN."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return 'DEAD'
+    except PermissionError:
+        pass
+    except OSError:
+        return 'UNKNOWN'
+    try:
+        from . import codex_direct_developer
+        current_start = codex_direct_developer.process_start_time(pid)
+    except Exception:
+        current_start = None
+    if current_start is None:
+        return 'UNKNOWN'
+    if current_start != start_time:
+        return 'DEAD'
+    try:
+        if os.getpgid(pid) != pgid:
+            return 'DEAD'
+    except (ProcessLookupError, PermissionError, OSError):
+        return 'UNKNOWN'
+    return 'ALIVE'
+
+
+def _execution_process_status(execution):
+    """The liveness of a Developer execution's recorded process, or None."""
+    if type(execution) is not dict:
+        return None
+    for pid_key, start_key, pgid_key in (('child_pid', 'child_start_time', 'child_pgid'),
+                                         ('pid', 'start_time', 'pgid')):
+        if pid_key not in execution:
+            continue
+        pid, start, pgid = (execution.get(pid_key), execution.get(start_key),
+                            execution.get(pgid_key))
+        if (type(pid) is not int or isinstance(pid, bool) or pid <= 0 or
+                type(start) is not str or not start or
+                type(pgid) is not int or isinstance(pgid, bool) or pgid <= 0):
+            return 'UNKNOWN'
+        return _pid_status(pid, start, pgid)
+    return None
+
+
+def _d6_process_status(store, executor_task):
+    """NONE, DEAD, ALIVE or UNKNOWN for processes recorded on this D6.
+
+    A process is bound to the D6 through a Developer execution of a Task whose
+    completion or developer names that D6. A record that cannot be read, or a
+    recorded process whose identity cannot be checked, is UNKNOWN (fail closed).
+    """
+    try:
+        task_ids = list(store.task_ids())
+    except Exception:
+        return 'UNKNOWN'
+    seen = uncertain = False
+    for task_id in task_ids:
+        try:
+            record = store.get(task_id)
+        except Exception:
+            return 'UNKNOWN'
+        if type(record) is not dict:
+            return 'UNKNOWN'
+        developer = record.get('developer')
+        completion = record.get('completion')
+        developer_d6 = (developer.get('executor_task_id')
+                        if type(developer) is dict else None)
+        completion_d6 = (completion.get('executor_task_id')
+                         if type(completion) is dict else None)
+        if developer_d6 != executor_task and completion_d6 != executor_task:
+            continue
+        status = _execution_process_status(
+            developer.get('execution') if type(developer) is dict else None)
+        if status is None:
+            continue
+        seen = True
+        if status == 'ALIVE':
+            return 'ALIVE'
+        if status == 'UNKNOWN':
+            uncertain = True
+    if uncertain:
+        return 'UNKNOWN'
+    return 'DEAD' if seen else 'NONE'
+
+
+def verify_ec2_recovery(store, root, repair_task_id, *, executor_task, pr_number,
+                        registered_d6=None, process_status=None, others=None):
+    """#2475 E1-EC2 and the no-launch evidence; return the claim or refuse.
+
+    The repair Task must exist with no Developer assignment of any kind: every
+    Developer route persists that assignment before it can spawn a provider,
+    so an absent assignment is positive evidence that no launch happened. The
+    registered D6 must be clean at the claim HEAD, and no live process may be
+    bound to it. Nothing here writes.
+    """
+    from . import review_repair
+    if others is None:
+        try:
+            others = [store.get(task_id) for task_id in store.task_ids()]
+        except Exception:
+            refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+    claim = check_ec2_claim(root, repair_task_id, executor_task=executor_task,
+                            pr_number=pr_number, others=others)
+    try:
+        repair = store.get(repair_task_id)
+    except Exception:
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+    if type(repair) is not dict or repair.get('task_id') != repair_task_id:
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+    # Positive evidence of no launch: no Developer assignment was ever persisted.
+    # Every Developer route writes that assignment before any provider spawn, so
+    # its absence proves no run could have started (a missing execution record
+    # alone would not).
+    if repair.get('developer') is not None:
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+    loader = review_repair._registered_d6 if registered_d6 is None else registered_d6
+    try:
+        registration, snapshot = loader(root, executor_task)
+        head = claim['head_sha']
+        clean = (getattr(snapshot, 'clean', None) is True and
+                 getattr(snapshot, 'head', None) == head and
+                 getattr(registration, 'result_sha', None) == head)
+    except Exception:
+        clean = False
+    if not clean:
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+    reader = _d6_process_status if process_status is None else process_status
+    try:
+        status = reader(store, executor_task)
+    except Exception:
+        status = 'UNKNOWN'
+    if status not in ('NONE', 'DEAD'):
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+    return claim
+
+
 def verify_recovery(store, root, repair_task_id, *, executor_task, pr_number):
     """E1-E5 on records read now from store; return the claim or refuse. Never writes.
 
@@ -222,13 +411,53 @@ def verify_recovery(store, root, repair_task_id, *, executor_task, pr_number):
     return claim
 
 
-def recover_unknown_claim(*, store, task_id, executor_task, pr_number, repair_task_id):
-    """Recover one UNKNOWN review repair claim as DISPATCHED under the chain lock.
+def _recover_ec2_claim(*, store, current, task_id, executor_task, pr_number,
+                       repair_task_id, registered_d6, process_status):
+    """#2475: move one UNKNOWN EC2/CI claim to DISPATCHED, or refuse. Never counts."""
+    from .task_store import TaskStoreConflict
+    try:
+        others = [store.get(other_id) for other_id in store.task_ids()]
+    except Exception:
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+    found = [item for item in current.get('review_repair_claims') or ()
+             if type(item) is dict and item.get('repair_task_id') == repair_task_id]
+    # A second recovery is refused, not repeated: the first one is the record.
+    if len(found) != 1 or found[0].get('state') != 'UNKNOWN':
+        refuse('REPAIR_RECOVERY_CLAIM_INVALID')
+    verify_ec2_recovery(store, current, repair_task_id, executor_task=executor_task,
+                        pr_number=pr_number, registered_d6=registered_d6,
+                        process_status=process_status, others=others)
+    claims = current['review_repair_claims']
+    marked = [dict(item, state='DISPATCHED')
+              if type(item) is dict and item.get('repair_task_id') == repair_task_id
+              else item for item in claims]
+    try:
+        saved = store.compare_and_update(
+            task_id, expected={'record_sha256': current['record_sha256']},
+            review_repair_claims=marked)
+    except TaskStoreConflict:
+        refuse('REPAIR_CLAIM_UNAVAILABLE')
+    except Exception:
+        refuse('REPAIR_CLAIM_UNAVAILABLE')
+    if type(saved) is not dict:
+        refuse('REPAIR_CLAIM_UNAVAILABLE')
+    updated = next((item for item in saved.get('review_repair_claims') or ()
+                    if type(item) is dict and item.get('repair_task_id') == repair_task_id),
+                   None)
+    if type(updated) is not dict:
+        refuse('REPAIR_CLAIM_UNAVAILABLE')
+    return {'recovered': True, 'claim': dict(updated)}
 
-    The chain lock is the one repair_review holds for its counts and claim. The store
-    write (recover_review_repair_claim) reruns E1-E5 inside its own locked update. A
-    claim already DISPATCHED for this executor and PR returns recovered False with no
-    write. Never calls an adapter, delegate or record_pm, and never creates a Task.
+
+def recover_unknown_claim(*, store, task_id, executor_task, pr_number, repair_task_id,
+                          registered_d6=None, process_status=None):
+    """Recover one UNKNOWN repair claim as DISPATCHED under the chain lock.
+
+    The chain lock is the one repair_review holds for its counts and claim. A
+    review claim goes through E1-E5 and the store's locked write. An EC2/CI
+    claim (#2475) goes through its own no-launch evidence and one CAS, and a
+    second recovery refuses. Neither path calls an adapter, delegate or
+    record_pm, and neither creates a Task or changes a repair count.
     """
     from . import lineage_counts
     from .task_store import TaskStoreConflict
@@ -249,6 +478,12 @@ def recover_unknown_claim(*, store, task_id, executor_task, pr_number, repair_ta
             refuse('REPAIR_CLAIM_UNAVAILABLE')
         found = [item for item in current.get('review_repair_claims') or ()
                  if type(item) is dict and item.get('repair_task_id') == repair_task_id]
+        if len(found) == 1 and _is_ec2_claim(found[0]):
+            return _recover_ec2_claim(
+                store=store, current=current, task_id=task_id,
+                executor_task=executor_task, pr_number=pr_number,
+                repair_task_id=repair_task_id, registered_d6=registered_d6,
+                process_status=process_status)
         if len(found) == 1 and found[0].get('state') == 'DISPATCHED':
             # A repeat still passes E1 (fields, root, uniqueness) before it is reported.
             try:
