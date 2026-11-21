@@ -212,6 +212,49 @@ class AdvanceDocsOnlyTests(unittest.TestCase):
         self.assertEqual(result['step'], 'DISPATCH_REVIEW')
         remote.assert_not_called()
 
+    def test_i_docs_only_ignores_ec2_fail_timeout_and_sha_mismatch(self):
+        record = base_record()
+        receipts = {
+            'FAIL': remote_receipt(record, 'FAIL', failure_excerpt='one failure',
+                                   failures=['x']),
+            'SHA_MISMATCH': remote_receipt(record, 'SHA_MISMATCH'),
+            'TIMEOUT': remote_receipt(record, 'TIMEOUT'),
+        }
+        for label, receipt in receipts.items():
+            with self.subTest(label=label):
+                case = base_record(remote_test_receipts=[receipt])
+                get = make_github(docs_files(), runs=[check_run(DOCS_CHECK)])
+                result, remote, dispatch = self._advance(get, case)
+                self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+                remote.assert_not_called()
+                dispatch.assert_called_once()
+        # Repeated TIMEOUT also no longer needs attention for a docs-only PR.
+        twice = base_record(remote_test_receipts=[
+            remote_receipt(record, 'TIMEOUT'),
+            remote_receipt(record, 'TIMEOUT', elapsed_s=0.02)])
+        get = make_github(docs_files(), runs=[check_run(DOCS_CHECK)])
+        result, remote, dispatch = self._advance(get, twice)
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        remote.assert_not_called()
+
+    def test_j_non_docs_with_ec2_fail_or_mismatch_is_unchanged(self):
+        record = base_record()
+        files = docs_files() + [{'filename': 'tools/llmtool/llmtool/task_advance.py',
+                                 'status': 'modified'}]
+        cases = {
+            'FAIL': (remote_receipt(record, 'FAIL', failure_excerpt='one failure',
+                                    failures=['x']), 'REPAIR_REVIEW'),
+            'SHA_MISMATCH': (remote_receipt(record, 'SHA_MISMATCH'), 'NEEDS_ATTENTION'),
+        }
+        for label, (receipt, expected) in cases.items():
+            with self.subTest(label=label):
+                case = base_record(remote_test_receipts=[receipt])
+                get = make_github(files, runs=[check_run(DOCS_CHECK)])
+                result, remote, dispatch = self._advance(get, case)
+                self.assertEqual(result['step'], expected)
+                remote.assert_not_called()
+                dispatch.assert_not_called()
+
     def test_h_non_docs_ec2_outcomes_are_unchanged(self):
         record = base_record()
         pr = pr_snapshot()

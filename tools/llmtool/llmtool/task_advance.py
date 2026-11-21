@@ -2517,6 +2517,12 @@ def _pr_docs_only(number, head, github_get):
         return False
 
 
+# #2473: steps the pre-review EC2 record can produce; a docs-only PR re-decides them.
+_EC2_DERIVED_STEPS = frozenset((
+    'RUN_REMOTE_TEST', 'REPAIR_REVIEW', 'NEEDS_ATTENTION', 'WAITING_REPAIR',
+    'REPAIR_RETRY', 'DEVELOPER_START_FAILED', 'REPAIR_OUTCOME_UNKNOWN'))
+
+
 def _pre_review_action(record, d6, pr, related, result_head, docs_only=False):
     """Return the gate action before a Reviewer may start on this head.
 
@@ -3454,9 +3460,11 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             {'task_id': task_id, 'step': 'D6_BINDING_UNAVAILABLE', 'result': None,
              'next': 'D6_BINDING_UNAVAILABLE', 'codes': [code]}, record, store, None)
     step = decide(record, d6, pr, related)
-    if step == 'RUN_REMOTE_TEST' and _pr_docs_only(number, d6['result_head'], get):
-        # #2473: a docs-only PR needs no EC2 result; the check (docs) gate below
-        # still runs before any Reviewer is dispatched.
+    if step in _EC2_DERIVED_STEPS and _pr_docs_only(number, d6['result_head'], get):
+        # #2473: a docs-only PR needs no EC2 result, whatever the EC2 record
+        # says (none, FAIL, TIMEOUT, SHA_MISMATCH). The check (docs) gate below
+        # still runs before any Reviewer is dispatched. A head with a Reviewer
+        # claim decides identically with docs_only, so those steps are unchanged.
         step = decide(record, d6, pr, related, docs_only=True)
     # A crash after GitHub creates the PR can leave the Task without its binding.
     # Only an exact-head open PR recovered from this D6 branch may fill it.
