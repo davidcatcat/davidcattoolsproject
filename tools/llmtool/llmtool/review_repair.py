@@ -862,7 +862,7 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         # assignment. The delegate serializes the old controller and handoff,
         # then applies its ordinary scope, policy, quota and D6 checks.
         repair_task = None
-        if dispatch_adapter is None:
+        if dispatch_adapter is None or (test_failure and existing.get('state') == 'CLAIMED'):
             try:
                 repair_task = store.get(existing['repair_task_id'])
             except (LLMToolError, KeyError):
@@ -898,6 +898,25 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         if auto and not test_failure:
             # v91 F1: an auto replay is decided under the chain lock too.
             existing = _auto_replay_claim(store, task, task_id, existing)
+        if (test_failure and existing.get('state') == 'CLAIMED' and
+                type(repair_task) is dict and repair_task.get('developer') is None):
+            adapter = dispatch_adapter
+            if adapter is None:
+                adapter = lambda **request: _delegate_repair(
+                    **request, delegate=delegate_callable, store=store)
+            try:
+                result = adapter(task=repair_task, developer=developer, packet=packet,
+                                 executor_task=executor_task, provider_profile=profile,
+                                 model=developer.get('model'))
+            except Exception:
+                _update_claim_state(store, task_id, existing, 'UNKNOWN')
+                raise
+            _update_claim_state(store, task_id, existing, 'DISPATCHED')
+            existing['state'] = 'DISPATCHED'
+            return {'result': result, 'attempt': existing['attempt'],
+                    'repair_task_id': repair_task['task_id'],
+                    'claim': existing, 'replayed': True,
+                    'next_action': f"review-dispatch --version {packet_version + 1}"}
         task_id_for_repair = existing.get('repair_task_id')
         dispatched = existing.get('state') == 'DISPATCHED'
         return {'claim': existing, 'repair_task_id': task_id_for_repair,
