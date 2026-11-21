@@ -34,7 +34,7 @@ boolean gate rather than a count.
 | `tools/llmtool/llmtool/task_submission_cli.py`, `_check_delegate_repair_cap` | Developer runs on one D6, found through `store.completion_d6_task_ids(executor_task)` | runs, per D6 | Skips the current Task, a Task with no Developer, a recorded start failure, a known prelaunch refusal, and a launched run proven to have done no work. EC2 classification comes from repair claims. |
 | `tools/llmtool/llmtool/task_submission_cli.py`, `_collect_ec2_repair_task_ids` | Adds the `repair_task_id` values of a record's `review_repair_claims` to the new and legacy EC2 sets | claims | A malformed claims list or claim adds nothing, so that run stays on the review count. |
 | `tools/llmtool/llmtool/task_submission_cli.py`, `_repair_run_stamp` | Assignment timestamp and count eligibility of one Developer run | runs | A malformed developer or assignment time refuses `DELEGATE_REPAIR_COUNT_UNAVAILABLE`. |
-| `tools/llmtool/llmtool/task_submission_cli.py`, `_launched_run_did_no_work` | Boolean proof that a launched run did no work | runs | Requires no artifact, confirmed cleanup, the recorded source SHA still at the D6 head, a clean tree, and no status path overlapping the write paths. |
+| `tools/llmtool/llmtool/task_submission_cli.py`, `_launched_run_did_no_work` | Boolean proof that a launched run did no work | runs | Requires no artifact, confirmed cleanup, the recorded source SHA still at the D6 head, a clean tree, and no status path overlapping the write paths. It can accept a launched `DEVELOPER_OUTCOME_UNKNOWN` run, so it does not prove the provider was never reached and must not decide `START_FAILED`. |
 | `tools/llmtool/llmtool/task_submission_cli.py`, `_check_repair_limits` | EC2 count against `test_fail_max`; review count against `1 + repair_max` | runs, per D6 | Review runs are every counted run except new EC2 repair runs; a legacy EC2 run still counts as a review run. This is the run-based threshold that differs from the claim-based lineage count. |
 | `tools/llmtool/llmtool/task_submission_cli.py`, `_check_repair_rca` | Uses the count and assignment stamps to require a confirmed root cause from repair #2 on | runs | Not a count source; it consumes the run count and stamps. |
 | `tools/llmtool/llmtool/task_submission_cli.py`, `_check_repair_packet_rca` | Binds a repair packet to a stored claim or High Debug entry at the failed head | claims | Not a count source; it is a claim consumer. |
@@ -151,11 +151,16 @@ moves to `START_FAILED`, which is terminal. A recorded start failure is
 therefore still a ledger entry, but not a counted repair. An attempt that is
 not provably a start failure is charged; the ledger is conservative.
 
-The proof for `START_FAILED` is the one the delegate cap already uses: a
-recorded start failure, a known prelaunch refusal, or a launched run proven by
-`tools/llmtool/llmtool/task_submission_cli.py`, `_launched_run_did_no_work` to
-have done no work. Any weaker or missing evidence leaves the reservation
-counted.
+The only proof for `START_FAILED` is proof that the provider was never
+reached: a recorded start failure through
+`tools/llmtool/llmtool/task_submission_cli.py`, `_recorded_start_failure` (the
+record-only `start_failure.record_checks` proof), or a known prelaunch refusal
+as matched in `_repair_run_stamp`. It is not `_launched_run_did_no_work`: that
+helper can accept a launched `DEVELOPER_OUTCOME_UNKNOWN` run from its record
+and an unchanged D6 tree, so it does not prove the provider was never
+reached. A launched run with an `UNKNOWN` outcome stays charged as `UNKNOWN`,
+even when it left no work. Any weaker or missing evidence leaves the
+reservation counted.
 
 ### 3.2 Counts and thresholds
 
@@ -245,7 +250,7 @@ All changes below are design targets only. No code is changed by this note.
 | --- | --- | --- |
 | `tools/llmtool/llmtool/lineage_counts.py` | Add the work-item ledger resolver and the work-item closure, and make the existing chain counts views over it. Keep the fail-closed chain and lock helpers. | Read scope. |
 | `tools/llmtool/llmtool/repair_policy.py` | Keep `repair_max`, `test_fail_max`, `review_fail_max`, and the decision functions. Remove the need for caller-supplied repair counts, and retire `repair_attempts_max` if the ledger makes it redundant. | Read scope. |
-| `tools/llmtool/llmtool/task_submission_cli.py` | Replace the counting in `_check_delegate_repair_cap`, `_check_repair_limits`, `_check_chain_repair_count`, `_delegate_chain_gate`, `_repair_run_stamp`, and `_collect_ec2_repair_task_ids` with the resolver. Append the `RESERVED` entry before the provider call, charge it on a confirmed launch or `UNKNOWN`, and bind the existing start-failure proof to `START_FAILED`. | Read scope. |
+| `tools/llmtool/llmtool/task_submission_cli.py` | Replace the counting in `_check_delegate_repair_cap`, `_check_repair_limits`, `_check_chain_repair_count`, `_delegate_chain_gate`, `_repair_run_stamp`, and `_collect_ec2_repair_task_ids` with the resolver. Append the `RESERVED` entry before the provider call, charge it on a confirmed launch or `UNKNOWN`, and bind only the record-only start-failure proof (`_recorded_start_failure` or a known prelaunch refusal) to `START_FAILED`. Never use `_launched_run_did_no_work` for `START_FAILED`, because it can accept a launched `DEVELOPER_OUTCOME_UNKNOWN` run. | Read scope. |
 | `tools/llmtool/llmtool/review_repair.py` | Bind review and EC2 claims to ledger entries and stop supplying an independent repair count. | UNKNOWN: outside the read scope. |
 | `tools/llmtool/llmtool/task_store.py` | Persist and validate the ledger and the `continues`/`replaces` work-item links. | UNKNOWN: outside the read scope. |
 | `tools/llmtool/llmtool/task_advance.py` | Move the test-failure count named in the `lineage_counts` docstring onto the resolver. | UNKNOWN: outside the read scope. |
