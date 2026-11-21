@@ -197,6 +197,35 @@ class EffectiveRepairCountTests(unittest.TestCase):
         self.assert_counted(_without(_quota_record(), 'developer') | {
             'developer': _without(_quota_record()['developer'], 'execution')})
 
+    def test_k_quota_stop_without_a_progress_field_is_counted_despite_a_clean_d6(self):
+        # Case (b): the record names a quota stop but carries no progress at all.
+        # The generic clean-D6 probe must not excuse it.
+        for profile, code in (('agy', 'AGY_QUOTA_EXHAUSTED'),
+                              ('claude', 'CLAUDE_QUOTA_EXHAUSTED')):
+            with self.subTest(profile=profile):
+                record = _quota_record(provider_profile=profile, error_code=code)
+                record['developer'] = _without(record['developer'], 'progress')
+                self.assertNotIn('progress', record['developer'])
+                self.assert_counted(record)
+
+    def test_l_blocked_record_with_done_execution_evidence_is_counted(self):
+        # Case (c): a BLOCKED quota record whose execution says the run finished.
+        for status in ('DONE', 'SUCCEEDED', 'RUNNING', 'TIMEOUT', '', None, 7):
+            with self.subTest(execution_status=status):
+                self.assert_counted(_quota_record(
+                    execution=_execution(status=status)))
+        # A missing execution status is not proof either.
+        execution = _without(_execution(), 'status')
+        self.assert_counted(_quota_record(execution=execution))
+
+    def test_m_partial_progress_is_counted_by_the_complete_shape_rule(self):
+        # Case (d), restated against the whole shape: every strict subset counts.
+        complete = _progress()
+        for key in complete:
+            with self.subTest(missing=key):
+                self.assert_counted(_quota_record(progress=_without(complete, key)))
+        self.assert_counted(_quota_record(progress={}))
+
     def test_i_six_pr_2383_shaped_rounds_compute_two_effective_repairs(self):
         # Six rounds: the first run, two repairs, two quota stops with complete
         # no-change progress and one refused before launch. Only the first run
@@ -265,19 +294,39 @@ class ChainEffectiveRepairCountTests(unittest.TestCase):
     def setUp(self):
         _patch_trust_and_binding(self)
 
-    def _chain(self, record):
+    @staticmethod
+    def _chain_with_probe(record, probe):
         real = {'completion': {'executor_task_id': _EXECUTOR_TASK},
                 'developer': {'state': 'DEVELOPER_RESPONDED', 'created_at': _CREATED_AT}}
         members = {'1' * 32: real, '2' * 32: record}
         args = SimpleNamespace(task_id='f' * 32, executor_task=_EXECUTOR_TASK)
         policy = dict(_POLICY, repair_max=1)
         with patch.object(task_submission_cli, '_d6_unchanged_probe',
-                          return_value=lambda *_a, **_k: False):
+                          return_value=probe):
             task_submission_cli._check_chain_repair_count(
                 args, _Store(count=0), None, policy, {'members': members})
 
+    @classmethod
+    def _chain_with_clean_probe(cls, record):
+        cls._chain_with_probe(record, _always_clean)
+
+    def _chain(self, record):
+        self._chain_with_probe(record, lambda *_a, **_k: False)
+
     def test_a_complete_quota_stop_on_another_d6_is_excluded(self):
         self._chain(_quota_record(executor=self.OTHER_D6))
+
+    def test_a_quota_stop_without_progress_on_another_d6_is_counted(self):
+        record = _quota_record(executor=self.OTHER_D6)
+        record['developer'] = _without(record['developer'], 'progress')
+        with self.assertRaisesRegex(LLMToolError, _LIMIT):
+            self._chain_with_clean_probe(record)
+
+    def test_a_blocked_quota_stop_with_done_execution_on_another_d6_is_counted(self):
+        record = _quota_record(executor=self.OTHER_D6,
+                               execution=_execution(status='DONE'))
+        with self.assertRaisesRegex(LLMToolError, _LIMIT):
+            self._chain(record)
 
     def test_a_doubtful_quota_stop_on_another_d6_is_counted(self):
         for progress in ({'head_sha': _HEAD}, _progress(changed_files=['sample.py']),
