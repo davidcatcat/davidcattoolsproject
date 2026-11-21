@@ -2259,13 +2259,22 @@ REVIEW_RERUN_RECORD_FAILED = 'REVIEW_RERUN_RECORD_FAILED'
 
 
 def _reviewer_process_live(claim):
-    """True when a reviewer session may still be running.
+    """True when a reviewer attempt may still be running; doubt refuses.
 
-    A refusal claim stores no PID. A bound native session id is the only durable
-    sign that a reviewer session started; without proof that it ended this fails
-    closed. A refused Codex run never binds its session, so it has none.
+    A COMPLETED claim has ended. A stored fixed-word refusal (UNKNOWN with a
+    failure_reason) ended with nothing posted, so it is only a doubt when it
+    also carries a bound native session id. Every other state, including
+    CLAIMED, DISPATCHED and UNKNOWN without a refusal, may still be running.
     """
-    return type(claim) is not dict or claim.get('native_session_id') is not None
+    if type(claim) is not dict:
+        return True
+    state = claim.get('state')
+    if state == 'COMPLETED':
+        return False
+    if (state == 'UNKNOWN' and
+            _failure_reason(claim.get('failure_reason')) is not None):
+        return claim.get('native_session_id') is not None
+    return True
 
 
 def _review_refusal_rerun(record, claim, d6, pr, store, github_get):
@@ -2294,7 +2303,12 @@ def _review_refusal_rerun(record, claim, d6, pr, store, github_get):
     if (type(contract_digest) is not str or
             receipt.get('contract_digest') != contract_digest):
         return None, REVIEW_RERUN_CONTRACT_CHANGED
-    if _reviewer_process_live(claim):
+    # #2486 security v91: any attempt for this PR and head may still be running,
+    # not only the newest refused claim. One live attempt is doubt; doubt refuses.
+    live_attempts = [item for item in _claims(record)
+                     if type(item) is dict and item.get('pr') == claim.get('pr') and
+                     item.get('head_sha') == head]
+    if any(_reviewer_process_live(item) for item in live_attempts):
         return None, REVIEW_RERUN_REVIEWER_LIVE
     if not _review_verdict_absent(claim, github_get):
         return None, None

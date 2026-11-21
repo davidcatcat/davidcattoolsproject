@@ -203,6 +203,20 @@ class RefusalRerunTests(unittest.TestCase):
         self.assertEqual(calls[0]['version'], 3)
         self.assertIs(calls[0]['refusal_rerun'], True)
 
+    def test_another_live_attempt_on_the_same_head_refuses_the_re_run(self):
+        # #2486 security v91: the newest claim is the refusal, but an older
+        # attempt on the same PR and head may still be running. Doubt refuses.
+        live = self._claim(version=1, state='DISPATCHED')
+        refused = self._claim(version=2, reviewer_task='reviewer-2')
+        store = self._store([live, refused])
+        self._write_receipt(refused)
+        calls = []
+        result = self._advance(store, lambda **kwargs: calls.append(kwargs) or {})
+
+        self.assertEqual(result['step'], 'REVIEW_UNUSABLE_STOPPED')
+        self.assertEqual(calls, [])
+        self.assertIn(task_advance.REVIEW_RERUN_REVIEWER_LIVE, result['codes'])
+
     def test_a_second_advance_after_the_re_run_does_not_re_run_again(self):
         first = self._claim()
         rerun = self._claim(version=2, reviewer_task='reviewer-2')
