@@ -145,7 +145,7 @@ def _ere(text):
 def reference_patterns(path):
     """git grep -E patterns (POSIX ERE, no \\b) that reference the file at path."""
     name = path.rsplit('/', 1)[-1]
-    patterns = [_ere(name) + _WORD_END]
+    patterns = ['(^|[^A-Za-z0-9_.-])' + _ere(name) + _WORD_END]
     if name.endswith('.py'):
         leaf = name[:-3]
         parts = path[:-3].split('/')

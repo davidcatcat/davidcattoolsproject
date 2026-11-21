@@ -96,6 +96,14 @@ class ReferencingTestsTest(unittest.TestCase):
             [item['path'] for item in self.refs(['tools/llmtool/llmtool/widget.py'])],
             ['tools/llmtool/tests/test_other.py', 'tools/llmtool/tests/test_widget.py'])
 
+    def test_file_name_needs_a_leading_boundary(self):
+        Path(self.root, 'tools/llmtool/tests/test_tox.py').write_text("N = 'tox.py'\n")
+        Path(self.root, 'tools/llmtool/tests/test_x.py').write_text("N = 'scripts/x.py'\n")
+        _git(self.root, 'add', '-A')
+        _git(self.root, 'commit', '-qm', 'more')
+        self.assertEqual([item['path'] for item in self.refs(['scripts/x.py'])],
+                         ['tools/llmtool/tests/test_x.py'])
+
     def test_prefix_named_module_is_not_a_match(self):
         paths = [item['path'] for item in self.refs(['tools/llmtool/llmtool/widget.py'])]
         self.assertNotIn('tools/llmtool/tests/test_unrelated.py', paths)
