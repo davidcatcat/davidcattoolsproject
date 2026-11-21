@@ -1,16 +1,18 @@
 """Admission of a confirmed main CI incident revert (#1706 R5a, #1019 Row 40).
 
-Pure and read-only: ``admit`` reads only its two arguments and returns a new
-dict. It never changes an input and never reads or writes files, Git, the
-network or the TaskStore. The result is advice for the PM; nothing here starts
-a revert.
+Read-only: ``admit`` returns a new dict and never changes an input. It reads
+only policy.json, for the revert scope limit (#2281 row 16), and never reads
+Git, the network or the TaskStore. The result is advice for the PM; nothing
+here starts a revert.
 """
 
 import copy
 
 from . import main_incident as mi
 from . import main_incident_store as store
+from . import repair_policy as policy
 
+# #2281 row 16: the scope limit used when policy.json has no such key.
 MAX_SCOPE_PRS = 5
 ADMITTED = 'REVERT_ADMITTED'
 REVERT_INCIDENT_INVALID = 'REVERT_INCIDENT_INVALID'
@@ -27,6 +29,15 @@ REVERT_DEPENDENT_LATER_MERGE = mi.REVERT_DEPENDENT
 
 def _refuse(code):
     return {'code': code, 'refused': True}
+
+
+def scope_prs_max(path=None):
+    """The revert scope PR limit from policy.json (#2281 row 16).
+
+    An absent key keeps MAX_SCOPE_PRS; a policy the loader refuses raises its
+    POLICY_INVALID, so there is never a silent fallback.
+    """
+    return policy.load_policy(path).get('revert_scope_prs_max', MAX_SCOPE_PRS)
 
 
 def _valid_record(record):
@@ -51,8 +62,11 @@ def _valid_scope(scope):
             scope == sorted(set(scope)))
 
 
-def admit(record, dependency):
+def admit(record, dependency, path=None):
     """Decide whether a confirmed incident may start a revert; return a new dict.
+
+    ``path`` selects the policy.json read for the scope limit; None uses the
+    loader's own location.
 
     The checks run in order and the first failure decides:
 
@@ -66,8 +80,9 @@ def admit(record, dependency):
     5. a last observation that is ENV or FLAKY is
        REVERT_CLASSIFICATION_NOT_CODE and any other class but CODE is
        REVERT_CLASSIFICATION_UNKNOWN;
-    6. a malformed scope is REVERT_INCIDENT_INVALID and more than
-       MAX_SCOPE_PRS PRs is REVERT_SCOPE_TOO_LARGE;
+    6. a malformed scope is REVERT_INCIDENT_INVALID and more than the
+       policy.json revert_scope_prs_max PRs (MAX_SCOPE_PRS when absent) is
+       REVERT_SCOPE_TOO_LARGE;
     7. a missing or unknown dependency result is REVERT_DEPENDENCY_UNKNOWN,
        a later dependent merge is REVERT_DEPENDENT_LATER_MERGE and no
        dependent merge admits the revert.
@@ -97,7 +112,7 @@ def admit(record, dependency):
     scope = confirmation.get('scope')
     if not _valid_scope(scope):
         return _refuse(REVERT_INCIDENT_INVALID)
-    if len(scope) > MAX_SCOPE_PRS:
+    if len(scope) > scope_prs_max(path):
         return _refuse(REVERT_SCOPE_TOO_LARGE)
     if not isinstance(dependency, dict):
         return _refuse(REVERT_DEPENDENCY_UNKNOWN)

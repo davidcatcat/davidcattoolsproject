@@ -73,14 +73,43 @@ class ClaimRecoveryStoreTests(unittest.TestCase):
         error = self.unchanged(LLMToolError, self.cas, review_repair_claims=[
             self.claims[0], dict(self.claims[1], state='DISPATCHED')])
         self.assertEqual(error.task_store_error_code, 'REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
+        error = self.unchanged(LLMToolError, self.cas, review_repair_claims=[
+            self.claims[0], dict(self.claims[1], state='CLAIMED')])
+        self.assertEqual(error.task_store_error_code, 'REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
         # A recovery never carries caller changes, and a CLAIMED claim is not recovered.
         error = self.unchanged(LLMToolError, self.store._update, self.task_id, expected=None,
                                changes={'review_repair_claims': self.claims},
                                claim_recovery=(self.repair, 'e-1', 17))
         self.assertEqual(error.task_store_error_code, 'REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
+        error = self.unchanged(LLMToolError, self.store._update, self.task_id, expected=None,
+                               changes={'review_repair_claims': self.claims},
+                               ec2_claim_recovery=(self.repair, 'e-1', 17, None, None))
+        self.assertEqual(error.task_store_error_code, 'REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
         error = self.unchanged(LLMToolError, self.recover,
                                repair=self.claims[0]['repair_task_id'])
         self.assertEqual(error.task_store_error_code, 'REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
+
+    def test_verified_ec2_recovery_sets_only_that_claim_claimed(self):
+        ec2_repair = new_id()
+        ec2_claim = dict(self.claim, family='pr-17-ec2', comment_id=None,
+                         head_sha='c' * 40, repair_task_id=ec2_repair, state='CLAIMED')
+        self.cas(review_repair_claims=self.claims + [ec2_claim])
+        self.cas(review_repair_claims=self.claims + [dict(ec2_claim, state='UNKNOWN')])
+        before = self.store.get(self.task_id)
+        calls = []
+
+        def fake_ec2(store, root, repair_id, *, executor_task, pr_number,
+                     registered_d6=None, process_status=None):
+            calls.append((store, root['record_sha256'], repair_id, executor_task, pr_number))
+
+        with mock.patch.object(review_repair_recovery, 'verify_ec2_recovery', fake_ec2):
+            saved = self.store.recover_ec2_repair_claim(
+                self.task_id, ec2_repair, executor_task='e-1', pr_number=17,
+                expected_sha256=before['record_sha256'])
+        self.assertEqual(calls, [(self.store, before['record_sha256'], ec2_repair, 'e-1', 17)])
+        self.assertEqual(saved['review_repair_claims'][-1], dict(ec2_claim, state='CLAIMED'))
+        changed = {key for key in saved if saved[key] != before.get(key)}
+        self.assertEqual(changed - {'updated_at'}, {'review_repair_claims', 'record_sha256'})
 
 
 if __name__ == '__main__':

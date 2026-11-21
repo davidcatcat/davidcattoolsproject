@@ -1,22 +1,76 @@
 # Formal verdict comment for `llmtool task complete`
 
-This format applies only when an llmtool Task's formal Claude or Codex review is checked by
-`llmtool task complete --reviewer-task --pr`, which parses it strictly
-(`tools/llmtool/llmtool/task_completion.py`). Every other PR records its review
-conclusion under the [Transition record](pm-continuation.md#transition-record) rule,
+This format applies when an llmtool Task's formal Claude or Codex review is checked by
+`llmtool task complete --reviewer-task --pr` (`tools/llmtool/llmtool/task_completion.py`)
+and when Codex Reviewer output is parsed by review dispatch
+(`tools/llmtool/llmtool/review_dispatch.py`, function `_parse_codex_review_inner` and function `_preflight`).
+Every other PR records its review conclusion under the [Transition record](pm-continuation.md#transition-record) rule,
 which also governs the marker and `Verdict:` line used here.
+
+## Parser backing and version ranges
+
+Backed by `tools/llmtool/llmtool/review_dispatch.py` functions `_parse_codex_review_inner` and `_preflight`, and `tools/llmtool/llmtool/review_result.py` functions `_comment_verdict`, `_codex_formal_pass`, `finding_ids`, and `record_review_result`:
+- **Formal verdict:** version integer must be in range `1 <= version <= 90` (`Version: v1` .. `Version: v90`).
+- **Security verdict:** version integer must be in range `91 <= version <= 9999` (`Version: v91` .. `Version: v9999`). Note that `dispatch_review` in `tools/llmtool/llmtool/review_dispatch.py` and `record_review_result` in `tools/llmtool/llmtool/review_result.py` currently enforce `kind == 'formal'`, refusing other kinds with `REVIEW_KIND_UNSUPPORTED`, while kind-aware version validation in `_preflight` retains the security version range.
+- **Claude PASS checks:** `review_result._comment_verdict` delegates Claude PASS verification to `is_formal_claude_pass` in `tools/llmtool/llmtool/task_completion.py`: the marker line with `actor=Claude` and `status=PASS`, then `Verdict: PASS | Version: vN | HEAD: <result HEAD>`, and both the exact `FORMAL SECURITY/FUNCTIONAL/QA ACCEPT` line and the exact binding line for that Task, run, contract and HEAD.
+
+## PR comment shape
 
 Every agent posts to GitHub as one shared account, and GitHub refuses APPROVE from
 a PR's own author. The Task's formal Reviewer therefore publishes its verdict as one
-new PR conversation comment:
+new PR conversation comment (<= 65536 bytes UTF-8, checked by `review_result._comment_verdict` and `review_dispatch._parse_codex_review_inner`):
 
 ```text
 <!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->
 Verdict: PASS | Version: v1 | HEAD: <40-hex result HEAD>
-LLMTOOL-REVIEW-BINDING v1 task=<task_id> run=<run_id> contract=<contract_digest> head=<40-hex result HEAD>
+LLMTOOL-REVIEW-BINDING v1 task=<32-hex task_id> run=<32-hex run_id> contract=<64-hex contract_digest> head=<40-hex result HEAD>
 FORMAL SECURITY/FUNCTIONAL/QA ACCEPT
 
 <findings, evidence, gates and disposition as free text>
+```
+
+### Minimal valid formal verdict example
+
+```text
+<!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->
+Verdict: PASS | Version: v1 | HEAD: 0123456789abcdef0123456789abcdef01234567
+LLMTOOL-REVIEW-BINDING v1 task=0123456789abcdef0123456789abcdef run=fedcba9876543210fedcba9876543210 contract=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef head=0123456789abcdef0123456789abcdef01234567
+FORMAL SECURITY/FUNCTIONAL/QA ACCEPT
+
+No findings.
+```
+
+### Security verdict comment shape (v91 and later; not dispatchable)
+
+`dispatch_review` (`review_dispatch.py`) and `record_review_result` (`review_result.py`) accept only `kind='formal'` and refuse any other kind with `REVIEW_KIND_UNSUPPORTED`, so llmtool cannot dispatch or record this as a review. `_preflight` keeps the `v91`-`v9999` range, and the shape below is what the PR-comment readers parse:
+
+```text
+<!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->
+Verdict: PASS | Version: v91 | HEAD: 0123456789abcdef0123456789abcdef01234567
+LLMTOOL-REVIEW-BINDING v1 task=0123456789abcdef0123456789abcdef run=fedcba9876543210fedcba9876543210 contract=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef head=0123456789abcdef0123456789abcdef01234567
+
+Security review only; functional and QA gates not covered. No findings.
+```
+
+## Codex Reviewer dispatch JSONL and JSON reply shape
+
+Backed by `tools/llmtool/llmtool/review_dispatch.py` functions `_parse_codex_review_inner` and `_iter_jsonl_lines`:
+- Stdout must be a UTF-8 JSONL stream (<= 16 MiB, lines split only on `\n`, each non-empty line a JSON object with unique keys):
+  - One `thread.started` event with `thread_id` matching `[0-9a-fA-F-]{16,64}`.
+  - At least one `item.completed` event with `item.type == "agent_message"` and string `item.text` (final message <= 1 MiB UTF-8).
+- The final `agent_message.text` must be a JSON object with unique keys and exact keys:
+  - `task_id` (32-hex string matching task ID)
+  - `run_id` (32-hex string matching run ID)
+  - `head` (40-hex commit SHA matching result HEAD)
+  - `verdict` (string: `'PASS'`, `'FIX'`, `'FAIL'`, or `'BLOCKED'`)
+  - `review` (string up to 65536 bytes UTF-8 containing the PR comment format above with `actor=Codex`)
+  - `contract_digest` (optional string, value ignored)
+
+### Minimal valid Codex review JSONL example
+
+```jsonl
+{"type":"thread.started","thread_id":"01234567-89ab-cdef-0123-456789abcdef"}
+{"type":"item.completed","item":{"type":"agent_message","text":"{\"task_id\":\"0123456789abcdef0123456789abcdef\",\"run_id\":\"fedcba9876543210fedcba9876543210\",\"head\":\"0123456789abcdef0123456789abcdef01234567\",\"verdict\":\"PASS\",\"review\":\"<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->\\nVerdict: PASS | Version: v1 | HEAD: 0123456789abcdef0123456789abcdef01234567\\nLLMTOOL-REVIEW-BINDING v1 task=0123456789abcdef0123456789abcdef run=fedcba9876543210fedcba9876543210 contract=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef head=0123456789abcdef0123456789abcdef01234567\\nFORMAL SECURITY/FUNCTIONAL/QA ACCEPT\\n\\nNo findings.\"}"}}
 ```
 
 - The marker is the first non-empty line and the `Verdict:` line the next one, each

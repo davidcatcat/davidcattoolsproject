@@ -22,7 +22,7 @@ from test_task_delegate_repair_cap import (
     _patch_trust_and_binding, _chain_store, _binding, _lock_patches,
     _assert_released, _use_policy, _record_id,
     _CURRENT_TASK, _HIGH_DEBUG_TASK, _EXECUTOR_TASK, _HIGH_DEBUG_REF, _HEAD,
-    _POLICY, _REPAIR_TWO, _REVIEW_LIMIT,
+    _POLICY, _FIRST_RCA_REPAIR, _REVIEW_LIMIT,
 )
 
 _PRED_D6 = 'predecessor-d6'
@@ -70,23 +70,23 @@ class SameD6BehaviourUnchangedTests(unittest.TestCase):
         _patch_trust_and_binding(self)
 
     def test_same_d6_confirmed_high_debug_passes(self):
-        store = _Store(count=_REPAIR_TWO, diagnosis=_diagnosis([_entry()]))
+        store = _Store(count=_FIRST_RCA_REPAIR, diagnosis=_diagnosis([_entry()]))
         task_submission_cli._check_delegate_repair_cap(_args(), store)
         self.assertEqual(store.writes, [])
 
     def test_same_d6_missing_high_debug_refuses_task_required(self):
-        store = _Store(count=_REPAIR_TWO, diagnosis=_diagnosis([_entry()]))
+        store = _Store(count=_FIRST_RCA_REPAIR, diagnosis=_diagnosis([_entry()]))
         with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_REQUIRED$'):
             task_submission_cli._check_delegate_repair_cap(_no_high_debug(), store)
 
     def test_same_d6_unconfirmed_high_debug_refuses_task_invalid(self):
-        store = _Store(count=_REPAIR_TWO,
+        store = _Store(count=_FIRST_RCA_REPAIR,
                        diagnosis=_diagnosis([_entry(status='RCA_UNCONFIRMED')]))
         with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_INVALID$'):
             task_submission_cli._check_delegate_repair_cap(_args(), store)
 
     def test_same_d6_head_moved_refuses(self):
-        store = _Store(count=_REPAIR_TWO,
+        store = _Store(count=_FIRST_RCA_REPAIR,
                        diagnosis=_diagnosis([_entry(examined_sha='b' * 40)]))
         with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_HEAD_MOVED'):
             task_submission_cli._check_delegate_repair_cap(_args(), store)
@@ -110,7 +110,64 @@ class PredecessorD6HDAcceptedTests(unittest.TestCase):
     def setUp(self):
         _patch_trust_and_binding(self)
 
-    def test_predecessor_d6_hd_accepted_for_continues_repair(self):
+    def test_2405_diagnosis_covers_2422_only_with_same_bound_findings(self):
+        store = _chain_store(_PRED_D6)
+        old_head = 'b' * 40
+        entry = _entry(executor_task=_PRED_D6, examined_sha=old_head, family='pr-2405')
+        unrelated = _entry(executor_task=_PRED_D6, family='pr-2442', status='BLOCKED')
+        source = _diagnosis([entry, unrelated], executor_task=_PRED_D6)
+        target = store.records[_CURRENT_TASK]
+        target['continues'] = _HIGH_DEBUG_TASK
+        store.records[_HIGH_DEBUG_TASK] = source
+
+        def formal(record, head, executor, pr, number, finding):
+            return {'state': 'COMPLETED', 'review_kind': 'formal', 'executor_task': executor,
+                    'head_sha': head, 'version': 1, 'pr': pr,
+                    'updated_at': '2026-11-04T00:00:00Z',
+                    'review_result': {'head': head, 'task_id': record['task_id'],
+                                      'verdict': 'FAIL',
+                                      'review_text': f'Finding: F{number} [High] {finding}'}}
+
+        finding = 'guard.py:19 missing principal check'
+        source['review_dispatch_claim'] = [formal(source, old_head, _PRED_D6, 2405, 1, finding)]
+        target['review_dispatch_claim'] = [formal(target, _HEAD, _FRESH_D6, 2422, 2, finding)]
+        args = _args(executor_task=_FRESH_D6, high_debug_family='pr-2405')
+        _check_continuation_rca(args, store, datetime(2026, 11, 20))
+        self.assertEqual(store.writes, [])
+        from llmtool import start_failure
+        packet = {'task': _CURRENT_TASK, 'executor_task': _FRESH_D6, 'pr': 2422,
+                  'failed_head': _HEAD, 'version': 1, 'verdict_comment_id': 55,
+                  'findings_count': 1,
+                  'reviewer_text_excerpt_untrusted_data': f'Finding: F2 [High] {finding}'}
+        digest = hashlib.sha256(start_failure.canonical(packet).encode()).hexdigest()
+        packet.update(high_debug_report_sha256=entry['report_sha256'],
+                      high_debug_report_untrusted_data=entry['report'])
+        repair_task_id = _record_id(0x900)
+        claim = {'executor_task': _FRESH_D6, 'pr': 2422, 'head_sha': _HEAD,
+                 'version': 1, 'comment_id': 55, 'state': 'CLAIMED',
+                 'repair_task_id': repair_task_id, 'packet_sha256': digest,
+                 'high_debug_report_sha256': entry['report_sha256'],
+                 'high_debug_source_task': _HIGH_DEBUG_TASK}
+        target['completion'] = {'executor_task_id': _FRESH_D6}
+        target['review_repair_claims'] = [claim]
+        self.assertEqual(start_failure.inherited_rca(store, target, packet),
+                         (_HIGH_DEBUG_TASK, entry))
+        task_submission_cli._check_repair_packet_rca(packet, store, _FRESH_D6, repair_task_id)
+        self.assertFalse(start_failure.repair_packet_matches(
+            dict(packet, high_debug_report_untrusted_data='tampered'), claim, target, store))
+        self.assertFalse(start_failure.repair_packet_matches(
+            packet, dict(claim, high_debug_source_task=repair_task_id), target, store))
+        source['review_dispatch_claim'][0]['pr'] = 2442
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED$'):
+            _check_continuation_rca(args, store, datetime(2026, 11, 20))
+        source['review_dispatch_claim'][0]['pr'] = 2405
+        target['review_dispatch_claim'] = [formal(
+            target, _HEAD, _FRESH_D6, 2422, 2, 'guard.py:19 wrong resource check')]
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED$'):
+            _check_continuation_rca(args, store, datetime(2026, 11, 20))
+        self.assertFalse(start_failure.repair_packet_matches(packet, claim, target, store))
+
+    def test_predecessor_d6_hd_without_bound_finding_refuses(self):
         # Chain: predecessor (count 1) on _PRED_D6, current Task on _FRESH_D6.
         # Under policy repair_max=1 (or store count at repair #2), this is repair #2.
         store = _chain_store(_PRED_D6)
@@ -128,10 +185,11 @@ class PredecessorD6HDAcceptedTests(unittest.TestCase):
         store.records[_HIGH_DEBUG_TASK] = _diagnosis([hd_entry], executor_task=_PRED_D6)
 
         args = _args(task_id=_CURRENT_TASK, executor_task=_FRESH_D6)
-        _check_continuation_rca(args, store)
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_INVALID$'):
+            _check_continuation_rca(args, store)
         self.assertEqual(store.writes, [])
 
-    def test_multi_step_predecessors_both_accepted(self):
+    def test_multi_step_predecessors_require_bound_findings(self):
         # Chain: Task 0x100 on _PRED_D6_EARLIER, Task 0x101 on _PRED_D6,
         # current Task _CURRENT_TASK on _FRESH_D6.
         # 2 prior runs in chain: delegates as repair #2.
@@ -142,7 +200,8 @@ class PredecessorD6HDAcceptedTests(unittest.TestCase):
                 store.records[_HIGH_DEBUG_TASK] = _diagnosis(
                     [hd_entry], executor_task=pred_executor)
                 args = _args(task_id=_CURRENT_TASK, executor_task=_FRESH_D6)
-                _check_continuation_rca(args, store)
+                with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_INVALID$'):
+                    _check_continuation_rca(args, store)
                 self.assertEqual(store.writes, [])
 
     def test_predecessor_hd_passes_through_chain_gate(self):
@@ -161,6 +220,35 @@ class PredecessorD6HDAcceptedTests(unittest.TestCase):
         result = task_submission_cli._delegate_chain_gate(
             args, store, binding, lambda: claims.append(_CURRENT_TASK) or 'CLAIMED')
         self.assertEqual(result, 'CLAIMED')
+        self.assertEqual(claims, [_CURRENT_TASK])
+        _assert_released(self, store)
+
+    def test_predecessor_repair_three_is_admitted_without_verified_debug(self):
+        # #2367 A2/A3: three runs in the chain (on two D6s), so the fresh D6's
+        # run is repair #3 under the repository policy. The High Debug taken
+        # before repair #2, on an earlier HEAD of a predecessor D6, covers it.
+        _lock_patches(self)
+        self.assertEqual(_POLICY['repair_max'], 5)
+        store = _chain_store(_PRED_D6_EARLIER, _PRED_D6, _PRED_D6)
+        store.records[_record_id(0x102)]['developer']['created_at'] = '2026-11-04T00:00:02Z'
+        hd_entry = _entry(executor_task=_PRED_D6, examined_sha='b' * 40)
+        store.records[_HIGH_DEBUG_TASK] = _diagnosis([hd_entry], executor_task=_PRED_D6)
+        claims = []
+        args = _args(task_id=_CURRENT_TASK, executor_task=_FRESH_D6)
+        binding = (SimpleNamespace(task_id=_FRESH_D6, root='/d6', source_sha=_HEAD,
+                                  trusted_agent_id='codex-developer'),
+                   SimpleNamespace(head=_HEAD))
+        result = task_submission_cli._delegate_chain_gate(
+            args, store, binding, lambda: claims.append(_CURRENT_TASK) or 'CLAIMED')
+        self.assertEqual(result, 'CLAIMED')
+        self.assertEqual(claims, [_CURRENT_TASK])
+        _assert_released(self, store)
+        # Repair four requires a matching diagnosis.
+        store = _chain_store(_PRED_D6_EARLIER, _PRED_D6, _PRED_D6, _PRED_D6)
+        store.records[_HIGH_DEBUG_TASK] = _diagnosis([hd_entry], executor_task=_PRED_D6)
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_INVALID$'):
+            task_submission_cli._delegate_chain_gate(
+                args, store, binding, lambda: claims.append('unexpected') or 'CLAIMED')
         self.assertEqual(claims, [_CURRENT_TASK])
         _assert_released(self, store)
 
@@ -264,7 +352,7 @@ class PredecessorHDBindingChecksUnchangedTests(unittest.TestCase):
         hd_entry = _entry(executor_task=_PRED_D6, examined_sha='b' * 40)
         store = self._setup_store(hd_entry)
         args = _args(task_id=_CURRENT_TASK, executor_task=_FRESH_D6)
-        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_HEAD_MOVED'):
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_INVALID$'):
             _check_continuation_rca(args, store)
 
     def test_predecessor_hd_stale_timestamp_refused(self):

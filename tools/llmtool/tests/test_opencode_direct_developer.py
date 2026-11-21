@@ -10,7 +10,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from llmtool.opencode_direct_developer import (
-    AGENT, MAX_OUTPUT_BYTES, MAX_OUTPUT_TOKENS, MAX_SOURCE_FILE_BYTES, MODEL,
+    AGENT, MAX_OUTPUT_BYTES, MAX_OUTPUT_TOKENS, MAX_SOURCE_FILE_BYTES, MAX_TASK_PATHS,
+    MODEL,
     DirectOpenCodeError, _classify_provider_error, _classify_provider_events,
     _recovered_transport_indices, configuration, parse_json_events, run,
     summarize_events,
@@ -813,6 +814,40 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertLessEqual(datetime.fromisoformat(result.started_at.replace('Z', '+00:00')),
                              datetime.fromisoformat(result.ended_at.replace('Z', '+00:00')))
 
+    def test_scope_accepts_up_to_1024_read_and_write_paths_2281(self):
+        # #2281: a scope of 33 and of 1024 paths runs end to end; 1025 read or
+        # write paths is refused before any CLI launch with the existing code.
+        self.assertEqual(MAX_TASK_PATHS, 1024)
+
+        def scope(count):
+            # Listed but absent paths are recorded in the manifest as missing.
+            return sorted([f'n{i:04d}.md' for i in range(count - 1)] + ['source.py'])
+
+        for count in (33, 1024):
+            paths = scope(count)
+            for write_paths in (['source.py'], paths):
+                with self.subTest(count=count, writes=len(write_paths)):
+                    result = self.run_with_valid_binding(
+                        root=self.root, read_paths=paths, write_paths=write_paths,
+                        prompt='bounded task prompt', timeout_seconds=30,
+                        executable=self.fake_cli(self.event('step_start') + '\n'))
+                    self.assertEqual(result.exit_code, 0)
+                    self.assertEqual(result.source_file_count, count)
+                    self.assertEqual(result.source_bytes, len(b'VALUE = 1\n'))
+        marker = self.root / 'run-invoked'
+        over = scope(1025)
+        for read_paths, write_paths in ((over, ['source.py']), (over, over)):
+            with self.subTest(reads=len(read_paths), writes=len(write_paths)):
+                cli = self.fake_cli(self.event('step_start') + '\n',
+                                    run_invocation_marker=marker)
+                with self.assertRaises(DirectOpenCodeError) as caught:
+                    self.run_with_valid_binding(
+                        root=self.root, read_paths=read_paths, write_paths=write_paths,
+                        prompt='bounded task prompt', timeout_seconds=5, executable=cli)
+                self.assertEqual(caught.exception.direct_opencode_code,
+                                 'OPENCODE_SCOPE_INVALID')
+                self.assertFalse(marker.exists())
+
     def test_credential_shaped_read_path_source_is_allowed(self):
         source_text = 'OPENAI_' + 'API_' + 'KEY=' + 'sk-' + 'A' * 24 + '\n'
         (self.root / 'source.py').write_text(source_text)
@@ -928,15 +963,25 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
             }}}
         })
 
-    def test_non_free_or_malformed_model_is_rejected_before_any_cli_launch(self):
+    def test_paid_and_other_provider_models_are_admitted(self):
+        for model in ('opencode/paid-model', 'other/name-free',
+                      'opencode/example-paid#high', 'opencode-go/deepseek-v4.1-flash#high'):
+            with self.subTest(model=model):
+                cli = self.fake_cli(self.event('step_start') + '\n', model=model)
+                result = self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                    write_paths=['source.py'], prompt='bounded task prompt',
+                    timeout_seconds=5, executable=cli, model=model)
+                self.assertEqual(result.exit_code, 0)
+
+    def test_malformed_model_is_rejected_before_any_cli_launch(self):
         marker = self.root / 'invoked'
         cli = self.fake_cli(self.event('step_start') + '\n', invocation_marker=marker)
-        for model in ('opencode/paid-model', 'other/name-free', 'opencode/a/b-free',
-                      'opencode/-free', 'opencode/x-free\n', None,
-                      'opencode/example-paid#high', 'opencode/example-free#',
-                      'opencode/example-free#HIGH', 'opencode/example-free#a b',
-                      'opencode/example-free#x#y',
-                      'opencode/example-free#abcdefghijklmnopq'):
+        for model in ('opencode/a/b-free', 'opencode/-free', 'opencode/x-free\n', None,
+                      'opencode/example-free#', 'opencode/example-free#HIGH',
+                      'opencode/example-free#a b', 'opencode/example-free#x#y',
+                      'opencode/example-free#abcdefghijklmnopq',
+                      'example-model-b-free', 'opencode/..', 'https://example.invalid/m',
+                      '', '   ', 'opencode/' + 'a' * 125):
             with self.subTest(model=model):
                 with self.assertRaises(DirectOpenCodeError) as caught:
                     self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
@@ -1183,18 +1228,18 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
 
     def test_run_bound_defaults_to_route_default(self):
         bound = self.run_bound_seconds()
-        self.assertGreater(bound, 1790)
-        self.assertLessEqual(bound, 1800)
+        self.assertGreater(bound, 10790)
+        self.assertLessEqual(bound, 10800)
 
     def test_run_accepts_long_resolved_bound(self):
-        for requested in (1200, 1800, 3600):
+        for requested in (1200, 1800, 3600, 18000):
             with self.subTest(requested=requested):
                 bound = self.run_bound_seconds(timeout_seconds=requested)
                 self.assertGreater(bound, requested - 10)
                 self.assertLessEqual(bound, requested)
 
     def test_run_refuses_bad_timeout_before_provider(self):
-        cases = ((3601, 'TIMEOUT_OVER_HARD_CAP'), (7200, 'TIMEOUT_OVER_HARD_CAP'),
+        cases = ((18001, 'TIMEOUT_OVER_HARD_CAP'), (36000, 'TIMEOUT_OVER_HARD_CAP'),
                  (0, 'TIMEOUT_INVALID'), (-1, 'TIMEOUT_INVALID'),
                  (True, 'TIMEOUT_INVALID'), (600.0, 'TIMEOUT_INVALID'),
                  ('600', 'TIMEOUT_INVALID'))
@@ -1212,14 +1257,18 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
                 self.assertFalse(marker.exists())
 
     def test_resolved_timeout_matches_route_limits(self):
+        from llmtool import developer_routes
         from llmtool import opencode_direct_developer as adapter
-        self.assertEqual(adapter.MAX_WALL_CLOCK_SECONDS, 3600)
-        self.assertEqual(adapter.resolved_timeout(), 1800)
-        for requested in (1, 600, 1200, 1800, 3600):
+        # #2281: the ceiling is the shared route hard cap, not a second copy.
+        self.assertEqual(adapter.MAX_WALL_CLOCK_SECONDS, 18000)
+        self.assertEqual(adapter.MAX_WALL_CLOCK_SECONDS,
+                         developer_routes.HARD_TIMEOUT_CAP_SECONDS)
+        self.assertEqual(adapter.resolved_timeout(), 10800)
+        for requested in (1, 600, 1200, 1800, 3600, 10800, 18000):
             with self.subTest(requested=requested):
                 self.assertEqual(adapter.resolved_timeout(requested), requested)
         with self.assertRaises(DirectOpenCodeError) as caught:
-            adapter.resolved_timeout(3601)
+            adapter.resolved_timeout(18001)
         self.assertEqual(caught.exception.direct_opencode_code, 'TIMEOUT_OVER_HARD_CAP')
         with patch('llmtool.developer_routes.load_route_config',
                    return_value={'routes': {'opencode': {'default_timeout': 600,

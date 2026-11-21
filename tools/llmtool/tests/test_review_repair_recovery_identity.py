@@ -4,6 +4,7 @@ import unittest
 
 from llmtool import review_repair, review_repair_recovery as rec
 from llmtool.errors import LLMToolError
+from llmtool.task_store import REPAIR_CLAIMS_PER_FAMILY_MAX
 
 ROOT, REPAIR, HEAD = 'a' * 32, 'b' * 32, 'c' * 40
 CLAIM = {'executor_task': 'exec-1', 'pr': 17, 'head_sha': HEAD, 'version': 1,
@@ -35,7 +36,8 @@ class RecoveryClaimTests(unittest.TestCase):
         bad = [{'state': 'DISPATCHED'}, {'state': 'CLAIMED'}, {'executor_task': 'exec-2'},
                {'pr': 18}, {'head_sha': 'C' * 40}, {'attempt': True}, {'version': '1'},
                {'comment_id': None}, {'family': 'pr-17-ec2'}, {'family': None},
-               {'attempt': 4}, {'version': 0}, {'comment_id': -1}, {'family': ''},
+               {'attempt': REPAIR_CLAIMS_PER_FAMILY_MAX + 1}, {'attempt': 0},
+               {'version': 0}, {'comment_id': -1}, {'family': ''},
                {'family': 'PR-17'}, {'packet_sha256': 'x'}, {'packet_sha256': None},
                {'claimed_at': '2026-11-15'}]
         for change in bad:
@@ -49,6 +51,14 @@ class RecoveryClaimTests(unittest.TestCase):
         # A bool PR number equals 1 but is not an int PR.
         self.assertEqual(self.code(self.e1, root(dict(CLAIM, pr=True)), pr=1),
                          'REPAIR_RECOVERY_CLAIM_INVALID')
+
+    def test_e1_accepts_claims_four_and_five_in_the_store_range(self):
+        # #2367: the range follows the TaskStore range, which follows policy.json.
+        self.assertEqual(REPAIR_CLAIMS_PER_FAMILY_MAX, review_repair.MAX_REPAIR_ATTEMPTS + 1)
+        for attempt in range(1, REPAIR_CLAIMS_PER_FAMILY_MAX + 1):
+            claim = dict(CLAIM, attempt=attempt)
+            with self.subTest(attempt=attempt):
+                self.assertEqual(self.e1(root(claim)), claim)
 
     def test_e1_refuses_bad_arguments(self):
         for kwargs in ({'repair': 'B' * 32}, {'pr': True}, {'pr': 0}, {'executor': ''}):
@@ -74,7 +84,7 @@ def identity_root():
                 pm_assignment={'goal': 'Fix it.'})
 
 
-def recorded(**packet):
+def recorded(attempt=1, **packet):
     """The repair Task exactly as review_repair._record_repair_task records it."""
     seen = {}
 
@@ -85,7 +95,7 @@ def recorded(**packet):
               'reviewer_text_excerpt_untrusted_data': 'x', **packet}
     review_repair._record_repair_task(
         task=identity_root(), developer={'provider_profile': 'gw-agent', 'acceptance': ['a']},
-        packet=packet, attempt=1, store=None, repair_task_id=REPAIR, record_pm=record_pm)
+        packet=packet, attempt=attempt, store=None, repair_task_id=REPAIR, record_pm=record_pm)
     return {'task_id': REPAIR, 'request': seen['request'], 'response': seen['response'],
             'pm_assignment': json.loads(seen['response'])['developer_assignment'],
             'pm_provenance': {'pm_native_session_id': seen['session']}}
@@ -114,6 +124,61 @@ class RecoveryRepairIdentityTests(unittest.TestCase):
         for root, claim in ((None, CLAIM), (identity_root(), {}), (identity_root(), None)):
             with self.subTest(root=root, claim=claim):
                 self.assertEqual(self.code(rec.check_identity, root, good, claim),
+                                 'REPAIR_RECOVERY_EVIDENCE_INVALID')
+
+    def test_e2_accepts_repairs_four_and_five_under_the_policy_bound(self):
+        # #2367: the runtime writes 'N/<policy bound>' for every attempt in range.
+        total = review_repair.MAX_REPAIR_ATTEMPTS
+        self.assertEqual(total, 5)
+        for attempt in (3, 4, 5):
+            repair = recorded(attempt)
+            with self.subTest(attempt=attempt):
+                self.assertEqual(repair['request'], f'REPAIR {attempt}/{total} of {ROOT}')
+                self.assertIsNone(rec.check_identity(
+                    identity_root(), repair, dict(CLAIM, attempt=attempt)))
+                # The attempt in the text must be the claim's own attempt.
+                self.assertEqual(self.code(rec.check_identity, identity_root(), repair,
+                                           dict(CLAIM, attempt=attempt - 1)),
+                                 'REPAIR_RECOVERY_EVIDENCE_INVALID')
+
+    def _with_total(self, repair, attempt, old, new, fields=('request', 'response', 'last')):
+        """repair with 'attempt/old' rewritten to 'attempt/new' in the chosen fields."""
+        before, after = f'{attempt}/{old}', f'{attempt}/{new}'
+        changed = dict(repair)
+        if 'request' in fields:
+            changed['request'] = repair['request'].replace(before, after)
+        if 'response' in fields:
+            changed['response'] = repair['response'].replace(before, after)
+        if 'last' in fields:
+            acceptance = list(repair['pm_assignment']['acceptance'])
+            acceptance[-1] = acceptance[-1].replace(before, after)
+            changed['pm_assignment'] = dict(repair['pm_assignment'], acceptance=acceptance)
+        return changed
+
+    def test_e2_old_records_with_the_n_of_2_text_still_match_their_own_claim(self):
+        # A repair Task recorded before #2367 carries 'REPAIR N/2' text.
+        total = review_repair.MAX_REPAIR_ATTEMPTS
+        for attempt in (1, 2):
+            old = self._with_total(recorded(attempt), attempt, total, 2)
+            with self.subTest(attempt=attempt):
+                self.assertEqual(old['request'], f'REPAIR {attempt}/2 of {ROOT}')
+                self.assertIn(f'continuation {attempt}/2 for Task',
+                              json.loads(old['response'])['summary'])
+                self.assertTrue(old['pm_assignment']['acceptance'][-1].startswith(
+                    f'Repair attempt {attempt}/2 for verdict comment id'))
+                self.assertIsNone(rec.check_identity(
+                    identity_root(), old, dict(CLAIM, attempt=attempt)))
+
+    def test_e2_refuses_mixed_or_unknown_denominators(self):
+        total = review_repair.MAX_REPAIR_ATTEMPTS
+        good = recorded()
+        cases = [self._with_total(good, 1, total, 2, fields=(field,))
+                 for field in ('request', 'response', 'last')]
+        cases.append(self._with_total(good, 1, total, 3))
+        cases.append(self._with_total(good, 1, total, total + 1))
+        for repair in cases:
+            with self.subTest(repair=repair['request']):
+                self.assertEqual(self.code(rec.check_identity, identity_root(), repair, CLAIM),
                                  'REPAIR_RECOVERY_EVIDENCE_INVALID')
 
 

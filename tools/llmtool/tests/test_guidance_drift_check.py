@@ -271,21 +271,19 @@ class GuidanceDriftCheckTests(unittest.TestCase):
         repository = Path(__file__).resolve().parents[3]
         self.assertEqual(check(repository), [])
 
-    def test_claude_md_agy_model_is_same_family_as_route_default(self):
-        # #2302: CLAUDE.md need not name the exact AGY route default, so a
-        # same-family switch by configuration needs no rule-file change; it
-        # must still name a model of the route default's family.
+    def test_claude_md_agy_line_names_no_model(self):
+        # Owner #289 (2026-11-22): the CLAUDE.md AGY line names no model and
+        # says the AGY model comes from the configuration, so a model switch
+        # by configuration needs no rule-file change.
         repository = Path(__file__).resolve().parents[3]
         claude_md = (repository / "CLAUDE.md").read_text(encoding="utf-8")
-        agy_lines = [line for line in claude_md.splitlines() if line.startswith("  - AGY: use `")]
+        agy_lines = [line for line in claude_md.splitlines() if line.startswith("  - AGY: ")]
         self.assertEqual(len(agy_lines), 1)
-        model = agy_lines[0].split("`", 2)[1]
-        routes_path = repository / "tools" / "llmtool" / "developer-routes.json"
-        with routes_path.open(encoding="utf-8") as routes_file:
-            data = json.load(routes_file)
-        family = guidance_drift_check._model_family(data["routes"]["agy"]["default_model"])
-        self.assertIsNotNone(family)
-        self.assertEqual(guidance_drift_check._model_family(model), family)
+        line = agy_lines[0]
+        self.assertIn("model comes from the configuration", line)
+        self.assertNotIn("gemini", line.lower())
+        self.assertNotIn("flash", line.lower())
+        self.assertNotIn("hydrogen", line.lower())
 
     def test_same_family_model_switch_passes_full_check(self):
         # #2302: docs name a same-family model that is not the route default
@@ -310,15 +308,25 @@ class GuidanceDriftCheckTests(unittest.TestCase):
                                             "CLAUDE.md: MODEL_NOT_ALLOWED llama-9-other"])
 
 
+# #2281 L0b: the limit-table keys (rows 2, 15, 16) at their recorded values;
+# L7 adds row 17, the D6 writer lease length in hours.
+POLICY_LIMIT_KEYS_2281 = {
+    "spec_preflight_large_file_lines": 2000, "merge_train_members_max": 6,
+    "merge_train_files_per_pr_max": 100, "revert_scope_prs_max": 5,
+    "d6_writer_lease_hours": 24,
+}
+
+
 def valid_rule_files():
     """Minimal valid documents for each registered rule-file schema."""
     return {
         "developer-routes.json": fixture_routes(
             roles={"fixture-reviewer": {"allowed_models": ["gpt-6.1-sol"]}}),
+        # #2367 (Owner 2026-11-19): the repository limits.
         "policy.json": {
-            "schema_version": 1, "repair_max": 2, "parent_debug_max": 1,
-            "group_debug_max": 1, "child_max": 3, "replan_max": 1,
-            "test_fail_max": 2, "review_fail_max": 3, "waiting_notify_after_hours": 24,
+            "schema_version": 1, "repair_max": 5, "parent_debug_max": 1,
+            "group_debug_max": 3, "child_max": 3, "replan_max": 1,
+            "test_fail_max": 5, "review_fail_max": 6, "waiting_notify_after_hours": 24,
         },
         "worker-dispatch.json": {
             "schema_version": 1,
@@ -384,6 +392,32 @@ class RuleFileSchemaTests(unittest.TestCase):
     def test_valid_rule_files_pass(self):
         self.assertEqual(guidance_drift_check.check_rule_files(self.repo), [])
 
+    def test_policy_schema_accepts_the_new_and_old_repair_limits(self):
+        # #2367: the schema accepts the 5-repair values and the earlier ones.
+        policy = self.valid["policy.json"]
+        for values in ({"repair_max": 5, "test_fail_max": 5, "review_fail_max": 6,
+                        "group_debug_max": 3},
+                       {"repair_max": 2, "test_fail_max": 2, "review_fail_max": 3,
+                        "group_debug_max": 1}):
+            with self.subTest(values=values):
+                self.assertEqual(self.findings_after("policy.json", {**policy, **values}), [])
+
+    def test_policy_schema_accepts_the_2281_limit_keys(self):
+        # #2281 L0b: rows 2, 15 and 16 of the limit table are optional keys,
+        # each a positive integer with no upper validation bound.
+        policy = self.valid["policy.json"]
+        self.assertEqual(self.findings_after("policy.json", {**policy, **POLICY_LIMIT_KEYS_2281}), [])
+        for key in POLICY_LIMIT_KEYS_2281:
+            for value in (1, 10 ** 9):
+                with self.subTest(key=key, value=value):
+                    self.assertEqual(self.findings_after("policy.json", {**policy, key: value}), [])
+
+    def test_repository_policy_passes_the_rule_schema(self):
+        # The real policy.json, with the #2281 keys, matches the registered schema.
+        repository = Path(__file__).resolve().parents[3]
+        self.assertFalse([item for item in guidance_drift_check.check_rule_files(repository)
+                          if item.startswith("tools/llmtool/policy.json:")])
+
     def test_max_prompt_bytes_accepted(self):
         routes = fixture_routes()
         routes["routes"]["fixture"]["max_prompt_bytes"] = 65536
@@ -401,7 +435,7 @@ class RuleFileSchemaTests(unittest.TestCase):
             "max_turns": 512,
             "max_input_tokens": 262144,
             "max_output_tokens": 65536,
-            "max_wall_seconds": 600,
+            "max_wall_seconds": 1800,
             "max_tool_result_bytes": 262144,
             "max_sent_bytes": 16777216,
         }
@@ -458,11 +492,11 @@ class RuleFileSchemaTests(unittest.TestCase):
                 **routes["routes"]["fixture"], "budgets": "not-a-dict"}}}, "must be an object"),
             ("developer-routes.json", {**routes, "routes": {"fixture": {
                 **routes["routes"]["fixture"], "budgets": {
-                    "max_turns": 0, "max_wall_seconds": 600, "max_tool_result_bytes": 262144,
+                    "max_turns": 0, "max_wall_seconds": 1800, "max_tool_result_bytes": 262144,
                     "max_sent_bytes": 16777216}}}}, "must be an integer >= 1"),
             ("developer-routes.json", {**routes, "routes": {"fixture": {
                 **routes["routes"]["fixture"], "budgets": {
-                    "max_turns": 1001, "max_wall_seconds": 600, "max_tool_result_bytes": 262144,
+                    "max_turns": 1001, "max_wall_seconds": 1800, "max_tool_result_bytes": 262144,
                     "max_sent_bytes": 16777216}}}}, "must be an integer >= 1 and <= 1000"),
             ("developer-routes.json", {**routes, "routes": {}}, "at least 1"),
             ("sensitive-paths.json", {**self.valid["sensitive-paths.json"], "exact": "x"}, "must be a list"),
@@ -518,6 +552,15 @@ class RuleFileSchemaTests(unittest.TestCase):
             ("policy.json", {**policy, "waiting_notify_after_hours": 0}, "integer"),
             ("policy.json", policy_missing, 'missing key "repair_max"'),
         ]
+        # #2281 L0b: each limit-table key must be a positive integer when present.
+        for key in POLICY_LIMIT_KEYS_2281:
+            cases += [
+                ("policy.json", {**policy, key: 0}, "integer >= 1"),
+                ("policy.json", {**policy, key: -1}, "integer >= 1"),
+                ("policy.json", {**policy, key: "5"}, "integer >= 1"),
+                ("policy.json", {**policy, key: True}, "integer >= 1"),
+                ("policy.json", {**policy, key: 2.5}, "integer >= 1"),
+            ]
         dispatch = self.valid["worker-dispatch.json"]
         worker = dispatch["workers"]["fixture-worker"]
         worker_missing = {key: value for key, value in worker.items() if key != "evidence"}
@@ -613,9 +656,10 @@ class RuleFileSchemaTests(unittest.TestCase):
         return self.findings_after("developer-routes.json", routes)
 
     def test_route_timeouts_valid_values_pass(self):
-        # #1815: 1 <= default_timeout <= max_timeout <= 3600.
+        # #1815, #2281: 1 <= default_timeout <= max_timeout <= 18000.
         for default, maximum in ((1, 1), (600, 600), (600, 1800), (1800, 1800), (1, 1800),
-                                 (1800, 3600), (3600, 3600), (1, 3600)):
+                                 (1800, 3600), (3600, 3600), (1, 3600), (10800, 18000),
+                                 (18000, 18000), (1, 18000)):
             with self.subTest(default=default, maximum=maximum):
                 self.assertEqual(
                     self.route_findings(default_timeout=default, max_timeout=maximum), [])
@@ -635,19 +679,19 @@ class RuleFileSchemaTests(unittest.TestCase):
         for key in ("default_timeout", "max_timeout"):
             for value in ("600", 600.0, 1.5, True, False, None, [600], {"s": 600}):
                 with self.subTest(key=key, value=value):
-                    self.assertIn(f"{prefix}.{key} must be an integer >= 1 and <= 3600",
+                    self.assertIn(f"{prefix}.{key} must be an integer >= 1 and <= 18000",
                                   self.route_findings(**{key: value}))
 
     def test_route_timeouts_out_of_range_fail(self):
         prefix = "tools/llmtool/developer-routes.json: RULE_SCHEMA $.routes.fixture"
         cases = [
-            ({"default_timeout": 0}, "default_timeout must be an integer >= 1 and <= 3600"),
-            ({"default_timeout": -5}, "default_timeout must be an integer >= 1 and <= 3600"),
-            ({"max_timeout": 0, "default_timeout": 0}, "max_timeout must be an integer >= 1 and <= 3600"),
-            ({"max_timeout": 3601}, "max_timeout must be an integer >= 1 and <= 3600"),
-            ({"default_timeout": 3601, "max_timeout": 3601},
-             "default_timeout must be an integer >= 1 and <= 3600"),
-            ({"default_timeout": 10 ** 9}, "default_timeout must be an integer >= 1 and <= 3600"),
+            ({"default_timeout": 0}, "default_timeout must be an integer >= 1 and <= 18000"),
+            ({"default_timeout": -5}, "default_timeout must be an integer >= 1 and <= 18000"),
+            ({"max_timeout": 0, "default_timeout": 0}, "max_timeout must be an integer >= 1 and <= 18000"),
+            ({"max_timeout": 18001}, "max_timeout must be an integer >= 1 and <= 18000"),
+            ({"default_timeout": 18001, "max_timeout": 18001},
+             "default_timeout must be an integer >= 1 and <= 18000"),
+            ({"default_timeout": 10 ** 9}, "default_timeout must be an integer >= 1 and <= 18000"),
             ({"default_timeout": 900, "max_timeout": 600}, "default_timeout must be <= max_timeout"),
             ({"default_timeout": 3600, "max_timeout": 1}, "default_timeout must be <= max_timeout"),
         ]
@@ -666,15 +710,17 @@ class RuleFileSchemaTests(unittest.TestCase):
         self.assertIn(f"{prefix}.default_timeout must be <= max_timeout", findings)
 
     def test_invalid_route_timeouts_make_model_allowlist_unavailable(self):
-        self.route_findings(max_timeout=3601)
+        self.route_findings(max_timeout=18001)
         self.assertEqual(guidance_drift_check._configured_families(self.repo)[1],
                          ["tools/llmtool/developer-routes.json: MODEL_ALLOWLIST_UNAVAILABLE schema invalid"])
 
-    def test_timeout_cap_is_3600(self):
+    def test_timeout_cap_is_18000(self):
         # This test does not import the llmtool package; the match with
         # llmtool.developer_routes.HARD_TIMEOUT_CAP_SECONDS is checked in
         # test_developer_route_timeout.py, which already imports it.
-        self.assertEqual(guidance_drift_check.ROUTE_TIMEOUT_CAP_SECONDS, 3600)
+        self.assertEqual(guidance_drift_check.ROUTE_TIMEOUT_CAP_SECONDS, 18000)
+        # #2281: the EC2 remote test timeout is not an AI run; its cap stays 3600.
+        self.assertEqual(guidance_drift_check.REMOTE_TEST_TIMEOUT_CAP_SECONDS, 3600)
 
     def test_real_routes_declare_timeouts(self):
         repository = Path(__file__).resolve().parents[3]
@@ -684,7 +730,9 @@ class RuleFileSchemaTests(unittest.TestCase):
             with self.subTest(route=name):
                 self.assertIs(type(entry["default_timeout"]), int)
                 self.assertIs(type(entry["max_timeout"]), int)
-                self.assertTrue(1 <= entry["default_timeout"] <= entry["max_timeout"] <= 3600)
+                self.assertTrue(1 <= entry["default_timeout"] <= entry["max_timeout"] <= 18000)
+                # #2281 (Owner 2026-11-19): 3-hour default, 5-hour maximum.
+                self.assertEqual((entry["default_timeout"], entry["max_timeout"]), (10800, 18000))
 
     @staticmethod
     def fixture_profile(**changes):
@@ -698,18 +746,18 @@ class RuleFileSchemaTests(unittest.TestCase):
         return profile
 
     def test_profile_timeout_seconds_is_optional_and_bounded_pass(self):
-        # #1817: the gateway profile may carry an integer timeout_seconds, 1..3600.
+        # #1817, #2281: the gateway profile may carry an integer timeout_seconds, 1..18000.
         self.assertEqual(self.route_findings(profile=self.fixture_profile()), [])
-        for value in (1, 120, 600, 1800, 3599, 3600):
+        for value in (1, 120, 600, 1800, 3600, 10800, 17999, 18000):
             with self.subTest(value=value):
                 self.assertEqual(
                     self.route_findings(profile=self.fixture_profile(timeout_seconds=value)), [])
 
     def test_profile_timeout_seconds_out_of_range_or_non_int_fail(self):
         prefix = "tools/llmtool/developer-routes.json: RULE_SCHEMA $.routes.fixture.profile"
-        for value in (0, -1, 3601, 10 ** 9, "600", 600.0, 1.5, True, False, None, [600], {"s": 600}):
+        for value in (0, -1, 18001, 10 ** 9, "600", 600.0, 1.5, True, False, None, [600], {"s": 600}):
             with self.subTest(value=value):
-                self.assertIn(f"{prefix}.timeout_seconds must be an integer >= 1 and <= 3600",
+                self.assertIn(f"{prefix}.timeout_seconds must be an integer >= 1 and <= 18000",
                               self.route_findings(profile=self.fixture_profile(timeout_seconds=value)))
 
     def test_profile_timeout_seconds_keeps_unknown_key_checks(self):
@@ -722,50 +770,61 @@ class RuleFileSchemaTests(unittest.TestCase):
         self.assertIn(f'{prefix} has unknown key "timeout_seconds"',
                       self.route_findings(timeout_seconds=600))
 
-    def test_real_gw_agent_profile_timeout_is_1800_and_equals_route_default(self):
+    def test_real_gw_agent_profile_timeout_is_10800_and_equals_route_default(self):
         # #1817 correction: one call is bounded only by the route's Task timeout.
         repository = Path(__file__).resolve().parents[3]
         with (repository / "tools" / "llmtool" / "developer-routes.json").open(encoding="utf-8") as stream:
             route = json.load(stream)["routes"]["gw-agent"]
         profile = route["profile"]
         self.assertIs(type(profile["timeout_seconds"]), int)
-        self.assertEqual(profile["timeout_seconds"], 1800)
+        self.assertEqual(profile["timeout_seconds"], 10800)
         self.assertEqual(profile["timeout_seconds"], route["default_timeout"])
 
     def test_gw_agent_budgets_schema_accepts_valid_direct_and_multiplier_objects(self):
         # #2281 L9: developer-routes schema accepts budgets object with direct or multiplier tokens.
         direct_budgets = {
             "max_turns": 512, "max_input_tokens": 262144, "max_output_tokens": 65536,
-            "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216,
+            "max_wall_seconds": 1800, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216,
         }
         multiplier_budgets = {
             "max_turns": 512, "max_input_tokens_multiplier": 8, "max_output_tokens_multiplier": 4,
-            "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216,
+            "max_wall_seconds": 1800, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216,
         }
         self.assertEqual(self.route_findings(budgets=direct_budgets), [])
         self.assertEqual(self.route_findings(budgets=multiplier_budgets), [])
+
+    def test_real_gw_agent_wall_budget_is_10800_and_equals_route_default(self):
+        # #2281: whole-run wall budget is no shorter than the route default timeout.
+        repository = Path(__file__).resolve().parents[3]
+        with (repository / "tools" / "llmtool" / "developer-routes.json").open(encoding="utf-8") as stream:
+            route = json.load(stream)["routes"]["gw-agent"]
+        budgets = route["budgets"]
+        self.assertIs(type(budgets["max_wall_seconds"]), int)
+        self.assertEqual(budgets["max_wall_seconds"], 10800)
+        self.assertEqual(budgets["max_wall_seconds"], route["default_timeout"])
+        self.assertLessEqual(budgets["max_wall_seconds"], route["max_timeout"])
 
     def test_gw_agent_budgets_schema_rejects_invalid_budgets(self):
         prefix = "tools/llmtool/developer-routes.json: RULE_SCHEMA $.routes.fixture.budgets"
         cases = [
             ({"max_turns": 0, "max_input_tokens": 262144, "max_output_tokens": 65536,
-              "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
+              "max_wall_seconds": 1800, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
              f"{prefix}.max_turns must be an integer >= 1 and <= 1000"),
             ({"max_turns": 1001, "max_input_tokens": 262144, "max_output_tokens": 65536,
-              "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
+              "max_wall_seconds": 1800, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
              f"{prefix}.max_turns must be an integer >= 1 and <= 1000"),
             ({"max_turns": 512, "max_input_tokens": 50_000_001, "max_output_tokens": 65536,
-              "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
+              "max_wall_seconds": 1800, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
              f"{prefix}.max_input_tokens must be an integer >= 1 and <= 50000000"),
             ({"max_turns": 512, "max_input_tokens_multiplier": 0, "max_output_tokens": 65536,
-              "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
-             f"{prefix}.max_input_tokens_multiplier must be an integer >= 1"),
+              "max_wall_seconds": 1800, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
+              f"{prefix}.max_input_tokens_multiplier must be an integer >= 1"),
             ({"max_turns": 512, "max_output_tokens": 5_000_001, "max_input_tokens": 262144,
-              "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
+              "max_wall_seconds": 1800, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
              f"{prefix}.max_output_tokens must be an integer >= 1 and <= 5000000"),
             ({"max_turns": 512, "max_output_tokens_multiplier": 0, "max_input_tokens": 262144,
-              "max_wall_seconds": 600, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
-             f"{prefix}.max_output_tokens_multiplier must be an integer >= 1"),
+              "max_wall_seconds": 1800, "max_tool_result_bytes": 262144, "max_sent_bytes": 16777216},
+              f"{prefix}.max_output_tokens_multiplier must be an integer >= 1"),
         ]
         for bad_budgets, expected in cases:
             with self.subTest(budgets=bad_budgets):
@@ -863,7 +922,7 @@ class ModelNameTests(unittest.TestCase):
     def test_same_family_passes_without_allowed_models(self):
         # #2302: families come from default_model when allowed_models is absent.
         (self.repo / "tools" / "llmtool" / "developer-routes.json").write_text(json.dumps(fixture_routes(
-            ("gemini-3.8-flash-medium",), allowed=False,
+            ("gemini-4-hydrogen-medium",), allowed=False,
             roles={"claude-reviewer": {"default_model": "claude-sonnet-5-5"},
                    "codex-reviewer": {"default_model": "gpt-6.1-sol", "allowed_models": ["gpt-6.1-sol"]}})),
             encoding="utf-8")
