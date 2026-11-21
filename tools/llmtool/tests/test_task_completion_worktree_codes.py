@@ -69,7 +69,9 @@ class TestTaskCompletionWorktreeCodes(unittest.TestCase):
         self.assertEqual(ctx.exception.completion_code, 'WORKTREE_PATH_INVALID')
 
     def test_case_3_read_scope_limit_refuses_worktree_scope_invalid(self):
-        read_names = tuple(f'r{i}.py' for i in range(32))
+        # #2281: the scope limit is 1024 paths (read and write union); the write
+        # path a.py makes 1024 distinct read names reach 1025 in total.
+        read_names = tuple(f'r{i}.py' for i in range(1024))
         with self.assertRaises(LLMToolError) as ctx:
             run(read=read_names)
         self.assertEqual(ctx.exception.completion_code, 'WORKTREE_SCOPE_INVALID')
