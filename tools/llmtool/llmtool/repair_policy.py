@@ -1,5 +1,7 @@
 """#1502 WP-D: limits for review repair, AI Debug, split, REPLAN and test failures.
 
+#2281 row 18 limits (basis #819): Developer assignment wait.
+
 The numbers live only in tools/llmtool/policy.json (spec section 5); no caller
 overrides them. The functions here are pure: callers pass counts derived from
 their own Task records. A count that cannot be derived is UNKNOWN, and UNKNOWN
@@ -36,9 +38,15 @@ OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
 #   row 16: revert_scope_prs_max
 #   row 17: d6_writer_lease_hours (#2281 L7: D6 writer lease length in hours,
 #           read by scripts/d6_worktree_lifecycle.py, which has no default)
+#   row 18: developer_assignment_wait_seconds (#819: Developer assignment wait;
+#           caller default llmtool.developer_assignment_inbox.DEFAULT_WAIT_SECONDS)
 OPTIONAL_POSITIVE_POLICY_KEYS = ('spec_preflight_large_file_lines', 'merge_train_members_max',
                                  'merge_train_files_per_pr_max', 'revert_scope_prs_max',
-                                 'd6_writer_lease_hours')
+                                 'd6_writer_lease_hours', 'developer_assignment_wait_seconds')
+# #2281 row 18 (basis #819): Developer assignment wait. The key above is
+# optional; a policy that omits it keeps the caller default, the hard-coded
+# wait at its point of use (llmtool.developer_assignment_inbox).
+DEVELOPER_ASSIGNMENT_WAIT_SECONDS = 540
 # #2281 L0a (design rule 3): the bound is a real technical limit, not an
 # arbitrary cap. policy.json is untrusted input, so load_policy reads at most
 # _MAX_BYTES + 1 bytes in one bounded buffer instead of the whole file. The
@@ -100,6 +108,17 @@ def repair_attempts_max(path=None):
     except LLMToolError:
         return 0
     return max(policy['repair_max'], policy['test_fail_max'])
+
+
+def assignment_wait_seconds(path=None):
+    """#2281 row 18 (basis #819): the Developer assignment wait, in seconds.
+
+    The key is optional; a policy that omits it keeps the caller default, the
+    hard-coded wait at its point of use (llmtool.developer_assignment_inbox).
+    """
+    policy = load_policy(path)
+    return policy.get('developer_assignment_wait_seconds',
+                      DEVELOPER_ASSIGNMENT_WAIT_SECONDS)
 
 
 KINDS = ('root', 'child', 'replan')
