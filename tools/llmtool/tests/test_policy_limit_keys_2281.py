@@ -46,6 +46,11 @@ ROW12_KEY = 'claude_review_envelope_limit_bytes'
 # (llmtool.task_review.PACKET_LIMIT). Row 12's packet key, like the envelope
 # key, is omitted from the repository policy.json.
 PACKET_ROW12_KEY = 'review_packet_limit_bytes'
+# #2281 row 12 (basis #131, #165): review source size limit in bytes; the
+# row 12 limit at its point of use (llmtool.task_review.SOURCE_LIMIT).
+# Like the packet key and the envelope key, it is omitted from the
+# repository policy.json.
+SOURCE_ROW12_KEY = 'review_source_limit_bytes'
 
 
 class PolicyLimitKeysTests(unittest.TestCase):
@@ -65,7 +70,7 @@ class PolicyLimitKeysTests(unittest.TestCase):
     def test_keys_are_the_optional_positive_keys(self):
         self.assertEqual(set(rp.OPTIONAL_POSITIVE_POLICY_KEYS),
                          {*LIMITS, *LATER_LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY,
-                          PACKET_ROW12_KEY, ROW12_KEY})
+                          PACKET_ROW12_KEY, SOURCE_ROW12_KEY, ROW12_KEY})
         # Optional: none of them is required by the loader.
         self.assertFalse(set(LIMITS) & set(rp.POLICY_KEYS))
         self.assertFalse(set(LIMITS) & set(rp.OPTIONAL_POLICY_LIMITS))
@@ -82,7 +87,8 @@ class PolicyLimitKeysTests(unittest.TestCase):
                 self.assertEqual(policy[key], value)
         # Row 18 is not in the repository policy.json; the repository file is
         # still accepted because the keys are optional.
-        for key in (ROW18_KEY, EXPIRY_ROW18_KEY, PACKET_ROW12_KEY, ROW12_KEY):
+        for key in (ROW18_KEY, EXPIRY_ROW18_KEY, PACKET_ROW12_KEY,
+                    SOURCE_ROW12_KEY, ROW12_KEY):
             with self.subTest(key=key):
                 self.assertNotIn(key, policy)
 
@@ -119,9 +125,17 @@ class PolicyLimitKeysTests(unittest.TestCase):
             dict(BASE, **{ROW12_KEY: 128 * 1024}))
         self.assertEqual(rp.load_policy(self._write(dict(BASE, **{ROW12_KEY: 1}))),
                          dict(BASE, **{ROW12_KEY: 1}))
+        # Row 12 (the review source) is optional: a policy setting it to a
+        # positive whole number is accepted, as is one omitting it.
+        self.assertEqual(
+            rp.load_policy(self._write(dict(BASE, **{SOURCE_ROW12_KEY: 128 * 1024}))),
+            dict(BASE, **{SOURCE_ROW12_KEY: 128 * 1024}))
+        self.assertEqual(rp.load_policy(self._write(dict(BASE, **{SOURCE_ROW12_KEY: 1}))),
+                         dict(BASE, **{SOURCE_ROW12_KEY: 1}))
 
     def test_no_upper_validation_bound(self):
-        for key in (*LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY, PACKET_ROW12_KEY, ROW12_KEY):
+        for key in (*LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY, PACKET_ROW12_KEY,
+                    SOURCE_ROW12_KEY, ROW12_KEY):
             for value in (1001, 10 ** 9):
                 with self.subTest(key=key, value=value):
                     self.assertEqual(
@@ -129,7 +143,8 @@ class PolicyLimitKeysTests(unittest.TestCase):
 
     # A2
     def test_invalid_value_refuses_policy_invalid(self):
-        for key in (*LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY, PACKET_ROW12_KEY, ROW12_KEY):
+        for key in (*LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY, PACKET_ROW12_KEY,
+                    SOURCE_ROW12_KEY, ROW12_KEY):
             for value in (0, -1, -2000, '5', True, False, 2.5, None, [5], {'value': 5}):
                 with self.subTest(key=key, value=value):
                     self._refuses({**BASE, **LIMITS, key: value})
@@ -155,6 +170,7 @@ class PolicyLimitKeysTests(unittest.TestCase):
         self.assertNotIn(ROW18_KEY, partial)
         self.assertNotIn(EXPIRY_ROW18_KEY, partial)
         self.assertNotIn(PACKET_ROW12_KEY, partial)
+        self.assertNotIn(SOURCE_ROW12_KEY, partial)
         self.assertNotIn(ROW12_KEY, partial)
 
     def test_absent_row18_key_keeps_the_current_hard_coded_wait(self):
@@ -228,6 +244,22 @@ class PolicyLimitKeysTests(unittest.TestCase):
                 self._write(dict(BASE, **{PACKET_ROW12_KEY: 900}))),
             900)
 
+    def test_absent_row12_key_keeps_the_current_hard_coded_source_limit(self):
+        # The row 12 default equals the review source size limit at its
+        # point of use, so callers wired later see the unchanged value.
+        from llmtool.task_review import SOURCE_LIMIT
+        self.assertEqual(rp.REVIEW_SOURCE_LIMIT_BYTES, SOURCE_LIMIT)
+        self.assertEqual(rp.review_source_limit_bytes(self._write(BASE)),
+                         SOURCE_LIMIT)
+        # The repository policy.json omits the key: the reported value is the
+        # caller default.
+        self.assertEqual(rp.review_source_limit_bytes(), SOURCE_LIMIT)
+        # A policy setting the key wins over the default.
+        self.assertEqual(
+            rp.review_source_limit_bytes(
+                self._write(dict(BASE, **{SOURCE_ROW12_KEY: 900}))),
+            900)
+
     def test_existing_keys_and_behaviour_are_unchanged(self):
         self.assertEqual(rp.POLICY_KEYS, (
             'repair_max', 'parent_debug_max', 'group_debug_max', 'child_max',
@@ -241,6 +273,7 @@ class PolicyLimitKeysTests(unittest.TestCase):
         self.assertEqual(set(policy), {*BASE, 'timeout_continuation_max', *LIMITS,
                                        *LATER_LIMITS})
         self.assertNotIn(PACKET_ROW12_KEY, policy)
+        self.assertNotIn(SOURCE_ROW12_KEY, policy)
         self.assertNotIn(ROW12_KEY, policy)
         for key, value in LATER_LIMITS.items():
             with self.subTest(key=key):
