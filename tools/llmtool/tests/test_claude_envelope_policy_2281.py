@@ -15,7 +15,10 @@ from llmtool.providers import claude_cli
 
 REPO_POLICY = Path(__file__).resolve().parent.parent / 'policy.json'
 BASE = json.loads(REPO_POLICY.read_text('utf-8'))
-_SESSION = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'
+# Synthetic fixture value (labelled synthetic per #981; not a real session
+# id): the nil UUID is a valid UUID, so the decoder's
+# str(uuid.UUID(value['session_id'])) != value['session_id'] check passes.
+_SESSION = '00000000-0000-0000-0000-000000000000'
 
 
 def _envelope(result):
