@@ -50,6 +50,8 @@ MAX_SOURCE_FILE_BYTES = DEFAULT_MAX_SOURCE_FILE_BYTES
 DEFAULT_MAX_SOURCE_TOTAL_BYTES = 2 * 1024 * 1024
 MAX_SOURCE_TOTAL_BYTES = DEFAULT_MAX_SOURCE_TOTAL_BYTES
 MAX_VERSION_OUTPUT_BYTES = 4096
+# #2281 (Owner 2026-11-19): read and write path counts of a Developer Task scope.
+MAX_TASK_PATHS = 1024
 VERSION_TIMEOUT_SECONDS = 5
 _SESSION = re.compile(r'ses_[A-Za-z0-9]{1,100}\Z')
 # Any well-formed release is accepted; event compatibility is enforced by the
@@ -90,6 +92,7 @@ class DirectOpenCodeError(LLMToolError):
         self.ended_at = ended_at
         self.native_session_id = native_session_id
         self.event_summary = None
+        self.stopped_before_prompt = False
         # Set only from parsed CLI events (design c6876861575 items 1-2).
         self.provider_evidence = provider_evidence
 
@@ -443,7 +446,8 @@ def _observed_run_id(store, task_id):
 
 def _valid_paths(root, read_paths, write_paths):
     if (type(read_paths) is not list or type(write_paths) is not list or
-            not read_paths or len(read_paths) > 32 or len(write_paths) > 32 or
+            not read_paths or len(read_paths) > MAX_TASK_PATHS or
+            len(write_paths) > MAX_TASK_PATHS or
             read_paths != sorted(set(read_paths)) or
             write_paths != sorted(set(write_paths)) or
             not set(write_paths).issubset(read_paths)):
@@ -875,7 +879,7 @@ def _fire_delivered(delivered_callback):
 
 def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
         dispatch_store=None, dispatch_task_id=None,
-        launch_callback=None, delivered_callback=None,
+        launch_callback=None, delivered_callback=None, spawn_authorization=None,
         timeout_seconds=None, executable=None, model=MODEL,
         steps=DEFAULT_AGENT_STEPS):
     """Invoke one bounded OpenCode run in the existing D6 task worktree.
@@ -932,6 +936,7 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
     work_deadline = started + timeout_seconds
     cleanup_deadline = work_deadline + 3
     stdout, stderr = bytearray(), bytearray()
+    offset = 0
     process = None
     cleanup = 'UNKNOWN'
     with tempfile.TemporaryDirectory(prefix='llmtool-opencode-config-') as config_dir:
@@ -965,6 +970,11 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                     except worker_dispatch.WorkerDispatchDenied as exc:
                         raise DirectOpenCodeError(exc.dispatch_code) from None
                     run_id = _observed_run_id(dispatch_store, dispatch_task_id)
+                    if spawn_authorization is not None:
+                        try:
+                            spawn_authorization()
+                        except Exception:
+                            _reject('OPENCODE_SPAWN_AUTHORIZATION_REFUSED')
                     try:
                         process = subprocess.Popen(argv, cwd=str(root), env=env,
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -988,7 +998,6 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                         selector.register(stream, selectors.EVENT_READ, name)
                     os.set_blocking(process.stdin.fileno(), False)
                     selector.register(process.stdin, selectors.EVENT_WRITE, 'stdin')
-                    offset = 0
                     delivered = False
                     denial_line_start = 0
                     while selector.get_map():
@@ -1079,6 +1088,10 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
             exc.started_at = started_at
             exc.ended_at = _utc_now() if started_at is not None else None
             exc.native_session_id = _observed_native_session(bytes(stdout))
+            exc.stopped_before_prompt = (
+                exc.attempted and cleanup == 'CONFIRMED' and
+                type(exc.process_exit_code) is int and exc.process_exit_code != 0 and
+                offset == 0 and not stdout and not stderr)
             raise
         except BaseException as exc:
             cleanup = 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN'

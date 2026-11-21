@@ -26,7 +26,7 @@ from .action_contract import TaskBinding
 from .diagnostics import validate_provider_usage
 from .errors import LLMToolError
 from . import file_ops
-from . import run_budget
+from . import repair_policy, run_budget
 from . import start_failure
 from .opencode_direct_developer import is_free_model, is_valid_model
 from .role_config import _NAME
@@ -57,7 +57,12 @@ SCHEMA_VERSION = 2
 MAX_RECORD_BYTES = 1024 * 1024
 # #1815: a Developer diff is stored whole; the 1 MiB record limit is the ceiling, so artifacts stay at or below half of it. Same value as developer_routes.base.HARD_MAX_DIFF_BYTES.
 MAX_ARTIFACT_BYTES = 512 * 1024
-TASK_ID = re.compile(r'[0-9a-f]{32}')
+# #2281 (Owner 2026-11-19): a Developer Task lists at most this many read paths
+# and this many write paths; a direct run's source_file_count (one entry per
+# read path) has the same bound. Same value as
+# task_submission_cli.DEVELOPER_TASK_MAX_PATHS.
+DEVELOPER_TASK_MAX_PATHS = 1024
+TASK_ID =re.compile(r'[0-9a-f]{32}')
 D6_TASK_ID = re.compile(r'[a-z0-9][a-z0-9-]{0,95}')
 SESSION_ID = re.compile(r'pm-[a-z0-9-]{1,60}')
 DEV_SESSION_ID = re.compile(r'dev-[a-z0-9-]{1,60}')
@@ -153,7 +158,7 @@ _REVIEW_REPAIR_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'attempt', 'state',
     'comment_id', 'packet_sha256', 'claimed_at'))
 _REVIEW_REPAIR_OPTIONAL_FIELDS = frozenset(('repair_task_id', 'family',
-                                             'high_debug_report_sha256'))
+                                             'high_debug_report_sha256', 'high_debug_source_task'))
 # #2367: the claims one repair family may store, numbered 1..N by 'attempt':
 # the policy repair bound (run_budget.MAX_REPAIR_ATTEMPTS, from policy.json)
 # plus one replaced (FAILED) retry claim. The floor keeps every record written
@@ -191,7 +196,7 @@ _HIGH_DEBUG_FIELDS = frozenset(('family', 'failed_corrections', 'early_reason', 
     'report_sha256', 'report', 'usage', 'recorded_at'))
 # #1502 WP-D O7: a RESERVED entry keeps these values and gets one of these statuses.
 _HIGH_DEBUG_IDENTITY = ('family', 'failed_corrections', 'early_reason', 'examined_sha',
-                        'd6', 'model_requested', 'rules_sha256', 'no_pr')
+                        'd6', 'model_requested', 'rules_sha256', 'no_pr', 'diagnosis_issue')
 _HIGH_DEBUG_FINAL_STATUSES = ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED',
                               'REPORT_INVALID', 'RUN_FAILED')
 
@@ -403,8 +408,35 @@ CLAUDE_CLI_SUBTYPES = frozenset((
 CLAUDE_FAILURE_MAX_TURNS = _NO_CHANGES_MAX_TURNS
 CLAUDE_FAILURE_MAX_DURATION_MS = 86_400_000
 CLAUDE_FAILURE_EXIT_CODE_RANGE = (-255, 255)
-_DEVELOPER_OPTIONAL_FIELDS = (_DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS |
+_DIRECT_DISPATCH_PROFILES = frozenset(('opencode', 'agy'))
+_DIRECT_DISPATCH_BOUNDARY = 'dispatch_boundary'
+_DIRECT_HANDOFF_HISTORY = 'direct_handoffs'
+_DEVELOPER_OPTIONAL_FIELDS = (frozenset((_DIRECT_DISPATCH_BOUNDARY, _DIRECT_HANDOFF_HISTORY)) |
+                              _DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS |
                               _DEVELOPER_CLAUDE_FAILURE_EVIDENCE_FIELDS)
+
+
+def _valid_direct_handoffs(entries):
+    fields = {'old_assignment', 'new_assignment', 'old_profile', 'new_profile',
+              'old_session_ref', 'executor_task', 'source_sha', 'old_record_sha256',
+              'reason', 'recorded_at'}
+    return (type(entries) is list and 0 < len(entries) <= 8 and
+            all(type(entry) is dict and set(entry) == fields and
+                all(_safe_identifier(entry[key], TASK_ID)
+                    for key in ('old_assignment', 'new_assignment')) and
+                entry['old_assignment'] != entry['new_assignment'] and
+                entry['old_profile'] in _DIRECT_DISPATCH_PROFILES and
+                entry['new_profile'] in _DIRECT_DISPATCH_PROFILES and
+                entry['old_profile'] != entry['new_profile'] and
+                type(entry['old_session_ref']) is str and
+                0 < len(entry['old_session_ref']) <= 256 and
+                not any(ord(c) < 32 or ord(c) == 127 for c in entry['old_session_ref']) and
+                _safe_identifier(entry['executor_task'], D6_TASK_ID) and
+                type(entry['source_sha']) is str and
+                re.fullmatch(r'[0-9a-f]{40}', entry['source_sha']) is not None and
+                _policy_digest(entry['old_record_sha256']) and
+                entry['reason'] in ('PENDING', 'NOT_STARTED_CONFIRMED', 'STOPPED_CONFIRMED') and
+                _valid_utc_seconds(entry['recorded_at']) for entry in entries))
 
 
 def valid_claude_failure_evidence(evidence):
@@ -1211,7 +1243,7 @@ def _validate_remote_test_receipts(record):
                  (type(receipt.get('pm_session')) is not str or
                   receipt['pm_session'] not in earlier_sessions)) or
                 type(receipt.get('modules')) is not list or
-                not 1 <= len(receipt['modules']) <= 32 or
+                not receipt['modules'] or
                 any(type(item) is not str or
                     re.fullmatch(r'test_[a-z0-9_]{1,80}', item) is None
                     for item in receipt['modules']) or
@@ -1228,7 +1260,6 @@ def _validate_remote_test_receipts(record):
                 not math.isfinite(receipt['elapsed_s']) or receipt['elapsed_s'] < 0 or
                 type(receipt.get('ran_total')) is not int or receipt['ran_total'] < 0 or
                 type(receipt.get('final')) is not list or
-                len(receipt['final']) > 64 or
                 any(type(item) is not str or len(item) > 512 for item in receipt['final']) or
                 type(receipt.get('failures')) is not list or len(receipt['failures']) > 10 or
                 any(item not in receipt['modules'] for item in receipt['failures']) or
@@ -1305,7 +1336,7 @@ def _valid_remote_test_dispatch_entry(entry):
     if type(executor_task) is not str or D6_TASK_ID.fullmatch(executor_task) is None:
         return False
     modules = entry.get('modules')
-    if (type(modules) is not list or not 1 <= len(modules) <= 8 or
+    if (type(modules) is not list or not modules or
             any(type(m) is not str or re.fullmatch(r'test_[a-z0-9_]{1,80}', m) is None for m in modules) or
             modules != sorted(set(modules))):
         return False
@@ -2311,7 +2342,11 @@ def _validate(record, *, strict=True):
         for item in entries:
             # #1502 WP-F: rules_sha256 is optional so older entries stay valid.
             if (type(item) is not dict or
-                set(item) - {'rules_sha256', 'no_pr'} != _HIGH_DEBUG_FIELDS or
+                set(item) - {'rules_sha256', 'no_pr', 'diagnosis_issue'} != _HIGH_DEBUG_FIELDS or
+                ('diagnosis_issue' in item and
+                 (item.get('no_pr') is not True or item.get('family') != 'no-pr' or
+                  type(item['diagnosis_issue']) is not int or
+                  not 1 <= item['diagnosis_issue'] <= 9999999)) or
                 ('no_pr' in item and item['no_pr'] is not True) or
                 ('rules_sha256' in item and
                  (type(item['rules_sha256']) is not str or
@@ -2451,6 +2486,11 @@ def _validate(record, *, strict=True):
                     ('high_debug_report_sha256' in item and
                      (type(item['high_debug_report_sha256']) is not str or
                       re.fullmatch(r'[0-9a-f]{64}', item['high_debug_report_sha256']) is None)) or
+                    ('high_debug_source_task' in item and
+                     ('high_debug_report_sha256' not in item or
+                      type(item['high_debug_source_task']) is not str or
+                      re.fullmatch(r'[0-9a-f]{32}', item['high_debug_source_task']) is None or
+                      item['high_debug_source_task'] == record['task_id'])) or
                     item.get('state') not in ('CLAIMED', 'DISPATCHED', 'UNKNOWN', 'FAILED') or
                     (item.get('comment_id') is not None and
                      (type(item['comment_id']) is not int or item['comment_id'] < 0)) or
@@ -2482,15 +2522,17 @@ def _validate(record, *, strict=True):
             # the HEAD of an earlier claim of the family. An old record (the
             # second claim on its HEAD, a third claim with a Debug on its HEAD)
             # meets this rule unchanged. A review claim (comment_id set, not an
-            # '-ec2' family) from the third on must bind one, as before.
+            # '-ec2' family) from the fourth on must bind one.
             seen_heads = set()
             for position, item in enumerate(family_claims, 1):
                 seen_heads.add(item['head_sha'])
-                if (position >= 3 and item.get('comment_id') is not None and
+                if (position > repair_policy.REVIEW_REPAIRS_WITHOUT_DEBUG and
+                        item.get('comment_id') is not None and
                         not item.get('family', f"pr-{item['pr']}").endswith('-ec2') and
                         'high_debug_report_sha256' not in item):
                     _fail('REVIEW_REPAIR_CLAIM_INVALID')
                 if ('high_debug_report_sha256' in item and
+                        'high_debug_source_task' not in item and
                         not any(type(entry) is dict and entry.get('family') ==
                                 item.get('family', f"pr-{item['pr']}") and
                                 entry.get('no_pr') is not True and
@@ -2749,6 +2791,29 @@ def _validate(record, *, strict=True):
                     frozenset(developer) - _DEVELOPER_OPTIONAL_FIELDS
                     not in _DEVELOPER_RECORD_SHAPES):
                 _fail()
+            if (_DIRECT_DISPATCH_BOUNDARY in developer and
+                    (developer.get('provider_profile') not in _DIRECT_DISPATCH_PROFILES or
+                     developer.get(_DIRECT_DISPATCH_BOUNDARY) not in ('PREPARED', 'STARTING', 'STOPPED') or
+                     developer['state'] == 'DEVELOPER_PENDING' or
+                     (developer[_DIRECT_DISPATCH_BOUNDARY] == 'PREPARED' and
+                      developer['state'] == 'DEVELOPER_DISPATCHING' and
+                      developer.get('execution') is not None))):
+                _fail('DIRECT_DISPATCH_BOUNDARY_INVALID')
+            if developer.get(_DIRECT_DISPATCH_BOUNDARY) == 'STOPPED':
+                execution = developer.get('execution')
+                if (developer.get('provider_profile') != 'opencode' or
+                        developer.get('state') != 'DEVELOPER_OUTCOME_UNKNOWN' or
+                        type(execution) is not dict or execution.get('cleanup_status') != 'CONFIRMED' or
+                        execution.get('native_session_id') is not None or
+                        execution.get('stdout_sha256') is not None or
+                        type(execution.get('process_exit_code')) is not int or
+                        execution['process_exit_code'] == 0):
+                    _fail('DIRECT_DISPATCH_BOUNDARY_INVALID')
+            if (_DIRECT_HANDOFF_HISTORY in developer and
+                    (not _valid_direct_handoffs(developer[_DIRECT_HANDOFF_HISTORY]) or
+                     developer[_DIRECT_HANDOFF_HISTORY][-1]['new_assignment'] !=
+                     developer.get('assignment_id'))):
+                _fail('DIRECT_REASSIGN_HISTORY_INVALID')
             if ('no_changes_diagnosis' in developer and
                     not _valid_no_changes_diagnosis(developer)):
                 _fail()
@@ -2975,7 +3040,7 @@ def _validate(record, *, strict=True):
                                 _DIRECT_EXECUTION_LAUNCH_FIELDS,
                                 *_DEVELOPER_EXECUTION_DIFF_SHAPES) or
                             (set(execution) == _DIRECT_EXECUTION_LAUNCH_FIELDS and
-                             (developer['provider_profile'] not in ('codex', 'opencode') or
+                             (developer['provider_profile'] not in ('codex', 'opencode', 'agy') or
                               execution['status'] != 'RUNNING' or
                               type(execution['child_pid']) is not int or
                               execution['child_pid'] <= 0 or
@@ -3022,7 +3087,8 @@ def _validate(record, *, strict=True):
                               not 0 <= execution['source_bytes'] <= 2 * 1024 * 1024)) or
                             (execution['source_file_count'] is not None and
                              (type(execution['source_file_count']) is not int or
-                              not 1 <= execution['source_file_count'] <= 32)) or
+                              not 1 <= execution['source_file_count'] <=
+                              DEVELOPER_TASK_MAX_PATHS)) or
                             (execution['source_manifest_sha256'] is not None and
                              (type(execution['source_manifest_sha256']) is not str or
                               re.fullmatch(r'[0-9a-f]{64}',
@@ -3078,7 +3144,8 @@ def _validate(record, *, strict=True):
                 _fail()
             for field in ('read_paths', 'write_paths'):
                 values = developer[field]
-                if (type(values) is not list or not values or len(values) > 32 or
+                if (type(values) is not list or not values or
+                        len(values) > DEVELOPER_TASK_MAX_PATHS or
                         any(type(item) is not str or not item or len(item) > 512 or
                             item.startswith('/') or '\\' in item or
                             any(part in ('', '.', '..') for part in item.split('/')) or
@@ -3984,6 +4051,11 @@ class TaskStore:
             claims_list = [claims] if type(claims) is dict else claims if type(claims) is list else []
             if any(type(c) is dict and c.get('review_kind') == 'security' for c in claims_list):
                 _fail('REVIEW_DISPATCH_CLAIM_INVALID')
+        if type(record) is dict:
+            repairs = record.get('review_repair_claims')
+            if type(repairs) is list and any(type(claim) is dict and
+                    'high_debug_source_task' in claim for claim in repairs):
+                _fail('REVIEW_REPAIR_CLAIM_INVALID')
         if type(record) is dict and 'start_failures' in record:
             # #2188: appended to an existing Task by its START_RETRY write only.
             _fail('START_RETRY_INVALID')
@@ -3994,6 +4066,10 @@ class TaskStore:
                 'completion_events' in record or 'completion_event_tombstones' in record or
                 'pm_session_adoptions' in record):
             _fail()
+        developer = record.get('developer')
+        if type(developer) is dict and (
+                _DIRECT_DISPATCH_BOUNDARY in developer or _DIRECT_HANDOFF_HISTORY in developer):
+            _fail('DIRECT_DISPATCH_BOUNDARY_FORBIDDEN')
         record = dict(record)
         # The owner gate runs first: a denied developer is cleared, so the
         # record gains no D6 and its audited denial never waits on, or is
@@ -4442,6 +4518,62 @@ class TaskStore:
             task_id, assignment_id=assignment_id, pid=pid, start_time=start_time,
             pgid=pgid, provider_profile='opencode',
             trusted_flag='trusted_opencode_launch')
+
+    def record_agy_launch(self, task_id, *, assignment_id, pid, start_time, pgid):
+        """Record AGY's actual provider launch, excluding boundary probes."""
+        return self._record_direct_launch(
+            task_id, assignment_id=assignment_id, pid=pid, start_time=start_time,
+            pgid=pgid, provider_profile='agy', trusted_flag='trusted_agy_launch')
+
+    def reconcile_direct_repair_claim(self, root, claim, repair, packet):
+        """Finalize a verified replacement on the existing repair claim."""
+        return self._update(
+            root['task_id'], expected={'record_sha256': root['record_sha256']},
+            changes={}, direct_claim_recovery=(claim, repair['task_id'], repair['record_sha256'], packet))
+
+    def record_direct_stop(self, task_id, *, expected_developer, developer):
+        """Persist an observed reap before the provider received its prompt."""
+        return self._update(task_id, expected={'developer': expected_developer},
+            changes={'developer': dict(developer, dispatch_boundary='STOPPED')},
+            direct_dispatch_boundary='STOPPED')
+
+    def reassign_direct_developer(self, task_id, *, current, developer, completion,
+                                  verify_binding):
+        """Replace the assignment once with the same scope and a pending writer handoff.
+
+        The controller must install the new D6 identity before dispatch. A pending
+        handoff remains resumable if the controller dies between the two writes.
+        """
+        old = current['developer']
+        old_evidence = (current.get('completion') or {}).get('evidence') or {}
+        entry = {
+            'old_assignment': old['assignment_id'], 'new_assignment': developer['assignment_id'],
+            'old_profile': old['provider_profile'], 'new_profile': developer['provider_profile'],
+            'old_session_ref': old_evidence.get('executor_session_ref'),
+            'executor_task': completion['executor_task_id'], 'source_sha': developer['source_sha'],
+            'old_record_sha256': current['record_sha256'],
+            'reason': ('PENDING' if old['state'] == 'DEVELOPER_PENDING'
+                       else 'STOPPED_CONFIRMED' if old.get('dispatch_boundary') == 'STOPPED'
+                       else 'NOT_STARTED_CONFIRMED'),
+            'recorded_at': datetime.now(timezone.utc).strftime(_UTC_SECONDS),
+        }
+        replacement = dict(developer, direct_handoffs=[*old.get('direct_handoffs', []), entry])
+        return self._update(task_id,
+            expected={'record_sha256': current['record_sha256'], 'developer': old},
+            changes={'developer': replacement, 'completion': completion},
+            direct_reassign_verify=verify_binding)
+
+    def prepare_direct_dispatch(self, task_id, *, expected_developer, developer):
+        """Record the assignment before a provider can acquire launch authority."""
+        return self._update(task_id, expected={'developer': expected_developer},
+            changes={'developer': dict(developer, dispatch_boundary='PREPARED')},
+            direct_dispatch_boundary='PREPARED')
+
+    def authorize_direct_spawn(self, task_id, *, expected_developer):
+        """Cross the durable boundary immediately before attempting provider spawn."""
+        return self._update(task_id, expected={'developer': expected_developer},
+            changes={'developer': dict(expected_developer, dispatch_boundary='STARTING')},
+            direct_dispatch_boundary='STARTING')
 
     def _record_direct_launch(self, task_id, *, assignment_id, pid, start_time, pgid,
                               provider_profile, trusted_flag):
@@ -5149,6 +5281,11 @@ class TaskStore:
         finally:
             self._unlock_sidecar(lock_fd)
 
+    def direct_dispatch_lease(self, task_id):
+        """Serialize direct launch controllers including the workspace preflight."""
+        return self._exclusive_sidecar('.' + self._name(task_id) + '.direct-dispatch.lock',
+                                       'DIRECT_DISPATCH_LEASE')
+
     def continues_lock(self):
         """#1502 WP-D L1: hold the store-wide continues lock exclusively.
 
@@ -5713,9 +5850,11 @@ class TaskStore:
                        trusted_completion_events=False, trusted_abandonment=False,
                        abandonment_pm_session_id=None, trusted_pm_session_adoption=False,
                        trusted_codex_launch=False, trusted_opencode_launch=False,
+                       trusted_agy_launch=False,
                        trusted_split=None, split_child_max=None, high_debug_finalize=None,
                        trusted_file_ops_evidence=False, trusted_file_ops_reservation=False,
-                       d6_unchanged=None):
+                       d6_unchanged=None, direct_dispatch_boundary=None,
+                       direct_reassign_verify=None, direct_claim_recovery=None):
         # Refused here, not by the writable-field check: the dispatch gate
         # before that check can write its audit to the record.
         if _D6_CLAIM_ARGUMENTS & set(changes):
@@ -5741,13 +5880,16 @@ class TaskStore:
                 (split_child_max is not None) != (trusted_split == 'COMMIT') or
                 ((changes['lineage'] is None) != (trusted_split == 'RELEASE'))):
             _fail('TASK_LINEAGE_TRANSITION_INVALID')
+        trusted_launch_profile = ('codex' if trusted_codex_launch else
+                                  'opencode' if trusted_opencode_launch else
+                                  'agy' if trusted_agy_launch else None)
         if ('developer' in changes and type(changes['developer']) is dict and
                 'execution' in changes['developer'] and
                 type(changes['developer'].get('execution')) is dict and
                 'child_pid' in changes['developer']['execution'] and
-                not (trusted_codex_launch or trusted_opencode_launch)):
+                trusted_launch_profile is None):
             _fail('CODEX_LAUNCH_IDENTITY_FORBIDDEN')
-        if (trusted_codex_launch or trusted_opencode_launch) and set(changes) != {'developer'}:
+        if trusted_launch_profile is not None and set(changes) != {'developer'}:
             _fail('CODEX_LAUNCH_IDENTITY_INVALID')
         if 'dispatch_audit' in changes and not trusted_dispatch_audit:
             _fail()
@@ -5850,13 +5992,94 @@ class TaskStore:
                 changes = {'review_repair_claims': [
                     dict(item, state='DISPATCHED') if item.get('repair_task_id') == repair_id
                     else item for item in current['review_repair_claims']]}
-            if trusted_codex_launch or trusted_opencode_launch:
+            if direct_claim_recovery is not None:
+                from . import direct_reassignment, start_failure
+                claim, repair_id, repair_digest, packet = direct_claim_recovery
+                repair = self.get(repair_id)
+                claims = current.get('review_repair_claims') or []
+                if (changes or repair.get('record_sha256') != repair_digest or
+                        claim not in claims or claim.get('repair_task_id') != repair_id or
+                        not start_failure.repair_packet_matches(packet, claim, current, self) or
+                        claim.get('state') not in ('CLAIMED', 'UNKNOWN')):
+                    _fail('DIRECT_REASSIGN_REPAIR_CLAIM_UNVERIFIED')
+                direct_reassignment.verified_repair_result(current, claim, repair)
+                changes = {'review_repair_claims': [
+                    dict(item, state='DISPATCHED') if item == claim else item for item in claims]}
+            if 'developer' in changes:
+                old = current.get('developer')
+                new = changes.get('developer')
+                old = old if type(old) is dict else {}
+                new = new if type(new) is dict else {}
+                before = old.get(_DIRECT_DISPATCH_BOUNDARY)
+                after = new.get(_DIRECT_DISPATCH_BOUNDARY)
+                old_history = old.get(_DIRECT_HANDOFF_HISTORY, [])
+                new_history = new.get(_DIRECT_HANDOFF_HISTORY, [])
+                if direct_reassign_verify is not None:
+                    old_completion = current.get('completion') or {}
+                    new_completion = changes.get('completion') or {}
+                    if (not callable(direct_reassign_verify) or
+                            set(changes) != {'developer', 'completion'} or
+                            not _valid_direct_handoffs(new_history) or
+                            new_history[:-1] != old_history or
+                            old.get('provider_profile') not in _DIRECT_DISPATCH_PROFILES or
+                            new.get('provider_profile') not in _DIRECT_DISPATCH_PROFILES or
+                            old.get('provider_profile') == new.get('provider_profile') or
+                            new.get('state') != 'DEVELOPER_PENDING' or
+                            (old.get('execution') is not None and before != 'STOPPED') or
+                            any(old.get(field) is not None for field in (
+                                'artifact', 'artifact_sha256', 'usage')) or
+                            new_completion.get('executor_task_id') !=
+                            old_completion.get('executor_task_id') or
+                            any(old.get(field) != new.get(field) for field in (
+                                'source_sha', 'read_paths', 'write_paths', 'acceptance',
+                                'egress_basis', 'selection_source', 'data_class')) or
+                            old.get('state') not in ('DEVELOPER_DISPATCHING', 'DEVELOPER_PENDING',
+                                                     'DEVELOPER_OUTCOME_UNKNOWN') or
+                            (old.get('state') == 'DEVELOPER_OUTCOME_UNKNOWN' and before != 'STOPPED') or
+                            (old.get('state') == 'DEVELOPER_DISPATCHING' and before != 'PREPARED') or
+                            direct_reassign_verify() is not True):
+                        _fail('DIRECT_REASSIGN_EVIDENCE_INVALID')
+                elif old_history != new_history:
+                    _fail('DIRECT_REASSIGN_HISTORY_FORBIDDEN')
+                if direct_dispatch_boundary == 'PREPARED':
+                    valid = (before is None and after == 'PREPARED' and
+                             old.get('state') == 'DEVELOPER_PENDING' and
+                             new.get('state') == 'DEVELOPER_DISPATCHING' and
+                             old.get('provider_profile') in _DIRECT_DISPATCH_PROFILES and
+                             new.get('provider_profile') == old.get('provider_profile') and
+                             new.get('assignment_id') == old.get('assignment_id') and
+                             old.get('execution') is None and new.get('execution') is None)
+                elif direct_dispatch_boundary == 'STARTING':
+                    valid = (before == 'PREPARED' and
+                             old.get('state') == 'DEVELOPER_DISPATCHING' and
+                             new == dict(old, dispatch_boundary='STARTING'))
+                elif direct_dispatch_boundary == 'STOPPED':
+                    execution = new.get('execution') or {}
+                    valid = (before == 'STARTING' and after == 'STOPPED' and
+                             old.get('state') == 'DEVELOPER_DISPATCHING' and
+                             old.get('provider_profile') == 'opencode' and
+                             (old.get('execution') or {}).get('status') == 'RUNNING' and
+                             new.get('assignment_id') == old.get('assignment_id') and
+                             new.get('state') == 'DEVELOPER_OUTCOME_UNKNOWN' and
+                             execution.get('cleanup_status') == 'CONFIRMED' and
+                             execution.get('native_session_id') is None and
+                             execution.get('stdout_sha256') is None and
+                             type(execution.get('process_exit_code')) is int and
+                             execution['process_exit_code'] != 0)
+                else:
+                    valid = (before == after or
+                             (direct_reassign_verify is not None and after is None))
+                if not valid:
+                    _fail('DIRECT_DISPATCH_BOUNDARY_FORBIDDEN')
+                if (before == 'PREPARED' and trusted_launch_profile is not None or
+                        trusted_agy_launch and before != 'STARTING'):
+                    _fail('DIRECT_DISPATCH_SPAWN_NOT_AUTHORIZED')
+            if trusted_launch_profile is not None:
                 proposed = changes.get('developer')
                 old = current.get('developer')
                 execution = (proposed.get('execution')
                              if type(proposed) is dict else None)
-                expected_profile = 'codex' if trusted_codex_launch else 'opencode'
-                if (type(old) is not dict or old.get('provider_profile') != expected_profile or
+                if (type(old) is not dict or old.get('provider_profile') != trusted_launch_profile or
                         old.get('state') != 'DEVELOPER_DISPATCHING' or
                         type(proposed) is not dict or
                         proposed.get('assignment_id') != old.get('assignment_id') or
@@ -6011,6 +6234,15 @@ class TaskStore:
                                 if item.get('family', f"pr-{item.get('pr')}") ==
                                 added.get('family'))):
                         _fail('REVIEW_REPAIR_CLAIM_LIMIT_REACHED')
+                    if 'high_debug_source_task' in added:
+                        from .start_failure import inherited_rca
+                        target = {'failed_head': added['head_sha'], 'pr': added['pr'],
+                                  'executor_task': added['executor_task'],
+                                  'version': added['version']}
+                        if inherited_rca(
+                                self, current, target, source_task_id=added['high_debug_source_task'],
+                                report_sha256=added.get('high_debug_report_sha256')) is None:
+                            _fail('REVIEW_REPAIR_CLAIM_INVALID')
                 else:
                     changed = [i for i, (old, new) in enumerate(zip(old_claims, new_claims))
                                if old != new]
@@ -6018,7 +6250,9 @@ class TaskStore:
                         _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
                     i = changed[0]
                     old, new = old_claims[i], new_claims[i]
-                    recovered = self._claim_recovered(old, new, claim_recovery is not None)
+                    recovered = self._claim_recovered(
+                        old, new, claim_recovery is not None or
+                        (direct_claim_recovery is not None and old.get('state') == 'UNKNOWN'))
                     if (not (recovered or (old.get('state') == 'CLAIMED' and
                               new.get('state') in ('DISPATCHED', 'UNKNOWN')) or
                              (old.get('state') == 'DISPATCHED' and
@@ -6091,8 +6325,11 @@ class TaskStore:
                         'WORKER_DISPATCH_AUDIT_UNAVAILABLE') from None
                 raise worker_dispatch.WorkerDispatchDenied(
                     'WORKER_ASSIGNMENT_CLEAR_FORBIDDEN')
+            dispatch_options = {'d6_unchanged': d6_unchanged}
+            if direct_reassign_verify is not None:
+                dispatch_options['recovered_reassign'] = True
             dispatch_denial = worker_dispatch.authorize_task_store_change(
-                current, changes, expected, d6_unchanged=d6_unchanged)
+                current, changes, expected, **dispatch_options)
             if dispatch_denial is not None:
                 _check_audit_append_only(stored_audit, current.get('dispatch_audit', []))
                 current['updated_at'] = datetime.now(timezone.utc).replace(

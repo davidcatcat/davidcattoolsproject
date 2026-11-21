@@ -52,9 +52,11 @@ REVIEW_FAILURE_REASONS = _D6_CREATE_FAILURE_REASONS | frozenset((
 REVIEWER_BIND_FAILURE_REASONS = frozenset(('REVIEWER_SESSION_BIND_FAILED', 'REVIEWER_SESSION_BIND_TIMEOUT'))
 REVIEW_OUTPUT_WITHHELD = 'REVIEW_OUTPUT_WITHHELD'
 REVIEW_OUTPUT_ABSENT = 'REVIEW_OUTPUT_ABSENT'
+REVIEW_OUTPUT_UNDECODABLE = 'REVIEW_OUTPUT_UNDECODABLE'
 _REVIEW_REFUSALS_DIR = 'review-refusals'
 _RECEIPT_NAME_RE = re.compile(r'^[0-9a-zA-Z._-]+-[0-9a-zA-Z._-]+-[0-9]+\.json\Z')
 _RECEIPT_PRUNE_LIMIT = 64
+_REVIEW_REFUSAL_RECEIPT_MAX = 8192
 # #1705: one durable post receipt and one lock file per COMPLETED Codex claim.
 _VERDICT_POSTS_DIR = 'review-verdict-posts'
 _VERDICT_POST_NAME_RE = re.compile(r'^[0-9A-Za-z][0-9A-Za-z._-]{0,127}\Z')
@@ -76,7 +78,8 @@ def _unique_json_object(pairs):
 
 
 def _refuse(code, message='Reviewer dispatch refused; details omitted', *, reason=None,
-            mismatch_keys=None, excerpt=None):
+            mismatch_keys=None, excerpt=None, reply_diagnostic=None,
+            reply_diagnostic_label=None):
     error = LLMToolError(message)
     error.review_dispatch_code = code
     if reason is not None:
@@ -86,6 +89,11 @@ def _refuse(code, message='Reviewer dispatch refused; details omitted', *, reaso
         error.review_binding_mismatch_keys = tuple(mismatch_keys)
     if excerpt is not None:
         error.review_excerpt = excerpt
+    if reply_diagnostic is not None:
+        # Fixed-word categories and counts only; never reply text (#2487).
+        error.review_reply_diagnostic = reply_diagnostic
+    if reply_diagnostic_label is not None:
+        error.review_reply_diagnostic_label = reply_diagnostic_label
     raise error from None
 
 
@@ -468,15 +476,138 @@ _OUTPUT_SHAPE = re.compile(
     r'line=[0-9]+ of [0-9]+ bytes=[0-9]+ first=(?:blank|brace|letter|digit|other))')
 
 
+def _reply_first(text):
+    """Return the fixed-word kind of a reply's first non-space character."""
+    first = text.lstrip()[:1]
+    return ('blank' if not first else 'brace' if first in '{[' else
+            'letter' if first.isalpha() else 'digit' if first.isdigit() else 'other')
+
+
 def _reply_shape(text):
     """#1907: fixed-word shape of a refused reply excerpt; never its text."""
     if type(text) is not str:
         return 'REPLY_SHAPE unavailable'
-    first = text.lstrip()[:1]
-    kind = ('blank' if not first else 'brace' if first in '{[' else
-            'letter' if first.isalpha() else 'digit' if first.isdigit() else 'other')
     return 'REPLY_SHAPE bytes=%d lines=%d first=%s' % (
-        len(text.encode('utf-8')), len(text.split('\n')), kind)
+        len(text.encode('utf-8')), len(text.split('\n')), _reply_first(text))
+
+
+# #2486: the same bound as the #1938 screened excerpt. A longer reply is only
+# marked truncated; its text is never stored.
+_REPLY_EXCERPT_MAX_BYTES = 2048
+_REPLY_EXCERPT_MAX_LINES = 40
+# #2487 security v91 (CWE-532): these fixed words are the only reply-derived
+# values a receipt may keep. A pattern screen cannot prove free text safe.
+_REPLY_STATUS_WORDS = ('PASS', 'FIX', 'FAIL', 'BLOCKED')
+_REPLY_VERDICT_KEYS = frozenset((
+    'task_id', 'run_id', 'contract_digest', 'head', 'verdict', 'review'))
+# #2486: fixed cause classes for the one-line message a CLI prints instead of
+# a review. Only the class word is stored; never the matched text.
+REPLY_CAUSE_USAGE_OR_RATE_LIMIT = 'usage_or_rate_limit'
+REPLY_CAUSE_CONTEXT_OR_INPUT_SIZE = 'context_or_input_size'
+REPLY_CAUSE_AUTHENTICATION = 'authentication'
+REPLY_CAUSE_MODEL_UNAVAILABLE = 'model_unavailable'
+REPLY_CAUSE_OTHER = 'other'
+REPLY_CAUSE_CATEGORIES = frozenset((
+    REPLY_CAUSE_USAGE_OR_RATE_LIMIT, REPLY_CAUSE_CONTEXT_OR_INPUT_SIZE,
+    REPLY_CAUSE_AUTHENTICATION, REPLY_CAUSE_MODEL_UNAVAILABLE, REPLY_CAUSE_OTHER))
+_REPLY_CAUSE_PATTERNS = (
+    (REPLY_CAUSE_USAGE_OR_RATE_LIMIT, re.compile(
+        r'\b(?:rate[ -]?limit|usage[ -]?limit|quota|too many requests|429)\b',
+        re.IGNORECASE)),
+    (REPLY_CAUSE_CONTEXT_OR_INPUT_SIZE, re.compile(
+        r'\b(?:context (?:length|window|limit)|input (?:is )?too (?:long|large)|'
+        r'prompt (?:is )?too long|maximum context|request too large)\b',
+        re.IGNORECASE)),
+    (REPLY_CAUSE_AUTHENTICATION, re.compile(
+        r'\b(?:unauthori[sz]ed|authentication|auth(?:entication)? failed|'
+        r'not logged in|log ?in|401|403|invalid api key|missing api key|credential)\b',
+        re.IGNORECASE)),
+    (REPLY_CAUSE_MODEL_UNAVAILABLE, re.compile(
+        r'\b(?:model (?:is )?(?:unavailable|not found|not available)|'
+        r'no such model|overloaded|service unavailable|502|503|capacity)\b',
+        re.IGNORECASE)),
+)
+
+
+def _reply_cause(text):
+    """Return one closed-list cause class for a one-line CLI reply; never text."""
+    if type(text) is not str:
+        return REPLY_CAUSE_OTHER
+    for cause, pattern in _REPLY_CAUSE_PATTERNS:
+        if pattern.search(text):
+            return cause
+    return REPLY_CAUSE_OTHER
+
+
+def _reply_diagnostic(text):
+    """Return a content-free diagnostic of a refused reply.
+
+    The receipt keeps only a fixed category, fixed JSON key names, fixed status
+    words and counts, so the PM can see the cause class without persisting any
+    reviewer text.
+    """
+    byte_count = len(text.encode('utf-8'))
+    line_count = text.count('\n') + 1
+    keys = ()
+    if text.strip().startswith('```'):
+        kind = 'code_fence'
+    else:
+        try:
+            parsed = json.loads(text, object_pairs_hook=_unique_json_object)
+        except (ValueError, TypeError, RecursionError):
+            kind = 'text'
+        else:
+            if type(parsed) is dict:
+                kind = 'json_object'
+                keys = tuple(sorted(set(parsed) & _REPLY_VERDICT_KEYS))
+            elif type(parsed) is list:
+                kind = 'json_array'
+            else:
+                kind = 'json_scalar'
+    diagnostic = {
+        'kind': kind,
+        'first': _reply_first(text),
+        'bytes': byte_count,
+        'lines': line_count,
+        'truncated': (byte_count > _REPLY_EXCERPT_MAX_BYTES or
+                      line_count > _REPLY_EXCERPT_MAX_LINES),
+    }
+    if kind == 'json_object':
+        diagnostic['keys'] = list(keys)
+    if '<!-- activity: type=review_verdict ' in text:
+        diagnostic['verdict_marker'] = True
+    if 'LLMTOOL-REVIEW-BINDING v1 ' in text:
+        diagnostic['binding_line'] = True
+    status_words = [word for word in _REPLY_STATUS_WORDS if word in text]
+    if status_words:
+        diagnostic['status_words'] = status_words
+    # #2486: a one-line plain reply is the CLI speaking instead of reviewing.
+    if kind == 'text' and len(text.strip().splitlines()) <= 1:
+        diagnostic['cause'] = _reply_cause(text)
+    return diagnostic
+
+
+def _reply_diagnostic_for_raw(raw):
+    """Return (content-free diagnostic, refusal label) for a raw reply.
+
+    The sensitive-content screen is only a gate: whether it passes or refuses,
+    the receipt never keeps reply text. Undecodable bytes and empty text keep a
+    fixed label and no diagnostic.
+    """
+    if type(raw) is not bytes:
+        return None, REVIEW_OUTPUT_ABSENT
+    try:
+        text = raw.decode('utf-8')
+    except UnicodeError:
+        return None, REVIEW_OUTPUT_UNDECODABLE
+    if not text.strip():
+        return None, REVIEW_OUTPUT_ABSENT
+    from .task_submission_cli import _screen_text
+    try:
+        _screen_text(text, _CODEX_REVIEW_MAX_OUTPUT)
+    except LLMToolError:
+        return None, REVIEW_OUTPUT_WITHHELD
+    return _reply_diagnostic(text), None
 
 
 def _codex_final_message(raw):
@@ -502,7 +633,7 @@ def _codex_final_message(raw):
 
 
 def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=1):
-    """Parse a bound review and attach only a screened excerpt to refusals."""
+    """Parse a bound review; refusals carry a shape and a content-free diagnostic."""
     try:
         return _parse_codex_review_inner(
             raw, task_id=task_id, run_id=run_id,
@@ -516,8 +647,11 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=
             raise
         final = _codex_final_message(raw)
         if reason == 'OUTPUT_NOT_JSONL' and (final is None or not final.strip()):
-            # #1163: keep only the fixed-word shape of the bad line, never its text.
-            _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=_jsonl_shape(raw))
+            # #1163 keeps the fixed-word shape of the bad line. #2486 adds a
+            # content-free diagnostic; #2487 never persists the raw reply text.
+            diagnostic, label = _reply_diagnostic_for_raw(raw)
+            _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=_jsonl_shape(raw),
+                    reply_diagnostic=diagnostic, reply_diagnostic_label=label)
         if final is None or not final.strip():
             _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=REVIEW_OUTPUT_ABSENT)
         from .task_submission_cli import _screen_text
@@ -531,10 +665,13 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=
         except LLMToolError:
             _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=REVIEW_OUTPUT_WITHHELD)
         # #1938: the message holds fixed words and the reply shape, never reply text.
+        # #2487: the receipt diagnostic is fixed words/counts, never reply text.
         _refuse('REVIEW_NOT_POSTED', 'Reviewer dispatch refused: %s; %s' % (
                     reason if reason in REVIEW_FAILURE_REASONS else 'UNKNOWN',
                     _reply_shape(excerpt)),
-                reason=reason, excerpt=excerpt)
+                reason=reason, excerpt=excerpt,
+                reply_diagnostic=(_reply_diagnostic(final)
+                                  if reason == 'OUTPUT_NOT_JSONL' else None))
 
 
 def _review_return(claim, result):
@@ -792,7 +929,9 @@ def _prune_receipts(directory, limit=_RECEIPT_PRUNE_LIMIT):
 
 
 def _write_refusal_receipt(*, store, task_id, pr_number, head, version,
-                           reviewer_task, reason, excerpt_key, excerpt_val):
+                           reviewer_task, reason, excerpt_key, excerpt_val,
+                           reply_diagnostic=None, contract_digest=None,
+                           automatic_rerun=False):
     root = getattr(store, 'root', None)
     if not isinstance(root, Path):
         return None
@@ -813,10 +952,149 @@ def _write_refusal_receipt(*, store, task_id, pr_number, head, version,
         'not_a_verdict': True,
         excerpt_key: excerpt_val,
     }
+    if reply_diagnostic is not None:
+        # #2486/#2487: fixed-word diagnostic beside the fixed-word shape; no text.
+        record['reply_diagnostic'] = reply_diagnostic
+    if type(contract_digest) is str:
+        # #2486: the contract this refusal was bound to, so a re-run can prove
+        # the Task contract has not changed since.
+        record['contract_digest'] = contract_digest
+    if automatic_rerun is True:
+        # #2486: this receipt belongs to the one bounded re-run, not a fresh
+        # refusal, so it is never re-run again.
+        record['automatic_rerun'] = True
     data = (json.dumps(record, sort_keys=True) + '\n').encode('utf-8')
     high_debug._create_private(receipt_path, data)
     _prune_receipts(receipt_dir, _RECEIPT_PRUNE_LIMIT)
     return receipt_path
+
+
+def _refusal_receipt_path(store, task_id, claim):
+    """Return the private receipt path for this claim, or None when unprovable."""
+    root = getattr(store, 'root', None)
+    if (not isinstance(root, Path) or type(task_id) is not str or
+            type(claim) is not dict):
+        return None
+    head, version = claim.get('head_sha'), claim.get('version')
+    if (type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None or
+            type(version) is not int or isinstance(version, bool) or version < 1):
+        return None
+    name = f'{task_id}-{head}-{version}.json'
+    if _RECEIPT_NAME_RE.fullmatch(name) is None:
+        return None
+    directory = root.parent / _REVIEW_REFUSALS_DIR
+    try:
+        info = os.lstat(str(directory))
+    except OSError:
+        return None
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        return None
+    return directory / name
+
+
+def _read_refusal_record(path):
+    """Read one small private refusal receipt; anything doubtful returns None."""
+    try:
+        if os.path.islink(str(path)):
+            return None
+    except OSError:
+        return None
+    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_CLOEXEC', 0)
+    try:
+        fd = os.open(str(path), flags)
+    except OSError:
+        return None
+    data = b''
+    try:
+        while len(data) <= _REVIEW_REFUSAL_RECEIPT_MAX:
+            chunk = os.read(fd, _REVIEW_REFUSAL_RECEIPT_MAX + 1 - len(data))
+            if not chunk:
+                break
+            data += chunk
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(data) > _REVIEW_REFUSAL_RECEIPT_MAX:
+        return None
+    try:
+        record = json.loads(data.decode('utf-8'),
+                            object_pairs_hook=_unique_json_object)
+    except (UnicodeError, ValueError, RecursionError):
+        return None
+    return record if type(record) is dict else None
+
+
+def read_refusal_receipt(*, store, task_id, claim):
+    """Return this claim's stored not-a-verdict refusal receipt, or None."""
+    path = _refusal_receipt_path(store, task_id, claim)
+    record = None if path is None else _read_refusal_record(path)
+    if record is None:
+        return None
+    if (record.get('not_a_verdict') is not True or
+            record.get('task_id') != task_id or
+            record.get('pr') != claim.get('pr') or
+            record.get('head') != claim.get('head_sha') or
+            record.get('version') != claim.get('version') or
+            record.get('reviewer_task') != claim.get('reviewer_task')):
+        return None
+    return record
+
+
+def _replace_refusal_record(path, data):
+    """Atomically replace one private receipt; return False on any failure."""
+    temp = path.parent / ('.' + path.name + '.tmp.' + os.urandom(8).hex())
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0) |
+             getattr(os, 'O_CLOEXEC', 0))
+    try:
+        fd = os.open(str(temp), flags, 0o600)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.chmod(str(temp), 0o600)
+        os.replace(str(temp), str(path))
+    except OSError:
+        try:
+            os.unlink(str(temp))
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def mark_refusal_rerun(*, store, task_id, claim, contract_digest, rerun_version):
+    """Record one automatic re-run on a stored not-a-verdict refusal receipt.
+
+    True only when the receipt is unchanged, matches this refusal, carries the
+    same contract, and has no earlier re-run. The write is atomic; any doubt
+    returns False so task advance refuses instead of re-running.
+    """
+    if (type(contract_digest) is not str or
+            type(rerun_version) is not int or isinstance(rerun_version, bool) or
+            rerun_version < 1):
+        return False
+    path = _refusal_receipt_path(store, task_id, claim)
+    record = None if path is None else _read_refusal_record(path)
+    if record is None:
+        return False
+    if (record.get('not_a_verdict') is not True or
+            record.get('task_id') != task_id or
+            record.get('pr') != claim.get('pr') or
+            record.get('head') != claim.get('head_sha') or
+            record.get('version') != claim.get('version') or
+            record.get('reviewer_task') != claim.get('reviewer_task') or
+            record.get('contract_digest') != contract_digest or
+            'rerun' in record or record.get('automatic_rerun') is True):
+        return False
+    updated = dict(record, rerun={'version': rerun_version, 'at': _now()})
+    data = (json.dumps(updated, sort_keys=True) + '\n').encode('utf-8')
+    if len(data) > _REVIEW_REFUSAL_RECEIPT_MAX:
+        return False
+    return _replace_refusal_record(path, data)
 
 
 class _PostError(Exception):
@@ -1247,7 +1525,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                     create_d6=None, dispatch_session=None, bind_session=None,
                     prompt_renderer=None, codex_runner=None, reviewer=None,
                     comment_lister=None, comment_poster=None, post_clock=None,
-                    kind='formal'):
+                    kind='formal', refusal_rerun=False):
     """Claim once, create a read-only Reviewer D6 and bind its dispatched session.
 
     #1705: a fresh COMPLETED Codex verdict is handed to the caller to post under
@@ -1511,7 +1789,14 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             pass
         if claim_updated and reason in REVIEW_FAILURE_REASONS:
             raw_excerpt = getattr(exc, 'review_excerpt', None)
-            if raw_excerpt in (REVIEW_OUTPUT_WITHHELD, REVIEW_OUTPUT_ABSENT):
+            reply_diagnostic = getattr(exc, 'review_reply_diagnostic', None)
+            reply_label = getattr(exc, 'review_reply_diagnostic_label', None)
+            if reply_label is not None:
+                # #2486: a fixed word when the screen refused or bytes did not decode.
+                excerpt_key = 'label'
+                excerpt_val = reply_label
+                reply_diagnostic = None
+            elif raw_excerpt in (REVIEW_OUTPUT_WITHHELD, REVIEW_OUTPUT_ABSENT):
                 excerpt_key = 'label'
                 excerpt_val = raw_excerpt
             elif raw_excerpt is None or not str(raw_excerpt).strip():
@@ -1528,11 +1813,17 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                 excerpt_key: excerpt_val,
                 'receipt_path': None,
             }
+            binding = task.get('task_binding')
+            contract_digest = (binding.get('contract_digest')
+                               if type(binding) is dict else None)
             try:
                 receipt_path = _write_refusal_receipt(
                     store=store, task_id=task_id, pr_number=pr_number, head=head,
                     version=version, reviewer_task=reviewer_task, reason=reason,
-                    excerpt_key=excerpt_key, excerpt_val=excerpt_val)
+                    excerpt_key=excerpt_key, excerpt_val=excerpt_val,
+                    reply_diagnostic=reply_diagnostic,
+                    contract_digest=contract_digest,
+                    automatic_rerun=refusal_rerun)
                 # #1927: task advance accepts only a str receipt path or None.
                 refusal['receipt_path'] = (None if receipt_path is None
                                            else str(receipt_path))

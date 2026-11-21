@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "repair_max": 5,
-  "parent_debug_max": 1,
+  "parent_debug_max": 3,
   "group_debug_max": 3,
   "child_max": 3,
   "replan_max": 1,

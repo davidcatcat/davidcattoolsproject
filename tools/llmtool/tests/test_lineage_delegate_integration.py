@@ -207,8 +207,9 @@ class LineageDelegateIntegrationTests(unittest.TestCase):
         fresh = self.record_pm()
         self.assertEqual(self.delegate(fresh, 'executor-f', SOURCE, 105), 'CLAIMED')
 
-        # A used the chain's one AI Debug, so B cannot reserve another.
-        self.store.append_high_debug(a, debug_entry('RCA_CONFIRMED'))
+        # A used the chain's three AI Debugs, so B cannot reserve another.
+        for _ in range(3):
+            self.store.append_high_debug(a, debug_entry('RCA_CONFIRMED'))
         entries = self.store.get(b).get('high_debug', [])
         error = self.refused(lambda: high_debug._reserve_debug(
             self.store, b, entries, debug_entry()))
@@ -232,11 +233,9 @@ class OwnerPolicyChainTests(LineageDelegateIntegrationTests):
         self.assertEqual(self.delegate(b, 'executor-b', HEAD_A, 102), 'CLAIMED')
         self.finish(b, HEAD_B)
         c = self.record_pm(continues=b)
-        # A new Task, D6 and PR keep the chain count (2 runs): C is repair #2,
-        # so it needs the AI Debug root cause, not the limit.
-        error = self.refused(lambda: self.delegate(c, 'executor-c', HEAD_B, 103))
-        self.assertEqual(str(error), 'DELEGATE_HIGH_DEBUG_TASK_REQUIRED')
-        self.assert_unclaimed(c)
+        # A new Task, D6 and PR keep the count. Two previous runs make C
+        # repair two, still before the Debug requirement.
+        self.assertEqual(self.delegate(c, 'executor-c', HEAD_B, 103), 'CLAIMED')
         self.assert_released(a)
 
 

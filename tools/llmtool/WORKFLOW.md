@@ -18,8 +18,8 @@ Declare read and write paths at task claude-bind, including an admitted test mod
 `llmtool task advance` is the only normal flow (#1502 §3-1). It runs one step at a time:
 
 1. Push the Developer's committed result branch.
-2. Run the Task's admitted test modules on EC2 (`task remote-test`) before the PR is opened.
-3. Open the PR.
+2. Open or reuse the branch's PR and record its number and exact HEAD on the Task.
+3. On the next advance, run the Task's admitted test modules on EC2 (`task remote-test`) using `refs/pull/<N>/head`. If EC2 fails, repair and retest the updated HEAD on the same PR.
 4. Wait for exact-head Linux CI: `check (Linux 3.14)`, or `check (docs)` for a documentation-only PR, must pass before review.
 5. Dispatch the formal cross-family review of that exact head.
 6. After PASS, `task advance` adds the `mac-ci` label; exact-head `check (macOS 3.13)` must be SUCCESS where required.
@@ -28,6 +28,33 @@ Declare read and write paths at task claude-bind, including an admitted test mod
 A required check must be SUCCESS. A check that does not apply to the PR is recorded NOT_RUN; skipped, cancelled or pending is never PASS. Environment problems (an EC2 timeout, an unreachable runner or EC2, a cancelled or startup-failed CI check) are not test failures: `task advance` reruns an EC2 timeout once on the same commit. A required CI check that ends `timed_out` is a test failure and counts like `failure` (#2094, PR #2108). An EC2, Linux CI or Mac CI failure goes back to the original Developer as a test-failure repair, on a count kept apart from review failures (#1502 WP-D D11; chain-wide caps #2026, #2048); an environment conclusion waits uncounted, and a used-up count stops with `TEST_FAIL_LIMIT_REACHED`.
 
 Manual commands are recovery only: use the [manual recovery flow](../../.claude/skills/ai-team-delivery/pm-continuation.md#manual-recovery-flow) when `task advance` cannot run. Review FAIL, AI Debug, split and Owner notification rules are in the [PM Continuation Contract](../../.claude/skills/ai-team-delivery/pm-continuation.md).
+
+The first three effective formal-review repairs can proceed without High Debug.
+If the third repair receives another formal FAIL, the fourth repair requires
+an applicable confirmed RCA. The fifth repair has the same requirement.
+A work lineage, including ROOT, split children, REPLAN and continuations,
+shares three effective High Debug runs. A confirmed RCA can cover the same
+blocking findings on a continuation when the previous Task and the current
+formal review provide matching evidence. An unconfirmed diagnosis or changed
+findings require fresh evidence. Uncertain launches count toward the budget.
+
+An interrupted AGY or OpenCode dispatch can continue on the same Task and D6.
+Run the original `task delegate` command as the owning PM with its original scope.
+The command automatically selects the other route when the old assignment is
+still pending, the persisted launch boundary proves it never authorized spawn,
+or the launcher recorded a verified stop before delivering any prompt. The
+replacement still needs current Owner authorization, route and quota admission.
+For an already counted repair, `task advance` uses this same delegate path.
+The handoff keeps the branch, PR and repair claim, and gives the replacement a
+new assignment and D6 session binding before launching it. A pending handoff
+can be resumed with the same command.
+
+`DIRECT_CHILD_LAUNCH_EVIDENCE_MISSING` identifies a historical dispatch with
+no durable launch observation. `DIRECT_CHILD_SPAWN_OUTCOME_UNVERIFIED` means
+spawn was authorized and its outcome still needs proof. For these records, keep
+the original worktree and claim, and use the ordinary result callback if an
+authentic result can be recovered. A missing PID, a clean tree, or a dead PID
+alone cannot authorize another writer.
 
 A review repair claim whose dispatch outcome was not recorded stays `UNKNOWN`, and llmtool does not treat it as dispatched.
 It settles only through `llmtool task repair TASK --executor-task D6 --pr N --recover-claim REPAIR_TASK_ID` (#1928).

@@ -90,6 +90,8 @@ def remote_receipt(record, *, source_sha=HEAD, result='PASS', excerpt=None,
         'result': result, 'modules': ['test_task_advance'],
         'ran_total': 1, 'elapsed_s': 0.01,
     }
+    if result == 'PASS':
+        receipt.update(final=['OK'], failures=[])
     if excerpt is not None:
         receipt['failure_excerpt'] = excerpt
     receipt.update(changes)
@@ -256,7 +258,8 @@ class TaskAdvanceTests(unittest.TestCase):
     def test_advance_executes_publish_and_returns_only_bounded_fields(self):
         record = base_record(developer={'state': 'DEVELOPER_RESPONDED',
                                         'write_paths': ['allowed.txt']})
-        store = type('S', (), {'get': lambda self, _id: record})()
+        store = type('S', (), {'get': lambda self, _id: record,
+                               'record_published_pr': lambda *_: None})()
         binding = {'root': '/d6', 'common_dir': '/canonical/.git',
                    'branch': 'feat/task', 'task_id': '3' * 32, 'result_head': HEAD,
                    'recorded_result_head': None, 'dirty': True, 'state': 'DIRTY'}
@@ -409,6 +412,9 @@ class TaskAdvanceTests(unittest.TestCase):
             def get(self, _task_id):
                 return self.record
 
+            def record_published_pr(self, _task_id, pr, head):
+                self.record['published_pr'] = {'pr': pr, 'head_sha': head}
+
         store = Store()
         snapshot = {'root': '/registered/d6', 'result_head': HEAD,
                     'recorded_result_head': HEAD, 'registered_result_head': HEAD,
@@ -456,6 +462,25 @@ class TaskAdvanceTests(unittest.TestCase):
         self.assertEqual(dispatched[0][0]['version'], 2)
         self.assertEqual(dispatched[0][1], new_head)
         self.assertEqual(os.getcwd(), initial_cwd)
+
+    def test_partial_pass_does_not_satisfy_large_remote_test_gate(self):
+        modules = [f'test_large_{index:02d}' for index in range(11)]
+        # A historical count denial must not skip the now-admitted test run.
+        record = base_record(developer={
+            'read_paths': [f'tools/llmtool/tests/{name}.py' for name in modules]})
+
+        def receipt(names):
+            return remote_receipt(
+                record, modules=names, final=['OK'] * len(names), ran_total=len(names),
+                module_results=[dict(module=name, ran=1, skipped=0, final='OK') for name in names])
+
+        self.assertIsNone(task_advance._remote_test_status(record, d6())[0])
+        record['remote_test_receipts'] = [receipt(modules[:8])]
+        self.assertIsNone(task_advance._remote_test_status(record, d6())[0])
+        self.assertIsNone(task_advance._remote_test_receipt_summary(record, HEAD))
+        record['remote_test_receipts'].append(receipt(modules))
+        self.assertEqual(task_advance._remote_test_status(record, d6())[0], 'PASS')
+        self.assertEqual(task_advance._remote_test_receipt_summary(record, HEAD)['modules'], modules)
 
     def test_old_head_remote_test_receipt_does_not_satisfy_gate(self):
         record = base_record(remote_test_receipts=[remote_receipt(
@@ -2041,7 +2066,6 @@ class TaskAdvancePublishTests(unittest.TestCase):
                       'branch': self.BRANCH, 'task_id': self.EXECUTOR_TASK,
                       'recorded_result_head': self.initial_head}
         return task_advance._publish_task(record, d6_binding, self.EXECUTOR_TASK,
-            pre_pr_gate=lambda _head, _branch: None,
             git_runner=self.git_runner if git_runner is None else git_runner, gh_runner=self.gh,
             record_result_call=self.record_result)
 
@@ -2084,6 +2108,7 @@ class TaskAdvancePublishTests(unittest.TestCase):
                 return [self.record['task_id']]
             def record_published_pr(self, task_id, pr, head):
                 self.published.append((task_id, pr, head))
+                self.record['published_pr'] = {'pr': pr, 'head_sha': head}
 
         return Store(base_record(
             developer={'state': 'DEVELOPER_RESPONDED', 'write_paths': list(write_paths)},
@@ -2091,7 +2116,8 @@ class TaskAdvancePublishTests(unittest.TestCase):
                         'evidence': {}},
             remote_test_outcomes=[], **changes))
 
-    def advance_gated(self, store, remote_test, *, dirty=False, repair=None, github_get=None):
+    def advance_gated(self, store, remote_test, *, dirty=False, repair=None, github_get=None,
+                      task_id=TASK_ID):
         head = self.head()
         binding = {'root': self.root, 'task_id': self.EXECUTOR_TASK, 'branch': self.BRANCH,
                    'common_dir': os.path.join(self.tmp.name, 'canonical', '.git'),
@@ -2100,19 +2126,18 @@ class TaskAdvancePublishTests(unittest.TestCase):
         with patch.object(task_advance, '_d6_snapshot', return_value=binding), \
              patch.object(task_advance, '_review_outcomes', return_value=[]), \
              patch.object(task_submission_cli, 'run_task_remote_test', side_effect=remote_test):
-            return task_advance.advance(task_id=self.TASK_ID, store=store,
+            return task_advance.advance(task_id=task_id, store=store,
                 publish_git_runner=self.git_runner, publish_gh_runner=self.gh,
                 record_result_call=self.record_result, repair_review_call=repair,
-                github_get=github_get or (lambda path: self.fail(f'unexpected read: {path}')))
+                github_get=github_get or (lambda path: {
+                    'number': 23, 'head': {'sha': self.pushed_head()}, 'state': 'open',
+                    'merged': False} if path == 'pulls/23' and self.pr_exists else []))
 
-    def assert_no_pr(self):
-        self.assertFalse(self.pr_exists)
-        self.assertFalse(any(args[:2] == ['pr', 'create'] for args in self.gh_calls))
-
-    def test_pass_pushes_branch_tests_its_ref_then_opens_pr(self):
+    def test_push_opens_and_records_pr_before_testing_its_exact_ref(self):
         self.change_file()
         store = self.gated_store()
         seen = []
+
         def remote_test(args, *, store):
             seen.append((args.sha, args.ref, args.pr, self.pushed_head(), self.pr_exists))
             store.record.setdefault('remote_test_receipts', []).append(remote_receipt(
@@ -2120,107 +2145,151 @@ class TaskAdvancePublishTests(unittest.TestCase):
             return 0
 
         result = self.advance_gated(store, remote_test, dirty=True)
-
         head = self.head()
         self.assertNotEqual(head, self.initial_head)
-        self.assertEqual(seen, [(head, f'refs/heads/{self.BRANCH}', None, head, False)])
         self.assertEqual(result, {'task_id': self.TASK_ID, 'codes': [], 'pr': 23, 'head': head})
         self.assertEqual(store.published, [(self.TASK_ID, 23, head)])
+        self.assertEqual(seen, [])
+        self.assertEqual(self.advance_gated(store, remote_test)['step'], 'RUN_REMOTE_TEST')
+        self.assertEqual(seen, [(head, 'refs/pull/23/head', 23, head, True)])
         comment = next(args for args in self.gh_calls if args[:2] == ['pr', 'comment'])
         self.assertEqual(comment[2], '23')
         self.assertIn(f'head={head}', comment[comment.index('--body') + 1])
 
-    def test_fail_leaves_no_pr_and_next_step_repairs(self):
+    def test_publish_record_failure_recovers_same_open_pr_before_test(self):
         self.change_file()
         store = self.gated_store()
+        never_test = lambda *_a, **_k: self.fail('PR binding must be persisted first')
+        with patch.object(store, 'record_published_pr', side_effect=RuntimeError):
+            failed = self.advance_gated(store, never_test, dirty=True)
+            self.assertEqual(failed['codes'], ['PUBLISH_PR_RECORD_FAILED'])
+            self.assertEqual(failed['step'], 'REFUSED')
+            self.assertEqual(self.advance_gated(store, never_test)['step'], 'REFUSED')
+        tested = self.advance_gated(store, lambda *_a, **_k: 0)
+        self.assertEqual(tested['step'], 'RUN_REMOTE_TEST')
+        self.assertEqual(store.published, [(self.TASK_ID, 23, self.head())])
+        self.assertEqual(sum(args[:2] == ['pr', 'create'] for args in self.gh_calls), 1)
+
+    def test_pr_first_flow_persists_and_counts_repairs_across_heads(self):
+        from llmtool import repair_policy, review_repair
+        from llmtool.task_store import TaskStore
+        from test_task_store import TaskStoreTests, new_id, record, remote_test_receipt
+        import review_trust_fixture
+        import worker_policy_fixture
+
+        worker_policy_fixture.install(self)
+        review_trust_fixture.install_for_case(self)
+        fixture = TaskStoreTests()
+        task = fixture._codex_dispatch_task()
+        task['pm_assignment']['route'] = 'agy'
+        task_id = task['task_id']
+        store_path = Path(self.tmp.name).resolve() / 'store'
+        store = TaskStore(store_path)
+        developer = fixture._developer_assignment(provider='agy')
+        artifact = ('diff --git a/allowed.txt b/allowed.txt\n--- a/allowed.txt\n'
+                    '+++ b/allowed.txt\n@@ -1 +1 @@\n-base\n+published\n')
+        developer.update(
+            state='DEVELOPER_RESPONDED', provider_type='agy-cli', model='gemini-test',
+            backend_session_semantics='CLI_REPORTED_SESSION_ID', owner_assignment_ref=None,
+            read_paths=['allowed.txt'], write_paths=['allowed.txt'],
+            artifact=artifact, artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest(),
+            execution={'status': 'DONE',
+                       'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                       'process_exit_code': 0, 'stdout_sha256': 'c' * 64, 'elapsed_ms': 12,
+                       'cleanup_status': 'CONFIRMED', 'usage_source': 'UNKNOWN',
+                       'source_bytes': None, 'source_file_count': None,
+                       'source_manifest_sha256': None})
+        completion = {
+            'state': 'WAITING_EXECUTOR', 'executor_task_id': self.EXECUTOR_TASK,
+            'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
+            'pm_dispatch': 'NOT_STARTED', 'pm_response': None, 'pm_recommendation': None,
+            'pm_usage': None, 'pm_error_code': None,
+        }
+        store.create(dict(task, developer=developer, completion=completion))
+        tested, packets = [], []
+
         def remote_test(args, *, store):
-            store.record.setdefault('remote_test_receipts', []).append(remote_receipt(
-                store.record, source_sha=args.sha, result='FAIL', excerpt='FAIL: test_example',
-                executor_task=self.EXECUTOR_TASK))
+            binding = store.get(task_id)['published_pr']
+            self.assertEqual((binding['pr'], binding['head_sha']), (23, args.sha))
+            self.assertEqual((args.pr, args.ref, self.pushed_head()),
+                             (23, 'refs/pull/23/head', args.sha))
+            tested.append(args.sha)
+            receipt = remote_test_receipt(
+                task, source_sha=args.sha, fetch_head=args.sha, result='FAIL', exit_code=1,
+                executor_task=self.EXECUTOR_TASK, failure_excerpt='FAIL: test_example',
+                final=['FAILED (failures=1)'], failures=['test_task_store'])
+            store.append_remote_test_receipt(task_id, receipt)
             return 0
 
-        held = self.advance_gated(store, remote_test, dirty=True)
+        def adapter(**kwargs):
+            packets.append(task_submission_cli._validate_repair_packet(kwargs['packet']))
+            return {'status': 'DISPATCHED', 'head': self.head()}
 
-        self.assertEqual((held['step'], held['next'], held['codes'], held['pr']),
-                         ('RUN_REMOTE_TEST', 'REPAIR_REVIEW', ['REMOTE_TEST_FAIL'], None))
-        self.assertEqual(held['head'], self.pushed_head())
-        self.assertEqual(held['result']['remote_test']['result'], 'FAIL')
-        self.assert_no_pr()
+        def record_repair(**kwargs):
+            ids = [kwargs['repair_task_id'], new_id(), new_id()]
+            with patch('test_task_store.new_id', side_effect=ids):
+                return store.create(record('Repair the reported test failure.'))
 
-        repairs = []
-        repaired = self.advance_gated(store, lambda *_a, **_k: self.fail('no second test'),
-            repair=lambda **kwargs: repairs.append(kwargs) or {'repair_task_id': 'repair-1'})
+        def repair(**kwargs):
+            return review_repair.repair_review(
+                **kwargs, current_head=lambda *_: self.head(),
+                dispatch_adapter=adapter, repair_task_recorder=record_repair)
 
-        self.assertEqual(repaired['step'], 'REPAIR_REVIEW')
-        self.assertIsNone(repairs[0]['pr_number'])
-        self.assertEqual(repairs[0]['remote_test_receipt']['failure_excerpt'], 'FAIL: test_example')
-        self.assert_no_pr()
-        self.assertEqual(store.published, [])
+        def advance(*, dirty=False):
+            return self.advance_gated(store, remote_test, dirty=dirty, repair=repair,
+                                      task_id=task_id)
 
-    def test_unavailable_or_busy_waits_then_retries_on_next_step(self):
+        limit = 2
+        policy = dict(repair_policy.load_policy(), test_fail_max=limit)
+        with patch.object(repair_policy, 'load_policy', return_value=policy):
+            for attempt in range(1, limit + 2):
+                self.change_file(f'candidate {attempt}\n')
+                opened = advance(dirty=True)
+                head = self.head()
+                self.assertEqual((opened['pr'], opened['head'], opened['codes']), (23, head, []))
+                self.assertEqual(len(tested), attempt - 1)
+                store = TaskStore(store_path)
+                self.assertEqual(store.get(task_id)['published_pr']['head_sha'], head)
+                self.assertEqual(advance()['step'], 'RUN_REMOTE_TEST')
+                self.assertEqual(tested[-1], head)
+                dispatched = advance()
+                if attempt <= limit:
+                    self.assertEqual(dispatched['step'], 'REPAIR_REVIEW')
+                    self.assertEqual(dispatched['codes'], [])
+                    claim = store.get(task_id)['review_repair_claims'][-1]
+                    self.assertEqual((claim['pr'], claim['family'], claim['attempt'],
+                                      claim['head_sha'], claim['state']),
+                                     (23, 'pr-23-ec2', attempt, head, 'DISPATCHED'))
+                    self.assertEqual((packets[-1]['pr'], packets[-1]['failed_head']), (23, head))
+                    self.assertEqual(advance()['step'], 'WAITING_REPAIR')
+                    self.assertEqual(len(packets), attempt)
+                else:
+                    self.assertEqual(dispatched['step'], 'STOPPED')
+                    self.assertEqual(dispatched['codes'], ['TEST_FAIL_LIMIT_REACHED'])
+        self.assertEqual(len(store.get(task_id)['review_repair_claims']), limit)
+        self.assertEqual(sum(args[:2] == ['pr', 'create'] for args in self.gh_calls), 1)
+
+    def test_existing_pr_at_a_different_head_refuses_before_testing(self):
         self.change_file()
         store = self.gated_store()
-        replies = ['REMOTE_BUSY', 'SSH_UNAVAILABLE', None]
-        refs = []
-        def remote_test(args, *, store):
-            refs.append(args.ref)
-            code = replies.pop(0)
-            if code is None:
-                store.record.setdefault('remote_test_receipts', []).append(remote_receipt(
-                    store.record, source_sha=args.sha, executor_task=self.EXECUTOR_TASK))
-            else:
-                print(json.dumps({'result': 'UNAVAILABLE', 'code': code}))
-            return 0
-
-        for dirty, code in ((True, 'REMOTE_BUSY'), (False, 'SSH_UNAVAILABLE')):
-            with self.subTest(code=code):
-                held = self.advance_gated(store, remote_test, dirty=dirty)
-                self.assertEqual((held['step'], held['codes'], held['pr']),
-                                 ('WAITING_REMOTE_TEST', ['REMOTE_TEST_UNAVAILABLE', code], None))
-                self.assert_no_pr()
-
-        opened = self.advance_gated(store, remote_test)
-
+        opened = self.advance_gated(store, lambda *_a, **_k: self.fail('no test'), dirty=True)
         self.assertEqual(opened['pr'], 23)
-        self.assertEqual(refs, [f'refs/heads/{self.BRANCH}'] * 3)
+        stale = {'number': 23, 'head': {'sha': self.initial_head}, 'state': 'open'}
+        real_gh = self.gh
 
-    def test_hosted_remote_test_codes_hold_at_waiting_remote_test_and_are_not_fail(self):
-        new_codes = ('HOSTED_PENDING', 'HOSTED_QUEUE_FULL', 'HOSTED_DISPATCH_UNCONFIRMED')
-        for code in new_codes:
-            with self.subTest(code=code):
-                self.change_file(f'{code}\n')
-                store = self.gated_store()
-                def remote_test(args, *, store):
-                    print(json.dumps({'result': 'UNAVAILABLE', 'code': code}))
-                    return 0
+        def stale_list(root, args):
+            if args[:2] == ['pr', 'list']:
+                return subprocess.CompletedProcess(args, 0, json.dumps([
+                    {'number': 23, 'headRefOid': self.initial_head}]).encode(), b'')
+            return real_gh(root, args)
 
-                held = self.advance_gated(store, remote_test, dirty=True)
-                self.assertEqual((held['step'], held['codes'], held['pr']),
-                                 ('WAITING_REMOTE_TEST', ['REMOTE_TEST_UNAVAILABLE', code], None))
-                self.assertEqual(held['next'], 'WAITING_REMOTE_TEST')
-                self.assertNotIn('REMOTE_TEST_FAIL', held['codes'])
-                self.assertNotEqual(held['step'], 'RUN_REMOTE_TEST')
-                self.assertNotEqual(held['next'], 'REPAIR_REVIEW')
-                self.assert_no_pr()
-
-    def test_pre_pr_remote_gate_hosted_codes_hold_at_waiting_remote_test_and_are_not_fail(self):
-        new_codes = ('HOSTED_PENDING', 'HOSTED_QUEUE_FULL', 'HOSTED_DISPATCH_UNCONFIRMED')
-        for code in new_codes:
-            with self.subTest(code=code):
-                self.change_file(f'clean-{code}\n')
-                store = self.gated_store()
-                def remote_test(args, *, store):
-                    print(json.dumps({'result': 'UNAVAILABLE', 'code': code}))
-                    return 0
-
-                held = self.advance_gated(store, remote_test, dirty=False)
-                self.assertEqual((held['step'], held['codes'], held['pr']),
-                                 ('WAITING_REMOTE_TEST', ['REMOTE_TEST_UNAVAILABLE', code], None))
-                self.assertEqual(held['next'], 'WAITING_REMOTE_TEST')
-                self.assertNotIn('REMOTE_TEST_FAIL', held['codes'])
-                self.assertNotEqual(held['step'], 'RUN_REMOTE_TEST')
-                self.assertNotEqual(held['next'], 'REPAIR_REVIEW')
-                self.assert_no_pr()
+        with patch.object(self, 'gh', side_effect=stale_list), \
+             patch.object(task_advance, '_publish_pause'):
+            result = self.advance_gated(store, lambda *_a, **_k: self.fail('stale PR head'),
+                                        github_get=lambda _path: stale)
+        self.assertEqual(result['codes'], ['PUBLISH_GITHUB_FAILED'])
+        self.assertEqual(store.published, [(self.TASK_ID, 23, self.head())])
+        self.assertEqual(sum(args[:2] == ['pr', 'create'] for args in self.gh_calls), 1)
 
     def test_docs_only_or_no_module_head_opens_pr_then_uses_pr_ref_step(self):
         self.change_file()
@@ -2324,22 +2393,6 @@ class TaskAdvancePublishTests(unittest.TestCase):
                 self.assertTrue(all('--delete-branch' not in args for args in self.gh_calls))
                 self.assertEqual(self.pushed_head(), self.head())
 
-    def test_head_moved_during_remote_test_refuses_pr(self):
-        self.change_file()
-        store = self.gated_store()
-        def remote_test(args, *, store):
-            store.record.setdefault('remote_test_receipts', []).append(remote_receipt(
-                store.record, source_sha=args.sha, executor_task=self.EXECUTOR_TASK))
-            self.git(['commit', '--allow-empty', '-m', 'moved'], cwd=self.root)
-            self.git(['push', 'origin', f'HEAD:refs/heads/{self.BRANCH}'], cwd=self.root)
-            return 0
-
-        result = self.advance_gated(store, remote_test, dirty=True)
-
-        self.assertEqual(result, {'task_id': self.TASK_ID, 'codes': ['PUBLISH_HEAD_MOVED']})
-        self.assert_no_pr()
-        self.assertEqual(store.published, [])
-
     def test_pushed_branch_moved_alone_is_refused(self):
         tested = self.head()
         self.git(['commit', '--allow-empty', '-m', 'moved'], cwd=self.root)
@@ -2348,66 +2401,6 @@ class TaskAdvancePublishTests(unittest.TestCase):
         with self.assertRaises(task_advance._PublishRefusal) as caught:
             task_advance._require_published_head(self.git_runner, self.root, self.BRANCH, tested)
         self.assertEqual(caught.exception.code, 'PUBLISH_HEAD_MOVED')
-
-    def test_pass_for_older_head_does_not_clear_new_head(self):
-        self.change_file()
-        store = self.gated_store()
-        store.record['remote_test_receipts'] = [remote_receipt(
-            store.record, source_sha=self.initial_head, executor_task=self.EXECUTOR_TASK)]
-        tested = []
-        def remote_test(args, *, store):
-            tested.append(args.sha)
-            print(json.dumps({'result': 'UNAVAILABLE', 'code': 'REMOTE_BUSY'}))
-            return 0
-
-        held = self.advance_gated(store, remote_test, dirty=True)
-
-        self.assertEqual(tested, [self.head()])
-        self.assertEqual(held['step'], 'WAITING_REMOTE_TEST')
-        self.assert_no_pr()
-
-    def test_branch_moved_before_ec2_fetch_needs_attention_without_pr(self):
-        self.change_file()
-        store = self.gated_store()
-        def remote_test(args, *, store):
-            store.record.setdefault('remote_test_receipts', []).append(remote_receipt(
-                store.record, source_sha=args.sha, result='SHA_MISMATCH',
-                executor_task=self.EXECUTOR_TASK))
-            return 0
-
-        held = self.advance_gated(store, remote_test, dirty=True)
-
-        self.assertEqual((held['step'], held['codes'], held['pr']),
-                         ('NEEDS_ATTENTION', ['REMOTE_TEST_SHA_MISMATCH'], None))
-        self.assert_no_pr()
-
-    def test_remote_test_refusal_is_named_and_opens_no_pr(self):
-        self.change_file()
-        store = self.gated_store()
-        def remote_test(_args, *, store):
-            print(json.dumps({'result': 'ADMISSION_DENIED', 'code': 'RECEIPT_HEAD_MISMATCH'}))
-            return 0
-
-        held = self.advance_gated(store, remote_test, dirty=True)
-
-        self.assertEqual((held['step'], held['codes'], held['pr']),
-                         ('REMOTE_TEST_REFUSED',
-                          ['PUBLISH_REMOTE_TEST_REFUSED', 'RECEIPT_HEAD_MISMATCH'], None))
-        self.assert_no_pr()
-
-    def test_remote_test_error_opens_no_pr(self):
-        self.change_file()
-        store = self.gated_store()
-        def remote_test(_args, *, store):
-            error = RuntimeError('adapter failed')
-            error.remote_test_code = 'REMOTE_TEST_ADAPTER_FAILED'
-            raise error
-
-        held = self.advance_gated(store, remote_test, dirty=True)
-
-        self.assertEqual(held['codes'],
-                         ['PUBLISH_REMOTE_TEST_REFUSED', 'REMOTE_TEST_ADAPTER_FAILED'])
-        self.assert_no_pr()
 
     def test_open_pr_skips_branch_gate_and_keeps_pr_ref_step(self):
         self.pr_exists = True
@@ -2419,9 +2412,9 @@ class TaskAdvancePublishTests(unittest.TestCase):
 
         self.assertEqual(result, {'task_id': self.TASK_ID, 'codes': [], 'pr': 23,
                                   'head': self.head()})
-        self.assertEqual(store.published, [])
+        self.assertEqual(store.published, [(self.TASK_ID, 23, self.head())])
 
-    def test_decide_without_pr_follows_exact_head_remote_status(self):
+    def test_decide_without_pr_always_publishes(self):
         def record(result, **receipt):
             return base_record(remote_test_outcomes=[], remote_test_receipts=[
                 remote_receipt(base_record(), result=result, **receipt)])
@@ -2430,12 +2423,11 @@ class TaskAdvancePublishTests(unittest.TestCase):
             base_record(remote_test_outcomes=[]), d6(), None, {}), 'PUBLISH')
         self.assertEqual(task_advance.decide(record('PASS'), d6(), None, {}), 'PUBLISH')
         self.assertEqual(task_advance.decide(
-            record('FAIL', excerpt='failure'), d6(), None, {}), 'REPAIR_REVIEW')
-        self.assertEqual(task_advance.decide(record('SHA_MISMATCH'), d6(), None, {}),
-                         'NEEDS_ATTENTION')
+            record('FAIL', excerpt='failure'), d6(), None, {}), 'PUBLISH')
+        self.assertEqual(task_advance.decide(record('SHA_MISMATCH'), d6(), None, {}), 'PUBLISH')
         self.assertEqual(task_advance.decide(record('FAIL', excerpt='failure'), d6(), None, {
             'repair_claims': [{'head_sha': HEAD, 'state': 'DISPATCHED',
-                               'repair_state': 'RUNNING'}]}), 'WAITING_REPAIR')
+                               'repair_state': 'RUNNING'}]}), 'PUBLISH')
         self.assertEqual(task_advance.decide(
             record('FAIL', excerpt='failure', source_sha='b' * 40), d6(), None, {}), 'PUBLISH')
 
@@ -2460,8 +2452,7 @@ class TaskAdvancePublishTests(unittest.TestCase):
                       'recorded_result_head': first['head']}
         second = task_advance._publish_task(
             {'task_id': self.TASK_ID, 'developer': {'write_paths': self.WRITE_PATHS}},
-            d6_binding, self.EXECUTOR_TASK, pre_pr_gate=lambda _head, _branch: None,
-            git_runner=self.git_runner, gh_runner=self.gh,
+            d6_binding, self.EXECUTOR_TASK, git_runner=self.git_runner, gh_runner=self.gh,
             record_result_call=self.record_result)
         self.assertEqual(second, first)
         self.assertEqual(self.git(['rev-parse', 'HEAD'], cwd=self.root).strip(), first['head'])
@@ -2507,7 +2498,7 @@ class TaskAdvancePublishTests(unittest.TestCase):
                         {'task_id': self.TASK_ID,
                          'developer': {'write_paths': self.WRITE_PATHS}},
                         d6_binding, self.EXECUTOR_TASK,
-                        pre_pr_gate=lambda _head, _branch: None, git_runner=self.git_runner,
+                        git_runner=self.git_runner,
                         gh_runner=self.gh, record_result_call=self.record_result)
                 self.assertEqual(caught.exception.code, 'PUBLISH_PROTECTED_BRANCH')
                 self.assertEqual(self.git(['rev-parse', 'HEAD'], cwd=self.root).strip(),
@@ -2979,7 +2970,11 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
         raise AssertionError('unexpected gh call')
 
     def _advance(self, *, pr_number=None, gh=None):
-        store = type('Store', (), {'get': lambda _self, _task_id: self.record})()
+        def record_published_pr(_store, _task_id, pr, head):
+            self.record['published_pr'] = {'pr': pr, 'head_sha': head}
+
+        store = type('Store', (), {'get': lambda _self, _task_id: self.record,
+                                  'record_published_pr': record_published_pr})()
         return task_advance.advance(task_id=self.record['task_id'], store=store,
             pr_number=pr_number, publish_gh_runner=gh or self._gh,
             github_get=lambda path: {'number': 41 if path == 'pulls/41' else 17,
@@ -3107,7 +3102,8 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
         answers fetch and merge so a reintroduced sync shows up in git_calls."""
         initial_head, committed_head, merged_head = 'a' * 40, 'b' * 40, 'c' * 40
         main_head = 'd' * 40
-        state = {'head': committed_head if committed_before else initial_head}
+        state = {'head': committed_head if committed_before else initial_head,
+                 'remote': initial_head}
         events = []
         git_calls = []
 
@@ -3128,7 +3124,7 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
             if args == ['diff', '--no-renames', '--name-only', '-z', 'HEAD']:
                 return result(args, output=b'' if committed_before else b'allowed.txt\0')
             if args == ['ls-remote', '--heads', 'origin', 'refs/heads/feature/task']:
-                return result(args, output=f'{initial_head}\trefs/heads/feature/task\n'.encode())
+                return result(args, output=f"{state['remote']}\trefs/heads/feature/task\n".encode())
             if args == ['ls-remote', '--heads', 'origin', 'refs/heads/main']:
                 return result(args, output=f'{main_head}\trefs/heads/main\n'.encode())
             if args == ['cat-file', '-e', f'{main_head}^{{commit}}']:
@@ -3180,6 +3176,7 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
                 events.append(('abort', tuple(args)))
                 return result(args)
             if args == ['push', 'origin', 'HEAD:refs/heads/feature/task']:
+                state['remote'] = state['head']
                 events.append(('push', state['head']))
                 return result(args)
             raise AssertionError(f'unexpected git call: {args}')
@@ -3202,7 +3199,6 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
             # The fake D6 root is not a directory; the graft check reads a real one.
             with patch.object(task_advance.task_completion, '_reject_legacy_grafts'):
                 value = task_advance._publish_task(record, binding, '3' * 32,
-                    pre_pr_gate=lambda _head, _branch: None,
                     git_runner=git, gh_runner=gh, record_result_call=record_result)
         except task_advance._PublishRefusal as exc:
             value = exc.code
@@ -4995,8 +4991,16 @@ class TaskAdvanceRepeatedVerdictPostTests(unittest.TestCase):
 class TaskAdvanceUnusableReviewTests(unittest.TestCase):
     """#1105: one safe redispatch on the same head, then a named stop."""
 
+    def setUp(self):
+        # The real receipt store survives between advances, so the fake one must
+        # too; otherwise every advance looks like the refusal's first re-run.
+        self.reruns = {}
+
     def _advance(self, store, *, comments=(), pr=PR, dispatch=None):
         dispatched, reads = [], []
+        contract = 'd' * 64
+        store.record.setdefault('task_binding', {'contract_digest': contract})
+        reruns = self.reruns
 
         def github_get(path):
             reads.append(path)
@@ -5006,6 +5010,22 @@ class TaskAdvanceUnusableReviewTests(unittest.TestCase):
                 return list(comments)
             return green_linux_ci(path, pr)
 
+        def read_receipt(*, store, task_id, claim):
+            receipt = {'task_id': task_id, 'pr': claim.get('pr'),
+                       'head': claim.get('head_sha'), 'version': claim.get('version'),
+                       'reviewer_task': claim.get('reviewer_task'),
+                       'failure_reason': claim.get('failure_reason'),
+                       'not_a_verdict': True, 'contract_digest': contract}
+            if claim.get('version') in reruns:
+                receipt['rerun'] = {'version': reruns[claim['version']], 'at': 'then'}
+            elif reruns:
+                receipt['automatic_rerun'] = True
+            return receipt
+
+        def mark_rerun(*, store, task_id, claim, contract_digest, rerun_version):
+            reruns[claim['version']] = rerun_version
+            return True
+
         def default_dispatch(**kwargs):
             return {'state': 'COMPLETED', 'verdict': 'FAIL'}
 
@@ -5014,7 +5034,11 @@ class TaskAdvanceUnusableReviewTests(unittest.TestCase):
             return (dispatch or default_dispatch)(**kwargs)
 
         with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
-             patch.object(task_advance, '_review_outcomes', return_value=[]):
+             patch.object(task_advance, '_review_outcomes', return_value=[]), \
+             patch.object(review_dispatch, 'read_refusal_receipt',
+                          side_effect=read_receipt), \
+             patch.object(review_dispatch, 'mark_refusal_rerun',
+                          side_effect=mark_rerun):
             result = task_advance.advance(task_id=TASK, store=store, pr_number=17,
                                           github_get=github_get,
                                           dispatch_review_call=record_dispatch)
@@ -5104,7 +5128,9 @@ class TaskAdvanceUnusableReviewTests(unittest.TestCase):
         self.assertEqual(again, [])
         self.assertEqual(second['step'], 'REVIEW_UNUSABLE_STOPPED')
         self.assertEqual(second['next'], 'REVIEW_UNUSABLE_STOPPED')
-        self.assertEqual(second['codes'], ['REVIEW_UNUSABLE_STOPPED', 'VERDICT_NOT_JSON'])
+        self.assertEqual(second['codes'], ['REVIEW_UNUSABLE_STOPPED',
+                                           task_advance.REVIEW_RERUN_ALREADY_DONE,
+                                           'VERDICT_NOT_JSON'])
         self.assertFalse(any(path.startswith('issues/') for path in reads))
 
 
@@ -6679,7 +6705,7 @@ class SplitVsAdvanceTests(unittest.TestCase):
         """The action each re-check guarded: the log entry right after it."""
         return [log[index + 1] for index, item in enumerate(log[:-1]) if item[0] == 'check']
 
-    # Publish: git add, git commit, git push, the pre-PR EC2 run, gh pr create.
+    # Publish: git add, git commit, git push, gh pr create.
 
     def publish_case(self):
         base = tempfile.mkdtemp(dir=self.tmp)
@@ -6862,7 +6888,7 @@ class SplitVsAdvanceTests(unittest.TestCase):
         self.assertEqual(len(opened), 1)
         steps = self.guarded(log)
         self.assertEqual(steps, [('git', 'add'), ('git', 'commit'), ('git', 'push'),
-                                 ('ec2', 'remote-test'), ('gh', 'pr create')])
+                                 ('gh', 'pr create')])
         self.assertEqual(store.checks, len(steps))
         for at, step in enumerate(steps, start=1):
             with self.subTest(step=step, injection='split'):
@@ -7081,7 +7107,7 @@ class EndVsAdvanceTests(unittest.TestCase):
             record_lineage(self.real, child, dict(line, state=state, reason=self.REASON))
         return inject
 
-    # Publish: git add, git commit, git push, the pre-PR EC2 run, gh pr create.
+    # Publish: git add, git commit, git push, gh pr create.
 
     def ended_publish_case(self):
         case = self.publish_case()
@@ -7094,7 +7120,7 @@ class EndVsAdvanceTests(unittest.TestCase):
         self.assertEqual(len(opened), 1)
         steps = self.guarded(log)
         self.assertEqual(steps, [('git', 'add'), ('git', 'commit'), ('git', 'push'),
-                                 ('ec2', 'remote-test'), ('gh', 'pr create')])
+                                 ('gh', 'pr create')])
         self.assertEqual(store.checks, len(steps))
         for at, step in enumerate(steps, start=1):
             with self.subTest(step=step, injection='end'):
@@ -7349,7 +7375,7 @@ class SplitRootVsAdvanceTests(unittest.TestCase):
         self.assertEqual(self.real.get(root)['lineage']['state'], 'PARKED')
         self.assertEqual(self.real.get(fresh)['lineage']['state'], 'OPEN')
 
-    # Publish: git add, git commit, git push, the pre-PR EC2 run, gh pr create.
+    # Publish: git add, git commit, git push, gh pr create.
 
     def test_a_root_split_at_each_publish_step_is_refused(self):
         baseline, log, opened, store = self.run_publish(self.publish_case())
@@ -7357,7 +7383,7 @@ class SplitRootVsAdvanceTests(unittest.TestCase):
         self.assertEqual(len(opened), 1)
         steps = self.guarded(log)
         self.assertEqual(steps, [('git', 'add'), ('git', 'commit'), ('git', 'push'),
-                                 ('ec2', 'remote-test'), ('gh', 'pr create')])
+                                 ('gh', 'pr create')])
         self.assertEqual(store.checks, len(steps))
         for at, step in enumerate(steps, start=1):
             with self.subTest(step=step, injection='split'):

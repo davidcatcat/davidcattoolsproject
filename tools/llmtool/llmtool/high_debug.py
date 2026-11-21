@@ -251,14 +251,39 @@ def _usage_from_events(events_raw):
     return fields
 
 
-def _session_observed(thread_id, sessions_dir=None):
+def _session_observed(thread_id, sessions_dir=None, codex_home=None):
     """Read only model/effort metadata from bounded, regular rollout files."""
     if type(thread_id) is not str or not thread_id:
         return 'UNKNOWN', 'UNKNOWN'
-    root = Path(sessions_dir) if sessions_dir is not None else Path.home() / '.codex' / 'sessions'
+    if sessions_dir is not None:
+        root = Path(sessions_dir)
+    else:
+        home = codex_home if codex_home is not None else os.environ.get('CODEX_HOME')
+        if home and isinstance(home, (str, Path)) and (not isinstance(home, str) or home.strip()):
+            home_dir = Path(os.path.expanduser(home))
+        else:
+            home_dir = Path.home() / '.codex'
+        root = home_dir / 'sessions'
+
+    # The Codex home path (and every ancestor) must contain no symlink, with no
+    # exempt directories. The explicit sessions_dir override is test-only (the
+    # launch path refuses it), so only its own root is checked below.
+    if sessions_dir is None:
+        check_path = root
+        while True:
+            try:
+                st = check_path.lstat()
+                if stat.S_ISLNK(st.st_mode):
+                    return 'UNKNOWN', 'UNKNOWN'
+            except OSError:
+                return 'UNKNOWN', 'UNKNOWN'
+            if check_path.parent == check_path:
+                break
+            check_path = check_path.parent
+
     try:
         root_stat = root.lstat()
-        if root.is_symlink() or not stat.S_ISDIR(root_stat.st_mode):
+        if not stat.S_ISDIR(root_stat.st_mode):
             return 'UNKNOWN', 'UNKNOWN'
     except OSError:
         return 'UNKNOWN', 'UNKNOWN'
@@ -267,8 +292,14 @@ def _session_observed(thread_id, sessions_dir=None):
     matched = False
     try:
         for current, dirs, files in os.walk(root, followlinks=False):
-            dirs[:] = [name for name in dirs
-                       if not (Path(current) / name).is_symlink()]
+            for name in dirs:
+                dir_path = Path(current) / name
+                try:
+                    if dir_path.is_symlink():
+                        return 'UNKNOWN', 'UNKNOWN'
+                except OSError:
+                    return 'UNKNOWN', 'UNKNOWN'
+
             for name in files:
                 if not (name.startswith('rollout-') and
                         name.endswith('-' + thread_id + '.jsonl')):
@@ -298,23 +329,71 @@ def _session_observed(thread_id, sessions_dir=None):
                 if len(raw) > _SESSION_READ_LIMIT:
                     return 'UNKNOWN', 'UNKNOWN'
                 matched = True
-                for line in raw.decode('utf-8', 'replace').split('\n'):
+                meta_seen = False
+                model_seen = False
+                lines = raw.decode('utf-8', 'replace').split('\n')
+                # A single terminal newline is allowed; any other empty line is
+                # malformed JSON and makes the whole file UNKNOWN.
+                if lines and lines[-1] == '':
+                    lines.pop()
+                for line in lines:
                     try:
                         record = json.loads(line)
                     except (TypeError, ValueError):
-                        continue
+                        return 'UNKNOWN', 'UNKNOWN'
                     if type(record) is not dict:
+                        return 'UNKNOWN', 'UNKNOWN'
+                    record_type = record.get('type')
+                    is_meta = record_type in ('session_meta', 'session_metadata')
+                    is_context = record_type == 'turn_context'
+                    if is_meta or is_context:
+                        payload = record.get('payload')
+                        if not isinstance(payload, dict):
+                            return 'UNKNOWN', 'UNKNOWN'
+                    else:
+                        if sessions_dir is None:
+                            continue
+                        payload = record.get('payload')
+                        if not isinstance(payload, dict):
+                            payload = record
+                        if 'model' not in payload and 'model' not in record:
+                            continue
+
+                    session_id = payload.get('id') or payload.get('session_id')
+                    if not session_id:
+                        session_id = record.get('id') or record.get('session_id')
+
+                    if session_id is not None and session_id != thread_id:
+                        return 'UNKNOWN', 'UNKNOWN'
+                    if is_meta:
+                        if sessions_dir is None and not session_id:
+                            return 'UNKNOWN', 'UNKNOWN'
+                        meta_seen = True
+
+                    model = payload.get('model')
+                    if model is None:
+                        model = record.get('model')
+                    effort = payload.get('effort', payload.get('reasoning_effort'))
+                    if effort is None:
+                        effort = record.get('effort', record.get('reasoning_effort'))
+
+                    if effort is not None and type(effort) is not str:
+                        return 'UNKNOWN', 'UNKNOWN'
+                    if is_meta and model is None:
+                        # The session metadata may carry only the session id; the
+                        # model and effort then come from a later turn_context.
                         continue
-                    containers = [record]
-                    if type(record.get('payload')) is dict:
-                        containers.append(record['payload'])
-                    for container in containers:
-                        model = container.get('model')
-                        effort = container.get('effort', container.get('reasoning_effort'))
-                        if type(model) is str:
-                            models.add(model)
-                        if type(effort) is str:
-                            efforts.add(effort)
+                    if type(model) is not str or not model:
+                        return 'UNKNOWN', 'UNKNOWN'
+
+                    models.add(model)
+                    efforts.add(effort if type(effort) is str else 'UNKNOWN')
+                    model_seen = True
+
+                # The thread id is bound by a matching session metadata record
+                # (the explicit sessions_dir override keeps its older layout).
+                if not model_seen or (sessions_dir is None and not meta_seen):
+                    return 'UNKNOWN', 'UNKNOWN'
     except OSError:
         return 'UNKNOWN', 'UNKNOWN'
     if not matched:
@@ -1056,7 +1135,7 @@ def _launch_settings(role, model):
         raise refused from None
 
 
-def _run_codex(*, prompt, cwd, output_path, model=_CODEX_MODEL):
+def _run_codex(*, prompt, cwd, output_path, model=_CODEX_MODEL, codex_home=None):
     from . import codex_direct_developer
     model, timeout = _launch_settings('codex-debug', model)
     argv =['codex', 'exec', '--ignore-user-config', '--ignore-rules',
@@ -1067,8 +1146,11 @@ def _run_codex(*, prompt, cwd, output_path, model=_CODEX_MODEL):
         argv.extend(('-c', setting))
     argv.extend(('-s', 'read-only', '--json', '-o', output_path, '-'))
     with tempfile.TemporaryDirectory(prefix='llmtool-high-debug-tmp-') as tmpdir:
+        env = codex_direct_developer._environment(tmpdir)
+        if codex_home is not None:
+            env['CODEX_HOME'] = str(codex_home)
         return subprocess.run(argv, input=prompt.encode('utf-8'), cwd=cwd,
-            env=codex_direct_developer._environment(tmpdir), stdout=subprocess.PIPE,
+            env=env, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, check=False, timeout=timeout)
 
 
@@ -1242,6 +1324,14 @@ def _report_rejection(code, checks, byte_count, report, hits=()):
     return stored
 
 
+def completion_event_id(task_id, head, report_sha256, d6=None):
+    """Identify the report event for one Debug attempt."""
+    keys = ('HIGH_DEBUG', task_id, head, report_sha256)
+    if d6 is not None:
+        keys += (d6,)
+    return hashlib.sha256('\0'.join(keys).encode()).hexdigest()[:32]
+
+
 def _d6_name(executor_task, attempt, head):
     """A D6 id unique per attempt that fits the lifecycle's 96-character id."""
     prefix = executor_task
@@ -1379,17 +1469,16 @@ def _debug_entry_used(entry):
         report = entry.get('report')
         if type(report) is not str:
             return True
+        usage = entry.get('usage')
+        if type(usage) is dict and any(type(tokens) is int and tokens > 0
+                                       for tokens in usage.values()):
+            return True
         return not (report in _DEBUG_NOT_STARTED or _prelaunch_refused(entry, report))
     return True
 
 
 def _admit_debug(task, entries):
-    """O2, D3: one AI Debug per ROOT or REPLAN Task; one per child within the lineage group.
-
-    #2367: policy group_debug_max is shared by the children of a lineage and
-    each child owns parent_debug_max of it; this first check sees the Task's
-    own entries only, the group is counted under the lock (_reserve_debug).
-    """
+    """Preflight the local entries before counting the lineage under lock."""
     from . import repair_policy
     try:
         policy = repair_policy.load_policy()
@@ -1408,13 +1497,11 @@ def _admit_debug(task, entries):
 
 
 def _debug_kind_and_key(store, task):
-    """(lineage kind, lock key): a split child locks on its ROOT, others on their chain."""
+    """Return the lineage kind and shared Debug lock key."""
     from . import lineage_counts
     lineage = task.get('lineage')
     kind = lineage.get('kind') if type(lineage) is dict else 'root'
-    if kind == 'child':
-        return kind, lineage.get('lineage_id')
-    return kind, lineage_counts.chain_key(store, task)
+    return kind, lineage_counts.debug_lineage_key(store, task)
 
 
 def _read_task(store, task_id):
@@ -1424,65 +1511,6 @@ def _read_task(store, task_id):
     except Exception:
         return None
     return task if type(task) is dict and task.get('task_id') == task_id else None
-
-
-def _group_children(records, root_id, line):
-    """Every child ID of the ROOT root_id, or None when the group is in doubt.
-
-    Codex security v91 on PR #2381 (CWE-841): a ROOT's 'splits' lists only the
-    children committed since Owner B, and a child written before Owner B has no
-    entry there (task_store keeps that legacy shape). So the group is every
-    child the splits list plus every stored Task whose lineage is a child of
-    root_id, in any state, as the split COMMIT counts them. A malformed split
-    entry, child ID or Task lineage is doubt.
-    """
-    children = set()
-    for split in line.get('splits', []):
-        listed = split.get('children') if type(split) is dict else None
-        if type(listed) is not list or any(type(child) is not str for child in listed):
-            return None
-        children.update(listed)
-    for other_id, other in records.items():
-        other_line = other.get('lineage')
-        if other_line is None:
-            continue
-        if type(other_line) is not dict:
-            return None
-        if other_line.get('kind') == 'child' and other_line.get('lineage_id') == root_id:
-            children.add(other_id)
-    return children
-
-
-def _group_debug_used(store, task, entries):
-    """Debugs used by the child and every other child of its ROOT; doubt is UNKNOWN.
-
-    The other children are found by a store scan, so a legacy child that its
-    ROOT's 'splits' does not list still counts; a scan in doubt is UNKNOWN,
-    which the policy treats as the limit. Run it under the ROOT lock.
-    """
-    from . import lineage_counts
-    from .repair_policy import UNKNOWN
-    root_id = task['lineage'].get('lineage_id')
-    root = _read_task(store, root_id)
-    line = root.get('lineage') if root else None
-    if (type(line) is not dict or type(line.get('splits', [])) is not list or
-            type(entries) is not list):
-        return UNKNOWN
-    records = lineage_counts.store_records(store)
-    children = _group_children(records, root_id, line) if records is not None else None
-    if children is None:
-        return UNKNOWN
-    children.discard(task.get('task_id'))
-    used = sum(1 for entry in entries if _debug_entry_used(entry))
-    for child_id in sorted(children):
-        child = records.get(child_id)
-        if type(child) is not dict or child.get('task_id') != child_id:
-            return UNKNOWN
-        other = child.get('high_debug', [])
-        if type(other) is not list:
-            return UNKNOWN
-        used += sum(1 for entry in other if _debug_entry_used(entry))
-    return used
 
 
 def _reserve_debug(store, task_id, entries, reservation):
@@ -1506,15 +1534,9 @@ def _reserve_debug(store, task_id, entries, reservation):
                 current.get('high_debug', []) != entries):
             _refuse('HIGH_DEBUG_BUSY')
         kind = _debug_kind_and_key(store, current)[0]
-        used = (_group_debug_used(store, current, entries) if kind == 'child' else
-                lineage_counts.chain_debug_used(store, current, entries, _debug_entry_used)[0])
-        # #2367: a split child is its own work item; it owns one Debug
-        # (its own entries) within the lineage's shared group limit.
-        own = (sum(1 for entry in entries if _debug_entry_used(entry))
-               if kind == 'child' else used)
+        used, _ = lineage_counts.chain_debug_used(store, current, entries, _debug_entry_used)
         try:
-            code = repair_policy.admit_debug(kind=kind, parent_debug_used=own,
-                                             group_debug_used=used, policy=policy)
+            code = repair_policy.admit_debug(kind=kind, group_debug_used=used, policy=policy)
         except LLMToolError:
             _refuse('HIGH_DEBUG_LINEAGE_INVALID')
         if code is not None:
@@ -1655,7 +1677,7 @@ _CODEX_ATTEMPT_UNCONFIRMED_DETAIL = (_CLAUDE_ROUTE_REFUSED_DETAIL +
 def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_number=None, family,
                    failed_corrections=None, early_reason=None, evidence=None,
                    runner=None, create_d6=None, repo_root=None,
-                   read_registration=None, sessions_dir=None,
+                   read_registration=None, sessions_dir=None, codex_home=None,
                    route='codex', claude_fallback=None, codex_attempt=None):
     # PR #2222 v91 (CWE-862): the Claude route needs this run's recorded Codex
     # quota or login failure (a grant from run_high_debug_with_fallback). The
@@ -1664,6 +1686,8 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
         if not _consume_claude_grant(claude_fallback, task_id):
             _refuse(CLAUDE_ROUTE_REFUSED, _CLAUDE_ROUTE_REFUSED_DETAIL)
     elif claude_fallback is not None:
+        _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
+    if runner is None and sessions_dir is not None:
         _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
     # PR #2222 v92: an attempt record is only for the Codex route, belongs to
     # this Task and starts empty; only the Codex attempt below fills it in.
@@ -1831,6 +1855,8 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
         head=head, d6=d6, code='HIGH_DEBUG_RESERVED', observed='UNKNOWN', effort='UNKNOWN',
         usage='UNKNOWN', recorded_at=reserved_at, model_requested=model_requested,
         rules_sha256=rules_sha256, no_pr=no_pr)
+    if no_pr:
+        reservation['diagnosis_issue'] = issue_number
     reservation['status'] = 'RESERVED'
     index = _reserve_debug(store, task_id, entries, reservation)
 
@@ -1846,6 +1872,8 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
                 observed=observed, effort=effort, usage=usage,
                 recorded_at=recorded_at, model_requested=model_requested,
                 rules_sha256=rules_sha256, no_pr=no_pr)
+        if no_pr:
+            entry['diagnosis_issue'] = issue_number
         try:
             store.finalize_high_debug(task_id, index, entry)
         except Exception:
@@ -1895,7 +1923,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
             actual_runner = functools.partial(_run_claude, config_dir=config_dir,
                                               model=debug_model)
         else:
-            actual_runner = functools.partial(_run_codex, model=debug_model)
+            actual_runner = functools.partial(_run_codex, model=debug_model, codex_home=codex_home)
         result = actual_runner(prompt=prompt, cwd=diagnosis_root or d6, output_path=output_path)
         if route == 'codex':
             if result.returncode != 0:
@@ -1911,7 +1939,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
                 raise _AttemptFailed('HIGH_DEBUG_RUN_FAILED')
             raw = Path(output_path).read_bytes()
             thread_id = _thread_id_from_events(events_raw)
-            observed, effort = _session_observed(thread_id, sessions_dir)
+            observed, effort = _session_observed(thread_id, sessions_dir, codex_home=codex_home)
             usage = _usage_from_events(events_raw)
             report = raw.decode('utf-8')
         else:
@@ -1994,10 +2022,11 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
        'rules_sha256':rules_sha256}
     if no_pr:
         entry['no_pr'] = True
+        entry['diagnosis_issue'] = issue_number
     store.finalize_high_debug(task_id, index, entry)
     posted = _post_record(entry, target_number, repo_root, task_id, account=account, issue_only=no_pr is True)
     payload=entry['report_sha256'].encode()
-    event_id=hashlib.sha256(('HIGH_DEBUG\0'+task_id+'\0'+head+'\0'+entry['report_sha256']).encode()).hexdigest()[:32]
+    event_id = completion_event_id(task_id, head, entry['report_sha256'], d6)
     result=store.record_completion_event(task_id,event_id=event_id,run_id=task['run_id'],
        session_id='high-debug-'+d6,source='HIGH_DEBUG',source_sha=head,sequence=len(entries),
        payload_sha256=hashlib.sha256(payload).hexdigest())

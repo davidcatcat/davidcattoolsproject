@@ -1,3 +1,4 @@
+import copy
 import contextlib
 import io
 import json
@@ -10,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, patch
 
+from llmtool.task_store import TaskStoreConflict
 from llmtool import (review_dispatch, skill_ledger, skill_manifest, task_completion,
                      task_submission_cli, worker_dispatch)
 from llmtool.developer_routes import (RouteError, resolve_route_max_diff_bytes,
@@ -156,21 +158,26 @@ class AgyRouteWiringTests(unittest.TestCase):
                 return dict(self.task)
 
             def compare_and_update(self, _task_id, *, expected, **updates):
+                if any(self.task.get(key) != value for key, value in expected.items()):
+                    raise TaskStoreConflict()
+                if (fail_success_persist and
+                        updates.get('developer', {}).get('state') == 'DEVELOPER_RESPONDED'):
+                    raise RuntimeError('simulated persistence rejection')
                 store_writes.append(updates)
-                self.task.update(updates)
-                return dict(self.task)
+                self.task.update(copy.deepcopy(updates))
+                return copy.deepcopy(self.task)
 
             def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
                                            expected, **updates):
                 return self.compare_and_update(task_id, expected=expected, **updates)
 
-            def update(self, _task_id, **updates):
-                if (fail_success_persist and
-                        updates.get('developer', {}).get('state') == 'DEVELOPER_RESPONDED'):
-                    raise RuntimeError('simulated persistence rejection')
-                store_writes.append(updates)
-                self.task.update(updates)
-                return dict(self.task)
+            def prepare_direct_dispatch(self, task_id, *, expected_developer, developer):
+                return self.compare_and_update(task_id, expected={'developer': expected_developer},
+                    developer=dict(developer, dispatch_boundary='PREPARED'))
+
+            def authorize_direct_spawn(self, task_id, *, expected_developer):
+                return self.compare_and_update(task_id, expected={'developer': expected_developer},
+                    developer=dict(expected_developer, dispatch_boundary='STARTING'))
 
         if store is None:
             store = Store()
@@ -202,7 +209,7 @@ class AgyRouteWiringTests(unittest.TestCase):
             task, registration, snapshot.head, test_policy='LOCAL')
         usage = ({'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5}
                  if usage is None else usage)
-        result = SimpleNamespace(session_id=session_id, model=verified_model, exit_code=0,
+        result = SimpleNamespace(session_id=session_id, model=verified_model, exit_code=0, summary='',
             stdout_sha256='e' * 64, elapsed_ms=42, cleanup_status='CONFIRMED', usage=usage)
         allowed = SimpleNamespace(allowed=True, reason_code='OWNER_ASSIGNMENT_MATCHED')
         denied = SimpleNamespace(allowed=False, reason_code='OWNER_ASSIGNMENT_MISMATCH')
@@ -235,12 +242,13 @@ class AgyRouteWiringTests(unittest.TestCase):
             bind_called = True
             return bind_result
 
-        def route_runner(_route, _request, *, gate, **_kwargs):
+        def route_runner(_route, _request, *, gate, on_launch, **_kwargs):
             prompts.append(_request['prompt'])
             gate_result = gate()
             if gate_result is False or getattr(gate_result, 'allowed', False) is not True:
                 raise RouteError('AGY_DISPATCH_DENIED',
                                  blocked_reason='OWNER_DISPATCH_DENIED')
+            on_launch()
             if route_error is not None:
                 raise route_error
             if audit is not None:
@@ -286,7 +294,7 @@ class AgyRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli.task_completion, '_worktree_diff',
                           side_effect=lambda *_args, **_kwargs:
                               diff_calls.append(True) or
-                              (changed_paths or ['src.py'], diff_bytes)), \
+                              (changed_paths if changed_paths is not None else ['src.py'], diff_bytes)), \
              patch.object(task_submission_cli, '_assignment_paths',
                           return_value=(read_paths or ['src.py'], ['src.py'])), \
              patch.object(task_submission_cli, '_remote_receipt_test_policy', return_value='LOCAL'), \
@@ -603,6 +611,27 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertNotIn('native_session_binding', task['developer']['execution'])
         self.assertEqual(inbox_events, [{'task_id': 'a' * 32,
                                          'executor_task_id': 'executor-d6'}])
+
+    def test_agy_empty_response_and_empty_diff_are_blocked(self):
+        decision = worker_dispatch.PolicyDecision(
+            worker_key='agy', allowed=True, reason_code='OWNER_POLICY_ALLOWED',
+            policy_sha256='f' * 64)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve() / 'tasks'
+            with patch.object(task_submission_cli, '_agy_developer_profile',
+                              return_value=('gemini-test', 'high')):
+                status, task, events, _ = self._run_agy_delegate(
+                    diff_bytes=b'', changed_paths=[], store=TaskStore(root),
+                    decisions=(decision,) * 4)
+            self.assertEqual(task, TaskStore(root).get('a' * 32))
+        developer = task['developer']
+        self.assertEqual(status, 1)
+        self.assertEqual(developer['state'], 'BLOCKED')
+        self.assertEqual(developer['error_code'], 'AGY_EMPTY_RESULT')
+        self.assertIsNone(developer['artifact'])
+        self.assertEqual(developer['execution']['process_exit_code'], 0)
+        self.assertEqual(developer['execution']['stdout_sha256'], 'e' * 64)
+        self.assertEqual(events, [])
 
     def test_agy_screened_diff_is_reported_as_sensitive_output(self):
         marker = 'pass' + 'word'

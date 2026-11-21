@@ -3,6 +3,7 @@
 import dataclasses
 import contextlib
 import copy
+from functools import wraps
 import hashlib
 import io
 import json
@@ -35,6 +36,7 @@ from .task_store import (TaskStore, TaskStoreConflict, new_id, _json_bytes,
 from . import active_pm_inbox
 from . import remote_test
 from . import task_completion
+from . import direct_reassignment
 from . import opencode_direct_developer
 from . import codex_direct_developer
 from . import worker_dispatch
@@ -894,6 +896,8 @@ def add_task_submission_parsers(actions):
                           help='Codex: text proposal (default) or direct D6 development')
     delegate.add_argument('--background', action='store_true',
                           help='run a direct Codex or OpenCode Developer in a detached child')
+    delegate.add_argument('--reassign-from', metavar='ASSIGNMENT_ID',
+                          help='replace a verified AGY or OpenCode assignment in its existing D6')
     delegate.add_argument('--selection-source', required=True, choices=('PM', 'USER'))
     delegate.add_argument('--executor-task', required=True,
                           help='registered D6 Executor task id; root/source/identity are read from its record')
@@ -906,7 +910,7 @@ def add_task_submission_parsers(actions):
                                 'Claude and AGY direct Tasks, validated when given'))
     delegate.add_argument('--high-debug-ref',
                           help='trusted GitHub Issue comment URL of the confirmed High Debug '
-                               'diagnosis that review repair #2 needs')
+                               'diagnosis for a review repair that requires RCA')
     delegate.add_argument('--high-debug-task',
                           help='32-character Task ID containing the confirmed High Debug diagnosis')
     delegate.add_argument('--high-debug-family',
@@ -2301,7 +2305,7 @@ def run_task_claude_bind(args, *, store=None, stdout=None):
         registration.source_sha, registration.result_sha, '--'), limit=1024 * 1024)
     changed_paths = sorted(set(path for path in
         changed_raw.decode('utf-8', 'strict').split('\x00') if path))
-    if not changed_paths or len(changed_paths) > 32:
+    if not changed_paths or len(changed_paths) > DEVELOPER_TASK_MAX_PATHS:
         raise LLMToolError('Claude D6 binding requires a bounded committed result diff')
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if not set(changed_paths).issubset(write_paths):
@@ -2954,6 +2958,12 @@ class _DeveloperSourceFiles(dict):
         self.regular_paths = set()
 
 
+# #2281 (Owner 2026-11-19): a Developer Task scope may list at most this many
+# read paths and this many write paths. The CI workflow-grant path list
+# (authorization_workflow_grant.MAX_PATHS_PER_GRANT) is a separate rule.
+DEVELOPER_TASK_MAX_PATHS = 1024
+
+
 def _assignment_paths(read_paths, write_paths):
     def valid(path):
         return (type(path) is str and 0 < len(path) <= 512 and
@@ -2967,7 +2977,8 @@ def _assignment_paths(read_paths, write_paths):
         invalid('PATH_LIST_INVALID')
     if not read_paths or not write_paths:
         invalid('PATH_LIST_EMPTY')
-    if len(read_paths) > 32 or len(write_paths) > 32:
+    if (len(read_paths) > DEVELOPER_TASK_MAX_PATHS or
+            len(write_paths) > DEVELOPER_TASK_MAX_PATHS):
         invalid('PATH_LIMIT_EXCEEDED')
     for path in read_paths + write_paths:
         if type(path) is str and (path.startswith('/') or '..' in path.split('/') or
@@ -4005,8 +4016,6 @@ def _remote_task_test_paths(task, *, read_paths=()):
                            '/' not in path[len('tools/llmtool/tests/'): ]}
         if task_test_paths and task_test_paths != set(paths):
             return ()
-    if len({Path(path).stem for path in paths}) > remote_test._MAX_REMOTE_MODULES:
-        return ()
     admitted_task = dict(task)
     admitted_task['completion'] = {'evidence': {'tests': [{'path': path} for path in paths]}}
     if set(remote_test._admitted_modules(admitted_task)) != {
@@ -4026,36 +4035,25 @@ def _matching_remote_test_receipt(task, *, executor_task, source_sha, paths):
     modules = tuple(sorted({Path(path).stem for path in paths}))
     if not modules:
         return None, 'REMOTE_TEST_RECEIPT_MISSING'
-    skipped = False
-    for receipt in task.get('remote_test_receipts', []):
-        if (type(receipt) is not dict or receipt.get('result') != 'PASS' or
-                receipt.get('task_id') != task.get('task_id') or
+    for receipt in reversed(task.get('remote_test_receipts', [])):
+        if (type(receipt) is not dict or receipt.get('task_id') != task.get('task_id') or
                 receipt.get('run_id') != task.get('run_id') or
                 receipt.get('executor_task') != executor_task or
-                receipt.get('source_sha') != source_sha or
-                type(receipt.get('modules')) is not list or
-                any(type(module) is not str for module in receipt['modules']) or
-                not set(modules).issubset(receipt['modules']) or
-                type(receipt.get('ran_total')) is not int or receipt['ran_total'] <= 0 or
-                receipt.get('failures') != [] or
-                type(receipt.get('final')) is not list or
-                len(receipt['final']) < len(receipt['modules']) or
-                type(receipt.get('receipt_digest')) is not str):
+                receipt.get('source_sha') != source_sha):
             continue
         digest_input = dict(receipt)
-        claimed = digest_input.pop('receipt_digest')
-        if claimed != hashlib.sha256(_json_bytes(digest_input)).hexdigest():
-            continue
-        if any(type(line) is str and re.search(r'\bskipp(?:ed|ing)?\b', line, re.I)
-               for line in receipt['final']):
-            skipped = True
-        if any(type(line) is not str or not (
-                line.endswith('OK') or
-                re.fullmatch(r'OK \(skipped=[1-9][0-9]{0,5}\)', line))
-               for line in receipt['final']):
-            continue
-        return receipt, None
-    return None, ('MAC_EVIDENCE_REQUIRED' if skipped else 'REMOTE_TEST_RECEIPT_MISSING')
+        claimed = digest_input.pop('receipt_digest', None)
+        if type(claimed) is not str or claimed != hashlib.sha256(_json_bytes(digest_input)).hexdigest():
+            break
+        if remote_test.pass_receipt_covers(receipt, modules):
+            return receipt, None
+        finals = receipt.get('final')
+        if type(finals) is list and any(
+                type(line) is str and re.search(r'\bskipp(?:ed|ing)?\b', line, re.I)
+                for line in finals):
+            return None, 'MAC_EVIDENCE_REQUIRED'
+        break
+    return None, 'REMOTE_TEST_RECEIPT_MISSING'
 
 
 def _direct_result_tests(task, evidence, result, developer, *, config_loader=None):
@@ -4378,7 +4376,7 @@ def _store_accepts_direct_execution(developer):
             type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None or
             not _bounded_int(execution['elapsed_ms'], 0, 86_400_000) or
             not _bounded_int(execution['source_bytes'], 0, 2 * 1024 * 1024) or
-            not _bounded_int(execution['source_file_count'], 1, 32) or
+            not _bounded_int(execution['source_file_count'], 1, DEVELOPER_TASK_MAX_PATHS) or
             (manifest is not None and
              (type(manifest) is not str or
               re.fullmatch(r'[0-9a-f]{64}', manifest) is None)) or
@@ -4910,26 +4908,64 @@ def _delegate_timeout(args, route):
             f'{exc.code}: --timeout refused for the {route} Developer route') from None
 
 
+def _serialize_direct_dispatch(run):
+    @wraps(run)
+    def invoke(args, *, store, **kwargs):
+        lease = (store.direct_dispatch_lease
+                 if _store_implements(store, 'direct_dispatch_lease') else None)
+        if getattr(args, 'reassign_from', None) is not None and not callable(lease):
+            raise LLMToolError('DIRECT_REASSIGN_LEASE_UNAVAILABLE')
+        with lease(args.task_id) if callable(lease) else contextlib.nullcontext():
+            old_assignment = getattr(args, 'reassign_from', None)
+            if old_assignment is None:
+                return run(args, store=store, **kwargs)
+            current = store.get(args.task_id).get('developer') or {}
+            history = current.get('direct_handoffs') or []
+            if (history and history[-1]['old_assignment'] == old_assignment and
+                    current.get('provider_profile') == args.provider and
+                    current.get('state') == 'DEVELOPER_RESPONDED'):
+                direct_reassignment.reconcile_claim(store, args.task_id, old_assignment)
+                return run_task_direct_result_event(args.task_id, args.executor_task, store=store)
+            result = run(args, store=store, **kwargs)
+            direct_reassignment.reconcile_claim(store, args.task_id, old_assignment)
+            return result
+    return invoke
+
+
+def _direct_reassignment_plan(args, store, task, registration, snapshot, profile,
+                              read_paths, write_paths):
+    if getattr(args, 'reassign_from', None) is None:
+        return None
+    return direct_reassignment.inspect(args, store, task, registration, snapshot,
+                                       profile, read_paths, write_paths)
+
+
+@_serialize_direct_dispatch
 def run_task_opencode_delegate(args, *, store, d6_binding=None):
     """Claim one PM-bound OpenCode run and capture its real scoped workspace diff."""
     timeout = _delegate_timeout(args, 'opencode')
     task = store.get(args.task_id)
     previous_developer = task.get('developer')
-    if (type(previous_developer) is dict and
+    reassigning = getattr(args, 'reassign_from', None) is not None
+    if (reassigning and type(previous_developer) is dict and
+            previous_developer.get('assignment_id') == args.reassign_from and
+            previous_developer.get('state') == 'DEVELOPER_RESPONDED'):
+        return run_task_direct_result_event(args.task_id, args.executor_task, store=store)
+    if (not reassigning and type(previous_developer) is dict and
             previous_developer.get('provider_profile') == 'opencode' and
             previous_developer.get('state') == 'DEVELOPER_DISPATCHING'):
-        _recover_direct_child_dispatch(
+        return _recover_direct_child_dispatch(
             args, task, previous_developer, store, expected_agent='opencode-developer')
     if (task['state'] != 'PM_RESPONDED' or not task['response'] or
             task['schema_version'] != 2):
         raise LLMToolError('task has no successful PM response')
-    if task['developer'] is not None:
+    if not reassigning and task['developer'] is not None:
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
     if getattr(args, 'context_stdin', False):
         raise LLMToolError('OpenCode reads only its registered task-local file scope')
     pm_assignment = task['pm_assignment']
     if args.selection_source == 'PM':
-        if (type(pm_assignment) is not dict or pm_assignment.get('route') != 'opencode' or
+        if (type(pm_assignment) is not dict or (not reassigning and pm_assignment.get('route') != 'opencode') or
                 pm_assignment.get('risk') != 'LOW'):
             raise LLMToolError('no validated low-risk OpenCode recommendation from the selected PM')
         if args.acceptance != pm_assignment['acceptance']:
@@ -4938,7 +4974,16 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
                               _delegate_d6_binding(args))
     if previous_developer is None:
         _reject_claude_reserved_d6(registration)
+        if ((getattr(registration, 'session_ref', None) or '').startswith('handoff-') and
+                registration.trusted_agent_id != direct_reassignment.AGENTS['opencode']):
+            raise LLMToolError('DIRECT_REASSIGN_D6_BINDING_MISMATCH')
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
+    reassignment = _direct_reassignment_plan(
+        args, store, task, registration, snapshot, 'opencode', read_paths, write_paths)
+    if reassignment is not None:
+        registration = reassignment.successor
+    repair_packet = (reassignment.repair_packet if reassignment is not None
+                     else getattr(args, 'repair_packet', None))
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
     acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
@@ -4950,13 +4995,21 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
     prompt_fields = dict(
         source_sha=snapshot.head, read_paths=read_paths,
         write_paths=write_paths, acceptance=acceptance, pm_goal=pm_goal,
-        repair_packet=getattr(args, 'repair_packet', None))
+        repair_packet=repair_packet)
     prompt = _opencode_developer_prompt(task, **prompt_fields)
     prompt_size = len(prompt.encode('utf-8'))
     if prompt_size > REQUEST_LIMIT:
         raise LLMToolError('OpenCode task prompt exceeds the supported size')
     _screen_text(prompt, REQUEST_LIMIT)
     model, steps = _opencode_developer_profile()
+    if reassignment is not None:
+        if not opencode_direct_developer.is_free_model(model):
+            raise LLMToolError('DIRECT_REASSIGN_OPENCODE_FREE_MODEL_REQUIRED')
+        if shutil.which('opencode') is None:
+            raise LLMToolError('DIRECT_REASSIGN_ALTERNATE_UNAVAILABLE')
+        decision = worker_dispatch.evaluate('opencode-developer', None, task['task_id'])
+        if not decision.allowed:
+            raise worker_dispatch.WorkerDispatchDenied(decision.reason_code)
     # #1502 WP-F: pin main and read the role cards before any Task write or
     # provider call; any pin or card failure refuses here (fail closed).
     card_prefix, card_prefix_sha256 = _developer_card_prefix(task, registration, 'opencode')
@@ -4965,8 +5018,11 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
     if prompt_size > REQUEST_LIMIT:
         raise LLMToolError('OPENCODE_SKILL_PROMPT_TOO_LARGE')
     _screen_text(prompt, REQUEST_LIMIT)
+    callback_policy = (direct_reassignment.test_policy(reassignment) if reassignment is not None
+                       else 'LOCAL')
     developer = {
-        'assignment_id': new_id(), 'selection_source': args.selection_source,
+        'assignment_id': reassignment.assignment if reassignment else new_id(),
+        'selection_source': args.selection_source,
         'state': 'DEVELOPER_PENDING', 'provider_profile': 'opencode',
         'provider_type': None, 'model': None,
         'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
@@ -4982,7 +5038,7 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         'execution': None, 'created_at': _timestamp(),
         'timeout_seconds': timeout,
         'direct_result_callback': _direct_result_callback(
-            task, registration, snapshot.head, test_policy='LOCAL'),
+            task, registration, snapshot.head, test_policy=callback_policy),
     }
     completion = {
         'state': 'WAITING_EXECUTOR', 'executor_task_id': registration.task_id,
@@ -5003,13 +5059,22 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
-            store.d6_bind_compare_and_update(
-                task['task_id'], executor_task_id=registration.task_id,
-                expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
-                          'completion': None},
-                developer=developer, completion=completion,
-            )))
+        if reassignment is not None:
+            claimed = _delegate_chain_gate(
+                args, store, (reassignment.original, snapshot),
+                lambda: direct_reassignment.claim(store, reassignment, developer, completion))
+            developer = copy.deepcopy(claimed['developer'])
+            completion = copy.deepcopy(claimed['completion'])
+        else:
+            packet_write = ({} if repair_packet is None else {
+                'repair_packet': start_failure.canonical(_validate_repair_packet(repair_packet))})
+            _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
+                store.d6_bind_compare_and_update(
+                    task['task_id'], executor_task_id=registration.task_id,
+                    expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
+                              'completion': None},
+                    developer=developer, completion=completion, **packet_write,
+                )))
     except TaskStoreConflict:
         raise LLMToolError(
             'developer assignment already exists; duplicate dispatch refused') from None
@@ -5018,8 +5083,10 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         developer.update(state='DEVELOPER_DISPATCHING', provider_type='opencode-cli',
                          model=model,
                          max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS)
-        dispatching_record = store.update(task['task_id'], developer=developer)
-        expected_developer = copy.deepcopy(dispatching_record['developer'])
+        dispatching_record = store.prepare_direct_dispatch(
+            task['task_id'], expected_developer=expected_developer, developer=developer)
+        developer = copy.deepcopy(dispatching_record['developer'])
+        expected_developer = copy.deepcopy(developer)
 
         def validate_prelaunch_d6_binding():
             current_registration, current_snapshot = task_completion.bind_executor_task(
@@ -5042,6 +5109,13 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
             binding_error_code='OPENCODE_D6_BINDING_CHANGED',
             marker_error_code='OPENCODE_ENV2_MARKER_INVALID',
             write_paths=write_paths)
+
+        def authorize_opencode_spawn():
+            nonlocal expected_developer
+            saved = store.authorize_direct_spawn(
+                task['task_id'], expected_developer=expected_developer)
+            expected_developer = copy.deepcopy(saved['developer'])
+            developer['dispatch_boundary'] = 'STARTING'
 
         def record_opencode_launch(pid, started_at, pgid):
             nonlocal expected_developer
@@ -5067,7 +5141,8 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
             write_paths=write_paths, prompt=prompt,
             dispatch_store=store, dispatch_task_id=task['task_id'], steps=steps,
             prelaunch_validate=validate_prelaunch_d6_binding, model=model,
-            launch_callback=record_opencode_launch, timeout_seconds=timeout)
+            launch_callback=record_opencode_launch,
+            spawn_authorization=authorize_opencode_spawn, timeout_seconds=timeout)
         _record_skill_delivery(task, registration, snapshot, 'opencode', model,
                                card_prefix_sha256, result)
     except opencode_direct_developer.DirectOpenCodeError as exc:
@@ -5095,9 +5170,13 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         else:
             developer.update(state='DEVELOPER_UNAVAILABLE',
                               error_code=exc.direct_opencode_code)
-        saved = store.compare_and_update(
-            task['task_id'], expected={'developer': expected_developer},
-            developer=developer)
+        if (exc.stopped_before_prompt and
+                (expected_developer.get('execution') or {}).get('status') == 'RUNNING'):
+            saved = store.record_direct_stop(
+                task['task_id'], expected_developer=expected_developer, developer=developer)
+        else:
+            saved = store.compare_and_update(
+                task['task_id'], expected={'developer': expected_developer}, developer=developer)
         _print(_task_view(saved))
         return 1
     except (KeyboardInterrupt, CLIHostTermination) as exc:
@@ -5375,6 +5454,7 @@ def _optional_agy_owner_ref(args):
     return owner_ref
 
 
+@_serialize_direct_dispatch
 def run_task_agy_delegate(args, *, store, route_runner=None):
     """Run the provider-neutral AGY adapter against its registered D6 task."""
     owner_ref = _optional_agy_owner_ref(args)
@@ -5385,15 +5465,20 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     timeout = _delegate_timeout(args, 'agy')
     task = store.get(args.task_id)
     previous_developer = task.get('developer')
-    if (type(previous_developer) is dict and
+    reassigning = getattr(args, 'reassign_from', None) is not None
+    if (reassigning and type(previous_developer) is dict and
+            previous_developer.get('assignment_id') == args.reassign_from and
+            previous_developer.get('state') == 'DEVELOPER_RESPONDED'):
+        return run_task_direct_result_event(args.task_id, args.executor_task, store=store)
+    if (not reassigning and type(previous_developer) is dict and
             previous_developer.get('provider_profile') == 'agy' and
             previous_developer.get('state') == 'DEVELOPER_DISPATCHING'):
-        _recover_direct_child_dispatch(
+        return _recover_direct_child_dispatch(
             args, task, previous_developer, store, expected_agent='agy-developer')
     if (task.get('state') != 'PM_RESPONDED' or not task.get('response') or
             task.get('schema_version') != 2):
         raise LLMToolError('task has no successful PM response')
-    if task.get('developer') is not None:
+    if not reassigning and task.get('developer') is not None:
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
     binding = task.get('task_binding')
     task_completion.validate_task_binding(
@@ -5401,17 +5486,26 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         contract_digest=binding.get('contract_digest') if type(binding) is dict else None)
     assignment = task.get('pm_assignment')
     if args.selection_source == 'PM':
-        if (type(assignment) is not dict or assignment.get('route') != 'agy' or
+        if (type(assignment) is not dict or (not reassigning and assignment.get('route') != 'agy') or
                 assignment.get('risk') != 'LOW' or args.acceptance != assignment.get('acceptance')):
             raise LLMToolError('no matching low-risk AGY recommendation from the selected PM route')
     registration, snapshot = _delegate_d6_binding(args)
     if previous_developer is None:
         _reject_claude_reserved_d6(registration)
+        if ((getattr(registration, 'session_ref', None) or '').startswith('handoff-') and
+                registration.trusted_agent_id != direct_reassignment.AGENTS['agy']):
+            raise LLMToolError('DIRECT_REASSIGN_D6_BINDING_MISMATCH')
     # A fresh Owner decision is required before creating the durable assignment.
     decision = worker_dispatch.evaluate('agy', owner_ref, task['task_id'])
     if not decision.allowed:
         raise worker_dispatch.WorkerDispatchDenied(decision.reason_code)
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
+    reassignment = _direct_reassignment_plan(
+        args, store, task, registration, snapshot, 'agy', read_paths, write_paths)
+    if reassignment is not None:
+        registration = reassignment.successor
+    repair_packet = (reassignment.repair_packet if reassignment is not None
+                     else getattr(args, 'repair_packet', None))
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
     acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
@@ -5434,7 +5528,6 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         'goal': pm_goal, 'acceptance': acceptance, 'read_paths': read_paths,
         'write_paths': write_paths,
     }
-    repair_packet = getattr(args, 'repair_packet', None)
     if repair_packet is not None:
         prompt_packet['untrusted_repair_reference'] = _validate_repair_packet(repair_packet)
     instructions = ('You are the AGY Developer for this bounded llmtool Task. Work only in the '
@@ -5458,9 +5551,11 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     if len(prompt.encode('utf-8')) > min(64 * 1024 - 1, agy_max_prompt_bytes):
         raise LLMToolError('AGY_SKILL_PROMPT_TOO_LARGE')
     provider_input_bytes = len(prompt.encode('utf-8'))
-    test_policy = _remote_receipt_test_policy(task, read_paths=read_paths)
+    test_policy = (direct_reassignment.test_policy(reassignment) if reassignment is not None
+                   else _remote_receipt_test_policy(task, read_paths=read_paths))
     developer = {
-        'assignment_id': new_id(), 'selection_source': args.selection_source,
+        'assignment_id': reassignment.assignment if reassignment else new_id(),
+        'selection_source': args.selection_source,
         'state': 'DEVELOPER_PENDING', 'provider_profile': 'agy',
         'provider_type': None, 'model': None,
         'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
@@ -5492,17 +5587,45 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
-            store.d6_bind_compare_and_update(task['task_id'],
-                executor_task_id=registration.task_id,
-                expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
-                          'completion': None}, developer=developer, completion=completion)))
+        if reassignment is not None:
+            claimed = _delegate_chain_gate(
+                args, store, (reassignment.original, snapshot),
+                lambda: direct_reassignment.claim(store, reassignment, developer, completion))
+            developer = copy.deepcopy(claimed['developer'])
+            completion = copy.deepcopy(claimed['completion'])
+        else:
+            packet_write = ({} if repair_packet is None else {
+                'repair_packet': start_failure.canonical(_validate_repair_packet(repair_packet))})
+            _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
+                store.d6_bind_compare_and_update(task['task_id'],
+                    executor_task_id=registration.task_id,
+                    expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
+                              'completion': None}, developer=developer, completion=completion, **packet_write)))
     except TaskStoreConflict:
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
     owner_gate_denied = False
+    expected_developer = copy.deepcopy(store.get(task['task_id'])['developer'])
     try:
         developer.update(state='DEVELOPER_DISPATCHING', provider_type='agy-cli', model=model)
-        store.update(task['task_id'], developer=developer)
+        dispatching_record = store.prepare_direct_dispatch(
+            task['task_id'], expected_developer=expected_developer, developer=developer)
+        developer = copy.deepcopy(dispatching_record['developer'])
+        expected_developer = copy.deepcopy(developer)
+
+        def authorize_agy_spawn():
+            nonlocal expected_developer
+            saved = store.authorize_direct_spawn(
+                task['task_id'], expected_developer=expected_developer)
+            expected_developer = copy.deepcopy(saved['developer'])
+            developer['dispatch_boundary'] = 'STARTING'
+
+        def record_agy_child(pid):
+            nonlocal expected_developer
+            saved = store.record_agy_launch(
+                task['task_id'], assignment_id=developer['assignment_id'], pid=pid,
+                start_time=codex_direct_developer.process_start_time(pid), pgid=os.getpgid(pid))
+            expected_developer = copy.deepcopy(saved['developer'])
+
         def validate_binding():
             current = store.get(task['task_id'])
             if (current.get('developer') != developer or current.get('task_binding') != binding or
@@ -5548,7 +5671,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             'prompt': prompt, 'log_path': 'agy.log', 'timeout': timeout,
             'state_dirs': (),
         }, gate=route_gate, boundary=GatedBoundary(),
-           snapshot=capture_snapshot)
+           snapshot=capture_snapshot, on_launch=authorize_agy_spawn, on_child=record_agy_child)
         _record_skill_delivery(task, registration, snapshot, 'agy', result.model,
                                card_prefix_sha256, result)
         after_registration = task_completion.read_d6_registration(
@@ -5570,7 +5693,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         if developer_diff_sensitive(artifact, _added_diff_content(artifact), _patch_paths):
             saved = _persist_developer_output_rejection(
                 store, task['task_id'], developer, 'DEVELOPER_OUTPUT_SENSITIVE', usage,
-                artifact, provider_type='agy-cli', model=model)
+                artifact, provider_type='agy-cli', model=model,
+                expected_developer=expected_developer)
             _print(_task_view(saved))
             return 1
         developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
@@ -5583,6 +5707,9 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None},
                 getattr(result, 'provider_evidence', None), 'agy'), usage=usage)
+        if not raw and not (getattr(result, 'summary', '') or '').strip():
+            developer.update(state='BLOCKED', error_code='AGY_EMPTY_RESULT',
+                             artifact=None, artifact_sha256=None)
         if (type(result.session_id) is str and
                 AGY_CONVERSATION.fullmatch(result.session_id)):
             binding = _bind_codex_native_session(registration, result.session_id)
@@ -5613,18 +5740,21 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                                           'agy', 'BLOCKED'))
             if execution is not None:
                 developer['execution'] = execution
-        store.update(task['task_id'], developer=developer)
+        store.compare_and_update(task['task_id'], expected={'developer': expected_developer},
+                                 developer=developer)
         _print(_task_view(store.get(task['task_id'])))
         return 1
     except Exception:
         developer.update(state='BLOCKED', provider_type='agy-cli', model=model,
                          error_code='AGY_RESULT_UNKNOWN', artifact=None,
                          artifact_sha256=None)
-        store.update(task['task_id'], developer=developer)
+        store.compare_and_update(task['task_id'], expected={'developer': expected_developer},
+                                 developer=developer)
         _print(_task_view(store.get(task['task_id'])))
         return 1
     try:
-        saved = store.update(task['task_id'], developer=developer, completion=completion)
+        saved = store.compare_and_update(task['task_id'], expected={'developer': expected_developer},
+                                 developer=developer, completion=completion)
     except Exception as exc:
         print(f'AGY_RESULT_PERSISTENCE_REJECTED reason={getattr(exc, "task_store_error_code", None) or type(exc).__name__}', file=sys.stderr)
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', artifact=None,
@@ -5632,7 +5762,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             execution={**developer['execution'], 'status': 'UNKNOWN',
                        'usage_source': 'UNKNOWN'}, usage=None)
         try:
-            saved = store.update(task['task_id'], developer=developer, completion=completion)
+            saved = store.compare_and_update(task['task_id'], expected={'developer': expected_developer},
+                                 developer=developer, completion=completion)
         except Exception:
             raise LLMToolError('AGY result was observed but could not be persisted') from None
     if developer['state'] == 'DEVELOPER_RESPONDED':
@@ -6796,25 +6927,59 @@ def _direct_child_liveness(execution):
     return 'ALIVE'
 
 
+def _direct_recovery_binding(args, record, developer, identity):
+    try:
+        registration, snapshot = _delegate_d6_binding(args)
+    except Exception:
+        raise LLMToolError('DIRECT_CHILD_D6_BINDING_UNVERIFIED') from None
+    completion = record.get('completion') or {}
+    executor = developer.get('executor_task_id') or completion.get('executor_task_id')
+    if (executor != registration.task_id or registration.trusted_agent_id != identity or
+            snapshot.head != developer.get('source_sha')):
+        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
+    return registration, snapshot
+
+
+def _same_direct_response(fresh, previous, args):
+    original = previous['developer']
+    current = fresh.get('developer')
+    completion = fresh.get('completion')
+    return (type(current) is dict and current.get('state') == 'DEVELOPER_RESPONDED' and
+            all(current.get(key) == original.get(key) for key in (
+                'assignment_id', 'provider_profile', 'source_sha', 'read_paths', 'write_paths',
+                'acceptance', 'context_sha256')) and
+            fresh.get('run_id') == previous.get('run_id') and
+            fresh.get('task_binding') == previous.get('task_binding') and
+            type(completion) is dict and completion.get('executor_task_id') == args.executor_task)
+
+
 def _recover_direct_child_dispatch(args, task, developer, store, *, expected_agent):
-    previous_developer = developer
-    if (developer.get('provider_profile') != 'opencode' or
+    identity = direct_reassignment.AGENTS.get(developer.get('provider_profile'))
+    if (identity is None or identity != expected_agent or
             developer.get('state') != 'DEVELOPER_DISPATCHING'):
         raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
-    try:
-        snapshot = task_completion.collect_git_snapshot(os.getcwd())
-        registration, _ = task_completion.bind_executor_task(
-            args.executor_task, expected_common_dir=snapshot.common_dir,
-            root=snapshot.root)
-    except Exception:
-        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
-    if (developer.get('executor_task_id') != registration.task_id or
-            registration.trusted_agent_id != expected_agent):
-        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
+    fresh = store.get(args.task_id)
+    if _same_direct_response(fresh, task, args):
+        return run_task_direct_result_event(args.task_id, args.executor_task, store=store)
+    if fresh.get('record_sha256') != task.get('record_sha256'):
+        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN')
+    first_binding = _direct_recovery_binding(args, task, developer, identity)
     liveness = _direct_child_liveness(developer.get('execution'))
     if liveness == 'ALIVE':
         raise LLMToolError('DIRECT_CHILD_STILL_RUNNING')
     if liveness != 'DEAD':
+        phase = developer.get('dispatch_boundary')
+        if phase == 'PREPARED':
+            raise LLMToolError('DIRECT_CHILD_SPAWN_NOT_AUTHORIZED')
+        if phase == 'STARTING':
+            raise LLMToolError('DIRECT_CHILD_SPAWN_OUTCOME_UNVERIFIED')
+        raise LLMToolError('DIRECT_CHILD_LAUNCH_EVIDENCE_MISSING')
+    fresh = store.get(args.task_id)
+    if _same_direct_response(fresh, task, args):
+        return run_task_direct_result_event(args.task_id, args.executor_task, store=store)
+    if (fresh.get('record_sha256') != task.get('record_sha256') or
+            _direct_recovery_binding(args, fresh, developer, identity) != first_binding or
+            _direct_child_liveness(developer.get('execution')) != 'DEAD'):
         raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN')
     outcome = dict(developer)
     execution = {
@@ -6828,8 +6993,13 @@ def _recover_direct_child_dispatch(args, task, developer, store, *, expected_age
                    error_code='DIRECT_CHILD_NOT_RUNNING', execution=execution)
     try:
         store.compare_and_update(args.task_id,
-                                 expected={'developer': previous_developer},
+                                 expected={'record_sha256': task.get('record_sha256'),
+                                           'developer': developer},
                                  developer=outcome)
+    except TaskStoreConflict:
+        if _same_direct_response(store.get(args.task_id), task, args):
+            return run_task_direct_result_event(args.task_id, args.executor_task, store=store)
+        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
     except Exception:
         raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
     raise LLMToolError('DIRECT_CHILD_OUTCOME_UNKNOWN') from None
@@ -7504,6 +7674,74 @@ def _paths_overlap(status_paths, write_paths):
     return False
 
 
+# #2367 P0-B: the quota stop each progress-recording route writes (AGY and
+# Claude; task_store gates 'progress' to these two profiles), and the exact
+# progress shape developer_routes.base records for it.
+_QUOTA_STOP_ERROR_CODES = {'agy': 'AGY_QUOTA_EXHAUSTED',
+                           'claude': 'CLAUDE_QUOTA_EXHAUSTED'}
+_QUOTA_PROGRESS_FIELDS = frozenset(('state', 'head_sha', 'changed_files',
+                                    'unfinished_checks', 'session_id'))
+
+
+def _quota_progress_shows_no_change(developer):
+    """True only when a quota-stopped run's progress proves it changed no file.
+
+    The route's complete shape is required: state, head_sha, changed_files,
+    unfinished_checks and session_id, all consistent with each other and with
+    the D6: the Developer is BLOCKED with the route's own quota code, the
+    progress state is QUOTA_EXHAUSTED, head_sha is the 40-hex D6 head the run
+    started from (its recorded source_sha, so the run committed nothing),
+    changed_files is an empty list, unfinished_checks is a list of strings,
+    and session_id is a well-formed ID that equals the execution's native
+    session ID when one is recorded. A missing, partial, contradictory,
+    unreadable or non-dict record is not proof: the run still counts.
+    """
+    try:
+        progress = developer.get('progress')
+        if type(progress) is not dict or set(progress) != _QUOTA_PROGRESS_FIELDS:
+            return False
+        profile = developer.get('provider_profile')
+        if (developer.get('state') != 'BLOCKED' or type(profile) is not str or
+                _QUOTA_STOP_ERROR_CODES.get(profile) != developer.get('error_code') or
+                progress['state'] != 'QUOTA_EXHAUSTED'):
+            return False
+        source_sha, head_sha = developer.get('source_sha'), progress['head_sha']
+        if (type(source_sha) is not str or
+                re.fullmatch(r'[0-9a-f]{40}', source_sha) is None or
+                head_sha != source_sha):
+            return False
+        changed_files, checks = progress['changed_files'], progress['unfinished_checks']
+        if (type(changed_files) is not list or changed_files or
+                type(checks) is not list or
+                any(type(item) is not str for item in checks)):
+            return False
+        session_id = progress['session_id']
+        if (type(session_id) is not str or
+                re.fullmatch(r'[A-Za-z0-9_-]{8,128}', session_id) is None):
+            return False
+        execution = developer.get('execution')
+        # A quota stop is a blocked run: any other execution status (DONE,
+        # SUCCEEDED, RUNNING, a missing record) contradicts it and counts.
+        if type(execution) is not dict or execution.get('status') != 'BLOCKED':
+            return False
+        native = execution.get('native_session_id')
+        return native is None or native == session_id
+    except Exception:
+        return False
+
+
+def _is_quota_stopped_run(developer):
+    """True when the record presents itself as a quota stop or carries progress.
+
+    Such a run is judged only by _quota_progress_shows_no_change: the generic
+    clean-D6 probe never excludes it, even when its progress field is absent.
+    """
+    if type(developer) is not dict:
+        return False
+    return ('progress' in developer or
+            developer.get('error_code') in _QUOTA_STOP_ERROR_CODES.values())
+
+
 def _launched_run_did_no_work(developer, d6_unchanged=None):
     """True only when a launched run's record proves it did no work.
 
@@ -7513,7 +7751,9 @@ def _launched_run_did_no_work(developer, d6_unchanged=None):
     must also confirm that the D6 head still equals the run's recorded source
     SHA, that its tree is clean, and that no status path overlaps the run's
     write paths. Anything missing, malformed or unknown does not prove that,
-    so the run still counts.
+    so the run still counts. A quota-stopped run (progress recorded, or a
+    route quota error code) is instead judged by its progress alone
+    (_quota_progress_shows_no_change, #2367).
     """
     if type(developer) is not dict:
         return False
@@ -7545,6 +7785,12 @@ def _launched_run_did_no_work(developer, d6_unchanged=None):
     if not (type(execution) is dict and
             execution.get('cleanup_status') == 'CONFIRMED'):
         return False
+    if _is_quota_stopped_run(developer):
+        # #2367 P0-B: a quota-stopped run (progress recorded or absent) is
+        # judged by its own progress record alone. A live D6 probe cannot
+        # vouch for it (a later run moves the D6), and a missing, partial or
+        # contradictory record must never be excused by a clean tree.
+        return _quota_progress_shows_no_change(developer)
     source_sha = developer.get('source_sha')
     if (type(source_sha) is not str or
             re.fullmatch(r'[0-9a-f]{40}', source_sha) is None or
@@ -7584,7 +7830,7 @@ _HIGH_DEBUG_MODELS = frozenset(('gpt-6.1-sol', 'claude-opus-5-5'))
 
 
 def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
-                                  executor_task, predecessor_executors=None):
+                                  executor_task, predecessor_executors=None, *, diagnosis_issue=None):
     """Raise ValueError unless ``entry`` is bound to the run behind it (#914).
 
     The High Debug Task must be the original Task of the executor D6 being
@@ -7594,9 +7840,10 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
     Task must hold the HIGH_DEBUG completion event run_high_debug records for
     this entry, live or compacted to a tombstone.
     """
-    from .high_debug import REPORT_SECTIONS, _has_report_section, _outcome_status
-    # #1943 WP-5: a no-PR Debug is a diagnosis only, never repair evidence.
-    if entry.get('no_pr') is True:
+    from .high_debug import (REPORT_SECTIONS, _has_report_section, _outcome_status,
+                             completion_event_id)
+    no_pr = entry.get('no_pr') is True
+    if no_pr and (diagnosis_issue is None or entry.get('diagnosis_issue') != diagnosis_issue):
         raise ValueError
 
     allowed_executors = set()
@@ -7612,9 +7859,11 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
     if not allowed_executors:
         raise ValueError
     completion = diagnosis_task.get('completion')
-    if (type(completion) is not dict or
-            completion.get('executor_task_id') not in allowed_executors):
-        raise ValueError
+    if type(completion) is not dict or completion.get('executor_task_id') not in allowed_executors:
+        from .high_debug import _task_holds_d6
+        if not no_pr or not any(_task_holds_d6(diagnosis_task, executor)
+                                for executor in allowed_executors):
+            raise ValueError
     model_observed = entry.get('model_observed')
     if (type(model_observed) is not str or
             model_observed not in _HIGH_DEBUG_MODELS or
@@ -7630,9 +7879,8 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
         raise ValueError
     # The same derivation run_high_debug uses when it records the event.
     examined_sha = entry['examined_sha']
-    event_id = hashlib.sha256(
-        ('HIGH_DEBUG\0' + high_debug_task + '\0' + examined_sha + '\0' +
-         report_sha256).encode()).hexdigest()[:32]
+    event_ids = {completion_event_id(high_debug_task, examined_sha, report_sha256),
+                 completion_event_id(high_debug_task, examined_sha, report_sha256, entry['d6'])}
     session_id = 'high-debug-' + entry['d6']
     payload_sha256 = hashlib.sha256(report_sha256.encode()).hexdigest()
     events = diagnosis_task.get('completion_events', [])
@@ -7640,7 +7888,8 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
     if type(events) is not list or type(tombstones) is not list:
         raise ValueError
     live = [event for event in events
-            if type(event) is dict and event.get('event_id') == event_id]
+            if type(event) is dict and event.get('event_id') in event_ids and
+            event.get('session_id') == session_id]
     if live:
         if not all(event.get('source') == 'HIGH_DEBUG' and
                    event.get('session_id') == session_id and
@@ -7650,58 +7899,39 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
             raise ValueError
         return
     compacted = [tombstone for tombstone in tombstones
-                 if type(tombstone) is dict and tombstone.get('event_id') == event_id]
+                 if type(tombstone) is dict and tombstone.get('event_id') in event_ids and
+                 tombstone.get('session_id') == session_id]
     if not compacted or not all(tombstone.get('source') == 'HIGH_DEBUG' and
                                 tombstone.get('session_id') == session_id
                                 for tombstone in compacted):
         raise ValueError
 
 
-def _check_repair_packet_rca(packet, store, executor_task):
-    """Accept the confirmed root cause a review repair packet carries (#1502 D7).
-
-    review_repair adds high_debug_report_sha256 to the packet of repair #2.
-    The packet's Task, on this D6, must hold an RCA_CONFIRMED High Debug
-    entry examined at the packet's failed HEAD whose report digest is the
-    packet's digest. #2367: from repair #3 on, review_repair binds the
-    family's covering RCA_CONFIRMED, examined at an earlier HEAD; it is then
-    accepted when a stored review repair claim of that Task at the packet's
-    failed HEAD binds the same digest (the store checks that binding).
-    Anything else refuses DELEGATE_HIGH_DEBUG_TASK_INVALID.
-    """
+def _check_repair_packet_rca(packet, store, executor_task, repair_task_id):
+    """Verify the RCA packet against the immutable claim for this repair Task."""
     try:
-        report_sha256 = packet.get('high_debug_report_sha256')
-        failed_head = packet.get('failed_head')
-        task_id = packet.get('task')
-        if (type(report_sha256) is not str or
-                re.fullmatch(r'[0-9a-f]{64}', report_sha256) is None or
-                type(failed_head) is not str or
-                re.fullmatch(r'[0-9a-f]{40}', failed_head) is None or
-                type(task_id) is not str or
+        task_id = packet['task']
+        record = store.get(task_id)
+        completion = record.get('completion') or {}
+        if (record.get('task_id') != task_id or
+                completion.get('executor_task_id') != executor_task or
                 packet.get('executor_task') != executor_task):
             raise ValueError
-        record = store.get(task_id)
-        completion = record.get('completion') if type(record) is dict else None
-        entries = record.get('high_debug') if type(record) is dict else None
-        claims = record.get('review_repair_claims', []) if type(record) is dict else None
-        bound_heads = {failed_head}
-        if (type(claims) is list and
-                any(type(claim) is dict and claim.get('head_sha') == failed_head and
-                    claim.get('high_debug_report_sha256') == report_sha256
-                    for claim in claims)):
-            bound_heads.update(claim.get('head_sha') for claim in claims
-                               if type(claim) is dict and
-                               type(claim.get('head_sha')) is str)
-        if (record.get('task_id') != task_id or type(completion) is not dict or
-                completion.get('executor_task_id') != executor_task or
-                type(entries) is not list or
-                not any(type(entry) is dict and
-                        entry.get('no_pr') is not True and
-                        entry.get('status') == 'RCA_CONFIRMED' and
-                        entry.get('examined_sha') in bound_heads and
-                        entry.get('report_sha256') == report_sha256
-                        for entry in entries)):
+        claims = [claim for claim in record.get('review_repair_claims', [])
+                  if claim.get('repair_task_id') == repair_task_id and
+                  claim.get('state') in ('CLAIMED', 'DISPATCHED', 'UNKNOWN')]
+        if (len(claims) != 1 or
+                not start_failure.repair_packet_matches(packet, claims[0], record, store)):
             raise ValueError
+        if 'high_debug_source_task' in claims[0]:
+            return
+        for entry in start_failure.local_rca_entries(packet, claims[0], record):
+            try:
+                _require_bound_high_debug_run(record, task_id, entry, executor_task)
+            except ValueError:
+                continue
+            return
+        raise ValueError
     except Exception:
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
 
@@ -7714,11 +7944,9 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
     limit; every other Task takes the review limit. The limits come from
     policy.json (#1502 WP-D D7): at most 1 + repair_max review runs and
     test_fail_max EC2 repair runs per D6. At or over a limit the delegate
-    always refuses. Every review repair after the first (repair #2 under
-    policy.json) needs a confirmed root cause, bound by the High Debug
-    arguments or by the repair packet; from repair #3 on the one taken before
-    repair #2 covers it (#2367). A recorded start failure is not a run
-    (#2367 A4). This check never changes a Task.
+    always refuses. Review repairs four and five need a confirmed applicable
+    root cause through the High Debug arguments or repair packet. A recorded
+    start failure is not a run. This check never changes a Task.
     """
     executor_task = getattr(args, 'executor_task', None)
     current_task_id = getattr(args, 'task_id', None)
@@ -7860,13 +8088,9 @@ def _repair_run_stamp(task_id, developer, d6_unchanged):
 
 def _check_repair_limits(args, store, d6_binding, policy, current_task_id, counted,
                          new_ec2_ids, legacy_ec2_ids, newest_assignment, stamps=None):
-    """Apply the review and EC2 limits to counted runs, then the root cause.
+    """Apply the review and EC2 limits to counted runs, then the root cause."""
+    from .repair_policy import REVIEW_REPAIRS_WITHOUT_DEBUG
 
-    #2367: repair #2 needs a High Debug taken after the newest run on the
-    current head, as before. Repairs 3 to repair_max need no new Debug: the
-    RCA_CONFIRMED taken before repair #2 (recorded after the run whose FAIL
-    asked for it, the second review run) covers them.
-    """
     if current_task_id in new_ec2_ids or current_task_id in legacy_ec2_ids:
         # Prior EC2 repair runs, new and legacy. EC2 repairs never take the
         # High Debug path.
@@ -7882,10 +8106,13 @@ def _check_repair_limits(args, store, d6_binding, policy, current_task_id, count
     count = len(review_runs)
     if count >= 1 + policy['repair_max']:
         raise LLMToolError('DELEGATE_REPAIR_LIMIT_REACHED')
-    if count < 2:
-        # The original run and repair #1 need no root cause (D1).
+    if count <= REVIEW_REPAIRS_WITHOUT_DEBUG:
+        packet = getattr(args, 'repair_packet', None)
+        if type(packet) is dict and 'high_debug_report_sha256' in packet:
+            _check_repair_packet_rca(packet, store, getattr(args, 'executor_task', None),
+                                     current_task_id)
         return
-    if count == 2:
+    if count == REVIEW_REPAIRS_WITHOUT_DEBUG + 1:
         _check_repair_rca(args, store, d6_binding, newest_assignment)
         return
     # A run without a known assignment time leaves the cover in doubt: refuse.
@@ -7894,21 +8121,16 @@ def _check_repair_limits(args, store, d6_binding, policy, current_task_id, count
     if len(times) != count:
         raise LLMToolError(
             f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
-    _check_repair_rca(args, store, d6_binding, times[1], covered=True)
+    _check_repair_rca(args, store, d6_binding, times[REVIEW_REPAIRS_WITHOUT_DEBUG], covered=True)
 
 
 def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=False):
-    """Repair #2 and later need a confirmed root cause (packet or High Debug Task).
-
-    covered (#2367, repairs 3 to repair_max): the High Debug was taken before
-    repair #2, so it must be newer than newest_assignment (the run whose FAIL
-    asked for it) but need not be on the current D6 head.
-    """
+    """Require a confirmed diagnosis applicable to the current failed review."""
     executor_task = getattr(args, 'executor_task', None)
     high_debug_task = getattr(args, 'high_debug_task', None)
     packet = getattr(args, 'repair_packet', None)
     if type(packet) is dict and 'high_debug_report_sha256' in packet:
-        _check_repair_packet_rca(packet, store, executor_task)
+        _check_repair_packet_rca(packet, store, executor_task, getattr(args, 'task_id', None))
         return
     ref = getattr(args, 'high_debug_ref', None)
     try:
@@ -7936,16 +8158,19 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
         entries = diagnosis_task.get('high_debug')
         if (type(diagnosis_task) is not dict or
                 diagnosis_task.get('task_id') != high_debug_task or
-                type(entries) is not list or not entries):
+                type(entries) is not list or not entries or
+                any(type(entry) is not dict for entry in entries)):
             raise ValueError
-        matching = [e for e in entries if not (type(e) is dict and e.get('no_pr') is True)]
+        family_arg = getattr(args, 'high_debug_family', None)
+        matching = [e for e in entries if type(e) is dict and e.get('family') == family_arg]
         if not matching:
             raise ValueError
         entry = matching[-1]
+        no_pr = entry.get('no_pr') is True
+        diagnosis_issue = int(ref.split('/issues/', 1)[1].split('/', 1)[0].split('#', 1)[0])
         d6 = entry.get('d6')
         examined_sha = entry.get('examined_sha')
         family = entry.get('family')
-        family_arg = getattr(args, 'high_debug_family', None)
         if (type(family) is not str or
                 re.fullmatch(r'[a-z0-9._-]{1,64}', family) is None or
                 type(family_arg) is not str or
@@ -7964,8 +8189,6 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
                 newest_assignment = datetime.strptime(newest_assignment, '%Y-%m-%dT%H:%M:%SZ')
             except (TypeError, ValueError):
                 raise ValueError from None
-        if newest_assignment is None or recorded_stamp <= newest_assignment:
-            raise ValueError
         # High Debug D6 names are derived from their executor D6, attempt
         # number, and examined HEAD. Recompute the name to bind this entry to
         # the executor D6 being repaired or a verified continuation predecessor (#2190).
@@ -7981,31 +8204,24 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
             raise ValueError
         attempt = int(attempt_match.group(1))
         task_id = getattr(args, 'task_id', None)
-        predecessor_executors = []
-        if task_id is not None and store is not None:
-            try:
-                task_record = store.get(task_id)
-            except Exception:
-                task_record = None
-            if type(task_record) is dict:
-                from . import lineage_counts
-                chain = lineage_counts.chain_records(store, task_record)
-                if chain is not None:
-                    for pred in chain[1:]:
-                        pred_completion = pred.get('completion') if type(pred) is dict else None
-                        pred_executor = (pred_completion.get('executor_task_id')
-                                         if type(pred_completion) is dict else None)
-                        if type(pred_executor) is str and pred_executor not in predecessor_executors:
-                            predecessor_executors.append(pred_executor)
-        allowed_executors = []
-        if type(executor_task) is str:
-            allowed_executors.append(executor_task)
-        for pe in predecessor_executors:
-            if pe not in allowed_executors:
-                allowed_executors.append(pe)
+        from . import lineage_counts
+        try:
+            members = lineage_counts.debug_lineage_members(store, store.get(task_id))
+        except Exception:
+            members = None
+        allowed_executors = {executor_task} if type(executor_task) is str else set()
+        if members is not None and high_debug_task in members:
+            source_completion = diagnosis_task.get('completion') or {}
+            source_executor = source_completion.get('executor_task_id')
+            if type(source_executor) is str:
+                allowed_executors.add(source_executor)
         diagnosis_completion = diagnosis_task.get('completion')
         diagnosis_executor = (diagnosis_completion.get('executor_task_id')
                               if type(diagnosis_completion) is dict else None)
+        if no_pr and diagnosis_executor is None:
+            from .high_debug import _task_holds_d6
+            if _task_holds_d6(diagnosis_task, executor_task):
+                diagnosis_executor = executor_task
         matched_executor = None
         for candidate in allowed_executors:
             if (d6 == _d6_name(candidate, attempt, examined_sha) and
@@ -8015,13 +8231,10 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
         if matched_executor is None:
             raise ValueError
         _require_bound_high_debug_run(
-            diagnosis_task, high_debug_task, entry, executor_task,
-            predecessor_executors=predecessor_executors)
+            diagnosis_task, high_debug_task, entry, matched_executor,
+            diagnosis_issue=diagnosis_issue)
     except Exception:
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
-    if covered:
-        # #2367 A2: the covering RCA was taken on an earlier head.
-        return
     if d6_binding is None:
         try:
             d6_binding = _delegate_d6_binding(args)
@@ -8029,6 +8242,34 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
             raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
     _registration, snapshot = d6_binding
     current_head = getattr(snapshot, 'head', None)
+    if no_pr:
+        if not members or high_debug_task not in members:
+            raise LLMToolError('DELEGATE_HIGH_DEBUG_LINEAGE_MISMATCH')
+        if not any(event.get('source') == 'GITHUB' and
+                   event.get('issue_number') == diagnosis_issue
+                   for task in members.values() for event in task.get('completion_events', [])):
+            raise LLMToolError('DELEGATE_HIGH_DEBUG_ISSUE_UNVERIFIED')
+        if matched_executor != executor_task or examined_sha != current_head:
+            raise LLMToolError('DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED')
+    if matched_executor == executor_task and examined_sha == current_head:
+        if newest_assignment is None or recorded_stamp <= newest_assignment:
+            raise LLMToolError('DELEGATE_HIGH_DEBUG_TIME_MISMATCH')
+        return
+    if covered or matched_executor != executor_task:
+        from . import review_result
+        source_pr = re.fullmatch(r'pr-([1-9][0-9]*)', family)
+        source = (review_result.diagnosis_findings(
+            diagnosis_task, examined_sha, matched_executor, before=recorded_at,
+            pr=int(source_pr.group(1))) if source_pr is not None else None)
+        if task_id is None or source is None:
+            raise LLMToolError('DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED')
+        if not members or high_debug_task not in members:
+            raise LLMToolError('DELEGATE_HIGH_DEBUG_LINEAGE_MISMATCH')
+        targets = [review_result.diagnosis_findings(item, current_head, executor_task)
+                   for item in members.values()]
+        if [target for target in targets if target is not None] == [source]:
+            return
+        raise LLMToolError('DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED')
     if examined_sha != current_head:
         head_prefix = current_head[:12] if type(current_head) is str else ''
         examined_prefix = examined_sha[:12] if type(examined_sha) is str else ''
@@ -8090,7 +8331,7 @@ def _delegate_chain_gate(args, store, d6_binding, claim):
     Runs at each route's claim site, after every route refusal. Takes the
     chain locks of the delegated Task's and its D6 Tasks' chains, recomputes
     the view on fresh reads (changed keys are UNKNOWN), applies the
-    chain-wide repair cap (with repair #2's root cause) and
+    chain-wide repair cap and RCA validation and
     CONTINUATION_LINK_REQUIRED, then calls claim() and returns its result.
     Any doubt refuses DELEGATE_REPAIR_COUNT_UNAVAILABLE before any write. The
     locks are released on every path, before any provider call or fork.
@@ -8132,6 +8373,53 @@ def _delegate_chain_gate(args, store, d6_binding, claim):
     return result
 
 
+def _auto_direct_replacement(args, store):
+    """Resolve one different authorized route, then use its ordinary launcher."""
+    provider = getattr(args, 'provider', None)
+    if (provider not in direct_reassignment.AGENTS or
+            getattr(args, 'selection_source', None) != 'PM' or
+            getattr(args, 'reassign_from', None) is not None):
+        return args
+    if provider == 'agy':
+        if getattr(args, 'mode', 'proposal') != 'direct' or getattr(args, 'background', False):
+            return args
+    elif getattr(args, 'mode', 'proposal') == 'direct':
+        return args
+    task = store.get(args.task_id)
+    previous = task.get('developer')
+    if not direct_reassignment.replacement_candidate(previous):
+        return args
+    if provider == 'agy':
+        _optional_agy_owner_ref(args)
+    history = previous.get('direct_handoffs', [])
+    if (history and previous.get('state') == 'DEVELOPER_PENDING' and
+            history[-1]['old_profile'] == provider):
+        selected = history[-1]['new_profile']
+        assignment = history[-1]['old_assignment']
+    elif previous.get('provider_profile') == provider:
+        selected = next(profile for profile in direct_reassignment.AGENTS if profile != provider)
+        assignment = previous['assignment_id']
+    else:
+        return args
+    target_worker = worker_dispatch.worker_key_for(selected)
+    auth = worker_dispatch.evaluate(target_worker, None, args.task_id)
+    if not auth.allowed:
+        raise LLMToolError('DIRECT_REASSIGN_NO_AUTHORIZED_ALTERNATE: ' + auth.reason_code)
+    blocked = worker_availability.quota_refusal(
+        store, target_worker, owner_assignment_ref=None, policy_task_id=args.task_id)
+    if blocked is not None:
+        raise LLMToolError('DIRECT_REASSIGN_ALTERNATE_UNAVAILABLE: ' + blocked)
+    replacement = copy.copy(args)
+    replacement.provider = selected
+    replacement.mode = 'direct' if selected == 'agy' else 'proposal'
+    replacement.reassign_from = assignment
+    replacement.owner_ref = None
+    replacement.background = False
+    # A timeout for the former route belongs to that route's policy limits.
+    replacement.timeout = None
+    return replacement
+
+
 def run_task_delegate(args, *, store=None):
     store = TaskStore() if store is None else store
     if getattr(args, 'provider', None) == 'company-gw':
@@ -8143,11 +8431,18 @@ def run_task_delegate(args, *, store=None):
             f'{worker_dispatch.RETIRED_WORKER_ALIASES[retired]} (#1502 WP-E)')
     # #1815: refuse a bad --timeout before any Task read, fork or provider call.
     selected_route = getattr(args, 'provider', None)
+    if getattr(args, 'reassign_from', None) is not None and (
+            selected_route not in direct_reassignment.AGENTS or
+            getattr(args, 'background', False) or
+            getattr(args, 'selection_source', None) != 'PM' or
+            getattr(args, 'data_class', None) is not None):
+        raise LLMToolError('DIRECT_REASSIGN_ROUTE_REFUSED')
     if selected_route in TIMEOUT_ROUTES:
         _delegate_timeout(args, selected_route)
     elif getattr(args, 'timeout', None) is not None:
         raise LLMToolError('TIMEOUT_ROUTE_UNSUPPORTED: --timeout applies only to the '
                            'Claude, OpenCode, AGY and gw-agent Developer routes')
+    args = _auto_direct_replacement(args, store)
     if getattr(args, 'background', False):
         provider = getattr(args, 'provider', None)
         if provider == 'codex' and getattr(args, 'mode', 'proposal') != 'direct':
@@ -8465,6 +8760,7 @@ def run_task_delegate_checked(args, *, store=None):
     except pm_caller.PMCallerRefused as exc:
         _print(pm_caller.refusal(args.task_id, exc.code), None)
         return 1
+    args = _auto_direct_replacement(args, store)
     # #1816: a fresh quota FAIL refuses before any Task or D6 write. An Owner
     # policy refusal comes first (quota_refusal then defers to the route).
     worker = worker_dispatch.worker_key_for(getattr(args, 'provider', None))
@@ -8561,7 +8857,7 @@ def _start_retry_repair_packet(store, task):
             claim.get('head_sha') != developer.get('source_sha')):
         raise LLMToolError('START_RETRY_REPAIR_CLAIM_INVALID')
     packet = start_failure.decode_repair_packet(task['repair_packet'])
-    if packet is None or not start_failure.repair_packet_matches(packet, claim, root):
+    if packet is None or not start_failure.repair_packet_matches(packet, claim, root, store):
         raise LLMToolError('START_RETRY_REPAIR_PACKET_MISMATCH')
     return packet
 
@@ -9506,6 +9802,9 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
             expected={'completion': completion}, completion=waiting)
         _print(_task_view(saved))
         return 1
+    if task.get('review_repair_claims'):
+        initial = direct_reassignment.effective_writer_admission(
+            store, task, initial, args.executor_task)
     # Preserve the immutable D6 admission binding across WAITING retries, but do
     # not carry forward result/test/review facts from a prior incomplete attempt.
     admission_fields = ('executor_identity', 'executor_session_ref',

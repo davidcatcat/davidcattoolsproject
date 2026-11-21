@@ -120,6 +120,7 @@ class HighDebugNoPRTests(unittest.TestCase):
             high_debug.run_high_debug(**options)
         (entry,) = store.entries
         self.assertIs(entry.get('no_pr'), True)
+        self.assertEqual(entry['diagnosis_issue'], 42)
         self.assertEqual((entry['family'], entry['examined_sha']), ('no-pr', HEAD))
         self.assertEqual(entry['status'], 'RCA_CONFIRMED')
         self.assertEqual(self.poster.call_args[0][0], 42)
@@ -298,12 +299,16 @@ class FormalRcaConsumerNoPRTests(unittest.TestCase):
 
     def test_review_gate_never_takes_a_no_pr_rca(self):
         body = _comment()['body']
-        packet = dict(reviewer_text_excerpt_untrusted_data=body, failed_head=GATE_HEAD, pr=PR)
+        packet = dict(reviewer_text_excerpt_untrusted_data=body, failed_head=GATE_HEAD, pr=PR, executor_task='executor', version=1)
         family = 'pr-%d' % PR
         stamp = '2026-10-27T03:00:00Z'
         entry = rca_entry(family=family, examined_sha=GATE_HEAD, recorded_at=stamp)
-        counts = {'review_repairs': 1, 'review_heads': {OLD_HEAD: 'FAIL'}}
-        task = {'task_id': GATE_TASK, 'high_debug': [entry]}
+        counts = {'review_repairs': 3, 'review_heads': {OLD_HEAD: 'FAIL'}}
+        review = {'executor_task': 'executor', 'pr': PR, 'version': 1, 'review_kind': 'formal',
+                  'head_sha': GATE_HEAD, 'state': 'COMPLETED', 'updated_at': stamp,
+                  'review_result': {'task_id': GATE_TASK, 'head': GATE_HEAD, 'verdict': 'FAIL',
+                                    'review_text': body}}
+        task = {'task_id': GATE_TASK, 'high_debug': [entry], 'review_dispatch_claim': [review]}
         found = review_repair._review_gate(task, [], packet, family, self.policy, counts=counts)
         self.assertEqual(found['status'], 'RCA_CONFIRMED')
         task['high_debug'] = [dict(entry, no_pr=True)]
@@ -323,10 +328,39 @@ class FormalRcaConsumerNoPRTests(unittest.TestCase):
         completion = {'executor_task_id': 'executor'}
         only_no_pr = _NoPRStore(completion=completion, entries=[rca_entry(no_pr=True)])
         with self.assertRaises(LLMToolError) as caught:
-            task_submission_cli._check_repair_packet_rca(packet, only_no_pr, 'executor')
+            task_submission_cli._check_repair_packet_rca(packet, only_no_pr, 'executor', TASK)
         self.assertEqual(str(caught.exception), 'DELEGATE_HIGH_DEBUG_TASK_INVALID')
-        both = _NoPRStore(completion=completion, entries=[rca_entry(), rca_entry(no_pr=True)])
-        task_submission_cli._check_repair_packet_rca(packet, both, 'executor')
+
+    def test_repair_rca_accepts_current_head_with_verified_issue_and_lineage(self):
+        from test_task_delegate_repair_cap import (
+            _Store, _args, _entry, _diagnosis, _HIGH_DEBUG_TASK,
+            _CURRENT_TASK, _HEAD,
+        )
+        entry = dict(_entry(family='no-pr'), no_pr=True, diagnosis_issue=1943)
+        source = _diagnosis([entry])
+        store = _Store(count=4, diagnosis=source)
+        store.records[_CURRENT_TASK] = {'task_id': _CURRENT_TASK, 'continues': _HIGH_DEBUG_TASK}
+        slug = review_trust_fixture.OWNER_SLUG
+        args = _args(high_debug_family='no-pr',
+                     high_debug_ref=f'https://github.com/{slug}/issues/1943#issuecomment-1')
+        binding = (None, SimpleNamespace(head=_HEAD))
+        def check(current_binding=binding):
+            return task_submission_cli._check_repair_rca(
+                args, store, current_binding, '2026-11-04T00:00:00Z')
+
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_ISSUE_UNVERIFIED$'):
+            check()
+        source['completion_events'].append({'source': 'GITHUB', 'issue_number': 1943})
+        self.assertIsNone(check())
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED$'):
+            check((None, SimpleNamespace(head='b' * 40)))
+        del store.records[_CURRENT_TASK]['continues']
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_LINEAGE_MISMATCH$'):
+            check()
+        store.records[_CURRENT_TASK]['continues'] = _HIGH_DEBUG_TASK
+        args.high_debug_ref = f'https://github.com/{slug}/issues/2443#issuecomment-1'
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_INVALID$'):
+            check()
 
     def test_repair_rca_refuses_when_only_a_no_pr_entry_exists(self):
         slug = review_trust_fixture.OWNER_SLUG

@@ -2190,7 +2190,8 @@ class ReviewRefusalReceiptTests(unittest.TestCase):
         self.assertNotIn('label', content)
         self.assertEqual(set(content.keys()), {
             'task_id', 'pr', 'head', 'version', 'reviewer_task',
-            'failure_reason', 'recorded_at', 'not_a_verdict', 'excerpt'
+            'failure_reason', 'recorded_at', 'not_a_verdict', 'excerpt',
+            'contract_digest'
         })
 
     def test_receipt_fields_with_withheld_label(self):
@@ -2221,7 +2222,8 @@ class ReviewRefusalReceiptTests(unittest.TestCase):
         self.assertNotIn('excerpt', content)
         self.assertEqual(set(content.keys()), {
             'task_id', 'pr', 'head', 'version', 'reviewer_task',
-            'failure_reason', 'recorded_at', 'not_a_verdict', 'label'
+            'failure_reason', 'recorded_at', 'not_a_verdict', 'label',
+            'contract_digest'
         })
 
     def test_receipt_fields_with_absent_label(self):
@@ -2250,7 +2252,8 @@ class ReviewRefusalReceiptTests(unittest.TestCase):
         self.assertNotIn('excerpt', content)
         self.assertEqual(set(content.keys()), {
             'task_id', 'pr', 'head', 'version', 'reviewer_task',
-            'failure_reason', 'recorded_at', 'not_a_verdict', 'label'
+            'failure_reason', 'recorded_at', 'not_a_verdict', 'label',
+            'contract_digest'
         })
 
     def test_prune_at_64_keeps_newest_and_leaves_other_files_untouched(self):

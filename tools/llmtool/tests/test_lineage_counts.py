@@ -676,6 +676,9 @@ def _current(**changes):
         'record_sha256': '0' * 64,
     }
     record.update(changes)
+    review_claim.update(state='COMPLETED', review_result={
+        'task_id': record['task_id'], 'head': HEAD, 'verdict': 'FAIL',
+        'review_text': _comment()['body']})
     return record
 
 
@@ -751,7 +754,7 @@ class ReviewRepairChainTests(unittest.TestCase):
         self.assertNotIn('high_debug_report_sha256', self.calls[0]['packet'])
 
     def test_repair_used_by_a_predecessor_needs_debug_on_the_failed_head(self):
-        used = [claim('pr-5', OLD_HEAD, pr=5)]
+        used = self.used_on_new_heads(3)
         self.refused(self.store(used), 'REPAIR_DEBUG_REQUIRED')
         # A Debug of another family or head does not count; RCA_CONFIRMED on HEAD does.
         self.refused(self.store(used, high_debug=self.rca(family='pr-5')),
@@ -811,8 +814,8 @@ class ReviewRepairChainTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_a_continuations_own_repair_on_another_pr_counts(self):
-        # F1: this Task's own review repair on PR 5 uses the chain's first repair.
-        own = [claim('pr-5', OLD_HEAD, pr=5)]
+        # A continuation's own repairs on PR 5 count toward its RCA threshold.
+        own = self.used_on_new_heads(3)
         self.refused(self.store([], review_repair_claims=own), 'REPAIR_DEBUG_REQUIRED')
         # One test repair left: this Task's own on PR 5 use the rest.
         own_ec2 = self.used_on_new_heads(self.policy['test_fail_max'] - 1, ec2=True)
@@ -840,7 +843,7 @@ class ReviewRepairChainTests(unittest.TestCase):
             task, [], packet, family, self.policy,
             counts={'review_repairs': 0, 'review_heads': {}}))
         for counts, code in (
-                ({'review_repairs': 1, 'review_heads': {OLD_HEAD: 'FAIL'}},
+                ({'review_repairs': 3, 'review_heads': {OLD_HEAD: 'FAIL'}},
                  'REPAIR_DEBUG_REQUIRED'),
                 ({'review_repairs': UNKNOWN, 'review_heads': UNKNOWN},
                  'REPAIR_SPLIT_REQUIRED')):
@@ -1690,14 +1693,15 @@ class LegacyChildDebugGroupTests(unittest.TestCase):
     def setUp(self):
         from llmtool import high_debug
         self.high_debug = high_debug
-        policy = dict(repair_policy.load_policy(), parent_debug_max=1, group_debug_max=3)
+        policy = dict(repair_policy.load_policy(), parent_debug_max=3, group_debug_max=3)
         patcher = patch.object(repair_policy, 'load_policy', return_value=policy)
         patcher.start()
         self.addCleanup(patcher.stop)
 
     def used(self, store, child_id):
         task = store.get(child_id)
-        return self.high_debug._group_debug_used(store, task, task.get('high_debug', []))
+        return lineage_counts.chain_debug_used(
+            store, task, task.get('high_debug', []), self.high_debug._debug_entry_used)[0]
 
     def reserve(self, store, child_id):
         entries = store.get(child_id).get('high_debug', [])
@@ -1714,6 +1718,22 @@ class LegacyChildDebugGroupTests(unittest.TestCase):
                                 _group_child(501, debugs=1), _group_child(502, debugs=1),
                                 _group_child(503))
         self.assertEqual(self.used(store, tid(503)), 2)
+
+    def test_root_child_and_replan_share_continuation_budget(self):
+        predecessor = {'task_id': tid(499), 'high_debug': [{'status': 'RESERVED'}]}
+        root = _group_lineage(GROUP_ROOT, kind='root')
+        root['continues'] = tid(499)
+        child = _group_child(501, debugs=1)
+        replan = _group_lineage(tid(502), kind='replan')
+        store = DebugGroupStore(predecessor, root, child, replan)
+
+        self.assertEqual(self.used(store, tid(502)), 2)
+        self.assertEqual(self.reserve(store, tid(502)), 0)
+        self.assertEqual(self.used(store, tid(499)), 3)
+        self.assert_refused(lambda: self.reserve(store, GROUP_ROOT),
+                            'HIGH_DEBUG_DEBUG_PARENT_USED')
+        self.assert_refused(lambda: self.reserve(store, tid(501)),
+                            'HIGH_DEBUG_DEBUG_GROUP_USED')
 
     def test_three_legacy_debugs_refuse_a_fourth_legacy_child(self):
         store = DebugGroupStore(_group_lineage(GROUP_ROOT, kind='root'),
