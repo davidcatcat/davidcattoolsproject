@@ -110,9 +110,11 @@ class ReplyExcerptReceiptTests(unittest.TestCase):
     def test_valid_jsonl_verdict_is_unchanged_and_writes_no_receipt(self):
         # (e) A valid JSONL verdict keeps the existing success path.
         task = self.store.get(self.task_id)
-        raw = base._codex_event_stream(base._codex_review_text(
-            run_id=task['run_id'],
-            contract=task['task_binding']['contract_digest']))
+        raw = base._codex_event_stream(
+            base._codex_review_text(
+                run_id=task['run_id'],
+                contract=task['task_binding']['contract_digest']),
+            run_id=task['run_id'])
 
         def runner(**_kw):
             return review_dispatch._parse_codex_review(
