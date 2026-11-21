@@ -2317,7 +2317,8 @@ def _remote_test_status(record, d6):
         return None, None, None
     from . import remote_test
     declared = remote_test._task_path_modules(record)
-    if len(declared) > remote_test._MAX_REMOTE_MODULES:
+    batch_mode = len(declared) > remote_test._MAX_REMOTE_MODULES
+    if batch_mode:
         batch_status = _batch_remote_test_status(record, executor_task, head, declared)
         if batch_status is not None:
             return batch_status
@@ -2352,7 +2353,9 @@ def _remote_test_status(record, d6):
             continue
         if outcome.get('result') == 'TIMEOUT':
             return 'TIMEOUT', None, None
-        if (outcome.get('result') == 'ADMISSION_DENIED' and
+        # #2457: with more declared modules than one EC2 run, an older
+        # MODULE_NOT_ADMITTED denial never stands in for the batches passing.
+        if (not batch_mode and outcome.get('result') == 'ADMISSION_DENIED' and
                 outcome.get('code') == 'MODULE_NOT_ADMITTED' and
                 outcome.get('modules') == []):
             return 'ADMISSION_DENIED', None, None

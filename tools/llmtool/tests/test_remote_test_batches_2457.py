@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from llmtool import remote_test, task_advance
+from llmtool import merge_train_eligibility, remote_test, task_advance, task_submission_cli
 from llmtool.task_store import _json_bytes
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "spec_preflight.py"
@@ -264,6 +264,174 @@ class BatchStatusTests(BatchCase):
         self.assertEqual(self.status(task)[0], 'PASS')
         task = self.task_with(8, sealed(names), sealed(names, 'FAIL'))
         self.assertEqual(self.status(task)[0], 'FAIL')
+
+
+def full_receipt(modules, result='PASS', sha=SHA):
+    """A sealed receipt with the fields the direct Developer evidence check reads."""
+    passed = result == 'PASS'
+    value = {'task_id': TASK_ID, 'run_id': RUN_ID, 'executor_task': EXECUTOR,
+             'source_sha': sha, 'result': result, 'modules': list(modules),
+             'ran_total': len(modules) if passed else 1,
+             'failures': [] if passed else [modules[0]],
+             'final': ['OK'] * len(modules) if passed else ['FAILED (failures=1)'],
+             'elapsed_s': 0.5}
+    value['receipt_digest'] = hashlib.sha256(_json_bytes(value)).hexdigest()
+    return value
+
+
+class ConsumerBatchTests(BatchCase):
+    """Every consumer of remote-test evidence applies the all-batches rule."""
+
+    PR_FILES = [{'filename': 'tools/llmtool/llmtool/example_module.py'}]
+
+    def task_with(self, count, *receipts, outcomes=()):
+        task = task_for(count)
+        task['remote_test_receipts'] = list(receipts)
+        task['remote_test_outcomes'] = list(outcomes)
+        task['completion']['state'] = 'PM_EVIDENCE_READY'
+        return task
+
+    def batches(self, count):
+        return remote_test.remote_test_batches(module_names(count))
+
+    def eligibility(self, task):
+        """Run member_check with every gate before the EC2 receipt gate satisfied."""
+        pull = {'state': 'open', 'merged': False, 'mergeable': True}
+        with mock.patch.object(merge_train_eligibility, '_pr_snapshot',
+                               return_value=(pull, SHA)), \
+                mock.patch.object(merge_train_eligibility, '_review_version', return_value=1), \
+                mock.patch.object(merge_train_eligibility, '_ci_gate',
+                                  return_value=(None, (10, 11))), \
+                mock.patch.object(merge_train_eligibility, '_rule_file_code',
+                                  return_value=None), \
+                mock.patch.object(merge_train_eligibility, '_live_train_code',
+                                  return_value=None):
+            return merge_train_eligibility.member_check(
+                FakeStore(task), TASK_ID, 7, lambda path: list(self.PR_FILES),
+                train_root=None, sleep=lambda seconds: None)
+
+    def assert_unsatisfied(self, task):
+        self.assertNotEqual(self.action(task), 'DISPATCH_REVIEW')
+        result = self.eligibility(task)
+        self.assertFalse(result['eligible'])
+        self.assertEqual(result['code'], merge_train_eligibility.TRAIN_MEMBER_REMOTE_TEST_MISSING)
+
+    def assert_satisfied(self, task):
+        self.assertEqual(self.action(task), 'DISPATCH_REVIEW')
+        result = self.eligibility(task)
+        self.assertTrue(result['eligible'], result)
+        return result
+
+    def test_a_one_passing_batch_of_twelve_satisfies_neither_gate(self):
+        first, _ = self.batches(12)
+        task = self.task_with(12, sealed(first))
+        self.assertEqual(self.action(task), 'RUN_REMOTE_TEST')
+        self.assert_unsatisfied(task)
+        task = self.task_with(12, sealed(self.batches(12)[1]))
+        self.assertEqual(self.action(task), 'RUN_REMOTE_TEST')
+        self.assert_unsatisfied(task)
+
+    def test_a_a_newest_pass_never_hides_an_earlier_fail_in_the_merge_train_gate(self):
+        first, second = self.batches(12)
+        self.assert_unsatisfied(self.task_with(12, sealed(first, 'FAIL'), sealed(second)))
+        self.assert_unsatisfied(self.task_with(12, sealed(first), sealed(second, 'FAIL')))
+        self.assert_unsatisfied(
+            self.task_with(12, sealed(first), sealed(second), sealed(first, 'FAIL')))
+
+    def test_a_receipts_for_another_head_never_satisfy_the_merge_train_gate(self):
+        first, second = self.batches(12)
+        self.assert_unsatisfied(
+            self.task_with(12, sealed(first, sha=OTHER_SHA), sealed(second, sha=OTHER_SHA)))
+
+    def test_a_a_forged_receipt_never_satisfies_the_merge_train_gate(self):
+        first, second = self.batches(12)
+        forged = dict(sealed(second), ran_total=99)
+        self.assert_unsatisfied(self.task_with(12, sealed(first), forged))
+
+    def test_b_both_batches_at_the_head_satisfy_both_gates(self):
+        first, second = self.batches(12)
+        task = self.task_with(12, sealed(first), sealed(second))
+        result = self.assert_satisfied(task)
+        self.assertEqual(result['member']['remote_test_receipt_digest'],
+                         task['remote_test_receipts'][-1]['receipt_digest'])
+
+    def test_b_a_repass_after_a_fail_satisfies_both_gates(self):
+        first, second = self.batches(12)
+        task = self.task_with(12, sealed(first, 'FAIL'), sealed(first), sealed(second))
+        self.assert_satisfied(task)
+
+    def test_b_batch_runs_through_the_run_path_satisfy_both_gates(self):
+        store, transport = FakeStore(self.task_with(12)), Transport()
+        self.run_once(store, transport)
+        self.assert_unsatisfied(store.task)
+        self.run_once(store, transport)
+        self.assert_satisfied(store.task)
+
+    def test_c_an_old_module_denial_never_stands_in_for_the_batches(self):
+        first, second = self.batches(12)
+        denial = {'executor_task': EXECUTOR, 'sha': SHA, 'result': 'ADMISSION_DENIED',
+                  'code': 'MODULE_NOT_ADMITTED', 'modules': []}
+        task = self.task_with(12, outcomes=[denial])
+        self.assertIsNone(self.status(task)[0])
+        self.assertEqual(self.action(task), 'RUN_REMOTE_TEST')
+        task = self.task_with(12, sealed(first), outcomes=[denial])
+        self.assertEqual(self.action(task), 'RUN_REMOTE_TEST')
+        task = self.task_with(12, sealed(first), sealed(second), outcomes=[denial])
+        self.assertEqual(self.status(task)[0], 'PASS')
+        self.assertEqual(self.action(task), 'DISPATCH_REVIEW')
+
+    def test_c_a_module_denial_still_counts_for_eight_or_fewer_modules(self):
+        denial = {'executor_task': EXECUTOR, 'sha': SHA, 'result': 'ADMISSION_DENIED',
+                  'code': 'MODULE_NOT_ADMITTED', 'modules': []}
+        task = self.task_with(8, outcomes=[denial])
+        self.assertEqual(self.status(task)[0], 'ADMISSION_DENIED')
+        self.assertEqual(self.action(task), 'DISPATCH_REVIEW')
+
+    def test_d_the_direct_developer_path_selects_remote_batches_not_local(self):
+        for count in (MAXIMUM, MAXIMUM + 1, 12, 2 * MAXIMUM):
+            with self.subTest(count=count):
+                task = task_for(count)
+                read_paths = task['developer']['read_paths']
+                self.assertEqual(
+                    task_submission_cli._remote_receipt_test_policy(task, read_paths=read_paths),
+                    'REMOTE_RECEIPT')
+                self.assertEqual(
+                    len(task_submission_cli._remote_task_test_paths(task, read_paths=read_paths)),
+                    count)
+
+    def match(self, task):
+        paths = task_submission_cli._remote_task_test_paths(
+            task, read_paths=task['developer']['read_paths'])
+        return task_submission_cli._matching_remote_test_receipt(
+            task, executor_task=EXECUTOR, source_sha=SHA, paths=paths)
+
+    def test_d_direct_evidence_needs_every_batch_to_pass_at_the_head(self):
+        first, second = self.batches(12)
+        task = self.task_with(12, full_receipt(first))
+        self.assertEqual(self.match(task), (None, 'REMOTE_TEST_RECEIPT_MISSING'))
+        task = self.task_with(12, full_receipt(first), full_receipt(second))
+        receipt, gate = self.match(task)
+        self.assertIsNone(gate)
+        self.assertEqual(receipt['modules'], list(second))
+        task = self.task_with(12, full_receipt(first, sha=OTHER_SHA), full_receipt(second))
+        self.assertEqual(self.match(task), (None, 'REMOTE_TEST_RECEIPT_MISSING'))
+
+    def test_d_direct_evidence_ignores_a_pass_that_a_later_fail_supersedes(self):
+        first, second = self.batches(12)
+        task = self.task_with(
+            12, full_receipt(first), full_receipt(second), full_receipt(first, 'FAIL'))
+        self.assertEqual(self.match(task), (None, 'REMOTE_TEST_RECEIPT_MISSING'))
+        task['remote_test_receipts'].append(full_receipt(first))
+        self.assertEqual(self.match(task), (None, 'REMOTE_TEST_RECEIPT_MISSING'))
+        task['remote_test_receipts'].append(full_receipt(second))
+        self.assertIsNone(self.match(task)[1])
+
+    def test_d_direct_evidence_for_eight_modules_still_needs_one_covering_pass(self):
+        names = tuple(module_names(8))
+        task = self.task_with(8, full_receipt(names))
+        self.assertIsNone(self.match(task)[1])
+        task = self.task_with(8, full_receipt(names[:4]), full_receipt(names[4:]))
+        self.assertEqual(self.match(task), (None, 'REMOTE_TEST_RECEIPT_MISSING'))
 
 
 class SpecPreflightBatchTests(unittest.TestCase):

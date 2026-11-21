@@ -14,7 +14,7 @@ need no receipt, every other PR needs an exact-head PASS receipt.
 import re
 import time
 
-from . import merge_train_store, sensitive_paths, task_advance, task_completion
+from . import merge_train_store, remote_test, sensitive_paths, task_advance, task_completion
 
 TRAIN_MEMBER_RECORD_UNAVAILABLE = 'TRAIN_MEMBER_RECORD_UNAVAILABLE'
 TRAIN_MEMBER_NOT_READY = 'TRAIN_MEMBER_NOT_READY'
@@ -314,6 +314,18 @@ def member_check(store, task_id, pr, github_get, train_root=None, sleep=None):
     paths = [item['filename'] for item in files]
     if _receipt_optional(paths) and not _has_head_receipt(record, head):
         digest = None
+    elif len(remote_test._task_path_modules(record)) > remote_test._MAX_REMOTE_MODULES:
+        # #2457: more declared modules than one EC2 run take batches. Every
+        # declared module needs a PASS receipt at this head after the newest
+        # non-PASS receipt there; one batch, or a later PASS after a FAIL, is
+        # not enough.
+        status = task_advance._batch_remote_test_status(
+            record, executor, head, remote_test._task_path_modules(record))
+        receipt = status[2] if type(status) is tuple else None
+        digest = receipt.get('receipt_digest') if type(receipt) is dict else None
+        if (type(status) is not tuple or status[0] != 'PASS' or
+                type(digest) is not str or _SHA256.fullmatch(digest) is None):
+            return _refused(TRAIN_MEMBER_REMOTE_TEST_MISSING)
     else:
         summary = task_advance._remote_test_receipt_summary(record, head)
         digest = _receipt_digest(record, head)
