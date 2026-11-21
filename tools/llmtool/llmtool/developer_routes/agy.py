@@ -13,7 +13,7 @@ from .. import github_identity
 _MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z')
 _EFFORT = re.compile(r'(?:minimal|low|medium|high)\Z')
 _CONVERSATION = re.compile(r'[A-Za-z0-9_-]{8,128}\Z')
-MAX_PROMPT_BYTES = 512 * 1024
+MAX_PROMPT_BYTES = 5 * 1024 * 1024
 
 
 def _unique_pairs(pairs):
