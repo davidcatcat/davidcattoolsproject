@@ -31,8 +31,9 @@ MAX_STDERR_BYTES = 64 * 1024
 # Route timeouts come from developer-routes.json (default_timeout and
 # max_timeout per route). A route without registry limits keeps the former
 # fixed 600-second default and maximum. No route may exceed the hard cap.
+# #2281 (Owner 2026-11-19): every AI run may run up to 5 hours (18000 s).
 DEFAULT_TIMEOUT_SECONDS = 600
-HARD_TIMEOUT_CAP_SECONDS = 3600
+HARD_TIMEOUT_CAP_SECONDS = 18000
 MAX_TIMEOUT_SECONDS = DEFAULT_TIMEOUT_SECONDS
 TIMEOUT_KEYS = frozenset({'default_timeout', 'max_timeout'})
 DEFAULT_MAX_DIFF_BYTES = 64 * 1024
@@ -434,7 +435,8 @@ def resolve_route_timeout(route: Any, requested: Any = None, *,
 
     * TIMEOUT_INVALID: requested is not an int (bool and float included) or
       is below 1;
-    * TIMEOUT_OVER_HARD_CAP: requested is above 3600, for every route;
+    * TIMEOUT_OVER_HARD_CAP: requested is above HARD_TIMEOUT_CAP_SECONDS
+      (18000), for every route;
     * TIMEOUT_OVER_ROUTE_MAX: requested is above the route's max_timeout;
     * ROUTE_CONFIG_INVALID: unknown route name or invalid timeout limits.
     """
@@ -667,7 +669,7 @@ def resolve_route_max_source_total_bytes(route: Any, *,
     return val
 
 
-def _default_runner(argv, cwd, env, timeout):
+def _default_runner(argv, cwd, env, timeout, *, on_child=None):
     started = time.monotonic()
     deadline = started + timeout
     lifecycle = CLIProcessLifecycle('direct-developer-route', deadline=deadline + 5)
@@ -681,6 +683,8 @@ def _default_runner(argv, cwd, env, timeout):
         lifecycle.own(process)
         selector = selectors.DefaultSelector()
         try:
+            if on_child is not None:
+                on_child(process.pid)
             for stream, name in ((process.stdout, 'stdout'), (process.stderr, 'stderr')):
                 os.set_blocking(stream.fileno(), False)
                 selector.register(stream, selectors.EVENT_READ, name)
@@ -1055,13 +1059,16 @@ def _fire_delivered(route, on_delivered):
 
 
 def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
-              runner=None, boundary, snapshot, on_launch=None, on_delivered=None):
+              runner=None, boundary, snapshot, on_launch=None, on_delivered=None,
+              on_child=None):
     """Run one route only after dispatch, D6, and OS write-boundary checks.
 
     ``on_launch`` (optional, no arguments) is called once at the launch
     boundary: after request validation, the dispatch/D6 gate, write-boundary
     verification and route input preparation, right before the process
-    starts. No refusal before that point calls it.
+    starts. No refusal before that point calls it. ``on_child`` runs only for
+    the managed provider process once the lifecycle owns it. Boundary probes
+    never receive the callback.
 
     ``on_delivered`` (optional, no arguments) is called once at the delivery
     boundary (#1502 WP-F design section 2.2 step 5): after every
@@ -1075,6 +1082,8 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
     """
     started = time.monotonic()
     if on_launch is not None and not callable(on_launch):
+        raise RouteError(_route_code(route, 'REQUEST_INVALID'))
+    if on_child is not None and (not callable(on_child) or runner is not None):
         raise RouteError(_route_code(route, 'REQUEST_INVALID'))
     if on_delivered is not None and not callable(on_delivered):
         raise RouteError(_route_code(route, 'REQUEST_INVALID'))
@@ -1208,7 +1217,11 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         raise RouteError(_route_code(route, 'REQUEST_INVALID')) from None
     execute = runner or _default_runner
     try:
-        code, stdout, stderr = execute(argv, value['root'], env, value['timeout'])
+        runner_args = (argv, value['root'], env, value['timeout'])
+        if on_child is None:
+            code, stdout, stderr = execute(*runner_args)
+        else:
+            code, stdout, stderr = execute(*runner_args, on_child=on_child)
     except TimeoutError:
         shutil.rmtree(private_tmp, ignore_errors=True)
         raise RouteError(_route_code(route, 'TIMEOUT')) from None

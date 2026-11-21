@@ -245,10 +245,10 @@ class GwAgentRouteTests(unittest.TestCase):
                     'authorization_ref': 'pm-task-ref',
                     'allowed_data_classes': ['synthetic'],
                     'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
-                                'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                                'max_output_tokens': 65536, 'max_wall_seconds': 1800,
                                 'max_tool_result_bytes': 262144,
                                 'max_sent_bytes': 16777216},
-                    'default_timeout': 600, 'max_timeout': 600,
+                    'default_timeout': 1800, 'max_timeout': 3600,
                 },
             },
         }
@@ -304,10 +304,10 @@ class GwAgentRouteTests(unittest.TestCase):
                     'authorization_ref': 'pm-task-ref',
                     'allowed_data_classes': ['synthetic'],
                     'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
-                                'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                                'max_output_tokens': 65536, 'max_wall_seconds': 1800,
                                 'max_tool_result_bytes': 262144,
                                 'max_sent_bytes': 16777216},
-                    'default_timeout': 600, 'max_timeout': 600,
+                    'default_timeout': 1800, 'max_timeout': 3600,
                 },
             },
         }
@@ -315,16 +315,20 @@ class GwAgentRouteTests(unittest.TestCase):
         path.write_text(json.dumps(route_config))
         self.assertEqual(
             load_route_config(path)['routes']['gw-agent']['budgets']['max_turns'], 512)
+        self.assertEqual(
+            load_route_config(path)['routes']['gw-agent']['budgets']['max_wall_seconds'], 1800)
 
         # Multiplier keys also accepted
         multiplier_budgets = {
             'max_turns': 512, 'max_input_tokens_multiplier': 8,
-            'max_output_tokens_multiplier': 4, 'max_wall_seconds': 600,
+            'max_output_tokens_multiplier': 4, 'max_wall_seconds': 1800,
             'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216}
         route_config['routes']['gw-agent']['budgets'] = multiplier_budgets
         path.write_text(json.dumps(route_config))
         self.assertEqual(
             load_route_config(path)['routes']['gw-agent']['budgets']['max_input_tokens_multiplier'], 8)
+        self.assertEqual(
+            load_route_config(path)['routes']['gw-agent']['budgets']['max_wall_seconds'], 1800)
 
         # Multipliers exceeding token ceilings are refused (#2281 L9 repair 2)
         exceeding_input_multiplier = dict(multiplier_budgets, max_input_tokens_multiplier=2000)
@@ -358,13 +362,21 @@ class GwAgentRouteTests(unittest.TestCase):
             'not-a-dict',
             {},
             {'max_turns': 0, 'max_input_tokens': 262144, 'max_output_tokens': 65536,
-             'max_wall_seconds': 600, 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
+             'max_wall_seconds': 1800, 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
             {'max_turns': 1001, 'max_input_tokens': 262144, 'max_output_tokens': 65536,
-             'max_wall_seconds': 600, 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
+             'max_wall_seconds': 1800, 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
             {'max_turns': True, 'max_input_tokens': 262144, 'max_output_tokens': 65536,
-             'max_wall_seconds': 600, 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
+             'max_wall_seconds': 1800, 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
             {'max_turns': 512, 'max_input_tokens': 0, 'max_output_tokens': 65536,
-             'max_wall_seconds': 600, 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
+             'max_wall_seconds': 1800, 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
+            {'max_turns': 512, 'max_input_tokens': 262144, 'max_output_tokens': 65536,
+             'max_wall_seconds': 0, 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
+            {'max_turns': 512, 'max_input_tokens': 262144, 'max_output_tokens': 65536,
+             'max_wall_seconds': 86401, 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
+            {'max_turns': 512, 'max_input_tokens': 262144, 'max_output_tokens': 65536,
+             'max_wall_seconds': True, 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
+            {'max_turns': 512, 'max_input_tokens': 262144, 'max_output_tokens': 65536,
+             'max_wall_seconds': '1800', 'max_tool_result_bytes': 262144, 'max_sent_bytes': 16777216},
         )
         for invalid in invalid_cases:
             if invalid is None:
@@ -1392,6 +1404,15 @@ class GwAgentRouteTests(unittest.TestCase):
                 self.route.collect(tmpdir, req)
             self.assertEqual(cm.exception.code, 'GW_AGENT_SESSION_PERSIST_FAILED')
 
+    def test_shipped_route_gw_agent_wall_budget_matches_default_timeout(self):
+        # #2281 (Owner 2026-11-19): whole-run wall budget is 10800 s (3 hours),
+        # matching route default_timeout; the route max_timeout is 18000 s.
+        config = load_route_config()['routes']['gw-agent']
+        self.assertEqual(config['budgets']['max_wall_seconds'], 10800)
+        self.assertEqual((config['default_timeout'], config['max_timeout']), (10800, 18000))
+        self.assertEqual(config['budgets']['max_wall_seconds'], config['default_timeout'])
+        self.assertLessEqual(config['budgets']['max_wall_seconds'], config['max_timeout'])
+
 
 class GwAgentDelegateDataClassTests(unittest.TestCase):
     """#1830: the delegate keeps its validated --data-class on the developer record."""
@@ -1435,7 +1456,7 @@ class GwAgentDelegateDataClassTests(unittest.TestCase):
         route_config = {'routes': {'gw-agent': {
             'allowed_data_classes': ['synthetic', 'public_repo'],
             'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
-                        'max_output_tokens': 65536, 'max_wall_seconds': 600,
+                        'max_output_tokens': 65536, 'max_wall_seconds': 1800,
                         'max_tool_result_bytes': 262144,
                         'max_sent_bytes': 16777216},
             'profile': {'context_cap_tokens': 10000, 'max_output_tokens': 1000}}}}

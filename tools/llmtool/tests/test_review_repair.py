@@ -115,6 +115,8 @@ def _record():
              'state': 'DISPATCHED', 'reviewer_task': 'reviewer-d6',
              'native_session_id': 'review-session', 'account_mode': 'DEFAULT_SECOND_ACCOUNT',
              'claimed_at': '2026-10-27T00:00:00Z', 'updated_at': '2026-10-27T00:00:00Z'}
+    claim.update(state='COMPLETED', review_result={
+        'head': HEAD, 'task_id': TASK, 'verdict': 'FAIL', 'review_text': _comment()['body']})
     event = {'event_id': EVENT_ID, 'source': 'REVIEWER', 'state': 'PENDING',
              'source_sha': HEAD, 'session_id': 'review-' + EVENT_ID,
              'received_at': '2026-10-27T01:01:00Z'}
@@ -537,6 +539,34 @@ class ReviewRepairTests(unittest.TestCase):
                 report.encode()).hexdigest()}]
         self.store = TempTaskStore(self.temp.name, record)
 
+    def test_later_prepared_repair_reuses_original_unknown_claim(self):
+        earlier = self._stored_claim(attempt=1, repair_id='1' * 32, head='1' * 40,
+                                     state='DISPATCHED')
+        interrupted = self._stored_claim(attempt=2, repair_id='2' * 32, head=HEAD,
+                                         state='UNKNOWN')
+        record = self.store.get(TASK)
+        record['review_repair_claims'] = [earlier, interrupted]
+        repair = {'task_id': interrupted['repair_task_id'],
+                  'developer': {'provider_profile': 'agy', 'state': 'DEVELOPER_DISPATCHING',
+                                'dispatch_boundary': 'PREPARED'}}
+        self.store = TempTaskStore(self.temp.name, [record, repair])
+        comment = lambda _path: [_comment(version=2)]
+        record['review_dispatch_claim'][0]['version'] = 2
+        self.store.put(record)
+        with patch.object(review_repair, '_delegate_repair', return_value=0) as dispatch:
+            result = self.dispatch(auto=True, dispatch_adapter=None, github_get=comment)
+            dispatch.assert_called_once()
+        self.assertTrue(result['replayed'])
+        self.assertEqual(result['repair_task_id'], repair['task_id'])
+        self.assertEqual(self.store.get(TASK)['review_repair_claims'], [earlier, interrupted])
+
+        repair['developer']['dispatch_boundary'] = 'STARTING'
+        self.store.put(repair)
+        with patch.object(review_repair, '_delegate_repair') as dispatch:
+            self._assert_refused('REVIEW_REPAIR_PM_REQUIRED', auto=True, dispatch_adapter=None,
+                                 github_get=comment)
+            dispatch.assert_not_called()
+
     def test_failed_claim_starts_a_new_repair_attempt(self):
         self.dispatch()
         record = self.store.get(TASK)
@@ -551,12 +581,12 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertNotEqual(claims[0]['repair_task_id'], claims[1]['repair_task_id'])
 
     def test_retry_guard_refusal_keeps_dispatched_claim(self):
-        self._repair_history(3)
+        version = self._repair_history(MAX)
         record = self.store.get(TASK)
         retry_id = record['review_repair_claims'][-1]['repair_task_id']
         with self.assertRaisesRegex(Exception, 'refused') as raised:
             self.dispatch(family='network', retry_claim_id=retry_id,
-                          github_get=lambda _path: [_comment(version=4)])
+                          github_get=lambda _path: [_comment(version=version)])
         self.assertEqual(raised.exception.review_repair_code, 'REPAIR_LIMIT_REACHED')
         self.assertEqual(self.store.get(TASK)['review_repair_claims'][-1]['state'],
                          'DISPATCHED')
@@ -571,17 +601,19 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(result['claim']['attempt'], 2)
         self.assertEqual([claim['state'] for claim in claims], ['FAILED', 'DISPATCHED'])
 
-    def test_third_attempt_on_a_new_head_at_limit_is_directed_to_split(self):
+    def test_sixth_attempt_on_a_new_head_at_limit_is_directed_to_split(self):
         # D14 (spec section 7): repairs used up, a new valid FAIL escalates a ROOT.
+        # #2367: the limit is repair_max (5) repairs, so this is the 6th.
         result = self.dispatch()
         record = self.store.get(TASK)
-        second = dict(record['review_repair_claims'][0], head_sha='a' * 40,
-                      version=2, attempt=2, packet_sha256='1' * 64,
-                      repair_task_id='1' * 32)
-        record['review_repair_claims'].append(second)
+        for attempt in range(2, MAX + 1):
+            record['review_repair_claims'].append(dict(
+                record['review_repair_claims'][0], head_sha=str(attempt) * 40,
+                version=attempt, attempt=attempt, packet_sha256=str(attempt) * 64,
+                repair_task_id=str(attempt) * 32))
         record['review_dispatch_claim'].append({
             'executor_task': EXECUTOR, 'pr': PR, 'head_sha': 'b' * 40,
-            'version': 3, 'state': 'DISPATCHED', 'reviewer_task': 'reviewer-d6',
+            'version': MAX + 1, 'state': 'DISPATCHED', 'reviewer_task': 'reviewer-d6',
             'native_session_id': 'review-session-2', 'account_mode': 'DEFAULT_SECOND_ACCOUNT',
             'claimed_at': '2026-10-27T00:00:00Z', 'updated_at': '2026-10-27T00:00:00Z'})
         record['completion_events'].append({
@@ -591,11 +623,11 @@ class ReviewRepairTests(unittest.TestCase):
         self.store = TempTaskStore(self.temp.name, record)
         with self.assertRaisesRegex(Exception, 'refused') as raised:
             self.dispatch(github_get=lambda _path: [_comment(
-                comment_id=10, head='b' * 40, version=3)],
+                comment_id=10, head='b' * 40, version=MAX + 1)],
                 current_head=lambda _task, _executor: 'b' * 40)
         self.assertEqual(getattr(raised.exception, 'review_repair_code'),
                          'REPAIR_SPLIT_REQUIRED')
-        self.assertEqual(len(self.store.get(TASK)['review_repair_claims']), 2)
+        self.assertEqual(len(self.store.get(TASK)['review_repair_claims']), MAX)
         self.assertEqual(len(self.calls), 1)
 
     def _repair_history(self, count, *, status=None, examined_sha=HEAD):
@@ -628,24 +660,151 @@ class ReviewRepairTests(unittest.TestCase):
         self.store = TempTaskStore(self.temp.name, record)
         return version
 
-    def test_third_attempt_is_refused_and_directed_to_high_debug(self):
-        version = self._repair_history(2)
+    def test_sixth_attempt_is_refused_at_the_limit(self):
+        version = self._repair_history(MAX)
         with self.assertRaisesRegex(Exception, 'refused') as raised:
             self.dispatch(family='network', github_get=lambda _path: [
                 _comment(comment_id=11, version=version)])
         self.assertEqual(raised.exception.review_repair_code,
                          'REPAIR_LIMIT_REACHED')
-        self.assertEqual(len(self.store.get(TASK)['review_repair_claims']), 2)
+        self.assertEqual(len(self.store.get(TASK)['review_repair_claims']), MAX)
         self.assertEqual(self.calls, [])
 
-    def test_confirmed_high_debug_does_not_allow_third_attempt(self):
-        version = self._repair_history(2, status='RCA_CONFIRMED')
+    def test_confirmed_high_debug_does_not_allow_a_sixth_attempt(self):
+        version = self._repair_history(MAX, status='RCA_CONFIRMED')
         with self.assertRaisesRegex(Exception, 'refused') as raised:
             self.dispatch(family='network', github_get=lambda _path: [
                 _comment(comment_id=11, version=version)])
         self.assertEqual(raised.exception.review_repair_code, 'REPAIR_LIMIT_REACHED')
+        self.assertEqual(len(self.store.get(TASK)['review_repair_claims']), MAX)
+        self.assertEqual(self.calls, [])
+
+    def test_another_review_version_cannot_duplicate_a_claim_on_the_same_head(self):
+        version = self._repair_history(2)
+        self._assert_refused('REPAIR_HEAD_ALREADY_CLAIMED', family='network',
+                             github_get=lambda _path: [_comment(comment_id=11,
+                                                                version=version)])
         self.assertEqual(len(self.store.get(TASK)['review_repair_claims']), 2)
         self.assertEqual(self.calls, [])
+
+    # #2367 A2/A5: repairs 3 to 5 reuse the RCA_CONFIRMED taken before repair #2.
+    _REPORT = 'Root cause evidence.'
+    _DIGEST = hashlib.sha256(_REPORT.encode()).hexdigest()
+
+    def _covered_history(self, entries=None):
+        """Repairs 1 and 2 used; the Debug before repair #2 is on FAIL 2's HEAD."""
+        first = self._stored_claim(attempt=1, repair_id='1' * 32, head='1' * 40,
+                                   state='DISPATCHED')
+        second = dict(self._stored_claim(attempt=2, repair_id='2' * 32, head='2' * 40,
+                                         state='DISPATCHED'),
+                      high_debug_report_sha256=self._DIGEST)
+        record = self.store.get(TASK)
+        record['review_repair_claims'] = [first, second]
+        record['high_debug'] = ([{
+            'family': f'pr-{PR}', 'status': 'RCA_CONFIRMED', 'examined_sha': '2' * 40,
+            'recorded_at': '2026-10-27T02:30:00Z', 'report': self._REPORT,
+            'report_sha256': self._DIGEST}] if entries is None else entries)
+        self.store = TempTaskStore(self.temp.name, record)
+
+    def _fail_at(self, head, version):
+        """Point the Task's latest formal review at head; return dispatch kwargs."""
+        record = self.store.get(TASK)
+        claim = dict(record['review_dispatch_claim'][0], head_sha=head, version=version,
+                     state='COMPLETED', review_result={
+                         'head': head, 'task_id': TASK, 'verdict': 'FAIL',
+                         'review_text': _comment(head=head, version=version)['body']})
+        event_id = hashlib.sha256(head.encode()).hexdigest()[:32]
+        record['review_dispatch_claim'] = [claim]
+        record['completion_events'] = [{
+            'event_id': event_id, 'source': 'REVIEWER', 'state': 'PENDING',
+            'source_sha': head, 'session_id': 'review-' + event_id,
+            'received_at': '2026-10-27T09:01:00Z'}]
+        self.store = TempTaskStore(self.temp.name, record)
+        return {'github_get': lambda _path: [_comment(comment_id=100 + version, head=head,
+                                                      version=version)],
+                'current_head': lambda _task, _executor: head}
+
+    def test_third_repair_needs_no_debug_and_fourth_needs_a_confirmed_report(self):
+        self.assertEqual(MAX, 5)
+        self._covered_history(entries=[])
+        self.assertEqual(self.dispatch(**self._fail_at(HEAD, 3))['claim']['attempt'], 3)
+        self._assert_refused('REPAIR_DEBUG_REQUIRED', **self._fail_at('d' * 40, 4))
+
+        for attempt, head in ((4, 'd' * 40), (5, 'e' * 40)):
+            with self.subTest(attempt=attempt):
+                kwargs = self._fail_at(head, attempt)
+                record = self.store.get(TASK)
+                record['high_debug'] = [{
+                    'family': f'pr-{PR}', 'status': 'RCA_CONFIRMED', 'examined_sha': head,
+                    'recorded_at': '2026-10-27T10:00:00Z', 'report': self._REPORT,
+                    'report_sha256': self._DIGEST}]
+                self.store = TempTaskStore(self.temp.name, record)
+                result = self.dispatch(**kwargs)
+                self.assertEqual(result['claim']['attempt'], attempt)
+                self.assertEqual(result['claim']['high_debug_report_sha256'], self._DIGEST)
+                self.assertEqual(self.calls[-1]['packet']['high_debug_report_untrusted_data'],
+                                 self._REPORT)
+        self._assert_refused('REPAIR_SPLIT_REQUIRED', **self._fail_at('f' * 40, 6))
+        self.assertEqual(len(self.store.get(TASK)['review_repair_claims']), MAX)
+
+    def test_same_head_new_finding_requires_a_fresh_debug(self):
+        first = 'Finding: F1 [High] guard.py:19 missing principal check'
+        changed = 'Finding: F1 [High] guard.py:19 wrong resource check'
+
+        def review(version, stamp, text):
+            return {'pr': PR, 'executor_task': EXECUTOR, 'head_sha': HEAD, 'version': version,
+                    'state': 'COMPLETED', 'updated_at': stamp, 'review_kind': 'formal',
+                    'review_result': {'task_id': TASK, 'head': HEAD, 'verdict': 'FAIL',
+                                      'review_text': text}}
+
+        initial = review(1, '2026-10-27T01:00:00Z', first)
+        latest = review(2, '2026-10-27T03:00:00Z', changed)
+        old_debug = {'family': f'pr-{PR}', 'status': 'RCA_CONFIRMED',
+                     'examined_sha': HEAD, 'recorded_at': '2026-10-27T02:00:00Z'}
+        fresh = dict(old_debug, recorded_at='2026-10-27T04:00:00Z')
+        task = {'task_id': TASK, 'review_dispatch_claim': [initial, latest],
+                'high_debug': [old_debug]}
+        packet = {'pr': PR, 'executor_task': EXECUTOR, 'failed_head': HEAD, 'version': 2,
+                  'reviewer_text_excerpt_untrusted_data': changed}
+        counts = {'review_repairs': 3, 'review_heads': {letter * 40: 'FAIL'
+                                                      for letter in 'def'}}
+
+        def admitted():
+            return review_repair._review_gate(
+                task, [], packet, f'pr-{PR}', repair_policy.load_policy(), counts=counts)
+
+        with self.assertRaises(LLMToolError) as stale:
+            admitted()
+        self.assertEqual(stale.exception.review_repair_code, 'REPAIR_DEBUG_REQUIRED')
+        task['high_debug'].append(fresh)
+        self.assertIs(admitted(), fresh)
+        del task['review_dispatch_claim']
+        with self.assertRaises(LLMToolError) as unbound:
+            admitted()
+        self.assertEqual(unbound.exception.review_repair_code, 'REPAIR_DEBUG_REQUIRED')
+
+    def test_fourth_repair_can_request_new_debug_for_an_unconfirmed_cause(self):
+        for status in ('RCA_UNCONFIRMED', 'BLOCKED'):
+            with self.subTest(status=status):
+                self._fourth_fail(status)
+                self._assert_refused('REPAIR_DEBUG_REQUIRED')
+        self.assertEqual(self.calls, [])
+
+    def test_test_repairs_three_to_five_are_admitted_and_the_sixth_stops(self):
+        # Evidence shape #2362: two test repairs used (the second an empty
+        # diff); under #2367 repairs 3 to 5 still run and the 6th stops.
+        self._seed_repair_claims([
+            self._stored_claim(attempt=n, family=EC2_FAMILY, comment_id=None,
+                               repair_id=f'{n:032x}', head=str(n) * 40)
+            for n in (1, 2)])
+        for expected in (3, 4, 5):
+            with self.subTest(attempt=expected):
+                result = self.dispatch(remote_test_receipt=_receipt())
+                self.assertEqual((result['claim']['family'], result['claim']['attempt']),
+                                 (EC2_FAMILY, expected))
+                self._fail_last_claim()
+        self._assert_refused('REPAIR_LIMIT_REACHED', remote_test_receipt=_receipt())
+        self.assertEqual(len(self.calls), 3)
 
     # #1502 WP-D (O2, D1, D3): the review repair counting gate.
     def _second_fail(self, status=None, head='e' * 40):
@@ -661,15 +820,17 @@ class ReviewRepairTests(unittest.TestCase):
                 'report_sha256': hashlib.sha256(report.encode()).hexdigest()}]
             self.store = TempTaskStore(self.temp.name, record)
 
-    def test_second_valid_fail_without_debug_is_refused_debug_required(self):
-        self._second_fail()
-        self._assert_refused('REPAIR_DEBUG_REQUIRED')
+    def _fourth_fail(self, status=None):
+        self._second_fail(status)
+        record = self.store.get(TASK)
+        for attempt, head in ((2, '1' * 40), (3, '2' * 40)):
+            record['review_repair_claims'].append(self._stored_claim(
+                attempt=attempt, repair_id=str(attempt) * 32, head=head, state='DISPATCHED'))
+        self.store = TempTaskStore(self.temp.name, record)
 
-    def test_unconfirmed_debug_on_second_fail_escalates_to_split(self):
-        for status in ('RCA_UNCONFIRMED', 'BLOCKED'):
-            with self.subTest(status=status):
-                self._second_fail(status)
-                self._assert_refused('REPAIR_SPLIT_REQUIRED')
+    def test_fourth_valid_fail_without_debug_is_refused_debug_required(self):
+        self._fourth_fail()
+        self._assert_refused('REPAIR_DEBUG_REQUIRED')
 
     def test_confirmed_debug_binds_its_report_into_the_second_repair(self):
         self._second_fail('RCA_CONFIRMED')
@@ -684,7 +845,7 @@ class ReviewRepairTests(unittest.TestCase):
     def test_a_second_review_of_one_head_is_one_valid_fail(self):
         # v1 and v2 FAIL on one HEAD count once: an unconfirmed Debug does not split.
         version = self._repair_history(1, status='RCA_UNCONFIRMED')
-        self._assert_refused('REPAIR_DEBUG_REQUIRED', family='network',
+        self._assert_refused('REPAIR_HEAD_ALREADY_CLAIMED', family='network',
                              github_get=lambda _path: [_comment(version=version)])
 
     def test_only_low_or_advisory_findings_are_not_a_valid_fail(self):
@@ -701,13 +862,13 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(repair_policy.load_policy()['repair_max'], MAX)
 
     def test_legacy_claims_count_as_pr_family(self):
-        self._repair_history(2)
+        version = self._repair_history(MAX)
         record = self.store.get(TASK)
         for claim in record['review_repair_claims']:
             claim.pop('family')
         self.store = TempTaskStore(self.temp.name, record)
         with self.assertRaisesRegex(Exception, 'refused') as raised:
-            self.dispatch(github_get=lambda _path: [_comment(version=3)])
+            self.dispatch(github_get=lambda _path: [_comment(version=version)])
         self.assertEqual(raised.exception.review_repair_code,
                          'REPAIR_LIMIT_REACHED')
 
@@ -1248,7 +1409,9 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertIs(store, self.store)
         self.assertEqual(args.pm_session_id, task['pm_provenance']['pm_native_session_id'])
         self.assertEqual(args.pm_cwd, task['pm_provenance']['pm_cwd'])
-        self.assertEqual(envelope['request'], f'REPAIR 1/2 of {TASK}')
+        # #2367: the denominator is the policy repair bound (5), not a fixed 2.
+        self.assertEqual(envelope['request'], f'REPAIR 1/{MAX} of {TASK}')
+        self.assertEqual(MAX, 5)
         response = json.loads(envelope['response'])
         self.assertEqual(set(response), {'schema_version', 'summary', 'developer_assignment'})
         self.assertTrue(response['summary'].startswith('LLMTOOL_RUNTIME recorded bounded'))
@@ -1535,10 +1698,7 @@ class ReviewRepairTests(unittest.TestCase):
         self._legacy_record([self._stored_claim(attempt=1, repair_id='1' * 32,
                                                 head='e' * 40, state='DISPATCHED')],
                             overrides=True)
-        # Valid FAIL #2 still needs AI Debug first ...
-        self._assert_refused('REPAIR_DEBUG_REQUIRED')
-        # ... and a confirmed Debug still admits repair #2 as usual.
-        self._confirm_rca()
+        # The legacy override cannot make the second repair require Debug.
         result = self.dispatch()
         self.assertEqual(result['claim']['attempt'], 2)
         self.assertEqual(len(self.calls), 1)
@@ -1614,9 +1774,12 @@ class LegacyPolicyGateTests(unittest.TestCase):
         self.policy = repair_policy.load_policy()
 
     def test_new_limits(self):
-        self.assertEqual((self.policy['repair_max'], self.policy['test_fail_max']), (2, 2))
-        # FAIL #2 goes to Debug, so escalation by count starts after it.
+        # #2367 (Owner 2026-11-19): 5 review repairs and 5 test repairs.
+        self.assertEqual((self.policy['repair_max'], self.policy['test_fail_max']), (5, 5))
+        # FAIL #2 goes to Debug, so escalation by count starts after it; the
+        # escalation FAIL is the one after the last repair.
         self.assertGreater(self.policy['review_fail_max'], 2)
+        self.assertEqual(self.policy['review_fail_max'], self.policy['repair_max'] + 1)
 
     def test_unknown_review_fail_count_escalates_by_kind(self):
         for kind, expected in (('root', 'SPLIT'), ('child', 'PM_DECIDE'),
@@ -1655,13 +1818,13 @@ class LegacyPolicyGateTests(unittest.TestCase):
                 with self.subTest(kind=kind, value=value):
                     self.assertEqual(repair_policy.admit_debug(
                         kind=kind, policy=self.policy, **{keyword: value}), code)
-        # A child at valid FAIL #2 whose shared Debug count is UNKNOWN goes to PM_DECIDE.
+        # A child at valid FAIL #4 whose shared Debug count is UNKNOWN goes to PM_DECIDE.
         self.assertEqual(repair_policy.review_action(
-            kind='child', fail_count=2, policy=self.policy), 'DEBUG')
+            kind='child', fail_count=4, policy=self.policy), 'DEBUG')
         for value in _UNKNOWN_COUNTS:
             with self.subTest(child_group_debug=value):
                 self.assertEqual(repair_policy.review_action(
-                    kind='child', fail_count=2, group_debug_used=value,
+                    kind='child', fail_count=4, group_debug_used=value,
                     policy=self.policy), 'PM_DECIDE')
 
     def test_legacy_override_field_is_ignored_by_the_gates(self):
@@ -1721,14 +1884,15 @@ class LegacyPolicyGateTests(unittest.TestCase):
                 self.assertEqual(repair_policy.admit_debug(
                     kind='child', group_debug_used=p['group_debug_max'] + over, policy=p),
                     'DEBUG_GROUP_USED')
-        # Over the Debug limit at valid FAIL #2: an unconfirmed Debug, or a
+        # Over the Debug limit at valid FAIL #4: an unconfirmed Debug, or a
         # child lineage whose shared Debug is used, escalates instead of repairing.
         for kind, expected in (('root', 'SPLIT'), ('child', 'PM_DECIDE'),
                                ('replan', 'FAILED_FINAL')):
             self.assertEqual(repair_policy.review_action(
-                kind=kind, fail_count=2, debug_status='RCA_UNCONFIRMED', policy=p), expected)
+                kind=kind, fail_count=4, debug_status='RCA_UNCONFIRMED',
+                group_debug_used=p['group_debug_max'], policy=p), expected)
         self.assertEqual(repair_policy.review_action(
-            kind='child', fail_count=2, group_debug_used=p['group_debug_max'], policy=p),
+            kind='child', fail_count=4, group_debug_used=p['group_debug_max'], policy=p),
             'PM_DECIDE')
 
 

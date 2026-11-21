@@ -115,7 +115,12 @@ def receipt(**changes):
     value = {'task_id': TASK_ID, 'run_id': RUN_ID, 'executor_task': 'executor-d6',
              'source_sha': HEAD, 'result': 'PASS',
              'modules': ['test_task_advance', 'test_task_review_prompt'],
-             'ran_total': 12, 'elapsed_s': 3.5, 'failure_excerpt': 'PRIVATE-EXCERPT'}
+             'ran_total': 12, 'elapsed_s': 3.5, 'final': ['OK', 'OK'], 'failures': [],
+             'module_results': [
+                 {'module': 'test_task_advance', 'ran': 6, 'skipped': 0, 'final': 'OK'},
+                 {'module': 'test_task_review_prompt', 'ran': 6, 'skipped': 0, 'final': 'OK'},
+             ],
+             'failure_excerpt': 'PRIVATE-EXCERPT'}
     value.update(changes)
     value['receipt_digest'] = hashlib.sha256(_json_bytes(value)).hexdigest()
     return value

@@ -16,7 +16,8 @@ A stale-source stop before build, merge or close prints the same one refusal.
 Malformed input refuses TRAIN_INPUT_INVALID while the command line is parsed,
 before the fresh-source check or any call: unknown options at the train or
 sub-command level, help flags (the train parsers have no help option), missing
-values, and malformed members or train_id.
+values, and malformed members or train_id. A policy that the loader refuses
+does the same with its own code (POLICY_INVALID), before any other read.
 
 Every command prints exactly one JSON object with ``train_id`` when known,
 ``step``, ``codes`` and ``result``. A refusal is ``pm_caller.refusal``-shaped
@@ -43,7 +44,16 @@ TRAIN_STEP_FAILED = 'TRAIN_STEP_FAILED'
 SOURCE_UNKNOWN = 'LLMTOOL_SOURCE_UNKNOWN'
 
 MIN_MEMBERS = 2
+# #2281 limit 15a: the default when policy.json has no merge_train_members_max.
 MAX_MEMBERS = 6
+# #2281 limit 15a (design rule 3): merge_train.build_candidate and
+# merge_train_store accept at most 64 members per train (their fixed candidate
+# and record cap). That is a real technical limit, so a configured maximum
+# above it is refused at load time as POLICY_INVALID instead of being silently
+# capped to 64.
+TECHNICAL_MEMBERS_MAX = 64
+MEMBERS_MAX_KEY = 'merge_train_members_max'
+POLICY_INVALID = 'POLICY_INVALID'
 STATUS_STEP = 'STATUS'
 EXIT_ZERO_STEPS = frozenset(('BUILT', 'MERGED', 'CLOSED', 'SUPERSEDED', 'WAITING_CI',
                              STATUS_STEP))
@@ -118,7 +128,11 @@ def _strict_train_parse(parse_known_args):
     @functools.wraps(parse_known_args)
     def parse(args=None, namespace=None):
         namespace, extras = parse_known_args(args, namespace)
-        if extras or not _valid_action(namespace):
+        try:
+            valid = not extras and _valid_action(namespace)
+        except _PolicyRefused as refusal:
+            raise SystemExit(_finish(_refused(refusal.code))) from None
+        if not valid:
             _input_error()
         return namespace, extras
     return parse
@@ -138,9 +152,9 @@ def add_train_parser(task_actions):
     actions = train.add_subparsers(dest='train_action', required=True,
                                    parser_class=_TrainParser)
     build = actions.add_parser('build', add_help=False,
-                               help='Build one train from 2 to 6 member Tasks')
+                               help='Build one train from its member Tasks')
     build.add_argument('--member', action='append', metavar='TASK_ID:PR',
-                       help='member Task and its PR, in train order (repeat 2 to 6 times)')
+                       help='member Task and its PR, in train order (at least two)')
     build.add_argument('--pm-session', help='caller PM session (default: runtime session)')
     status = actions.add_parser('status', add_help=False,
                                 help='Print one train record; changes nothing')
@@ -153,9 +167,43 @@ def add_train_parser(task_actions):
     return train
 
 
+class _PolicyRefused(Exception):
+    """The member maximum could not be read; carries the policy loader code."""
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+def _policy_code(error):
+    """The loader's own code when it is well formed, else POLICY_INVALID."""
+    code = str(error)
+    return code if _CODE.fullmatch(code) else POLICY_INVALID
+
+
+def _max_members():
+    """The configured member maximum, else the previous default.
+
+    The key is read through the one policy loader, exactly as the train build
+    path reads it, so the two cannot disagree. An unreadable policy refuses
+    fail closed through the loader's code; a configured value above the fixed
+    candidate and record cap cannot be built, so it is refused here rather
+    than silently capped.
+    """
+    from . import repair_policy
+    from .errors import LLMToolError
+    try:
+        maximum = repair_policy.load_policy().get(MEMBERS_MAX_KEY, MAX_MEMBERS)
+    except LLMToolError as error:
+        raise _PolicyRefused(_policy_code(error)) from None
+    if maximum > TECHNICAL_MEMBERS_MAX:
+        raise _PolicyRefused(POLICY_INVALID)
+    return maximum
+
+
 def _members(raw):
     """Return the ordered member list, or None for malformed input."""
-    if type(raw) is not list or not MIN_MEMBERS <= len(raw) <= MAX_MEMBERS:
+    if type(raw) is not list or not MIN_MEMBERS <= len(raw) <= _max_members():
         return None
     members, task_ids, prs = [], set(), set()
     for item in raw:
@@ -289,7 +337,10 @@ def run_task_train(args, *, store=None, build_call=None, merge_call=None, close_
     action = getattr(args, 'train_action', None)
     members = train_id = None
     if action == 'build':
-        members = _members(getattr(args, 'member', None))
+        try:
+            members = _members(getattr(args, 'member', None))
+        except _PolicyRefused as refusal:
+            return _finish(_refused(refusal.code))
         if members is None:
             return _finish(_refused(TRAIN_INPUT_INVALID))
     elif action in ('status', 'merge', 'close'):

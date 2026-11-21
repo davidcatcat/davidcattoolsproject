@@ -35,8 +35,10 @@ COMMENTS = f'issues/{PR}/comments?per_page=100'
 
 
 def _receipt(head, result='PASS', ran_total=3):
-    body = {'source_sha': head, 'result': result,
+    body = {'source_sha': head, 'result': result, 'task_id': TASK_ID,
+            'run_id': 'run-1', 'executor_task': EXECUTOR,
             'modules': ['test_merge_train_eligibility'], 'ran_total': ran_total,
+            'final': ['OK'], 'failures': [],
             'elapsed_s': 1.5}
     body['receipt_digest'] = hashlib.sha256(task_store._json_bytes(body)).hexdigest()
     return body
@@ -190,6 +192,27 @@ class _Base(unittest.TestCase):
 class EligibleMemberTests(_Base):
     def test_executor_fixture_is_a_valid_d6_task_id(self):
         self.assertIsNotNone(task_store.D6_TASK_ID.fullmatch(EXECUTOR))
+
+    def test_partial_or_wrong_executor_pass_cannot_admit_large_member(self):
+        modules = [f'test_member_{index:02}' for index in range(11)]
+        record = _record(developer={
+            'read_paths': [f'tools/llmtool/tests/{name}.py' for name in modules]})
+
+        def candidate(names, executor):
+            body = _receipt(HEAD)
+            body.pop('receipt_digest')
+            body.update(executor_task=executor, modules=names, final=['OK'] * len(names),
+                        ran_total=len(names), module_results=[
+                            dict(module=name, ran=1, skipped=0, final='OK') for name in names])
+            body['receipt_digest'] = hashlib.sha256(task_store._json_bytes(body)).hexdigest()
+            return body
+
+        for names, executor in ((modules[:8], EXECUTOR), (modules, 'other-executor'),
+                                (modules, EXECUTOR)):
+            with self.subTest(count=len(names), executor=executor):
+                record['remote_test_receipts'] = [candidate(names, executor)]
+                self.assertEqual(self.check(record=record)['eligible'],
+                                 len(names) == 11 and executor == EXECUTOR)
 
     def test_eligible_member_and_exact_fields(self):
         result = self.check()

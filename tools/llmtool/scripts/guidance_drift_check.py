@@ -170,8 +170,12 @@ class TimeoutPair:
 
 # Same value as llmtool.developer_routes.HARD_TIMEOUT_CAP_SECONDS (#1815);
 # tests/test_developer_route_timeout.py keeps the two in step. This script and
-# its own test do not import the llmtool package.
-ROUTE_TIMEOUT_CAP_SECONDS = 3600
+# its own test do not import the llmtool package. #2281 (Owner 2026-11-19):
+# every AI run may run up to 5 hours.
+ROUTE_TIMEOUT_CAP_SECONDS = 18000
+# The EC2 remote test timeout is not an AI run and keeps its 3600 s ceiling;
+# same value as the loader check in llmtool.developer_routes.
+REMOTE_TEST_TIMEOUT_CAP_SECONDS = 3600
 REPO_PATH = r"(?!/)(?!.*\\)(?!(?:.*/)?\.\.(?:/|$))[^\s]+"
 ROUTE_PROFILE = Obj(
     {"adapter": Str(), "model": Str()},
@@ -227,7 +231,10 @@ DEVELOPER_ROUTE = TimeoutPair(Obj(
         "max_prompt_bytes": Int(1),
         "max_source_file_bytes": Int(1),
         "max_source_total_bytes": Int(1),
-        # #2281 L9: gw-agent per-Task budgets object.
+        # #2281 L9, #2281 limit unblock: gw-agent per-Task budgets object.
+        # max_wall_seconds is 10800 s, no shorter than route default_timeout (10800 s)
+        # and bounded by max_timeout (18000 s). Basis: the route default timeout and
+        # the two recorded 600 s stops on #2302.
         "budgets": Obj(
             {
                 "max_turns": Int(1, 1000),
@@ -301,7 +308,7 @@ RULE_SCHEMAS: dict[str, Any] = {
         {"schema_version": Const(1), "routes": MapOf(DEVELOPER_ROUTE, min_items=1)},
         {
             "roles": MapOf(ROLE_MODELS, min_items=1),
-            "remote_test_timeout": Int(1, ROUTE_TIMEOUT_CAP_SECONDS),
+            "remote_test_timeout": Int(1, REMOTE_TEST_TIMEOUT_CAP_SECONDS),
         },
     ),
     "policy.json": Obj({
@@ -314,7 +321,17 @@ RULE_SCHEMAS: dict[str, Any] = {
         "test_fail_max": Int(0),
         "review_fail_max": Int(0),
         "waiting_notify_after_hours": Int(1),
-    }, {"timeout_continuation_max": Int(0, 3)}),
+    }, {
+        "timeout_continuation_max": Int(0, 3),
+        # #2281 L0b: same rule as repair_policy.OPTIONAL_POSITIVE_POLICY_KEYS
+        # (>= 1, no upper bound); limit table rows 2, 15 and 16, and row 17
+        # (#2281 L7, the D6 writer lease length in hours).
+        "spec_preflight_large_file_lines": Int(1),
+        "merge_train_members_max": Int(1),
+        "merge_train_files_per_pr_max": Int(1),
+        "revert_scope_prs_max": Int(1),
+        "d6_writer_lease_hours": Int(1),
+    }),
     "worker-dispatch.json": Obj({
         "schema_version": Const(1),
         "workers": MapOf(WORKER_DISPATCH_ENTRY, min_items=1),

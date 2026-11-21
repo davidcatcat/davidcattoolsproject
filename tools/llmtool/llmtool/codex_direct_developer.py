@@ -15,11 +15,13 @@ import tempfile
 import time
 
 from . import worker_dispatch
-from .config import codex_direct_timeout
+from .config import CODEX_DIRECT_MAX_TIMEOUT_SECONDS, codex_direct_timeout
 from .errors import LLMToolError
 from .providers.cli_lifecycle import CLIHostTermination, CLIProcessLifecycle
 
-MAX_WALL_CLOCK_SECONDS = 1800
+# #2281 (Owner 2026-11-19): the run ceiling is the configured Codex direct
+# maximum (5 hours), the same bound config.py enforces on timeout_seconds.
+MAX_WALL_CLOCK_SECONDS = CODEX_DIRECT_MAX_TIMEOUT_SECONDS
 MAX_OUTPUT_BYTES = 1024 * 1024
 MAX_STDERR_BYTES = 64 * 1024
 MAX_PROMPT_BYTES = 64 * 1024

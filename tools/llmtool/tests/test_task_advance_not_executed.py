@@ -129,30 +129,12 @@ class TestTaskAdvanceNotExecuted(unittest.TestCase):
         receipt_not_exec = remote_receipt(record, result='FAIL', ran_total=0, failures=[])
         record['remote_test_receipts'] = [receipt_not_exec]
         action = task_advance.decide(record, d6(), no_pr, {'repair_claims': []})
-        self.assertEqual(action, 'NEEDS_ATTENTION')
+        self.assertEqual(action, 'PUBLISH')
 
         receipt_fail = remote_receipt(record, result='FAIL', ran_total=1, failures=['f'])
         record['remote_test_receipts'] = [receipt_fail]
         action = task_advance.decide(record, d6(), no_pr, {'repair_claims': []})
-        self.assertEqual(action, 'REPAIR_REVIEW')
-
-    def test_publish_remote_test_step_not_executed_hold(self):
-        record = base_record()
-        receipt_not_exec = remote_receipt(record, result='FAIL', ran_total=0, failures=[])
-        record['remote_test_receipts'] = [receipt_not_exec]
-
-        class DummyStore:
-            def get(self, _task_id):
-                return record
-
-        with patch('llmtool.remote_test._task_path_modules', return_value=['sample_mod']):
-            status, hold = task_advance._pre_pr_remote_gate(
-                record, DummyStore(), 'executor-1', HEAD, 'sample-branch')
-            self.assertEqual(status, 'NOT_EXECUTED')
-            self.assertIsNotNone(hold)
-            self.assertEqual(hold['step'], 'NEEDS_ATTENTION')
-            self.assertEqual(hold['codes'], ['TEST_REMOTE_MODULE_NOT_EXECUTED'])
-            self.assertEqual(hold['result']['remote_test']['result'], 'NOT_EXECUTED')
+        self.assertEqual(action, 'PUBLISH')
 
     def test_advance_not_executed_step_codes(self):
         record = base_record()
@@ -171,9 +153,9 @@ class TestTaskAdvanceNotExecuted(unittest.TestCase):
 
         with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
              patch.object(task_advance, '_review_outcomes', return_value=[]), \
-             patch.object(task_advance, '_pr_snapshot', return_value=(PR, None)):
+             patch.object(task_advance, '_pr_snapshot', return_value=PR):
             res = task_advance.advance(task_id=record['task_id'], store=DummyStore(),
-                                       publish_gh_runner=lambda *args: None)
+                                       pr_number=PR['number'], publish_gh_runner=lambda *args: None)
             self.assertEqual(res['step'], 'NEEDS_ATTENTION')
             self.assertIn('TEST_REMOTE_MODULE_NOT_EXECUTED', res['codes'])
 

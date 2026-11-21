@@ -26,15 +26,14 @@ WRONG_FAMILY = {'agy': ('claude-opus-5-5', 'gpt-6.1-sol', 'example-model-b',
                         'opencode/example-model-b-free', 'gemini-claude-b'),
                 'claude': ('gemini-3.8-flash-medium', 'gpt-6.1-sol', 'example-model-b',
                            'claude-gpt-6', 'claude-openai-b'),
-                'opencode': ('claude-opus-5-5', 'gemini-3.8-flash-medium',
-                             'opencode/example-paid')}
+                'opencode': ('claude-opus-5-5', 'gemini-3.8-flash-medium')}
 # Badly formatted names for each route's format check.
 BAD_FORMAT = {'agy': ('https://example.invalid/m', 'has space', '-leading-dash',
                       'GEMINI-UPPER', 'gemini-', 'vendor/gemini-example-b'),
               'claude': ('example-model-b', 'claude-UPPER', 'claude-'),
               'gw-agent': ('https://example.invalid/m', 'has space', '-leading-dash'),
-              'opencode': ('example-model-b-free', 'opencode/example-paid',
-                           'opencode/example-model-b-free#high')}
+              'opencode': ('example-model-b-free', 'https://example.invalid/m',
+                           'has space', '-leading-dash/model', 'opencode/example#HIGH')}
 # #1502 WP-E: the review and AI Debug role registry in use.
 SHIPPED_ROLES = {
     'codex-reviewer': {'allowed_models': ['gpt-6.1-sol']},
@@ -72,7 +71,7 @@ class AllowedModelsConfigTests(unittest.TestCase):
     def test_shipped_file_lists_only_each_default_model(self):
         config = load_route_config()
         self.assertEqual(config['routes']['agy']['allowed_models'],
-                         ['gemini-3.8-flash-medium'])
+                         ['gemini-4-hydrogen-medium'])
         self.assertEqual(config['routes']['claude']['allowed_models'], ['claude-opus-5-5'])
         # #1502 WP-E: gw-agent lists today's actual served default model.
         self.assertEqual(config['routes']['gw-agent']['allowed_models'], ['gw'])
@@ -268,11 +267,11 @@ class AllowedModelsConfigTests(unittest.TestCase):
         config = load_route_config()
         config['routes']['agy']['allowed_models'].append('gemini-example-b')
         self.assertEqual(load_route_config()['routes']['agy']['allowed_models'],
-                         ['gemini-3.8-flash-medium'])
+                         ['gemini-4-hydrogen-medium'])
 
 
 class OpenCodeRouteTests(unittest.TestCase):
-    """#1502 WP-E: the OpenCode route uses only free models."""
+    """#1502 WP-E, Owner #289: the OpenCode route accepts free and paid models."""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -302,22 +301,23 @@ class OpenCodeRouteTests(unittest.TestCase):
                          f"{entry['default_model']}#{entry['default_effort']}")
         self.assertTrue(opencode_direct_developer.is_free_model(entry['default_model']))
 
-    def test_paid_or_variant_default_model_is_invalid(self):
-        for model in ('opencode/example-paid', 'opencode/example-model-b-free#high',
-                      'other/example-model-b-free', 'example-model-b-free'):
+    def test_malformed_default_model_is_invalid(self):
+        for model in ('example-model-b-free', 'has space', '-leading-dash/model',
+                      'opencode/-leading-dash', 'opencode/a/b', 'opencode/example#HIGH'):
             with self.subTest(model=model):
                 self.assert_invalid(lambda entry, model=model: entry.update(
                     default_model=model, allowed_models=[model]))
 
-    def test_paid_or_variant_model_is_refused_at_check(self):
-        # Owner #2302 P2 keeps OpenCode free-only at the route check.
+    def test_paid_and_variant_models_are_admitted_at_check(self):
+        # Owner #289: paid, other provider, and variant models are admitted.
         config = load_route_config()
         for model in ('opencode/example-paid', 'opencode/example-model-b-free#high',
-                      'other/example-model-b-free', 'example-model-b-free'):
+                      'other/example-model-b-free', 'opencode-go/deepseek-v4.1-flash#high'):
             with self.subTest(model=model):
-                with self.assertRaises(RouteError) as caught:
-                    check_route_model(config, 'opencode', model)
-                self.assertEqual(caught.exception.code, 'ROLE_MODEL_NOT_ALLOWED')
+                self.assertEqual(check_route_model(config, 'opencode', model), model)
+        with self.assertRaises(RouteError) as caught:
+            check_route_model(config, 'opencode', 'example-model-b-free')
+        self.assertEqual(caught.exception.code, 'ROLE_MODEL_NOT_ALLOWED')
 
     def test_wrong_fields_are_invalid(self):
         mutations = {

@@ -827,6 +827,10 @@ class _DelegateStore:
     def update(self, task_id, **changes):
         return self._apply(None, changes)
 
+    def prepare_direct_dispatch(self, task_id, *, expected_developer, developer):
+        return self.compare_and_update(task_id, expected={'developer': expected_developer},
+                                       developer=dict(developer, dispatch_boundary='PREPARED'))
+
     def compare_and_update(self, task_id, *, expected, **changes):
         return self._apply(expected, changes)
 

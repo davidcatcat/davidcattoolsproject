@@ -123,13 +123,18 @@ class RemoteEvidenceStatusTests(unittest.TestCase):
         self.assertEqual(timeout[:2], (ev.STEP_ATTENTION, 'REMOTE_TEST_TIMEOUT'))
 
     def test_unsupported_paths_stop_before_any_receipt(self):
-        nine = ['tools/llmtool/tests/test_m%d.py' % index for index in range(9)]
-        cases = (['tools/llmtool/scripts/test_x.py'], ['tools/llmtool/tests/test_Upper.py'], nine)
+        cases = (['tools/llmtool/scripts/test_x.py'], ['tools/llmtool/tests/test_Upper.py'])
         for paths in cases:
             with self.subTest(count=len(paths)):
                 remote, tui, unsupported = ev.expected_remote_modules(paths, [])
                 got = status(remote=remote, unsupported=unsupported)
                 self.assertEqual(got[:2], (ev.STEP_STOP, ev.MODULE_UNSUPPORTED))
+
+    def test_large_supported_set_without_receipt_requests_a_run(self):
+        paths = [f'tools/llmtool/tests/test_m{index:02d}.py' for index in range(25)]
+        remote, _tui, unsupported = ev.expected_remote_modules(paths, [])
+        self.assertEqual(status(remote=remote, unsupported=unsupported)[:2],
+                         (ev.STEP_RUN, ev.RECEIPT_MISSING))
 
     def test_tui_paths_are_classified(self):
         path = 'tools/llmtool/tests/test_chat_tui_pty.py'

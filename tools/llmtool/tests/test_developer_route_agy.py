@@ -53,6 +53,14 @@ class AgyRouteTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_parse_output_keeps_a_long_reply_for_the_pm(self):
+        # #2503: the reply is bounded when stored, not cut at 4000 characters here.
+        reply = 'BLOCKED ' + 'y' * 9000
+        stdout = json.dumps({'conversation_id': 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d',
+                             'status': 'SUCCESS', 'response': reply}).encode('utf-8')
+        parsed = self.route.parse_output(stdout, b'', '')
+        self.assertEqual(parsed['summary'], reply)
+
     def request(self):
         return {'root': str(self.root), 'prompt': 'bounded prompt',
                 'model': MODEL, 'effort': 'medium',

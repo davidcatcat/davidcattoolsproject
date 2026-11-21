@@ -535,7 +535,8 @@ class GwAgentRoute(DeveloperRoute):
                 self.expected_served_model in _ROUTING_ALIASES) and
                 self._validated_request is not None):
             self._validated_request['model'] = result['served_model']
-        return {'status': result['status'], 'summary': result['summary'][:4000],
+        # #2503: the reply is kept for the PM and bounded to 8 KiB when stored.
+        return {'status': result['status'], 'summary': result['summary'][:64 * 1024],
                 'session_id': result.get('session_id'),
                 'usage': _normalize_gw_agent_usage(result.get('usage')),
                 'changed_paths': result['changed_paths']}

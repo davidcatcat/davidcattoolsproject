@@ -22,6 +22,7 @@ The Owner's binding working rules for PM runs (2026-11-16 – 2026-11-18), recor
 
 - Before every dispatch, reassignment, retry, repair, recovery or Reviewer hand-off, reread [worker-dispatch.json](../../../tools/llmtool/worker-dispatch.json) through the dispatch gate. Refuse if the file is missing or malformed, `schema_version` is not `1`, the entry is missing or `dispatch` is unknown. `PAUSED` binds. `OWNER_ASSIGNMENT_ONLY` needs an Owner reference. `ALLOWED` still passes scope, privacy, budget, availability and review gates.
 - Developer routes are Claude Developer, OpenCode, AGY and `gw-agent`. Codex reviews and debugs only. Prefer `gw-agent` for small, low-risk, bounded Tasks.
+- Before every Developer dispatch or repair, apply the [read scope rule](../../../CLAUDE.md#worker-dispatch) to the spec `read` list.
 - Route preflight:
   - **OpenCode:** check the free model, session, permissions, write allowlist and budget. Pause on a free-limit refusal or after two consecutive failures.
   - **AGY:** check the D6, auth, executable, actual model, allowlist and quota. Pause after two consecutive failures. See [agy-direct-developer](../agy-direct-developer/SKILL.md).
@@ -34,7 +35,7 @@ The Owner's binding working rules for PM runs (2026-11-16 – 2026-11-18), recor
 - Pick a Reviewer from a different family: `codex-reviewer` for Claude-authored work and `claude-reviewer` for other work. It works in a separate read-only context with its own D6 record. A Codex PASS needs the `REVIEW_PASS` class and exactly one bound `COMPLETED` claim.
 - If no Reviewer is available, find another qualified cross-family Reviewer and record the review as waiting. Never substitute one. Ask the Owner only if none exists (D6).
 - A repair dispatch lists every finding of the FAIL. Mark each one fix, defer or dispute. Defer only Low or advisory findings. Dispute only with evidence on the PR (O3, E10). The arbiter is chosen by llmtool.
-- The second valid FAIL triggers AI Debug. There are two repairs in total (D1). A third valid FAIL splits the Task into at most 3 child Tasks, then one REPLAN or a DROP (D3). Notify the Owner of every non-successful Task (D4). See [High Debug](../ai-team-delivery/pm-continuation-reference.md#high-debug).
+- The first three effective review repairs can proceed without High Debug. Another formal FAIL after the third repair requires an applicable confirmed RCA before repair four. Each original work lineage shares three effective Debug runs and has a five-repair limit on the review line. After exhaustion, apply the existing ROOT split, child PM decision and REPLAN terminal rules. Notify the Owner of every non-successful Task. See [High Debug](../ai-team-delivery/pm-continuation-reference.md#high-debug).
 - Same-family Debug and Reviewer: the PR records `INDEPENDENCE_NOTE: same-family debug` (D-2).
 - Record adopted advice as a PM decision, not review: source, evidence, smallest-check result, reason (D-6).
 - [Design consultation](debug.md#consultation) (O6): at most once per WP and, at first, 10 per week, listed cases only, no new dispatch key.
@@ -52,7 +53,7 @@ The Owner's binding working rules for PM runs (2026-11-16 – 2026-11-18), recor
 1. **A fresh-D6 continuation restates the whole PR acceptance**, not only the delta or the last finding.
 2. **Before a High-Debug last repair, put every file the RCA fix needs in the Task `write_paths`.** Otherwise the last repair is spent on a scope refusal.
 3. **Never PM-merge conflicts on top of a Developer result.** Use the merged result as the base of a new D6, with its own Task, Developer and review.
-4. **EC2 admits at most 8 modules, and only from `tools/llmtool/tests`.** Run anything else locally in a registered test D6.
+4. **Declare every applicable `tools/llmtool/tests` module in the Task paths.** EC2 admission checks the declared paths, and acceptance requires execution evidence for every requested test module. Run platform-specific tests on their supported platform.
 5. **PM scratch test runs include the monitor tests and `test_owner_literal_guard`.**
 6. **Write a reviewed design doc first** for concurrency and multi-Task features: locks, shared state, parallel Tasks and merge trains.
 7. **Sync the canonical repo before dispatch** with `git merge --ff-only origin/main`. Otherwise dispatch fails with `LLMTOOL_SOURCE_STALE`.
