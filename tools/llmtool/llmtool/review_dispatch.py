@@ -52,6 +52,7 @@ REVIEW_FAILURE_REASONS = _D6_CREATE_FAILURE_REASONS | frozenset((
 REVIEWER_BIND_FAILURE_REASONS = frozenset(('REVIEWER_SESSION_BIND_FAILED', 'REVIEWER_SESSION_BIND_TIMEOUT'))
 REVIEW_OUTPUT_WITHHELD = 'REVIEW_OUTPUT_WITHHELD'
 REVIEW_OUTPUT_ABSENT = 'REVIEW_OUTPUT_ABSENT'
+REVIEW_OUTPUT_UNDECODABLE = 'REVIEW_OUTPUT_UNDECODABLE'
 _REVIEW_REFUSALS_DIR = 'review-refusals'
 _RECEIPT_NAME_RE = re.compile(r'^[0-9a-zA-Z._-]+-[0-9a-zA-Z._-]+-[0-9]+\.json\Z')
 _RECEIPT_PRUNE_LIMIT = 64
@@ -76,7 +77,8 @@ def _unique_json_object(pairs):
 
 
 def _refuse(code, message='Reviewer dispatch refused; details omitted', *, reason=None,
-            mismatch_keys=None, excerpt=None):
+            mismatch_keys=None, excerpt=None, reply_excerpt=None,
+            reply_excerpt_truncated=False, reply_excerpt_label=None):
     error = LLMToolError(message)
     error.review_dispatch_code = code
     if reason is not None:
@@ -86,6 +88,12 @@ def _refuse(code, message='Reviewer dispatch refused; details omitted', *, reaso
         error.review_binding_mismatch_keys = tuple(mismatch_keys)
     if excerpt is not None:
         error.review_excerpt = excerpt
+    if reply_excerpt is not None:
+        # Screened reply text for the refusal receipt, never for the message.
+        error.review_reply_excerpt = reply_excerpt
+        error.review_reply_excerpt_truncated = bool(reply_excerpt_truncated)
+    if reply_excerpt_label is not None:
+        error.review_reply_excerpt_label = reply_excerpt_label
     raise error from None
 
 
@@ -479,6 +487,50 @@ def _reply_shape(text):
         len(text.encode('utf-8')), len(text.split('\n')), kind)
 
 
+# #2486: the same bound as the #1938 screened excerpt, kept as receipt text.
+_REPLY_EXCERPT_MAX_BYTES = 2048
+_REPLY_EXCERPT_MAX_LINES = 40
+
+
+def _bounded_reply_excerpt(text):
+    """Return a screened-text-sized excerpt and whether it was truncated."""
+    lines = text.splitlines()
+    truncated = len(lines) > _REPLY_EXCERPT_MAX_LINES
+    cut = '\n'.join(lines[:_REPLY_EXCERPT_MAX_LINES])
+    encoded = cut.encode('utf-8')
+    if len(encoded) > _REPLY_EXCERPT_MAX_BYTES:
+        cut = encoded[:_REPLY_EXCERPT_MAX_BYTES].decode('utf-8', 'ignore')
+        truncated = True
+    return cut, truncated
+
+
+def _screened_raw_reply(raw):
+    """Return (screened excerpt, truncated, refusal label) for a raw reply.
+
+    A reply that is not JSONL is the raw output itself. It is bounded and passed
+    through the existing sensitive-content screen. Undecodable bytes, a screen
+    refusal, or empty text yields a fixed label and no text.
+    """
+    if type(raw) is not bytes:
+        return None, False, REVIEW_OUTPUT_ABSENT
+    try:
+        text = raw.decode('utf-8')
+    except UnicodeError:
+        return None, False, REVIEW_OUTPUT_UNDECODABLE
+    if not text.strip():
+        return None, False, REVIEW_OUTPUT_ABSENT
+    from .task_submission_cli import _screen_text
+    try:
+        _screen_text(text, _CODEX_REVIEW_MAX_OUTPUT)
+        cut, truncated = _bounded_reply_excerpt(text)
+        cut = _screen_text(cut, _REPLY_EXCERPT_MAX_BYTES)
+    except LLMToolError:
+        return None, False, REVIEW_OUTPUT_WITHHELD
+    if type(cut) is not str or not cut.strip():
+        return None, False, REVIEW_OUTPUT_ABSENT
+    return cut, truncated, None
+
+
 def _codex_final_message(raw):
     """Return the last complete Codex agent message when its JSONL is readable."""
     if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_STREAM_CEILING:
@@ -516,8 +568,12 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=
             raise
         final = _codex_final_message(raw)
         if reason == 'OUTPUT_NOT_JSONL' and (final is None or not final.strip()):
-            # #1163: keep only the fixed-word shape of the bad line, never its text.
-            _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=_jsonl_shape(raw))
+            # #1163 keeps the fixed-word shape of the bad line. #2486 adds the
+            # bounded raw reply text only after the sensitive-content screen.
+            reply, truncated, label = _screened_raw_reply(raw)
+            _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=_jsonl_shape(raw),
+                    reply_excerpt=reply, reply_excerpt_truncated=truncated,
+                    reply_excerpt_label=label)
         if final is None or not final.strip():
             _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=REVIEW_OUTPUT_ABSENT)
         from .task_submission_cli import _screen_text
@@ -530,11 +586,15 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=
             excerpt = _screen_text(cut, 2048)
         except LLMToolError:
             _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=REVIEW_OUTPUT_WITHHELD)
+        truncated = (len(final.splitlines()) > _REPLY_EXCERPT_MAX_LINES or
+                     len(final.encode('utf-8')) > _REPLY_EXCERPT_MAX_BYTES)
         # #1938: the message holds fixed words and the reply shape, never reply text.
         _refuse('REVIEW_NOT_POSTED', 'Reviewer dispatch refused: %s; %s' % (
                     reason if reason in REVIEW_FAILURE_REASONS else 'UNKNOWN',
                     _reply_shape(excerpt)),
-                reason=reason, excerpt=excerpt)
+                reason=reason, excerpt=excerpt,
+                reply_excerpt=(excerpt if reason == 'OUTPUT_NOT_JSONL' else None),
+                reply_excerpt_truncated=truncated)
 
 
 def _review_return(claim, result):
@@ -792,7 +852,8 @@ def _prune_receipts(directory, limit=_RECEIPT_PRUNE_LIMIT):
 
 
 def _write_refusal_receipt(*, store, task_id, pr_number, head, version,
-                           reviewer_task, reason, excerpt_key, excerpt_val):
+                           reviewer_task, reason, excerpt_key, excerpt_val,
+                           reply_excerpt=None, reply_excerpt_truncated=False):
     root = getattr(store, 'root', None)
     if not isinstance(root, Path):
         return None
@@ -813,6 +874,11 @@ def _write_refusal_receipt(*, store, task_id, pr_number, head, version,
         'not_a_verdict': True,
         excerpt_key: excerpt_val,
     }
+    if reply_excerpt is not None:
+        # #2486: screened, bounded reply text beside the fixed-word shape.
+        record['reply_excerpt'] = reply_excerpt
+        if reply_excerpt_truncated:
+            record['reply_excerpt_truncated'] = True
     data = (json.dumps(record, sort_keys=True) + '\n').encode('utf-8')
     high_debug._create_private(receipt_path, data)
     _prune_receipts(receipt_dir, _RECEIPT_PRUNE_LIMIT)
@@ -1511,7 +1577,15 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             pass
         if claim_updated and reason in REVIEW_FAILURE_REASONS:
             raw_excerpt = getattr(exc, 'review_excerpt', None)
-            if raw_excerpt in (REVIEW_OUTPUT_WITHHELD, REVIEW_OUTPUT_ABSENT):
+            reply_excerpt = getattr(exc, 'review_reply_excerpt', None)
+            reply_truncated = getattr(exc, 'review_reply_excerpt_truncated', False)
+            reply_label = getattr(exc, 'review_reply_excerpt_label', None)
+            if reply_label is not None:
+                # #2486: no text when the screen refused or bytes did not decode.
+                excerpt_key = 'label'
+                excerpt_val = reply_label
+                reply_excerpt = None
+            elif raw_excerpt in (REVIEW_OUTPUT_WITHHELD, REVIEW_OUTPUT_ABSENT):
                 excerpt_key = 'label'
                 excerpt_val = raw_excerpt
             elif raw_excerpt is None or not str(raw_excerpt).strip():
@@ -1532,7 +1606,9 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                 receipt_path = _write_refusal_receipt(
                     store=store, task_id=task_id, pr_number=pr_number, head=head,
                     version=version, reviewer_task=reviewer_task, reason=reason,
-                    excerpt_key=excerpt_key, excerpt_val=excerpt_val)
+                    excerpt_key=excerpt_key, excerpt_val=excerpt_val,
+                    reply_excerpt=reply_excerpt,
+                    reply_excerpt_truncated=reply_truncated)
                 # #1927: task advance accepts only a str receipt path or None.
                 refusal['receipt_path'] = (None if receipt_path is None
                                            else str(receipt_path))
