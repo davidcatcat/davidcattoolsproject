@@ -5700,6 +5700,9 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None},
                 getattr(result, 'provider_evidence', None), 'agy'), usage=usage)
+        if not raw and not (getattr(result, 'summary', '') or '').strip():
+            developer.update(state='BLOCKED', error_code='AGY_EMPTY_RESULT',
+                             artifact=None, artifact_sha256=None)
         if (type(result.session_id) is str and
                 AGY_CONVERSATION.fullmatch(result.session_id)):
             binding = _bind_codex_native_session(registration, result.session_id)
