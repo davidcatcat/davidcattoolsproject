@@ -5710,6 +5710,9 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         if not raw and not (getattr(result, 'summary', '') or '').strip():
             developer.update(state='BLOCKED', error_code='AGY_EMPTY_RESULT',
                              artifact=None, artifact_sha256=None)
+        # #2503: the PM sees AGY's own reply (for example BLOCKED with the
+        # missing read paths), whether or not the worktree changed.
+        _attach_developer_reply(developer, getattr(result, 'summary', None))
         if (type(result.session_id) is str and
                 AGY_CONVERSATION.fullmatch(result.session_id)):
             binding = _bind_codex_native_session(registration, result.session_id)
@@ -5936,12 +5939,19 @@ def _claude_no_change_reply(raw):
     """#2324: {'summary': text} from a no-change Claude run's final reply, else None.
 
     raw is the run's parsed CLI result object. No reply (result absent, not a
-    string, or blank) gives None. The whole reply is screened first, so a cut
-    can never split credential material past the screen; a reply that is too
-    long is then cut at the end, marked ' [truncated]', and screened again. Any
-    screen refusal keeps only the fixed CLAUDE_REPLY_WITHHELD text: the reply is
-    never reworded or reshaped to pass the screen."""
-    text = raw.get('result') if type(raw) is dict else None
+    string, or blank) gives None. The bounding rules are _bounded_developer_reply's."""
+    return _bounded_developer_reply(raw.get('result') if type(raw) is dict else None)
+
+
+def _bounded_developer_reply(text):
+    """#2324/#2503: {'summary': text} from a Developer's final reply text, else None.
+
+    No reply (not a string, or blank) gives None. The whole reply is screened
+    first, so a cut can never split credential material past the screen; a
+    reply that is too long is then cut at the end, marked ' [truncated]', and
+    screened again. Any screen refusal keeps only the fixed
+    CLAUDE_REPLY_WITHHELD text: the reply is never reworded or reshaped to pass
+    the screen."""
     if type(text) is not str or not text.strip():
         return None
     try:
@@ -5970,13 +5980,30 @@ def _claude_attach_no_change_reply(developer, raw):
     """#2324: add developer.reported only when the store will accept it, so the
     reply can never block persisting the CLAUDE_NO_CHANGES record."""
     try:
-        reported = _claude_no_change_reply(raw)
-        if (type(reported) is dict and set(reported) == {'summary'} and
-                _valid_reported_text(reported['summary'], CLAUDE_REPLY_MAX_REPORTED_BYTES) and
-                _reported_size(reported) <= CLAUDE_REPLY_MAX_REPORTED_BYTES):
-            developer['reported'] = reported
+        _store_reported_reply(developer, _claude_no_change_reply(raw))
     except Exception:
         pass
+
+
+def _attach_developer_reply(developer, text):
+    """#2503: keep a Developer's final reply as developer.reported.summary.
+
+    Developer-reported and unverified (the PM packet labels it so). It is
+    added only when the store will accept it, and every failure is swallowed,
+    so the reply can never block persisting the Developer record. No reply
+    text leaves the record unchanged."""
+    try:
+        _store_reported_reply(developer, _bounded_developer_reply(text))
+    except Exception:
+        pass
+
+
+def _store_reported_reply(developer, reported):
+    """Set developer.reported only to a {'summary': text} the TaskStore accepts."""
+    if (type(reported) is dict and set(reported) == {'summary'} and
+            _valid_reported_text(reported['summary'], CLAUDE_REPLY_MAX_REPORTED_BYTES) and
+            _reported_size(reported) <= CLAUDE_REPLY_MAX_REPORTED_BYTES):
+        developer['reported'] = reported
 
 
 def _advance_no_change_reply(record):
@@ -6845,6 +6872,8 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None},
                 getattr(result, 'provider_evidence', None), 'gw-agent'))
+        # #2503: keep the home LLM's own final reply for the PM.
+        _attach_developer_reply(developer, getattr(result, 'summary', None))
         site.after_result(result.session_id, task_input)
         # #1535: a D6 keeps the first gw-agent session it took. A later PM Task
         # (fresh session, #1509) or repair round there keeps that session; a D6
