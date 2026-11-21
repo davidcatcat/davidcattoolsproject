@@ -443,7 +443,8 @@ class WorkerDispatchTests(unittest.TestCase):
         return {'task_id': 'a' * 32, 'run_id': 'b' * 32,
                 'developer': {'provider_profile': 'agy', 'model': model}}
 
-    # The task advance fallback half of these cases lives in
+    # The per-author-family real-policy cases (gw-agent, OpenCode, Codex-family
+    # and Claude authors) live in
     # test_gw_agent_route_wiring.RealPolicyReviewerFallbackTests: importing
     # task_advance here would make ci_mac_modules select this module for #781
     # (test_ci_mac_modules uses it as the unrelated control).

@@ -1438,7 +1438,7 @@ class ReviewDispatchTests(unittest.TestCase):
 
     def test_reviewer_selection_is_cross_family_and_unknown_is_refused(self):
         # #1692: the shared all-ALLOWED policy, not the live worker-dispatch.json
-        # (#289 c6922657359 paused claude-reviewer there; the real-file cases live
+        # (its claude-reviewer row is an Owner decision; the real-file cases live
         # in test_worker_dispatch and test_gw_agent_route_wiring).
         worker_policy_fixture.install(self)
         executor = SimpleNamespace(
@@ -1520,7 +1520,7 @@ class ReviewDispatchTests(unittest.TestCase):
     def test_dirty_executor_refuses_before_claim_or_adapter_calls(self):
         # #1692: the default claude-reviewer must pass the gate so the dirty
         # executor check is reached; use the shared all-ALLOWED policy, not the
-        # live worker-dispatch.json (#289 c6922657359 paused claude-reviewer).
+        # live worker-dispatch.json, whose rows are Owner decisions (#289).
         worker_policy_fixture.install(self)
         task = {
             'task_id': TASK, 'run_id': 'run',
