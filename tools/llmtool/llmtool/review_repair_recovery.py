@@ -431,6 +431,7 @@ def _recover_ec2_claim(*, store, current, task_id, executor_task, pr_number,
     # UNKNOWN claim to DISPATCHED. Some stores shape it for review claims only,
     # so an EC2/CI claim falls back to the same locked record compare-and-set
     # after re-reading the no-launch evidence under the held chain lock.
+    saved = None
     try:
         saved = store.recover_review_repair_claim(
             task_id, repair_task_id, executor_task=executor_task, pr_number=pr_number,
@@ -438,6 +439,12 @@ def _recover_ec2_claim(*, store, current, task_id, executor_task, pr_number,
     except TaskStoreConflict:
         refuse('REPAIR_CLAIM_UNAVAILABLE')
     except Exception:
+        # A store shaped for review claims may raise here; fall back to the
+        # locked record compare-and-set below.
+        saved = None
+    if type(saved) is not dict:
+        # A store shaped for review claims may also decline an EC2/CI claim by
+        # returning None instead of raising; the fallback is the same.
         try:
             fresh = store.get(task_id)
         except Exception:
