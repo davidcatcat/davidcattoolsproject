@@ -1600,7 +1600,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
                   wrap_store=None, gate=None, authorize=None, route_factory=None,
                   content='hello synthetic\n', bind=None, repair_packet=None,
                   data_class='SYNTHETIC', egress_basis='Synthetic test content only.',
-                  list_provider_model=True):
+                  list_provider_model=True, finish_summary='done'):
         # #1072: without ``bind`` the D6 session step keeps today's unbound
         # result; with it the real step runs against that fake lifecycle helper.
         # #1773: the gateway profile model must be in allowed_models, so the
@@ -1622,7 +1622,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.server.script.extend((
             self.reply(self.tool_call('apply_edit', path=target, new=content,
                                       create=True), model=served_model, usage=usage),
-            self.reply(self.tool_call('finish', summary='done'), model=served_model,
+            self.reply(self.tool_call('finish', summary=finish_summary), model=served_model,
                        usage=usage)))
         args = Namespace(task_id=task_id, mode='direct', context_stdin=False,
             data_class=data_class, egress_basis=egress_basis,
@@ -1941,6 +1941,27 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertEqual(task_status.derive_state(reloaded_root), 'ABANDONED')
         gw_agent_sessions.sweep_quietly(self.store)
         self.assertFalse(home.exists())
+
+    def test_final_reply_is_kept_for_the_pm(self):
+        # #2503: the home LLM's own finish summary is stored as developer.reported.
+        target = 'gw-agent-reply.md'
+        reply = 'Created the file. BLOCKED on the second item: it needs other.py.'
+        code, task = self._delegate(target, finish_summary=reply)
+        self.assertEqual(code, 0)
+        persisted = task_store.TaskStore(Path(self.base / 'tasks').resolve()).get(
+            task['task_id'])
+        self.assertEqual(persisted['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(persisted['developer']['reported'], {'summary': reply})
+
+    def test_unsafe_final_reply_is_withheld_and_the_result_still_saved(self):
+        target = 'gw-agent-reply-unsafe.md'
+        marker = 'pass' + 'word'
+        code, task = self._delegate(
+            target, finish_summary='done ' + marker + ' = "' + 'q7' * 12 + '"')
+        self.assertEqual(code, 0)
+        self.assertEqual(task['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(task['developer']['reported'],
+                         {'summary': task_submission_cli.CLAUDE_REPLY_WITHHELD})
 
     def test_docs_success_persists_and_reaches_the_active_pm(self):
         target = 'gw-agent-synthetic.md'
