@@ -363,9 +363,10 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         self.assertTrue(all('log_path' not in request for request in requests))
         self.assertIn('Claude Developer', prompts[0])
 
-    def _run_with_reply(self, reply):
+    def _run_with_reply(self, reply, **setup):
         # The route keeps the run's parsed CLI result, as _DiagnosedClaudeRoute does.
-        cli, store, args, _registration, _evaluations, _prompts, _requests, patches, runner = self._setup()
+        cli, store, args, _registration, _evaluations, _prompts, _requests, patches, runner = (
+            self._setup(**setup))
 
         def replying_runner(route, request, **kwargs):
             route.parsed_cli_result = (None if reply is None else
@@ -390,6 +391,39 @@ class ClaudeRouteWiringTests(unittest.TestCase):
     def test_success_without_a_reply_adds_no_reported_field(self):
         _cli, status, developer = self._run_with_reply(None)
         self.assertEqual(status, 0)
+        self.assertNotIn('reported', developer)
+
+    # #2503: other Claude failures keep the final reply when the CLI produced one.
+
+    def test_route_failure_after_parsing_keeps_the_final_reply(self):
+        reply = 'SPEC_MISMATCH: item 2 needs other.py outside read_paths.'
+        _cli, status, developer = self._run_with_reply(
+            reply, runner_error=RouteError('CLAUDE_OUTPUT_INVALID'))
+        self.assertEqual(status, 1)
+        self.assertEqual((developer['state'], developer['error_code']),
+                         ('BLOCKED', 'CLAUDE_OUTPUT_INVALID'))
+        self.assertEqual(developer['reported'], {'summary': reply})
+
+    def test_scope_violation_after_a_result_keeps_the_final_reply(self):
+        reply = 'Edited src.py and other.py.'
+        _cli, status, developer = self._run_with_reply(
+            reply, changed_paths=('src.py', 'other.py'))
+        self.assertEqual(status, 1)
+        self.assertEqual(developer['error_code'], 'CLAUDE_WRITE_SCOPE_VIOLATION')
+        self.assertEqual(developer['reported'], {'summary': reply})
+
+    def test_unexpected_failure_after_parsing_keeps_the_final_reply(self):
+        reply = 'Done with item 1.'
+        _cli, status, developer = self._run_with_reply(
+            reply, runner_error=RuntimeError('runner broke'))
+        self.assertEqual(status, 1)
+        self.assertEqual(developer['error_code'], 'CLAUDE_RESULT_UNKNOWN')
+        self.assertEqual(developer['reported'], {'summary': reply})
+
+    def test_failure_without_a_parsed_reply_stores_nothing(self):
+        _cli, status, developer = self._run_with_reply(
+            None, runner_error=RouteError('CLAUDE_TIMEOUT'))
+        self.assertEqual(status, 1)
         self.assertNotIn('reported', developer)
 
     def _run_with_cards(self, cards, **git_kwargs):

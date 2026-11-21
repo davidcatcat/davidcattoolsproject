@@ -10,7 +10,7 @@ only after the real run_route has returned its result.
 
 Test data rule (Owner #763 A): no test here holds a password-, API-key-,
 token- or other credential-shaped string, and no screen function is touched.
-The provider text is a plain marker word that must never be stored or printed.
+The provider text is a plain marker word that is never stored or printed outside\ndeveloper.reported, the Developer's kept final reply (#2503, Owner decision).
 """
 
 import contextlib
@@ -50,6 +50,15 @@ _TASK_ID = 'a' * 32
 _EXECUTOR_ID = 'c' * 32
 _ACCEPTANCE = ['the requested changes are complete']
 _PROSE = 'PROSE-MARKER'
+
+
+def _without_reported(view):
+    """#2503: the record or view without developer.reported (the Developer's kept reply)."""
+    view = json.loads(json.dumps(view))
+    developer = view.get('developer') if type(view) is dict else None
+    if type(developer) is dict:
+        developer.pop('reported', None)
+    return view
 _DROP = object()
 _EVIDENCE = 'claude_failure_evidence'
 
@@ -286,9 +295,15 @@ class ClaudeFailureEvidenceTests(unittest.TestCase):
             SimpleNamespace(task_id=_TASK_ID), store=store, stdout=shown), 0)
         self.assertEqual(json.loads(shown.getvalue())['developer'].get(_EVIDENCE), expected)
         if prose_free:
-            self.assertNotIn(_PROSE, json.dumps(record))
-            self.assertNotIn(_PROSE, printed)
-            self.assertNotIn(_PROSE, shown.getvalue())
+            # #2503 (Owner): the Developer's own reply may be kept, but only as the
+            # labelled, screened developer.reported; the #2275 evidence and every
+            # other field stay free of provider text.
+            for text in (json.dumps(record), printed.strip().splitlines()[-1],
+                         shown.getvalue()):
+                self.assertNotIn(_PROSE, json.dumps(_without_reported(json.loads(text))))
+            reported = developer.get('reported')
+            if reported is not None:
+                self.assertEqual(set(reported), {'summary'})
         return store, developer
 
     def test_subtype_enum_matches_the_store(self):
@@ -474,7 +489,16 @@ class ClaudeFailureEvidenceTests(unittest.TestCase):
                 self.assertIsNone(developer['execution'])
                 self.assertIsNone(developer['usage'])
                 self.assertNotIn(_EVIDENCE, developer)
-                self.assertNotIn(_PROSE, printed)
+                self.assertNotIn(_PROSE, json.dumps(_without_reported(
+                    json.loads(printed.strip().splitlines()[-1]))))
+                if when == 'BEFORE_LAUNCH':
+                    # No process ran: no reply exists, so none is stored.
+                    self.assertNotIn('reported', developer)
+                    self.assertNotIn(_PROSE, printed)
+                else:
+                    # #2503: the CLI ran and its reply was parsed; it is kept only
+                    # as the labelled developer.reported.
+                    self.assertIn(_PROSE, developer['reported']['summary'])
 
     def test_result_persistence_rejected_is_unchanged(self):
         status, store, _printed = self._run(_process(0, _cli(), write='src.py'),

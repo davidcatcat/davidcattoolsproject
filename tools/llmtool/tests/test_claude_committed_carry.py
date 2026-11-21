@@ -25,7 +25,7 @@ def tearDownModule():
 
 class ClaudeCommittedCarryTests(unittest.TestCase):
     def run_case(self, *, committed=('src.py',), result_sha=HEAD, base=BASE, status='DONE',
-                 runner_error=None, ancestor=True, others=(), store_error=None):
+                 runner_error=None, ancestor=True, others=(), store_error=None, reply=None):
         cli, store, args, registration, _evals, _prompts, _requests, patches, runner = (
             wiring.ClaudeRouteWiringTests._setup(self, runner_error=runner_error))
         registration.source_sha, registration.result_sha = base, result_sha
@@ -41,6 +41,9 @@ class ClaudeCommittedCarryTests(unittest.TestCase):
             return b''
 
         def finished_runner(*call_args, **kwargs):
+            # #2503: the route keeps the run's parsed CLI result, as a real run does.
+            call_args[0].parsed_cli_result = (None if reply is None else
+                                              {'type': 'result', 'result': reply})
             result = runner(*call_args, **kwargs)
             result.status = status
             return result
@@ -99,6 +102,19 @@ class ClaudeCommittedCarryTests(unittest.TestCase):
                           task['completion']['evidence']['result_head']), (BASE, HEAD))
         direct_event.assert_called_once_with(task['task_id'], 'executor-d6', store=unittest.mock.ANY)
         self.assertEqual(task_advance.derive_repair_state(task), 'RESPONDED')
+
+    def test_2503_carried_result_keeps_the_final_reply_for_the_pm(self):
+        reply = 'Already committed src.py; verified only. Item 2 is not done.'
+        status_code, task, direct_event = self.run_case(reply=reply)
+        developer = task['developer']
+        self.assertEqual((status_code, developer['state']), (0, 'DEVELOPER_RESPONDED'))
+        self.assertEqual(developer['reported'], {'summary': reply})
+        direct_event.assert_called_once()
+
+    def test_2503_carried_result_without_a_reply_adds_nothing(self):
+        _status_code, task, _direct_event = self.run_case(reply=None)
+        self.assertEqual(task['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertNotIn('reported', task['developer'])
 
     def test_1279_verify_only_run_after_timeouts_carries_the_committed_head(self):
         timed_out = {'developer': {'executor_task_id': 'executor-d6', 'state': 'BLOCKED',
