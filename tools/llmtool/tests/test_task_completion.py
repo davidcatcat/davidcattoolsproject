@@ -6042,7 +6042,12 @@ class TaskCompletionTests(unittest.TestCase):
 
     def _claude_bound_task_context(self, *, skip_remote_test=False,
                                    skip_completed_claim=False, old_sha_receipt=False,
-                                   guard_file=False):
+                                   guard_file=False, docs_change=False,
+                                   docs_check='success', pr_files=None):
+        # #2473: docs_change makes the Developer result one Markdown file while
+        # the read list keeps a test module (the #2421 shape); docs_check is the
+        # exact-head check (docs) conclusion ('success', 'failure', 'pending' or
+        # None for missing); pr_files overrides GitHub's PR file list.
         from llmtool import remote_test, review_dispatch
         from llmtool.cli import main
 
@@ -6078,7 +6083,11 @@ class TaskCompletionTests(unittest.TestCase):
         self._git('branch', 'main', base)
         self._write_registration(d6_task, 'claude-developer', 'claude-session',
             root, 'feat/executor', base, base, native_session_id='claude-native')
-        head, _ = self._make_result()
+        if docs_change:
+            head = self._make_path_result('docs/guide.md', 'Guide text.\n')
+            skip_remote_test = True
+        else:
+            head, _ = self._make_result()
 
         policy = json.loads(self.policy_path.read_text(encoding='utf-8'))
         policy['workers']['claude-developer']['dispatch'] = 'OWNER_ASSIGNMENT_ONLY'
@@ -6142,7 +6151,9 @@ class TaskCompletionTests(unittest.TestCase):
             rc, _ = call(['task', 'claude-bind', task_id, '--executor-task',
                           d6_task, '--owner-ref', owner_ref, '--common-dir', self.common,
                           '--read-path', self.source_path,
-                          '--write-path', self.source_path,
+                          *(['--read-path', 'docs/guide.md',
+                             '--write-path', 'docs/guide.md'] if docs_change else
+                            ['--write-path', self.source_path]),
                           '--pm-session', task['pm_session_id']])
             self.assertEqual(rc, 0)
             if not old_sha_receipt:
@@ -6251,6 +6262,33 @@ class TaskCompletionTests(unittest.TestCase):
                 *self._github_response_sequence(head, pr, [], checks,
                                                 comments=[comment]),
             ]
+            if docs_change:
+                files = ([{'filename': 'docs/guide.md', 'status': 'added'}]
+                         if pr_files is None else pr_files)
+                docs_pr = dict(pr, changed_files=1)
+                docs_runs = [] if docs_check is None else [{
+                    'id': 61, 'name': 'check (docs)', 'head_sha': head,
+                    'status': 'in_progress' if docs_check == 'pending' else 'completed',
+                    'conclusion': None if docs_check == 'pending' else docs_check,
+                    'app': {'id': 15368, 'slug': 'github-actions',
+                            'name': 'GitHub Actions'}}]
+                docs_checks = {'total_count': len(docs_runs), 'check_runs': docs_runs}
+                sequence = self._github_response_sequence(
+                    head, pr, [], docs_checks, comments=[comment])
+                if docs_runs:
+                    sequence[9]['jobs'][0]['name'] = 'check (docs)'
+                    sequence[9]['jobs'][0]['status'] = docs_runs[0]['status']
+                    sequence[9]['jobs'][0]['conclusion'] = docs_runs[0]['conclusion']
+                    sequence[9]['jobs'][0]['check_run_url'] = (
+                        'https://api.github.com/repos/davidcatcat/'
+                        'davidcattoolsproject/check-runs/61')
+                    sequence[10] = docs_checks
+                # Task complete reads the main pin, then the #2473 docs-only
+                # proof (PR, its files, PR again), then the review/CI evidence.
+                # check (docs) is a Linux-workflow check: PR, reviews, comments,
+                # then the Linux workflow responses only.
+                github_responses = [github_responses[0], docs_pr, files, docs_pr,
+                                    *sequence[:3], *sequence[7:11]]
 
             def remote_test_at(tested_head, github_get):
                 tested = dict(receipt, source_sha=tested_head, fetch_head=tested_head,
@@ -6614,6 +6652,87 @@ class TaskCompletionTests(unittest.TestCase):
         context = self._claude_bound_task_context(skip_remote_test=True)
         self._assert_cli_completion_waits(
             context, 'REMOTE_TEST_RECEIPT_MISSING', 'WAITING_EXECUTOR')
+
+    # #2473 Task Complete: a PR GitHub proves docs-only needs no EC2 receipt.
+
+    def test_2473_docs_only_completes_without_receipt(self):
+        context = self._claude_bound_task_context(docs_change=True)
+        rc, completed = self._complete_claude_bound_context(context)
+        self.assertEqual(rc, 0, completed)
+        completion = completed['completion']
+        self.assertEqual(completion['state'], 'PM_EVIDENCE_READY')
+        self.assertEqual(completion['missing_gates'], [])
+        self.assertEqual(completion['evidence']['tests'], [{
+            'status': 'NOT_APPLICABLE_DOCS_ONLY', 'changed_paths': ['docs/guide.md'],
+            'source_sha': context['head'], 'docs_only': True}])
+        review_ci = completion['evidence']['review_pr_ci']
+        self.assertEqual(review_ci['formal_review_state'], 'ACCEPTED')
+        self.assertEqual(review_ci['required_checks'], ['check (docs)'])
+        saved = context['store'].get(context['task_id'])
+        self.assertEqual(saved.get('remote_test_receipts', []), [])
+
+    def test_2473_docs_only_with_remote_busy_outcome_completes_without_rerun(self):
+        context = self._claude_bound_task_context(docs_change=True)
+        store = context['store']
+        task_id = context['task_id']
+        busy = {'at': '2026-11-20T05:46:48.614161Z', 'code': 'REMOTE_BUSY',
+                'executor_task': '4' * 32, 'modules': ['test_fixture'],
+                'result': 'UNAVAILABLE', 'sha': context['head']}
+        store.update(task_id, remote_test_outcomes=[busy])
+        rc, completed = self._complete_claude_bound_context(context)
+        self.assertEqual(rc, 0, completed)
+        self.assertEqual(completed['completion']['state'], 'PM_EVIDENCE_READY')
+        saved = store.get(task_id)
+        self.assertEqual(saved['remote_test_outcomes'], [busy])
+        self.assertEqual(saved.get('remote_test_receipts', []), [])
+
+    def test_2473_docs_only_waits_when_docs_ci_is_not_success(self):
+        for conclusion in ('pending', 'failure', None):
+            with self.subTest(docs_check=conclusion):
+                self.setUp()
+                try:
+                    context = self._claude_bound_task_context(
+                        docs_change=True, docs_check=conclusion)
+                    rc, completed = self._complete_claude_bound_context(context)
+                    self.assertEqual(rc, 1)
+                    completion = completed['completion']
+                    self.assertNotEqual(completion['state'], 'PM_EVIDENCE_READY')
+                    self.assertTrue(completion['missing_gates'])
+                    self.assertNotIn('REMOTE_TEST_RECEIPT_MISSING',
+                                     completion['missing_gates'])
+                finally:
+                    self.tearDown()
+
+    def test_2473_docs_only_waits_without_reviewer_pass(self):
+        context = self._claude_bound_task_context(docs_change=True,
+                                                  skip_completed_claim=True)
+        rc, completed = self._complete_claude_bound_context(context)
+        self.assertEqual(rc, 1)
+        completion = completed['completion']
+        self.assertNotEqual(completion['state'], 'PM_EVIDENCE_READY')
+        self.assertTrue(completion['missing_gates'])
+
+    def test_2473_unproven_docs_pr_keeps_the_receipt_requirement(self):
+        cases = {
+            'files_incomplete': [],
+            'code_file_on_pr': [{'filename': 'docs/guide.md', 'status': 'added'},
+                                {'filename': 'tools/llmtool/llmtool/x.py',
+                                 'status': 'added'}],
+            'rename_from_code': [{'filename': 'docs/guide.md', 'status': 'renamed',
+                                  'previous_filename': 'tools/llmtool/llmtool/x.py'}],
+        }
+        for name, files in cases.items():
+            with self.subTest(case=name):
+                self.setUp()
+                try:
+                    context = self._claude_bound_task_context(docs_change=True,
+                                                              pr_files=files)
+                    rc, completed = self._complete_claude_bound_context(context)
+                    self.assertEqual(rc, 1)
+                    self.assertIn('REMOTE_TEST_RECEIPT_MISSING',
+                                  completed['completion']['missing_gates'])
+                finally:
+                    self.tearDown()
 
     def test_claude_bound_complete_rejects_old_sha_remote_receipt(self):
         context = self._claude_bound_task_context(old_sha_receipt=True)
