@@ -1,5 +1,6 @@
 """Plain-text provider backed by the user's local Claude CLI installation."""
 
+import json
 import os
 import selectors
 import shutil
@@ -22,6 +23,16 @@ READ_SIZE = 8192
 REVIEW_ENVELOPE_LIMIT = 128 * 1024
 
 
+def _review_envelope_limit():
+    # #2281 row 12 (basis #131, #165): the Claude review envelope size limit now
+    # comes from the policy key claude_review_envelope_limit_bytes. The key is
+    # optional; a policy that omits it keeps this hard-coded default
+    # (REVIEW_ENVELOPE_LIMIT). An invalid policy refuses (POLICY_INVALID); it
+    # never falls back silently to REVIEW_ENVELOPE_LIMIT.
+    from .. import repair_policy
+    return repair_policy.claude_review_envelope_limit_bytes()
+
+
 def decode_review_envelope(raw, *, forbidden_sessions=()):
     """Pinned Claude SDKResultMessage result/success subset (upstream v2.1.301/2.1.303).
 
@@ -31,10 +42,16 @@ def decode_review_envelope(raw, *, forbidden_sessions=()):
     Usage is allowlisted CLI_REPORTED data, never measured billing or identity.
     """
     from ..task_review import load_json, screen, reject, VERDICT_LIMIT
+    # An invalid policy refuses (POLICY_INVALID) before any envelope data is
+    # consumed; it never falls back silently to REVIEW_ENVELOPE_LIMIT.
+    try:
+        limit = _review_envelope_limit()
+    except LLMToolError:
+        reject('POLICY_INVALID')
     try:
         if type(raw) is bytes:
             raw = raw.decode('utf-8')
-        value = load_json(raw, REVIEW_ENVELOPE_LIMIT)
+        value = load_json(raw, limit)
         required = {'type', 'subtype', 'is_error', 'session_id', 'result'}
         # Only this documented subset is consumed. Unknown top-level data is
         # rejected rather than reflected into diagnostics or interpreted as pins.
@@ -466,7 +483,12 @@ class ClaudeCLIProvider:
                             else:
                                 target = output if kind == 'stdout' else errors
                                 result = self._read_pipe(stream, target)
-                                if result == 'limit' or len(output) > REVIEW_ENVELOPE_LIMIT:
+                                envelope_limit = REVIEW_ENVELOPE_LIMIT
+                                try:
+                                    envelope_limit = _review_envelope_limit()
+                                except LLMToolError:
+                                    reject('POLICY_INVALID')
+                                if result == 'limit' or len(output) > envelope_limit:
                                     reject('REVIEW_WORKER_OUTPUT_LIMIT')
                                 if result:
                                     selector.unregister(stream); stream.close()
