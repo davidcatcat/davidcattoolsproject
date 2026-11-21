@@ -49,7 +49,7 @@ import argparse
 import ctypes
 from collections import deque
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import math
 import os
 import platform
@@ -5765,6 +5765,39 @@ def _quota_timestamp(value):
     return None
 
 
+def _parse_reset_time(text: str) -> tuple[int, int] | None:
+    if not isinstance(text, str):
+        return None
+    m = re.fullmatch(r"([0-9]{1,2})(?::([0-9]{2}))?\s*(am|pm)", text.strip(), re.I)
+    if not m:
+        return None
+    hour = int(m.group(1))
+    minute = int(m.group(2)) if m.group(2) is not None else 0
+    if not (1 <= hour <= 12 and 0 <= minute <= 59):
+        return None
+    meridiem = m.group(3).lower()
+    if meridiem == "am":
+        hour_24 = 0 if hour == 12 else hour
+    else:
+        hour_24 = 12 if hour == 12 else hour + 12
+    return (hour_24, minute)
+
+
+def _claude_quota_reset_timestamp(reset_str: str, hit_time: float) -> float | None:
+    parsed = _parse_reset_time(reset_str)
+    if parsed is None:
+        return None
+    try:
+        hit_dt = datetime.fromtimestamp(hit_time)
+        hour_24, minute = parsed
+        cand = hit_dt.replace(hour=hour_24, minute=minute, second=0, microsecond=0)
+        if cand <= hit_dt - timedelta(minutes=1):
+            cand += timedelta(days=1)
+        return cand.timestamp()
+    except (ValueError, OverflowError, OSError, TypeError):
+        return None
+
+
 def read_codex_quota(now, path=None) -> dict:
     """Read ~/.local/state/llmtool/codex-quota.json.
 
@@ -5960,6 +5993,10 @@ def quota_warnings(now, codex_root=None, claude_root=None, codex_quota_path=None
         content = message.get("content") if type(message) is dict else None
         first = content[0].get("text") if type(content) is list and content and type(content[0]) is dict else ""
         reset = re.search(r"resets ([0-9:]{1,5}(?:am|pm))", first, re.I) if type(first) is str else None
+        if reset:
+            reset_ts = _claude_quota_reset_timestamp(reset.group(1), latest[0])
+            if reset_ts is not None and now >= reset_ts:
+                continue
         config_name = os.path.basename(os.path.dirname(top))
         suffix = f"，resets {reset.group(1)}" if reset else ""
         out.append(f"Claude（{config_name}）已到用量上限{suffix}")
