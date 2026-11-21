@@ -341,8 +341,10 @@ def _d6_process_status(store, executor_task):
             # No verifiable process evidence. A terminal Developer holds no process;
             # an active one (for example DEVELOPER_DISPATCHING before its PID is
             # recorded) may be launching a provider now, so it is UNKNOWN, not absent.
-            if (type(developer) is dict and developer_d6 == executor_task and
-                    developer.get('state') not in _TERMINAL):
+            # The D6 binding may sit on the developer record or on the completion
+            # (OpenCode, AGY and gw-agent Tasks bind through completion), so either
+            # binding counts.
+            if type(developer) is dict and developer.get('state') not in _TERMINAL:
                 uncertain = True
             continue
         seen = True

@@ -325,6 +325,37 @@ class RecoverEc2ClaimTests(unittest.TestCase):
                                      get=lambda task_id: done)
         self.assertEqual(rec._d6_process_status(only, EXECUTOR), 'NONE')
 
+    def test_d2_completion_bound_active_developer_without_process_refuses(self):
+        # OpenCode, AGY and gw-agent Tasks bind the D6 through completion while the
+        # developer record has no executor_task_id and no execution PID yet.
+        root = self._make_ec2()
+        _root, claim = self._root_and_claim()
+        for state in ('DEVELOPER_DISPATCHING', 'DEVELOPER_PENDING',
+                      'DEVELOPER_STARTING'):
+            for execution in (None, {}):
+                live = {
+                    'task_id': 'e' * 32,
+                    'completion': {'executor_task_id': EXECUTOR},
+                    'developer': {'state': state, 'execution': execution},
+                }
+                view = _StoreView(self.store, live['task_id'], live,
+                                  extra_ids=[live['task_id']])
+                with self.subTest(state=state, execution=execution):
+                    self.assertEqual(rec._d6_process_status(view, EXECUTOR), 'UNKNOWN')
+                    with self.assertRaises(LLMToolError) as caught:
+                        rec.verify_ec2_recovery(
+                            view, root, self.repair, executor_task=EXECUTOR,
+                            pr_number=PR, registered_d6=_clean_d6(claim['head_sha']))
+                    self.assertEqual(caught.exception.review_repair_code,
+                                     'REPAIR_RECOVERY_EVIDENCE_INVALID')
+        # A terminal Developer bound only through completion holds no process.
+        done = {'task_id': 'e' * 32,
+                'completion': {'executor_task_id': EXECUTOR},
+                'developer': {'state': 'DEVELOPER_RESPONDED', 'execution': None}}
+        only = types.SimpleNamespace(task_ids=lambda: [done['task_id']],
+                                     get=lambda task_id: done)
+        self.assertEqual(rec._d6_process_status(only, EXECUTOR), 'NONE')
+
     def test_e_non_unknown_other_pr_or_executor_refuses(self):
         for kwargs, code in (
                 ({'pr_number': PR + 1}, 'REPAIR_RECOVERY_CLAIM_INVALID'),
