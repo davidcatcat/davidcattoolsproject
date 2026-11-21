@@ -198,3 +198,137 @@ def referencing_tests(*, root, commit, read_paths, write_paths, runner=None):
     return [item(TEST_REFERENCES_WRITE, test,
                  ('references ' + source + '; it may pin the old behaviour')[:MAX_NOTE_CHARS])
             for test, source in sorted(found.items())] + more
+
+
+# --- #2503 PR-6: route capability and size advice ----------------------------
+
+ROUTE_PATH_DENIED = 'ROUTE_PATH_DENIED'
+ROUTE_NO_SHELL = 'ROUTE_NO_SHELL'
+READ_FILE_TOO_LARGE = 'READ_FILE_TOO_LARGE'
+READ_TOTAL_TOO_LARGE = 'READ_TOTAL_TOO_LARGE'
+WRITE_FILE_TOO_LONG = 'WRITE_FILE_TOO_LONG'
+_SHELL_ASK = re.compile(
+    r"\b(?:run|execute|invoke)\b[^.\n]{0,60}?\b(?:tests?|pytest|unittest|make|commands?|"
+    r"scripts?|shell|bash)\b|\bgit\s+(?:commit|push|add|checkout|rebase|merge|stash|reset|switch)\b",
+    re.IGNORECASE)
+# "Do not run tests" is a limit, not an ask.
+_NEGATED = re.compile(r"\b(?:not|never|no|don't|do not|without|nor)\b[^.\n]*$", re.IGNORECASE)
+
+
+def route_path_items(provider, paths, *, validate=None):
+    """read/write paths the route's own path validator refuses (#2503 PR-6 a)."""
+    if provider != 'opencode':
+        return []
+    if validate is None:
+        from .action_contract import _path as validate
+    items = []
+    for path in sorted(set(paths or [])):
+        try:
+            validate(path)
+        except Exception:
+            items.append(item(ROUTE_PATH_DENIED, path,
+                              'OpenCode refuses this path (action_contract path rule)'))
+    return items
+
+
+def _allows_shell(value):
+    """True if an OpenCode permission envelope allows a shell-like action anywhere."""
+    if type(value) is dict:
+        if (value.get('effect') == 'allow' and
+                value.get('action') in ('bash', 'shell', 'command', 'exec', '*')):
+            return True
+        return any(_allows_shell(item) for item in value.values())
+    if type(value) in (list, tuple):
+        return any(_allows_shell(item) for item in value)
+    return False
+
+
+def route_has_shell(provider):
+    """Shell/Git ability from the route's own tool configuration; None when unknown."""
+    try:
+        if provider == 'claude':
+            from .developer_routes.claude import ClaudeRoute
+            argv = ClaudeRoute.build_argv(None, 'claude',
+                                          {'model': 'm', 'effort': 'medium', 'prompt': 'p'})
+            return 'Bash' in argv[argv.index('--tools') + 1].split(',')
+        if provider == 'gw-agent':
+            from .developer_routes.gw_agent import _AUDIT_TOOLS
+            return any(name in _AUDIT_TOOLS for name in ('shell', 'bash', 'run_command'))
+        if provider == 'opencode':
+            from .opencode_direct_developer import configuration
+            return _allows_shell(configuration(read_paths=['a.py'], write_paths=['a.py']))
+    except Exception:
+        return None
+    return None
+
+
+def shell_items(provider, texts):
+    """The spec asks for a shell, test or Git step the route cannot do (#2503 PR-6 b)."""
+    if route_has_shell(provider) is not False:
+        return []
+    for text in _texts(texts):
+        match = next((found for found in _SHELL_ASK.finditer(text)
+                      if not _NEGATED.search(text[max(0, found.start() - 24):found.start()])),
+                     None)
+        if match:
+            return [item(ROUTE_NO_SHELL, None,
+                         (provider + ' has no shell or Git; the spec asks: ' +
+                          match.group(0))[:MAX_NOTE_CHARS])]
+    return []
+
+
+def route_size_limits(provider):
+    """The route's existing configured limits; {} when it has none (no new numbers)."""
+    if provider == 'opencode':
+        from .opencode_direct_developer import (resolved_max_source_file_bytes,
+                                                resolved_max_source_total_bytes)
+        return {'read_file_bytes': resolved_max_source_file_bytes(),
+                'read_total_bytes': resolved_max_source_total_bytes()}
+    if provider == 'gw-agent':
+        import importlib.util
+        from pathlib import Path
+        path = Path(__file__).resolve().parents[1] / 'scripts' / 'spec_preflight.py'
+        spec = importlib.util.spec_from_file_location('_llmtool_spec_preflight_limits', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return {'write_file_lines': module.large_file_lines()}
+    return {}
+
+
+def size_items(provider, root, read_paths, write_paths, *, limits=None):
+    """Files over the route's configured limits (#2503 PR-6 c)."""
+    from pathlib import Path
+    limits = route_size_limits(provider) if limits is None else limits
+    if not limits:
+        return []
+    items, total = [], 0
+
+    def data(path):
+        try:
+            file = Path(root) / path
+            return file.read_bytes() if file.is_file() and not file.is_symlink() else None
+        except OSError:
+            return None
+
+    for path in sorted(set(read_paths or [])):
+        content = data(path)
+        if content is None:
+            continue
+        total += len(content)
+        limit = limits.get('read_file_bytes')
+        if type(limit) is int and len(content) > limit:
+            items.append(item(READ_FILE_TOO_LARGE, path,
+                              '%d bytes > route limit %d' % (len(content), limit)))
+    limit = limits.get('read_total_bytes')
+    if type(limit) is int and total > limit:
+        items.append(item(READ_TOTAL_TOO_LARGE, None,
+                          'read total %d bytes > route limit %d' % (total, limit)))
+    limit = limits.get('write_file_lines')
+    if type(limit) is int:
+        for path in sorted(set(write_paths or [])):
+            content = data(path)
+            if content is not None and content.count(b'\n') > limit:
+                items.append(item(WRITE_FILE_TOO_LONG, path,
+                                  '%d lines > route guide %d (policy.json)'
+                                  % (content.count(b'\n'), limit)))
+    return items
