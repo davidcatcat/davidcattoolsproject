@@ -1,21 +1,38 @@
 """#2475: recover an UNKNOWN EC2/CI claim with positive no-launch evidence."""
 import hashlib
-import io
 import json
 import os
 import types
 import unittest
 from unittest import mock
 
+import test_task_store
 import test_task_store_claim_recovery as base
 from llmtool import (codex_direct_developer, review_repair,
                      review_repair_recovery as rec, task_advance,
-                     task_submission_cli, worker_availability, worker_dispatch)
+                     worker_availability, worker_dispatch)
 from llmtool.errors import LLMToolError
-from llmtool.task_store import _json_bytes, new_id
+from llmtool.task_store import _json_bytes
 
 EXECUTOR, PR, HEAD = 'e-1', 17, 'a' * 40
 EC2_HEAD = 'b' * 40
+
+
+def _packet(task_id):
+    """The remote-test failure packet the next advance derives for the claim."""
+    return {
+        'task': task_id, 'pr': PR, 'executor_task': EXECUTOR,
+        'failed_head': EC2_HEAD, 'version': 0,
+        'verdict_comment_id': 0, 'findings_count': 0,
+        'reviewer_text_excerpt_untrusted_data': 'test_a failed',
+    }
+
+
+def _packet_sha(packet):
+    """The digest review_repair binds a claim to (same canonical JSON form)."""
+    return hashlib.sha256(json.dumps(
+        packet, ensure_ascii=True, sort_keys=True,
+        separators=(',', ':')).encode('utf-8')).hexdigest()
 
 
 def _clean_d6(head, clean=True):
@@ -47,30 +64,11 @@ class RecoverEc2ClaimTests(unittest.TestCase):
     setUp = base.ClaimRecoveryStoreTests.setUp
     cas = base.ClaimRecoveryStoreTests.cas
 
-    def _ensure_repair(self, repair_task_id):
-        """Make sure the given repair Task exists, with no Developer."""
-        try:
-            repair = self.store.get(repair_task_id)
-        except Exception:
-            repair = None
-        if type(repair) is dict:
-            return repair
-        response = json.dumps({
-            'schema_version': 1,
-            'summary': 'Fixture repair Task recorded without a Developer.',
-            'developer_assignment': {
-                'route': 'opencode', 'risk': 'LOW',
-                'goal': 'Repair evidence fixture.',
-                'acceptance': ['Record the fixture repair Task.'],
-            },
-        }, separators=(',', ':'))
-        args = types.SimpleNamespace(pm_session_id=None, pm_runtime=None, pm_cwd=None)
-        task_submission_cli.run_task_record_pm(
-            args, store=self.store, task_id=repair_task_id,
-            input_stream=io.StringIO(json.dumps({
-                'request': 'repair evidence fixture', 'response': response})),
-            return_record=True)
-        return self.store.get(repair_task_id)
+    def _new_repair_task(self):
+        """Create a repair Task with no Developer, from the TaskStore test builder."""
+        repair = test_task_store.TaskStoreTests._codex_dispatch_task(self)
+        self.store.create(repair)
+        return repair['task_id']
 
     def _root_and_claim(self):
         root = self.store.get(self.task_id)
@@ -89,14 +87,14 @@ class RecoverEc2ClaimTests(unittest.TestCase):
         repair_task_id = getattr(self, '_ec2_repair_id', None)
         if repair_task_id is not None:
             return self.store.get(self.task_id)
-        repair_task_id = new_id()
-        self._ensure_repair(repair_task_id)
+        repair_task_id = self._new_repair_task()
         root = self.store.get(self.task_id)
         source = next(item for item in root['review_repair_claims']
                       if item.get('repair_task_id') == self.repair)
         claim = dict(source, repair_task_id=repair_task_id, family=f'pr-{PR}-ec2',
                      comment_id=None, state='CLAIMED', head_sha=EC2_HEAD,
-                     attempt=1, version=1)
+                     attempt=1, version=1,
+                     packet_sha256=_packet_sha(_packet(self.task_id)))
         self.store.compare_and_update(
             self.task_id, expected={'record_sha256': root['record_sha256']},
             review_repair_claims=[dict(item) for item in root['review_repair_claims']] + [claim])
@@ -164,12 +162,8 @@ class RecoverEc2ClaimTests(unittest.TestCase):
             'failure_excerpt': 'test_a failed',
         }
         receipt['receipt_digest'] = hashlib.sha256(_json_bytes(receipt)).hexdigest()
-        packet = {
-            'task': saved['task_id'], 'pr': PR, 'executor_task': EXECUTOR,
-            'failed_head': EC2_HEAD, 'version': 0,
-            'verdict_comment_id': 0, 'findings_count': 0,
-            'reviewer_text_excerpt_untrusted_data': 'test_a failed',
-        }
+        packet = _packet(saved['task_id'])
+        self.assertEqual(updated['packet_sha256'], _packet_sha(packet))
         delegated = []
         d6_info = {'root': '/d6', 'common_dir': '/repo/.git', 'task_id': EXECUTOR,
                    'branch': 'branch', 'result_head': EC2_HEAD,
@@ -192,19 +186,18 @@ class RecoverEc2ClaimTests(unittest.TestCase):
             # Ensure the root developer/completion exist for repair_review.
             with mock.patch.object(worker_dispatch, 'authorize_task_store_change',
                                    return_value=None):
-                diff = 'diff\n'
-                base_dev = {k: v for k, v in (saved.get('developer') or {}).items()
-                            if k != 'execution'}
+                diff = 'diff --git a/src.py b/src.py\n'
+                # A complete Developer record from the TaskStore test builder.
+                developer = {
+                    **test_task_store.TaskStoreTests._developer_assignment(provider='agy'),
+                    'state': 'DEVELOPER_RESPONDED', 'provider_type': 'agy-cli',
+                    'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+                    'owner_assignment_ref': None, 'executor_task_id': EXECUTOR,
+                    'artifact': diff,
+                    'artifact_sha256': hashlib.sha256(diff.encode('utf-8')).hexdigest(),
+                }
                 self.cas(
-                    developer={**base_dev, 'state': 'DEVELOPER_RESPONDED',
-                               'provider_profile': 'agy', 'provider_type': 'agy-cli',
-                               'model': None, 'owner_assignment_ref': None,
-                               'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
-                               'max_tokens': None, 'artifact': diff,
-                               'artifact_sha256': hashlib.sha256(diff.encode('utf-8')).hexdigest(),
-                               'error_code': None,
-                               'read_paths': ['a.py'], 'write_paths': ['a.py'],
-                               'acceptance': ['fix'], 'egress_basis': 'test'},
+                    developer=developer,
                     completion={**(saved.get('completion') or {}),
                                 'state': 'WAITING_EXECUTOR', 'executor_task_id': EXECUTOR,
                                 'reviewer_task_id': None,
@@ -213,15 +206,13 @@ class RecoverEc2ClaimTests(unittest.TestCase):
                                 'missing_gates': [], 'pm_dispatch': 'NOT_STARTED',
                                 'pm_response': None, 'pm_recommendation': None,
                                 'pm_usage': None, 'pm_error_code': None})
-            # Bind the receipt packet sha to the recovered claim's packet_sha256.
-            with mock.patch.object(review_repair.hashlib, 'sha256',
-                                   return_value=types.SimpleNamespace(
-                                       hexdigest=lambda: updated['packet_sha256'])):
-                adv = task_advance.advance(
-                    task_id=self.task_id, store=self.store, pr_number=PR,
-                    repair_review_call=lambda **kw: review_repair.repair_review(
-                        **kw, delegate_callable=lambda args, store=None: delegated.append(
-                            args.task_id) or {'delegated': args.task_id}))
+            # The claim's packet_sha256 is the real digest of this packet, so the
+            # replay finds the recovered claim without any digest being faked.
+            adv = task_advance.advance(
+                task_id=self.task_id, store=self.store, pr_number=PR,
+                repair_review_call=lambda **kw: review_repair.repair_review(
+                    **kw, delegate_callable=lambda args, store=None: delegated.append(
+                        args.task_id) or {'delegated': args.task_id}))
         self.assertEqual(delegated, [self.repair])
         self.assertEqual(adv['step'], 'REPAIR_REVIEW')
         self.assertEqual(adv['result']['repair_task_id'], self.repair)
