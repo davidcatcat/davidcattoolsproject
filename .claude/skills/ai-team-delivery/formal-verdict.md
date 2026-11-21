@@ -50,6 +50,40 @@ FORMAL SECURITY/FUNCTIONAL/QA ACCEPT
   supersedes an earlier PASS. A PR review and a verdict comment with the same timestamp
   are not accepted.
 
+## Exact accepted values (#2423)
+
+- Binding line, whole line, lowercase hex: `task=` 32 hex, `run=` 32 hex, `contract=` 64 hex,
+  `head=` 40 hex, nothing after the HEAD (`review_result._CODEX_BINDING`). Placeholders such
+  as `task-1` are refused.
+- `Version:` is the version the dispatch gave you; a formal review is `v1` to `v90`
+  (`review_dispatch._preflight`).
+- A Claude PASS passes `task_completion.is_formal_claude_pass`: marker with `actor=Claude`
+  and `status=PASS` first, then `Verdict: PASS | Version: vN | HEAD: <result HEAD>`, and the
+  exact ACCEPT and binding lines present.
+- Security verdicts (`v91` and later) are not dispatchable: `review_dispatch.dispatch_review`
+  and `review_result.record_review_result` accept only `kind='formal'` and refuse others
+  with `REVIEW_KIND_UNSUPPORTED`.
+
+## Codex reply shape
+
+`review_dispatch._parse_codex_review_inner` reads the Codex CLI JSONL stream (the CLI writes
+it). Your final agent message must be exactly one JSON object, with no text before or after
+it (else `REVIEW_NOT_POSTED`, `VERDICT_NOT_JSON`):
+
+- keys exactly `task_id`, `run_id`, `head`, `verdict`, `review` (an extra `contract_digest`
+  is ignored); `task_id`, `run_id` and `head` equal the dispatched values;
+- `verdict` is `PASS`, `FIX`, `FAIL` or `BLOCKED`;
+- `review` is at most 65536 bytes and is the comment above with `actor=Codex`: marker
+  `status=PASS` for PASS, else `status=FIX`; `Verdict: PASS` or `Verdict: FAIL`; at least
+  three non-empty lines including the binding line (else `REVIEW_HEADER_MISMATCH` or
+  `REVIEW_BINDING_LINE_MISSING`).
+
+Illustration (placeholder IDs; use the dispatched ones):
+
+```json
+{"task_id":"<32 hex>","run_id":"<32 hex>","head":"<40 hex>","verdict":"FIX","review":"<!-- activity: type=review_verdict actor=Codex target=PM status=FIX -->\nVerdict: FAIL | Version: v1 | HEAD: <40 hex>\nLLMTOOL-REVIEW-BINDING v1 task=<32 hex> run=<32 hex> contract=<64 hex> head=<40 hex>\nFinding: F1 [High] tools/llmtool/llmtool/foo.py:10 <text>"}
+```
+
 ## Reviewer record for these Tasks
 
 - The `actor=Claude` verdict comes from the separate, read-only Reviewer context that
