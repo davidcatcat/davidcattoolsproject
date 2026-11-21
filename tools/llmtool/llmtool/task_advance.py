@@ -19,7 +19,7 @@ from argparse import Namespace
 from . import active_pm_inbox, github_events, review_dispatch, review_repair
 from . import github_identity, review_result, sensitive_paths, task_completion
 from . import lineage_counts, mac_full_suite, repair_policy, review_transcript
-from . import start_failure, task_submission_cli
+from . import remote_test, start_failure, task_submission_cli
 from .ai_github_exec import AiIdentityError, verified_ai_env
 from .errors import LLMToolError
 from .task_store import TaskStore, _json_bytes, external_action_refusal
@@ -1110,6 +1110,9 @@ def _remote_test_receipt_summary(record, head):
         hosted_run_id = (actions.get('run_id')
                          if type(actions) is dict and type(actions.get('run_id')) is int and actions['run_id'] > 0
                          else None)
+        if receipt['result'] == 'PASS' and not remote_test.pass_receipt_covers(
+                receipt, remote_test._task_path_modules(record)):
+            return None
         summary_result = ('NOT_EXECUTED'
                           if _receipt_not_executed(receipt)
                           else receipt.get('result'))
@@ -2297,7 +2300,10 @@ def _remote_test_status(record, d6):
         if type(claimed) is not str or claimed != digest:
             continue
         if receipt['result'] == 'PASS':
-            return 'PASS', None, receipt
+            if remote_test.pass_receipt_covers(
+                    receipt, remote_test._task_path_modules(record)):
+                return 'PASS', None, receipt
+            break
         if receipt['result'] in ('TIMEOUT', 'SHA_MISMATCH'):
             return receipt['result'], None, receipt
         if receipt['result'] == 'FAIL':
@@ -2324,7 +2330,7 @@ def _remote_test_status(record, d6):
             return 'TIMEOUT', None, None
         if (outcome.get('result') == 'ADMISSION_DENIED' and
                 outcome.get('code') == 'MODULE_NOT_ADMITTED' and
-                outcome.get('modules') == []):
+                outcome.get('modules') == [] and not remote_test._task_path_modules(record)):
             return 'ADMISSION_DENIED', None, None
     return None, None, None
 

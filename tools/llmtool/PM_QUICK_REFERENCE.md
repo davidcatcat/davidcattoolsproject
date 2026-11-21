@@ -56,7 +56,7 @@ Read each value in its source; this page copies none.
 - **Route models, effort, timeouts and diff size; Reviewer and Debug models:** [developer-routes.json](developer-routes.json).
 - **Repair, Debug, child split, replan, test-fail, review-fail, Owner-notice and timeout-continuation caps:** [policy.json](policy.json).
 - **Continuation chain length:** `MAX_CHAIN` in [lineage_counts.py](llmtool/lineage_counts.py).
-- **EC2 module admission and modules per run:** `_task_path_modules` and `_MAX_REMOTE_MODULES` in [remote_test.py](llmtool/remote_test.py).
+- **EC2 module admission and receipts:** `_task_path_modules` and `_validate_remote_receipt` in [remote_test.py](llmtool/remote_test.py).
 - **Spec text, acceptance count, edits and ladder tiers:** `check`, `REPAIR_ROOM_MAX_ACCEPTANCE`, `check_edits` and `LADDER_SIZES` in [spec_preflight.py](scripts/spec_preflight.py).
 
 ## Known cases

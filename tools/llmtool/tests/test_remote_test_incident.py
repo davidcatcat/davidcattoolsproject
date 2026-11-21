@@ -379,7 +379,7 @@ class IncidentRemoteTestTests(unittest.TestCase):
         self.assert_denied(result, remote_test.INCIDENT_NOT_OPEN)
 
     def test_more_modules_than_the_cap_are_refused(self):
-        many = ['test_m%d' % index for index in range(remote_test._MAX_REMOTE_MODULES + 1)]
+        many = ['test_m%d' % index for index in range(incident_store.MAX_REMOTE_MODULES + 1)]
         record = self.make_incident([name + '.Case.test_x' for name in many], OTHER_GOOD)
         incident = record['incident_id']
         for modules in (many, ()):
@@ -390,7 +390,7 @@ class IncidentRemoteTestTests(unittest.TestCase):
 
         at_cap = self.run_it(incident=incident, modules=many[:-1])
         self.assertEqual(at_cap['result'], 'PASS')
-        self.assertEqual(len(self.calls[0][0][12:]), remote_test._MAX_REMOTE_MODULES)
+        self.assertEqual(len(self.calls[0][0][12:]), incident_store.MAX_REMOTE_MODULES)
 
     def test_invalid_config_is_refused(self):
         self.config.chmod(0o644)

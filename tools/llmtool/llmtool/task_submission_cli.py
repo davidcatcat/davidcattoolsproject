@@ -4009,8 +4009,6 @@ def _remote_task_test_paths(task, *, read_paths=()):
                            '/' not in path[len('tools/llmtool/tests/'): ]}
         if task_test_paths and task_test_paths != set(paths):
             return ()
-    if len({Path(path).stem for path in paths}) > remote_test._MAX_REMOTE_MODULES:
-        return ()
     admitted_task = dict(task)
     admitted_task['completion'] = {'evidence': {'tests': [{'path': path} for path in paths]}}
     if set(remote_test._admitted_modules(admitted_task)) != {
@@ -4030,36 +4028,25 @@ def _matching_remote_test_receipt(task, *, executor_task, source_sha, paths):
     modules = tuple(sorted({Path(path).stem for path in paths}))
     if not modules:
         return None, 'REMOTE_TEST_RECEIPT_MISSING'
-    skipped = False
-    for receipt in task.get('remote_test_receipts', []):
-        if (type(receipt) is not dict or receipt.get('result') != 'PASS' or
-                receipt.get('task_id') != task.get('task_id') or
+    for receipt in reversed(task.get('remote_test_receipts', [])):
+        if (type(receipt) is not dict or receipt.get('task_id') != task.get('task_id') or
                 receipt.get('run_id') != task.get('run_id') or
                 receipt.get('executor_task') != executor_task or
-                receipt.get('source_sha') != source_sha or
-                type(receipt.get('modules')) is not list or
-                any(type(module) is not str for module in receipt['modules']) or
-                not set(modules).issubset(receipt['modules']) or
-                type(receipt.get('ran_total')) is not int or receipt['ran_total'] <= 0 or
-                receipt.get('failures') != [] or
-                type(receipt.get('final')) is not list or
-                len(receipt['final']) < len(receipt['modules']) or
-                type(receipt.get('receipt_digest')) is not str):
+                receipt.get('source_sha') != source_sha):
             continue
         digest_input = dict(receipt)
-        claimed = digest_input.pop('receipt_digest')
-        if claimed != hashlib.sha256(_json_bytes(digest_input)).hexdigest():
-            continue
-        if any(type(line) is str and re.search(r'\bskipp(?:ed|ing)?\b', line, re.I)
-               for line in receipt['final']):
-            skipped = True
-        if any(type(line) is not str or not (
-                line.endswith('OK') or
-                re.fullmatch(r'OK \(skipped=[1-9][0-9]{0,5}\)', line))
-               for line in receipt['final']):
-            continue
-        return receipt, None
-    return None, ('MAC_EVIDENCE_REQUIRED' if skipped else 'REMOTE_TEST_RECEIPT_MISSING')
+        claimed = digest_input.pop('receipt_digest', None)
+        if type(claimed) is not str or claimed != hashlib.sha256(_json_bytes(digest_input)).hexdigest():
+            break
+        if remote_test.pass_receipt_covers(receipt, modules):
+            return receipt, None
+        finals = receipt.get('final')
+        if type(finals) is list and any(
+                type(line) is str and re.search(r'\bskipp(?:ed|ing)?\b', line, re.I)
+                for line in finals):
+            return None, 'MAC_EVIDENCE_REQUIRED'
+        break
+    return None, 'REMOTE_TEST_RECEIPT_MISSING'
 
 
 def _direct_result_tests(task, evidence, result, developer, *, config_loader=None):
