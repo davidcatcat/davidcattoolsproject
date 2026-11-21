@@ -38,6 +38,9 @@ OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
 #   row 16: revert_scope_prs_max
 #   row 17: d6_writer_lease_hours (#2281 L7: D6 writer lease length in hours,
 #           read by scripts/d6_worktree_lifecycle.py, which has no default)
+#   row 12: review_packet_limit_bytes (#2281 row 12, first part, basis #131
+#           and #165: review packet size limit in bytes; caller default
+#           llmtool.task_review.PACKET_LIMIT)
 #   row 12: claude_review_envelope_limit_bytes (#2281 row 12, basis #131 and
 #           #165: Claude review envelope size limit in bytes; caller default
 #           llmtool.providers.claude_cli.REVIEW_ENVELOPE_LIMIT)
@@ -50,6 +53,7 @@ OPTIONAL_POSITIVE_POLICY_KEYS = ('spec_preflight_large_file_lines', 'merge_train
                                  'merge_train_files_per_pr_max', 'revert_scope_prs_max',
                                  'd6_writer_lease_hours', 'developer_assignment_wait_seconds',
                                  'developer_assignment_expiry_seconds',
+                                 'review_packet_limit_bytes',
                                  'claude_review_envelope_limit_bytes')
 # #2281 row 18 (basis #819): Developer assignment wait. The key above is
 # optional; a policy that omits it keeps the caller default, the hard-coded
@@ -59,6 +63,11 @@ DEVELOPER_ASSIGNMENT_WAIT_SECONDS = 540
 # optional; a policy that omits it keeps the caller default, the hard-coded
 # expiry at its point of use (llmtool.developer_assignment_inbox).
 DEVELOPER_ASSIGNMENT_EXPIRY_SECONDS = 600
+# #2281 row 12 (first part, basis #131, #165): review packet size limit in
+# bytes. The key above is optional; a policy that omits it keeps the caller
+# default, the hard-coded limit at its point of use (llmtool.task_review,
+# PACKET_LIMIT).
+REVIEW_PACKET_LIMIT_BYTES = 256 * 1024
 # #2281 row 12 (basis #131, #165): Claude review envelope size limit in bytes.
 # The key above is optional; a policy that omits it keeps the caller default,
 # the hard-coded limit at its point of use
@@ -147,6 +156,18 @@ def assignment_expiry_seconds(path=None):
     policy = load_policy(path)
     return policy.get('developer_assignment_expiry_seconds',
                       DEVELOPER_ASSIGNMENT_EXPIRY_SECONDS)
+
+
+def review_packet_limit_bytes(path=None):
+    """#2281 row 12 (first part, basis #131, #165): the review packet size
+    limit, in bytes.
+
+    The key is optional; a policy that omits it keeps the caller default, the
+    hard-coded limit at its point of use (llmtool.task_review, PACKET_LIMIT).
+    """
+    policy = load_policy(path)
+    return policy.get('review_packet_limit_bytes',
+                      REVIEW_PACKET_LIMIT_BYTES)
 
 
 def claude_review_envelope_limit_bytes(path=None):
