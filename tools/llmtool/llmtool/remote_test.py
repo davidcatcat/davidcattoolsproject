@@ -633,13 +633,15 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         return denied('CONFIG_INVALID')
     argv = _ssh_argv(config, sha, ref, selected)
     command_digest = _command_digest(argv)
-    for known in task.get('remote_test_receipts', []):
-        if (known.get('executor_task') == executor_task and known.get('source_sha') == sha and
-                known.get('modules') == list(selected) and
-                known.get('command_digest') == command_digest and
+    for known in reversed(task.get('remote_test_receipts', [])):
+        if (known.get('executor_task') != executor_task or known.get('source_sha') != sha):
+            continue
+        if (known.get('modules') == list(selected) and known.get('command_digest') == command_digest and
                 (known.get('result') == 'SHA_MISMATCH' or pass_receipt_covers(known, selected))):
             record_remote_test_event(store, task_id, known)
             return known
+        # A newer same-head receipt supersedes older cached test evidence.
+        break
     if transport is None:
         transport = _ssh_transport
     timeout = _ssh_timeout()

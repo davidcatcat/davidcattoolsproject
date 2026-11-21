@@ -764,6 +764,19 @@ class RemoteTestTests(unittest.TestCase):
         self.run_it()
         self.assertIsNone(self.store.task['published_pr'])
 
+    def test_rerun_does_not_reuse_pass_superseded_by_same_head_failure(self):
+        first = self.run_it()
+        later = dict(first, result='FAIL', exit_code=1, final=['FAILED (failures=1)'],
+                     failures=['test_remote_test'])
+        later.pop('receipt_digest')
+        later['receipt_digest'] = hashlib.sha256(_json_bytes(later)).hexdigest()
+        self.store.task['remote_test_receipts'].append(later)
+
+        retried = self.run_it(self.receipt('FAIL', exit_code=1,
+                                          final=('FAILED (failures=2)',)))
+        self.assertEqual(retried['result'], 'FAIL')
+        self.assertEqual(len(self.calls), 2)
+
     def test_published_link_survives_ssh_failure_and_receipt_replay(self):
         with patch.object(remote_test, '_github_get',
                           return_value={'number': 425, 'head': {'sha': SHA}}):
