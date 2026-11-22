@@ -63,7 +63,8 @@ class PolicyLoaderSizeTests(unittest.TestCase):
 
     def test_repository_policy_loads_all_limits(self):
         # #2281 L0b added the limit-table keys (rows 2, 15, 16) and L7 row 17
-        # (the D6 writer lease, 24 hours); the rest is as before.
+        # (the D6 writer lease, 24 hours); #2622 adds the route-failure pause
+        # count at the Owner value (repair_policy.ROUTE_FAILURE_PAUSE_AFTER).
         self.assertEqual(rp.load_policy(), dict(
             GOOD, parent_debug_max=3, timeout_continuation_max=1,
             route_failure_pause_after=3, spec_preflight_large_file_lines=2000,

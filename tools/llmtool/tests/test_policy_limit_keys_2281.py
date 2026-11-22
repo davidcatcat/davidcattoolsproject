@@ -113,6 +113,9 @@ class PolicyLimitKeysTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertIs(type(policy[key]), int)
                 self.assertEqual(policy[key], value)
+        # #2622 (Owner decision relayed in the issue): the route-failure pause
+        # count is recorded in the repository policy.json.
+        self.assertEqual(policy[ROUTE_FAILURE_KEY], 3)
         # Row 18 is not in the repository policy.json; the repository file is
         # still accepted because the keys are optional.
         for key in (ROW18_KEY, EXPIRY_ROW18_KEY, PACKET_ROW12_KEY,
@@ -189,7 +192,7 @@ class PolicyLimitKeysTests(unittest.TestCase):
     def test_no_upper_validation_bound(self):
         for key in (*LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY, PACKET_ROW12_KEY,
                     SOURCE_ROW12_KEY, ROW12_KEY, ROW13_KEY, ROW13_RETRY_KEY,
-                    ROW14_KEY):
+                    ROW14_KEY, ROUTE_FAILURE_KEY):
             for value in (1001, 10 ** 9):
                 with self.subTest(key=key, value=value):
                     self.assertEqual(
@@ -199,7 +202,7 @@ class PolicyLimitKeysTests(unittest.TestCase):
     def test_invalid_value_refuses_policy_invalid(self):
         for key in (*LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY, PACKET_ROW12_KEY,
                     SOURCE_ROW12_KEY, ROW12_KEY, ROW13_KEY, ROW13_RETRY_KEY,
-                    ROW14_KEY):
+                    ROW14_KEY, ROUTE_FAILURE_KEY):
             for value in (0, -1, -2000, '5', True, False, 2.5, None, [5], {'value': 5}):
                 with self.subTest(key=key, value=value):
                     self._refuses({**BASE, **LIMITS, key: value})
