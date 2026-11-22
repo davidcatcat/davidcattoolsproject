@@ -1123,7 +1123,8 @@ class ChainLockTests(unittest.TestCase):
 # task advance / drive through a continuation chain (I2, I4).
 
 ADV_TASK, ADV_PRED = '1' * 32, '9' * 32
-PR_SNAPSHOT = {'number': 17, 'head': {'sha': HEAD}, 'merged': False}
+PR_SNAPSHOT = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open',
+               'merged': False, 'changed_files': 1}
 
 
 def _advance_record(**changes):
@@ -1157,7 +1158,7 @@ def _linux_failure_get(calls):
         if path.startswith('check-runs/'):
             return dict(run, output={'title': 'Tests failed', 'summary': 'FAIL: test_example'})
         if path.endswith('/files?per_page=100'):
-            return [{'filename': 'src/app.py'}]
+            return [{'filename': 'src/app.py', 'status': 'modified'}]
         return PR_SNAPSHOT
     return github_get
 

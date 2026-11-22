@@ -1,4 +1,5 @@
 import ast
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -10,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from llmtool import remote_test
 from llmtool.errors import LLMToolError
@@ -19,6 +20,16 @@ from llmtool.task_store import _json_bytes, _validate_remote_test_receipts
 
 SHA = 'a' * 40
 OTHER = 'b' * 40
+
+
+def _default_github_get(path):
+    if path == 'pulls/425':
+        return {'number': 425, 'head': {'sha': SHA}, 'state': 'open',
+                'merged': False, 'changed_files': 1}
+    if path == 'pulls/425/files?per_page=100':
+        return [{'filename': 'tools/llmtool/llmtool/remote_test.py',
+                 'status': 'modified'}]
+    return []
 
 
 class Store:
@@ -122,15 +133,20 @@ class RemoteTestTests(unittest.TestCase):
             '/tmp/llmtool-remote-test.Abc123', '/home/runner')
 
     def run_it(self, data=None, *, error=None, modules=('test_remote_test',), sha=SHA,
-               pr=None):
+               pr=425):
         def transport(argv, script, timeout):
             self.calls.append((argv, script, timeout))
             if error:
                 raise error
             return SimpleNamespace(stdout=self.receipt() if data is None else data,
                                    stderr=b'', returncode=0)
-        with patch.object(remote_test, 'read_d6_registration',
-                          return_value=SimpleNamespace(result_sha=SHA)):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(
+                remote_test, 'read_d6_registration',
+                return_value=SimpleNamespace(result_sha=SHA)))
+            if not isinstance(remote_test._github_get, Mock):
+                stack.enter_context(patch.object(
+                    remote_test, '_github_get', side_effect=_default_github_get))
             return remote_test.run_remote_test(
                 self.store.task['task_id'], executor_task='d6-task', sha=sha,
                 ref='refs/pull/425/head', modules=modules, pr=pr, store=self.store,
@@ -621,11 +637,12 @@ class RemoteTestTests(unittest.TestCase):
 
     def test_pr_without_completion_review_reads_and_binds_github_head(self):
         with patch.object(remote_test, '_github_get',
-                          return_value={'number': 425, 'head': {'sha': SHA}}) as github_get:
+                          side_effect=_default_github_get) as github_get:
             result = self.run_it(pr=425)
 
         self.assertEqual(result['result'], 'PASS')
-        github_get.assert_called_once_with('pulls/425')
+        github_get.assert_any_call('pulls/425')
+        github_get.assert_any_call('pulls/425/files?per_page=100')
         self.assertEqual(len(self.calls), 1)
 
     def test_pr_without_completion_review_denies_mismatch_or_read_failure_before_ssh(self):
@@ -646,7 +663,7 @@ class RemoteTestTests(unittest.TestCase):
 
     def test_pr_records_published_link_after_matching_head_admission(self):
         with patch.object(remote_test, '_github_get',
-                          return_value={'number': 425, 'head': {'sha': SHA}}):
+                          side_effect=_default_github_get):
             result = self.run_it(pr=425)
 
         self.assertEqual(result['result'], 'PASS')
@@ -661,9 +678,16 @@ class RemoteTestTests(unittest.TestCase):
             self.calls.append((argv, script, timeout))
             return SimpleNamespace(stdout=self.receipt(), stderr=b'', returncode=0)
 
+        def github_get(path):
+            if path == f'pulls/{pr}/files?per_page=100':
+                return [{'filename': 'tools/llmtool/llmtool/remote_test.py',
+                         'status': 'modified'}]
+            return {'number': 425, 'head': {'sha': pr_head}, 'state': 'open',
+                    'merged': False, 'changed_files': 1}
+
         with patch.object(remote_test, 'read_d6_registration', return_value=registration), \
                 patch.object(remote_test, '_github_get',
-                             return_value={'number': 425, 'head': {'sha': pr_head}}) as github, \
+                             side_effect=github_get) as github, \
                 patch('llmtool.task_submission_cli.result_head_admitted',
                       return_value=admitted) as check:
             result = remote_test.run_remote_test(
@@ -679,7 +703,8 @@ class RemoteTestTests(unittest.TestCase):
 
         self.assertEqual(result['result'], 'PASS')
         self.assertEqual(len(self.calls), 1)
-        github.assert_called_once_with('pulls/425')
+        github.assert_any_call('pulls/425')
+        github.assert_any_call('pulls/425/files?per_page=100')
         check.assert_called_once()
         self.assertEqual(check.call_args.kwargs['recorded_head'], OTHER)
         self.assertEqual(check.call_args.kwargs['head'], SHA)
@@ -761,7 +786,7 @@ class RemoteTestTests(unittest.TestCase):
         self.assertIsNone(self.store.task['published_pr'])
 
         self.store = Store()
-        self.run_it()
+        self.run_it(pr=None)
         self.assertIsNone(self.store.task['published_pr'])
 
     def test_rerun_does_not_reuse_pass_superseded_by_same_head_failure(self):
@@ -779,19 +804,19 @@ class RemoteTestTests(unittest.TestCase):
 
     def test_published_link_survives_ssh_failure_and_receipt_replay(self):
         with patch.object(remote_test, '_github_get',
-                          return_value={'number': 425, 'head': {'sha': SHA}}):
+                          side_effect=_default_github_get):
             failed = self.run_it(pr=425, error=OSError('offline'))
         self.assertEqual(failed['result'], 'UNAVAILABLE')
         saved = self.store.task['published_pr']
         self.assertEqual((saved['pr'], saved['head_sha']), (425, SHA))
 
         with patch.object(remote_test, '_github_get',
-                          return_value={'number': 425, 'head': {'sha': SHA}}):
+                          side_effect=_default_github_get):
             passed = self.run_it(pr=425)
         self.assertEqual(passed['result'], 'PASS')
         saved = self.store.task['published_pr']
         with patch.object(remote_test, '_github_get',
-                          return_value={'number': 425, 'head': {'sha': SHA}}):
+                          side_effect=_default_github_get):
             replay = self.run_it(pr=425)
         self.assertEqual(replay, passed)
         self.assertEqual(self.store.task['published_pr'], saved)
@@ -799,8 +824,10 @@ class RemoteTestTests(unittest.TestCase):
     def test_pr_with_completion_review_keeps_existing_binding(self):
         self.store.task['completion']['evidence']['review_pr_ci'] = {
             'pr_number': 425, 'head_sha': SHA}
-        with patch.object(remote_test, '_github_get',
-                          side_effect=AssertionError('unexpected GitHub lookup')):
+        with patch.object(remote_test, '_fresh_pr_head',
+                          side_effect=AssertionError('unexpected head lookup')), \
+                patch.object(remote_test, '_github_get',
+                             side_effect=_default_github_get):
             result = self.run_it(pr=425)
         self.assertEqual(result['result'], 'PASS')
         self.assertEqual(len(self.calls), 1)
@@ -857,8 +884,9 @@ class RemoteTestTests(unittest.TestCase):
                           return_value=SimpleNamespace(result_sha=SHA)):
             result = remote_test.run_remote_test(
                 self.store.task['task_id'], executor_task='d6-task', sha=SHA,
-                ref='refs/pull/425/head', modules=('test_remote_test',), store=self.store,
-                config_path=self.config, transport=transport)
+                ref='refs/pull/425/head', modules=('test_remote_test',), pr=425,
+                store=self.store, config_path=self.config, transport=transport,
+                get=_default_github_get)
         self.assertEqual((result['result'], result['code']), ('UNAVAILABLE', 'REMOTE_BUSY'))
         self.assertTrue(result['persisted'])
         self.assertEqual(len(self.store.task['remote_test_outcomes']), 1)
@@ -873,8 +901,9 @@ class RemoteTestTests(unittest.TestCase):
                           return_value=SimpleNamespace(result_sha=SHA)):
             result = remote_test.run_remote_test(
                 self.store.task['task_id'], executor_task='d6-task', sha=SHA,
-                ref='refs/pull/425/head', modules=('test_remote_test',), store=self.store,
-                config_path=self.config, transport=transport)
+                ref='refs/pull/425/head', modules=('test_remote_test',), pr=425,
+                store=self.store, config_path=self.config, transport=transport,
+                get=_default_github_get)
         self.assertEqual((result['result'], result['code']),
                          ('UNAVAILABLE', 'REMOTE_LOCK_UNSAFE'))
         self.assertTrue(result['persisted'])
