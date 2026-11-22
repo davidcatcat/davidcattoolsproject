@@ -1548,6 +1548,8 @@ def _validate_lineage(record):
             not hex32(item.get('lineage_id')) or item.get('state') not in _LINEAGE_STATES or
             type(item.get('replaces')) is not list or len(item['replaces']) > 3 or
             not all(hex32(value) for value in item['replaces']) or
+            len(set(item['replaces'])) != len(item['replaces']) or
+            record.get('task_id') in item['replaces'] or
             (item.get('reason') is not None and
              (type(item['reason']) is not str or not 1 <= len(item['reason']) <= 500)) or
             (item['state'] == 'DROPPED' and item.get('reason') is None) or
@@ -1567,7 +1569,7 @@ def _validate_lineage(record):
                  item['state'] != 'PARKED' and 'splits' not in item and
                  ('split_op' not in item or item['kind'] == 'child') and
                  (item['state'] != 'PENDING' or 'split_op' in item) and
-                 (item['kind'] == 'replan') == bool(item['replaces']))
+                 (item['kind'] != 'replan' or bool(item['replaces'])))
     if not valid:
         _fail('TASK_LINEAGE_INVALID')
 
