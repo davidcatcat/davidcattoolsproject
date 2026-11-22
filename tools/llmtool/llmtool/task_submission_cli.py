@@ -317,6 +317,23 @@ def _run_background_delegate(args, *, provider, store, d6_binding):
     return result.get('return_code', 1)
 
 
+MAX_TASK_ISSUE = 2 ** 31 - 1
+
+
+def _task_issue(value):
+    """Return a host-recorded GitHub Issue number, or None when not supplied.
+
+    #1817 W2a F1: the issue is set only by the Task creation paths below, so
+    the OpenCode delegate reads grant input from the durable Task record, never
+    from Developer or provider output. An invalid value refuses the creation.
+    """
+    if value is None:
+        return None
+    if type(value) is not int or not 1 <= value <= MAX_TASK_ISSUE:
+        raise LLMToolError('TASK_ISSUE_INVALID')
+    return value
+
+
 def _screen_text(value, limit):
     if type(value) is not str or not value.strip():
         raise LLMToolError('request or response must be non-empty UTF-8 text')
@@ -548,10 +565,10 @@ def _contract(task_id, request_sha256=None, continues=None):
 
 def _record(task_id, run_id, session_id, profile, prompt, *, state='PM_PENDING',
             provider_type=None, model=None, backend='NOT_STARTED', request_sha=None,
-            contract=None, error_code=None):
+            contract=None, error_code=None, issue=None):
     now = _timestamp()
     contract = _contract(task_id, request_sha) if contract is None else contract
-    return {
+    record = {
         'schema_version': 2,
         'task_id': task_id,
         'run_id': run_id,
@@ -577,6 +594,9 @@ def _record(task_id, run_id, session_id, profile, prompt, *, state='PM_PENDING',
         'completion': None,
         'record_sha256': None,
     }
+    if issue is not None:
+        record['issue'] = _task_issue(issue)
+    return record
 
 
 def _active_pm_runtime(task):
@@ -807,11 +827,17 @@ def add_task_submission_parsers(actions):
     drop.add_argument('--reason', required=True, help='printable reason (1-500 characters)')
     submit =actions.add_parser('submit', help='Submit a development request to an explicit PM provider profile')
     submit.add_argument('--provider', required=True, help='configured PM provider profile; no implicit default')
+    submit.add_argument('--issue', type=int,
+                        help=('GitHub Issue number this Task belongs to; required for an '
+                              'Owner-granted workflow-file path'))
     submit.add_argument('request', nargs='+', help='development request text')
     record_pm = actions.add_parser(
         'record-pm', help='Record an active PM runtime decision without invoking a provider')
     record_pm.add_argument('--stdin-json', action='store_true', required=True,
                            help='read one bounded JSON object with request and response from stdin')
+    record_pm.add_argument('--issue', type=int,
+                           help=('GitHub Issue number this Task belongs to; required for an '
+                                 'Owner-granted workflow-file path'))
     record_pm.add_argument('--pm-session-id',
                            help='native session UUID of this PM; its local transcript must exist')
     record_pm.add_argument('--pm-runtime', choices=('claude-code', 'codex'),
@@ -5265,13 +5291,19 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
                 _background_launch_notifier(pid)
             return saved
 
+        # #1817 W2a F1: the grant inputs come from the durable Task record and
+        # its host-bound D6 base commit, never from Developer or provider
+        # output. ``issue`` is written only by the Task creation paths
+        # (submit/record-pm); a Task without one leaves the W1 grant check closed.
         result = opencode_direct_developer.run(
             root=registration.root, read_paths=read_paths,
             write_paths=write_paths, prompt=prompt,
             dispatch_store=store, dispatch_task_id=task['task_id'], steps=steps,
             prelaunch_validate=validate_prelaunch_d6_binding, model=model,
             launch_callback=record_opencode_launch,
-            spawn_authorization=authorize_opencode_spawn, timeout_seconds=timeout)
+            spawn_authorization=authorize_opencode_spawn, timeout_seconds=timeout,
+            workflow_grant_base_commit=snapshot.head,
+            workflow_grant_issue=task.get('issue'))
         _record_skill_delivery(task, registration, snapshot, 'opencode', model,
                                card_prefix_sha256, result)
     except opencode_direct_developer.DirectOpenCodeError as exc:
@@ -9351,6 +9383,7 @@ def run_task_submit(args, *, store=None, stdout=None):
     profile = args.provider
     if type(profile) is not str or _PROFILE.fullmatch(profile) is None:
         raise LLMToolError('select one valid configured PM provider profile')
+    issue = _task_issue(getattr(args, 'issue', None))
     prompt = ' '.join(args.request)
     task_id, run_id = new_id(), new_id()
     session_id = 'pm-' + new_id()
@@ -9360,7 +9393,7 @@ def run_task_submit(args, *, store=None, stdout=None):
         contract = _contract(task_id)
         record = _record(task_id, run_id, session_id, profile, None,
                          state='INPUT_REJECTED', request_sha=None, contract=contract,
-                         error_code='PM_INPUT_REJECTED')
+                         error_code='PM_INPUT_REJECTED', issue=issue)
         store.create(record)
         _print(_task_view(store.get(task_id)), stdout=stdout)
         return 1
@@ -9368,7 +9401,7 @@ def run_task_submit(args, *, store=None, stdout=None):
     digest = hashlib.sha256(prompt.encode('utf-8', 'strict')).hexdigest()
     contract = _contract(task_id, digest)
     record = _record(task_id, run_id, session_id, profile, prompt,
-                     request_sha=digest, contract=contract)
+                     request_sha=digest, contract=contract, issue=issue)
     store.create(record)  # Durable IDs and request precede any provider call.
 
     try:
@@ -9447,6 +9480,7 @@ def run_task_record_pm(args, *, store=None, input_stream=None, return_record=Fal
                    'pm_native_session_id': native_session,
                    'pm_cwd': observer(native_session, os.getcwd() if cwd is None else cwd)}
     prompt, response, assignment = _read_pm_record_input(input_stream)
+    issue = _task_issue(getattr(args, 'issue', None))
     task_id, run_id = (new_id() if task_id is None else task_id), new_id()
     # #1502 WP-D L1: an optional write-once link to the Task this one continues.
     # The check and the create run under one store-wide continues lock, so two
@@ -9456,16 +9490,16 @@ def run_task_record_pm(args, *, store=None, input_stream=None, return_record=Fal
     continues = getattr(args, 'continues', None)
     if continues is None:
         return _record_pm_create(store, task_id, run_id, prompt, response, assignment,
-                                 session, continues, return_record)
+                                 session, continues, return_record, issue=issue)
     from . import lineage_counts
     with lineage_counts.continues_lock(store):
         lineage_counts.check_continues(store, task_id, continues)
         return _record_pm_create(store, task_id, run_id, prompt, response, assignment,
-                                 session, continues, return_record)
+                                 session, continues, return_record, issue=issue)
 
 
 def _record_pm_create(store, task_id, run_id, prompt, response, assignment, session,
-                      continues, return_record):
+                      continues, return_record, *, issue=None):
     digest = hashlib.sha256(prompt.encode('utf-8', 'strict')).hexdigest()
     contract = _contract(task_id, digest, continues)
     record = _record(
@@ -9474,7 +9508,7 @@ def _record_pm_create(store, task_id, run_id, prompt, response, assignment, sess
         'active-pm-runtime', prompt,
         state='PM_RESPONDED', provider_type='active-pm-runtime', model=None,
         backend='ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL', request_sha=digest,
-        contract=contract,
+        contract=contract, issue=issue,
     )
     record.update(
         pm_route_binding={'type': 'active-pm-runtime', 'model': None, 'base_url': None},

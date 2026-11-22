@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 import time
 
+from . import authorization_workflow_grant
 from .errors import LLMToolError
 from . import developer_stderr
 from . import worker_dispatch
@@ -450,7 +451,21 @@ def _observed_run_id(store, task_id):
     return record['run_id']
 
 
-def _valid_paths(root, read_paths, write_paths):
+def _workflow_grant_allows(root, name, mode, *, base_commit, issue):
+    """Allow one exact workflow path only when the W1 grant module grants it."""
+    if base_commit is None or issue is None:
+        return False
+    try:
+        decision = authorization_workflow_grant.evaluate_workflow_grant(
+            base_commit=base_commit, issue=issue, path=name, mode=mode, root=root)
+    except Exception:
+        return False
+    return (decision.allowed is True and
+            decision.code is authorization_workflow_grant.WorkflowGrantCode.GRANTED)
+
+
+def _valid_paths(root, read_paths, write_paths, *, workflow_grant_base_commit=None,
+                 workflow_grant_issue=None):
     if (type(read_paths) is not list or type(write_paths) is not list or
             not read_paths or len(read_paths) > MAX_TASK_PATHS or
             len(write_paths) > MAX_TASK_PATHS or
@@ -463,7 +478,23 @@ def _valid_paths(root, read_paths, write_paths):
         try:
             _path(name)
         except Exception:
-            _reject('OPENCODE_SCOPE_INVALID')
+            # F2 still refuses every .github/workflows path; the W1 module is
+            # the only way one exact path is accepted, for this mode only.
+            if not _workflow_grant_allows(
+                    root, name, 'read',
+                    base_commit=workflow_grant_base_commit,
+                    issue=workflow_grant_issue):
+                _reject('OPENCODE_SCOPE_INVALID')
+    for name in write_paths:
+        try:
+            _path(name)
+        except Exception:
+            if not _workflow_grant_allows(
+                    root, name, 'write',
+                    base_commit=workflow_grant_base_commit,
+                    issue=workflow_grant_issue):
+                _reject('OPENCODE_SCOPE_INVALID')
+    for name in read_paths:
         target = root / name
         for ancestor in (target, *target.parents):
             if ancestor == root:
@@ -887,12 +918,18 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
         dispatch_store=None, dispatch_task_id=None,
         launch_callback=None, delivered_callback=None, spawn_authorization=None,
         timeout_seconds=None, executable=None, model=MODEL,
-        steps=DEFAULT_AGENT_STEPS):
+        steps=DEFAULT_AGENT_STEPS,
+        workflow_grant_base_commit=None, workflow_grant_issue=None):
     """Invoke one bounded OpenCode run in the existing D6 task worktree.
 
     timeout_seconds None uses the opencode route default_timeout; a given value
     must pass resolve_route_timeout (route max_timeout, hard cap 18000). A
     refusal raises the resolver code before any provider process starts.
+
+    workflow_grant_base_commit and workflow_grant_issue carry the Task base
+    commit and Issue for the W1 workflow-file grant. A .github/workflows path
+    is accepted for read or write only when that module grants that exact path
+    for that mode; all other path rules and refusals are unchanged.
 
     delivered_callback (optional, no arguments) is called once at the delivery
     boundary (#1502 WP-F design section 2.2 step 5): after os.write has
@@ -907,7 +944,9 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
     root = Path(root).resolve(strict=True)
     if not root.is_dir():
         _reject('OPENCODE_WORKTREE_INVALID')
-    _valid_paths(root, read_paths, write_paths)
+    _valid_paths(root, read_paths, write_paths,
+                 workflow_grant_base_commit=workflow_grant_base_commit,
+                 workflow_grant_issue=workflow_grant_issue)
     max_prompt_bytes = resolved_max_prompt_bytes()
     max_source_file_bytes = resolved_max_source_file_bytes()
     max_source_total_bytes = resolved_max_source_total_bytes()
