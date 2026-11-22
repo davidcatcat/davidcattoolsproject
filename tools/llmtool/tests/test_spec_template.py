@@ -285,6 +285,29 @@ class AutoFillTests(TemplateTestBase):
             with self.subTest(path=path):
                 self.assertIn(path, spec['read_paths'])
 
+    def test_read_scope_covers_every_repository_root_file(self):
+        # #2388 v5 F2: root files have no directory part and were missed.
+        spec = build_spec(
+            'developer',
+            'Add a bounded dispatch helper.',
+            'Build one dispatch spec from source facts.',
+            ['Keep SECURITY.md and .gitignore consistent with the change.'],
+            facts_for('developer'),
+        )
+        for path in ('SECURITY.md', '.gitignore'):
+            with self.subTest(path=path):
+                self.assertIn(path, spec['read_paths'])
+
+    def test_bare_non_root_file_name_is_not_a_root_path(self):
+        spec = build_spec(
+            'developer',
+            'Add a bounded dispatch helper.',
+            'Build one dispatch spec from source facts.',
+            ['Keep policy.json limits unchanged.'],
+            facts_for('developer'),
+        )
+        self.assertNotIn('policy.json', spec['read_paths'])
+
     def test_acceptance_cited_test_module_is_admitted(self):
         spec = build_spec(
             'developer',

@@ -94,7 +94,11 @@ _ACCEPTANCE_PATH = re.compile(
     r'(?<![a-zA-Z0-9_./-])'
     r'('
     r'(?:[a-zA-Z0-9_.-]+/)+[a-zA-Z0-9_.-]+\.[a-zA-Z0-9]+'
-    r'|(?:AGENTS|CLAUDE|README)\.md'
+    # Repository-root files have no directory part, so they are listed by name
+    # (every root file of this repository); a bare name elsewhere in prose is
+    # not treated as a root path (#2388 v5 F2).
+    r'|(?:AGENTS|CLAUDE|README|SECURITY)\.md'
+    r'|\.gitignore'
     r')'
     r'(?![a-zA-Z0-9_/-]|\.[a-zA-Z0-9])'
 )
