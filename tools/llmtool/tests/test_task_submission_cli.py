@@ -2176,6 +2176,58 @@ class TaskSubmissionCLITests(unittest.TestCase):
                         self.assertEqual(store.get(task['task_id'])['developer']['state'],
                                          'DEVELOPER_RESPONDED')
 
+    def test_opencode_evidence_failure_records_the_task_store_cause_2532(self):
+        # #2532: a TaskStore lock timeout during the post-run evidence step is
+        # recorded with its fixed cause, not only OPENCODE_RESULT_EVIDENCE_UNKNOWN.
+        from llmtool import task_store as task_store_module
+        result = DirectResult(0, 'ses_Abc123', 'Updated fixture.', None,
+                              'UNKNOWN', 'a' * 64, 32, 'CONFIRMED',
+                              'opencode v2.0.32', 10, 1, 'b' * 64)
+        task = self._pm_task_with_opencode_assignment()
+        args = self._opencode_delegate_args(task)
+        store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+
+        def execute(**kwargs):
+            kwargs['spawn_authorization']()
+            kwargs['launch_callback'](321, '123456', 321)
+            (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+            return result
+
+        def busy(*_args, **_kwargs):
+            task_store_module._fail('TASK_STORE_BUSY')
+
+        snapshot = type('Snapshot', (), {
+            'common_dir': self.executor_common_dir, 'root': str(self.executor_root),
+            'branch': 'feat/test-executor', 'head': self.executor_head,
+        })()
+        registration = type('Registration', (), {
+            'task_id': 'executor-task-1', 'trusted_agent_id': 'opencode-developer',
+            'session_ref': 'Executor Session 1', 'native_session_id': None,
+            'root': str(self.executor_root), 'common_dir': self.executor_common_dir,
+            'branch': 'feat/test-executor',
+        })()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch.object(submission_cli.task_completion, 'collect_git_snapshot',
+                             return_value=snapshot), \
+                patch.object(submission_cli.task_completion, 'bind_executor_task',
+                             return_value=(registration, snapshot)), \
+                patch.object(submission_cli, '_bootstrap_registered_d6'), \
+                patch.object(submission_cli, '_refresh_d6_binding_after_bootstrap',
+                             return_value=registration), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      side_effect=execute), \
+                patch('llmtool.task_submission_cli._attach_developer_reply',
+                      side_effect=busy), \
+                redirect_stdout(io.StringIO()):
+            try:
+                run_task_opencode_delegate(args, store=store)
+            except Exception:
+                pass
+        developer = store.get(task['task_id'])['developer']
+        self.assertEqual(developer['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(developer['error_code'], 'OPENCODE_RESULT_EVIDENCE_UNKNOWN')
+        self.assertEqual(developer['error_cause'], 'TASK_STORE_BUSY')
+
     def test_run_task_delegate_binds_explicit_registered_root_outside_process_cwd(self):
         task = self._pm_task_with_opencode_assignment()
         args = self._opencode_delegate_args(task, cwd=str(self.executor_root))
