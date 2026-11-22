@@ -351,6 +351,15 @@ class PMCallerStoreTests(unittest.TestCase):
                                'completion': {'executor_task_id': 'executor-1'}})
         d6 = {'root': str(self.home), 'branch': 'feat/x', 'dirty': False,
               'result_head': head, 'recorded_result_head': head}
+
+        def github_get(path):
+            if path == 'pulls/17':
+                return {'number': 17, 'head': {'sha': head}, 'state': 'open',
+                        'merged': False, 'changed_files': 1}
+            if path.endswith('/files?per_page=100'):
+                return [{'filename': 'docs/guide.md', 'status': 'modified'}]
+            return []
+
         with _environment(), \
                 patch.object(task_advance, '_closed_train_member_head', return_value=None), \
                 patch.object(task_advance, '_d6_snapshot', return_value=d6), \
@@ -363,7 +372,7 @@ class PMCallerStoreTests(unittest.TestCase):
                       return_value={'state': 'DISPATCHED'}) as dispatch, \
                 redirect_stdout(io.StringIO()):
             result = task_advance.advance(task_id='t', store=store, pr_number=17,
-                                          github_get=lambda _path: {})
+                                          github_get=github_get)
         check.assert_not_called()
         dispatch.assert_called_once_with(store=store, task_id='t',
                                          executor_task='executor-1',
