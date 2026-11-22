@@ -4,10 +4,10 @@ An index for the Claude Integrator/PM, not a rule source (#1502 WP-H). Each item
 
 ## Dispatch
 
-- **Authority:** reread [worker-dispatch.json](worker-dispatch.json) through the dispatch gate before every dispatch, retry, repair, recovery and Reviewer hand-off; `PAUSED` refuses whatever the live health and `OWNER_ASSIGNMENT_ONLY` needs an explicit Owner assignment ([CLAUDE.md Worker dispatch](../../CLAUDE.md#worker-dispatch)).
+- **Authority:** reread [worker-dispatch.json](worker-dispatch.json) through the dispatch gate before every dispatch, retry, repair, recovery and Reviewer hand-off; `PAUSED` refuses whatever the live health and `OWNER_ASSIGNMENT_ONLY` needs an explicit Owner assignment ([AGENTS.md Current authority](../../AGENTS.md#current-authority-restructured-per-owner-decision-010-step-2)).
 - **Owner PM rules:** write only problem, observable acceptance, constraints, scopes and evidence; no solutions, code, edits, exact test values, or PM technical inferences ([PM role card](../../.claude/skills/role-cards/pm.md#owner-pm-working-rules)).
 - **Route and model:** take each Developer route's executable, model and timeout, and each Reviewer and Debug role model, from [developer-routes.json](developer-routes.json), never from memory or chat.
-- **Reviewer pairing:** the formal Reviewer comes from the other model family than the Developer ([CLAUDE.md Review](../../CLAUDE.md#review)).
+- **Reviewer pairing:** the formal Reviewer comes from the other model family than the Developer ([AGENTS.md Current authority](../../AGENTS.md#current-authority-restructured-per-owner-decision-010-step-2)).
 - **Spec preflight:** run [spec_preflight.py](scripts/spec_preflight.py) on every hand-made spec, and record or dispatch it only after a `SPEC_PREFLIGHT_OK` result ([dispatch hygiene](../../.claude/skills/ai-team-delivery/pm-continuation.md#dispatch-hygiene)).
 - **Scope:** list every write path, and every test module to run on EC2, in the read paths ([WORKFLOW.md](WORKFLOW.md), [dispatch hygiene](../../.claude/skills/ai-team-delivery/pm-continuation.md#dispatch-hygiene)).
 - **Fresh source:** fast-forward the canonical checkout to `origin/main` before dispatch, or llmtool refuses `LLMTOOL_SOURCE_STALE` ([dispatch hygiene](../../.claude/skills/ai-team-delivery/pm-continuation.md#dispatch-hygiene)).
@@ -36,17 +36,21 @@ Legal recovery commands (the manual flow only when `task advance` cannot run):
 - **Worker back after quota:** relay the Owner's words, then run `llmtool worker-quota-recovered <worker> --owner-relay <URL>` ([quota continuation](../../.claude/skills/ai-team-delivery/pm-continuation-reference.md#quota-and-reviewer-continuation)).
 - **High Debug screen block:** record hits with `python -m llmtool.high_debug screen-disposition`, or use `screen-recover` when hits were omitted ([sensitive-screen refusals](../../.claude/skills/ai-team-delivery/pm-continuation.md#sensitive-screen-refusals-owner-2026-11-05-981)).
 - **BLOCKED:** confirm the cause with evidence, classify it, then retry (transient only), reassign or isolate ([BLOCKED](../../.claude/skills/ai-team-delivery/pm-continuation.md#blocked-diagnose-then-retry-reassign-or-isolate)).
+- **`MAIN_PIN_COMMIT_MISSING`:** the main commit the step pins is missing from the local checkout, so fetch main first and then rerun the step ([PR #2567](https://github.com/davidcatcat/davidcattoolsproject/pull/2567)).
+- **Dispute withdraw:** `task dispute withdraw` withdraws only the PM's own dispute, while the finding stays on the record and then goes through normal repair ([dispute background #2087](https://github.com/davidcatcat/davidcattoolsproject/issues/2087), [PR #2579](https://github.com/davidcatcat/davidcattoolsproject/pull/2579)).
 
 Refusals not to retry unchanged:
 
 - **Sensitive screen** (for example `DEVELOPER_OUTPUT_SENSITIVE`): stop, record metadata only, and never reword, reshape or resend ([sensitive-screen refusals](../../.claude/skills/ai-team-delivery/pm-continuation.md#sensitive-screen-refusals-owner-2026-11-05-981)).
 - **Confirmed safety refusal:** it is never routed around, and reassignment resets no count ([confirmed refusals](../../.claude/skills/ai-team-delivery/pm-continuation.md#confirmed-refusals-owner-o5-1943)).
 - **`WORKER_QUOTA_UNAVAILABLE`:** wait for expiry or the recorded recovery, and never take a paid fallback ([quota continuation](../../.claude/skills/ai-team-delivery/pm-continuation-reference.md#quota-and-reviewer-continuation)).
+- **`DEVELOPER_GW_AGENT_GATEWAY_STALE`:** the home LLM dispatch is refused before it touches the Task because the installed gateway no longer matches main, so the attempt is not counted as a home LLM failure; ask for the gateway to be synced before dispatching again ([Issue #1502](https://github.com/davidcatcat/davidcattoolsproject/issues/1502), [PR #2582](https://github.com/davidcatcat/davidcattoolsproject/pull/2582)).
+- **`TASK_STORE_ARTIFACT_SENSITIVE`:** the Developer output was blocked by the sensitive-content screen, so handle it like a sensitive-screen refusal: stop, record metadata only, and never reword, reshape or resend ([PR #2567](https://github.com/davidcatcat/davidcattoolsproject/pull/2567)).
 - **`TEST_FAIL_LIMIT_REACHED` or a spent repair cap:** no further repair on that chain; follow the Debug and split rule ([repair cap](../../.claude/skills/ai-team-delivery/pm-continuation-reference.md#repair-cap)).
 - **`CONTINUES_*` and `CONTINUATION_LINK_REQUIRED`:** the chain shape is refused with no override ([lineage_counts.py](llmtool/lineage_counts.py)).
 - **`MODULE_NOT_ADMITTED`, `RECEIPT_HEAD_UNRECORDED`, `RECEIPT_HEAD_MISMATCH`:** fix the Task read paths or the recorded result head first, since an unchanged rerun refuses again ([remote_test.py](llmtool/remote_test.py)).
 - **`MERGE_ACCEPTANCE_CARRY_*`:** ask the Owner again for the current head ([escalation](../../.claude/skills/ai-team-delivery/pm-continuation.md#escalate-only-when-continuing-is-not-allowed)).
-- **`REPAIR_CODEX_DEVELOPER_RETIRED`, `COMPANY_GW_DIRECT_RETIRED`:** the route is retired, so choose an `ALLOWED` Developer route ([CLAUDE.md Worker dispatch](../../CLAUDE.md#worker-dispatch)).
+- **`REPAIR_CODEX_DEVELOPER_RETIRED`, `COMPANY_GW_DIRECT_RETIRED`:** the route is retired, so choose an `ALLOWED` Developer route ([AGENTS.md Current authority](../../AGENTS.md#current-authority-restructured-per-owner-decision-010-step-2)).
 
 ## Limits
 
