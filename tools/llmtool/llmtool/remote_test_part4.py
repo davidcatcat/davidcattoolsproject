@@ -450,3 +450,6 @@ def _run_hosted(store, task_id, task, *, executor_task, sha, ref, modules,
         )
     return _record_outcome(store, task_id, task, result='UNKNOWN', code='HOSTED_RUN_UNKNOWN',
                            executor_task=executor_task, sha=sha, modules=modules)
+
+
+_load_part('remote_test_part5.py')

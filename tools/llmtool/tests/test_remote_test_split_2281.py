@@ -15,6 +15,7 @@ _PARTS = tuple(_PACKAGE / name for name in (
     'remote_test_part2.py',
     'remote_test_part3.py',
     'remote_test_part4.py',
+    'remote_test_part5.py',
 ))
 _PUBLIC_NAMES = (
     'run_remote_test', 'valid_module_results', 'pass_receipt_covers',
