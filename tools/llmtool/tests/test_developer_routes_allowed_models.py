@@ -37,10 +37,11 @@ WRONG_FAMILY = {'agy': ('example-model-b', 'opencode/example-model-b-free',
                 'opencode': ('claude-opus-5-5', 'gemini-3.8-flash-medium')}
 # Badly formatted names for each route's format check.
 BAD_FORMAT = {'agy': ('https://example.invalid/m', 'has space', '-leading-dash',
-                      'gemini..b', ''),
+                      'gemini..b', '', 'Gemini-example-b'),
               'claude': ('https://example.invalid/m', 'has space', '-leading-dash',
-                         'claude..b', ''),
-              'gw-agent': ('https://example.invalid/m', 'has space', '-leading-dash'),
+                         'claude..b', '', 'Claude-example-b'),
+              'gw-agent': ('https://example.invalid/m', 'has space', '-leading-dash',
+                           'Qwen3-example-b'),
               'opencode': ('example-model-b-free', 'https://example.invalid/m',
                            'has space', '-leading-dash/model', 'opencode/example#HIGH')}
 # #1502 WP-E: the review and AI Debug role registry in use.

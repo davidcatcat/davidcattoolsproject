@@ -120,8 +120,13 @@ def model_family(model):
 
 
 def _developer_model_ok(value):
-    """A Developer model for the agy and claude routes: well formed, family known."""
+    """A Developer model for the agy and claude routes: well formed, family known.
+
+    Well formed means lower case: a case change of an id is a badly formatted
+    id, not another model (the format the agy and claude routes always had).
+    """
     return (_generic_model_ok(value) and '..' not in value and len(value) <= 128 and
+            value == value.lower() and
             model_family(value) != MODEL_FAMILY_UNKNOWN)
 
 
