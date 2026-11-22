@@ -333,7 +333,76 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(updated['review_repair_claims'][1]['high_debug_report_sha256'],
                          entry['report_sha256'])
 
-    def test_review_repair_claims_three_to_five_bind_the_covering_debug(self):
+    def test_2405_to_2422_inherited_rca_is_validated_at_claim_write_and_replay(self):
+        from llmtool import high_debug, start_failure, task_submission_cli
+        from test_task_delegate_repair_cap import _entry
+
+        def work(pr, executor, head, finding, predecessor=None):
+            task = self._codex_dispatch_task()
+            if predecessor is not None:
+                task['continues'] = predecessor
+            task['completion'] = {
+                'state': 'WAITING_EXECUTOR', 'executor_task_id': executor,
+                'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
+                'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+                'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+            }
+            at = '2026-11-04T00:00:00Z'
+            task['review_dispatch_claim'] = [{
+                'executor_task': executor, 'pr': pr, 'head_sha': head, 'version': 1,
+                'state': 'COMPLETED', 'review_kind': 'formal', 'reviewer_task': f'reviewer-{pr}',
+                'native_session_id': f'review-{pr}', 'account_mode': 'CODEX_CLI',
+                'claimed_at': at, 'updated_at': at,
+                'review_result': {'task_id': task['task_id'], 'run_id': task['run_id'],
+                                  'contract_digest': task['task_binding']['contract_digest'],
+                                  'head': head, 'verdict': 'FAIL', 'review_text': finding},
+            }]
+            return self.store.create(task)
+
+        source_executor = 'claude-predecessor'
+        target_executor = 'agy-successor'
+        source_head, target_head = 'b' * 40, 'a' * 40
+        finding = 'Finding: F1 [High] guard.py:19 missing principal check'
+        source = work(2405, source_executor, source_head, finding)
+        target = work(2422, target_executor, target_head, finding, predecessor=source['task_id'])
+        entry = _entry(executor_task=source_executor, examined_sha=source_head, family='pr-2405')
+        self.store.append_high_debug(source['task_id'], entry)
+        sha = entry['report_sha256']
+        self.store.record_completion_event(
+            source['task_id'], event_id=high_debug.completion_event_id(
+                source['task_id'], source_head, sha, entry['d6']),
+            run_id=source['run_id'], session_id='high-debug-' + entry['d6'],
+            source='HIGH_DEBUG', source_sha=source_head, sequence=0,
+            payload_sha256=hashlib.sha256(sha.encode()).hexdigest())
+        packet = {'task': target['task_id'], 'executor_task': target_executor,
+                  'pr': 2422, 'failed_head': target_head, 'version': 1, 'verdict_comment_id': 55,
+                  'findings_count': 1, 'reviewer_text_excerpt_untrusted_data': finding}
+        packet_sha = hashlib.sha256(start_failure.canonical(packet).encode()).hexdigest()
+        packet.update(high_debug_report_sha256=sha, high_debug_report_untrusted_data=entry['report'])
+        claim = {'executor_task': target_executor, 'pr': 2422, 'head_sha': target_head,
+                 'family': 'pr-2422', 'attempt': 1, 'version': 1, 'comment_id': 55,
+                 'state': 'CLAIMED', 'repair_task_id': new_id(), 'packet_sha256': packet_sha,
+                 'claimed_at': '2026-11-05T00:00:00Z', 'high_debug_report_sha256': sha,
+                 'high_debug_source_task': source['task_id']}
+
+        for bad in (dict(claim, high_debug_source_task=new_id()),
+                    dict(claim, high_debug_report_sha256='0' * 64),
+                    dict(claim, version=2)):
+            with self.assertRaises(LLMToolError):
+                self.store.compare_and_update(target['task_id'],
+                    expected={'record_sha256': target['record_sha256']}, review_repair_claims=[bad])
+            self.assertEqual(self.store.get(target['task_id']), target)
+        saved = self.store.compare_and_update(target['task_id'],
+            expected={'record_sha256': target['record_sha256']}, review_repair_claims=[claim])
+        self.assertEqual(saved['review_repair_claims'], [claim])
+        task_submission_cli._check_repair_packet_rca(
+            packet, self.store, target_executor, claim['repair_task_id'])
+        with self.assertRaises(LLMToolError):
+            task_submission_cli._check_repair_packet_rca(
+                dict(packet, reviewer_text_excerpt_untrusted_data='changed'),
+                self.store, target_executor, claim['repair_task_id'])
+
+    def test_review_repair_claims_fourth_and_later_bind_the_covering_debug(self):
         # #2367: claims follow the policy bound (5 repairs plus one retry claim);
         # one RCA_CONFIRMED of the family covers the later claims.
         from llmtool import high_debug, run_budget
@@ -378,7 +447,9 @@ class TaskStoreTests(unittest.TestCase):
         write(claims)
         claims.append(claim(2, high_debug_report_sha256=digest))
         write(claims)
-        for attempt in (3, 4, 5, 6):
+        claims.append(claim(3))
+        write(claims)
+        for attempt in (4, 5, 6):
             # A later review claim must bind a Debug (no new one is needed) ...
             refused(claims + [claim(attempt)], 'REVIEW_REPAIR_CLAIM_INVALID')
             refused(claims + [claim(attempt, high_debug_report_sha256='0' * 64)],
@@ -1576,6 +1647,34 @@ class TaskStoreTests(unittest.TestCase):
             task['task_id'], expected={'developer': None}, developer=developer)
         self.assertEqual(saved['developer']['account'], 'codex-developer')
         self.assertNotIn('/private', repr(saved['developer']))
+
+    def test_developer_scope_of_33_and_1024_paths_is_stored_and_1025_refused_2281(self):
+        # #2281 (Owner 2026-11-19): a Developer Task lists up to 1024 read and
+        # 1024 write paths; the store bound matches the delegate check.
+        self.assertEqual(task_store_module.DEVELOPER_TASK_MAX_PATHS, 1024)
+        names = [f'src/file{i:04d}.py' for i in range(1025)]
+        for count in (33, 1024):
+            with self.subTest(count=count):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                developer = self._developer_assignment()
+                developer['read_paths'] = names[:count]
+                developer['write_paths'] = names[:count]
+                saved = self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None}, developer=developer)
+                self.assertEqual(saved['developer']['read_paths'], names[:count])
+                self.assertEqual(saved['developer']['write_paths'], names[:count])
+        for reads, writes in ((1025, 1), (1025, 1025)):
+            with self.subTest(reads=reads, writes=writes):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                developer = self._developer_assignment()
+                developer['read_paths'] = names[:reads]
+                developer['write_paths'] = names[:writes]
+                with self.assertRaises(LLMToolError):
+                    self.store.compare_and_update(
+                        task['task_id'], expected={'developer': None}, developer=developer)
+                self.assertIsNone(self.store.get(task['task_id'])['developer'])
 
     def test_developer_account_rejects_path_like_and_invalid_names(self):
         task = self._codex_dispatch_task()

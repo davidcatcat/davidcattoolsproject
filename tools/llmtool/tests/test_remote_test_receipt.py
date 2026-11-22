@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,6 +59,65 @@ class RemoteTestReceiptTests(unittest.TestCase):
             code = remote_test_receipt.main(argv, runner=runner, clock=clock, git=git)
         return code, stdout.getvalue()
 
+    def test_single_request_runs_all_modules_in_isolated_subprocesses(self):
+        repo = self.root / "module-fixture"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        tests = repo / "tests"
+        tests.mkdir()
+        names = [f"test_case_{index:03}" for index in range(25)]
+        source = ("import unittest\n"
+                  "class Case(unittest.TestCase):\n"
+                  "    def test_executes(self):\n"
+                  "        self.assertTrue(True)\n")
+        for name in names:
+            (tests / (name + ".py")).write_text(source, encoding="utf-8")
+        (repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "tests", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=Tester", "-c",
+                        "user.email=tester@example.org", "commit", "-qm", "fixtures"], check=True)
+        head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+        for count in (1, 8, 9, 11, 17, 25):
+            with self.subTest(count=count):
+                out = self.root / f"isolated-{count}"
+                code, printed = self.invoke(
+                    ["run", "--src", str(repo), "--python", sys.executable, "--out", str(out),
+                     "--sha", head, "--fetch-head", head, *names[:count]],
+                    git=remote_test_receipt.run_git)
+                self.assertEqual(code, 0, printed)
+                receipt = remote_test._validate_remote_receipt(
+                    (out / "receipt.json").read_bytes(), sha=head, modules=names[:count])
+                self.assertTrue(remote_test.pass_receipt_covers(receipt, names[:count]))
+                self.assertEqual(receipt["ran_total"], count)
+                self.assertEqual([entry["module"] for entry in receipt["module_results"]],
+                                 names[:count])
+
+    def test_late_failure_timeout_and_skipped_or_empty_module_prevent_pass(self):
+        names = [f"test_case_{index:03}" for index in range(11)]
+        for result, rc, output in (
+                ("FAIL", 1, b"Ran 1 test in 0.01s\nFAILED (failures=1)\n"),
+                ("TIMEOUT", 124, b""),
+                ("FAIL", 0, b"Ran 0 tests in 0.01s\nOK (skipped=1)\n"),
+                ("FAIL", 0, b"Ran 0 tests in 0.01s\nOK\n")):
+            with self.subTest(result=result, output=output):
+                calls = []
+
+                def runner(python, src, module, timeout):
+                    calls.append(module)
+                    return (rc, output, b"", rc == 124) if module == names[9] else (
+                        0, b"Ran 1 test in 0.01s\nOK\n", b"", False)
+
+                out = self.root / f"late-{len(list(self.root.glob('late-*')))}"
+                code, _ = self.invoke(
+                    ["run", "--src", str(self.src), "--python", str(self.venv_py), "--out", str(out),
+                     "--sha", SHA, "--fetch-head", SHA, *names], runner=runner)
+                self.assertNotEqual(code, 0)
+                receipt = remote_test._validate_remote_receipt(
+                    (out / "receipt.json").read_bytes(), sha=SHA, modules=names)
+                self.assertEqual(receipt["result"], result)
+                self.assertEqual(receipt["failures"], [names[9]])
+                self.assertEqual(calls, names[:10] if rc == 124 else names)
+
     def test_pass_receipt_is_accepted_by_validate_remote_receipt(self):
         out_dir = self.root / "out-pass"
         calls = []
@@ -67,7 +127,7 @@ class RemoteTestReceiptTests(unittest.TestCase):
             if module == "test_alpha":
                 output = b"Ran 2 tests in 0.010s\n\nOK\n"
             else:
-                output = b"Ran 1 test in 0.005s\n\nOK (skipped=1)\n"
+                output = b"Ran 2 tests in 0.005s\n\nOK (skipped=1)\n"
             return SimpleNamespace(returncode=0, stdout=output, stderr=b"", timed_out=False)
 
         code, printed = self.invoke(
@@ -94,7 +154,7 @@ class RemoteTestReceiptTests(unittest.TestCase):
             raw, sha=SHA, modules=("test_alpha", "test_beta")
         )
         self.assertIsNotNone(validated)
-        self.assertEqual(set(validated), remote_test._RECEIPT_FIELDS)
+        self.assertEqual(set(validated), remote_test._RECEIPT_FIELDS | remote_test._MODULE_RESULTS_FIELD)
         self.assertNotIn("failure_excerpt", validated)
         self.assertEqual(validated["result"], "PASS")
         self.assertEqual(validated["exit_code"], 0)
@@ -102,7 +162,7 @@ class RemoteTestReceiptTests(unittest.TestCase):
         self.assertEqual(validated["fetch_head"], SHA)
         self.assertEqual(validated["modules"], ["test_alpha", "test_beta"])
         self.assertEqual(validated["identity"], {"uid": os.getuid()})
-        self.assertEqual(validated["ran_total"], 3)
+        self.assertEqual(validated["ran_total"], 4)
         self.assertEqual(validated["final"], ["OK", "OK (skipped=1)"])
         self.assertEqual(validated["failures"], [])
         self.assertIsNone(validated["remote_log_path"])
@@ -111,7 +171,7 @@ class RemoteTestReceiptTests(unittest.TestCase):
             [
                 "Ran 2 tests in 0.010s",
                 "OK",
-                "Ran 1 test in 0.005s",
+                "Ran 2 tests in 0.005s",
                 "OK (skipped=1)",
                 "PASS",
             ],
@@ -339,7 +399,6 @@ class RemoteTestReceiptTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertFalse((existing_out / "receipt.json").exists())
 
-        nine_modules = [f"test_mod_{i}" for i in range(9)]
         bad_cases = [
             ["run", "--src", str(self.src), "--python", str(self.venv_py), "--out", str(self.root / "b1"), "--sha", "bad", "--fetch-head", "bad", "test_alpha"],
             ["run", "--src", str(self.src), "--python", str(self.venv_py), "--out", str(self.root / "b2"), "--sha", SHA, "--fetch-head", OTHER_SHA, "test_alpha"],
@@ -349,7 +408,7 @@ class RemoteTestReceiptTests(unittest.TestCase):
             ["run", "--src", str(self.src), "--python", str(self.root / "missing-py"), "--out", str(self.root / "b6"), "--sha", SHA, "--fetch-head", SHA, "test_alpha"],
             ["run", "--src", str(self.src), "--python", str(self.venv_py), "--out", str(self.root / "b7"), "--sha", SHA, "--fetch-head", SHA, "invalid_module"],
             ["run", "--src", str(self.src), "--python", str(self.venv_py), "--out", str(self.root / "b8"), "--sha", SHA, "--fetch-head", SHA, "test_alpha", "test_alpha"],
-            ["run", "--src", str(self.src), "--python", str(self.venv_py), "--out", str(self.root / "b9"), "--sha", SHA, "--fetch-head", SHA, *nine_modules],
+            ["run", "--src", str(self.src), "--python", str(self.venv_py), "--out", str(self.root / "b9"), "--sha", SHA, "--fetch-head", SHA, "test_alpha;false"],
             ["mismatch", "--out", str(self.root / "b10"), "--sha", SHA, "--fetch-head", SHA, "test_alpha"],
             ["mismatch", "--out", str(self.root / "b11"), "--sha", SHA, "--fetch-head", "invalid", "test_alpha"],
             ["unknown", "--out", str(self.root / "b12")],

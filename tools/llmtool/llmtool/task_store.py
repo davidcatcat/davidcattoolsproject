@@ -26,7 +26,7 @@ from .action_contract import TaskBinding
 from .diagnostics import validate_provider_usage
 from .errors import LLMToolError
 from . import file_ops
-from . import run_budget
+from . import repair_policy, run_budget
 from . import start_failure
 from .opencode_direct_developer import is_free_model, is_valid_model
 from .role_config import _NAME
@@ -60,7 +60,12 @@ MAX_RECORD_BYTES = 48 * 1024 * 1024
 # #2281: a Developer diff is stored whole at the 5 MiB route ceiling. Same
 # value as developer_routes.base.HARD_MAX_DIFF_BYTES.
 MAX_ARTIFACT_BYTES = 5 * 1024 * 1024
-TASK_ID = re.compile(r'[0-9a-f]{32}')
+# #2281 (Owner 2026-11-19): a Developer Task lists at most this many read paths
+# and this many write paths; a direct run's source_file_count (one entry per
+# read path) has the same bound. Same value as
+# task_submission_cli.DEVELOPER_TASK_MAX_PATHS.
+DEVELOPER_TASK_MAX_PATHS = 1024
+TASK_ID =re.compile(r'[0-9a-f]{32}')
 D6_TASK_ID = re.compile(r'[a-z0-9][a-z0-9-]{0,95}')
 SESSION_ID = re.compile(r'pm-[a-z0-9-]{1,60}')
 DEV_SESSION_ID = re.compile(r'dev-[a-z0-9-]{1,60}')
@@ -111,7 +116,7 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'published_pr', 'repair_cap_override', 'publish_operations',
     'review_exception', 'lineage', 'review_disputes', 'waiting', 'continues',
     'file_ops', 'file_ops_evidence', 'file_ops_reservation',
-    'start_failures', 'repair_packet'))
+    'start_failures', 'repair_packet', 'read_scope_advice'))
 # #2188 design section 3: the append-only archive of failed Claude starts.
 MAX_START_FAILURES = 2
 _START_FAILURE_ENTRY_FIELDS = frozenset((
@@ -155,7 +160,7 @@ _REVIEW_REPAIR_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'attempt', 'state',
     'comment_id', 'packet_sha256', 'claimed_at'))
 _REVIEW_REPAIR_OPTIONAL_FIELDS = frozenset(('repair_task_id', 'family',
-                                             'high_debug_report_sha256'))
+                                             'high_debug_report_sha256', 'high_debug_source_task'))
 # #2367: the claims one repair family may store, numbered 1..N by 'attempt':
 # the policy repair bound (run_budget.MAX_REPAIR_ATTEMPTS, from policy.json)
 # plus one replaced (FAILED) retry claim. The floor keeps every record written
@@ -193,7 +198,7 @@ _HIGH_DEBUG_FIELDS = frozenset(('family', 'failed_corrections', 'early_reason', 
     'report_sha256', 'report', 'usage', 'recorded_at'))
 # #1502 WP-D O7: a RESERVED entry keeps these values and gets one of these statuses.
 _HIGH_DEBUG_IDENTITY = ('family', 'failed_corrections', 'early_reason', 'examined_sha',
-                        'd6', 'model_requested', 'rules_sha256', 'no_pr')
+                        'd6', 'model_requested', 'rules_sha256', 'no_pr', 'diagnosis_issue')
 _HIGH_DEBUG_FINAL_STATUSES = ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED',
                               'REPORT_INVALID', 'RUN_FAILED')
 
@@ -1240,7 +1245,7 @@ def _validate_remote_test_receipts(record):
                  (type(receipt.get('pm_session')) is not str or
                   receipt['pm_session'] not in earlier_sessions)) or
                 type(receipt.get('modules')) is not list or
-                not 1 <= len(receipt['modules']) <= 32 or
+                not receipt['modules'] or
                 any(type(item) is not str or
                     re.fullmatch(r'test_[a-z0-9_]{1,80}', item) is None
                     for item in receipt['modules']) or
@@ -1257,7 +1262,6 @@ def _validate_remote_test_receipts(record):
                 not math.isfinite(receipt['elapsed_s']) or receipt['elapsed_s'] < 0 or
                 type(receipt.get('ran_total')) is not int or receipt['ran_total'] < 0 or
                 type(receipt.get('final')) is not list or
-                len(receipt['final']) > 64 or
                 any(type(item) is not str or len(item) > 512 for item in receipt['final']) or
                 type(receipt.get('failures')) is not list or len(receipt['failures']) > 10 or
                 any(item not in receipt['modules'] for item in receipt['failures']) or
@@ -1334,7 +1338,7 @@ def _valid_remote_test_dispatch_entry(entry):
     if type(executor_task) is not str or D6_TASK_ID.fullmatch(executor_task) is None:
         return False
     modules = entry.get('modules')
-    if (type(modules) is not list or not 1 <= len(modules) <= 8 or
+    if (type(modules) is not list or not modules or
             any(type(m) is not str or re.fullmatch(r'test_[a-z0-9_]{1,80}', m) is None for m in modules) or
             modules != sorted(set(modules))):
         return False
@@ -1804,6 +1808,56 @@ def _check_waiting_transition(old, new):
         _fail('TASK_WAITING_TRANSITION_INVALID')
 
 
+# #2503: advisory scope findings shown to the PM before a dispatch; never a gate.
+_SCOPE_ADVICE_ENTRY_FIELDS = frozenset(('at', 'items', 'pm_reason', 'source_sha'))
+_SCOPE_ADVICE_ITEM_FIELDS = frozenset(('kind', 'path', 'note'))
+_SCOPE_ADVICE_KIND = re.compile(r'[A-Z][A-Z0-9_]{0,63}')
+SCOPE_ADVICE_MAX_ENTRIES = 16
+SCOPE_ADVICE_MAX_ITEMS = 64
+
+
+def _scope_advice_text(value, limit):
+    return (type(value) is str and 1 <= len(value) <= limit and value == value.strip() and
+            all(char.isprintable() for char in value) and
+            not any(unicodedata.category(char) == 'Cf' for char in value) and
+            not _emitted_sensitive(value))
+
+
+def _validate_read_scope_advice(value):
+    """The append-only read_scope_advice list (#2503); any defect is TASK_SCOPE_ADVICE_INVALID."""
+    if type(value) is not list or not 1 <= len(value) <= SCOPE_ADVICE_MAX_ENTRIES:
+        _fail('TASK_SCOPE_ADVICE_INVALID')
+    for entry in value:
+        items = entry.get('items') if type(entry) is dict else None
+        reason = entry.get('pm_reason') if type(entry) is dict else None
+        sha = entry.get('source_sha') if type(entry) is dict else None
+        if (type(entry) is not dict or set(entry) != _SCOPE_ADVICE_ENTRY_FIELDS or
+                not _valid_utc_seconds(entry['at']) or
+                type(items) is not list or len(items) > SCOPE_ADVICE_MAX_ITEMS or
+                (reason is not None and not _scope_advice_text(reason, 500)) or
+                (sha is not None and (type(sha) is not str or
+                                      re.fullmatch(r'[0-9a-f]{40}', sha) is None))):
+            _fail('TASK_SCOPE_ADVICE_INVALID')
+        for item in items:
+            path = item.get('path') if type(item) is dict else None
+            note = item.get('note') if type(item) is dict else None
+            if (type(item) is not dict or set(item) != _SCOPE_ADVICE_ITEM_FIELDS or
+                    type(item['kind']) is not str or
+                    _SCOPE_ADVICE_KIND.fullmatch(item['kind']) is None or
+                    (path is not None and (
+                        not _scope_advice_text(path, 256) or path.startswith('/') or
+                        '..' in path.split('/'))) or
+                    (note is not None and not _scope_advice_text(note, 300))):
+                _fail('TASK_SCOPE_ADVICE_INVALID')
+
+
+def _check_read_scope_advice_transition(old, new):
+    """read_scope_advice only grows: every stored entry stays, in order."""
+    old = [] if old is None else old
+    if type(new) is not list or new[:len(old)] != old or len(new) <= len(old):
+        _fail('TASK_SCOPE_ADVICE_TRANSITION_INVALID')
+
+
 def is_waiting(record):
     """True only for a Task with a recorded WAITING; waiting_owner is not WAITING."""
     return type(record) is dict and type(record.get('waiting')) is dict
@@ -2249,6 +2303,10 @@ def _validate(record, *, strict=True):
         # #2188: optional; a record without it stays valid.
         keys.discard('start_failures')
         _validate_start_failures(record)
+    if 'read_scope_advice' in keys:
+        # #2503: optional; a record without it stays valid.
+        keys.discard('read_scope_advice')
+        _validate_read_scope_advice(record['read_scope_advice'])
     if 'repair_packet' in keys:
         # #2188: optional; a record without it stays valid.
         keys.discard('repair_packet')
@@ -2340,7 +2398,11 @@ def _validate(record, *, strict=True):
         for item in entries:
             # #1502 WP-F: rules_sha256 is optional so older entries stay valid.
             if (type(item) is not dict or
-                set(item) - {'rules_sha256', 'no_pr'} != _HIGH_DEBUG_FIELDS or
+                set(item) - {'rules_sha256', 'no_pr', 'diagnosis_issue'} != _HIGH_DEBUG_FIELDS or
+                ('diagnosis_issue' in item and
+                 (item.get('no_pr') is not True or item.get('family') != 'no-pr' or
+                  type(item['diagnosis_issue']) is not int or
+                  not 1 <= item['diagnosis_issue'] <= 9999999)) or
                 ('no_pr' in item and item['no_pr'] is not True) or
                 ('rules_sha256' in item and
                  (type(item['rules_sha256']) is not str or
@@ -2480,6 +2542,11 @@ def _validate(record, *, strict=True):
                     ('high_debug_report_sha256' in item and
                      (type(item['high_debug_report_sha256']) is not str or
                       re.fullmatch(r'[0-9a-f]{64}', item['high_debug_report_sha256']) is None)) or
+                    ('high_debug_source_task' in item and
+                     ('high_debug_report_sha256' not in item or
+                      type(item['high_debug_source_task']) is not str or
+                      re.fullmatch(r'[0-9a-f]{32}', item['high_debug_source_task']) is None or
+                      item['high_debug_source_task'] == record['task_id'])) or
                     item.get('state') not in ('CLAIMED', 'DISPATCHED', 'UNKNOWN', 'FAILED') or
                     (item.get('comment_id') is not None and
                      (type(item['comment_id']) is not int or item['comment_id'] < 0)) or
@@ -2511,15 +2578,17 @@ def _validate(record, *, strict=True):
             # the HEAD of an earlier claim of the family. An old record (the
             # second claim on its HEAD, a third claim with a Debug on its HEAD)
             # meets this rule unchanged. A review claim (comment_id set, not an
-            # '-ec2' family) from the third on must bind one, as before.
+            # '-ec2' family) from the fourth on must bind one.
             seen_heads = set()
             for position, item in enumerate(family_claims, 1):
                 seen_heads.add(item['head_sha'])
-                if (position >= 3 and item.get('comment_id') is not None and
+                if (position > repair_policy.REVIEW_REPAIRS_WITHOUT_DEBUG and
+                        item.get('comment_id') is not None and
                         not item.get('family', f"pr-{item['pr']}").endswith('-ec2') and
                         'high_debug_report_sha256' not in item):
                     _fail('REVIEW_REPAIR_CLAIM_INVALID')
                 if ('high_debug_report_sha256' in item and
+                        'high_debug_source_task' not in item and
                         not any(type(entry) is dict and entry.get('family') ==
                                 item.get('family', f"pr-{item['pr']}") and
                                 entry.get('no_pr') is not True and
@@ -3074,7 +3143,8 @@ def _validate(record, *, strict=True):
                               not 0 <= execution['source_bytes'] <= 5 * 1024 * 1024)) or
                             (execution['source_file_count'] is not None and
                              (type(execution['source_file_count']) is not int or
-                              not 1 <= execution['source_file_count'] <= 32)) or
+                              not 1 <= execution['source_file_count'] <=
+                              DEVELOPER_TASK_MAX_PATHS)) or
                             (execution['source_manifest_sha256'] is not None and
                              (type(execution['source_manifest_sha256']) is not str or
                               re.fullmatch(r'[0-9a-f]{64}',
@@ -3130,7 +3200,8 @@ def _validate(record, *, strict=True):
                 _fail()
             for field in ('read_paths', 'write_paths'):
                 values = developer[field]
-                if (type(values) is not list or not values or len(values) > 32 or
+                if (type(values) is not list or not values or
+                        len(values) > DEVELOPER_TASK_MAX_PATHS or
                         any(type(item) is not str or not item or len(item) > 512 or
                             item.startswith('/') or '\\' in item or
                             any(part in ('', '.', '..') for part in item.split('/')) or
@@ -4036,6 +4107,11 @@ class TaskStore:
             claims_list = [claims] if type(claims) is dict else claims if type(claims) is list else []
             if any(type(c) is dict and c.get('review_kind') == 'security' for c in claims_list):
                 _fail('REVIEW_DISPATCH_CLAIM_INVALID')
+        if type(record) is dict:
+            repairs = record.get('review_repair_claims')
+            if type(repairs) is list and any(type(claim) is dict and
+                    'high_debug_source_task' in claim for claim in repairs):
+                _fail('REVIEW_REPAIR_CLAIM_INVALID')
         if type(record) is dict and 'start_failures' in record:
             # #2188: appended to an existing Task by its START_RETRY write only.
             _fail('START_RETRY_INVALID')
@@ -4171,10 +4247,30 @@ class TaskStore:
         return self._update(task_id, expected={'record_sha256': expected_sha256}, changes={},
                             claim_recovery=(repair_task_id, executor_task, pr_number))
 
+    def recover_ec2_repair_claim(self, task_id, repair_task_id, *, executor_task, pr_number,
+                                 expected_sha256, registered_d6=None, process_status=None):
+        """#2475: one CAS setting one UNKNOWN EC2/CI repair claim CLAIMED.
+
+        review_repair_recovery.verify_ec2_recovery runs inside the locked update
+        on the record read there; a failed check refuses and nothing is written.
+        """
+        return self._update(
+            task_id, expected={'record_sha256': expected_sha256}, changes={},
+            ec2_claim_recovery=(repair_task_id, executor_task, pr_number,
+                                registered_d6, process_status))
+
     @staticmethod
     def _claim_recovered(old, new, recovery):
         """#1928: under a claim recovery the one change is UNKNOWN -> DISPATCHED."""
         if recovery and (old.get('state') != 'UNKNOWN' or new.get('state') != 'DISPATCHED' or
+                         set(old) != set(new)):
+            _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
+        return recovery
+
+    @staticmethod
+    def _ec2_claim_recovered(old, new, recovery):
+        """#2475: under an EC2 claim recovery the one change is UNKNOWN -> CLAIMED."""
+        if recovery and (old.get('state') != 'UNKNOWN' or new.get('state') != 'CLAIMED' or
                          set(old) != set(new)):
             _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
         return recovery
@@ -5285,6 +5381,21 @@ class TaskStore:
         name = '.' + self._name(chain_key) + CHAIN_LOCK_SUFFIX
         return self._exclusive_sidecar(name, 'TASK_CHAIN_LOCK')
 
+    def repair_dispatch_lock(self, repair_task_id):
+        """#2475: hold one repair Task's dispatch lock exclusively.
+
+        review_repair holds it from before a repair claim is visible (initial
+        dispatch) or from before a CLAIMED claim is replayed, across the
+        delegate call and the claim's final state write. So two callers can
+        never delegate the same continuation, and a loser cannot move a claim
+        the winner is finishing. It is a sidecar distinct from the chain lock
+        and from the direct dispatch lease the delegate takes; it is always
+        taken before those, never while holding them. A holder past the
+        bounded wait is TASK_REPAIR_DISPATCH_LOCK_BUSY.
+        """
+        name = '.' + self._name(repair_task_id) + '.repair-dispatch.lock'
+        return self._exclusive_sidecar(name, 'TASK_REPAIR_DISPATCH_LOCK')
+
     def _take_advance_lease_exclusive(self, task_id, *, busy_code='SPLIT_CHILD_ADVANCING'):
         """Take the advance lease exclusively without waiting; return its fd.
 
@@ -5711,6 +5822,20 @@ class TaskStore:
 
         return self._with_assignments(exclusive=True, change=change)
 
+    def append_read_scope_advice(self, task_id, entry):
+        """#2503: append one advisory scope entry under the task lock (CAS on the list)."""
+        for _ in range(4):
+            current = self.get(task_id)
+            old = current.get('read_scope_advice')
+            new = ([] if old is None else list(old)) + [entry]
+            _validate_read_scope_advice(new)
+            try:
+                return self.compare_and_update(task_id, expected={'read_scope_advice': old},
+                                               read_scope_advice=new)
+            except TaskStoreConflict:
+                continue
+        _fail('TASK_STORE_BUSY')
+
     def append_dispatch_audit(self, task_id, entry, *, expected=None):
         """Append one bounded gate result using the existing TaskStore CAS lock."""
         if expected is not None and type(expected) is not dict:
@@ -5834,7 +5959,8 @@ class TaskStore:
                        trusted_split=None, split_child_max=None, high_debug_finalize=None,
                        trusted_file_ops_evidence=False, trusted_file_ops_reservation=False,
                        d6_unchanged=None, direct_dispatch_boundary=None,
-                       direct_reassign_verify=None, direct_claim_recovery=None):
+                       direct_reassign_verify=None, direct_claim_recovery=None,
+                       ec2_claim_recovery=None):
         # Refused here, not by the writable-field check: the dispatch gate
         # before that check can write its audit to the record.
         if _D6_CLAIM_ARGUMENTS & set(changes):
@@ -5852,8 +5978,8 @@ class TaskStore:
         if 'file_ops_reservation' in changes and (
                 not trusted_file_ops_reservation or set(changes) != {'file_ops_reservation'}):
             _fail('TASK_FILE_OPS_RESERVATION_FORBIDDEN')
-        if claim_recovery is not None and changes:
-            # #1928: a claim recovery builds its one change under the lock.
+        if (claim_recovery is not None or ec2_claim_recovery is not None) and changes:
+            # #1928/#2475: a claim recovery builds its one change under the lock.
             _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
         if (trusted_split is not None or split_child_max is not None) and (
                 trusted_split not in SPLIT_ACTIONS or set(changes) != {'lineage'} or
@@ -5972,16 +6098,24 @@ class TaskStore:
                 changes = {'review_repair_claims': [
                     dict(item, state='DISPATCHED') if item.get('repair_task_id') == repair_id
                     else item for item in current['review_repair_claims']]}
+            if ec2_claim_recovery is not None:
+                # #2475: E1-EC2 + no-launch evidence on the record read under this lock.
+                from . import review_repair_recovery
+                repair_id, executor, pr_number, registered_d6, process_status = ec2_claim_recovery
+                review_repair_recovery.verify_ec2_recovery(
+                    self, current, repair_id, executor_task=executor, pr_number=pr_number,
+                    registered_d6=registered_d6, process_status=process_status)
+                changes = {'review_repair_claims': [
+                    dict(item, state='CLAIMED') if item.get('repair_task_id') == repair_id
+                    else item for item in current['review_repair_claims']]}
             if direct_claim_recovery is not None:
-                from . import direct_reassignment
+                from . import direct_reassignment, start_failure
                 claim, repair_id, repair_digest, packet = direct_claim_recovery
-                packet_digest = direct_reassignment.packet_digest(packet)
                 repair = self.get(repair_id)
                 claims = current.get('review_repair_claims') or []
                 if (changes or repair.get('record_sha256') != repair_digest or
                         claim not in claims or claim.get('repair_task_id') != repair_id or
-                        packet.get('task') != task_id or packet.get('pr') != claim.get('pr') or
-                        packet_digest != claim.get('packet_sha256') or
+                        not start_failure.repair_packet_matches(packet, claim, current, self) or
                         claim.get('state') not in ('CLAIMED', 'UNKNOWN')):
                     _fail('DIRECT_REASSIGN_REPAIR_CLAIM_UNVERIFIED')
                 direct_reassignment.verified_repair_result(current, claim, repair)
@@ -6110,6 +6244,10 @@ class TaskStore:
                 # #1502 WP-D D13: append and forward transitions only, under the task lock.
                 _check_review_disputes_transition(current.get('review_disputes'),
                                                   changes['review_disputes'])
+            if 'read_scope_advice' in changes:
+                # #2503: advisory entries are append-only.
+                _check_read_scope_advice_transition(current.get('read_scope_advice'),
+                                                    changes['read_scope_advice'])
             if 'waiting' in changes:
                 # #1502 WP-D D12: the WAITING clock restarts only through a clear.
                 _check_waiting_transition(current.get('waiting'), changes['waiting'])
@@ -6216,6 +6354,15 @@ class TaskStore:
                                 if item.get('family', f"pr-{item.get('pr')}") ==
                                 added.get('family'))):
                         _fail('REVIEW_REPAIR_CLAIM_LIMIT_REACHED')
+                    if 'high_debug_source_task' in added:
+                        from .start_failure import inherited_rca
+                        target = {'failed_head': added['head_sha'], 'pr': added['pr'],
+                                  'executor_task': added['executor_task'],
+                                  'version': added['version']}
+                        if inherited_rca(
+                                self, current, target, source_task_id=added['high_debug_source_task'],
+                                report_sha256=added.get('high_debug_report_sha256')) is None:
+                            _fail('REVIEW_REPAIR_CLAIM_INVALID')
                 else:
                     changed = [i for i, (old, new) in enumerate(zip(old_claims, new_claims))
                                if old != new]
@@ -6226,7 +6373,10 @@ class TaskStore:
                     recovered = self._claim_recovered(
                         old, new, claim_recovery is not None or
                         (direct_claim_recovery is not None and old.get('state') == 'UNKNOWN'))
-                    if (not (recovered or (old.get('state') == 'CLAIMED' and
+                    ec2_recovered = self._ec2_claim_recovered(
+                        old, new, ec2_claim_recovery is not None)
+                    if (not (recovered or ec2_recovered or
+                             (old.get('state') == 'CLAIMED' and
                               new.get('state') in ('DISPATCHED', 'UNKNOWN')) or
                              (old.get('state') == 'DISPATCHED' and
                               new.get('state') == 'FAILED')) or

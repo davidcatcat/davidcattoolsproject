@@ -917,7 +917,7 @@ def add_task_submission_parsers(actions):
                                 'Claude and AGY direct Tasks, validated when given'))
     delegate.add_argument('--high-debug-ref',
                           help='trusted GitHub Issue comment URL of the confirmed High Debug '
-                               'diagnosis that review repair #2 needs')
+                               'diagnosis for a review repair that requires RCA')
     delegate.add_argument('--high-debug-task',
                           help='32-character Task ID containing the confirmed High Debug diagnosis')
     delegate.add_argument('--high-debug-family',
@@ -928,6 +928,12 @@ def add_task_submission_parsers(actions):
                                 'the route max_timeout and never above 18000)'))
     delegate.add_argument('--context-stdin', action='store_true',
                           help='codex text proposals only: read bounded, sensitive-screened context from stdin')
+    delegate.add_argument('--read-scope-reason', metavar='TEXT',
+                          help=('#2503: why this dispatch proceeds despite scope advice; '
+                                'recorded on the Task (the advice never blocks)'))
+    delegate.add_argument('--read-scope-check', action='store_true',
+                          help=('#2503: print the scope advice as JSON and exit without '
+                                'dispatching or writing anything'))
     delegate.add_argument('--pm-session',
                           help=('caller PM session (native UUID or pm- ID); must own '
                                 'the Task; default: CLAUDE_CODE_SESSION_ID or '
@@ -1079,8 +1085,12 @@ def add_task_submission_parsers(actions):
     repair.add_argument('--auto-review', action='store_true',
                         help='dispatch the next formal review after a successful repair')
     repair.add_argument('--recover-claim', metavar='REPAIR_TASK_ID',
-                        help=('#1928: set this UNKNOWN review repair claim DISPATCHED after '
-                              'the E1-E5 evidence checks; dispatches nothing'))
+                        help=('#1928/#2475: recover this UNKNOWN repair claim after its '
+                              'evidence checks; an EC2/CI claim returns to CLAIMED so the '
+                              'next advance may delegate it, and is admitted only when its '
+                              'repair Task has no Developer assignment, the D6 is clean at '
+                              'the claim head and no process is bound to it; dispatches '
+                              'nothing'))
     repair.add_argument('--pm-session',
                         help=('caller PM session (native UUID or pm- ID); must own '
                               'the Task; default: CLAUDE_CODE_SESSION_ID or '
@@ -2312,7 +2322,7 @@ def run_task_claude_bind(args, *, store=None, stdout=None):
         registration.source_sha, registration.result_sha, '--'), limit=1024 * 1024)
     changed_paths = sorted(set(path for path in
         changed_raw.decode('utf-8', 'strict').split('\x00') if path))
-    if not changed_paths or len(changed_paths) > 32:
+    if not changed_paths or len(changed_paths) > DEVELOPER_TASK_MAX_PATHS:
         raise LLMToolError('Claude D6 binding requires a bounded committed result diff')
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if not set(changed_paths).issubset(write_paths):
@@ -2965,6 +2975,12 @@ class _DeveloperSourceFiles(dict):
         self.regular_paths = set()
 
 
+# #2281 (Owner 2026-11-19): a Developer Task scope may list at most this many
+# read paths and this many write paths. The CI workflow-grant path list
+# (authorization_workflow_grant.MAX_PATHS_PER_GRANT) is a separate rule.
+DEVELOPER_TASK_MAX_PATHS = 1024
+
+
 def _assignment_paths(read_paths, write_paths):
     def valid(path):
         return (type(path) is str and 0 < len(path) <= 512 and
@@ -2978,7 +2994,8 @@ def _assignment_paths(read_paths, write_paths):
         invalid('PATH_LIST_INVALID')
     if not read_paths or not write_paths:
         invalid('PATH_LIST_EMPTY')
-    if len(read_paths) > 32 or len(write_paths) > 32:
+    if (len(read_paths) > DEVELOPER_TASK_MAX_PATHS or
+            len(write_paths) > DEVELOPER_TASK_MAX_PATHS):
         invalid('PATH_LIMIT_EXCEEDED')
     for path in read_paths + write_paths:
         if type(path) is str and (path.startswith('/') or '..' in path.split('/') or
@@ -4016,8 +4033,6 @@ def _remote_task_test_paths(task, *, read_paths=()):
                            '/' not in path[len('tools/llmtool/tests/'): ]}
         if task_test_paths and task_test_paths != set(paths):
             return ()
-    if len({Path(path).stem for path in paths}) > remote_test._MAX_REMOTE_MODULES:
-        return ()
     admitted_task = dict(task)
     admitted_task['completion'] = {'evidence': {'tests': [{'path': path} for path in paths]}}
     if set(remote_test._admitted_modules(admitted_task)) != {
@@ -4033,40 +4048,55 @@ def _remote_receipt_test_policy(task, *, read_paths=(), config_loader=None):
             else 'LOCAL')
 
 
+def _docs_only_completion_tests(pr_number, git_evidence, github_get=None):
+    """#2473: the NOT_APPLICABLE_DOCS_ONLY test record for a proven docs-only PR, else None.
+
+    Both proofs must hold: the Developer-attributed result paths are Markdown
+    the CI classifier calls docs (the shape TaskStore accepts for this
+    status), and task_advance._pr_docs_only proves from GitHub's complete file
+    list that the open, unmerged PR at this exact head changes documentation
+    only. Any doubt returns None, which keeps the EC2 receipt requirement.
+    """
+    try:
+        from . import task_advance  # task_advance imports this module at load time
+        head = git_evidence.get('result_head') if type(git_evidence) is dict else None
+        paths = _attributed_paths(git_evidence) if type(head) is str else None
+        if (type(pr_number) is not int or type(paths) is not list or not paths or
+                any(type(path) is not str or not path.endswith('.md') for path in paths) or
+                not task_completion._docs_only_ci(paths)):
+            return None
+        get = task_completion._github_get if github_get is None else github_get
+        if not task_advance._pr_docs_only(pr_number, head, get):
+            return None
+        return [{'status': 'NOT_APPLICABLE_DOCS_ONLY', 'changed_paths': list(paths),
+                 'source_sha': head, 'docs_only': True}]
+    except Exception:
+        return None
+
+
 def _matching_remote_test_receipt(task, *, executor_task, source_sha, paths):
     modules = tuple(sorted({Path(path).stem for path in paths}))
     if not modules:
         return None, 'REMOTE_TEST_RECEIPT_MISSING'
-    skipped = False
-    for receipt in task.get('remote_test_receipts', []):
-        if (type(receipt) is not dict or receipt.get('result') != 'PASS' or
-                receipt.get('task_id') != task.get('task_id') or
+    for receipt in reversed(task.get('remote_test_receipts', [])):
+        if (type(receipt) is not dict or receipt.get('task_id') != task.get('task_id') or
                 receipt.get('run_id') != task.get('run_id') or
                 receipt.get('executor_task') != executor_task or
-                receipt.get('source_sha') != source_sha or
-                type(receipt.get('modules')) is not list or
-                any(type(module) is not str for module in receipt['modules']) or
-                not set(modules).issubset(receipt['modules']) or
-                type(receipt.get('ran_total')) is not int or receipt['ran_total'] <= 0 or
-                receipt.get('failures') != [] or
-                type(receipt.get('final')) is not list or
-                len(receipt['final']) < len(receipt['modules']) or
-                type(receipt.get('receipt_digest')) is not str):
+                receipt.get('source_sha') != source_sha):
             continue
         digest_input = dict(receipt)
-        claimed = digest_input.pop('receipt_digest')
-        if claimed != hashlib.sha256(_json_bytes(digest_input)).hexdigest():
-            continue
-        if any(type(line) is str and re.search(r'\bskipp(?:ed|ing)?\b', line, re.I)
-               for line in receipt['final']):
-            skipped = True
-        if any(type(line) is not str or not (
-                line.endswith('OK') or
-                re.fullmatch(r'OK \(skipped=[1-9][0-9]{0,5}\)', line))
-               for line in receipt['final']):
-            continue
-        return receipt, None
-    return None, ('MAC_EVIDENCE_REQUIRED' if skipped else 'REMOTE_TEST_RECEIPT_MISSING')
+        claimed = digest_input.pop('receipt_digest', None)
+        if type(claimed) is not str or claimed != hashlib.sha256(_json_bytes(digest_input)).hexdigest():
+            break
+        if remote_test.pass_receipt_covers(receipt, modules):
+            return receipt, None
+        finals = receipt.get('final')
+        if type(finals) is list and any(
+                type(line) is str and re.search(r'\bskipp(?:ed|ing)?\b', line, re.I)
+                for line in finals):
+            return None, 'MAC_EVIDENCE_REQUIRED'
+        break
+    return None, 'REMOTE_TEST_RECEIPT_MISSING'
 
 
 def _direct_result_tests(task, evidence, result, developer, *, config_loader=None):
@@ -4389,7 +4419,7 @@ def _store_accepts_direct_execution(developer):
             type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None or
             not _bounded_int(execution['elapsed_ms'], 0, 86_400_000) or
             not _bounded_int(execution['source_bytes'], 0, 5 * 1024 * 1024) or
-            not _bounded_int(execution['source_file_count'], 1, 32) or
+            not _bounded_int(execution['source_file_count'], 1, DEVELOPER_TASK_MAX_PATHS) or
             (manifest is not None and
              (type(manifest) is not str or
               re.fullmatch(r'[0-9a-f]{64}', manifest) is None)) or
@@ -5238,6 +5268,9 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
             artifact, write_paths, normalize=False, allow_new_files=True,
             sources=_revision_sources(registration.root, snapshot.head))
         execution = _direct_execution(result, evidence=True)
+        # #2503: keep OpenCode's own text for the PM. It is the whole run's text
+        # stream, so the end (the final answer) is kept when it must be cut.
+        _attach_developer_reply(developer, getattr(result, 'text', None), keep_end=True)
         if rejection is not None:
             saved = _persist_developer_output_rejection(
                 store, task['task_id'], developer, rejection, result.usage, artifact,
@@ -5720,6 +5753,12 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None},
                 getattr(result, 'provider_evidence', None), 'agy'), usage=usage)
+        if not raw and not (getattr(result, 'summary', '') or '').strip():
+            developer.update(state='BLOCKED', error_code='AGY_EMPTY_RESULT',
+                             artifact=None, artifact_sha256=None)
+        # #2503: the PM sees AGY's own reply (for example BLOCKED with the
+        # missing read paths), whether or not the worktree changed.
+        _attach_developer_reply(developer, getattr(result, 'summary', None))
         if (type(result.session_id) is str and
                 AGY_CONVERSATION.fullmatch(result.session_id)):
             binding = _bind_codex_native_session(registration, result.session_id)
@@ -5794,7 +5833,8 @@ class _DiagnosedClaudeRoute(ClaudeRoute):
     """#1824: ClaudeRoute that keeps its run's parsed CLI result object.
 
     Parsing, validation and errors stay ClaudeRoute's. Only a parsed object of
-    type "result" is kept, and only for the CLAUDE_NO_CHANGES diagnosis."""
+    type "result" is kept: for the CLAUDE_NO_CHANGES diagnosis, and (#2324,
+    #2503) for the Developer's final reply kept as developer.reported."""
 
     parsed_cli_result = None
 
@@ -5946,12 +5986,21 @@ def _claude_no_change_reply(raw):
     """#2324: {'summary': text} from a no-change Claude run's final reply, else None.
 
     raw is the run's parsed CLI result object. No reply (result absent, not a
-    string, or blank) gives None. The whole reply is screened first, so a cut
-    can never split credential material past the screen; a reply that is too
-    long is then cut at the end, marked ' [truncated]', and screened again. Any
-    screen refusal keeps only the fixed CLAUDE_REPLY_WITHHELD text: the reply is
-    never reworded or reshaped to pass the screen."""
-    text = raw.get('result') if type(raw) is dict else None
+    string, or blank) gives None. The bounding rules are _bounded_developer_reply's."""
+    return _bounded_developer_reply(raw.get('result') if type(raw) is dict else None)
+
+
+def _bounded_developer_reply(text, *, keep_end=False):
+    """#2324/#2503: {'summary': text} from a Developer's final reply text, else None.
+
+    No reply (not a string, or blank) gives None. The whole reply is screened
+    first, so a cut can never split credential material past the screen; a
+    reply that is too long is then cut at the end, marked ' [truncated]', and
+    screened again. keep_end (#2503, for a run's whole text stream whose final
+    answer comes last) cuts the start instead, marked with
+    DEVELOPER_REPLY_EARLIER_TRUNCATED. Any screen refusal keeps only the fixed
+    CLAUDE_REPLY_WITHHELD text: the reply is never reworded or reshaped to pass
+    the screen."""
     if type(text) is not str or not text.strip():
         return None
     try:
@@ -5960,15 +6009,15 @@ def _claude_no_change_reply(raw):
         return {'summary': CLAUDE_REPLY_WITHHELD}
     summary = text.strip()
     if not _claude_reply_fits(summary):
-        # The ASCII-JSON size only grows with the prefix length.
+        # The ASCII-JSON size only grows with the kept length.
         low, high = 0, len(summary)
         while low < high:
             middle = (low + high + 1) // 2
-            if _claude_reply_fits(summary[:middle].rstrip() + CLAUDE_REPLY_TRUNCATED):
+            if _claude_reply_fits(_cut_reply(summary, middle, keep_end)):
                 low = middle
             else:
                 high = middle - 1
-        summary = summary[:low].rstrip() + CLAUDE_REPLY_TRUNCATED
+        summary = _cut_reply(summary, low, keep_end)
     try:
         _screen_text(summary, CLAUDE_REPLY_MAX_REPORTED_BYTES)
     except LLMToolError:
@@ -5976,17 +6025,44 @@ def _claude_no_change_reply(raw):
     return {'summary': summary}
 
 
+DEVELOPER_REPLY_EARLIER_TRUNCATED = '[earlier text truncated] '
+
+
+def _cut_reply(summary, kept, keep_end):
+    """Keep `kept` characters from the start (marked at the end) or the end (marked at the start)."""
+    if keep_end:
+        return DEVELOPER_REPLY_EARLIER_TRUNCATED + summary[len(summary) - kept:].lstrip()
+    return summary[:kept].rstrip() + CLAUDE_REPLY_TRUNCATED
+
+
 def _claude_attach_no_change_reply(developer, raw):
     """#2324: add developer.reported only when the store will accept it, so the
     reply can never block persisting the CLAUDE_NO_CHANGES record."""
     try:
-        reported = _claude_no_change_reply(raw)
-        if (type(reported) is dict and set(reported) == {'summary'} and
-                _valid_reported_text(reported['summary'], CLAUDE_REPLY_MAX_REPORTED_BYTES) and
-                _reported_size(reported) <= CLAUDE_REPLY_MAX_REPORTED_BYTES):
-            developer['reported'] = reported
+        _store_reported_reply(developer, _claude_no_change_reply(raw))
     except Exception:
         pass
+
+
+def _attach_developer_reply(developer, text, *, keep_end=False):
+    """#2503: keep a Developer's final reply as developer.reported.summary.
+
+    Developer-reported and unverified (the PM packet labels it so). It is
+    added only when the store will accept it, and every failure is swallowed,
+    so the reply can never block persisting the Developer record. No reply
+    text leaves the record unchanged."""
+    try:
+        _store_reported_reply(developer, _bounded_developer_reply(text, keep_end=keep_end))
+    except Exception:
+        pass
+
+
+def _store_reported_reply(developer, reported):
+    """Set developer.reported only to a {'summary': text} the TaskStore accepts."""
+    if (type(reported) is dict and set(reported) == {'summary'} and
+            _valid_reported_text(reported['summary'], CLAUDE_REPLY_MAX_REPORTED_BYTES) and
+            _reported_size(reported) <= CLAUDE_REPLY_MAX_REPORTED_BYTES):
+        developer['reported'] = reported
 
 
 def _advance_no_change_reply(record):
@@ -6380,6 +6456,10 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
                                             completion, result, write_paths, test_policy)
             if carry is None:
                 raise RouteError('CLAUDE_NO_CHANGES')
+            # #2503: the carried result keeps this run's final reply for the PM too.
+            carried_reply = getattr(route, 'parsed_cli_result', None)
+            _attach_developer_reply(
+                carry[0], carried_reply.get('result') if type(carried_reply) is dict else None)
             try:
                 store.compare_and_update(task['task_id'], expected={'developer': developer},
                                          developer=carry[0], completion=carry[1])
@@ -6404,6 +6484,11 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None},
                 getattr(result, 'provider_evidence', None), 'claude'), usage=usage)
+        # #2503: keep Claude's final reply for the PM when it changed files too
+        # (a partial result can say what it did not do).
+        parsed_reply = getattr(route, 'parsed_cli_result', None)
+        _attach_developer_reply(
+            developer, parsed_reply.get('result') if type(parsed_reply) is dict else None)
     except _ClaudeCommittedCarry:
         return run_task_direct_result_event(task['task_id'], registration.task_id, store=store)
     except RouteError as exc:
@@ -6430,6 +6515,10 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
             # #2324: the Developer's final reply (screened, bounded, unverified), so
             # a SPEC_MISMATCH answer is not stored like a silent no-op.
             _claude_attach_no_change_reply(developer, parsed_cli_result)
+        elif type(parsed_cli_result) is dict and not owner_gate_denied:
+            # #2503: any other failure keeps the run's final reply when the CLI
+            # produced one (output invalid, model or exit checks, scope, size ...).
+            _attach_developer_reply(developer, parsed_cli_result.get('result'))
         if not owner_gate_denied:
             # #2275: structured run evidence; kept only when the store accepts it.
             _claude_attach_failure_evidence(developer, route, exc, result)
@@ -6458,6 +6547,10 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
             developer.update(execution=execution, usage=usage)
             if execution is not None and not owner_gate_denied:
                 _claude_attach_failure_evidence(developer, route, exc, result)
+        parsed_cli_result = getattr(route, 'parsed_cli_result', None)
+        if type(parsed_cli_result) is dict and not owner_gate_denied:
+            # #2503: an unexpected failure after the run keeps its final reply too.
+            _attach_developer_reply(developer, parsed_cli_result.get('result'))
         store.update(task['task_id'], developer=developer)
         _print(_task_view(store.get(task['task_id'])))
         return 1
@@ -6855,6 +6948,8 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None},
                 getattr(result, 'provider_evidence', None), 'gw-agent'))
+        # #2503: keep the home LLM's own final reply for the PM.
+        _attach_developer_reply(developer, getattr(result, 'summary', None))
         site.after_result(result.session_id, task_input)
         # #1535: a D6 keeps the first gw-agent session it took. A later PM Task
         # (fresh session, #1509) or repair round there keeps that session; a D6
@@ -7684,6 +7779,74 @@ def _paths_overlap(status_paths, write_paths):
     return False
 
 
+# #2367 P0-B: the quota stop each progress-recording route writes (AGY and
+# Claude; task_store gates 'progress' to these two profiles), and the exact
+# progress shape developer_routes.base records for it.
+_QUOTA_STOP_ERROR_CODES = {'agy': 'AGY_QUOTA_EXHAUSTED',
+                           'claude': 'CLAUDE_QUOTA_EXHAUSTED'}
+_QUOTA_PROGRESS_FIELDS = frozenset(('state', 'head_sha', 'changed_files',
+                                    'unfinished_checks', 'session_id'))
+
+
+def _quota_progress_shows_no_change(developer):
+    """True only when a quota-stopped run's progress proves it changed no file.
+
+    The route's complete shape is required: state, head_sha, changed_files,
+    unfinished_checks and session_id, all consistent with each other and with
+    the D6: the Developer is BLOCKED with the route's own quota code, the
+    progress state is QUOTA_EXHAUSTED, head_sha is the 40-hex D6 head the run
+    started from (its recorded source_sha, so the run committed nothing),
+    changed_files is an empty list, unfinished_checks is a list of strings,
+    and session_id is a well-formed ID that equals the execution's native
+    session ID when one is recorded. A missing, partial, contradictory,
+    unreadable or non-dict record is not proof: the run still counts.
+    """
+    try:
+        progress = developer.get('progress')
+        if type(progress) is not dict or set(progress) != _QUOTA_PROGRESS_FIELDS:
+            return False
+        profile = developer.get('provider_profile')
+        if (developer.get('state') != 'BLOCKED' or type(profile) is not str or
+                _QUOTA_STOP_ERROR_CODES.get(profile) != developer.get('error_code') or
+                progress['state'] != 'QUOTA_EXHAUSTED'):
+            return False
+        source_sha, head_sha = developer.get('source_sha'), progress['head_sha']
+        if (type(source_sha) is not str or
+                re.fullmatch(r'[0-9a-f]{40}', source_sha) is None or
+                head_sha != source_sha):
+            return False
+        changed_files, checks = progress['changed_files'], progress['unfinished_checks']
+        if (type(changed_files) is not list or changed_files or
+                type(checks) is not list or
+                any(type(item) is not str for item in checks)):
+            return False
+        session_id = progress['session_id']
+        if (type(session_id) is not str or
+                re.fullmatch(r'[A-Za-z0-9_-]{8,128}', session_id) is None):
+            return False
+        execution = developer.get('execution')
+        # A quota stop is a blocked run: any other execution status (DONE,
+        # SUCCEEDED, RUNNING, a missing record) contradicts it and counts.
+        if type(execution) is not dict or execution.get('status') != 'BLOCKED':
+            return False
+        native = execution.get('native_session_id')
+        return native is None or native == session_id
+    except Exception:
+        return False
+
+
+def _is_quota_stopped_run(developer):
+    """True when the record presents itself as a quota stop or carries progress.
+
+    Such a run is judged only by _quota_progress_shows_no_change: the generic
+    clean-D6 probe never excludes it, even when its progress field is absent.
+    """
+    if type(developer) is not dict:
+        return False
+    return ('progress' in developer or
+            developer.get('error_code') in _QUOTA_STOP_ERROR_CODES.values())
+
+
 def _launched_run_did_no_work(developer, d6_unchanged=None):
     """True only when a launched run's record proves it did no work.
 
@@ -7693,7 +7856,9 @@ def _launched_run_did_no_work(developer, d6_unchanged=None):
     must also confirm that the D6 head still equals the run's recorded source
     SHA, that its tree is clean, and that no status path overlaps the run's
     write paths. Anything missing, malformed or unknown does not prove that,
-    so the run still counts.
+    so the run still counts. A quota-stopped run (progress recorded, or a
+    route quota error code) is instead judged by its progress alone
+    (_quota_progress_shows_no_change, #2367).
     """
     if type(developer) is not dict:
         return False
@@ -7725,6 +7890,12 @@ def _launched_run_did_no_work(developer, d6_unchanged=None):
     if not (type(execution) is dict and
             execution.get('cleanup_status') == 'CONFIRMED'):
         return False
+    if _is_quota_stopped_run(developer):
+        # #2367 P0-B: a quota-stopped run (progress recorded or absent) is
+        # judged by its own progress record alone. A live D6 probe cannot
+        # vouch for it (a later run moves the D6), and a missing, partial or
+        # contradictory record must never be excused by a clean tree.
+        return _quota_progress_shows_no_change(developer)
     source_sha = developer.get('source_sha')
     if (type(source_sha) is not str or
             re.fullmatch(r'[0-9a-f]{40}', source_sha) is None or
@@ -7764,7 +7935,7 @@ _HIGH_DEBUG_MODELS = frozenset(('gpt-6.1-sol', 'claude-opus-5-5'))
 
 
 def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
-                                  executor_task, predecessor_executors=None):
+                                  executor_task, predecessor_executors=None, *, diagnosis_issue=None):
     """Raise ValueError unless ``entry`` is bound to the run behind it (#914).
 
     The High Debug Task must be the original Task of the executor D6 being
@@ -7774,9 +7945,10 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
     Task must hold the HIGH_DEBUG completion event run_high_debug records for
     this entry, live or compacted to a tombstone.
     """
-    from .high_debug import REPORT_SECTIONS, _has_report_section, _outcome_status
-    # #1943 WP-5: a no-PR Debug is a diagnosis only, never repair evidence.
-    if entry.get('no_pr') is True:
+    from .high_debug import (REPORT_SECTIONS, _has_report_section, _outcome_status,
+                             completion_event_id)
+    no_pr = entry.get('no_pr') is True
+    if no_pr and (diagnosis_issue is None or entry.get('diagnosis_issue') != diagnosis_issue):
         raise ValueError
 
     allowed_executors = set()
@@ -7792,9 +7964,11 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
     if not allowed_executors:
         raise ValueError
     completion = diagnosis_task.get('completion')
-    if (type(completion) is not dict or
-            completion.get('executor_task_id') not in allowed_executors):
-        raise ValueError
+    if type(completion) is not dict or completion.get('executor_task_id') not in allowed_executors:
+        from .high_debug import _task_holds_d6
+        if not no_pr or not any(_task_holds_d6(diagnosis_task, executor)
+                                for executor in allowed_executors):
+            raise ValueError
     model_observed = entry.get('model_observed')
     if (type(model_observed) is not str or
             model_observed not in _HIGH_DEBUG_MODELS or
@@ -7810,9 +7984,8 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
         raise ValueError
     # The same derivation run_high_debug uses when it records the event.
     examined_sha = entry['examined_sha']
-    event_id = hashlib.sha256(
-        ('HIGH_DEBUG\0' + high_debug_task + '\0' + examined_sha + '\0' +
-         report_sha256).encode()).hexdigest()[:32]
+    event_ids = {completion_event_id(high_debug_task, examined_sha, report_sha256),
+                 completion_event_id(high_debug_task, examined_sha, report_sha256, entry['d6'])}
     session_id = 'high-debug-' + entry['d6']
     payload_sha256 = hashlib.sha256(report_sha256.encode()).hexdigest()
     events = diagnosis_task.get('completion_events', [])
@@ -7820,7 +7993,8 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
     if type(events) is not list or type(tombstones) is not list:
         raise ValueError
     live = [event for event in events
-            if type(event) is dict and event.get('event_id') == event_id]
+            if type(event) is dict and event.get('event_id') in event_ids and
+            event.get('session_id') == session_id]
     if live:
         if not all(event.get('source') == 'HIGH_DEBUG' and
                    event.get('session_id') == session_id and
@@ -7830,58 +8004,39 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
             raise ValueError
         return
     compacted = [tombstone for tombstone in tombstones
-                 if type(tombstone) is dict and tombstone.get('event_id') == event_id]
+                 if type(tombstone) is dict and tombstone.get('event_id') in event_ids and
+                 tombstone.get('session_id') == session_id]
     if not compacted or not all(tombstone.get('source') == 'HIGH_DEBUG' and
                                 tombstone.get('session_id') == session_id
                                 for tombstone in compacted):
         raise ValueError
 
 
-def _check_repair_packet_rca(packet, store, executor_task):
-    """Accept the confirmed root cause a review repair packet carries (#1502 D7).
-
-    review_repair adds high_debug_report_sha256 to the packet of repair #2.
-    The packet's Task, on this D6, must hold an RCA_CONFIRMED High Debug
-    entry examined at the packet's failed HEAD whose report digest is the
-    packet's digest. #2367: from repair #3 on, review_repair binds the
-    family's covering RCA_CONFIRMED, examined at an earlier HEAD; it is then
-    accepted when a stored review repair claim of that Task at the packet's
-    failed HEAD binds the same digest (the store checks that binding).
-    Anything else refuses DELEGATE_HIGH_DEBUG_TASK_INVALID.
-    """
+def _check_repair_packet_rca(packet, store, executor_task, repair_task_id):
+    """Verify the RCA packet against the immutable claim for this repair Task."""
     try:
-        report_sha256 = packet.get('high_debug_report_sha256')
-        failed_head = packet.get('failed_head')
-        task_id = packet.get('task')
-        if (type(report_sha256) is not str or
-                re.fullmatch(r'[0-9a-f]{64}', report_sha256) is None or
-                type(failed_head) is not str or
-                re.fullmatch(r'[0-9a-f]{40}', failed_head) is None or
-                type(task_id) is not str or
+        task_id = packet['task']
+        record = store.get(task_id)
+        completion = record.get('completion') or {}
+        if (record.get('task_id') != task_id or
+                completion.get('executor_task_id') != executor_task or
                 packet.get('executor_task') != executor_task):
             raise ValueError
-        record = store.get(task_id)
-        completion = record.get('completion') if type(record) is dict else None
-        entries = record.get('high_debug') if type(record) is dict else None
-        claims = record.get('review_repair_claims', []) if type(record) is dict else None
-        bound_heads = {failed_head}
-        if (type(claims) is list and
-                any(type(claim) is dict and claim.get('head_sha') == failed_head and
-                    claim.get('high_debug_report_sha256') == report_sha256
-                    for claim in claims)):
-            bound_heads.update(claim.get('head_sha') for claim in claims
-                               if type(claim) is dict and
-                               type(claim.get('head_sha')) is str)
-        if (record.get('task_id') != task_id or type(completion) is not dict or
-                completion.get('executor_task_id') != executor_task or
-                type(entries) is not list or
-                not any(type(entry) is dict and
-                        entry.get('no_pr') is not True and
-                        entry.get('status') == 'RCA_CONFIRMED' and
-                        entry.get('examined_sha') in bound_heads and
-                        entry.get('report_sha256') == report_sha256
-                        for entry in entries)):
+        claims = [claim for claim in record.get('review_repair_claims', [])
+                  if claim.get('repair_task_id') == repair_task_id and
+                  claim.get('state') in ('CLAIMED', 'DISPATCHED', 'UNKNOWN')]
+        if (len(claims) != 1 or
+                not start_failure.repair_packet_matches(packet, claims[0], record, store)):
             raise ValueError
+        if 'high_debug_source_task' in claims[0]:
+            return
+        for entry in start_failure.local_rca_entries(packet, claims[0], record):
+            try:
+                _require_bound_high_debug_run(record, task_id, entry, executor_task)
+            except ValueError:
+                continue
+            return
+        raise ValueError
     except Exception:
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
 
@@ -7894,11 +8049,9 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
     limit; every other Task takes the review limit. The limits come from
     policy.json (#1502 WP-D D7): at most 1 + repair_max review runs and
     test_fail_max EC2 repair runs per D6. At or over a limit the delegate
-    always refuses. Every review repair after the first (repair #2 under
-    policy.json) needs a confirmed root cause, bound by the High Debug
-    arguments or by the repair packet; from repair #3 on the one taken before
-    repair #2 covers it (#2367). A recorded start failure is not a run
-    (#2367 A4). This check never changes a Task.
+    always refuses. Review repairs four and five need a confirmed applicable
+    root cause through the High Debug arguments or repair packet. A recorded
+    start failure is not a run. This check never changes a Task.
     """
     executor_task = getattr(args, 'executor_task', None)
     current_task_id = getattr(args, 'task_id', None)
@@ -8040,13 +8193,9 @@ def _repair_run_stamp(task_id, developer, d6_unchanged):
 
 def _check_repair_limits(args, store, d6_binding, policy, current_task_id, counted,
                          new_ec2_ids, legacy_ec2_ids, newest_assignment, stamps=None):
-    """Apply the review and EC2 limits to counted runs, then the root cause.
+    """Apply the review and EC2 limits to counted runs, then the root cause."""
+    from .repair_policy import REVIEW_REPAIRS_WITHOUT_DEBUG
 
-    #2367: repair #2 needs a High Debug taken after the newest run on the
-    current head, as before. Repairs 3 to repair_max need no new Debug: the
-    RCA_CONFIRMED taken before repair #2 (recorded after the run whose FAIL
-    asked for it, the second review run) covers them.
-    """
     if current_task_id in new_ec2_ids or current_task_id in legacy_ec2_ids:
         # Prior EC2 repair runs, new and legacy. EC2 repairs never take the
         # High Debug path.
@@ -8062,10 +8211,13 @@ def _check_repair_limits(args, store, d6_binding, policy, current_task_id, count
     count = len(review_runs)
     if count >= 1 + policy['repair_max']:
         raise LLMToolError('DELEGATE_REPAIR_LIMIT_REACHED')
-    if count < 2:
-        # The original run and repair #1 need no root cause (D1).
+    if count <= REVIEW_REPAIRS_WITHOUT_DEBUG:
+        packet = getattr(args, 'repair_packet', None)
+        if type(packet) is dict and 'high_debug_report_sha256' in packet:
+            _check_repair_packet_rca(packet, store, getattr(args, 'executor_task', None),
+                                     current_task_id)
         return
-    if count == 2:
+    if count == REVIEW_REPAIRS_WITHOUT_DEBUG + 1:
         _check_repair_rca(args, store, d6_binding, newest_assignment)
         return
     # A run without a known assignment time leaves the cover in doubt: refuse.
@@ -8074,21 +8226,16 @@ def _check_repair_limits(args, store, d6_binding, policy, current_task_id, count
     if len(times) != count:
         raise LLMToolError(
             f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
-    _check_repair_rca(args, store, d6_binding, times[1], covered=True)
+    _check_repair_rca(args, store, d6_binding, times[REVIEW_REPAIRS_WITHOUT_DEBUG], covered=True)
 
 
 def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=False):
-    """Repair #2 and later need a confirmed root cause (packet or High Debug Task).
-
-    covered (#2367, repairs 3 to repair_max): the High Debug was taken before
-    repair #2, so it must be newer than newest_assignment (the run whose FAIL
-    asked for it) but need not be on the current D6 head.
-    """
+    """Require a confirmed diagnosis applicable to the current failed review."""
     executor_task = getattr(args, 'executor_task', None)
     high_debug_task = getattr(args, 'high_debug_task', None)
     packet = getattr(args, 'repair_packet', None)
     if type(packet) is dict and 'high_debug_report_sha256' in packet:
-        _check_repair_packet_rca(packet, store, executor_task)
+        _check_repair_packet_rca(packet, store, executor_task, getattr(args, 'task_id', None))
         return
     ref = getattr(args, 'high_debug_ref', None)
     try:
@@ -8116,16 +8263,19 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
         entries = diagnosis_task.get('high_debug')
         if (type(diagnosis_task) is not dict or
                 diagnosis_task.get('task_id') != high_debug_task or
-                type(entries) is not list or not entries):
+                type(entries) is not list or not entries or
+                any(type(entry) is not dict for entry in entries)):
             raise ValueError
-        matching = [e for e in entries if not (type(e) is dict and e.get('no_pr') is True)]
+        family_arg = getattr(args, 'high_debug_family', None)
+        matching = [e for e in entries if type(e) is dict and e.get('family') == family_arg]
         if not matching:
             raise ValueError
         entry = matching[-1]
+        no_pr = entry.get('no_pr') is True
+        diagnosis_issue = int(ref.split('/issues/', 1)[1].split('/', 1)[0].split('#', 1)[0])
         d6 = entry.get('d6')
         examined_sha = entry.get('examined_sha')
         family = entry.get('family')
-        family_arg = getattr(args, 'high_debug_family', None)
         if (type(family) is not str or
                 re.fullmatch(r'[a-z0-9._-]{1,64}', family) is None or
                 type(family_arg) is not str or
@@ -8144,8 +8294,6 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
                 newest_assignment = datetime.strptime(newest_assignment, '%Y-%m-%dT%H:%M:%SZ')
             except (TypeError, ValueError):
                 raise ValueError from None
-        if newest_assignment is None or recorded_stamp <= newest_assignment:
-            raise ValueError
         # High Debug D6 names are derived from their executor D6, attempt
         # number, and examined HEAD. Recompute the name to bind this entry to
         # the executor D6 being repaired or a verified continuation predecessor (#2190).
@@ -8161,31 +8309,24 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
             raise ValueError
         attempt = int(attempt_match.group(1))
         task_id = getattr(args, 'task_id', None)
-        predecessor_executors = []
-        if task_id is not None and store is not None:
-            try:
-                task_record = store.get(task_id)
-            except Exception:
-                task_record = None
-            if type(task_record) is dict:
-                from . import lineage_counts
-                chain = lineage_counts.chain_records(store, task_record)
-                if chain is not None:
-                    for pred in chain[1:]:
-                        pred_completion = pred.get('completion') if type(pred) is dict else None
-                        pred_executor = (pred_completion.get('executor_task_id')
-                                         if type(pred_completion) is dict else None)
-                        if type(pred_executor) is str and pred_executor not in predecessor_executors:
-                            predecessor_executors.append(pred_executor)
-        allowed_executors = []
-        if type(executor_task) is str:
-            allowed_executors.append(executor_task)
-        for pe in predecessor_executors:
-            if pe not in allowed_executors:
-                allowed_executors.append(pe)
+        from . import lineage_counts
+        try:
+            members = lineage_counts.debug_lineage_members(store, store.get(task_id))
+        except Exception:
+            members = None
+        allowed_executors = {executor_task} if type(executor_task) is str else set()
+        if members is not None and high_debug_task in members:
+            source_completion = diagnosis_task.get('completion') or {}
+            source_executor = source_completion.get('executor_task_id')
+            if type(source_executor) is str:
+                allowed_executors.add(source_executor)
         diagnosis_completion = diagnosis_task.get('completion')
         diagnosis_executor = (diagnosis_completion.get('executor_task_id')
                               if type(diagnosis_completion) is dict else None)
+        if no_pr and diagnosis_executor is None:
+            from .high_debug import _task_holds_d6
+            if _task_holds_d6(diagnosis_task, executor_task):
+                diagnosis_executor = executor_task
         matched_executor = None
         for candidate in allowed_executors:
             if (d6 == _d6_name(candidate, attempt, examined_sha) and
@@ -8195,13 +8336,10 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
         if matched_executor is None:
             raise ValueError
         _require_bound_high_debug_run(
-            diagnosis_task, high_debug_task, entry, executor_task,
-            predecessor_executors=predecessor_executors)
+            diagnosis_task, high_debug_task, entry, matched_executor,
+            diagnosis_issue=diagnosis_issue)
     except Exception:
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
-    if covered:
-        # #2367 A2: the covering RCA was taken on an earlier head.
-        return
     if d6_binding is None:
         try:
             d6_binding = _delegate_d6_binding(args)
@@ -8209,6 +8347,34 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
             raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
     _registration, snapshot = d6_binding
     current_head = getattr(snapshot, 'head', None)
+    if no_pr:
+        if not members or high_debug_task not in members:
+            raise LLMToolError('DELEGATE_HIGH_DEBUG_LINEAGE_MISMATCH')
+        if not any(event.get('source') == 'GITHUB' and
+                   event.get('issue_number') == diagnosis_issue
+                   for task in members.values() for event in task.get('completion_events', [])):
+            raise LLMToolError('DELEGATE_HIGH_DEBUG_ISSUE_UNVERIFIED')
+        if matched_executor != executor_task or examined_sha != current_head:
+            raise LLMToolError('DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED')
+    if matched_executor == executor_task and examined_sha == current_head:
+        if newest_assignment is None or recorded_stamp <= newest_assignment:
+            raise LLMToolError('DELEGATE_HIGH_DEBUG_TIME_MISMATCH')
+        return
+    if covered or matched_executor != executor_task:
+        from . import review_result
+        source_pr = re.fullmatch(r'pr-([1-9][0-9]*)', family)
+        source = (review_result.diagnosis_findings(
+            diagnosis_task, examined_sha, matched_executor, before=recorded_at,
+            pr=int(source_pr.group(1))) if source_pr is not None else None)
+        if task_id is None or source is None:
+            raise LLMToolError('DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED')
+        if not members or high_debug_task not in members:
+            raise LLMToolError('DELEGATE_HIGH_DEBUG_LINEAGE_MISMATCH')
+        targets = [review_result.diagnosis_findings(item, current_head, executor_task)
+                   for item in members.values()]
+        if [target for target in targets if target is not None] == [source]:
+            return
+        raise LLMToolError('DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED')
     if examined_sha != current_head:
         head_prefix = current_head[:12] if type(current_head) is str else ''
         examined_prefix = examined_sha[:12] if type(examined_sha) is str else ''
@@ -8270,7 +8436,7 @@ def _delegate_chain_gate(args, store, d6_binding, claim):
     Runs at each route's claim site, after every route refusal. Takes the
     chain locks of the delegated Task's and its D6 Tasks' chains, recomputes
     the view on fresh reads (changed keys are UNKNOWN), applies the
-    chain-wide repair cap (with repair #2's root cause) and
+    chain-wide repair cap and RCA validation and
     CONTINUATION_LINK_REQUIRED, then calls claim() and returns its result.
     Any doubt refuses DELEGATE_REPAIR_COUNT_UNAVAILABLE before any write. The
     locks are released on every path, before any provider call or fork.
@@ -8357,6 +8523,85 @@ def _auto_direct_replacement(args, store):
     # A timeout for the former route belongs to that route's policy limits.
     replacement.timeout = None
     return replacement
+
+
+def _scope_advice_items(args, store):
+    """#2503: advisory scope items for this dispatch; any error gives [] (fail-open)."""
+    from . import read_scope_advice
+    try:
+        task = store.get(args.task_id)
+        assignment = task.get('pm_assignment') if type(task) is dict else None
+        goal = (assignment.get('goal') if type(assignment) is dict else None) or (
+            task.get('request') if type(task) is dict else None)
+        reports = []
+        high_debug_task = getattr(args, 'high_debug_task', None)
+        if type(high_debug_task) is str and re.fullmatch(r'[0-9a-f]{32}', high_debug_task):
+            try:
+                entries = store.get(high_debug_task).get('high_debug')
+            except Exception:
+                entries = None
+            if type(entries) is list:
+                reports = [item.get('report') for item in entries if type(item) is dict]
+        root = getattr(args, 'cwd', None) or os.getcwd()
+        missing = read_scope_advice.missing_read_paths(
+            texts=[goal, getattr(args, 'acceptance', None),
+                   getattr(args, 'repair_packet', None), reports],
+            read_paths=getattr(args, 'read_path', None),
+            write_paths=getattr(args, 'write_path', None),
+            exists=read_scope_advice.git_exists(root))
+        return [read_scope_advice.item(read_scope_advice.READ_MISSING, path,
+                                       'named in the spec, findings or RCA but not in read')
+                for path in missing]
+    except Exception:
+        return []
+
+
+def _record_scope_advice(args, store, items):
+    """#2503: record the advice and the PM reason on the Task; never raises."""
+    from . import read_scope_advice
+    try:
+        reason = getattr(args, 'read_scope_reason', None)
+        if not items and reason is None:
+            return
+        try:
+            head = subprocess.run(['git', 'rev-parse', 'HEAD'],
+                                  cwd=getattr(args, 'cwd', None) or os.getcwd(),
+                                  stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                  timeout=10, check=False).stdout.strip()
+        except Exception:
+            head = ''
+        source_sha = head if re.fullmatch(r'[0-9a-f]{40}', head or '') else None
+        store.append_read_scope_advice(
+            args.task_id, read_scope_advice.entry(items, reason, source_sha))
+    except Exception:
+        try:
+            print('SCOPE_ADVICE_NOT_RECORDED (#2503): the dispatch was not affected.',
+                  file=sys.stderr)
+        except Exception:
+            pass
+
+
+def _delegate_with_scope_advice(args, store, call):
+    """#2503: show scope advice, run the dispatch unchanged, then record the advice.
+
+    The advice never blocks: it is printed before the dispatch, the dispatch
+    runs exactly as without it, and the advice is recorded only after the
+    dispatch returned (so no Task write precedes the route's own checks).
+    --read-scope-check prints the advice and dispatches nothing.
+    """
+    from . import read_scope_advice
+    items = _scope_advice_items(args, store)
+    if getattr(args, 'read_scope_check', False) is True:
+        _print({'task_id': args.task_id, 'scope_advice': items}, None)
+        return 0
+    if items:
+        try:
+            print(read_scope_advice.warning(items), file=sys.stderr)
+        except Exception:
+            pass
+    result = call()
+    _record_scope_advice(args, store, items)
+    return result
 
 
 def run_task_delegate(args, *, store=None):
@@ -8711,7 +8956,8 @@ def run_task_delegate_checked(args, *, store=None):
     if code is not None:
         raise LLMToolError(f'{code}: a fresh quota observation for {worker} is FAIL; '
                            'no Task or D6 write was made')
-    return run_task_delegate(args, store=store)
+    return _delegate_with_scope_advice(
+        args, store, lambda: run_task_delegate(args, store=store))
 
 
 # #2188 design section 3: the new developer of a start retry keeps these of D.
@@ -8796,7 +9042,7 @@ def _start_retry_repair_packet(store, task):
             claim.get('head_sha') != developer.get('source_sha')):
         raise LLMToolError('START_RETRY_REPAIR_CLAIM_INVALID')
     packet = start_failure.decode_repair_packet(task['repair_packet'])
-    if packet is None or not start_failure.repair_packet_matches(packet, claim, root):
+    if packet is None or not start_failure.repair_packet_matches(packet, claim, root, store):
         raise LLMToolError('START_RETRY_REPAIR_PACKET_MISMATCH')
     return packet
 
@@ -9821,8 +10067,17 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
         direct_callback = developer.get('direct_result_callback')
         callback_evidence = (direct_callback.get('evidence')
                              if type(direct_callback) is dict else None)
-        if (claude_route or (type(callback_evidence) is dict and
-                callback_evidence.get('test_policy') == 'REMOTE_RECEIPT')):
+        remote_receipt_route = (claude_route or (type(callback_evidence) is dict and
+                                callback_evidence.get('test_policy') == 'REMOTE_RECEIPT'))
+        docs_only_tests = (_docs_only_completion_tests(args.pr, git_evidence)
+                           if remote_receipt_route and not executor_result_only else None)
+        if docs_only_tests:
+            # #2473: a PR GitHub proves docs-only needs no EC2 receipt. The
+            # NOT_APPLICABLE_DOCS_ONLY record is not a receipt; the GitHub
+            # evidence below still requires exact-head check (docs) and the
+            # formal Reviewer PASS.
+            tests = docs_only_tests
+        elif remote_receipt_route:
             paths = _remote_task_test_paths(task, read_paths=developer['read_paths'])
             receipt, receipt_gate = _matching_remote_test_receipt(
                 task, executor_task=args.executor_task,

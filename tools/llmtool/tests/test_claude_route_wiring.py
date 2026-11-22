@@ -14,6 +14,7 @@ from llmtool import review_repair
 from llmtool import skill_ledger
 from llmtool import skill_manifest
 from llmtool import task_advance
+from llmtool import task_store
 from llmtool import worker_dispatch
 from llmtool.developer_routes import (RouteError, resolve_route_max_diff_bytes,
                                      resolve_route_max_prompt_bytes)
@@ -361,6 +362,69 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                             for call in evaluations))
         self.assertTrue(all('log_path' not in request for request in requests))
         self.assertIn('Claude Developer', prompts[0])
+
+    def _run_with_reply(self, reply, **setup):
+        # The route keeps the run's parsed CLI result, as _DiagnosedClaudeRoute does.
+        cli, store, args, _registration, _evaluations, _prompts, _requests, patches, runner = (
+            self._setup(**setup))
+
+        def replying_runner(route, request, **kwargs):
+            route.parsed_cli_result = (None if reply is None else
+                                       {'type': 'result', 'result': reply})
+            return runner(route, request, **kwargs)
+
+        with contextlib.ExitStack() as stack:
+            for item in patches:
+                stack.enter_context(item)
+            status = cli.run_task_claude_delegate(args, store=store, route_runner=replying_runner)
+        return cli, status, store.task['developer']
+
+    def test_success_with_changes_keeps_the_final_reply_for_the_pm(self):
+        # #2503: a partial result's own words reach the PM, not only no-change runs.
+        reply = 'Changed src.py. SPEC_MISMATCH on item 2: it needs other.py outside read_paths.'
+        cli, status, developer = self._run_with_reply(reply)
+        self.assertEqual(status, 0)
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(developer['reported'], {'summary': reply})
+        self.assertTrue(task_store._valid_reported_text(developer['reported']['summary'], 8 * 1024))
+
+    def test_success_without_a_reply_adds_no_reported_field(self):
+        _cli, status, developer = self._run_with_reply(None)
+        self.assertEqual(status, 0)
+        self.assertNotIn('reported', developer)
+
+    # #2503: other Claude failures keep the final reply when the CLI produced one.
+
+    def test_route_failure_after_parsing_keeps_the_final_reply(self):
+        reply = 'SPEC_MISMATCH: item 2 needs other.py outside read_paths.'
+        _cli, status, developer = self._run_with_reply(
+            reply, runner_error=RouteError('CLAUDE_OUTPUT_INVALID'))
+        self.assertEqual(status, 1)
+        self.assertEqual((developer['state'], developer['error_code']),
+                         ('BLOCKED', 'CLAUDE_OUTPUT_INVALID'))
+        self.assertEqual(developer['reported'], {'summary': reply})
+
+    def test_scope_violation_after_a_result_keeps_the_final_reply(self):
+        reply = 'Edited src.py and other.py.'
+        _cli, status, developer = self._run_with_reply(
+            reply, changed_paths=('src.py', 'other.py'))
+        self.assertEqual(status, 1)
+        self.assertEqual(developer['error_code'], 'CLAUDE_WRITE_SCOPE_VIOLATION')
+        self.assertEqual(developer['reported'], {'summary': reply})
+
+    def test_unexpected_failure_after_parsing_keeps_the_final_reply(self):
+        reply = 'Done with item 1.'
+        _cli, status, developer = self._run_with_reply(
+            reply, runner_error=RuntimeError('runner broke'))
+        self.assertEqual(status, 1)
+        self.assertEqual(developer['error_code'], 'CLAUDE_RESULT_UNKNOWN')
+        self.assertEqual(developer['reported'], {'summary': reply})
+
+    def test_failure_without_a_parsed_reply_stores_nothing(self):
+        _cli, status, developer = self._run_with_reply(
+            None, runner_error=RouteError('CLAUDE_TIMEOUT'))
+        self.assertEqual(status, 1)
+        self.assertNotIn('reported', developer)
 
     def _run_with_cards(self, cards, **git_kwargs):
         """One successful run whose cards come from real build_role_cards()."""

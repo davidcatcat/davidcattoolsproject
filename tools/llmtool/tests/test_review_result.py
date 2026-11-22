@@ -533,6 +533,24 @@ class StableFindingIdTests(unittest.TestCase):
                           'F10': 'Medium', 'F4': 'Blocker'})
         self.assertEqual(review_result.blocking_findings(body), ['F1', 'F4', 'F10'])
 
+    def test_diagnosis_findings_bind_exact_completed_formal_fail(self):
+        head = 'a' * 40
+        claim = {'state': 'COMPLETED', 'review_kind': 'formal', 'executor_task': 'developer-d6',
+                 'head_sha': head, 'version': 1, 'pr': 2405, 'updated_at': '2026-11-20T00:00:00Z',
+                 'review_result': {'head': head, 'task_id': 'task', 'verdict': 'FAIL',
+                                   'review_text': 'Finding: F1 [High] a.py:2 missing authorization'}}
+        task = {'task_id': 'task', 'review_dispatch_claim': [claim]}
+        self.assertEqual(review_result.diagnosis_findings(task, head, 'developer-d6', pr=2405),
+                         ('High a.py:2 missing authorization',))
+        self.assertIsNone(review_result.diagnosis_findings(task, head, 'other-d6'))
+        self.assertIsNone(review_result.diagnosis_findings(task, 'b' * 40, 'developer-d6'))
+        self.assertIsNone(review_result.diagnosis_findings(task, head, 'developer-d6', pr=2422))
+        self.assertIsNone(review_result.diagnosis_findings(
+            task, head, 'developer-d6', before='2026-11-19T23:59:59Z'))
+        claim['review_result']['review_text'] = 'Finding: F1 [High] a.py:2 wrong authorization target'
+        self.assertEqual(review_result.diagnosis_findings(task, head, 'developer-d6'),
+                         ('High a.py:2 wrong authorization target',))
+
     def test_only_low_findings_leave_no_blocking_finding(self):
         self.assertEqual(review_result.blocking_findings(
             'Finding: F1 [Low] a.py:1 x\nFinding: F2 [Advisory] a.py:2 y\n'), [])

@@ -1071,9 +1071,26 @@ class ArbiterChooserTests(unittest.TestCase):
                 self.assertEqual((chosen['reviewer'], chosen['fresh_session']), expected)
 
     def test_agy_authored_is_gemini_and_prefers_the_other_reviewer(self):
-        self.assertEqual(review_repair.developer_family({'provider_profile': 'agy'}), 'gemini')
-        chosen = self.choose({'provider_profile': 'agy'}, 'claude-reviewer')
+        developer = {'provider_profile': 'agy', 'model': 'gemini-3.8-flash-medium'}
+        self.assertEqual(review_repair.developer_family(developer), 'gemini')
+        chosen = self.choose(developer, 'claude-reviewer')
         self.assertEqual(chosen['reviewer'], 'codex-reviewer')
+
+    def test_agy_authored_with_a_claude_model_is_claude(self):
+        developer = {'provider_profile': 'agy', 'model': 'claude-sonnet-5-5-medium'}
+        self.assertEqual(review_repair.developer_family(developer), 'claude')
+        chosen = self.choose(developer, 'codex-reviewer')
+        self.assertEqual((chosen['reviewer'], chosen['family'], chosen['fresh_session']),
+                         ('codex-reviewer', 'codex', True))
+
+    def test_agy_without_a_recorded_model_is_unknown_and_refuses_an_arbiter(self):
+        for developer in ({'provider_profile': 'agy'},
+                          {'provider_profile': 'agy', 'model': None}):
+            with self.subTest(developer=developer):
+                self.assertIsNone(review_repair.developer_family(developer))
+                with self.assertRaises(LLMToolError) as caught:
+                    self.choose(developer, 'codex-reviewer')
+                self.assertEqual(caught.exception.dispute_code, 'DISPUTE_ARBITER_UNAVAILABLE')
 
     def test_the_arbiter_is_never_the_developer_family(self):
         # A same-family first review (never a formal one) still leaves a cross-family arbiter.

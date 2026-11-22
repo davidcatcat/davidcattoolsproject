@@ -428,7 +428,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
     def test_gw_agent_uses_claude_formal_reviewer(self):
         # The default Reviewer route for a gw-agent author, under the shared
         # all-ALLOWED test policy (#1692), never the live worker-dispatch.json
-        # (#289 c6922657359 paused claude-reviewer there; see
+        # (its claude-reviewer row is an Owner decision; the real-file cases are
         # RealPolicyReviewerFallbackTests).
         worker_policy_fixture.install(self)
         task = {'task_id': 'a' * 32, 'run_id': 'b' * 32,
@@ -1405,12 +1405,13 @@ class GwAgentShippedServedModelTests(unittest.TestCase):
 
 
 class RealPolicyReviewerFallbackTests(unittest.TestCase):
-    """#289 c6922657359: the live worker-dispatch.json pauses claude-reviewer.
+    """#289 c7070193668: the live worker-dispatch.json allows claude-reviewer.
 
-    Decisions go through the real reader, parser and gate on the repository
-    policy file; only the trusted repository config is pinned. Formal reviews
-    for a non-Claude author reach codex-reviewer through the existing #1831 P1
-    task advance Reviewer fallback.
+    Owner decision (#289 c7070144907, B on c7070193668): claude-reviewer on
+    account claude2 is the formal Reviewer for OpenCode, AGY and home LLM
+    authored changes; codex-reviewer stays the Reviewer for Claude-authored
+    changes. Decisions go through the real reader, parser and gate on the
+    repository policy file; only the trusted repository config is pinned.
     """
 
     def setUp(self):
@@ -1428,40 +1429,41 @@ class RealPolicyReviewerFallbackTests(unittest.TestCase):
     def _task(developer):
         return {'task_id': 'a' * 32, 'run_id': 'b' * 32, 'developer': developer}
 
-    def test_gw_agent_author_review_falls_back_to_codex_reviewer(self):
+    def test_gw_agent_author_review_uses_claude_reviewer(self):
         task = self._task({'provider_profile': 'gw-agent'})
-        # An explicit claude-reviewer request is refused by the real row.
-        with self.assertRaises(LLMToolError) as explicit:
-            review_dispatch._select_reviewer(task, 'claude-reviewer')
-        self.assertEqual(explicit.exception.review_dispatch_code, 'REVIEWER_NOT_ALLOWED')
-        # The default Reviewer for a gw-agent author is claude-reviewer: refused too.
-        with self.assertRaises(LLMToolError) as default:
-            review_dispatch._select_reviewer(task)
-        self.assertEqual(default.exception.review_dispatch_code, 'REVIEWER_NOT_ALLOWED')
-        # The existing advance fallback admits codex-reviewer.
-        self.assertEqual(task_advance._reviewer_fallback(task, default.exception),
-                         ('codex-reviewer', 'REVIEWER_NOT_ALLOWED'))
+        # The real row admits an explicit claude-reviewer request.
+        self.assertEqual(review_dispatch._select_reviewer(task, 'claude-reviewer'),
+                         'claude-reviewer')
+        # The default Reviewer for a gw-agent author is claude-reviewer, admitted.
+        self.assertEqual(review_dispatch._select_reviewer(task), 'claude-reviewer')
+        # codex-reviewer stays admitted as an explicit cross-family choice.
         self.assertEqual(review_dispatch._select_reviewer(task, 'codex-reviewer'),
                          'codex-reviewer')
 
-    def test_other_family_author_review_falls_back_to_codex_reviewer(self):
-        task = self._task({'provider_profile': 'agy', 'model': 'gemini-2.5-pro'})
-        with self.assertRaises(LLMToolError) as default:
-            review_dispatch._select_reviewer(task)
-        self.assertEqual(default.exception.review_dispatch_code, 'REVIEWER_NOT_ALLOWED')
-        self.assertEqual(task_advance._reviewer_fallback(task, default.exception),
-                         ('codex-reviewer', 'REVIEWER_NOT_ALLOWED'))
+    def test_other_family_and_opencode_authors_use_claude_reviewer(self):
+        for developer in ({'provider_profile': 'agy', 'model': 'gemini-2.5-pro'},
+                          {'provider_profile': 'opencode'}):
+            with self.subTest(developer=developer):
+                task = self._task(developer)
+                self.assertEqual(review_dispatch._select_reviewer(task), 'claude-reviewer')
 
-    def test_codex_authored_task_has_no_fallback_reviewer(self):
-        # Family separation forbids codex-reviewer for a Codex-family author, so
-        # with claude-reviewer paused the fallback has no alternate (advance then
-        # reports REVIEWER_UNAVAILABLE). Pinned so the consequence stays visible.
+    def test_codex_authored_task_uses_claude_reviewer_never_codex(self):
+        # Family separation still forbids codex-reviewer for a Codex-family
+        # author; with claude-reviewer allowed the default now has a Reviewer.
         task = self._task({'provider_profile': 'agy', 'model': 'gpt-6-luna'})
-        with self.assertRaises(LLMToolError) as default:
-            review_dispatch._select_reviewer(task)
-        self.assertEqual(default.exception.review_dispatch_code, 'REVIEWER_NOT_ALLOWED')
-        self.assertEqual(task_advance._reviewer_fallback(task, default.exception),
-                         (None, 'REVIEWER_NOT_ALLOWED'))
+        self.assertEqual(review_dispatch._select_reviewer(task), 'claude-reviewer')
+        with self.assertRaises(LLMToolError) as same_family:
+            review_dispatch._select_reviewer(task, 'codex-reviewer')
+        self.assertEqual(same_family.exception.review_dispatch_code, 'REVIEWER_SAME_FAMILY')
+
+    def test_claude_authored_task_keeps_codex_reviewer(self):
+        # Claude-authored changes keep codex-reviewer; claude-reviewer is the
+        # same family and stays refused.
+        task = self._task({'provider_profile': 'claude'})
+        self.assertEqual(review_dispatch._select_reviewer(task), 'codex-reviewer')
+        with self.assertRaises(LLMToolError) as same_family:
+            review_dispatch._select_reviewer(task, 'claude-reviewer')
+        self.assertEqual(same_family.exception.review_dispatch_code, 'REVIEWER_SAME_FAMILY')
 
 
 class _NoSandboxBoundary:
@@ -1600,7 +1602,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
                   wrap_store=None, gate=None, authorize=None, route_factory=None,
                   content='hello synthetic\n', bind=None, repair_packet=None,
                   data_class='SYNTHETIC', egress_basis='Synthetic test content only.',
-                  list_provider_model=True):
+                  list_provider_model=True, finish_summary='done'):
         # #1072: without ``bind`` the D6 session step keeps today's unbound
         # result; with it the real step runs against that fake lifecycle helper.
         # #1773: the gateway profile model must be in allowed_models, so the
@@ -1622,7 +1624,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.server.script.extend((
             self.reply(self.tool_call('apply_edit', path=target, new=content,
                                       create=True), model=served_model, usage=usage),
-            self.reply(self.tool_call('finish', summary='done'), model=served_model,
+            self.reply(self.tool_call('finish', summary=finish_summary), model=served_model,
                        usage=usage)))
         args = Namespace(task_id=task_id, mode='direct', context_stdin=False,
             data_class=data_class, egress_basis=egress_basis,
@@ -1941,6 +1943,35 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertEqual(task_status.derive_state(reloaded_root), 'ABANDONED')
         gw_agent_sessions.sweep_quietly(self.store)
         self.assertFalse(home.exists())
+
+    def test_final_reply_is_kept_for_the_pm(self):
+        # #2503: the home LLM's own finish summary is stored as developer.reported.
+        target = 'gw-agent-reply.md'
+        reply = 'Created the file. BLOCKED on the second item: it needs other.py.'
+        code, task = self._delegate(target, finish_summary=reply)
+        self.assertEqual(code, 0)
+        persisted = task_store.TaskStore(Path(self.base / 'tasks').resolve()).get(
+            task['task_id'])
+        self.assertEqual(persisted['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(persisted['developer']['reported'], {'summary': reply})
+
+    def test_unsafe_final_reply_is_withheld_and_the_result_still_saved(self):
+        target = 'gw-agent-reply-unsafe.md'
+        # The reply screen refuses a harmless sentinel; other texts keep the real screen.
+        sentinel = 'SCREEN-REFUSED-SENTINEL-2503'
+        real_screen = task_submission_cli._screen_text
+
+        def screen(value, *args, **kwargs):
+            if type(value) is str and sentinel in value:
+                raise task_submission_cli.LLMToolError('screen refused')
+            return real_screen(value, *args, **kwargs)
+
+        with patch.object(task_submission_cli, '_screen_text', side_effect=screen):
+            code, task = self._delegate(target, finish_summary='done ' + sentinel)
+        self.assertEqual(code, 0)
+        self.assertEqual(task['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(task['developer']['reported'],
+                         {'summary': task_submission_cli.CLAUDE_REPLY_WITHHELD})
 
     def test_docs_success_persists_and_reaches_the_active_pm(self):
         target = 'gw-agent-synthetic.md'
@@ -2735,7 +2766,8 @@ class GwAgentRealStoreTests(unittest.TestCase):
                  set_(**{**source, 'source_bytes': 2 * 1024 * 1024 + 1})),
                 ('source-bytes-bool', set_(**{**source, 'source_bytes': True})),
                 ('source-files-zero', set_(**{**source, 'source_file_count': 0})),
-                ('source-files-too-many', set_(**{**source, 'source_file_count': 33})),
+                # #2281: one source entry per read path, at most 1024 paths.
+                ('source-files-too-many', set_(**{**source, 'source_file_count': 1025})),
                 ('source-files-bool', set_(**{**source, 'source_file_count': True})),
                 ('manifest-uppercase',
                  set_(**{**source, 'source_manifest_sha256': 'B' * 64})),
@@ -2758,8 +2790,15 @@ class GwAgentRealStoreTests(unittest.TestCase):
 
     def test_gw_agent_bind_accepts_execution_at_the_store_bounds(self):
         set_ = self._set_execution
+        source = {'source_bytes': 10, 'source_file_count': 1,
+                  'source_manifest_sha256': 'b' * 64}
         for name, mutate in (('elapsed-zero', set_(elapsed_ms=0)),
-                             ('elapsed-max', set_(elapsed_ms=86_400_000))):
+                             ('elapsed-max', set_(elapsed_ms=86_400_000)),
+                             # #2281: the old 32 bound and the new 1024 bound
+                             # are both accepted; 1025 is refused above.
+                             ('source-files-33', set_(**{**source, 'source_file_count': 33})),
+                             ('source-files-max',
+                              set_(**{**source, 'source_file_count': 1024}))):
             with self.subTest(field=name):
                 run = self._bind_run(f'gw-agent-bounds-{name}.md', mutate=mutate)
                 self.assertEqual(run['code'], 0)
@@ -2850,32 +2889,6 @@ class GwAgentRealStoreTests(unittest.TestCase):
             return 'BOUND'
         return lifecycle
 
-    def _record_confirmed_root_cause(self, task_id):
-        """Record an RCA_CONFIRMED High Debug entry on task_id at the D6 head.
-
-        The entry has the shape run_high_debug stores; the store validates it.
-        Returns (report, report_sha256) for the repair #2 packet.
-        """
-        from llmtool.high_debug import _d6_name
-        report = '\n'.join((
-            '## Identity and source', 'Synthetic fixture.',
-            '## Symptom and reproduction', 'Synthetic fixture.',
-            '## Root Cause', 'Confirmed root cause.',
-            '## Exactly what to modify', 'Synthetic fixture.',
-            '## Verification', 'Synthetic fixture.',
-            '## Risks and handoff', 'Synthetic fixture.',
-            '## Outcome/cost', 'RCA_CONFIRMED', 'Cost: UNKNOWN',
-        )) + '\n'
-        report_sha256 = hashlib.sha256(report.encode('utf-8')).hexdigest()
-        self.store.append_high_debug(task_id, {
-            'status': 'RCA_CONFIRMED', 'family': 'pr-1', 'failed_corrections': 2,
-            'early_reason': None, 'd6': _d6_name('executor-d6', 1, self.head),
-            'examined_sha': self.head, 'model_requested': 'synthetic-model',
-            'model_observed': 'synthetic-model', 'effort_observed': 'high',
-            'report': report, 'report_sha256': report_sha256, 'usage': 'UNKNOWN',
-            'recorded_at': '2026-11-15T00:00:00Z'})
-        return report, report_sha256
-
     def _gw_home_binding(self):
         from llmtool.developer_routes import gw_agent
         home = Path(self.store_root).parent / 'gw-agent-sessions' / 'executor-d6'
@@ -2928,20 +2941,13 @@ class GwAgentRealStoreTests(unittest.TestCase):
             seen.update(request)
             return task_submission_cli.run_route(route, request, **kwargs)
 
-        # #1502 WP-D R2: the first two runs on executor-d6 count, so this
-        # round is the D6's repair #2. Its packet carries the confirmed root
-        # cause review_repair binds, recorded on the Task it repairs.
-        report, report_sha256 = self._record_confirmed_root_cause(second['task_id'])
-        with patch.object(task_submission_cli, '_validate_repair_packet',
-                          side_effect=lambda value: value):
-            code, repair = self._delegate(
-                'gw-agent-two.md', bind=bind, route_runner=spy_runner,
-                repair_packet={'reviewer_text_excerpt_untrusted_data':
-                               'synthetic finding',
-                               'task': second['task_id'], 'executor_task': 'executor-d6',
-                               'failed_head': self.head,
-                               'high_debug_report_untrusted_data': report,
-                               'high_debug_report_sha256': report_sha256})
+        # Repair #2 must resume the second Task's session without High Debug.
+        code, repair = self._delegate(
+            'gw-agent-two.md', bind=bind, route_runner=spy_runner,
+            repair_packet={'reviewer_text_excerpt_untrusted_data': 'synthetic finding',
+                           'task': second['task_id'], 'executor_task': 'executor-d6',
+                           'pr': 1, 'failed_head': self.head, 'version': 1,
+                           'verdict_comment_id': 1, 'findings_count': 1})
         self.assertEqual(seen['session_id'], second_session)
         self.assertEqual(seen['task']['task_id'], second['task_id'])
         self.assertEqual(self._assert_kept_d6_session(code, repair, first_session),

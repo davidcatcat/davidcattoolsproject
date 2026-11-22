@@ -50,6 +50,8 @@ MAX_SOURCE_FILE_BYTES = DEFAULT_MAX_SOURCE_FILE_BYTES
 DEFAULT_MAX_SOURCE_TOTAL_BYTES = 5 * 1024 * 1024
 MAX_SOURCE_TOTAL_BYTES = DEFAULT_MAX_SOURCE_TOTAL_BYTES
 MAX_VERSION_OUTPUT_BYTES = 4096
+# #2281 (Owner 2026-11-19): read and write path counts of a Developer Task scope.
+MAX_TASK_PATHS = 1024
 VERSION_TIMEOUT_SECONDS = 5
 _SESSION = re.compile(r'ses_[A-Za-z0-9]{1,100}\Z')
 # Any well-formed release is accepted; event compatibility is enforced by the
@@ -444,7 +446,8 @@ def _observed_run_id(store, task_id):
 
 def _valid_paths(root, read_paths, write_paths):
     if (type(read_paths) is not list or type(write_paths) is not list or
-            not read_paths or len(read_paths) > 32 or len(write_paths) > 32 or
+            not read_paths or len(read_paths) > MAX_TASK_PATHS or
+            len(write_paths) > MAX_TASK_PATHS or
             read_paths != sorted(set(read_paths)) or
             write_paths != sorted(set(write_paths)) or
             not set(write_paths).issubset(read_paths)):

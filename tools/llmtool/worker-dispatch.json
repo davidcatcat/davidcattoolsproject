@@ -44,11 +44,11 @@
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6760670167"
     },
     "claude-reviewer": {
-      "dispatch": "PAUSED",
+      "dispatch": "ALLOWED",
       "decided_by": "Owner",
-      "decided_at": "2026-11-17",
-      "reason": "Owner instruction, relayed by PM on #289: pause the Claude formal Reviewer; formal reviews use codex-reviewer through the existing task advance Reviewer fallback",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6922657359"
+      "decided_at": "2026-11-22",
+      "reason": "Owner decision: claude-reviewer on account claude2 is the formal Reviewer for OpenCode, AGY and home LLM authored changes; codex-reviewer remains the formal Reviewer for Claude-authored changes",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-7070193668"
     },
     "codex-reviewer": {
       "dispatch": "ALLOWED",

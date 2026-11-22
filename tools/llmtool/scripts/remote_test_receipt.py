@@ -18,7 +18,6 @@ from types import SimpleNamespace
 
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
 _MODULE = re.compile(r"test_[a-z0-9_]{1,80}\Z")
-_MAX_REMOTE_MODULES = 8
 _MODULE_TIMEOUT = 180
 _TOTAL_TIMEOUT = 540
 _REMOTE_LIMIT = 32768
@@ -74,7 +73,7 @@ _SKIPPED_COUNT = re.compile(r"skipped=(\d+)")
 
 
 def module_result(module, test_output, final):
-    """One module_results entry per #2119 design section 3. Not wired into main() yet.
+    """One module_results entry per #2119 design section 3.
 
     ran comes from the last line matching 'Ran N tests in ', so earlier nested output
     does not count; it is 0 when there is no such line. skipped comes from
@@ -329,8 +328,7 @@ def _parse_and_validate(argv):
     if (
         not args.modules or
         any(not isinstance(mod, str) or _MODULE.fullmatch(mod) is None for mod in args.modules) or
-        len(set(args.modules)) != len(args.modules) or
-        len(args.modules) > _MAX_REMOTE_MODULES
+        len(set(args.modules)) != len(args.modules)
     ):
         raise ValueError("invalid modules")
     args.modules = sorted(args.modules)
@@ -473,6 +471,7 @@ def main(argv=None, *, runner=None, clock=None, git=None):
     result = "FAIL"
     code = 1
     finals = []
+    module_results = []
     failures = []
     failed_outputs = []
     homes = []
@@ -486,6 +485,7 @@ def main(argv=None, *, runner=None, clock=None, git=None):
             code = 124
             failures.append(mod)
             finals.append("NO_FINAL")
+            module_results.append(module_result(mod, b"", "NO_FINAL"))
             printed_summaries.append((None, "NO_FINAL"))
             break
         limit = min(_MODULE_TIMEOUT, remaining)
@@ -522,8 +522,9 @@ def main(argv=None, *, runner=None, clock=None, git=None):
         if launch_failed:
             final = LAUNCH_REASON
         finals.append(final)
-        ran_match = re.search(rb"Ran (\d+) tests?", test_output)
-        ran += int(ran_match.group(1)) if ran_match else 0
+        evidence = module_result(mod, test_output, final)
+        module_results.append(evidence)
+        ran += evidence["ran"]
         ran_line = next(
             (
                 x.decode("utf8", "replace").strip()
@@ -540,7 +541,7 @@ def main(argv=None, *, runner=None, clock=None, git=None):
             failures.append(mod)
             failed_outputs.extend((stdout, stderr))
             break
-        if returncode != 0 or not passing_final(final):
+        if returncode != 0 or not passing_final(final) or evidence["ran"] <= evidence["skipped"]:
             result = "FAIL"
             code = returncode if isinstance(returncode, int) and returncode > 0 else 1
             failures.append(mod)
@@ -564,7 +565,8 @@ def main(argv=None, *, runner=None, clock=None, git=None):
         "ended_at": ended,
         "elapsed_s": elapsed,
         "ran_total": ran,
-        "final": finals[-len(args.modules) * 2:],
+        "final": finals,
+        "module_results": module_results,
         "failures": failures[:10],
         "log_bytes": min(len(log), _MAX_LOG_BYTES),
         "log_sha256": hashlib.sha256(log).hexdigest(),
