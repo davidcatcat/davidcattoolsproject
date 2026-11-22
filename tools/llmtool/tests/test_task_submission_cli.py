@@ -815,6 +815,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
                    for option in action.option_strings]
         self.assertIn('--executor-task', options)
         self.assertNotIn('--source-sha', options)
+        probed = parser.parse_args(['task', 'gw-agent-probe', '--json'])
+        self.assertEqual((probed.action, probed.json), ('gw-agent-probe', True))
 
     def test_record_pm_is_strict_offline_and_persists_truthful_provenance(self):
         request = 'Implement a small, isolated OpenCode adapter test.'

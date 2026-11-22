@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore
+from llmtool import worker_availability as wa
 from llmtool import worker_dispatch
 from test_task_store import record as make_task_record
 
@@ -316,6 +317,200 @@ class WorkerAvailabilityStoreTests(unittest.TestCase):
             evidence_sha256=hashlib.sha256(b'updated evidence').hexdigest(),
             expected=None)
         self.assertEqual(saved['codex-developer']['runtime']['status'], 'PASS')
+
+
+class GwAgentAvailabilityProbeTests(unittest.TestCase):
+    """#2367: gw-agent probe/hold classes reuse the existing sidecar."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve() / 'tasks'
+        self.policy_path = worker_policy_fixture.install(self)
+        self.store = TaskStore(self.root)
+        self.now = datetime.now(timezone.utc).replace(microsecond=0)
+        # #2609 RCA (c7082417851): the tests step a logical clock forward, and
+        # the store refuses observations dated after its own clock (product rule,
+        # unchanged). The tests therefore control the one clock both read, so no
+        # observation is ever later than the store's time.
+        self.clock = self.now
+        test = self
+
+        class _Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return test.clock if tz is None else test.clock.astimezone(tz)
+
+        for module in ('llmtool.task_store', 'llmtool.worker_availability'):
+            clock = patch(module + '.datetime', _Clock)
+            clock.start()
+            self.addCleanup(clock.stop)
+        allowed = worker_dispatch.PolicyDecision(
+            'gw-agent', True, 'OWNER_POLICY_ALLOWED', '0' * 64)
+        policy = patch.object(worker_dispatch, 'evaluate', return_value=allowed)
+        policy.start()
+        self.addCleanup(policy.stop)
+
+    def sidecar(self):
+        return self.root / '.worker-availability.json'
+
+    def at(self, delta=timedelta(0)):
+        """Advance the shared test clock to self.now + delta and return it."""
+        self.clock = self.now + delta
+        return self.clock
+
+    def test_infrastructure_pause_is_cleared_only_by_a_passing_probe(self):
+        result = wa.record_gw_agent_failure(
+            self.store, 'infrastructure', now=self.at(), task_id='1' * 32)
+        self.assertEqual(result['action'], 'INFRASTRUCTURE_PAUSE')
+        self.assertEqual(wa.gw_agent_refusal(self.store, now=self.at()),
+                         'WORKER_GW_AGENT_UNAVAILABLE')
+
+        calls = []
+        report = wa.probe_gw_agent(
+            self.store, now=self.at(timedelta(minutes=1)),
+            call=lambda: calls.append('probe') or {
+                'tcp': 'PASS', 'auth': 'PASS', 'inference': 'PASS'})
+        self.assertEqual(report['status'], 'PASS')
+        self.assertTrue(report['provider_call'])
+        self.assertEqual(calls, ['probe'])
+        self.assertIsNone(wa.gw_agent_refusal(
+            self.store, now=self.at(timedelta(minutes=1))))
+
+    def test_model_failure_steps_down_once_then_pauses_without_a_probe_call(self):
+        first = wa.record_gw_agent_failure(
+            self.store, 'model', now=self.at(), task_id='2' * 32)
+        self.assertEqual(first['action'], 'STEP_DOWN')
+        self.assertIsNone(wa.gw_agent_refusal(self.store, now=self.at()))
+
+        second = wa.record_gw_agent_failure(
+            self.store, 'model', now=self.at(timedelta(minutes=1)), task_id='3' * 32)
+        self.assertEqual(second['action'], 'PAUSE')
+        self.assertEqual(wa.gw_agent_refusal(
+            self.store, now=self.at(timedelta(minutes=1))),
+            'WORKER_GW_AGENT_MODEL_PAUSED')
+
+        called = []
+        report = wa.probe_gw_agent(
+            self.store, now=self.at(timedelta(minutes=2)),
+            call=lambda: called.append('provider'))
+        self.assertFalse(report['provider_call'])
+        self.assertEqual(report['reason'], 'WORKER_GW_AGENT_MODEL_PAUSED')
+        self.assertEqual(called, [])
+        self.assertEqual(wa.gw_agent_refusal(
+            self.store, now=self.at(timedelta(minutes=2))),
+            'WORKER_GW_AGENT_MODEL_PAUSED')
+
+    def test_429_retry_after_blocks_the_probe_until_it_expires(self):
+        result = wa.record_gw_agent_failure(
+            self.store, 'rate_limit', now=self.at(), retry_after=120,
+            task_id='4' * 32)
+        self.assertEqual(result['action'], 'RATE_LIMITED')
+        called = []
+        early = wa.probe_gw_agent(
+            self.store, now=self.at(timedelta(seconds=60)),
+            call=lambda: called.append('provider'))
+        self.assertFalse(early['provider_call'])
+        self.assertEqual(called, [])
+
+        late = wa.probe_gw_agent(
+            self.store, now=self.at(timedelta(seconds=121)),
+            call=lambda: {'tcp': 'PASS', 'auth': 'PASS', 'inference': 'PASS'})
+        self.assertEqual(late['status'], 'PASS')
+        self.assertTrue(late['provider_call'])
+        self.assertIsNone(wa.gw_agent_refusal(
+            self.store, now=self.at(timedelta(seconds=121))))
+
+    def test_security_hold_is_not_auto_recovered_by_a_probe(self):
+        result = wa.record_gw_agent_failure(
+            self.store, 'security', now=self.at(), task_id='5' * 32)
+        self.assertEqual(result['action'], 'SECURITY_HOLD')
+        called = []
+        report = wa.probe_gw_agent(
+            self.store, now=self.at(timedelta(minutes=1)),
+            call=lambda: called.append('provider'))
+        self.assertFalse(report['provider_call'])
+        self.assertEqual(report['reason'], 'WORKER_GW_AGENT_SECURITY_HOLD')
+        self.assertEqual(called, [])
+        self.assertEqual(wa.gw_agent_refusal(
+            self.store, now=self.at(timedelta(minutes=1))),
+            'WORKER_GW_AGENT_SECURITY_HOLD')
+
+    def test_failed_hold_write_refuses_a_later_admission(self):
+        class FailingStore:
+            root = self.root / 'failing'
+
+            def record_worker_observation(self, **_observation):
+                raise LLMToolError('synthetic hold write failure')
+
+        store = FailingStore()
+        self.addCleanup(wa._GW_HOLD_WRITE_FAILED.pop, wa._store_key(store), None)
+        result = wa.record_gw_agent_failure(store, 'security', now=self.at())
+        self.assertEqual(result['action'], 'HOLD_WRITE_FAILED')
+        self.assertEqual(wa.gw_agent_refusal(store, now=self.at()),
+                         'WORKER_GW_AGENT_HOLD_UNRECORDED')
+
+    def test_one_model_failure_is_a_step_down_even_with_the_task_record(self):
+        class ScanStore:
+            root = self.root
+
+            def __init__(self, store, developer):
+                self.store = store
+                self.developer = developer
+
+            def get_worker_observations(self):
+                return self.store.get_worker_observations()
+
+            def record_worker_observation(self, **observation):
+                return self.store.record_worker_observation(**observation)
+
+            def task_ids(self):
+                return ['a' * 32]
+
+            def get(self, _task_id):
+                return {'developer': self.developer}
+
+        developer = {'provider_profile': 'gw-agent', 'state': 'DEVELOPER_UNAVAILABLE',
+                     'error_code': 'DEVELOPER_GW_AGENT_MODEL_ERROR',
+                     'created_at': wa._stamp(self.now - timedelta(minutes=1))}
+        store = ScanStore(self.store, developer)
+        first = wa.record_gw_agent_failure(store, 'model', now=self.at(),
+                                           task_id='a' * 32)
+        self.assertEqual(first['action'], 'STEP_DOWN')
+        self.assertIsNone(wa.gw_agent_refusal(store, now=self.at()))
+        second = wa.record_gw_agent_failure(store, 'model', now=self.at(),
+                                            task_id='a' * 32)
+        self.assertEqual(second['action'], 'PAUSE')
+        self.assertEqual(wa.gw_agent_refusal(store, now=self.at()),
+                         'WORKER_GW_AGENT_MODEL_PAUSED')
+
+    def test_failure_classes_use_fixed_codes_only(self):
+        cases = (
+            ('DEVELOPER_GW_AGENT_QUOTA_EXHAUSTED_HTTP_429', 'rate_limit'),
+            ('DEVELOPER_GW_AGENT_AUDIT_INVALID', 'security'),
+            ('DEVELOPER_GW_AGENT_TIMEOUT', 'infrastructure'),
+            ('DEVELOPER_GW_AGENT_MODEL_ERROR_HTTP_500', 'infrastructure'),
+            ('DEVELOPER_GW_AGENT_MODEL_UNVERIFIED', 'model'),
+            ('DEVELOPER_GW_AGENT_MODEL_ERROR', 'model'),
+            ('DEVELOPER_GW_AGENT_RESULT_UNKNOWN', 'unknown'),
+        )
+        for code, expected in cases:
+            with self.subTest(code=code):
+                self.assertEqual(wa.classify_gw_agent_failure(code), expected)
+
+    def test_unknown_outcome_writes_nothing_and_does_not_pause(self):
+        result = wa.record_gw_agent_failure(
+            self.store, 'DEVELOPER_GW_AGENT_RESULT_UNKNOWN', now=self.at())
+        self.assertEqual(result['action'], 'NONE')
+        self.assertIsNone(wa.gw_agent_refusal(self.store, now=self.at()))
+        self.assertFalse(self.sidecar().exists())
+
+    def test_other_developer_routes_are_unaffected(self):
+        wa.record_gw_agent_failure(self.store, 'model', now=self.at())
+        wa.record_gw_agent_failure(self.store, 'model', now=self.at(timedelta(seconds=1)))
+        self.assertFalse(wa.fresh_quota_fail(self.store, 'opencode-developer'))
+        self.assertIsNone(wa.quota_refusal(self.store, 'opencode-developer'))
+        self.assertIsNotNone(wa.gw_agent_refusal(self.store, now=self.at()))
 
 
 if __name__ == '__main__':

@@ -292,3 +292,489 @@ def quota_refusal(store, worker, *, owner_assignment_ref=None, policy_task_id=No
         return None
     decision = worker_dispatch.evaluate(worker, owner_assignment_ref, policy_task_id)
     return REFUSAL_CODE if decision.allowed else None
+
+
+# #2367: gw-agent availability. The probe reuses the existing worker
+# availability sidecar (no new state system); delegation and probing are both
+# refused while a hold is active. Failure classes are kept apart:
+#   runtime        infrastructure pause, cleared by a passing probe
+#   endpoint       rate limit (HTTP 429), cleared by Retry-After or a probe
+#   inference      model capability, stepped down once then paused at the
+#                  lowest tier (never cleared by a probe, per S1)
+#   task_acceptance security/authorization hold (never auto-recovered)
+GW_AGENT_WORKER = 'gw-agent'
+GW_AGENT_INFRA_LAYER = 'runtime'
+GW_AGENT_RATE_LAYER = 'endpoint'
+GW_AGENT_MODEL_LAYER = 'inference'
+GW_AGENT_SECURITY_LAYER = 'task_acceptance'
+GW_AGENT_PROBE_LAYERS = ('runtime', 'endpoint', 'authentication', 'inference')
+GW_AGENT_FAILURE_CLASSES = frozenset((
+    'infrastructure', 'rate_limit', 'model', 'security', 'unknown'))
+GW_AGENT_REFUSALS = {
+    'infrastructure': 'WORKER_GW_AGENT_UNAVAILABLE',
+    'rate_limit': 'WORKER_GW_AGENT_RATE_LIMITED',
+    'model': 'WORKER_GW_AGENT_MODEL_PAUSED',
+    'security': 'WORKER_GW_AGENT_SECURITY_HOLD',
+    'unrecorded': 'WORKER_GW_AGENT_HOLD_UNRECORDED',
+}
+GW_AGENT_HOLD_FRESH_FOR = timedelta(days=29)  # under WORKER_AVAILABILITY_MAX_AGE_DAYS
+_MODEL_STEP_TWO = hashlib.sha256(b'gw-agent-model-failure:2').hexdigest()
+_MODEL_STEP_ONE = hashlib.sha256(b'gw-agent-model-failure:1').hexdigest()
+_GW_HOLD_WRITE_FAILED = {}
+
+
+def _store_key(store):
+    root = getattr(store, 'root', None)
+    return str(root) if root is not None else ('id', id(store))
+
+
+def _observation_view(store):
+    reader = getattr(store, 'get_worker_observations', None)
+    if not callable(reader):
+        return None
+    try:
+        return reader()
+    except Exception:
+        return 'UNAVAILABLE'
+
+
+def _observation(view, layer):
+    try:
+        return view[GW_AGENT_WORKER][layer]
+    except Exception:
+        return None
+
+
+def _active_fail(view, layer, now=None):
+    entry = _observation(view, layer)
+    if type(entry) is not dict or entry.get('status') != 'FAIL':
+        return False
+    if now is None:
+        return True
+    # The stored view marks freshness at read time; a caller's bounded time
+    # (a probe or a later admission) must also see an expired FAIL as inactive.
+    try:
+        return (datetime.strptime(entry.get('fresh_until'), '%Y-%m-%dT%H:%M:%SZ')
+                .replace(tzinfo=timezone.utc) > now)
+    except (TypeError, ValueError):
+        return True
+
+
+def _failure_class(value):
+    if type(value) is not str:
+        return 'unknown'
+    code = value.upper()
+    for prefix in ('DEVELOPER_GW_AGENT_', 'GW_AGENT_'):
+        if code.startswith(prefix):
+            code = code[len(prefix):]
+            break
+    if ('429' in code or 'RATE' in code or 'QUOTA' in code):
+        return 'rate_limit'
+    if any(token in code for token in (
+            'AUTH', 'CREDENTIAL', 'AUDIT', 'SECURITY', 'FORBIDDEN',
+            'UNAUTHORIZED', 'DISPATCH_DENIED', 'HTTP_401', 'HTTP_403')):
+        return 'security'
+    if any(token in code for token in (
+            'HTTP_5', 'TIMEOUT', 'CONNECTION', 'NETWORK', 'TRANSPORT',
+            'GATEWAY_STALE', 'UNAVAILABLE')):
+        return 'infrastructure'
+    if any(token in code for token in (
+            'MODEL', 'PROFILE', 'CAPABILITY', 'SERVED', 'UNVERIFIED')):
+        return 'model'
+    return 'unknown'
+
+
+def classify_gw_agent_failure(error_code=None, *, gateway_code=None,
+                              exception=None, status_code=None):
+    """Return infrastructure, rate_limit, model, security or unknown.
+
+    The class comes only from fixed route/gateway codes, an HTTP status or the
+    exception type; provider text is never inspected.
+    """
+    if type(status_code) is int:
+        if status_code == 429:
+            return 'rate_limit'
+        if status_code in (401, 403):
+            return 'security'
+        if status_code >= 500:
+            return 'infrastructure'
+        if 400 <= status_code < 500:
+            return 'model'
+    if exception is not None:
+        if isinstance(exception, PermissionError):
+            return 'security'
+        if isinstance(exception, (TimeoutError, ConnectionError, OSError)):
+            return 'infrastructure'
+    for value in (gateway_code, error_code):
+        code = _failure_class(value)
+        if code != 'unknown':
+            return code
+    return 'unknown'
+
+
+def _utc_now(now):
+    return (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(
+        microsecond=0)
+
+
+def _hold_fresh_until(now):
+    return now + GW_AGENT_HOLD_FRESH_FOR
+
+
+def _retry_seconds(value, now):
+    """A bounded Retry-After value (seconds or HTTP date); None when unusable."""
+    if type(value) in (int, float) and not isinstance(value, bool):
+        seconds = value
+    elif type(value) is str:
+        try:
+            seconds = float(value.strip())
+        except ValueError:
+            try:
+                from email.utils import parsedate_to_datetime
+                parsed = parsedate_to_datetime(value)
+                if parsed is None or parsed.tzinfo is None:
+                    return None
+                seconds = (parsed - now).total_seconds()
+            except Exception:
+                return None
+    else:
+        return None
+    if seconds < 0:
+        return None
+    return min(seconds, MAX_RESET_WINDOW.total_seconds())
+
+
+def _write_observation(store, layer, status, observed, fresh_until, evidence):
+    store.record_worker_observation(
+        worker_key=GW_AGENT_WORKER, layer=layer, status=status,
+        observed_at=_stamp(observed), fresh_until=_stamp(fresh_until),
+        source='LOCAL_OBSERVATION', evidence_sha256=evidence)
+
+
+def record_gw_agent_failure(store, failure_class=None, *, error_code=None,
+                            gateway_code=None, exception=None, status_code=None,
+                            now=None, retry_after=None, retry_after_seconds=None,
+                            task_id=None, tier='lowest'):
+    """Record one gw-agent failure in the existing worker availability record.
+
+    infrastructure pauses dispatch until a probe passes. rate_limit honours
+    Retry-After. security stays held. model steps down once and pauses on the
+    second consecutive failure at the lowest tier (S1). unknown writes nothing.
+    A hold that cannot be recorded marks the store so a later admission is
+    refused until a hold or a passing probe is durably recorded (S2).
+    """
+    if failure_class not in GW_AGENT_FAILURE_CLASSES:
+        failure_class = classify_gw_agent_failure(
+            error_code if failure_class is None else failure_class,
+            gateway_code=gateway_code, exception=exception, status_code=status_code)
+    now = _utc_now(now)
+    key = _store_key(store)
+    if failure_class == 'unknown':
+        return {'worker': GW_AGENT_WORKER, 'failure_class': 'unknown',
+                'action': 'NONE', 'at': _stamp(now)}
+    retry = retry_after_seconds if retry_after_seconds is not None else retry_after
+    evidence = hashlib.sha256(
+        ('gw-agent:' + failure_class + ':' + (task_id or '')).encode('utf-8')).hexdigest()
+    if failure_class == 'model':
+        view = _observation_view(store)
+        prior = None if view in (None, 'UNAVAILABLE') else _observation(
+            view, GW_AGENT_MODEL_LAYER)
+        count = 2
+        if tier != 'lowest' or type(prior) is not dict or (
+                prior.get('status') != 'FAIL' and
+                prior.get('evidence_sha256') != _MODEL_STEP_ONE):
+            count = 1
+        status = 'FAIL' if count >= 2 else 'UNKNOWN'
+        evidence = _MODEL_STEP_TWO if count >= 2 else _MODEL_STEP_ONE
+        layer, fresh = GW_AGENT_MODEL_LAYER, _hold_fresh_until(now)
+        action = 'PAUSE' if count >= 2 else 'STEP_DOWN'
+    elif failure_class == 'security':
+        count, layer, fresh = 2, GW_AGENT_SECURITY_LAYER, _hold_fresh_until(now)
+        status, action = 'FAIL', 'SECURITY_HOLD'
+    elif failure_class == 'infrastructure':
+        count, layer, fresh = 2, GW_AGENT_INFRA_LAYER, _hold_fresh_until(now)
+        status, action = 'FAIL', 'INFRASTRUCTURE_PAUSE'
+    else:
+        seconds = _retry_seconds(retry, now)
+        count, layer, status, action = 2, GW_AGENT_RATE_LAYER, 'FAIL', 'RATE_LIMITED'
+        fresh = now + (timedelta(seconds=seconds) if seconds is not None else FRESH_FOR)
+    try:
+        _write_observation(store, layer, status, now, fresh, evidence)
+        if failure_class == 'security':
+            # The auth layer reports the finding; the task_acceptance layer is
+            # the hold a probe can never clear (S1).
+            _write_observation(store, 'authentication', 'FAIL', now, fresh, evidence)
+    except Exception:
+        _GW_HOLD_WRITE_FAILED[key] = failure_class
+        return {'worker': GW_AGENT_WORKER, 'failure_class': failure_class,
+                'action': 'HOLD_WRITE_FAILED', 'at': _stamp(now)}
+    _GW_HOLD_WRITE_FAILED.pop(key, None)
+    return {'worker': GW_AGENT_WORKER, 'failure_class': failure_class,
+            'action': action, 'count': count, 'layer': layer,
+            'status': status, 'observed_at': _stamp(now),
+            'fresh_until': _stamp(fresh)}
+
+
+def record_gw_agent_success(store, *, now=None, evidence=None):
+    """Record a passing probe: PASS on every probe layer, holds untouched."""
+    now = _utc_now(now)
+    key = _store_key(store)
+    digest = evidence or hashlib.sha256(
+        ('gw-agent:probe:pass:' + _stamp(now)).encode('utf-8')).hexdigest()
+    fresh = now + FRESH_FOR
+    view = _observation_view(store)
+    failed = False
+    for layer in GW_AGENT_PROBE_LAYERS:
+        if layer == GW_AGENT_MODEL_LAYER and _active_fail(view, layer, now):
+            continue  # S1: a model pause is never cleared by a probe
+        if layer == GW_AGENT_RATE_LAYER and _active_fail(view, layer, now):
+            continue  # an unexpired Retry-After is not cleared by a probe
+        try:
+            _write_observation(store, layer, 'PASS', now, fresh, digest)
+        except Exception:
+            failed = True
+    if failed:
+        _GW_HOLD_WRITE_FAILED.setdefault(key, 'infrastructure')
+    elif _GW_HOLD_WRITE_FAILED.get(key) not in ('security', 'model'):
+        _GW_HOLD_WRITE_FAILED.pop(key, None)
+    return not failed
+
+
+def _task_failure_unresolved(store, now, view, *, classes=None):
+    """True when a stored gw-agent failure still needs a hold or passing probe.
+
+    This is the durable half of S2: if recording a hold failed, the failed
+    Task's own record is enough to refuse a later admission. A passing probe
+    (or a fresh hold) resolves an infrastructure failure. A recorded step-down
+    is not a pause; a model pause and every security hold stay unresolved.
+    """
+    lister = getattr(store, 'task_ids', None)
+    if not callable(lister):
+        return False
+    try:
+        task_ids = list(lister())
+    except Exception:
+        return False
+    for task_id in task_ids:
+        try:
+            record = store.get(task_id)
+        except Exception:
+            continue
+        developer = record.get('developer') if type(record) is dict else None
+        if (type(developer) is not dict or
+                developer.get('provider_profile') != GW_AGENT_WORKER):
+            continue
+        failure = classify_gw_agent_failure(developer.get('error_code'))
+        if failure == 'unknown' or (classes is not None and failure not in classes):
+            continue
+        created = developer.get('created_at')
+        if type(created) is not str:
+            continue
+        try:
+            created_at = datetime.strptime(created, '%Y-%m-%dT%H:%M:%SZ').replace(
+                tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if now - created_at > MAX_RESET_WINDOW:
+            continue
+        if failure == 'security':
+            entry = (None if view in (None, 'UNAVAILABLE')
+                     else _observation(view, GW_AGENT_SECURITY_LAYER))
+            if type(entry) is not dict or entry.get('status') != 'FAIL':
+                return True
+            try:
+                if (datetime.strptime(entry.get('observed_at'), '%Y-%m-%dT%H:%M:%SZ')
+                        .replace(tzinfo=timezone.utc) < created_at):
+                    return True
+            except (TypeError, ValueError):
+                return True
+            continue
+        if failure == 'model':
+            entry = (None if view in (None, 'UNAVAILABLE')
+                     else _observation(view, GW_AGENT_MODEL_LAYER))
+            if type(entry) is not dict:
+                return True
+            try:
+                if (datetime.strptime(entry.get('observed_at'), '%Y-%m-%dT%H:%M:%SZ')
+                        .replace(tzinfo=timezone.utc) < created_at):
+                    return True
+            except (TypeError, ValueError):
+                return True
+            if entry.get('status') == 'FAIL':
+                continue  # the active-pause check already refused
+            if entry.get('evidence_sha256') == _MODEL_STEP_TWO:
+                return True
+            continue
+        layer = (GW_AGENT_INFRA_LAYER if failure == 'infrastructure'
+                 else GW_AGENT_RATE_LAYER)
+        entry = None if view in (None, 'UNAVAILABLE') else _observation(view, layer)
+        if failure == 'rate_limit':
+            reset = entry.get('fresh_until') if type(entry) is dict else None
+            if type(reset) is str:
+                try:
+                    if datetime.strptime(reset, '%Y-%m-%dT%H:%M:%SZ').replace(
+                            tzinfo=timezone.utc) <= now:
+                        continue
+                except ValueError:
+                    pass
+            if type(entry) is dict and entry.get('status') == 'PASS':
+                continue
+            return True
+        if type(entry) is not dict or entry.get('status') != 'PASS':
+            return True
+        observed = entry.get('observed_at')
+        try:
+            if (datetime.strptime(observed, '%Y-%m-%dT%H:%M:%SZ').replace(
+                    tzinfo=timezone.utc) < created_at):
+                return True
+        except (TypeError, ValueError):
+            return True
+    return False
+
+
+def gw_agent_refusal(store, *, now=None):
+    """The refusal code while gw-agent is held out of dispatch, else None."""
+    key = _store_key(store)
+    if key in _GW_HOLD_WRITE_FAILED:
+        return GW_AGENT_REFUSALS['unrecorded']
+    view = _observation_view(store)
+    if view is None:
+        return None
+    if view == 'UNAVAILABLE':
+        return 'WORKER_GW_AGENT_AVAILABILITY_UNKNOWN'
+    now = _utc_now(now)
+    if _active_fail(view, GW_AGENT_SECURITY_LAYER, now):
+        return GW_AGENT_REFUSALS['security']
+    if _active_fail(view, GW_AGENT_MODEL_LAYER, now):
+        return GW_AGENT_REFUSALS['model']
+    if _active_fail(view, GW_AGENT_INFRA_LAYER, now):
+        return GW_AGENT_REFUSALS['infrastructure']
+    if _active_fail(view, GW_AGENT_RATE_LAYER, now):
+        return GW_AGENT_REFUSALS['rate_limit']
+    if _task_failure_unresolved(store, now, view):
+        return GW_AGENT_REFUSALS['unrecorded']
+    return None
+
+
+def _probe_report(status, now, *, provider_call, tcp='UNKNOWN', auth='UNKNOWN',
+                  inference='UNKNOWN', reason=None):
+    report = {'worker': GW_AGENT_WORKER, 'status': status, 'at': _stamp(now),
+              'observed_at': _stamp(now), 'tcp': tcp, 'auth': auth,
+              'inference': inference, 'provider_call': provider_call}
+    if reason is not None:
+        report['reason'] = reason
+    return report
+
+
+def probe_gw_agent(store, *, call=None, now=None):
+    """Probe gw-agent through the caller's existing route call.
+
+    One call at most, never a loop. No provider call is made while Owner policy
+    refuses gw-agent, while a model/security hold is active (S1), or while an
+    unexpired Retry-After holds the rate layer. A passing call records PASS on
+    the probe layers and clears an infrastructure pause.
+    """
+    now = _utc_now(now)
+    key = _store_key(store)
+    if _GW_HOLD_WRITE_FAILED.get(key) in ('security', 'model'):
+        return _probe_report('UNKNOWN', now, provider_call=False,
+                             reason=GW_AGENT_REFUSALS['unrecorded'])
+    try:
+        decision = worker_dispatch.evaluate(GW_AGENT_WORKER)
+    except Exception:
+        return _probe_report('UNKNOWN', now, provider_call=False,
+                             reason='OWNER_POLICY_UNAVAILABLE')
+    if not decision.allowed:
+        return _probe_report('UNKNOWN', now, provider_call=False,
+                             reason=decision.reason_code)
+    view = _observation_view(store)
+    if view is None:
+        return _probe_report('UNKNOWN', now, provider_call=False,
+                             reason='AVAILABILITY_STORE_UNAVAILABLE')
+    if view == 'UNAVAILABLE':
+        return _probe_report('UNKNOWN', now, provider_call=False,
+                             reason='AVAILABILITY_UNAVAILABLE')
+    if _active_fail(view, GW_AGENT_SECURITY_LAYER, now):
+        return _probe_report('FAIL', now, provider_call=False, auth='FAIL',
+                             reason=GW_AGENT_REFUSALS['security'])
+    if _active_fail(view, GW_AGENT_MODEL_LAYER, now):
+        return _probe_report('FAIL', now, provider_call=False, inference='FAIL',
+                             reason=GW_AGENT_REFUSALS['model'])
+    if _active_fail(view, GW_AGENT_RATE_LAYER, now):
+        return _probe_report('UNKNOWN', now, provider_call=False,
+                             reason=GW_AGENT_REFUSALS['rate_limit'])
+    if _task_failure_unresolved(store, now, view, classes=('security', 'model')):
+        return _probe_report('UNKNOWN', now, provider_call=False,
+                             reason=GW_AGENT_REFUSALS['unrecorded'])
+    if not callable(call):
+        return _probe_report('UNKNOWN', now, provider_call=False,
+                             reason='PROBE_CALL_UNAVAILABLE')
+    try:
+        result = call()
+    except Exception as exc:
+        failure = classify_gw_agent_failure(
+            getattr(exc, 'code', None), exception=exc,
+            status_code=getattr(exc, 'status_code', None))
+        facts = getattr(exc, 'facts', None)
+        retry = (getattr(exc, 'retry_after', None) or
+                 (facts.get('retry_after') if type(facts) is dict else None) or
+                 (facts.get('retry_after_seconds') if type(facts) is dict else None))
+        record_gw_agent_failure(
+            store, failure, exception=exc, now=now, retry_after=retry)
+        inference = ('FAIL' if failure == 'model' else 'UNKNOWN')
+        return _probe_report('FAIL', now, provider_call=True,
+                             tcp=('FAIL' if failure == 'infrastructure' else 'UNKNOWN'),
+                             auth=('FAIL' if failure == 'security' else 'UNKNOWN'),
+                             inference=inference, reason=failure)
+    if type(result) is dict:
+        statuses = {name: (result.get(name) if result.get(name) in
+                           ('PASS', 'FAIL', 'UNKNOWN') else 'UNKNOWN')
+                    for name in ('tcp', 'auth', 'inference')}
+        if result.get('status') in ('PASS', 'FAIL', 'UNKNOWN'):
+            statuses = {name: (value if value != 'UNKNOWN' else result['status'])
+                        for name, value in statuses.items()}
+        if result.get('model_capability') is True and statuses['inference'] == 'FAIL':
+            failure = 'model'
+        elif statuses['auth'] == 'FAIL':
+            failure = 'security'
+        elif statuses['tcp'] == 'FAIL':
+            failure = 'infrastructure'
+        elif statuses['inference'] == 'FAIL':
+            failure = ('infrastructure' if result.get('infrastructure') is True
+                       else 'model')
+        elif 'FAIL' in statuses.values():
+            failure = 'infrastructure'
+        else:
+            failure = None
+        retry = result.get('retry_after', result.get('retry_after_seconds'))
+    else:
+        if result is False:
+            statuses = {'tcp': 'FAIL', 'auth': 'UNKNOWN', 'inference': 'UNKNOWN'}
+            failure = 'infrastructure'
+        else:
+            statuses = {'tcp': 'PASS', 'auth': 'PASS', 'inference': 'PASS'}
+            failure = None
+        retry = None
+    if failure is not None:
+        record_gw_agent_failure(store, failure, now=now, retry_after=retry)
+        return _probe_report('FAIL', now, provider_call=True, reason=failure,
+                             **statuses)
+    if type(result) is dict and any(value == 'UNKNOWN' for value in statuses.values()):
+        return _probe_report('UNKNOWN', now, provider_call=True,
+                             reason='PROBE_INCONCLUSIVE', **statuses)
+    if not record_gw_agent_success(store, now=now):
+        return _probe_report('UNKNOWN', now, provider_call=True,
+                             reason='PROBE_RESULT_NOT_RECORDED', **statuses)
+    return _probe_report('PASS', now, provider_call=True, **statuses)
+
+
+def record_gw_agent_hold(store, hold='security', **kwargs):
+    """Record one gw-agent hold: a security hold or any failure class."""
+    return record_gw_agent_failure(store, hold, **kwargs)
+
+
+# Compatibility names for callers that describe the same two operations.
+gw_agent_probe = probe_gw_agent
+gw_agent_availability_refusal = gw_agent_refusal
+record_availability_failure = record_gw_agent_failure
+record_hold = record_gw_agent_hold

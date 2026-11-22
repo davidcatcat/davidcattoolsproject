@@ -25,6 +25,7 @@ from llmtool import (
     task_completion,
     task_status,
     task_submission_cli,
+    worker_availability,
     worker_dispatch,
 )
 from llmtool.developer_routes import GwAgentRoute, RouteError, load_route_config
@@ -102,6 +103,19 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             with self.assertRaises(LLMToolError):
                 task_submission_cli.run_task_gw_agent_delegate(args, store=store)
             sweep.assert_called_once_with(store)
+
+    def test_model_pause_refuses_before_any_task_read(self):
+        class HeldStore:
+            def get_worker_observations(self):
+                return {'gw-agent': {'inference': {'status': 'FAIL'}}}
+
+            def get(self, _task_id):
+                raise AssertionError('a pause must refuse before a Task read')
+
+        with patch('llmtool.gw_agent_sessions.sweep_quietly'):
+            with self.assertRaisesRegex(LLMToolError, 'WORKER_GW_AGENT_MODEL_PAUSED'):
+                task_submission_cli.run_task_gw_agent_delegate(
+                    Namespace(), store=HeldStore())
 
     def test_company_gateway_origin_with_path_is_refused(self):
         task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
@@ -1724,6 +1738,16 @@ class GwAgentRealStoreTests(unittest.TestCase):
             self.task_id, pm_session_id=stranded['pm_session_id'],
             reason='Synthetic subtest finished with the D6.')
 
+    def _passing_probe(self):
+        # #2367: an infrastructure failure pauses dispatch until a probe passes.
+        allowed = worker_dispatch.PolicyDecision(
+            'gw-agent', True, 'OWNER_POLICY_ALLOWED', 'f' * 64)
+        with patch.object(worker_dispatch, 'evaluate', return_value=allowed):
+            report = worker_availability.probe_gw_agent(
+                self.store, call=lambda: {'tcp': 'PASS', 'auth': 'PASS',
+                                          'inference': 'PASS'})
+        self.assertEqual(report['status'], 'PASS')
+
     def _assert_success_persisted(self, task, target):
         developer = task['developer']
         self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
@@ -2603,7 +2627,10 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self._assert_failed(failed, 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TIMEOUT')
         # No abandonment: a run that ended DEVELOPER_UNAVAILABLE holds no D6.
+        # #2367: the timeout paused dispatch, so a probe must pass before the
+        # repair round may reach the provider again.
         self.server.script.clear()
+        self._passing_probe()
         target = 'gw-agent-repair.md'
         code, task = self._delegate(target)
         self.assertEqual(code, 0)
@@ -2662,7 +2689,10 @@ class GwAgentRealStoreTests(unittest.TestCase):
                                  reason='Synthetic store outage.')
         self.assertEqual(saved['abandonment']['reason'], 'Synthetic store outage.')
 
+        # #2367: the timeout paused dispatch, so a probe must pass before a
+        # later Task may reach the provider again.
         self.server.script.clear()
+        self._passing_probe()
         target = 'gw-agent-after-abandon.md'
         code, task = self._delegate(target)
         self.assertEqual(code, 0)
