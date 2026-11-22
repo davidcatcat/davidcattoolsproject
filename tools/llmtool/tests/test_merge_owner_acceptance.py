@@ -80,6 +80,7 @@ def fake_github(*, files=TUI_FILES, runs=GREEN, comment_value=None, commit_value
             'check_runs': [dict(item, id=index + 1) for index, item in enumerate(runs)]},
         'pulls/17/files?per_page=100': [{'filename': item} for item in files],
         'pulls/17': pr,
+        'issues/17/comments?per_page=100': [],
         'branches/main': {'commit': {'sha': MAIN_SHA}},
         f'compare/{MAIN_SHA}...{HEAD}': {'status': 'ahead'},
         COMMENT_PATH: comment() if comment_value is None else comment_value,
