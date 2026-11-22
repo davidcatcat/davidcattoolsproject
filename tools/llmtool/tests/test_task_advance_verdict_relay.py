@@ -91,3 +91,24 @@ class BlockedReviewerRelayTest(VerdictRelayTest):
         result = self.advance(entries=entries, state='blocked')
         self.assertEqual((self.posted, result['step'], result['codes']), ([], 'REVIEW_NOT_POSTED',
             ['REVIEWER_VERDICT_UNPOSTED', 'REVIEWER_WAITING_APPROVAL']))
+
+
+class FullVerdictRelayTest(unittest.TestCase):
+    """#2536: advance posts the whole verdict, findings included, never only its header."""
+
+    advance = VerdictRelayTest.advance
+
+    def test_fail_findings_after_binding_are_posted(self):
+        from test_review_transcript import fail_verdict
+        expected = fail_verdict('', 'Finding: F1 [High] a.py:1 synthetic.', '',
+                                'Finding: F2 [Low] a.py:2 synthetic.')
+        result = self.advance('Review done.\n\n' + expected)
+        self.assertEqual(self.posted, [['pr', 'comment', '17', '--body', expected]])
+        self.assertEqual((len(self.reads), result['step'], result['codes']),
+                         (2, 'RECORD_REVIEW_RESULT', []))
+
+    def test_fail_without_findings_is_not_posted(self):
+        from test_review_transcript import fail_verdict
+        result = self.advance(fail_verdict())
+        self.assertEqual((self.posted, result['step'], result['codes']), ([], 'REVIEW_NOT_POSTED',
+            ['REVIEWER_VERDICT_UNPOSTED', 'REVIEWER_VERDICT_NO_FINDINGS']))

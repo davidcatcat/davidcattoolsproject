@@ -46,10 +46,12 @@ class UnpostedVerdictTest(unittest.TestCase):
                          ('ENDED', 'REVIEWER_VERDICT_BINDING_MISMATCH', None))
         self.assertEqual(self.relay(verdict(), verdict())[1], 'REVIEWER_VERDICT_AMBIGUOUS')
 
-    def test_fenced_verdict_with_trailing_prose_posts_only_verdict_lines(self):
+    def test_fenced_verdict_ends_at_its_closing_fence(self):
         self.assertEqual(self.relay('Post this:\n\n```\n' + verdict() + '\n```\n\nNot run: CI.'),
                          ('ENDED', None, verdict()))
-        self.assertEqual(self.relay(verdict() + '\nNot run: CI.')[2], verdict())
+        # #2536: an unfenced verdict keeps everything after its binding line.
+        self.assertEqual(self.relay(verdict() + '\nNot run: CI.')[2],
+                         verdict() + '\nNot run: CI.')
 
     def test_extra_lines_inside_the_verdict_are_refused(self):
         lines = verdict().split('\n')
@@ -160,3 +162,60 @@ class BlockedBackgroundReviewerTest(unittest.TestCase):
     def test_other_live_states_stay_running(self):
         self.assertEqual(self.relay([assistant(text(verdict()))], state='running'),
                          ('RUNNING', None, None))
+
+
+BINDING = (f'LLMTOOL-REVIEW-BINDING v1 task={"1" * 32} run={"2" * 32} '
+           f'contract={"c" * 64} head={HEAD}')
+
+
+def fail_verdict(*body):
+    return '\n'.join([
+        '<!-- activity: type=review_verdict actor=Claude target=PM status=FIX -->',
+        f'Verdict: FAIL | Version: v1 | HEAD: {HEAD}', BINDING, *body])
+
+
+class FullVerdictTest(unittest.TestCase):
+    """#2536: the findings and evidence after the binding line are part of the verdict."""
+
+    relay = UnpostedVerdictTest.relay
+
+    def test_fail_with_findings_after_binding_is_kept_whole(self):
+        # Shape of PR #2365 v4: prose, blank, header, then text and four findings.
+        body = ['', 'Scope reviewed: the note.', '',
+                'Finding: F1 [High] docs/a.md:1 synthetic one.', 'Evidence line.', '',
+                'Finding: F2 [High] docs/a.md:2 synthetic two.', '',
+                'Finding: F3 [Medium] docs/a.md:3 synthetic three.', '',
+                'Finding: F4 [Low] docs/a.md:4 synthetic four.', '', 'Disposition: FIX.']
+        expected = fail_verdict(*body)
+        self.assertEqual(self.relay('I reviewed the change.\n\n' + expected + '\n'),
+                         ('ENDED', None, expected))
+
+    def test_prose_verdict_line_before_the_marker_is_not_part_of_it(self):
+        # Shape of PR #2553 v1: a summary line starting "Verdict:" before the marker.
+        expected = fail_verdict('', 'Finding: F1 [High] llmtool/x.py:1 synthetic.', '', 'Why.')
+        self.assertEqual(self.relay('Verdict: FAIL, one High finding.\n\n' + expected),
+                         ('ENDED', None, expected))
+
+    def test_pass_with_accept_before_binding_keeps_its_notes(self):
+        # Shape of PR #2540 v1: marker, Verdict, ACCEPT, binding, then the review notes.
+        lines = verdict().split('\n')
+        expected = '\n'.join(lines[:2] + [lines[2], lines[3], '', 'Checked: synthetic notes.'])
+        self.assertEqual(self.relay('Done.\n\n' + expected), ('ENDED', None, expected))
+
+    def test_fail_without_findings_is_never_posted(self):
+        self.assertEqual(self.relay(fail_verdict('', 'Looks wrong.')),
+                         ('ENDED', 'REVIEWER_VERDICT_NO_FINDINGS', None))
+
+    def test_text_between_header_lines_or_a_second_binding_is_refused(self):
+        lines = fail_verdict().split('\n')
+        moved = '\n'.join(lines[:2] + ['Note.', lines[2], 'Finding: F1 [High] a:1 x'])
+        self.assertEqual(self.relay(moved)[1], 'REVIEWER_VERDICT_NOT_EXACT')
+        twice = fail_verdict('Finding: F1 [High] a:1 x', BINDING)
+        self.assertEqual(self.relay(twice)[1], 'REVIEWER_VERDICT_NOT_EXACT')
+        other = fail_verdict('Finding: F1 [High] a:1 x', BINDING.replace('1' * 32, '9' * 32))
+        self.assertEqual(self.relay(other)[1], 'REVIEWER_VERDICT_NOT_EXACT')
+
+    def test_fenced_fail_keeps_findings_up_to_the_closing_fence(self):
+        expected = fail_verdict('', 'Finding: F1 [High] a.py:1 synthetic.')
+        self.assertEqual(self.relay('Post:\n```\n' + expected + '\n```\nAfter the fence.'),
+                         ('ENDED', None, expected))
