@@ -66,6 +66,10 @@ OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
 #           caller default llmtool.start_failure.HIGH_DEBUG_EXCERPT_MAX_CHARS)
 #   #2537:  gw_agent_max_turns (the per-Task gw-agent turn cap; caller default
 #           GW_AGENT_MAX_TURNS below)
+#   #2622 (Owner decision relayed in the issue): route_failure_pause_after (the
+#           number of consecutive route failures after which a Developer route
+#           pauses; the Owner decision is 3, set in policy.json; caller default
+#           ROUTE_FAILURE_PAUSE_AFTER below)
 OPTIONAL_POSITIVE_POLICY_KEYS = ('spec_preflight_large_file_lines', 'merge_train_members_max',
                                  'merge_train_files_per_pr_max', 'revert_scope_prs_max',
                                  'd6_writer_lease_hours', 'developer_assignment_wait_seconds',
@@ -74,7 +78,8 @@ OPTIONAL_POSITIVE_POLICY_KEYS = ('spec_preflight_large_file_lines', 'merge_train
                                  'claude_review_envelope_limit_bytes',
                                  'review_source_limit_bytes', 'start_failures_max',
                                  'start_retries_max', 'committed_result_carries_max',
-                                 'ai_debug_excerpt_max_chars', 'gw_agent_max_turns')
+                                 'ai_debug_excerpt_max_chars', 'gw_agent_max_turns',
+                                 'route_failure_pause_after')
 # #2281 row 18 (basis #819): Developer assignment wait. The key above is
 # optional; a policy that omits it keeps the caller default, the hard-coded
 # wait at its point of use (llmtool.developer_assignment_inbox).
@@ -128,6 +133,10 @@ AI_DEBUG_EXCERPT_MAX_CHARS = 6000
 # under half the smallest one. The key above is optional; a policy that omits
 # it keeps this value.
 GW_AGENT_MAX_TURNS = 64
+# #2622 (Owner decision relayed in the issue): a Developer route pauses after
+# this many consecutive route failures. The key above is optional; a policy
+# that omits it keeps this value, and tools/llmtool/policy.json records 3.
+ROUTE_FAILURE_PAUSE_AFTER = 3
 # #2281 L0a (design rule 3): the bound is a real technical limit, not an
 # arbitrary cap. policy.json is untrusted input, so load_policy reads at most
 # _MAX_BYTES + 1 bytes in one bounded buffer instead of the whole file. The
@@ -308,6 +317,15 @@ def gw_agent_max_turns(path=None):
     GW_AGENT_MAX_TURNS)."""
     policy = load_policy(path)
     return policy.get('gw_agent_max_turns', GW_AGENT_MAX_TURNS)
+
+
+def route_failure_pause_after(path=None):
+    """#2622: the consecutive route failures after which a Developer route pauses.
+
+    The key is optional; a policy that omits it keeps the Owner's value, 3.
+    """
+    policy = load_policy(path)
+    return policy.get('route_failure_pause_after', ROUTE_FAILURE_PAUSE_AFTER)
 
 
 KINDS = ('root', 'child', 'replan')
