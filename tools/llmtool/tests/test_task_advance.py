@@ -1651,6 +1651,9 @@ def ci_github_get(reply, calls, pr=PR):
             return dict(run, output=CI_OUTPUT)
         if path.endswith('/files?per_page=100'):
             return reply[1]
+        if path.startswith('issues/') and path.endswith('/comments?per_page=100'):
+            # #2199 A2: a readable empty page means no security verdict.
+            return []
         return pr
     return github_get
 

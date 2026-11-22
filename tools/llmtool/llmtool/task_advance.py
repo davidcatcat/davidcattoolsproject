@@ -1265,8 +1265,17 @@ def _security_merge_refusal(code, *, number=None, head=None, task_id=None):
 
 
 def _security_comment_code(comments, head):
-    """Refuse when any security verdict comment (v91+) at head is not PASS, failing closed."""
-    if type(comments) is not list or len(comments) >= 100:
+    """Refuse when any security verdict comment (v91+) at head is not PASS, failing closed.
+
+    A successfully read EMPTY list means this head has no security verdict, so
+    the check passes (#2199 A2). Only a malformed read, an incomplete page or a
+    malformed comment entry refuses.
+    """
+    if type(comments) is not list:
+        return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+    if not comments:
+        return None
+    if len(comments) >= 100:
         return 'MERGE_SECURITY_REVIEW_UNKNOWN'
     for comment in comments:
         if type(comment) is not dict:

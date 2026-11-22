@@ -229,6 +229,12 @@ class DirectSecurityCommentGateTests(unittest.TestCase):
         self.assertEqual(result['step'], 'MERGED')
         self.assertEqual(sum(call[:2] == ['pr', 'merge'] for call in calls), 1)
 
+    def test_readable_empty_comment_list_merges(self):
+        # A2: an empty page is a complete read with no security verdict.
+        result, calls, _updates = _run_merge_once([])
+        self.assertEqual(result['step'], 'MERGED')
+        self.assertEqual(sum(call[:2] == ['pr', 'merge'] for call in calls), 1)
+
     def test_security_pass_at_exact_head_merges(self):
         sec_pass = _verdict_comment(1, 'PASS', HEAD, version=91, actor='Codex')
         result, calls, _updates = _run_merge_once([sec_pass])
