@@ -248,6 +248,15 @@ class CiFailRepairTests(unittest.TestCase):
         self.assertEqual(self._claims(), before)
         self.assertEqual(len(self.calls), 1)
 
+    def test_empty_excerpt_is_accepted_without_screen_error(self):
+        result = self.dispatch(ci_failure=_ci(excerpt=''))
+        self.assertEqual(len(self.calls), 1)
+        packet = self.calls[0]['packet']
+        self.assertTrue(packet['reviewer_text_excerpt_untrusted_data'].startswith(
+            f'{review_repair.CI_PACKET_HEADER} check=check (Linux 3.14) run=7 '
+            f'conclusion=failure head={HEAD}\n'))
+        self.assertEqual(result['claim']['state'], 'DISPATCHED')
+
 
 if __name__ == '__main__':
     unittest.main()

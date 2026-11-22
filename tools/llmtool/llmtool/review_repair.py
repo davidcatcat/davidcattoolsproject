@@ -575,7 +575,9 @@ def _ci_failure(task, *, executor_task, pr_number, ci_failure):
             ci_failure['conclusion'] != 'failure' or
             type(ci_failure['excerpt']) is not str):
         _refuse('CI_FAILURE_INVALID')
-    excerpt = task_submission_cli._screen_text(ci_failure['excerpt'], CI_EXCERPT_MAX_BYTES + 1024)
+    excerpt = ci_failure['excerpt']
+    if excerpt.strip():
+        excerpt = task_submission_cli._screen_text(excerpt, CI_EXCERPT_MAX_BYTES + 1024)
     try:
         valid_excerpt = (len(excerpt.encode('utf-8')) <= CI_EXCERPT_MAX_BYTES and
                          len(excerpt.splitlines()) <= CI_EXCERPT_MAX_LINES)

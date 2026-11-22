@@ -2078,6 +2078,32 @@ class TaskAdvanceCiFailRepairTests(unittest.TestCase):
         self.assertEqual(len(dispatched), 1)
         self.assertEqual(repaired, [])
 
+    def test_ci_failure_without_output_routes_with_empty_excerpt(self):
+        run = check_run(4, name='check (docs)', conclusion='failure')
+        self.assertEqual(task_advance._ci_excerpt(run), '')
+        self.assertEqual(task_advance._ci_excerpt({'output': {'title': '   \n  '}}), '')
+        record = base_record()
+        repaired = []
+
+        def get(path):
+            if path.startswith('commits/'):
+                return {'total_count': 1, 'check_runs': [run]}
+            if path.startswith('check-runs/4'):
+                return dict(run)
+            if path.endswith('/files?per_page=100'):
+                return [{'filename': 'docs/guide.md'}]
+            return PR
+
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]):
+            result = task_advance.advance(
+                task_id=record['task_id'], store=CiGateStore(record), pr_number=17,
+                github_get=get,
+                repair_review_call=lambda **kw: repaired.append(kw) or {'repair': 'sent'})
+        self.assertEqual((result['step'], result['codes']), ('CI_FAILED', []))
+        self.assertEqual(len(repaired), 1)
+        self.assertEqual(repaired[0]['ci_failure']['excerpt'], '')
+
 
 class TaskAdvancePublishTests(unittest.TestCase):
     TASK_ID = '1' * 32

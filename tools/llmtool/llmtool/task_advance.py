@@ -775,6 +775,8 @@ def _ci_excerpt(run):
     lines = '\n'.join(parts).splitlines()[:review_repair.CI_EXCERPT_MAX_LINES]
     raw = '\n'.join(lines).encode('utf-8', errors='replace')
     excerpt = raw[:review_repair.CI_EXCERPT_MAX_BYTES].decode('utf-8', errors='ignore')
+    if not excerpt.strip():
+        return ''
     return task_submission_cli._screen_text(excerpt, review_repair.CI_EXCERPT_MAX_BYTES + 1024)
 
 
