@@ -1710,14 +1710,16 @@ class TaskStoreTests(unittest.TestCase):
 
     def test_long_goal_and_items_still_screened_and_bounded(self):
         # #2281 limit row 8: the sensitive screen still runs on the goal and each
-        # item (screen mocked, per the test data rule); the 64 KiB bound stays.
+        # item (screen mocked, per the test data rule). #2281 5 MiB rule (Owner
+        # 2026-11-19): the goal and item bound follows the 5 MiB request/response
+        # bound; one byte over it is still refused.
         long_goal = 'Keep the whole goal in plain prose. ' * 40
         flagged = 'Text the mocked screen is told to flag.'
         cases = (
             ('goal_screen', {'goal': long_goal + flagged}),
             ('item_screen', {'acceptance': [long_goal + flagged]}),
-            ('goal_bound', {'goal': 'a' * (64 * 1024 + 1)}),
-            ('item_bound', {'acceptance': ['a' * (64 * 1024 + 1)]}),
+            ('goal_bound', {'goal': 'a' * (5 * 1024 * 1024 + 1)}),
+            ('item_bound', {'acceptance': ['a' * (5 * 1024 * 1024 + 1)]}),
         )
         for name, change in cases:
             with self.subTest(case=name):
@@ -1731,7 +1733,7 @@ class TaskStoreTests(unittest.TestCase):
         task = self._codex_dispatch_task()
         self.store.create(task)
         developer = dict(self._developer_assignment(),
-                         acceptance=['a' * (64 * 1024 + 1)])
+                         acceptance=['a' * (5 * 1024 * 1024 + 1)])
         with self.assertRaises(LLMToolError):
             self.store.compare_and_update(
                 task['task_id'], expected={'developer': None}, developer=developer)
@@ -3689,7 +3691,7 @@ class TaskStoreTests(unittest.TestCase):
         self.store.update(task['task_id'], developer=responded)
         self.assertEqual(self.store.get(task['task_id'])['developer']['artifact'], artifact)
 
-    def test_developer_artifact_over_512_kib_is_refused(self):
+    def test_developer_artifact_over_5_mib_is_refused(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
         pending = self._developer_assignment(provider='codex', max_tokens=None)
@@ -3701,7 +3703,8 @@ class TaskStoreTests(unittest.TestCase):
         self.store.update(task['task_id'], developer=dispatching)
         header = ('diff --git a/src.py b/src.py\n'
                   '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n')
-        artifact = header + '+y = 1\n' * ((512 * 1024 - len(header)) // 7 + 1)
+        # #2281: the artifact ceiling is 5 MiB; one line over it is refused.
+        artifact = header + '+y = 1\n' * ((5 * 1024 * 1024 - len(header)) // 7 + 1)
         execution = {'status': 'DONE',
             'native_session_id': '12345678-1234-4234-8234-123456789abc',
             'process_exit_code': 0, 'stdout_sha256': 'c' * 64, 'elapsed_ms': 12,
