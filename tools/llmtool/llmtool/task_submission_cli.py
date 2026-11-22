@@ -1404,7 +1404,9 @@ def _lineage_cli(store, stdout, call):
         if type(code) is not str or re.fullmatch(r'[A-Z0-9_]{1,64}', code) is None:
             code = 'LINEAGE_REFUSED'
         payload = {'code': code}
-        if str(exc) and str(exc) != code:
+        # Only an explicit refusal explanation rides with the code; a generic
+        # store diagnostic is never printed as the command's message.
+        if str(exc) and str(exc).startswith(code + ':'):
             payload['message'] = str(exc)
         _print(payload, stdout=stdout)
         return 1

@@ -935,7 +935,8 @@ class LineageEndVsAdvanceTests(LineageCase):
         only = self.member(root)
         with self.store.advance_lease(root):
             result = cli.lineage_end(self.store, only, 'DROPPED', pm_session=PM,
-                                     reason='Original function is not affected.')
+                                     reason='Original function is not affected.',
+                                     final=True)
         # The child's end is saved and notified; the ROOT stays PARKED (fail closed).
         self.assertEqual((result['state'], result['root']),
                          ('DROPPED', {'code': 'LINEAGE_ROLL_UP_FAILED'}))
