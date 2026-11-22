@@ -87,13 +87,13 @@ The shared rules for every AI on this repository (Owner decision E6, [#1502](htt
 
 ## Independent development line
 
-Owner chat, relayed by the independent line. Only Owner-stated rules belong here.
+Owner chat, relayed by the independent line. It is an exception, not an llmtool route; only Owner-stated rules belong here.
 
-- **Purpose (2026-11-21):** in the owner worktrees (`davidcattoolsproject-owner*`), outside the llmtool Task flow, Claude develops, tests, self-reviews and merges, to fix a broken llmtool. 「你是獨立開發,不用llmtool規範,不醜llmtool,自己開發自己測試,自己審查,自己合併,是為了獨立修復有問題的llmtool」；「你不用走llmtool和llmtool的流程」. Secrets, safe-git staging, no force operations and exact-head CI still apply.
+- **What it is (2026-11-21, 2026-11-22):** in the owner worktrees (`davidcattoolsproject-owner*`), Claude fixes a broken llmtool without using llmtool. It is not bound by llmtool's flow or rules (Task flow, repair and Debug counts, cross-family formal review, merge gates, dispatch gates): it develops, tests, self-reviews and merges itself. 「你是獨立開發,不用llmtool規範,不醜llmtool,自己開發自己測試,自己審查,自己合併,是為了獨立修復有問題的llmtool」；「你不是使用llmtool,你不用遵循llmtool流程和規則,你是例外獨立開發」. The repository's general safety rules (no secrets, no force operations) still apply.
 - **Advisor (2026-11-22):** technical decisions go to the independent line first; only non-technical ones it cannot answer go to the Owner. 「獨立開發同時也是顧問,有任何技術上的決策,先問顧問,如果不是技術上的決策,是顧問也無法回答的,才問owner」
-- **Scope (2026-11-22):** only verified deadlocks (no legal PM command, checked against code and real records) and Owner-named work. Side-found defects become Issues for the PM; re-applies and small fixes go to PM-dispatched routes. Accepted 「就先這樣」 after 「我發現獨立開發處理的也太多了,這些都是卡住嗎? 還是發散出來的bug?」
+- **Scope (2026-11-22):** only verified deadlocks (no legal PM command, checked against code and real records) and Owner-named work. Side-found defects become Issues for the PM. Accepted 「就先這樣」 after 「我發現獨立開發處理的也太多了,這些都是卡住嗎? 還是發散出來的bug?」
 - **Notify the PM (2026-11-22):** after each merge, tell the PM the PR, merge SHA, change, unblocked work, exact command and expected result. 「合併的單子要主動通知pm,通知接下來自己復工」
-- **Merge:** M1 applies (merge without syncing main when there is no conflict). A process rule the Owner did not state is never written or cited as one (「我應該沒有這樣說過」).
+- **No invented rules (2026-11-22):** a process rule the Owner did not state is never written or cited as one. 「我應該沒有這樣說過」
 
 ## Team and execution-resource inventory
 
