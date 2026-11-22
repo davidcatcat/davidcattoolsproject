@@ -73,8 +73,9 @@ def verify_artifact_applied(*args, **kwargs):
 
 def _merge_resolution_paths(root, commit, first_parent, second_parent):
     """Return the paths a two-parent merge resolved by hand or conflicted on."""
-    resolution_raw = _remerge_diff_paths_raw(root, commit)
-    conflict_raw = _merge_tree_conflict_paths_raw(root, first_parent, second_parent)
+    from . import task_completion as _m
+    resolution_raw = _m._remerge_diff_paths_raw(root, commit)
+    conflict_raw = _m._merge_tree_conflict_paths_raw(root, first_parent, second_parent)
     try:
         resolution_paths = set(
             path for path in resolution_raw.decode('utf-8', 'strict').split('\x00')
@@ -99,6 +100,7 @@ def _developer_tip(root, start_sha, head_sha, trusted_base_sha=None):
     resolution or conflict path, so it adds nothing to its first parent except
     trusted main. The first commit that fails is returned, or else start_sha.
     """
+    from . import task_completion as _m
     if trusted_base_sha is None:
         trusted_base_sha = start_sha
     current = head_sha
@@ -107,7 +109,7 @@ def _developer_tip(root, start_sha, head_sha, trusted_base_sha=None):
         parents = raw.decode('ascii').split()[1:]
         if len(parents) == 2:
             _require_trusted_base(root, trusted_base_sha)
-        if (len(parents) != 2 or not _is_ancestor(root, parents[1], trusted_base_sha) or
+        if (len(parents) != 2 or not _m._is_ancestor(root, parents[1], trusted_base_sha) or
                 _merge_resolution_paths(root, current, parents[0], parents[1])):
             return current
         current = parents[0]
@@ -325,10 +327,11 @@ def _verify_recorded_segment(root, start_sha, end_sha, recorded_head, trusted_ba
     trusted-main merges, as for the Claude root segment. A Developer commit
     after the recorded HEAD is unrecorded and refuses.
     """
+    from . import task_completion as _m
     try:
         if (type(recorded_head) is not str or _HEX40.fullmatch(recorded_head) is None or
                 recorded_head == start_sha or
-                not _is_ancestor(root, start_sha, recorded_head) or
+                not _m._is_ancestor(root, start_sha, recorded_head) or
                 _developer_tip(root, recorded_head, end_sha,
                                trusted_base_sha) != recorded_head):
             _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')

@@ -414,6 +414,68 @@ def _test_excerpt(home, output, code):
     return selected['excerpts']
 
 
+def _worktree_diff(root, source_sha):
+    """Return a bounded source diff including safe untracked files."""
+    tracked_patch = _git(root, ('diff', '--binary', '--no-ext-diff', '--no-textconv',
+        '--no-renames', source_sha, '--'), limit=_GIT_LIMIT)
+    tracked_raw = _git(root, ('diff', '--name-only', '-z', '--no-ext-diff',
+        '--no-textconv', '--no-renames', source_sha, '--'), limit=1024 * 1024)
+    untracked_raw = _git(root, ('ls-files', '--others', '--exclude-standard', '-z'),
+                         limit=64 * 1024)
+    try:
+        tracked = set(path for path in tracked_raw.decode('utf-8', 'strict').split('\x00') if path)
+        untracked = [path for path in untracked_raw.decode('utf-8', 'strict').split('\x00') if path]
+    except UnicodeError:
+        _stop('WORKTREE_PATH_INVALID')
+    if len(untracked) > _PROPOSAL_FILE_LIMIT or len(set(untracked)) != len(untracked):
+        _stop('WORKTREE_UNTRACKED_FILES')
+    extra = []
+    for path in untracked:
+        parts = Path(path).parts
+        if (not path or Path(path).is_absolute() or '\\' in path or
+                any(part in ('', '.', '..') for part in parts) or
+                any(ord(char) < 0x20 or ord(char) >= 0x7f for char in path)):
+            _stop('WORKTREE_PATH_INVALID')
+        target = Path(root).joinpath(*parts)
+        try:
+            before = target.lstat()
+        except OSError:
+            _stop('WORKTREE_FILE_UNAVAILABLE')
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or
+                before.st_size > _GIT_LIMIT):
+            _stop('WORKTREE_FILE_UNSUPPORTED')
+        raw = _git(root, ('diff', '--no-index', '--binary', '--no-ext-diff',
+            '--no-textconv', '--no-renames', '/dev/null', path),
+            limit=_GIT_LIMIT, allow_exit_1=True)
+        try:
+            after = target.lstat()
+        except OSError:
+            _stop('WORKTREE_FILE_CHANGED')
+        if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) !=
+                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
+            _stop('WORKTREE_FILE_CHANGED')
+        # --no-index names /dev/null in its header. Emit Git's standard
+        # new-file patch shape so the direct Developer parser can validate it.
+        try:
+            text = raw.decode('utf-8', 'strict')
+        except UnicodeError:
+            _stop('WORKTREE_PATH_INVALID')
+        standard_header = f'diff --git a/{path} b/{path}\n'
+        null_header = f'diff --git a/dev/null b/{path}\n'
+        if text.startswith(null_header):
+            text = standard_header + text[len(null_header):]
+        elif not text.startswith(standard_header):
+            _stop('WORKTREE_FILE_UNSUPPORTED')
+        extra.append(text.encode('utf-8'))
+    paths = tuple(sorted(tracked | set(untracked)))
+    if len(paths) > _PROPOSAL_FILE_LIMIT:
+        _stop('WORKTREE_SCOPE_MISMATCH')
+    patch = tracked_patch + b''.join(extra)
+    if len(patch) > _GIT_LIMIT:
+        _stop('GIT_EVIDENCE_TOO_LARGE')
+    return paths, patch
+
+
 
 
 

@@ -278,38 +278,6 @@ def validate_review_dispatch_intent(intent):
     return intent
 
 
-def review_dispatch_blocked(intent, code='REVIEW_ADAPTER_UNAVAILABLE'):
-    """Return an honest no-launch status receipt for a missing trusted adapter."""
-    validate_review_dispatch_intent(intent)
-    if type(code) is not str or re.fullmatch(r'[A-Z0-9_]{1,64}', code) is None:
-        _stop('REVIEW_DISPATCH_BINDING_INVALID')
-    receipt = {
-        'schema_version': 2,
-        'dispatch_id': intent.get('dispatch_id'),
-        'task_id': intent.get('task_id'),
-        'run_id': intent.get('run_id'),
-        'contract_digest': intent.get('contract_digest'),
-        'source_sha': intent.get('source_sha'),
-        'result_head': intent.get('result_head'),
-        'diff_sha256': intent.get('diff_sha256'),
-        'developer_task_id': intent.get('developer_task_id'),
-        'reviewer_task_id': None,
-        'reviewer_identity': None,
-        'reviewer_session_ref': None,
-        'review_packet_digest': None,
-        'verdict': 'BLOCKED',
-        'security': 'BLOCKED',
-        'functional': 'BLOCKED',
-        'execution_status': 'NOT_DISPATCHED',
-        'code': code,
-        'findings_sha256': None,
-        'provenance': 'LOCAL_NO_ADAPTER',
-    }
-    receipt['receipt_sha256'] = hashlib.sha256(_canonical_json_bytes(
-        receipt, 'REVIEW_RECEIPT_INVALID')).hexdigest()
-    return receipt
-
-
 
 
 
@@ -386,68 +354,6 @@ def _git(root, args, *, limit=_GIT_LIMIT, allow_exit_1=False,
             process.wait()
         process.stdout.close()
         process.stderr.close()
-
-
-def _worktree_diff(root, source_sha):
-    """Return a bounded source diff including safe untracked files."""
-    tracked_patch = _git(root, ('diff', '--binary', '--no-ext-diff', '--no-textconv',
-        '--no-renames', source_sha, '--'), limit=_GIT_LIMIT)
-    tracked_raw = _git(root, ('diff', '--name-only', '-z', '--no-ext-diff',
-        '--no-textconv', '--no-renames', source_sha, '--'), limit=1024 * 1024)
-    untracked_raw = _git(root, ('ls-files', '--others', '--exclude-standard', '-z'),
-                         limit=64 * 1024)
-    try:
-        tracked = set(path for path in tracked_raw.decode('utf-8', 'strict').split('\x00') if path)
-        untracked = [path for path in untracked_raw.decode('utf-8', 'strict').split('\x00') if path]
-    except UnicodeError:
-        _stop('WORKTREE_PATH_INVALID')
-    if len(untracked) > _PROPOSAL_FILE_LIMIT or len(set(untracked)) != len(untracked):
-        _stop('WORKTREE_UNTRACKED_FILES')
-    extra = []
-    for path in untracked:
-        parts = Path(path).parts
-        if (not path or Path(path).is_absolute() or '\\' in path or
-                any(part in ('', '.', '..') for part in parts) or
-                any(ord(char) < 0x20 or ord(char) >= 0x7f for char in path)):
-            _stop('WORKTREE_PATH_INVALID')
-        target = Path(root).joinpath(*parts)
-        try:
-            before = target.lstat()
-        except OSError:
-            _stop('WORKTREE_FILE_UNAVAILABLE')
-        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or
-                before.st_size > _GIT_LIMIT):
-            _stop('WORKTREE_FILE_UNSUPPORTED')
-        raw = _git(root, ('diff', '--no-index', '--binary', '--no-ext-diff',
-            '--no-textconv', '--no-renames', '/dev/null', path),
-            limit=_GIT_LIMIT, allow_exit_1=True)
-        try:
-            after = target.lstat()
-        except OSError:
-            _stop('WORKTREE_FILE_CHANGED')
-        if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) !=
-                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
-            _stop('WORKTREE_FILE_CHANGED')
-        # --no-index names /dev/null in its header. Emit Git's standard
-        # new-file patch shape so the direct Developer parser can validate it.
-        try:
-            text = raw.decode('utf-8', 'strict')
-        except UnicodeError:
-            _stop('WORKTREE_PATH_INVALID')
-        standard_header = f'diff --git a/{path} b/{path}\n'
-        null_header = f'diff --git a/dev/null b/{path}\n'
-        if text.startswith(null_header):
-            text = standard_header + text[len(null_header):]
-        elif not text.startswith(standard_header):
-            _stop('WORKTREE_FILE_UNSUPPORTED')
-        extra.append(text.encode('utf-8'))
-    paths = tuple(sorted(tracked | set(untracked)))
-    if len(paths) > _PROPOSAL_FILE_LIMIT:
-        _stop('WORKTREE_SCOPE_MISMATCH')
-    patch = tracked_patch + b''.join(extra)
-    if len(patch) > _GIT_LIMIT:
-        _stop('GIT_EVIDENCE_TOO_LARGE')
-    return paths, patch
 
 
 @dataclass(frozen=True)
@@ -1647,67 +1553,15 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
             'missing_gates': sorted(set(missing))}
 
 
-def _canonical_verdict_body(text):
-    """Return the one canonical form used to match a PASS comment to its claim.
-
-    A Codex PASS comment is accepted only when its body equals the bound
-    claim's ``review_text`` after this single normalization of both texts:
-
-    1. CRLF and lone CR line endings become LF;
-    2. trailing whitespace and newlines at the end of the whole body are
-       removed (nothing else: interior blank lines, leading text and
-       per-line whitespace are kept and must match exactly).
-
-    Return None for a non-string, so it never equals a real body.
-    """
-    if type(text) is not str:
-        return None
-    return text.replace('\r\n', '\n').replace('\r', '\n').rstrip()
-
-
-def _newer_claim_pending(record, pr_number, head, body):
-    """#1132 item 1: a newer open review claim at the same PR and head blocks an older PASS."""
-    # Security v91 F1: read the status line with the acceptance parser's own
-    # splitlines() semantics (CR, CRLF and Unicode separators included).
-    match = next((found for line in (body if type(body) is str else '').splitlines()
-                  if (found := re.fullmatch(r'Verdict: PASS \| Version: v(\d+) \| HEAD: '
-                                            r'[0-9a-f]{40}', line.strip())) is not None),
-                 None)
-    claims = record.get('review_dispatch_claim') if type(record) is dict else None
-    if type(claims) is dict:
-        claims = [claims]
-    if match is None or type(claims) is not list:
-        return False
-    version = int(match.group(1))
-    return any(type(claim) is dict and claim.get('pr') == pr_number and
-               claim.get('head_sha') == head and type(claim.get('version')) is int and
-               claim['version'] > version and
-               claim.get('state') in ('CLAIMED', 'DISPATCHED', 'UNKNOWN')
-               for claim in claims)
-
-
-def is_formal_claude_pass(body, *, task_id, run_id, contract_digest, result_sha):
-    """Return whether a comment is the exact task-bound formal Claude PASS."""
-    if type(body) is not str:
-        return False
-    raw_lines = [line for line in body.splitlines() if line.strip()]
-    if len(raw_lines) < 2:
-        return False
-    marker = _VERDICT_MARKER.fullmatch(raw_lines[0])
-    status = _VERDICT_STATUS.fullmatch(raw_lines[1])
-    binding_line = _review_binding_line(task_id, run_id, contract_digest, result_sha)
-    lines = [line.strip() for line in raw_lines]
-    return (marker is not None and status is not None and
-            marker.group(1) == 'Claude' and marker.group(2) == 'PASS' and
-            status.group(1) == 'PASS' and status.group(2) == result_sha and
-            _FORMAL_ACCEPT in lines and binding_line in lines)
-
-
 # #2281: names moved to the part modules are re-exported here, so every
 # importer and test that uses or patches this module path keeps working.
 from .task_completion_part1 import (  # noqa: E402
+    _canonical_verdict_body,
     _committed_changed_paths,
+    _newer_claim_pending,
+    is_formal_claude_pass,
     normalize_review_handoff_record,
+    review_dispatch_blocked,
     review_handoff_dispatching,
     review_handoff_not_dispatched,
     review_handoff_pending,
@@ -1727,6 +1581,7 @@ from .task_completion_part2 import (  # noqa: E402
     _test_excerpt,
     _tree_blob,
     _tree_entry,
+    _worktree_diff,
     read_d6_registration,
     validate_env2_pass_marker,
 )
