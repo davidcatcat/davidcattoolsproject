@@ -381,7 +381,7 @@ class MergeTrainSecurityCommentGateTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         suite_patcher = mock.patch(
-            'llmtool.mac_full_suite.request_train_full',
+            'llmtool.mac_full_due.request_train_full',
             return_value=mac_full_suite.MAC_FULL_SUITE_DISPATCHED)
         suite_patcher.start()
         self.addCleanup(suite_patcher.stop)
