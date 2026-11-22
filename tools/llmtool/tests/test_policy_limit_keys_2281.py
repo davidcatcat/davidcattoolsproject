@@ -71,6 +71,9 @@ ROW14_KEY = 'committed_result_carries_max'
 # size limit in characters; omitted from the repository policy.json like the
 # row 12, 13 and 14 keys.
 ROW19_KEY = 'ai_debug_excerpt_max_chars'
+# #2537: the per-Task gw-agent turn cap; omitted from the repository
+# policy.json (default repair_policy.GW_AGENT_MAX_TURNS).
+TURN_CAP_KEY = 'gw_agent_max_turns'
 
 
 class PolicyLimitKeysTests(unittest.TestCase):
@@ -91,7 +94,8 @@ class PolicyLimitKeysTests(unittest.TestCase):
         self.assertEqual(set(rp.OPTIONAL_POSITIVE_POLICY_KEYS),
                          {*LIMITS, *LATER_LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY,
                           PACKET_ROW12_KEY, SOURCE_ROW12_KEY, ROW12_KEY,
-                          ROW13_KEY, ROW13_RETRY_KEY, ROW14_KEY, ROW19_KEY})
+                          ROW13_KEY, ROW13_RETRY_KEY, ROW14_KEY, ROW19_KEY,
+                          TURN_CAP_KEY})
         # Optional: none of them is required by the loader.
         self.assertFalse(set(LIMITS) & set(rp.POLICY_KEYS))
         self.assertFalse(set(LIMITS) & set(rp.OPTIONAL_POLICY_LIMITS))

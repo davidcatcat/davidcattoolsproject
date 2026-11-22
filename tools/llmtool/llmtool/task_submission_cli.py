@@ -6835,6 +6835,11 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             route_config['profile']['http_allow_hosts'] = [host]
     except Exception:
         raise LLMToolError('gateway profile is unavailable or invalid') from None
+    # #2537: the route max_turns is a route-wide ceiling; every Task gets at
+    # most the policy turn cap (repair_policy.gw_agent_max_turns), so a looping
+    # run ends with the gateway's definite TURN_BUDGET_EXCEEDED result. An
+    # invalid policy refuses POLICY_INVALID here, before any Task mutation.
+    max_turns = min(max_turns, repair_policy.gw_agent_max_turns())
     # #1502 WP-E, #1773 (CWE-863): after the gateway validation, the role
     # resolver checks the role model and supplies the effort, and the model the
     # gateway profile will actually serve is checked against allowed_models (or
@@ -6864,7 +6869,8 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         'task_id': task['task_id'], 'source_sha': snapshot.head,
         'goal': assignment['goal'], 'acceptance': acceptance + [TEST_DATA_RULE],
         'read_paths': read_paths, 'write_paths': write_paths,
-        # Per-Task budgets come from the gw-agent route in developer-routes.json (#2281 L9).
+        # Per-Task budgets come from the gw-agent route in developer-routes.json
+        # (#2281 L9); max_turns is also capped per Task (#2537).
         'budgets': {'max_turns': max_turns,
                     'max_input_tokens': max_input_tokens_budget,
                     'max_output_tokens': max_output_tokens_budget,

@@ -64,6 +64,8 @@ OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
 #   row 19: ai_debug_excerpt_max_chars (#2281 row 19, second part, basis #2188
 #           and #1502 D11: the AI Debug excerpt size limit in characters;
 #           caller default llmtool.start_failure.HIGH_DEBUG_EXCERPT_MAX_CHARS)
+#   #2537:  gw_agent_max_turns (the per-Task gw-agent turn cap; caller default
+#           GW_AGENT_MAX_TURNS below)
 OPTIONAL_POSITIVE_POLICY_KEYS = ('spec_preflight_large_file_lines', 'merge_train_members_max',
                                  'merge_train_files_per_pr_max', 'revert_scope_prs_max',
                                  'd6_writer_lease_hours', 'developer_assignment_wait_seconds',
@@ -72,7 +74,7 @@ OPTIONAL_POSITIVE_POLICY_KEYS = ('spec_preflight_large_file_lines', 'merge_train
                                  'claude_review_envelope_limit_bytes',
                                  'review_source_limit_bytes', 'start_failures_max',
                                  'start_retries_max', 'committed_result_carries_max',
-                                 'ai_debug_excerpt_max_chars')
+                                 'ai_debug_excerpt_max_chars', 'gw_agent_max_turns')
 # #2281 row 18 (basis #819): Developer assignment wait. The key above is
 # optional; a policy that omits it keeps the caller default, the hard-coded
 # wait at its point of use (llmtool.developer_assignment_inbox).
@@ -116,6 +118,16 @@ COMMITTED_RESULT_CARRIES_MAX = 1
 # keeps the caller default, the hard-coded limit at its point of use
 # (llmtool.start_failure, HIGH_DEBUG_EXCERPT_MAX_CHARS).
 AI_DEBUG_EXCERPT_MAX_CHARS = 6000
+# #2537: the per-Task gw-agent turn cap. llmtool passes the gateway
+# min(route max_turns, this cap), so a looping run ends with the definite
+# BUDGET_EXCEEDED / TURN_BUDGET_EXCEEDED result instead of running to the
+# wall timeout. Basis (299 local gw-agent session records, 2026-11-22):
+# successful single runs used at most 37 turns (recent successes above 16
+# turns used 17-37); looping runs reached 137 (#2537) and 274 turns.
+# 64 leaves about 1.7x headroom over the largest success and stops a loop at
+# under half the smallest one. The key above is optional; a policy that omits
+# it keeps this value.
+GW_AGENT_MAX_TURNS = 64
 # #2281 L0a (design rule 3): the bound is a real technical limit, not an
 # arbitrary cap. policy.json is untrusted input, so load_policy reads at most
 # _MAX_BYTES + 1 bytes in one bounded buffer instead of the whole file. The
@@ -289,6 +301,13 @@ def ai_debug_excerpt_max_chars(path=None):
     policy = load_policy(path)
     return policy.get('ai_debug_excerpt_max_chars',
                       AI_DEBUG_EXCERPT_MAX_CHARS)
+
+
+def gw_agent_max_turns(path=None):
+    """#2537: the per-Task gw-agent turn cap (optional key, default
+    GW_AGENT_MAX_TURNS)."""
+    policy = load_policy(path)
+    return policy.get('gw_agent_max_turns', GW_AGENT_MAX_TURNS)
 
 
 KINDS = ('root', 'child', 'replan')
