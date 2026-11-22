@@ -93,3 +93,70 @@ class UnpostedVerdictTest(unittest.TestCase):
                                side_effect=review_transcript.LLMToolError('synthetic')):
             self.assertEqual(self.relay(verdict()),
                              ('ENDED', 'REVIEWER_VERDICT_WITHHELD', None))
+
+
+def _entries_file(home, entries):
+    os.makedirs(os.path.join(home, 'projects', '-tasks-' + REVIEWER), exist_ok=True)
+    with open(os.path.join(home, 'projects', '-tasks-' + REVIEWER,
+                           SESSION + '.jsonl'), 'w') as handle:
+        for entry in entries:
+            handle.write(json.dumps(entry) + '\n')
+
+
+def assistant(*content, stop='end_turn'):
+    return {'type': 'assistant', 'message': {'stop_reason': stop, 'content': list(content)}}
+
+
+def text(value):
+    return {'type': 'text', 'text': value}
+
+
+class BlockedBackgroundReviewerTest(unittest.TestCase):
+    """#2552: a background reviewer that answered sits in agents state 'blocked'."""
+
+    def relay(self, entries, state='blocked'):
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home)
+        _entries_file(home, entries)
+        rows = json.dumps([{'sessionId': SESSION, 'kind': 'background',
+                            'state': state, 'status': 'idle'}]).encode()
+        return review_transcript.unposted_verdict(
+            {'native_session_id': SESSION, 'reviewer_task': REVIEWER, 'head_sha': HEAD,
+             'version': 1}, TASK, config_dir=home, claude='claude',
+            run=lambda *_a, **_k: subprocess.CompletedProcess([], 0, rows, b''))
+
+    def test_finished_turn_with_bound_pass_is_collected(self):
+        # The real #2552 shape: a thinking entry, then the verdict, both end_turn.
+        entries = [assistant({'type': 'thinking', 'thinking': '...'}),
+                   assistant(text('Review done.\n' + verdict()))]
+        self.assertEqual(self.relay(entries), ('ENDED', None, verdict()))
+
+    def test_finished_turn_after_completed_tool_use_is_collected(self):
+        entries = [assistant({'type': 'tool_use', 'id': 't1', 'name': 'Read'}, stop='tool_use'),
+                   {'type': 'user', 'message': {'content': [
+                       {'type': 'tool_result', 'tool_use_id': 't1', 'content': 'ok'}]}},
+                   assistant(text(verdict()))]
+        self.assertEqual(self.relay(entries), ('ENDED', None, verdict()))
+
+    def test_finished_turn_without_verdict_is_a_definite_code(self):
+        self.assertEqual(self.relay([assistant(text('No verdict.'))]),
+                         ('ENDED', 'REVIEWER_VERDICT_MISSING', None))
+
+    def test_pending_tool_approval_is_never_ended(self):
+        # Waiting on a permission: the verdict text earlier must not be collected.
+        entries = [assistant(text(verdict())),
+                   assistant({'type': 'tool_use', 'id': 't2', 'name': 'Bash'}, stop='tool_use')]
+        self.assertEqual(self.relay(entries), ('BLOCKED', 'REVIEWER_WAITING_APPROVAL', None))
+
+    def test_blocked_without_end_turn_proof_is_waiting(self):
+        self.assertEqual(self.relay([{'type': 'assistant', 'message': {
+            'content': [{'type': 'text', 'text': verdict()}]}}]),
+            ('BLOCKED', 'REVIEWER_WAITING_APPROVAL', None))
+
+    def test_blocked_with_mismatched_binding_is_refused(self):
+        self.assertEqual(self.relay([assistant(text(verdict('9' * 32)))]),
+                         ('ENDED', 'REVIEWER_VERDICT_BINDING_MISMATCH', None))
+
+    def test_other_live_states_stay_running(self):
+        self.assertEqual(self.relay([assistant(text(verdict()))], state='running'),
+                         ('RUNNING', None, None))

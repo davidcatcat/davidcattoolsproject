@@ -13,15 +13,16 @@ from test_task_advance import HEAD, PR, base_record, d6
 
 
 class VerdictRelayTest(unittest.TestCase):
-    def advance(self, *texts, state='done'):
+    def advance(self, *texts, state='done', entries=None):
         home = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, home)
         os.makedirs(os.path.join(home, 'projects', '-tasks-' + REVIEWER))
         with open(os.path.join(home, 'projects', '-tasks-' + REVIEWER,
                                SESSION + '.jsonl'), 'w') as handle:
-            for text in texts:
-                handle.write(json.dumps({'type': 'assistant', 'message': {
-                    'content': [{'type': 'text', 'text': text}]}}) + '\n')
+            for entry in (entries if entries is not None else [
+                    {'type': 'assistant', 'message': {
+                        'content': [{'type': 'text', 'text': text}]}} for text in texts]):
+                handle.write(json.dumps(entry) + '\n')
         rows = json.dumps([{'sessionId': SESSION, 'state': state}]).encode()
         relay = functools.partial(
             review_transcript.unposted_verdict, config_dir=home, claude='claude',
@@ -70,3 +71,23 @@ class VerdictRelayTest(unittest.TestCase):
         self.assertEqual((self.posted, len(self.reads), result['step'], result['codes']),
                          ([], 1, 'RECORD_REVIEW_RESULT', []))
         self.assertEqual(result['result']['state'], 'NOT_READY')
+
+
+class BlockedReviewerRelayTest(VerdictRelayTest):
+    """#2552: advance collects a background reviewer that answered (agents 'blocked')."""
+
+    def test_blocked_finished_turn_with_pass_is_posted_and_recorded(self):
+        entries = [{'type': 'assistant', 'message': {'stop_reason': 'end_turn', 'content': [
+            {'type': 'text', 'text': 'Review done.\n' + verdict()}]}}]
+        result = self.advance(entries=entries, state='blocked')
+        self.assertEqual(self.posted, [['pr', 'comment', '17', '--body', verdict()]])
+        self.assertEqual((len(self.reads), result['step'], result['codes']),
+                         (2, 'RECORD_REVIEW_RESULT', []))
+        self.assertEqual(result['result']['state'], 'REVIEW_PASS')
+
+    def test_blocked_waiting_on_approval_is_a_definite_stop(self):
+        entries = [{'type': 'assistant', 'message': {'stop_reason': 'tool_use', 'content': [
+            {'type': 'tool_use', 'id': 't9', 'name': 'Bash'}]}}]
+        result = self.advance(entries=entries, state='blocked')
+        self.assertEqual((self.posted, result['step'], result['codes']), ([], 'REVIEW_NOT_POSTED',
+            ['REVIEWER_VERDICT_UNPOSTED', 'REVIEWER_WAITING_APPROVAL']))
