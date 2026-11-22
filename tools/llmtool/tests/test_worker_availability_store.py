@@ -385,20 +385,25 @@ class GwAgentAvailabilityProbeTests(unittest.TestCase):
 
         second = wa.record_gw_agent_failure(
             self.store, 'model', now=self.at(timedelta(minutes=1)), task_id='3' * 32)
-        self.assertEqual(second['action'], 'PAUSE')
+        self.assertEqual(second['action'], 'STEP_DOWN')
+        self.assertIsNone(wa.gw_agent_refusal(self.store, now=self.at(timedelta(minutes=1))))
+
+        third = wa.record_gw_agent_failure(
+            self.store, 'model', now=self.at(timedelta(minutes=2)), task_id='4' * 32)
+        self.assertEqual(third['action'], 'PAUSE')
         self.assertEqual(wa.gw_agent_refusal(
-            self.store, now=self.at(timedelta(minutes=1))),
+            self.store, now=self.at(timedelta(minutes=2))),
             'WORKER_GW_AGENT_MODEL_PAUSED')
 
         called = []
         report = wa.probe_gw_agent(
-            self.store, now=self.at(timedelta(minutes=2)),
+            self.store, now=self.at(timedelta(minutes=3)),
             call=lambda: called.append('provider'))
         self.assertFalse(report['provider_call'])
         self.assertEqual(report['reason'], 'WORKER_GW_AGENT_MODEL_PAUSED')
         self.assertEqual(called, [])
         self.assertEqual(wa.gw_agent_refusal(
-            self.store, now=self.at(timedelta(minutes=2))),
+            self.store, now=self.at(timedelta(minutes=3))),
             'WORKER_GW_AGENT_MODEL_PAUSED')
 
     def test_429_retry_after_blocks_the_probe_until_it_expires(self):
@@ -480,7 +485,11 @@ class GwAgentAvailabilityProbeTests(unittest.TestCase):
         self.assertIsNone(wa.gw_agent_refusal(store, now=self.at()))
         second = wa.record_gw_agent_failure(store, 'model', now=self.at(),
                                             task_id='a' * 32)
-        self.assertEqual(second['action'], 'PAUSE')
+        self.assertEqual(second['action'], 'STEP_DOWN')
+        self.assertIsNone(wa.gw_agent_refusal(store, now=self.at()))
+        third = wa.record_gw_agent_failure(store, 'model', now=self.at(),
+                                           task_id='a' * 32)
+        self.assertEqual(third['action'], 'PAUSE')
         self.assertEqual(wa.gw_agent_refusal(store, now=self.at()),
                          'WORKER_GW_AGENT_MODEL_PAUSED')
 
@@ -508,6 +517,7 @@ class GwAgentAvailabilityProbeTests(unittest.TestCase):
     def test_other_developer_routes_are_unaffected(self):
         wa.record_gw_agent_failure(self.store, 'model', now=self.at())
         wa.record_gw_agent_failure(self.store, 'model', now=self.at(timedelta(seconds=1)))
+        wa.record_gw_agent_failure(self.store, 'model', now=self.at(timedelta(seconds=2)))
         self.assertFalse(wa.fresh_quota_fail(self.store, 'opencode-developer'))
         self.assertIsNone(wa.quota_refusal(self.store, 'opencode-developer'))
         self.assertIsNotNone(wa.gw_agent_refusal(self.store, now=self.at()))
