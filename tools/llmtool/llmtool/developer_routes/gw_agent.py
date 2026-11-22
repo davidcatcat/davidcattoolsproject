@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 from urllib.parse import urlsplit
@@ -705,6 +706,140 @@ class GwAgentRoute(DeveloperRoute):
             raise
         except (OSError, UnicodeError, ValueError, TypeError, RecursionError):
             raise RouteError('GW_AGENT_OUTPUT_INVALID') from None
+
+
+_PROBE_TASK_ID = 'gwprobe' + '0' * 25
+_PROBE_SOURCE_SHA = '0' * 40
+_PROBE_PATH = 'llmtool-availability-probe.txt'
+_PROBE_TIMEOUT_SECONDS = 60
+_PROBE_RETRY_MAX_SECONDS = 30 * 24 * 60 * 60
+
+
+def _probe_status(value):
+    return value if value in ('PASS', 'FAIL', 'UNKNOWN') else 'UNKNOWN'
+
+
+def _probe_retry_after(result):
+    """A provider Retry-After value in seconds, bounded; never text."""
+    value = result.get('retry_after') if type(result) is dict else None
+    if type(value) is int and not isinstance(value, bool) and 1 <= value <= _PROBE_RETRY_MAX_SECONDS:
+        return value
+    value = result.get('retry_after_seconds') if type(result) is dict else None
+    if type(value) is int and not isinstance(value, bool) and 1 <= value <= _PROBE_RETRY_MAX_SECONDS:
+        return value
+    return None
+
+
+def probe_gateway(route_config, *, timeout=_PROBE_TIMEOUT_SECONDS):
+    """Make one minimal gateway call through the normal gw-agent route path.
+
+    Returns only statuses, an optional fixed gateway code and an optional
+    Retry-After. The call uses GwAgentRoute.prepare_files/build_argv/collect,
+    so credential handling is entirely the existing route's. It runs in a
+    private temporary directory and never reads or writes a repository or a
+    TaskStore record. The request asks for one short answer and no edits.
+    """
+    report = {'status': 'UNKNOWN', 'tcp': 'UNKNOWN', 'auth': 'UNKNOWN',
+              'inference': 'UNKNOWN', 'code': None, 'retry_after': None,
+              'security': False}
+    temporary = None
+    audit_parent = None
+    reached = False
+    try:
+        if type(route_config) is not dict or type(route_config.get('profile')) is not dict:
+            return report
+        profile = route_config['profile']
+        allowed = profile.get('allowed_data_classes')
+        top_allowed = route_config.get('allowed_data_classes')
+        target = next((item for item in ('synthetic', 'public_repo')
+                       if type(allowed) is list and item in allowed and
+                       type(top_allowed) is list and item in top_allowed), None)
+        if target is None:
+            return report
+        data_class = 'SYNTHETIC' if target == 'synthetic' else 'PUBLIC_REPO'
+        temporary = tempfile.mkdtemp(prefix='llmtool-gw-agent-probe-')
+        os.chmod(temporary, 0o700)
+        base = Path(temporary)
+        root = base / 'repo'
+        route_tmp = base / 'route'
+        root.mkdir(mode=0o700)
+        route_tmp.mkdir(mode=0o700)
+        (route_tmp / 'state').mkdir(mode=0o700)
+        (root / _PROBE_PATH).write_text(
+            'llmtool availability probe; do not edit.\n', encoding='utf-8')
+        max_output = profile.get('max_output_tokens')
+        if type(max_output) is not int or max_output < 1:
+            return report
+        task = {
+            'schema_version': 1, 'task_id': _PROBE_TASK_ID,
+            'source_sha': _PROBE_SOURCE_SHA,
+            'goal': 'Return the single word OK. Do not edit any file.',
+            'acceptance': ['Return OK.'],
+            'read_paths': [_PROBE_PATH], 'write_paths': [_PROBE_PATH],
+            'egress_basis': 'Synthetic availability probe; no task data.',
+            'data_class': data_class,
+            'budgets': {
+                'max_turns': 1, 'max_input_tokens': 2048,
+                'max_output_tokens': min(64, max_output),
+                'max_wall_seconds': max(1, int(timeout)),
+                'max_tool_result_bytes': 256, 'max_sent_bytes': 4096,
+            },
+            'findings': [],
+        }
+        request = {'root': str(root), 'task': task}
+        route = GwAgentRoute(route_config)
+        route.prepare_files(str(route_tmp), request)
+        argv = route.build_argv(sys.executable, dict(request, _route_tmpdir=str(route_tmp)))
+        env = route.build_env(str(route_tmp))
+        completed = subprocess.run(
+            argv, cwd=str(root), env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=timeout)
+        reached = True
+        route.collect(str(route_tmp), request)
+        if route.audit_copy_path:
+            audit_parent = Path(route.audit_copy_path).parent
+        route.parse_output(completed.stdout, completed.stderr, '')
+        code = route._gateway_code
+        report['code'] = code
+        if route._status == 'DONE':
+            report.update(status='PASS', tcp='PASS', auth='PASS', inference='PASS')
+        elif code == 'HTTP_429':
+            report.update(status='FAIL', tcp='PASS', auth='PASS', inference='FAIL',
+                          retry_after=_probe_retry_after(route._result))
+        elif code in ('HTTP_401', 'HTTP_403'):
+            report.update(status='FAIL', tcp='PASS', auth='FAIL', security=True)
+        elif type(code) is str and (code.startswith('HTTP_5') or
+                                    code in ('HTTP_400', 'HTTP_404', 'HTTP_422')):
+            report.update(status='FAIL', tcp='PASS', auth='PASS', inference='FAIL')
+        elif route._status in ('POLICY_REFUSED', 'MODEL_REPORTED_BLOCKED',
+                               'BLOCKED', 'BUDGET_EXCEEDED'):
+            # The gateway and provider answered; this is not an availability failure.
+            report.update(status='PASS', tcp='PASS', auth='PASS', inference='PASS')
+        else:
+            report.update(tcp='PASS', auth='PASS')
+        return report
+    except RouteError as exc:
+        report['code'] = exc.code
+        if exc.code == 'GW_AGENT_CREDENTIAL_MISSING':
+            report.update(auth='FAIL', security=True)
+        elif exc.code == 'GW_AGENT_AUDIT_INVALID':
+            report.update(auth='FAIL', security=True)
+        elif reached:
+            report.update(tcp='PASS', auth='PASS')
+        return report
+    except subprocess.TimeoutExpired:
+        report['code'] = 'GW_AGENT_PROBE_TIMEOUT'
+        return report
+    except OSError:
+        report.update(status='FAIL', tcp='FAIL', code='GW_AGENT_PROBE_TRANSPORT')
+        return report
+    except Exception:
+        return report
+    finally:
+        if temporary is not None:
+            shutil.rmtree(temporary, ignore_errors=True)
+        if audit_parent is not None:
+            shutil.rmtree(audit_parent, ignore_errors=True)
 
 
 _BINDING_SESSION_ID_WRITE = re.compile(r'[0-9a-fA-F-]{16,64}\Z')

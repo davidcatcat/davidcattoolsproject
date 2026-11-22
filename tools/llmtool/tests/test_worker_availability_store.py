@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore
+from llmtool import worker_availability as wa
 from llmtool import worker_dispatch
 from test_task_store import record as make_task_record
 
@@ -316,6 +317,122 @@ class WorkerAvailabilityStoreTests(unittest.TestCase):
             evidence_sha256=hashlib.sha256(b'updated evidence').hexdigest(),
             expected=None)
         self.assertEqual(saved['codex-developer']['runtime']['status'], 'PASS')
+
+
+def _gw_record(error_code):
+    return {'task_id': '1' * 32, 'developer': {
+        'assignment_id': '2' * 32, 'provider_profile': 'gw-agent',
+        'state': 'DEVELOPER_UNAVAILABLE', 'error_code': error_code,
+        'usage': None, 'execution': None}}
+
+
+class GwAgentAvailabilityProbeTests(unittest.TestCase):
+    """#2367: gw-agent probe, holds and admission, all with injected calls."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve() / 'tasks'
+        self.store = TaskStore(self.root)
+        self.policy_path = worker_policy_fixture.install(self)
+        repository = patch.object(
+            worker_dispatch, 'repository_config',
+            return_value={'slug': 'davidcatcat/davidcattoolsproject',
+                          'dispatch_issue': 289, 'dispatch_evidence_pr': 1})
+        repository.start()
+        self.addCleanup(repository.stop)
+        self.now = datetime.now(timezone.utc).replace(microsecond=0)
+        wa._GW_AGENT_HOLD_NOT_RECORDED = False
+        self.addCleanup(setattr, wa, '_GW_AGENT_HOLD_NOT_RECORDED', False)
+
+    def test_probe_pass_clears_infrastructure_hold(self):
+        wa.observe(self.store, _gw_record('DEVELOPER_GW_AGENT_MODEL_ERROR_HTTP_503'),
+                   now=self.now)
+        self.assertEqual(wa.gw_agent_hold_refusal(self.store),
+                         wa.GW_AGENT_INFRASTRUCTURE_PAUSED)
+        result = wa.probe_gw_agent(
+            self.store, now=self.now + timedelta(minutes=1),
+            probe_call=lambda: {'tcp': 'PASS', 'auth': 'PASS', 'inference': 'PASS'})
+        self.assertEqual((result['status'], result['tcp'], result['auth'],
+                          result['inference']), ('PASS', 'PASS', 'PASS', 'PASS'))
+        self.assertIsNone(wa.gw_agent_hold_refusal(self.store))
+
+    def test_two_model_failures_pause_and_the_probe_makes_no_call(self):
+        wa.observe(self.store, _gw_record('DEVELOPER_GW_AGENT_MODEL_UNVERIFIED'),
+                   now=self.now)
+        self.assertIsNone(wa.gw_agent_hold_refusal(self.store))
+        wa.observe(self.store, _gw_record('DEVELOPER_GW_AGENT_MODEL_UNVERIFIED'),
+                   now=self.now + timedelta(minutes=1))
+        self.assertEqual(wa.gw_agent_hold_refusal(self.store),
+                         wa.GW_AGENT_MODEL_CAPABILITY_PAUSED)
+        calls = []
+        result = wa.probe_gw_agent(
+            self.store, now=self.now + timedelta(minutes=2),
+            probe_call=lambda: calls.append('called') or {
+                'tcp': 'PASS', 'auth': 'PASS', 'inference': 'PASS'})
+        self.assertEqual((result['status'], result['code']),
+                         ('BLOCKED', wa.GW_AGENT_MODEL_CAPABILITY_PAUSED))
+        self.assertEqual(calls, [])
+
+    def test_429_retry_after_is_honoured_and_not_replayed(self):
+        result = wa.probe_gw_agent(
+            self.store, now=self.now,
+            probe_call=lambda: {'tcp': 'PASS', 'auth': 'PASS',
+                                'inference': 'FAIL', 'retry_after': 120})
+        self.assertEqual((result['status'], result['retry_after']), ('FAIL', 120))
+        entry = self.store.get_worker_observations()['gw-agent']['quota']
+        self.assertEqual(entry['status'], 'FAIL')
+        self.assertEqual(entry['fresh_until'], wa._stamp(
+            self.now + timedelta(seconds=120)))
+        calls = []
+        replay = wa.probe_gw_agent(
+            self.store, now=self.now + timedelta(seconds=60),
+            probe_call=lambda: calls.append('called') or {'tcp': 'PASS'})
+        self.assertEqual(replay['status'], 'BLOCKED')
+        self.assertEqual(calls, [])
+
+    def test_security_failure_is_not_auto_recovered_by_a_probe(self):
+        result = wa.probe_gw_agent(
+            self.store, now=self.now,
+            probe_call=lambda: {'tcp': 'PASS', 'auth': 'FAIL',
+                                'inference': 'UNKNOWN', 'security': True})
+        self.assertEqual(result['status'], 'FAIL')
+        self.assertEqual(wa.gw_agent_hold_refusal(self.store),
+                         wa.GW_AGENT_SECURITY_STOP)
+        calls = []
+        second = wa.probe_gw_agent(
+            self.store, now=self.now + timedelta(minutes=5),
+            probe_call=lambda: calls.append('called') or {'tcp': 'PASS'})
+        self.assertEqual(second['status'], 'BLOCKED')
+        self.assertEqual(calls, [])
+
+    def test_failed_hold_write_keeps_gw_agent_unavailable(self):
+        failing = patch.object(self.store, 'record_worker_observation',
+                               side_effect=LLMToolError('fixture store unavailable'))
+        with failing:
+            self.assertFalse(wa.record_gw_agent_hold(
+                self.store, wa._SECURITY, now=self.now))
+        self.assertEqual(wa.gw_agent_hold_refusal(self.store),
+                         wa.GW_AGENT_HOLD_UNRECORDED)
+
+    def test_unknown_outcome_is_recorded_and_not_replayed(self):
+        first = wa.probe_gw_agent(self.store, now=self.now, probe_call=lambda: {})
+        self.assertEqual(first['status'], 'UNKNOWN')
+        calls = []
+        second = wa.probe_gw_agent(
+            self.store, now=self.now + timedelta(minutes=1),
+            probe_call=lambda: calls.append('called') or {'tcp': 'PASS'})
+        self.assertEqual(second['status'], 'BLOCKED')
+        self.assertEqual(calls, [])
+
+    def test_other_developers_are_unaffected_by_a_gw_agent_pause(self):
+        wa.observe(self.store, _gw_record('DEVELOPER_GW_AGENT_MODEL_UNVERIFIED'),
+                   now=self.now)
+        wa.observe(self.store, _gw_record('DEVELOPER_GW_AGENT_MODEL_UNVERIFIED'),
+                   now=self.now + timedelta(minutes=1))
+        self.assertEqual(wa.gw_agent_hold_refusal(self.store),
+                         wa.GW_AGENT_MODEL_CAPABILITY_PAUSED)
+        self.assertFalse(wa.fresh_quota_fail(self.store, 'opencode-developer'))
 
 
 if __name__ == '__main__':

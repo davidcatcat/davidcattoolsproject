@@ -63,6 +63,7 @@ TASK_ACTIONS = {
     'github-events': ('run_task_github_events', False),
     'high-debug': ('run_task_high_debug', True),
     'inbox': ('run_task_inbox', False),
+    'probe-gw-agent': ('run_task_probe_gw_agent', False),
     'record-pm': ('run_task_record_pm', False),
     'remote-test': ('run_task_remote_test_checked', True),
     'repair': ('run_task_repair', True),

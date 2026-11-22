@@ -59,7 +59,7 @@ from .developer_routes import (AgyRoute, ClaudeRoute, GwAgentRoute, RouteError, 
                                resolve_route_timeout, run_route)
 from .developer_routes.base import _git_status_paths
 from .developer_routes.gw_agent import (_GATEWAY_DATA_CLASS, _normalize_gw_agent_usage,
-                                        cleanup_audit_copies)
+                                        cleanup_audit_copies, probe_gateway)
 from .developer_routes.agy import _CONVERSATION as AGY_CONVERSATION
 from . import gw_agent_callsite, gw_agent_wiring
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
@@ -897,6 +897,11 @@ def add_task_submission_parsers(actions):
                              help=('caller PM session (native UUID or pm- ID); must own '
                                    'the Task; default: CLAUDE_CODE_SESSION_ID or '
                                    'CODEX_THREAD_ID'))
+    probe_gw = actions.add_parser(
+        'probe-gw-agent',
+        help='Probe gw-agent availability once without touching a repo or Task')
+    probe_gw.add_argument('--timeout', type=int, default=60,
+                          help='probe wall-clock limit in seconds (1-600)')
     delegate = actions.add_parser('delegate', help='Dispatch an explicitly selected Developer for an existing task')
     delegate.add_argument('task_id', help='existing durable Task ID')
     delegate.add_argument('--provider', required=True,
@@ -6704,12 +6709,81 @@ def _gw_agent_endpoint():
     return provider, {'max_tokens': gateway['max_output_tokens']}
 
 
+def _gw_agent_probe_route_config():
+    """The same validated gw-agent route config a real dispatch uses."""
+    route_config = load_route_config()['routes'].get('gw-agent')
+    if type(route_config) is not dict or type(route_config.get('profile')) is not dict:
+        raise LLMToolError('gateway profile is unavailable or invalid')
+    company_provider, generation = _gw_agent_endpoint()
+    model = company_provider.get('model')
+    base_url = company_provider.get('base_url')
+    profile = route_config['profile']
+    max_output_tokens = generation.get('max_tokens') if type(generation) is dict else None
+    context_cap_tokens = profile.get('context_cap_tokens')
+    route_output_cap = profile.get('max_output_tokens')
+    if (company_provider.get('type') != 'openai-compatible' or
+            type(model) is not str or not model or type(base_url) is not str or
+            not base_url or type(max_output_tokens) is not int or
+            type(context_cap_tokens) is not int or type(route_output_cap) is not int):
+        raise LLMToolError('gateway profile is unavailable or invalid')
+    endpoint = urlsplit(base_url)
+    if (endpoint.scheme not in ('http', 'https') or not endpoint.hostname or
+            endpoint.username is not None or endpoint.password is not None or
+            endpoint.path not in ('', '/') or '?' in base_url or '#' in base_url):
+        raise LLMToolError('gateway profile is unavailable or invalid')
+    model, _effort = _gw_agent_developer_profile(route_config, served_model=model)
+    effective = copy.deepcopy(route_config)
+    effective['profile'].update(
+        base_url=base_url.rstrip('/') + '/v1',
+        max_output_tokens=min(max_output_tokens, route_output_cap, context_cap_tokens - 1),
+        context_cap_tokens=context_cap_tokens)
+    effective['profile'].pop('http_allow_hosts', None)
+    if endpoint.scheme == 'http':
+        effective['profile']['http_allow_hosts'] = [endpoint.hostname]
+    effective['default_model'] = model
+    effective['expected_served_model'] = model
+    effective['profile']['model'] = model
+    return effective
+
+
+def _gw_agent_probe_call(timeout=60):
+    """One minimal gateway probe; credential handling stays in GwAgentRoute."""
+    try:
+        return probe_gateway(_gw_agent_probe_route_config(), timeout=timeout)
+    except RouteError as exc:
+        return {'status': 'UNKNOWN', 'tcp': 'UNKNOWN', 'auth': 'UNKNOWN',
+                'inference': 'UNKNOWN', 'code': exc.code}
+    except Exception:
+        return {'status': 'UNKNOWN', 'tcp': 'UNKNOWN', 'auth': 'UNKNOWN',
+                'inference': 'UNKNOWN', 'code': 'GW_AGENT_PROBE_UNAVAILABLE'}
+
+
+def run_task_probe_gw_agent(args, *, store=None, stdout=None, probe_call=None):
+    """CLI entry for one gw-agent availability probe; writes no Task or repo."""
+    store = TaskStore() if store is None else store
+    timeout = getattr(args, 'timeout', 60)
+    if type(timeout) is not int or not 1 <= timeout <= 600:
+        timeout = 60
+    if probe_call is None:
+        def probe_call():
+            return _gw_agent_probe_call(timeout)
+    result = worker_availability.probe_gw_agent(store, probe_call=probe_call)
+    _print(result, stdout=stdout)
+    return 0 if result.get('status') == 'PASS' else 2
+
+
 def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     """Run the company Gw Agent Gateway route against its registered D6 task."""
     from . import gw_agent_sessions
     gw_agent_sessions.sweep_quietly(store)
     if getattr(args, 'mode', None) != 'direct':
         raise LLMToolError('--provider gw-agent requires --mode direct')
+    hold = worker_availability.gw_agent_hold_refusal(
+        store, owner_assignment_ref=getattr(args, 'owner_ref', None),
+        policy_task_id=getattr(args, 'task_id', None))
+    if hold is not None:
+        raise LLMToolError(f'{hold}: gw-agent is not available; '
+                           'no Task or D6 write was made')
     if getattr(args, 'context_stdin', False):
         raise LLMToolError('gw-agent direct reads only its registered D6 task scope')
     timeout = _delegate_timeout(args, 'gw-agent')
@@ -9130,6 +9204,13 @@ def run_task_delegate_checked(args, *, store=None):
     if code is not None:
         raise LLMToolError(f'{code}: a fresh quota observation for {worker} is FAIL; '
                            'no Task or D6 write was made')
+    if worker == worker_availability.GW_AGENT:
+        code = worker_availability.gw_agent_hold_refusal(
+            store, owner_assignment_ref=getattr(args, 'owner_ref', None),
+            policy_task_id=args.task_id)
+        if code is not None:
+            raise LLMToolError(f'{code}: gw-agent is not available; '
+                               'no Task or D6 write was made')
     return _delegate_with_scope_advice(
         args, store, lambda: run_task_delegate(args, store=store))
 
