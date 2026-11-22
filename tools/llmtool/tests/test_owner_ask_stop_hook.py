@@ -437,5 +437,97 @@ class OwnerAskStopHookTests(unittest.TestCase):
         self.assertIsNone(result)
 
 
+
+class _FakeGh:
+    """Stands in for `gh api` at the subprocess boundary of default_fetcher."""
+
+    def __init__(self, pages, fail_on_page=None):
+        self.pages = pages
+        self.fail_on_page = fail_on_page
+        self.calls = []
+
+    def __call__(self, argv, **_kwargs):
+        from types import SimpleNamespace
+        url = argv[2]
+        page = int(url.rsplit("page=", 1)[1])
+        self.calls.append(page)
+        if page == self.fail_on_page:
+            return SimpleNamespace(returncode=1, stdout=b"", stderr=b"boom")
+        payload = self.pages[page - 1] if page <= len(self.pages) else []
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload).encode(), stderr=b"")
+
+
+class DefaultFetcherPaginationTests(unittest.TestCase):
+    """#2595 v1 F1: every comment page is read; a partial listing fails closed."""
+
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+
+    def _fetch_with(self, fake):
+        with self.mock.patch.object(hook.subprocess, "run", fake):
+            return hook.default_fetcher("a/b", 17, 123)
+
+    def _page(self, start, count):
+        return [_make_comment(cid=start + i, body="note") for i in range(count)]
+
+    def test_reads_every_page_until_a_short_page(self):
+        fake = _FakeGh([self._page(1, 100), self._page(101, 100), self._page(201, 7)])
+        comments = self._fetch_with(fake)
+        self.assertEqual(len(comments), 207)
+        self.assertEqual(fake.calls, [1, 2, 3])
+
+    def test_exactly_full_last_page_reads_one_empty_page(self):
+        fake = _FakeGh([self._page(1, 100)])
+        self.assertEqual(len(self._fetch_with(fake)), 100)
+        self.assertEqual(fake.calls, [1, 2])
+
+    def test_later_page_failure_is_fetch_incomplete(self):
+        fake = _FakeGh([self._page(1, 100), self._page(101, 100)], fail_on_page=2)
+        with self.assertRaises(hook.FetchIncomplete):
+            self._fetch_with(fake)
+
+    def test_first_page_failure_keeps_runtime_error(self):
+        fake = _FakeGh([], fail_on_page=1)
+        with self.assertRaises(RuntimeError) as ctx:
+            self._fetch_with(fake)
+        self.assertNotIsInstance(ctx.exception, hook.FetchIncomplete)
+
+    def test_more_pages_than_an_issue_can_hold_is_fetch_incomplete(self):
+        pages = [self._page(i * 100 + 1, 100) for i in range(hook.MAX_COMMENT_PAGES + 1)]
+        fake = _FakeGh(pages)
+        with self.assertRaises(hook.FetchIncomplete):
+            self._fetch_with(fake)
+        self.assertEqual(fake.calls[-1], hook.MAX_COMMENT_PAGES + 1)
+
+    def test_marker_on_second_page_is_found(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        transcript = _write_transcript(Path(tmp.name) / "t.jsonl", [
+            {"type": "user", "timestamp": _iso(NOW - 300), "message": {"content": "status?"}},
+            {"type": "assistant", "timestamp": _iso(NOW - 100), "message": {"content": "ok"}},
+        ])
+        target = _make_comment(cid=123, created_at=NOW - 600)
+        fake = _FakeGh([self._page(1000, 100), [target]])
+        reply = f"你需要做：請決定 #17 範圍。Marker: {COMMENT_URL}"
+        with self.mock.patch.object(hook.subprocess, "run", fake):
+            passed, detail, _ = hook._verify_cited_marker(reply, transcript, hook.default_fetcher, NOW)
+        self.assertEqual((passed, detail), (True, "PASS"))
+
+    def test_incomplete_listing_never_passes(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        transcript = _write_transcript(Path(tmp.name) / "t.jsonl", [
+            {"type": "user", "timestamp": _iso(NOW - 300), "message": {"content": "status?"}},
+            {"type": "assistant", "timestamp": _iso(NOW - 100), "message": {"content": "ok"}},
+        ])
+        target = _make_comment(cid=123, created_at=NOW - 600)
+        fake = _FakeGh([[target] + self._page(1000, 99), self._page(2000, 100)], fail_on_page=2)
+        reply = f"你需要做：請決定 #17 範圍。Marker: {COMMENT_URL}"
+        with self.mock.patch.object(hook.subprocess, "run", fake):
+            passed, detail, issue = hook._verify_cited_marker(reply, transcript, hook.default_fetcher, NOW)
+        self.assertEqual((passed, detail, issue), (False, "FETCH_INCOMPLETE", "17"))
+
+
 if __name__ == "__main__":
     unittest.main()

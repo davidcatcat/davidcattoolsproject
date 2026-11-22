@@ -50,6 +50,11 @@ MODE_ENFORCE = "enforce"
 VALID_MODES = frozenset({MODE_OBSERVE, MODE_ENFORCE})
 MAX_LOG_LINE_BYTES = 65536
 FETCH_TIMEOUT_SECONDS = 15
+# GitHub caps one issue at 2,500 comments (#763 hit that cap), so 25 pages of
+# 100 hold every possible comment; a 26th non-empty page means the listing is
+# not what we expect and the fetch is refused, never truncated.
+COMMENTS_PER_PAGE = 100
+MAX_COMMENT_PAGES = 25
 
 ISSUE_COMMENT_URL_CAPTURE = re.compile(
     r"(?<![A-Za-z0-9_])https://github\.com/"
@@ -192,13 +197,17 @@ def transcript_turn_start(transcript_path: str | Path | None) -> int | None:
         return None
 
 
-def default_fetcher(repo: str, issue_number: int, _comment_id: int) -> list[dict[str, Any]]:
-    """Fetch comments on the cited issue via `gh api`."""
+class FetchIncomplete(RuntimeError):
+    """The comment listing could not be read to its end (fail closed)."""
+
+
+def _fetch_comment_page(repo: str, issue_number: int, page: int) -> list[dict[str, Any]]:
     result = subprocess.run(
         [
             "gh",
             "api",
-            f"repos/{repo}/issues/{issue_number}/comments?per_page=100",
+            f"repos/{repo}/issues/{issue_number}/comments"
+            f"?per_page={COMMENTS_PER_PAGE}&page={page}",
         ],
         stdin=subprocess.DEVNULL,
         capture_output=True,
@@ -212,6 +221,31 @@ def default_fetcher(repo: str, issue_number: int, _comment_id: int) -> list[dict
     if type(payload) is not list:
         raise RuntimeError("unexpected gh payload")
     return payload
+
+
+def default_fetcher(repo: str, issue_number: int, _comment_id: int) -> list[dict[str, Any]]:
+    """Fetch every comment on the cited issue via `gh api`, page by page.
+
+    A first-page failure raises RuntimeError as before. A failure on a later
+    page, or more pages than an issue can hold, raises FetchIncomplete, so a
+    partial listing never yields a PASS or MARKER_NOT_FOUND (#2595 v1 F1).
+    """
+    comments: list[dict[str, Any]] = []
+    for page in range(1, MAX_COMMENT_PAGES + 2):
+        try:
+            payload = _fetch_comment_page(repo, issue_number, page)
+        except Exception as exc:
+            if page == 1:
+                raise
+            raise FetchIncomplete("comment page unreadable") from exc
+        if page > MAX_COMMENT_PAGES:
+            if payload:
+                raise FetchIncomplete("more comment pages than an issue can hold")
+            return comments
+        comments.extend(payload)
+        if len(payload) < COMMENTS_PER_PAGE:
+            return comments
+    raise FetchIncomplete("comment pagination did not end")  # pragma: no cover
 
 
 def _valid_comment_issue(comment: dict[str, Any], expected_repo: str, expected_issue: int) -> bool:
@@ -315,7 +349,10 @@ def _verify_cited_marker(
         if named_issues and issue_number not in named_issues:
             return False, "ISSUE_MISMATCH", issue_label
 
-        comments = fetcher(repo, issue_number, comment_id)
+        try:
+            comments = fetcher(repo, issue_number, comment_id)
+        except FetchIncomplete:
+            return False, "FETCH_INCOMPLETE", issue_label
         if type(comments) is not list:
             return False, "FETCH_INVALID", issue_label
 
