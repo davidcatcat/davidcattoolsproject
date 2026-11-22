@@ -5,6 +5,7 @@ incident: an admitted incident SHA and its failing modules, recorded on the
 incident instead of a Task.
 """
 
+import ast
 import hashlib
 import io
 import json
@@ -320,6 +321,75 @@ def _task_path_modules(task):
     return tuple(sorted(Path(path).stem for path in declared_paths))
 
 
+_MAC_MANIFEST = Path(__file__).resolve().parents[1] / 'ci' / 'mac-modules.txt'
+_TESTS_DIR = Path(__file__).resolve().parents[1] / 'tests'
+
+
+def _darwin_skip(decorator):
+    """True only for unittest.skipUnless(sys.platform == 'darwin', ...)."""
+    if not isinstance(decorator, ast.Call) or not decorator.args:
+        return False
+    func = decorator.func
+    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, 'id', None)
+    test = decorator.args[0]
+    return (name == 'skipUnless' and isinstance(test, ast.Compare) and
+            len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq) and
+            isinstance(test.left, ast.Attribute) and test.left.attr == 'platform' and
+            isinstance(test.left.value, ast.Name) and test.left.value.id == 'sys' and
+            len(test.comparators) == 1 and isinstance(test.comparators[0], ast.Constant) and
+            test.comparators[0].value == 'darwin')
+
+
+def _darwin_only_modules(stems, *, manifest=None, tests_dir=None):
+    """#2573: test modules that are Darwin-only by design.
+
+    Linux remote tests (EC2 and hosted) skip every test in such a module, so
+    a receipt would count it as FAIL although nothing failed. A module counts
+    only when every unittest TestCase class in it is listed in the Mac CI
+    baseline manifest (ci/mac-modules.txt, always run by exact-head Mac CI)
+    and carries skipUnless(sys.platform == 'darwin'), and it has no
+    module-level test functions. The manifest and modules are read from the
+    running llmtool checkout. Any read or parse doubt keeps the module in the
+    remote set (fail closed).
+    """
+    manifest = _MAC_MANIFEST if manifest is None else Path(manifest)
+    tests_dir = _TESTS_DIR if tests_dir is None else Path(tests_dir)
+    try:
+        listed = {line.partition('#')[0].strip()
+                  for line in manifest.read_text(encoding='utf-8').splitlines()}
+    except (OSError, UnicodeDecodeError):
+        return frozenset()
+    found = set()
+    for stem in stems:
+        if type(stem) is not str or not _MODULE.fullmatch(stem):
+            continue
+        try:
+            tree = ast.parse((tests_dir / (stem + '.py')).read_text(encoding='utf-8'))
+        except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+            continue
+        if any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and
+               node.name.startswith('test') for node in tree.body):
+            continue
+        cases = [node for node in tree.body if isinstance(node, ast.ClassDef) and any(
+            (isinstance(base, ast.Name) and base.id == 'TestCase') or
+            (isinstance(base, ast.Attribute) and base.attr == 'TestCase')
+            for base in node.bases)]
+        if cases and all(f'{stem}.{node.name}' in listed and
+                         any(map(_darwin_skip, node.decorator_list)) for node in cases):
+            found.add(stem)
+    return frozenset(found)
+
+
+def remote_required_modules(task):
+    """Task test modules a Linux remote receipt must cover (#2573).
+
+    Darwin-only modules are left to the exact-head Mac CI merge gate.
+    """
+    declared = _task_path_modules(task)
+    darwin = _darwin_only_modules(declared)
+    return tuple(module for module in declared if module not in darwin)
+
+
 def _admitted_modules(task):
     declared = _task_path_modules(task)
     if declared:
@@ -616,7 +686,7 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         return denied('RECEIPT_HEAD_MISMATCH')
     if pr is not None:
         store.record_published_pr(task_id, pr, recorded_head)
-    admitted = _task_path_modules(task)
+    admitted = remote_required_modules(task)
     if (type(modules) not in (tuple, list, set, frozenset) or
             any(type(module) is not str for module in modules)):
         return denied('MODULE_NOT_ADMITTED')

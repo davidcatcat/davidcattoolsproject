@@ -1111,7 +1111,7 @@ def _remote_test_receipt_summary(record, head):
                          if type(actions) is dict and type(actions.get('run_id')) is int and actions['run_id'] > 0
                          else None)
         if receipt['result'] == 'PASS' and not remote_test.pass_receipt_covers(
-                receipt, remote_test._task_path_modules(record)):
+                receipt, remote_test.remote_required_modules(record)):
             return None
         summary_result = ('NOT_EXECUTED'
                           if _receipt_not_executed(receipt)
@@ -2447,7 +2447,7 @@ def _remote_test_status(record, d6):
             continue
         if receipt['result'] == 'PASS':
             if remote_test.pass_receipt_covers(
-                    receipt, remote_test._task_path_modules(record)):
+                    receipt, remote_test.remote_required_modules(record)):
                 return 'PASS', None, receipt
             break
         if receipt['result'] in ('TIMEOUT', 'SHA_MISMATCH'):
@@ -2476,7 +2476,7 @@ def _remote_test_status(record, d6):
             return 'TIMEOUT', None, None
         if (outcome.get('result') == 'ADMISSION_DENIED' and
                 outcome.get('code') == 'MODULE_NOT_ADMITTED' and
-                outcome.get('modules') == [] and not remote_test._task_path_modules(record)):
+                outcome.get('modules') == [] and not remote_test.remote_required_modules(record)):
             return 'ADMISSION_DENIED', None, None
     return None, None, None
 
