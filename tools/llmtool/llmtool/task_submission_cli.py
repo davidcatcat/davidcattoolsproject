@@ -59,7 +59,8 @@ from .developer_routes import (AgyRoute, ClaudeRoute, GwAgentRoute, RouteError, 
                                resolve_route_timeout, run_route)
 from .developer_routes.base import _git_status_paths
 from .developer_routes.gw_agent import (_GATEWAY_DATA_CLASS, _normalize_gw_agent_usage,
-                                        cleanup_audit_copies)
+                                        GATEWAY_SOURCE_DIR, GATEWAY_STALE_CODE,
+                                        cleanup_audit_copies, installed_gateway_stale)
 from .developer_routes.agy import _CONVERSATION as AGY_CONVERSATION
 from . import gw_agent_callsite, gw_agent_wiring
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
@@ -6934,6 +6935,15 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     # run ends with the gateway's definite TURN_BUDGET_EXCEEDED result. An
     # invalid policy refuses POLICY_INVALID here, before any Task mutation.
     max_turns = min(max_turns, repair_policy.gw_agent_max_turns())
+    # #2310: refuse before any Task mutation when the installed gateway differs
+    # from the gateway source this llmtool checkout ships; nothing is counted.
+    if installed_gateway_stale(route_config.get('package_path')):
+        raise LLMToolError(
+            GATEWAY_STALE_CODE + ': the installed gateway at ' +
+            str(route_config.get('package_path')) + ' differs from ' +
+            str(GATEWAY_SOURCE_DIR) + '; refresh it from main, for example: '
+            'rsync -a --delete --exclude __pycache__ ' + str(GATEWAY_SOURCE_DIR) +
+            '/ ' + str(route_config.get('package_path')) + '/api_agent_gateway/')
     # #1502 WP-E, #1773 (CWE-863): after the gateway validation, the role
     # resolver checks the role model and supplies the effort, and the model the
     # gateway profile will actually serve is checked against allowed_models (or

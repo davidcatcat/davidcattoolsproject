@@ -158,6 +158,54 @@ def _scope_digest(task):
     return hashlib.sha256(_canonical(scope)).hexdigest()
 
 
+# #2310: the gateway source that this llmtool checkout ships. The installed
+# copy at the route package_path is refreshed by hand, so a dispatch compares
+# the two before any Task mutation instead of failing later in the gateway.
+GATEWAY_SOURCE_DIR = Path(__file__).resolve().parents[3] / 'api-agent-gateway' / 'api_agent_gateway'
+GATEWAY_STALE_CODE = 'DEVELOPER_GW_AGENT_GATEWAY_STALE'
+
+
+def _gateway_tree_digest(directory):
+    """SHA-256 over the relative path and bytes of every regular file, sorted;
+    __pycache__ directories and *.pyc files are left out."""
+    root = Path(directory)
+    entries = []
+    for path in root.rglob('*'):
+        relative = path.relative_to(root)
+        if '__pycache__' in relative.parts or path.suffix == '.pyc':
+            continue
+        if path.is_symlink():
+            raise OSError(errno.ELOOP, 'symlink in gateway package')
+        if path.is_file():
+            entries.append(relative.as_posix())
+    digest = hashlib.sha256()
+    for name in sorted(entries):
+        digest.update(name.encode('utf-8') + b'\0')
+        digest.update(hashlib.sha256((root / name).read_bytes()).digest())
+    return digest.hexdigest()
+
+
+def installed_gateway_stale(package_path, source_dir=None):
+    """Return True when the installed gateway differs from the shipped source.
+
+    Returns False (no check) when either directory is absent: a missing install
+    is refused later by GwAgentRoute as GW_AGENT_CONFIG_INVALID, and a llmtool
+    copy without the gateway source has nothing to compare with. An unreadable
+    tree counts as stale, so the refusal stays definite.
+    """
+    source = Path(GATEWAY_SOURCE_DIR if source_dir is None else source_dir)
+    if type(package_path) is not str or not package_path:
+        return False
+    expanded = os.path.expanduser(package_path) if package_path.startswith('~/') else package_path
+    installed = Path(expanded) / 'api_agent_gateway'
+    if not source.is_dir() or not installed.is_dir():
+        return False
+    try:
+        return _gateway_tree_digest(installed) != _gateway_tree_digest(source)
+    except (OSError, ValueError):
+        return True
+
+
 class GwAgentRoute(DeveloperRoute):
     name = 'gw_agent'
     worker_key = 'gw'

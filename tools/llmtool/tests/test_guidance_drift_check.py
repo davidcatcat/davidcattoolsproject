@@ -114,6 +114,33 @@ class GuidanceDriftCheckTests(unittest.TestCase):
                 findings = check(self.repo)
                 self.assertTrue(any(f"MISSING_IN_CLAUDE {missing}" in item for item in findings))
 
+    def test_claude_import_of_agents_satisfies_hard_values(self):
+        # #1502 E6: an "@AGENTS.md" line imports every AGENTS.md hard value.
+        self.agents = "`https://missing.invalid/decision` `OWNER_ASSIGNMENT_ONLY` `check (docs)`\n"
+        self.claude = "# Claude\n\n@AGENTS.md\n\nClaude-only text.\n"
+        self.write_guidance()
+        self.write_config()
+        self.assertEqual(check(self.repo), [])
+
+    def test_claude_import_still_hash_pinned(self):
+        self.agents = "`ALLOWED`\n"
+        self.claude = "@AGENTS.md\n"
+        self.write_guidance()
+        self.write_config()
+        (self.repo / "AGENTS.md").write_text("`ALLOWED` changed\n", encoding="utf-8")
+        self.assertTrue(any("AGENTS.md: HASH_STALE" in item for item in check(self.repo)))
+
+    def test_import_must_be_its_own_line(self):
+        # A mention inside text or code is not an import.
+        for claude in ("See `@AGENTS.md` for rules.\n", "x @AGENTS.md\n", "@AGENTS.md.bak\n"):
+            with self.subTest(claude=claude):
+                self.agents = "`OWNER_ASSIGNMENT_ONLY`\n"
+                self.claude = claude
+                self.write_guidance()
+                self.write_config()
+                findings = check(self.repo)
+                self.assertTrue(any("MISSING_IN_CLAUDE OWNER_ASSIGNMENT_ONLY" in item for item in findings))
+
     def test_dispatch_values_are_matched_as_whole_words_in_full_source(self):
         self.agents = "Worker is PAUSED now, **ALLOWED** only, dispatch=OWNER_ASSIGNMENT_ONLY.\n"
         self.claude = "PAUSED and **ALLOWED**, dispatch=OWNER_ASSIGNMENT_ONLY.\n"
@@ -271,13 +298,15 @@ class GuidanceDriftCheckTests(unittest.TestCase):
         repository = Path(__file__).resolve().parents[3]
         self.assertEqual(check(repository), [])
 
-    def test_claude_md_agy_line_names_no_model(self):
-        # Owner #289 (2026-11-22): the CLAUDE.md AGY line names no model and
+    def test_guidance_agy_line_names_no_model(self):
+        # Owner #289 (2026-11-22): the guidance AGY line names no model and
         # says the AGY model comes from the configuration, so a model switch
-        # by configuration needs no rule-file change.
+        # by configuration needs no rule-file change. Since #1502 E6 the line
+        # lives in AGENTS.md, which CLAUDE.md imports.
         repository = Path(__file__).resolve().parents[3]
-        claude_md = (repository / "CLAUDE.md").read_text(encoding="utf-8")
-        agy_lines = [line for line in claude_md.splitlines() if line.startswith("  - AGY: ")]
+        self.assertIn("\n@AGENTS.md\n", (repository / "CLAUDE.md").read_text(encoding="utf-8"))
+        agents_md = (repository / "AGENTS.md").read_text(encoding="utf-8")
+        agy_lines = [line for line in agents_md.splitlines() if line.startswith("  - AGY: ")]
         self.assertEqual(len(agy_lines), 1)
         line = agy_lines[0]
         self.assertIn("model comes from the configuration", line)
