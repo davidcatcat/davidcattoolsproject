@@ -363,6 +363,41 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                             for call in evaluations))
         self.assertTrue(all('log_path' not in request for request in requests))
         self.assertIn('Claude Developer', prompts[0])
+        # #2302 part 1 (A2): the run records its model provenance. The fake route
+        # result reports no model, so provider_model is None.
+        self.assertEqual(developer['model'], 'claude-test-1')
+        self.assertEqual(developer['model_provenance'], {
+            'requested_model': 'claude-test-1', 'resolved_model': 'claude-test-1',
+            'model_source': 'repo_default', 'model_family': 'claude',
+            'provider_model': None})
+
+    def test_a_configured_model_of_another_family_is_dispatched_and_recorded(self):
+        # A1/A2: a user-config model of another vendor runs with no repository
+        # change, and the Task records where it came from and its family.
+        cli, store, args, registration, _evaluations, _prompts, requests, patches, runner = (
+            self._setup())
+        patches.append(patch.object(task_submission_cli.role_config, 'resolve_role',
+            return_value={'model': 'gemini-3.8-flash-medium', 'model_source': 'roles',
+                          'effort': None, 'config_dir': '/tmp/claude-config'}))
+        with contextlib.ExitStack() as stack:
+            for item in patches:
+                stack.enter_context(item)
+            status = cli.run_task_claude_delegate(args, store=store, route_runner=runner)
+        developer = store.task['developer']
+        self.assertEqual(status, 0)
+        self.assertEqual(requests[-1]['model'], 'gemini-3.8-flash-medium')
+        self.assertEqual(developer['model'], 'gemini-3.8-flash-medium')
+        self.assertEqual(developer['model_provenance'], {
+            'requested_model': 'gemini-3.8-flash-medium',
+            'resolved_model': 'gemini-3.8-flash-medium',
+            'model_source': 'roles', 'model_family': 'gemini', 'provider_model': None})
+
+    def test_a_configured_model_of_unknown_family_is_refused_before_store_write(self):
+        def configure(_cli, _store, _args, patches):
+            patches.append(patch.object(task_submission_cli.role_config, 'resolve_role',
+                return_value={'model': 'example-model-b', 'model_source': 'roles',
+                              'effort': None, 'config_dir': '/tmp/claude-config'}))
+        self._assert_prewrite_refusal(configure, message='ROLE_MODEL_NOT_ALLOWED')
 
     def _run_with_reply(self, reply, *, stderr=None, **setup):
         # The route keeps the run's parsed CLI result, as _DiagnosedClaudeRoute does.

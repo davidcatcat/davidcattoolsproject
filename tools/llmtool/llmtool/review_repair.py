@@ -128,23 +128,33 @@ def _named_model_family(model):
 def developer_family(developer):
     """The actual model family of a Task's Developer, or None when unknown.
 
-    A route that can serve another vendor's model (AGY, OpenCode, gw-agent)
-    takes the family of the recorded model when its name shows one. Security
-    repair (Codex security v91 F1, CWE-863): the AGY route serves both Gemini
-    and Claude ids, so its family is never the route name alone; an AGY run
-    with an unrecorded or unnamed model is UNKNOWN (None), and choose_arbiter
-    refuses rather than pairing a same-family arbiter with it.
+    #2302 part 1 (Codex security v91 F2, A1c, CWE-863): a record that names its
+    run model takes the family of that model on every route
+    (developer_routes.model_family), never the route's. A model of no
+    determinable family is UNKNOWN (None) on the claude, codex and agy routes,
+    and choose_arbiter then refuses rather than pairing a same-family arbiter
+    with it; the multi-vendor opencode, company-gw and gw-agent routes keep
+    their former reading of such a name (marker, else the route key). A legacy
+    record with no recorded model keeps its former result: claude, codex,
+    opencode and gw-agent by route key, and AGY unknown.
     """
     if type(developer) is not dict:
         return None
     profile = developer.get('provider_profile')
     family = _PROFILE_FAMILIES.get(profile)
     model = developer.get('model')
+    if type(model) is str and model:
+        if family is None and profile != 'agy':
+            return None
+        from .developer_routes import MODEL_FAMILY_UNKNOWN, model_family
+        named = model_family(model)
+        if named != MODEL_FAMILY_UNKNOWN:
+            return named
+        if family in ('opencode', 'gw-agent'):
+            return _named_model_family(model) or family
+        return None
     if profile == 'agy':
-        named = _named_model_family(model)
-        return named if named in ('claude', 'gemini') else None
-    if family in ('opencode', 'gw-agent') and type(model) is str:
-        return _named_model_family(model) or family
+        return None
     return family
 
 

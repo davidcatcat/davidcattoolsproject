@@ -93,22 +93,39 @@ class OwnerOverrideTest(unittest.TestCase):
     def test_bad_route_is_invalid(self):
         self.assert_refused('OWNER_OVERRIDE_INVALID', route='Example_Route')
 
-    def test_wrong_family_model_is_refused_before_the_ref_is_read(self):
-        # Owner #2302 P2 Repair 2: no override bypasses a route family check.
+    def test_unknown_family_model_is_refused_before_the_ref_is_read(self):
+        # Repair 2: no override bypasses a route model check; #2302 part 1 means
+        # an id of no determinable family is that check's refusal.
+        for route in ('agy', 'claude', 'gw-agent'):
+            with self.subTest(route=route):
+                override = valid_override()
+                override['model'] = 'example-model-b'
+                fetch = FakeFetch(make_comment(MARKER + '\n' + OVERRIDE_LINE))
+                self.assert_refused('ROLE_MODEL_NOT_ALLOWED', override=override,
+                                    route=route, fetch=fetch)
+                self.assertEqual(fetch.calls, [])
+
+    def test_malformed_model_is_refused_before_the_ref_is_read(self):
         override = valid_override()
-        override['model'] = 'claude-opus-5-5'
+        override['model'] = 'gemini..b'
         fetch = FakeFetch(make_comment(MARKER + '\n' + OVERRIDE_LINE))
         self.assert_refused('ROLE_MODEL_NOT_ALLOWED', override=override,
                             route='agy', fetch=fetch)
         self.assertEqual(fetch.calls, [])
 
-    def test_malformed_model_is_refused_before_the_ref_is_read(self):
-        override = valid_override()
-        override['model'] = 'GEMINI-UPPER'
-        fetch = FakeFetch(make_comment(MARKER + '\n' + OVERRIDE_LINE))
-        self.assert_refused('ROLE_MODEL_NOT_ALLOWED', override=override,
-                            route='agy', fetch=fetch)
-        self.assertEqual(fetch.calls, [])
+    def test_an_existing_override_for_another_vendors_model_is_still_validated(self):
+        # #2302 part 1: such a model is admitted without an override; a record
+        # that names it still verifies as before.
+        for route, model in (('agy', 'claude-opus-5-5'), ('claude', 'gpt-6.1-sol'),
+                             ('gw-agent', 'qwen3.8-27b')):
+            with self.subTest(route=route, model=model):
+                line = 'owner-model-override: route=' + route + ' model=' + model
+                fetch = FakeFetch(make_comment(MARKER + '\n' + line))
+                result = validate_owner_override(
+                    {'model': model, 'ref': REF}, route,
+                    repository=REPOSITORY, fetch_comment=fetch)
+                self.assertEqual(result, {'route': route, 'model': model, 'ref': REF,
+                                          'comment_id': COMMENT_ID})
 
     def test_bad_repository_argument_is_invalid(self):
         self.assert_refused('OWNER_OVERRIDE_INVALID', repository='example-owner')

@@ -51,19 +51,20 @@ class GwAgentRouteWiringTests(unittest.TestCase):
     def setUp(self):
         self._real_gw_agent_endpoint = task_submission_cli._gw_agent_endpoint
         endpoint = patch.object(task_submission_cli, '_gw_agent_endpoint', return_value=({
-            'type': 'openai-compatible', 'model': 'authorized-model',
+            'type': 'openai-compatible', 'model': 'qwen-authorized',
             'base_url': 'https://authorized.example'}, {'max_tokens': 49152}))
         endpoint.start()
         self.addCleanup(endpoint.stop)
-        # #1773: dispatch checks the gateway-served model against allowed_models,
-        # so the default route config lists the served model the fake endpoint
-        # names. A test that patches load_route_config itself overrides this.
+        # #1773, #2302 part 1: dispatch checks the gateway-served model (any
+        # well-formed id of a known family is admitted; allowed_models is not a
+        # gate). The default route config still lists the served model the fake
+        # endpoint names. A test that patches load_route_config itself overrides this.
         real_load = task_submission_cli.load_route_config
 
         def listed_route_config(*args, **kwargs):
             config = real_load(*args, **kwargs)
             entry = config['routes']['gw-agent']
-            entry['allowed_models'] = list(entry['allowed_models']) + ['authorized-model']
+            entry['allowed_models'] = list(entry['allowed_models']) + ['qwen-authorized']
             return config
 
         routes = patch.object(task_submission_cli, 'load_route_config',
@@ -141,7 +142,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, 'load_route_config',
                           return_value={'routes': {'gw-agent': route_config}}), \
              patch.object(task_submission_cli, '_gw_agent_endpoint', return_value=({
-                 'type': 'openai-compatible', 'model': 'authorized-model',
+                 'type': 'openai-compatible', 'model': 'qwen-authorized',
                  'base_url': 'https://gateway.example/v1'}, {'max_tokens': 4096})):
             with self.assertRaisesRegex(
                     LLMToolError, 'gateway profile is unavailable or invalid'):
@@ -405,7 +406,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, 'resolve_profile_config',
                           return_value={'generation': {'max_tokens': 49152}}), \
              patch.object(task_submission_cli, 'selected_provider', return_value={
-                 'type': 'openai-compatible', 'model': 'authorized-model',
+                 'type': 'openai-compatible', 'model': 'qwen-authorized',
                  'base_url': 'https://authorized.example'}), \
              patch.object(worker_dispatch, 'authorize_dispatch'), \
              patch.object(worker_dispatch, 'evaluate', return_value=decision), \
@@ -516,17 +517,17 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                                           'max_sent_bytes': 16777216},
                               'profile': {'adapter': 'openai-chat-tools',
                                   'base_url': 'https://api.openai.com/v1',
-                                  'model': 'gw-agent-default',
+                                  'model': 'qwen-agent-default',
                                   'context_cap_tokens': 32768,
                                   'max_output_tokens': 8192,
                                   'allowed_data_classes': ['synthetic', 'public_repo']},
-                              'default_model': 'gw-agent-default',
-                              'allowed_models': ['gw-agent-default', 'authorized-model'],
+                              'default_model': 'qwen-agent-default',
+                              'allowed_models': ['qwen-agent-default', 'qwen-authorized'],
                               'default_effort': 'low'}}}), \
              patch.object(task_submission_cli, 'resolve_profile_config',
                           return_value={'generation': {'max_tokens': 49152}}), \
              patch.object(task_submission_cli, 'selected_provider', return_value={
-                 'type': 'openai-compatible', 'model': 'authorized-model',
+                 'type': 'openai-compatible', 'model': 'qwen-authorized',
                  'base_url': 'https://authorized.example'}), \
              patch.object(worker_dispatch, 'evaluate', return_value=worker_dispatch.PolicyDecision(
                  'gw-agent', True, 'OWNER_POLICY_ALLOWED', 'f' * 64)), \
@@ -544,7 +545,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertIsNone(store.developer_records[0]['provider_type'])
         self.assertIsNone(store.developer_records[0]['model'])
         self.assertEqual(store.developer_records[1]['provider_type'], 'gw-agent-cli')
-        self.assertEqual(store.developer_records[1]['model'], 'authorized-model')
+        self.assertEqual(store.developer_records[1]['model'], 'qwen-authorized')
         self.assertEqual(store.value['developer']['state'], 'DEVELOPER_UNAVAILABLE')
         self.assertEqual(store.value['developer']['error_code'], 'DEVELOPER_OWNER_PAUSED')
         self.assertEqual(store.value['dispatch_audit'][-1]['action'], 'DISPATCH')
@@ -586,10 +587,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                         'max_output_tokens': 65536, 'max_wall_seconds': 1800,
                         'max_tool_result_bytes': 262144,
                         'max_sent_bytes': 16777216},
-            'profile': {'adapter': 'openai-chat-tools', 'model': 'gw-agent-default',
+            'profile': {'adapter': 'openai-chat-tools', 'model': 'qwen-agent-default',
                         'context_cap_tokens': 32768, 'max_output_tokens': 8192,
                         'allowed_data_classes': ['synthetic', 'public_repo']},
-            'default_model': 'gw-agent-default', 'allowed_models': ['gw-agent-default'],
+            'default_model': 'qwen-agent-default', 'allowed_models': ['qwen-agent-default'],
             'default_effort': 'low'}
         with tempfile.TemporaryDirectory() as home, \
              patch.dict(os.environ, {'HOME': home}), \
@@ -702,7 +703,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
 
         dispatching = copy.deepcopy(developer)
         dispatching.update(state='DEVELOPER_DISPATCHING',
-                           provider_type='gw-agent-cli', model='gw-agent-default')
+                           provider_type='gw-agent-cli', model='qwen-agent-default')
         self.assertFalse(worker_dispatch._developer_identity_changed(developer, dispatching))
         self.assertTrue(worker_dispatch._initial_provider_binding(developer, dispatching))
         updated = copy.deepcopy(record)
@@ -787,17 +788,17 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                                           'max_sent_bytes': 16777216},
                               'profile': {'adapter': 'openai-chat-tools',
                                   'base_url': 'https://api.openai.com/v1',
-                                  'model': 'gw-agent-default',
+                                  'model': 'qwen-agent-default',
                                   'context_cap_tokens': 32768,
                                   'max_output_tokens': 8192,
                                   'allowed_data_classes': ['synthetic', 'public_repo']},
-                              'default_model': 'gw-agent-default',
-                              'allowed_models': ['gw-agent-default', 'authorized-model'],
+                              'default_model': 'qwen-agent-default',
+                              'allowed_models': ['qwen-agent-default', 'qwen-authorized'],
                               'default_effort': 'low'}}}), \
              patch.object(task_submission_cli, 'resolve_profile_config',
                           return_value={'generation': {'max_tokens': 49152}}), \
              patch.object(task_submission_cli, 'selected_provider', return_value={
-                 'type': 'openai-compatible', 'model': 'authorized-model',
+                 'type': 'openai-compatible', 'model': 'qwen-authorized',
                  'base_url': 'https://authorized.example'}), \
              patch.object(worker_dispatch, 'authorize_dispatch'), \
              patch.object(worker_dispatch, 'evaluate', return_value=decision), \
@@ -839,7 +840,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         developer = {
             'assignment_id': 'd' * 32, 'selection_source': 'PM',
             'state': 'DEVELOPER_DISPATCHING', 'provider_profile': 'gw-agent',
-            'provider_type': 'gw-agent-cli', 'model': 'gw-agent-default',
+            'provider_type': 'gw-agent-cli', 'model': 'qwen-agent-default',
             'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
             'session_id': 'dev-' + 'e' * 32, 'source_sha': 'f' * 40,
             'source_sha_binding': 'D6_REGISTRY_OBSERVED',
@@ -971,9 +972,9 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             '  company-gw:\n'
             '    type: openai-compatible\n'
             '    base_url: http://10.20.30.40:8080\n'
-            '    model: authorized-model\n',
+            '    model: qwen-authorized\n',
             encoding='utf-8')
-        result = SimpleNamespace(model='authorized-model', usage={
+        result = SimpleNamespace(model='qwen-authorized', usage={
             'prompt_tokens': 1, 'completion_tokens': 2, 'total_tokens': 3},
             session_id='provider-session', exit_code=0, stdout_sha256='f' * 64,
             elapsed_ms=10, cleanup_status='CLEAN')
@@ -1037,8 +1038,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                               'profile': gateway_profile,
                               'profile_name': 'llmtool-direct',
                               'authorization_ref': 'pm-task-ref',
-                              'default_model': 'gw-agent-default',
-                              'allowed_models': ['gw-agent-default', 'authorized-model'],
+                              'default_model': 'qwen-agent-default',
+                              'allowed_models': ['qwen-agent-default', 'qwen-authorized'],
                               'default_effort': 'low',
                               'budgets': {'max_turns': 512, 'max_input_tokens': 262144,
                                           'max_output_tokens': 65536, 'max_wall_seconds': 1800,
@@ -1046,7 +1047,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                                           'max_sent_bytes': 16777216}}}}), \
              patch.dict(os.environ, {'HOME': str(config_home)}), \
              patch.object(task_submission_cli, '_gw_agent_endpoint', return_value=({
-                 'type': 'openai-compatible', 'model': 'authorized-model',
+                 'type': 'openai-compatible', 'model': 'qwen-authorized',
                  'base_url': 'http://10.20.30.40:8080'}, {'max_tokens': 49152})), \
              patch.object(worker_dispatch, 'authorize_dispatch'), \
              patch.object(worker_dispatch, 'evaluate', return_value=decision), \
@@ -1067,14 +1068,14 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(status, 0)
         developer = store.value['developer']
         self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
-        self.assertEqual(developer['model'], 'authorized-model')
-        self.assertEqual(seen['route_model'], 'authorized-model')
-        self.assertEqual(seen['profile']['model'], 'authorized-model')
+        self.assertEqual(developer['model'], 'qwen-authorized')
+        self.assertEqual(seen['route_model'], 'qwen-authorized')
+        self.assertEqual(seen['profile']['model'], 'qwen-authorized')
         self.assertEqual(seen['profile']['base_url'], 'http://10.20.30.40:8080/v1')
         self.assertEqual(seen['profile']['max_output_tokens'], 16384)
         self.assertEqual(seen['profile']['http_allow_hosts'], ['10.20.30.40'])
         self.assertEqual(developer['artifact'], 'diff')
-        self.assertEqual(developer['usage']['served_model'], 'authorized-model')
+        self.assertEqual(developer['usage']['served_model'], 'qwen-authorized')
         self.assertEqual(seen['task']['schema_version'], 1)
         self.assertEqual(seen['task']['goal'], 'goal')
         self.assertEqual(seen['task']['acceptance'], ['record result', task_submission_cli.TEST_DATA_RULE])
@@ -1124,15 +1125,15 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
             read_path=['src.py'], write_path=['src.py'])
         gateway_profile = {'adapter': 'openai-chat-tools', 'base_url': 'http://10.20.30.40:8080/v1',
-                           'model': 'authorized-model', 'context_cap_tokens': 32768,
+                           'model': 'qwen-authorized', 'context_cap_tokens': 32768,
                            'max_output_tokens': 16384, 'auth_env': None}
         base_route = {
             'allowed_data_classes': ['synthetic', 'public_repo'],
             'profile': gateway_profile,
             'profile_name': 'llmtool-direct',
             'authorization_ref': 'pm-task-ref',
-            'default_model': 'authorized-model',
-            'allowed_models': ['authorized-model'],
+            'default_model': 'qwen-authorized',
+            'allowed_models': ['qwen-authorized'],
             'default_effort': 'low',
         }
         cases = (
@@ -1158,7 +1159,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                  patch.object(task_submission_cli, 'load_route_config',
                               return_value={'routes': {'gw-agent': mock_route}}), \
                  patch.object(task_submission_cli, '_gw_agent_endpoint', return_value=({
-                     'type': 'openai-compatible', 'model': 'authorized-model',
+                     'type': 'openai-compatible', 'model': 'qwen-authorized',
                      'base_url': 'http://10.20.30.40:8080'}, {'max_tokens': 49152})):
                 with self.assertRaisesRegex(
                         LLMToolError, 'gateway profile is unavailable or invalid'):
@@ -1205,7 +1206,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.addCleanup(store._temp.cleanup)
         route = SimpleNamespace(validate_profile=lambda *_args: None)
         gateway_profile = {'adapter': 'openai-chat-tools', 'base_url': 'http://10.20.30.40:8080/v1',
-                           'model': 'authorized-model', 'context_cap_tokens': 32768,
+                           'model': 'qwen-authorized', 'context_cap_tokens': 32768,
                            'max_output_tokens': 16384, 'auth_env': None,
                            'allowed_data_classes': ['synthetic', 'public_repo']}
         multiplier_route = {
@@ -1213,8 +1214,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             'profile': gateway_profile,
             'profile_name': 'llmtool-direct',
             'authorization_ref': 'pm-task-ref',
-            'default_model': 'authorized-model',
-            'allowed_models': ['authorized-model'],
+            'default_model': 'qwen-authorized',
+            'allowed_models': ['qwen-authorized'],
             'default_effort': 'low',
             'budgets': {'max_turns': 512, 'max_input_tokens_multiplier': 8,
                         'max_output_tokens_multiplier': 4, 'max_wall_seconds': 1800,
@@ -1238,7 +1239,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, 'load_route_config',
                           return_value={'routes': {'gw-agent': multiplier_route}}), \
              patch.object(task_submission_cli, '_gw_agent_endpoint', return_value=({
-                 'type': 'openai-compatible', 'model': 'authorized-model',
+                 'type': 'openai-compatible', 'model': 'qwen-authorized',
                  'base_url': 'http://10.20.30.40:8080'}, {'max_tokens': 49152})), \
              patch.object(worker_dispatch, 'authorize_dispatch'), \
              patch.object(worker_dispatch, 'evaluate', return_value=worker_dispatch.PolicyDecision(
@@ -1393,7 +1394,10 @@ class GwAgentShippedServedModelTests(unittest.TestCase):
         self.assertEqual(model, 'gw')
         self.assertEqual(effort, self.route_config['default_effort'])
 
-    def test_unlisted_served_model_is_still_refused(self):
+    def test_served_model_of_unknown_family_is_still_refused(self):
+        # #2302 part 1: allowed_models no longer gates the served model, but an id
+        # whose family cannot be read from it is refused (the alias 'gw' is the
+        # one name admitted without a family).
         for served in ('example-model-b', 'gw-agent-default', 'GW', 'gw-b'):
             with self.subTest(served=served):
                 with self.assertRaises(LLMToolError) as caught:
@@ -1402,6 +1406,15 @@ class GwAgentShippedServedModelTests(unittest.TestCase):
                 self.assertEqual(caught.exception.role_config_code,
                                  'ROLE_MODEL_NOT_ALLOWED')
                 self.assertIn('ROLE_MODEL_NOT_ALLOWED', str(caught.exception))
+
+    def test_unlisted_served_model_of_a_known_family_is_admitted(self):
+        for served in ('qwen-agent-default', 'qwen3.8-27b', 'claude-opus-5-5',
+                       'gemini-3.8-flash-medium', 'gpt-6.1-sol'):
+            with self.subTest(served=served):
+                model, effort = task_submission_cli._gw_agent_developer_profile(
+                    self.route_config, served_model=served)
+                self.assertEqual(model, served)
+                self.assertEqual(effort, self.route_config['default_effort'])
 
 
 class RealPolicyReviewerFallbackTests(unittest.TestCase):
@@ -1605,8 +1618,8 @@ class GwAgentRealStoreTests(unittest.TestCase):
                   list_provider_model=True, finish_summary='done'):
         # #1072: without ``bind`` the D6 session step keeps today's unbound
         # result; with it the real step runs against that fake lifecycle helper.
-        # #1773: the gateway profile model must be in allowed_models, so the
-        # fixture lists it unless list_provider_model is False.
+        # #1773: the fixture lists the gateway profile model in allowed_models
+        # unless list_provider_model is False (#2302 part 1: not a gate any more).
         task_id = self.task_id = self._active_pm_task(target)
         if provider_model != 'gw':
             config = self.base / '.config' / 'llmtool' / 'config.yaml'
@@ -1714,6 +1727,13 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertIsNone(developer['error_code'])
         self.assertEqual(developer['changed_files'], [target])
         self.assertEqual(developer['model'], 'qwen3.8-27b')
+        # #2302 part 1 (A2): the run keeps its requested model (the routing alias
+        # the role named), the model dispatched, where the request came from,
+        # the family read from the served model's id, and the served model.
+        self.assertEqual(developer['model_provenance'], {
+            'requested_model': 'gw', 'resolved_model': 'gw',
+            'model_source': 'repo_default', 'model_family': 'qwen',
+            'provider_model': 'qwen3.8-27b'})
         self.assertEqual(developer['usage'], {
             'prompt_tokens': 2052, 'completion_tokens': 98, 'total_tokens': 2150,
             'served_model': 'qwen3.8-27b'})
@@ -2128,15 +2148,15 @@ class GwAgentRealStoreTests(unittest.TestCase):
             acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
             read_path=['src.py'], write_path=['src.py'])
         gateway_profile = {'adapter': 'openai-chat-tools', 'base_url': 'http://10.20.30.40:8080/v1',
-                           'model': 'authorized-model', 'context_cap_tokens': 32768,
+                           'model': 'qwen-authorized', 'context_cap_tokens': 32768,
                            'max_output_tokens': 16384, 'auth_env': None}
         base_route = {
             'allowed_data_classes': ['synthetic', 'public_repo'],
             'profile': gateway_profile,
             'profile_name': 'llmtool-direct',
             'authorization_ref': 'pm-task-ref',
-            'default_model': 'authorized-model',
-            'allowed_models': ['authorized-model'],
+            'default_model': 'qwen-authorized',
+            'allowed_models': ['qwen-authorized'],
             'default_effort': 'low',
         }
         cases = (
@@ -2162,7 +2182,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
                  patch.object(task_submission_cli, 'load_route_config',
                               return_value={'routes': {'gw-agent': mock_route}}), \
                  patch.object(task_submission_cli, '_gw_agent_endpoint', return_value=({
-                     'type': 'openai-compatible', 'model': 'authorized-model',
+                     'type': 'openai-compatible', 'model': 'qwen-authorized',
                      'base_url': 'http://10.20.30.40:8080'}, {'max_tokens': 49152})):
                 with self.assertRaisesRegex(
                         LLMToolError, 'gateway profile is unavailable or invalid'):
@@ -2282,9 +2302,24 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertEqual(reloaded['state'], 'PM_RESPONDED')
         self.assertIsNone(reloaded.get('developer'))
 
-    def test_gateway_profile_model_outside_allowed_models_is_refused(self):
-        # #1773 (CWE-863): the real repo route lists only its default model; a
-        # gateway profile serving another model is refused before any claim.
+    def test_gateway_profile_model_of_a_known_family_needs_no_allowed_models_entry(self):
+        # #2302 part 1: the real repo route lists only 'gw', yet a gateway profile
+        # serving another model of a known family runs, and the Task records it.
+        target = 'gw-agent-unlisted-known-family.md'
+        code, task = self._delegate(target, provider_model='qwen3.8-27b',
+                                    list_provider_model=False)
+        developer = task['developer']
+        self.assertEqual(code, 0)
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(developer['model'], 'qwen3.8-27b')
+        self.assertEqual(developer['model_provenance'], {
+            'requested_model': 'gw', 'resolved_model': 'qwen3.8-27b',
+            'model_source': 'repo_default', 'model_family': 'qwen',
+            'provider_model': 'qwen3.8-27b'})
+
+    def test_gateway_profile_model_of_unknown_family_is_refused(self):
+        # #1773 (CWE-863), #2302 part 1: a gateway profile serving a model whose
+        # family cannot be read from its id is refused before any claim.
         with self.assertRaises(LLMToolError) as caught:
             self._delegate('gw-agent-unlisted-model.md', provider_model='unlisted-model',
                            list_provider_model=False, route_runner=self._unused_runner)

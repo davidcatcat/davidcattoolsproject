@@ -417,10 +417,47 @@ _DIRECT_HANDOFF_HISTORY = 'direct_handoffs'
 # #2503: optional bounded, screened tail of the Developer CLI's stderr
 # (Developer-runtime, unverified), kept for the PM on any recorded outcome.
 _DEVELOPER_STDERR_FIELDS = frozenset(('stderr_excerpt',))
+# #2302 part 1: the model a Claude, AGY or gw-agent Developer run used: requested
+# model, resolved model, where the request came from, the model family read from
+# the id, and the model the provider reported (None when it reported none).
+# Optional on every developer shape; legacy records omit it.
+_DEVELOPER_MODEL_PROVENANCE_FIELDS = frozenset(('model_provenance',))
+_MODEL_PROVENANCE_KEYS = frozenset((
+    'requested_model', 'resolved_model', 'model_source', 'model_family', 'provider_model'))
+_MODEL_PROVENANCE_SOURCES = frozenset(('repo_default', 'roles', 'env', 'cli', 'UNKNOWN'))
+_MODEL_PROVENANCE_PROFILES = frozenset(('agy', 'claude', 'gw-agent'))
+_MODEL_FAMILY_NAME = re.compile(r'[a-z0-9][a-z0-9._-]{0,31}|UNKNOWN')
 _DEVELOPER_OPTIONAL_FIELDS = (frozenset((_DIRECT_DISPATCH_BOUNDARY, _DIRECT_HANDOFF_HISTORY)) |
                               _DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS |
                               _DEVELOPER_CLAUDE_FAILURE_EVIDENCE_FIELDS |
-                              _DEVELOPER_STDERR_FIELDS)
+                              _DEVELOPER_STDERR_FIELDS | _DEVELOPER_MODEL_PROVENANCE_FIELDS)
+
+
+def _model_text_ok(value):
+    """A recorded model id: a printable str of 1 to 256 characters."""
+    return (type(value) is str and 1 <= len(value) <= 256 and value.isprintable() and
+            value == value.strip())
+
+
+def valid_model_provenance(developer):
+    """#2302 part 1: strict shape of developer.model_provenance.
+
+    Exactly the keys requested_model, resolved_model, model_source,
+    model_family and provider_model. The three model fields are printable ids
+    (provider_model may also be None), model_source is one of repo_default,
+    roles, env, cli or UNKNOWN, and model_family is a short lower-case family
+    name or UNKNOWN. Only agy, claude and gw-agent records carry it.
+    """
+    provenance = developer.get('model_provenance') if type(developer) is dict else None
+    return (type(provenance) is dict and set(provenance) == _MODEL_PROVENANCE_KEYS and
+            developer.get('provider_profile') in _MODEL_PROVENANCE_PROFILES and
+            _model_text_ok(provenance['requested_model']) and
+            _model_text_ok(provenance['resolved_model']) and
+            (provenance['provider_model'] is None or _model_text_ok(provenance['provider_model'])) and
+            type(provenance['model_source']) is str and
+            provenance['model_source'] in _MODEL_PROVENANCE_SOURCES and
+            type(provenance['model_family']) is str and
+            _MODEL_FAMILY_NAME.fullmatch(provenance['model_family']) is not None)
 
 
 def _valid_direct_handoffs(entries):
@@ -2884,6 +2921,8 @@ def _validate(record, *, strict=True):
             if ('stderr_excerpt' in developer and
                     not _valid_reported_text(developer['stderr_excerpt'],
                                              DEVELOPER_STDERR_EXCERPT_MAX_BYTES)):
+                _fail()
+            if 'model_provenance' in developer and not valid_model_provenance(developer):
                 _fail()
             if ('data_class' in developer and
                     (developer.get('provider_profile') != 'gw-agent' or

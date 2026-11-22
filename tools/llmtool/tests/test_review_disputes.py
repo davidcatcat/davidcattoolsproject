@@ -1043,8 +1043,9 @@ class ArbiterChooserTests(unittest.TestCase):
                          ('claude-reviewer', True))
 
     def test_gw_agent_authored_prefers_the_other_reviewer_family(self):
-        developer = {'provider_profile': 'gw-agent', 'model': 'home-model-7b'}
-        self.assertEqual(review_repair.developer_family(developer), 'gw-agent')
+        # #2302 part 1 (A1c): the family is the recorded model's, here Qwen.
+        developer = {'provider_profile': 'gw-agent', 'model': 'qwen3.8-27b'}
+        self.assertEqual(review_repair.developer_family(developer), 'qwen')
         for first, expected in (('claude-reviewer', 'codex-reviewer'),
                                 ('codex-reviewer', 'claude-reviewer')):
             with self.subTest(first=first):
@@ -1052,12 +1053,39 @@ class ArbiterChooserTests(unittest.TestCase):
                 self.assertEqual((chosen['reviewer'], chosen['fresh_session']),
                                  (expected, False))
 
-    def test_opencode_authored_prefers_the_other_reviewer_family(self):
-        developer = {'provider_profile': 'opencode', 'model': 'deepseek-free'}
-        self.assertEqual(review_repair.developer_family(developer), 'opencode')
+    def test_gw_agent_keeps_its_former_reading_of_a_model_that_shows_no_family(self):
+        # The multi-vendor gw-agent route keeps its route key for such a name
+        # (a model of unknown family is refused at dispatch, A1b), and a legacy
+        # record with no model keeps it too.
+        developer = {'provider_profile': 'gw-agent', 'model': 'home-model-7b'}
+        self.assertEqual(review_repair.developer_family(developer), 'gw-agent')
+        self.assertEqual(review_repair.developer_family({'provider_profile': 'gw-agent'}),
+                         'gw-agent')
         chosen = self.choose(developer, 'claude-reviewer')
         self.assertEqual((chosen['reviewer'], chosen['fresh_session']),
                          ('codex-reviewer', False))
+
+    def test_opencode_authored_prefers_the_other_reviewer_family(self):
+        developer = {'provider_profile': 'opencode', 'model': 'deepseek-free'}
+        self.assertEqual(review_repair.developer_family(developer), 'deepseek')
+        chosen = self.choose(developer, 'claude-reviewer')
+        self.assertEqual((chosen['reviewer'], chosen['fresh_session']),
+                         ('codex-reviewer', False))
+        # OpenCode keeps its former reading of a name that shows no family.
+        unnamed = {'provider_profile': 'opencode', 'model': 'big-model'}
+        self.assertEqual(review_repair.developer_family(unnamed), 'opencode')
+
+    def test_a_claude_route_run_of_another_vendors_model_takes_that_family(self):
+        # A1c: never the route's family; a same-family arbiter is never chosen.
+        for model, family, first, expected in (
+                ('gpt-6.1-sol', 'codex', 'claude-reviewer', 'claude-reviewer'),
+                ('gemini-3.8-flash-medium', 'gemini', 'codex-reviewer', 'claude-reviewer')):
+            developer = {'provider_profile': 'claude', 'model': model}
+            with self.subTest(model=model):
+                self.assertEqual(review_repair.developer_family(developer), family)
+                chosen = self.choose(developer, first)
+                self.assertEqual(chosen['reviewer'], expected)
+                self.assertNotEqual(chosen['family'], family)
 
     def test_a_route_serving_another_vendors_model_takes_that_family(self):
         for developer, family, first, expected in (
