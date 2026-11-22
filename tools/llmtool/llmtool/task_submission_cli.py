@@ -5172,13 +5172,18 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
                 _background_launch_notifier(pid)
             return saved
 
+        # #1817 W2a F1: the grant inputs come from the durable Task record and
+        # its host-bound D6 base commit, never from Developer or provider
+        # output. A Task without an Issue leaves the W1 grant check closed.
         result = opencode_direct_developer.run(
             root=registration.root, read_paths=read_paths,
             write_paths=write_paths, prompt=prompt,
             dispatch_store=store, dispatch_task_id=task['task_id'], steps=steps,
             prelaunch_validate=validate_prelaunch_d6_binding, model=model,
             launch_callback=record_opencode_launch,
-            spawn_authorization=authorize_opencode_spawn, timeout_seconds=timeout)
+            spawn_authorization=authorize_opencode_spawn, timeout_seconds=timeout,
+            workflow_grant_base_commit=snapshot.head,
+            workflow_grant_issue=task.get('issue'))
         _record_skill_delivery(task, registration, snapshot, 'opencode', model,
                                card_prefix_sha256, result)
     except opencode_direct_developer.DirectOpenCodeError as exc:
