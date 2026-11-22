@@ -253,7 +253,9 @@ class RunRouteConfirmsPreSpawnCodesTests(unittest.TestCase):
 
     def test_each_code_is_raised_before_the_runner(self):
         config = {'executable': '/usr/bin/true'}
-        self.assertEqual(self._run(config, model='other-model'), 'CLAUDE_PROFILE_INVALID')
+        # #2302 part 1: any well-formed model id is admitted by the route; a
+        # malformed id is still refused before the runner.
+        self.assertEqual(self._run(config, model='not a model'), 'CLAUDE_PROFILE_INVALID')
         self.assertEqual(self._run(config, executable='relative-name'),
                          'CLAUDE_REQUEST_INVALID')
         self.assertEqual(self._run(config, prompt='x' * (5 * 1024 * 1024 + 1)),
