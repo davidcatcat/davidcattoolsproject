@@ -404,6 +404,14 @@ class DispatchCallerWorkflowGrantTests(unittest.TestCase):
             stack.enter_context(patch.object(
                 task_submission_cli.task_completion, 'validate_task_binding'))
             stack.enter_context(patch.object(
+                task_submission_cli.task_completion, 'bind_executor_task',
+                return_value=(registration, snapshot)))
+            # The fake store has no chain history; this test proves the dispatch
+            # caller builds the request and the route refuses it before launch.
+            stack.enter_context(patch.object(
+                task_submission_cli, '_delegate_chain_gate',
+                side_effect=lambda _args, _store, _binding, claim: claim()))
+            stack.enter_context(patch.object(
                 task_submission_cli, '_delegate_d6_binding',
                 return_value=(registration, snapshot)))
             stack.enter_context(patch.object(
