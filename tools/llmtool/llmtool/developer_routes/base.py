@@ -23,6 +23,7 @@ from typing import Any, Mapping
 
 from ..errors import LLMToolError
 from ..providers.cli_lifecycle import CLIProcessLifecycle
+from .. import developer_stderr
 from .. import task_completion
 
 # #2281 (Owner 2026-11-21): the provider reply travels on stdout; like every
@@ -121,6 +122,9 @@ class RouteError(LLMToolError):
         self.provider_evidence = (dict(provider_evidence)
                                   if provider_evidence is not None else None)
         self.execution_facts = None
+        # #2503: run_route sets this to the screened, bounded stderr tail
+        # (developer_stderr) once the process ran; never the raw stream.
+        self.stderr_excerpt = None
 
 
 # Design c6876861575 items 1-2: the evidence a route may return from its own
@@ -158,6 +162,9 @@ class RouteResult:
     cleanup_status: str
     boundary: Mapping[str, Any]
     provider_evidence: Mapping[str, Any] | None = None
+    # #2503: the screened, bounded tail of the CLI's stderr (developer_stderr), never
+    # the raw stream.
+    stderr_excerpt: str | None = None
 
 
 class DeveloperRoute(ABC):
@@ -1257,10 +1264,13 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
                                verified, value['effort'], parsed.get('usage'), changed,
                                code, stdout_hash, elapsed,
                                getattr(execute, 'last_cleanup_status', 'UNKNOWN'), dict(proof),
-                               _result_evidence(route, parsed))
+                               _result_evidence(route, parsed),
+                               stderr_excerpt=developer_stderr.safe_excerpt(stderr))
         except Exception:
             raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
     except RouteError as exc:
         if exc.execution_facts is None:
             exc.execution_facts = _post_run_execution_facts(code, stdout, started, execute)
+        if exc.stderr_excerpt is None and type(stderr) is bytes:
+            exc.stderr_excerpt = developer_stderr.safe_excerpt(stderr)
         raise

@@ -101,6 +101,15 @@ class AgyRouteTests(unittest.TestCase):
         self.assertEqual(result.usage, {'input_tokens': 3, 'output_tokens': 2})
         self.assertEqual(result.changed_files, ('source.py',))
 
+    def test_run_route_carries_the_cli_stderr(self):
+        # #2503: the raw stderr reaches the caller on a result and on a refusal.
+        result, _calls = self.run_case(stderr=b'notice: soft-denied run_command\n')
+        self.assertEqual(result.stderr_excerpt, 'notice: soft-denied run_command')
+        with self.assertRaises(RouteError) as caught:
+            self.run_case(stderr=b'Error: login required\n', code=1)
+        self.assertEqual(caught.exception.code, 'AGY_EXIT_NONZERO')
+        self.assertEqual(caught.exception.stderr_excerpt, 'Error: login required')
+
     def test_prompt_byte_limit_boundary(self):
         request = self.request()
         request['prompt'] = 'x' * MAX_PROMPT_BYTES
