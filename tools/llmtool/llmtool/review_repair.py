@@ -543,9 +543,14 @@ def _remote_test_failure(task, *, executor_task, pr_number, receipt):
     return packet
 
 
-# #1502 WP-D D11: an exact-head required CI check that ended in conclusion
-# 'failure' is repaired like an EC2 FAIL and shares its count.
-CI_REPAIR_CHECKS = ('check (Linux 3.14)', 'check (macOS 3.13)')
+# #1502 WP-D D11, #2337: exact-head required CI checks a CI repair may answer.
+CI_REPAIR_CHECKS = (
+    'check (Linux 3.14)',
+    'check (docs)',
+    'gateway tests (Linux 3.14)',
+    'ai-loop helper tests (Python 3.14)',
+    'check (macOS 3.13)',
+)
 CI_EXCERPT_MAX_BYTES = 4096
 CI_EXCERPT_MAX_LINES = 40
 CI_PACKET_HEADER = 'CI_CHECK_FAILURE'
@@ -559,6 +564,7 @@ def _ci_failure(task, *, executor_task, pr_number, ci_failure):
     check run, so a replayed failure of the same run reuses its claim even when
     the untrusted excerpt differs. Any malformed input refuses CI_FAILURE_INVALID.
     """
+    from . import task_submission_cli
     if (type(ci_failure) is not dict or set(ci_failure) != _CI_FAILURE_FIELDS or
             type(ci_failure['head']) is not str or
             re.fullmatch(r'[0-9a-f]{40}', ci_failure['head']) is None or
@@ -570,6 +576,8 @@ def _ci_failure(task, *, executor_task, pr_number, ci_failure):
             type(ci_failure['excerpt']) is not str):
         _refuse('CI_FAILURE_INVALID')
     excerpt = ci_failure['excerpt']
+    if excerpt.strip():
+        excerpt = task_submission_cli._screen_text(excerpt, CI_EXCERPT_MAX_BYTES + 1024)
     try:
         valid_excerpt = (len(excerpt.encode('utf-8')) <= CI_EXCERPT_MAX_BYTES and
                          len(excerpt.splitlines()) <= CI_EXCERPT_MAX_LINES)
