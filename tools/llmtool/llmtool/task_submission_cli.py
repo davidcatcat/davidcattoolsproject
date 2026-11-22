@@ -4814,17 +4814,93 @@ def _developer_role_value(role, key, route_config):
 
 
 def _require_developer_model(role_name, route, route_config, model, role):
-    """Dispatch-time allowed_models check; a verified override must match exactly."""
+    """Dispatch-time model check (#2302 part 1, Owner B).
+
+    Any well-formed model id whose family can be determined from the id is
+    admitted, with no repository change and no owner override. A malformed id,
+    or one of no determinable family, is refused; an override cannot admit it
+    (it is not read here). allowed_models is not consulted.
+    """
     try:
         check_route_model({'routes': {route: route_config}}, route, model)
         return
     except RouteError:
         pass
-    verified = role.get('owner_override') if type(role) is dict else None
-    if (type(verified) is dict and verified.get('route') == route and
-            type(model) is str and verified.get('model') == model):
-        return
     _refuse_developer_model(role_name)
+
+
+# #2302 part 1: where a Developer run's model came from. Anything else is UNKNOWN.
+_DEVELOPER_MODEL_SOURCES = ('repo_default', 'roles', 'env', 'cli')
+
+
+class _DeveloperProfile(tuple):
+    """A Developer profile tuple that also carries the provenance of its model.
+
+    It equals and unpacks as the plain tuple ((model, effort) or, for Claude,
+    (model, effort, config_dir)); requested_model and model_source are extra
+    attributes read by _model_provenance. A profile that is a plain tuple
+    (a test double, say) has none, and its source is recorded as UNKNOWN.
+    """
+    requested_model = None
+    model_source = None
+
+
+def _developer_model_source(role):
+    """The source of the model a resolved Developer role names, else UNKNOWN."""
+    if type(role) is not dict:
+        return 'UNKNOWN'
+    if role.get('model') is None or role.get('model_source') == 'repo_default':
+        return 'repo_default'
+    source = role.get('model_source')
+    return source if source in _DEVELOPER_MODEL_SOURCES else 'UNKNOWN'
+
+
+def _profile_with_provenance(values, role, requested_model):
+    profile = _DeveloperProfile(values)
+    profile.requested_model = requested_model
+    profile.model_source = _developer_model_source(role)
+    return profile
+
+
+def _model_provenance(profile, resolved_model, provider_model=None):
+    """The record a Developer run keeps of its model (#2302 part 1, A2).
+
+    requested_model is the model the role asked for (user config, environment,
+    CLI or the repository default); resolved_model is the model dispatched;
+    model_source says where the request came from; model_family is read from
+    the id of the model the run used (the provider-reported one when there is
+    one), or is UNKNOWN; provider_model is the model the provider reported, or
+    None when it reported none.
+    """
+    from .developer_routes import model_family
+    requested = getattr(profile, 'requested_model', None)
+    if type(requested) is not str or not requested:
+        requested = resolved_model
+    source = getattr(profile, 'model_source', None)
+    reported = provider_model if type(provider_model) is str and provider_model else None
+    return {
+        'requested_model': requested, 'resolved_model': resolved_model,
+        'model_source': source if source in _DEVELOPER_MODEL_SOURCES else 'UNKNOWN',
+        'model_family': model_family(reported or resolved_model),
+        'provider_model': reported,
+    }
+
+
+def _record_provider_model(developer, provider_model):
+    """Add the provider-reported model to a Developer record's model_provenance.
+
+    The family is then read from that model. A record with no model_provenance
+    (a legacy or test record) is left unchanged. Never raises.
+    """
+    try:
+        provenance = developer.get('model_provenance')
+        if type(provenance) is dict and type(provider_model) is str and provider_model:
+            from .developer_routes import model_family
+            developer['model_provenance'] = dict(
+                provenance, provider_model=provider_model,
+                model_family=model_family(provider_model))
+    except Exception:
+        pass
 
 
 def _agy_developer_profile(route_config, *, owner_override=None, repository=None,
@@ -4838,7 +4914,8 @@ def _agy_developer_profile(route_config, *, owner_override=None, repository=None
         raise error
     model = _developer_role_value(role, 'model', route_config)
     effort = _developer_role_value(role, 'effort', route_config)
-    # The allowlist check runs after the route's own profile validation, so a
+    requested = model
+    # The model check runs after the route's own profile validation, so a
     # malformed model or effort keeps its AGY_ROLE_PROFILE_INVALID refusal.
     try:
         model, effort = AgyRoute(route_config).validate_profile(model, effort)
@@ -4847,7 +4924,7 @@ def _agy_developer_profile(route_config, *, owner_override=None, repository=None
         error.role_config_code = 'AGY_ROLE_PROFILE_INVALID'
         raise error from None
     _require_developer_model('agy-developer', 'agy', route_config, model, role)
-    return model, effort
+    return _profile_with_provenance((model, effort), role, requested)
 
 
 def _claude_developer_profile(route_config, *, owner_override=None, repository=None,
@@ -4859,6 +4936,7 @@ def _claude_developer_profile(route_config, *, owner_override=None, repository=N
         raise LLMToolError('claude-developer role configuration is invalid')
     model = _developer_role_value(role, 'model', route_config)
     effort = _developer_role_value(role, 'effort', route_config)
+    requested = model
     config_dir = role.get('config_dir')
     if type(config_dir) is not str or not os.path.isabs(config_dir):
         raise LLMToolError('claude-developer config_dir is unavailable or invalid')
@@ -4868,7 +4946,7 @@ def _claude_developer_profile(route_config, *, owner_override=None, repository=N
     except RouteError:
         raise LLMToolError('claude-developer role model or effort is invalid') from None
     _require_developer_model('claude-developer', 'claude', route_config, model, role)
-    return model, effort, config_dir
+    return _profile_with_provenance((model, effort, config_dir), role, requested)
 
 
 _GW_AGENT_EFFORTS = ('minimal', 'low', 'medium', 'high')
@@ -4878,12 +4956,13 @@ def _gw_agent_developer_profile(route_config, *, served_model=None, owner_overri
                                 repository=None, fetch_comment=None):
     """Resolve the gw-agent role model and effort through the single resolver.
 
-    The role model is checked against allowed_models. The gateway profile, not
-    the role, decides the model the gateway actually serves, so dispatch passes
-    it as served_model: that model is checked too (allowed_models or a verified
-    owner override naming route gw-agent and that exact model) and is the model
-    returned (#1773, CWE-863). Without served_model the checked role model is
-    returned.
+    The role model is checked like any Developer model (#2302 part 1: any
+    well-formed id of a determinable family, or the gateway routing alias).
+    The gateway profile, not the role, decides the model the gateway actually
+    serves, so dispatch passes it as served_model: that model is checked the
+    same way and is the model returned (#1773, CWE-863). Without served_model
+    the checked role model is returned. The returned tuple also carries the
+    role's requested model and its source (see _DeveloperProfile).
     """
     role = _resolve_developer_role('gw-agent-developer', owner_override=owner_override,
                                    repository=repository, fetch_comment=fetch_comment)
@@ -4895,6 +4974,7 @@ def _gw_agent_developer_profile(route_config, *, served_model=None, owner_overri
         raise error
     model = _developer_role_value(role, 'model', route_config)
     effort = _developer_role_value(role, 'effort', route_config)
+    requested = model
     _require_developer_model('gw-agent-developer', 'gw-agent', route_config, model, role)
     if effort not in _GW_AGENT_EFFORTS:
         error = LLMToolError('gw-agent-developer role model or effort is invalid')
@@ -4904,24 +4984,19 @@ def _gw_agent_developer_profile(route_config, *, served_model=None, owner_overri
         model = _require_gw_agent_served_model(
             route_config, served_model, role, owner_override=owner_override,
             repository=repository, fetch_comment=fetch_comment)
-    return model, effort
+    return _profile_with_provenance((model, effort), role, requested)
 
 
 def _require_gw_agent_served_model(route_config, served_model, role, *, owner_override=None,
                                    repository=None, fetch_comment=None):
-    """Return the gateway-served model once it passes the allowed_models check.
+    """Return the gateway-served model once it passes the Developer model check.
 
-    An override the resolver already verified for this same route and model
-    is reused; otherwise role_config.check_role_model verifies the supplied
-    override against served_model itself. Anything else is refused with
-    ROLE_MODEL_NOT_ALLOWED.
+    role_config.check_role_model applies the same check as for the role model;
+    an override is not needed and cannot admit a model the check refuses. A
+    model that fails is refused with ROLE_MODEL_NOT_ALLOWED.
     """
     if type(served_model) is not str or not served_model:
         _refuse_developer_model('gw-agent-developer')
-    verified = role.get('owner_override') if type(role) is dict else None
-    if (type(verified) is dict and verified.get('route') == 'gw-agent' and
-            verified.get('model') == served_model):
-        return served_model
     try:
         role_config.check_role_model('gw-agent', route_config, served_model,
                                      owner_override=owner_override,
@@ -5683,7 +5758,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     _screen_text(task['response'], RESPONSE_LIMIT)
     config = load_route_config()
     route_config = dict(config['routes']['agy'])
-    model, effort = _agy_developer_profile(route_config)
+    agy_profile = _agy_developer_profile(route_config)
+    model, effort = agy_profile
     executable = shutil.which(route_config['executable'])
     if executable is None:
         raise LLMToolError('AGY executable is unavailable')
@@ -5776,7 +5852,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     result = None
     expected_developer = copy.deepcopy(store.get(task['task_id'])['developer'])
     try:
-        developer.update(state='DEVELOPER_DISPATCHING', provider_type='agy-cli', model=model)
+        developer.update(state='DEVELOPER_DISPATCHING', provider_type='agy-cli', model=model,
+                         model_provenance=_model_provenance(agy_profile, model))
         dispatching_record = store.prepare_direct_dispatch(
             task['task_id'], expected_developer=expected_developer, developer=developer)
         developer = copy.deepcopy(dispatching_record['developer'])
@@ -5844,6 +5921,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
            snapshot=capture_snapshot, on_launch=authorize_agy_spawn, on_child=record_agy_child)
         _record_skill_delivery(task, registration, snapshot, 'agy', result.model,
                                card_prefix_sha256, result)
+        _record_provider_model(developer, getattr(result, 'model', None))
         after_registration = task_completion.read_d6_registration(
             registration.task_id, registration.common_dir)
         after = task_completion.collect_git_snapshot(registration.root)
@@ -5902,6 +5980,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         error_code = ('AGY_DISPATCH_DENIED' if owner_gate_denied else exc.code)
         developer.update(state='BLOCKED', provider_type='agy-cli', model=model,
                          error_code=error_code, artifact=None, artifact_sha256=None)
+        if result is not None:
+            _record_provider_model(developer, getattr(result, 'model', None))
         # #2503: AGY's stderr (soft-deny notices, quota or auth errors) for the PM.
         _attach_stderr_excerpt(developer, getattr(exc, 'stderr_excerpt', None) or
                                getattr(result, 'stderr_excerpt', None))
@@ -6433,7 +6513,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
     if type(route_value) is not dict:
         raise LLMToolError('Claude route configuration is unavailable')
     route_config = dict(route_value)
-    model, effort, config_dir = _claude_developer_profile(route_config)
+    claude_profile = _claude_developer_profile(route_config)
+    model, effort, config_dir = claude_profile
     executable = shutil.which('claude')
     if executable is None:
         raise LLMToolError('Claude executable is unavailable')
@@ -6549,7 +6630,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
     # Bound before the try: every failure handler asks whether a result returned.
     result = None
     try:
-        developer.update(state='DEVELOPER_DISPATCHING', provider_type='claude-cli', model=model)
+        developer.update(state='DEVELOPER_DISPATCHING', provider_type='claude-cli', model=model,
+                         model_provenance=_model_provenance(claude_profile, model))
         store.update(task['task_id'], developer=developer)
         def validate_binding():
             current = store.get(task['task_id'])
@@ -6608,6 +6690,10 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
                                             completion, result, write_paths, test_policy)
             if carry is None:
                 raise RouteError('CLAUDE_NO_CHANGES')
+            # #2302: the carried record names the model the provider reported. It
+            # is a new dict, so the stored record the write below compares with
+            # stays as it was.
+            _record_provider_model(carry[0], getattr(result, 'model', None))
             # #2503: the carried result keeps this run's final reply for the PM too.
             carried_reply = getattr(route, 'parsed_cli_result', None)
             _attach_developer_reply(
@@ -6627,6 +6713,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
             raise RouteError('CLAUDE_WRITE_SCOPE_VIOLATION')
         artifact = raw.decode('utf-8', 'strict')
         usage = _normalize_agy_usage(result.usage)
+        _record_provider_model(developer, getattr(result, 'model', None))
         developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
             artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
             error_code=None, execution=_with_provider_evidence({
@@ -6656,6 +6743,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
             # #2275: a returned route result decides, not the error code.
             execution, usage = _claude_post_result_execution(result)
             developer.update(execution=execution, usage=usage)
+            _record_provider_model(developer, getattr(result, 'model', None))
         elif not owner_gate_denied:
             execution = _route_failure_execution(
                 exc, _condition_execution(getattr(exc, 'provider_evidence', None),
@@ -6703,6 +6791,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
             except Exception:
                 execution = usage = None
             developer.update(execution=execution, usage=usage)
+            _record_provider_model(developer, getattr(result, 'model', None))
             if execution is not None and not owner_gate_denied:
                 _claude_attach_failure_evidence(developer, route, exc, result)
         parsed_cli_result = getattr(route, 'parsed_cli_result', None)
@@ -6886,7 +6975,8 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     # resolver checks the role model and supplies the effort, and the model the
     # gateway profile will actually serve is checked against allowed_models (or
     # a verified owner override). Only that checked model is bound below.
-    model, effort = _gw_agent_developer_profile(role_route_config, served_model=model)
+    gw_agent_profile = _gw_agent_developer_profile(role_route_config, served_model=model)
+    model, effort = gw_agent_profile
     route_config['default_model'] = model
     route_config['expected_served_model'] = model
     route_config['profile']['model'] = model
@@ -7026,7 +7116,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             return False
 
     developer.update(state='DEVELOPER_DISPATCHING', provider_type='gw-agent-cli',
-                     model=model)
+                     model=model, model_provenance=_model_provenance(gw_agent_profile, model))
     try:
         dispatching = store.compare_and_update(
             task['task_id'], expected={'developer': expected_developer},
@@ -7112,6 +7202,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         usage = _normalize_gw_agent_usage(result.usage)
         if usage is not None:
             usage['served_model'] = served_model
+        _record_provider_model(developer, served_model)
         developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
             model=served_model,
             artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),

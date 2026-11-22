@@ -1875,6 +1875,83 @@ class TaskStoreTests(unittest.TestCase):
                 developer=dict(self._developer_assignment(), data_class='PUBLIC_REPO'))
         self.assertIsNone(self.store.get(codex_task['task_id'])['developer'])
 
+    @staticmethod
+    def _model_provenance(**changes):
+        provenance = {'requested_model': 'gw', 'resolved_model': 'qwen3.8-27b',
+                      'model_source': 'repo_default', 'model_family': 'qwen',
+                      'provider_model': 'qwen3.8-27b'}
+        provenance.update(changes)
+        return provenance
+
+    def test_developer_stores_its_model_provenance_2302(self):
+        # #2302 part 1 (A2): requested model, resolved model, model source,
+        # model family and the provider-reported model persist on the Task.
+        # The agy and claude records carry it the same way; their full shapes are
+        # exercised by the route wiring tests.
+        task = self._gw_agent_dispatch_task()
+        saved = self.store.compare_and_update(
+            task['task_id'], expected={'developer': None},
+            developer=self._gw_agent_developer(model_provenance=self._model_provenance()))
+        self.assertEqual(saved['developer']['model_provenance'], self._model_provenance())
+        self.assertEqual(
+            self.store.get(task['task_id'])['developer']['model_provenance'],
+            self._model_provenance())
+
+    def test_legacy_developer_without_model_provenance_stays_valid_2302(self):
+        task = self._gw_agent_dispatch_task()
+        saved = self.store.compare_and_update(
+            task['task_id'], expected={'developer': None},
+            developer=self._gw_agent_developer())
+        self.assertNotIn('model_provenance', saved['developer'])
+        task_store_module._validate(dict(self.store.get(task['task_id'])))
+
+    def test_model_provenance_accepts_unknown_family_source_and_no_provider_model(self):
+        task = self._gw_agent_dispatch_task()
+        provenance = self._model_provenance(
+            model_source='UNKNOWN', model_family='UNKNOWN', provider_model=None)
+        saved = self.store.compare_and_update(
+            task['task_id'], expected={'developer': None},
+            developer=self._gw_agent_developer(model_provenance=provenance))
+        self.assertEqual(saved['developer']['model_provenance'], provenance)
+
+    def test_model_provenance_rejects_malformed_values_2302(self):
+        task = self._gw_agent_dispatch_task()
+        bad = (
+            None, 'qwen', [], {},
+            {k: v for k, v in self._model_provenance().items() if k != 'provider_model'},
+            dict(self._model_provenance(), extra='x'),
+            self._model_provenance(requested_model=''),
+            self._model_provenance(requested_model=None),
+            self._model_provenance(resolved_model=7),
+            self._model_provenance(resolved_model='x' * 257),
+            self._model_provenance(resolved_model='bad\nmodel'),
+            self._model_provenance(provider_model=''),
+            self._model_provenance(provider_model=3),
+            self._model_provenance(model_source='guess'),
+            self._model_provenance(model_source=None),
+            self._model_provenance(model_family='Qwen'),
+            self._model_provenance(model_family=''),
+            self._model_provenance(model_family='Qwen Family'),
+            self._model_provenance(model_family=None),
+        )
+        for provenance in bad:
+            with self.subTest(provenance=provenance):
+                with self.assertRaises(LLMToolError):
+                    self.store.compare_and_update(
+                        task['task_id'], expected={'developer': None},
+                        developer=self._gw_agent_developer(model_provenance=provenance))
+        self.assertIsNone(self.store.get(task['task_id'])['developer'])
+
+    def test_model_provenance_is_refused_on_a_route_that_does_not_record_it_2302(self):
+        codex_task = self._codex_dispatch_task()
+        self.store.create(codex_task)
+        with self.assertRaises(LLMToolError):
+            self.store.compare_and_update(
+                codex_task['task_id'], expected={'developer': None},
+                developer=dict(self._developer_assignment(),
+                               model_provenance=self._model_provenance()))
+        self.assertIsNone(self.store.get(codex_task['task_id'])['developer'])
+
     def test_real_store_accepts_reviewer_accounts_and_preserves_them_on_transition(self):
         for account in ('claude-reviewer', 'codex-reviewer'):
             with self.subTest(account=account):

@@ -1,8 +1,10 @@
 """#1502 WP-E: per-route allowed_models in developer-routes.json.
 
-Owner #2302 P2: agy, claude and opencode accept any model of their own
-provider family in a valid format; allowed_models is optional there and is
-not a membership list. gw-agent keeps its one-item allowed_models gate.
+#2302 part 1 (Owner B): every Developer route (agy, claude, gw-agent, opencode)
+admits any well-formed model id with no repository change; allowed_models is
+not a membership list on any route. agy, claude and gw-agent also need a model
+family that can be read from the id. The gw-agent route file still holds its
+one-item allowed_models list (a load rule, not an admission gate).
 """
 
 import copy
@@ -16,22 +18,30 @@ from llmtool.developer_routes import RouteError, check_route_model, load_route_c
 
 ROUTES_FILE = Path(__file__).resolve().parents[1] / 'developer-routes.json'
 ROUTE_NAMES = ('agy', 'claude', 'gw-agent', 'opencode')
-# Owner #2302 P2: routes gated by provider family and format, not by a list.
+# #2302 part 1: routes with no membership list (allowed_models is optional on
+# them). gw-agent also admits any model now, but its route file keeps the
+# one-item allowed_models load rule, so it is listed apart.
 FAMILY_ROUTES = ('agy', 'claude', 'opencode')
-# Valid, same-family example model names that are not the default, per route.
+# Valid example model names that are not the default, per route.
 OTHER_MODEL = {'agy': 'gemini-example-b', 'claude': 'claude-example-b',
-               'gw-agent': 'example-model-b', 'opencode': 'opencode/example-model-b-free'}
-# Well-formed names of another provider family, per family route.
-WRONG_FAMILY = {'agy': ('claude-opus-5-5', 'gpt-6.1-sol', 'example-model-b',
-                        'opencode/example-model-b-free', 'gemini-claude-b'),
-                'claude': ('gemini-3.8-flash-medium', 'gpt-6.1-sol', 'example-model-b',
-                           'claude-gpt-6', 'claude-openai-b'),
+               'gw-agent': 'qwen3-example-b', 'opencode': 'opencode/example-model-b-free'}
+# Another vendor's well-formed model ids, now admitted by agy and claude.
+OTHER_VENDOR = {'agy': ('claude-opus-5-5', 'gpt-6.1-sol', 'claude-sonnet-5-5-medium',
+                        'qwen3.8-27b', 'deepseek-v4.1-flash'),
+                'claude': ('gemini-3.8-flash-medium', 'gpt-6.1-sol', 'qwen3.8-27b',
+                           'deepseek-v4.1-flash')}
+# Well-formed names whose family cannot be read from the id, per route (A1b).
+WRONG_FAMILY = {'agy': ('example-model-b', 'opencode/example-model-b-free',
+                        'gemini-claude-b'),
+                'claude': ('example-model-b', 'claude-gpt-6', 'claude-openai-b'),
                 'opencode': ('claude-opus-5-5', 'gemini-3.8-flash-medium')}
 # Badly formatted names for each route's format check.
 BAD_FORMAT = {'agy': ('https://example.invalid/m', 'has space', '-leading-dash',
-                      'GEMINI-UPPER', 'gemini-', 'vendor/gemini-example-b'),
-              'claude': ('example-model-b', 'claude-UPPER', 'claude-'),
-              'gw-agent': ('https://example.invalid/m', 'has space', '-leading-dash'),
+                      'gemini..b', '', 'Gemini-example-b'),
+              'claude': ('https://example.invalid/m', 'has space', '-leading-dash',
+                         'claude..b', '', 'Claude-example-b'),
+              'gw-agent': ('https://example.invalid/m', 'has space', '-leading-dash',
+                           'Qwen3-example-b'),
               'opencode': ('example-model-b-free', 'https://example.invalid/m',
                            'has space', '-leading-dash/model', 'opencode/example#HIGH')}
 # #1502 WP-E: the review and AI Debug role registry in use.
@@ -46,7 +56,7 @@ SHIPPED_ROLES = {
 def same_family(route, index):
     """A valid, same-family example model name for route, numbered index."""
     return {'agy': f'gemini-example-{index}', 'claude': f'claude-example-{index}',
-            'gw-agent': f'example-model-{index}',
+            'gw-agent': f'qwen3-example-{index}',
             'opencode': f'opencode/example-{index}-free'}[route]
 
 
@@ -182,13 +192,9 @@ class AllowedModelsConfigTests(unittest.TestCase):
             with self.subTest(route=route):
                 default = config['routes'][route]['default_model']
                 self.assertEqual(check_route_model(config, route, default), default)
-                if route in FAMILY_ROUTES:
-                    self.assertEqual(check_route_model(config, route, OTHER_MODEL[route]),
-                                     OTHER_MODEL[route])
-                else:
-                    with self.assertRaises(RouteError) as caught:
-                        check_route_model(config, route, OTHER_MODEL[route])
-                    self.assertEqual(caught.exception.code, 'ROLE_MODEL_NOT_ALLOWED')
+                # #2302 part 1: an unlisted model is admitted on every route.
+                self.assertEqual(check_route_model(config, route, OTHER_MODEL[route]),
+                                 OTHER_MODEL[route])
 
     def test_missing_key(self):
         # Owner #2302 P2: allowed_models is optional for family routes only.
@@ -591,8 +597,10 @@ class CheckRouteModelTests(unittest.TestCase):
     def test_exported(self):
         self.assertIn('check_route_model', developer_routes.__all__)
 
-    def test_route_checks_cover_the_family_routes_only(self):
-        self.assertEqual(set(developer_routes._ROUTE_MODEL_CHECKS), set(FAMILY_ROUTES))
+    def test_route_checks_cover_every_developer_route(self):
+        self.assertEqual(set(developer_routes._ROUTE_MODEL_CHECKS), set(ROUTE_NAMES))
+        for route in ROUTE_NAMES:
+            self.assertTrue(developer_routes.route_has_family_check(route))
 
     def test_listed_model_is_returned(self):
         for route in ROUTE_NAMES:
@@ -600,44 +608,85 @@ class CheckRouteModelTests(unittest.TestCase):
                 model = self.config['routes'][route]['default_model']
                 self.assertEqual(check_route_model(self.config, route, model), model)
 
-    def test_same_family_model_is_accepted_without_a_list_entry(self):
-        # Owner #2302 P2: agy accepts gemini-4-hydrogen-medium and claude
-        # accepts claude-fable-5-2, with or without allowed_models.
+    def test_any_model_is_accepted_without_a_list_entry(self):
+        # #2302 part 1: a model of any known family is admitted on every
+        # route, with or without allowed_models (no repository change).
         unlisted = copy.deepcopy(self.config)
-        for route in FAMILY_ROUTES:
-            del unlisted['routes'][route]['allowed_models']
+        for route in ROUTE_NAMES:
+            unlisted['routes'][route].pop('allowed_models', None)
         for config in (self.config, unlisted):
             for route, model in (('agy', 'gemini-4-hydrogen-medium'),
                                  ('claude', 'claude-fable-5-2'),
+                                 ('gw-agent', OTHER_MODEL['gw-agent']),
                                  ('opencode', OTHER_MODEL['opencode'])):
                 with self.subTest(route=route, model=model,
                                   listed='allowed_models' in config['routes'][route]):
                     self.assertEqual(check_route_model(config, route, model), model)
+            for route in ('agy', 'claude'):
+                for model in OTHER_VENDOR[route]:
+                    with self.subTest(route=route, vendor_model=model,
+                                      listed='allowed_models' in config['routes'][route]):
+                        self.assertEqual(check_route_model(config, route, model), model)
 
-    def test_wrong_family_or_malformed_model_is_refused(self):
+    def test_routing_alias_is_admitted_for_gw_agent_only(self):
+        self.assertEqual(check_route_model(self.config, 'gw-agent', 'gw'), 'gw')
+        for route in ('agy', 'claude'):
+            with self.subTest(route=route):
+                self.assert_refused(self.config, route, 'gw')
+
+    def test_undetermined_family_or_malformed_model_is_refused(self):
         for route in FAMILY_ROUTES:
             for model in WRONG_FAMILY[route] + BAD_FORMAT[route]:
                 with self.subTest(route=route, model=model):
                     self.assert_refused(self.config, route, model)
-        self.assert_refused(self.config, 'claude', 'CLAUDE-OPUS-5-5')
-        self.assert_refused(self.config, 'claude', 'anthropic/claude-fable-5-2')
-        self.assert_refused(self.config, 'agy', 'GEMINI-4-HYDROGEN-MEDIUM')
-        self.assert_refused(self.config, 'claude', '')
-        self.assert_refused(self.config, 'agy', '')
+        for model in BAD_FORMAT['gw-agent'] + ('example-model-b', 'authorized-model'):
+            with self.subTest(route='gw-agent', model=model):
+                self.assert_refused(self.config, 'gw-agent', model)
+        for route in ROUTE_NAMES:
+            self.assert_refused(self.config, route, '')
 
-    def test_a_listed_wrong_family_model_is_still_refused(self):
-        # allowed_models is not consulted for a family route.
+    def test_a_listed_model_of_unknown_family_is_still_refused(self):
+        # allowed_models is not consulted on any route.
         config = copy.deepcopy(self.config)
-        config['routes']['agy']['allowed_models'].append('claude-opus-5-5')
-        self.assert_refused(config, 'agy', 'claude-opus-5-5')
+        config['routes']['agy']['allowed_models'].append('example-model-b')
+        self.assert_refused(config, 'agy', 'example-model-b')
+        self.assertEqual(check_route_model(config, 'agy', 'claude-opus-5-5'),
+                         'claude-opus-5-5')
 
-    def test_gw_agent_unlisted_model_is_refused(self):
-        # gw-agent is unchanged: list membership still gates its model.
-        self.assert_refused(self.config, 'gw-agent', OTHER_MODEL['gw-agent'])
-        self.assert_refused(self.config, 'gw-agent', 'claude-opus-5-5')
+    def test_gw_agent_unlisted_model_is_admitted(self):
+        # #2302 part 1: list membership no longer gates a gw-agent model.
+        self.assertEqual(check_route_model(self.config, 'gw-agent', OTHER_MODEL['gw-agent']),
+                         OTHER_MODEL['gw-agent'])
+        self.assertEqual(check_route_model(self.config, 'gw-agent', 'claude-opus-5-5'),
+                         'claude-opus-5-5')
         without_list = copy.deepcopy(self.config)
         del without_list['routes']['gw-agent']['allowed_models']
-        self.assert_refused(without_list, 'gw-agent', 'gw')
+        self.assertEqual(check_route_model(without_list, 'gw-agent', 'gw'), 'gw')
+        self.assertEqual(check_route_model(without_list, 'gw-agent', 'qwen3.8-27b'),
+                         'qwen3.8-27b')
+
+    def test_model_family_is_read_from_the_id(self):
+        family = developer_routes.model_family
+        unknown = developer_routes.MODEL_FAMILY_UNKNOWN
+        for model, expected in (
+                ('claude-opus-5-5', 'claude'), ('Claude-Sonnet-5-5#high', 'claude'),
+                ('anthropic/claude-opus-5-5', 'claude'),
+                ('gemini-3.8-flash-medium', 'gemini'), ('gemini-4-hydrogen-medium', 'gemini'),
+                ('gpt-6.1-sol', 'codex'), ('openai/gpt-6-luna', 'codex'),
+                ('codex-mini', 'codex'), ('o4-mini', 'codex'), ('o3', 'codex'),
+                ('qwen3.8-27b', 'qwen'), ('qwen3:8b', 'qwen'),
+                ('opencode/deepseek-v4.1-flash-free#high', 'deepseek'),
+                ('kimi-k2', 'kimi'), ('glm-4.6', 'glm'),
+                # Other vendors' markers make the family unknown (fail closed).
+                ('claude-gpt-6', unknown), ('gemini-claude-b', unknown),
+                ('openai/deepseek-x', unknown), ('qwen-anthropic-b', unknown),
+                ('claude-gemini-b', unknown),
+                # No known family in the id.
+                ('example-model-b', unknown), ('gw', unknown), ('opus-5', unknown),
+                ('opencode/example-paid', unknown), ('', unknown),
+                (None, unknown), (7, unknown), (['claude-opus-5-5'], unknown)):
+            with self.subTest(model=model):
+                self.assertEqual(family(model), expected)
 
     def test_non_str_model_is_refused(self):
         for route in ROUTE_NAMES:

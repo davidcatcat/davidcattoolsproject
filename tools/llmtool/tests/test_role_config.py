@@ -103,6 +103,38 @@ class RoleConfigTests(unittest.TestCase):
         self.assertEqual((resolved_claude["model"], resolved_claude["model_source"]),
                          ("claude-fable-5-2", "roles"))
 
+    def test_developer_any_vendor_model_is_accepted_from_user_config_and_cli(self):
+        # #2302 part 1 (A1): a developer role takes any well-formed model id of
+        # a known family, with no repository change and no owner override; the
+        # Reviewer and AI Debug family rules above are unchanged.
+        cases = (("agy-developer", "claude-sonnet-5-5-medium"),
+                 ("agy-developer", "gpt-6.1-sol"),
+                 ("claude-developer", "gemini-3.8-flash-medium"),
+                 ("gw-agent-developer", "qwen3.8-27b"))
+        for role, model in cases:
+            with self.subTest(role=role, model=model, layer="roles"):
+                self.save({"roles": {role: {"model": model}}})
+                resolved = resolve_role(role, environ={}, home=self.home)
+                self.assertEqual((resolved["model"], resolved["model_source"]),
+                                 (model, "roles"))
+                self.assertNotIn("owner_override", resolved)
+            with self.subTest(role=role, model=model, layer="cli"):
+                self.save({})
+                resolved = resolve_role(role, cli={"model": model}, environ={}, home=self.home)
+                self.assertEqual((resolved["model"], resolved["model_source"]),
+                                 (model, "cli"))
+
+    def test_developer_malformed_or_unknown_family_model_is_refused(self):
+        for role, model in (("agy-developer", "model-extra"),
+                            ("claude-developer", "claude-gpt-6"),
+                            ("gw-agent-developer", "has space"),
+                            ("agy-developer", "https://example.invalid/m")):
+            with self.subTest(role=role, model=model):
+                self.save({"roles": {role: {"model": model}}})
+                with self.assertRaises(LLMToolError) as caught:
+                    resolve_role(role, environ={}, home=self.home)
+                self.assertEqual(caught.exception.role_config_code, "ROLE_MODEL_NOT_ALLOWED")
+
     def test_reviewer_model_outside_its_family_is_refused_at_every_layer(self):
         # #1502 WP-E R1: the resolver applies the shared check after precedence.
         self.save(self.account_config())
