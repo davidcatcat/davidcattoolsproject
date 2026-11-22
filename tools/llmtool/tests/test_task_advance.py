@@ -954,7 +954,9 @@ class TaskAdvanceTests(unittest.TestCase):
             result = task_advance.advance(task_id=store.record['task_id'], store=store,
                 pr_number=17, github_get=lambda _path: [])
         self.assertEqual(result['step'], 'REPAIR_OUTCOME_UNKNOWN')
-        self.assertEqual(result['codes'], ['REPAIR_OUTCOME_UNKNOWN'])
+        # #2325: the stop names why the launched repair is not retried.
+        self.assertEqual(result['codes'],
+                         ['REPAIR_OUTCOME_UNKNOWN', 'REPAIR_CLEANUP_NOT_CONFIRMED'])
 
     def test_pass_retries_completion_and_reaches_integration(self):
         claim = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}

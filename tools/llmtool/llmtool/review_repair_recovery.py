@@ -422,6 +422,29 @@ def _d6_process_status(store, executor_task):
     return 'DEAD' if seen else 'NONE'
 
 
+def _check_no_launch_d6(store, root, claim, *, executor_task, registered_d6, process_status):
+    """The registered D6 is clean at the claim HEAD and no live process is bound to it."""
+    from . import review_repair
+    loader = review_repair._registered_d6 if registered_d6 is None else registered_d6
+    try:
+        registration, snapshot = loader(root, executor_task)
+        head = claim['head_sha']
+        clean = (getattr(snapshot, 'clean', None) is True and
+                 getattr(snapshot, 'head', None) == head and
+                 getattr(registration, 'result_sha', None) == head)
+    except Exception:
+        clean = False
+    if not clean:
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+    reader = _d6_process_status if process_status is None else process_status
+    try:
+        status = reader(store, executor_task)
+    except Exception:
+        status = 'UNKNOWN'
+    if status not in ('NONE', 'DEAD'):
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+
+
 def verify_ec2_recovery(store, root, repair_task_id, *, executor_task, pr_number,
                         registered_d6=None, process_status=None, others=None):
     """#2475 E1-EC2 and the no-launch evidence; return the claim or refuse.
@@ -455,25 +478,71 @@ def verify_ec2_recovery(store, root, repair_task_id, *, executor_task, pr_number
         refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
     # F1: no Developer is not enough; the Task must be the recorded continuation.
     check_ec2_continuation(store, root, repair, claim)
-    loader = review_repair._registered_d6 if registered_d6 is None else registered_d6
-    try:
-        registration, snapshot = loader(root, executor_task)
-        head = claim['head_sha']
-        clean = (getattr(snapshot, 'clean', None) is True and
-                 getattr(snapshot, 'head', None) == head and
-                 getattr(registration, 'result_sha', None) == head)
-    except Exception:
-        clean = False
-    if not clean:
-        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
-    reader = _d6_process_status if process_status is None else process_status
-    try:
-        status = reader(store, executor_task)
-    except Exception:
-        status = 'UNKNOWN'
-    if status not in ('NONE', 'DEAD'):
-        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+    _check_no_launch_d6(store, root, claim, executor_task=executor_task,
+                        registered_d6=registered_d6, process_status=process_status)
     return claim
+
+
+def check_review_no_launch(root, repair, claim):
+    """#2492: repair is the runtime-recorded review continuation for claim, never started.
+
+    The continuation text must match what review_repair records (check_identity),
+    and the Task must still be exactly as the runtime left it before any
+    delegation: PM_RESPONDED, no Developer assignment, completion, abandonment
+    or continuation, and an ACTIVE_PM_RUNTIME provenance that invoked no
+    provider. Every Developer route persists its assignment before it can spawn
+    a provider, so the absent assignment is the positive no-launch evidence.
+    """
+    check_identity(root, repair, claim)
+    try:
+        provenance = repair['pm_provenance']
+        audit = repair.get('dispatch_audit')
+        valid = (repair.get('state') == 'PM_RESPONDED' and
+                 repair.get('developer') is None and repair.get('completion') is None and
+                 repair.get('abandonment') is None and repair.get('continues') is None and
+                 type(provenance) is dict and
+                 provenance.get('source') == 'ACTIVE_PM_RUNTIME' and
+                 provenance.get('provider_invoked') is False and
+                 (audit is None or audit == []))
+    except Exception:
+        valid = False
+    if not valid:
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+
+
+def verify_review_no_launch_recovery(store, root, repair_task_id, *, executor_task, pr_number,
+                                     registered_d6=None, process_status=None, others=None):
+    """#2492: E1 plus the no-launch evidence for one UNKNOWN review claim; never writes.
+
+    Admitted only when the claimed repair Task never reached a Developer
+    (check_review_no_launch), the registered D6 is clean at the claim HEAD and
+    no live process is bound to it. Any doubt refuses and the claim stays UNKNOWN.
+    """
+    if others is None:
+        try:
+            others = [store.get(task_id) for task_id in store.task_ids()]
+        except Exception:
+            refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+    claim = check_claim(root, repair_task_id, executor_task=executor_task,
+                        pr_number=pr_number, others=others)
+    try:
+        repair = store.get(repair_task_id)
+    except Exception:
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+    if type(repair) is not dict or repair.get('task_id') != repair_task_id:
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+    check_review_no_launch(root, repair, claim)
+    _check_no_launch_d6(store, root, claim, executor_task=executor_task,
+                        registered_d6=registered_d6, process_status=process_status)
+    return claim
+
+
+def verify_no_launch_recovery(store, root, repair_task_id, **kwargs):
+    """The no-launch recovery for an EC2/CI (#2475) or review (#2492) claim."""
+    found = [item for item in _claims(root) if item.get('repair_task_id') == repair_task_id]
+    if len(found) == 1 and not _is_ec2_claim(found[0]):
+        return verify_review_no_launch_recovery(store, root, repair_task_id, **kwargs)
+    return verify_ec2_recovery(store, root, repair_task_id, **kwargs)
 
 
 def verify_recovery(store, root, repair_task_id, *, executor_task, pr_number):
@@ -502,9 +571,25 @@ def verify_recovery(store, root, repair_task_id, *, executor_task, pr_number):
     return claim
 
 
+def _review_never_started(store, claim, repair_task_id):
+    """#2492: an UNKNOWN review claim whose repair Task has no Developer goes the no-launch way.
+
+    This only routes; the store re-checks every piece of evidence under its lock.
+    A Task that has any Developer assignment keeps the #1928 launched-path checks.
+    """
+    if claim.get('state') != 'UNKNOWN':
+        return False
+    try:
+        repair = store.get(repair_task_id)
+    except Exception:
+        return False
+    return (type(repair) is dict and repair.get('task_id') == repair_task_id and
+            'developer' in repair and repair['developer'] is None)
+
+
 def _recover_ec2_claim(*, store, current, task_id, executor_task, pr_number,
                        repair_task_id, registered_d6, process_status):
-    """#2475: restore one UNKNOWN EC2/CI claim to CLAIMED, or refuse. Never counts.
+    """#2475/#2492: restore one UNKNOWN no-launch claim to CLAIMED, or refuse. Never counts.
 
     CLAIMED records the positive no-launch evidence: the claim is live again, so
     the next advance may delegate the same repair Task on the same claim and
@@ -563,7 +648,8 @@ def recover_unknown_claim(*, store, task_id, executor_task, pr_number, repair_ta
             refuse('REPAIR_CLAIM_UNAVAILABLE')
         found = [item for item in current.get('review_repair_claims') or ()
                  if type(item) is dict and item.get('repair_task_id') == repair_task_id]
-        if len(found) == 1 and _is_ec2_claim(found[0]):
+        if len(found) == 1 and (_is_ec2_claim(found[0]) or
+                                _review_never_started(store, found[0], repair_task_id)):
             return _recover_ec2_claim(
                 store=store, current=current, task_id=task_id,
                 executor_task=executor_task, pr_number=pr_number,

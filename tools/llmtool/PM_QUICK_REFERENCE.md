@@ -55,6 +55,8 @@ Read each value in its source; this page copies none.
 - **Dispatch switches:** [worker-dispatch.json](worker-dispatch.json).
 - **Route models, effort, timeouts and diff size; Reviewer and Debug models:** [developer-routes.json](developer-routes.json).
 - **Repair, Debug, child split, replan, test-fail, review-fail, Owner-notice and timeout-continuation caps:** [policy.json](policy.json).
+- **Spec check large-file line count, merge train member count and files per PR, revert scope and D6 writer lease:** `spec_preflight_large_file_lines`, `merge_train_members_max`, `merge_train_files_per_pr_max`, `revert_scope_prs_max` and `d6_writer_lease_hours` in [policy.json](policy.json).
+- **Optional caps not present in policy.json:** they keep their defaults in the llmtool policy loader module.
 - **Continuation chain length:** `MAX_CHAIN` in [lineage_counts.py](llmtool/lineage_counts.py).
 - **EC2 module admission and receipts:** `_task_path_modules` and `_validate_remote_receipt` in [remote_test.py](llmtool/remote_test.py).
 - **Spec text, acceptance count, edits and ladder tiers:** `check`, `REPAIR_ROOM_MAX_ACCEPTANCE`, `check_edits` and `LADDER_SIZES` in [spec_preflight.py](scripts/spec_preflight.py).
