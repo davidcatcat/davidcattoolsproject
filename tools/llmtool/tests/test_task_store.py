@@ -6250,7 +6250,7 @@ class IssueTaskStoreTests(unittest.TestCase):
                 self.assertEqual(created['issue'], issue)
                 loaded = self.store.get(created['task_id'])
                 self.assertEqual(loaded['issue'], issue)
-                updated = self.store.update(created['task_id'], error_code='PM_UNAVAILABLE')
+                updated = self.store.update(created['task_id'], state='PM_UNAVAILABLE', error_code='PM_UNAVAILABLE')
                 self.assertEqual(updated['issue'], issue)
                 self.assertEqual(self.store.get(created['task_id'])['issue'], issue)
 
