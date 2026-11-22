@@ -146,6 +146,7 @@ from .board_check_part3 import (  # noqa: E402, F401
 )
 from .board_check_part4 import (  # noqa: E402, F401
     _identity_match,
+    _interval,
     _lstart,
     _ps_snapshot,
     _reject_constant,
