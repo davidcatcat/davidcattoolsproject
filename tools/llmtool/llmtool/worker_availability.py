@@ -1,16 +1,28 @@
-"""#1816 part 2: the worker quota layer from Developer outcomes.
+"""#1816 part 2 and #2622: worker quota and Developer route-failure layers.
 
 classify() reads only developer.execution.provider_evidence, the route's exact
 quota/rate codes and the worker key (plus, for a legacy record without the
 field, its CLI_REPORTED usage). It never reads a state, an outcome or an
-error-code family. observe() turns one outcome into one TaskStore quota-layer
-observation; fresh_quota_fail() reads it back for the delegate gate.
+error-code family. observe() turns one outcome into one TaskStore observation:
+a quota-layer result (#1816) and, for AGY and OpenCode only, a route-failure
+streak (#2622). fresh_quota_fail() reads the quota layer back for the delegate
+gate; route_pause_refusal() reads the route layer there and in the repair path.
+
+#2622: AGY and OpenCode pause after route_failure_pause_after consecutive
+route-level failures. A route-level failure is a failure of the route itself
+(CLI exit/startup, runtime, home/config, login/authorization, provider/service
+unavailable), never a Task-level outcome, and never a quota/free-limit/rate
+code. A Developer result that reached the route (responded or output rejected)
+resets the streak before a pause. Once paused, only the explicit PM command
+`llmtool worker-route-resume <worker>` clears it.
 
 Observations are evidence only. They never write worker-dispatch.json, never
 re-enable a PAUSED worker and never grant dispatch authority: Owner policy is
 always decided first and separately. One success proves only that request: a
 PASS is fresh for the same bounded window as any other observation (30 min; a
-provider reset only shortens it).
+provider reset only shortens it). A policy that cannot be read never creates a
+new pause and never clears one: an existing pause stays until the PM resumes
+the route, and no route is blocked merely because policy.json is unreadable.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -48,6 +60,69 @@ _ROUTE_CODES = {
 _LEGACY_USAGE_ROUTES = frozenset(('claude', 'opencode', 'gw-agent'))
 _TOKEN_FIELDS = ('total_tokens', 'prompt_tokens', 'completion_tokens',
                  'input_tokens', 'output_tokens')
+
+# #2622: the two Developer routes that pause after consecutive route failures.
+# The keys are dispatch worker keys, the same keys the availability record uses.
+ROUTE_PAUSE_WORKERS = frozenset(('agy', 'opencode-developer'))
+ROUTE_PAUSE_PROFILES = frozenset(('agy', 'opencode'))
+ROUTE_FAILURE_LAYER = 'runtime'
+ROUTE_PAUSE_REFUSAL_CODE = 'WORKER_ROUTE_PAUSED'
+ROUTE_PAUSE_RESUME_COMMAND = 'llmtool worker-route-resume'
+# A route failure is a definite code: CLI exit/startup, runtime, home/config,
+# login/authorization or provider/service unavailable. Quota, free-limit and
+# rate-limit codes keep their own handling and never count here.
+_ROUTE_FAILURE_SUFFIXES = frozenset((
+    'EXIT_NONZERO', 'CLI_EXIT_NONZERO', 'START_FAILED', 'START_FAILURE',
+    'STARTUP_FAILED', 'STARTUP_FAILURE', 'CLI_START_FAILED', 'CONFIG_INVALID',
+    'CONFIG_ERROR', 'CLI_CONFIG_INVALID', 'ENV_INVALID', 'ENV_ERROR',
+    'HOME_INVALID', 'HOME_ERROR', 'PROFILE_INVALID', 'REQUEST_INVALID',
+    'LOGIN_REQUIRED', 'LOGIN_FAILED', 'CLI_LOGIN_REQUIRED', 'AUTH_REQUIRED',
+    'AUTH_FAILED', 'AUTH_ERROR', 'CLI_AUTH_REQUIRED', 'AUTHORIZATION_REQUIRED',
+    'AUTHORIZATION_FAILED', 'PROVIDER_FAILED', 'PROVIDER_ERROR',
+    'CLI_PROVIDER_FAILED', 'PROVIDER_UNAVAILABLE', 'SERVICE_UNAVAILABLE',
+    'SERVICE_FAILED', 'SERVICE_ERROR', 'UNAVAILABLE', 'ROUTE_UNAVAILABLE',
+    'RUNTIME_INVALID', 'RUNTIME_FAILED', 'RUNTIME_ERROR', 'RUNTIME_UNAVAILABLE',
+    'RUNTIME_MISSING', 'CLI_FAILED', 'CLI_ERROR', 'CLI_UNAVAILABLE',
+    'CLI_NOT_FOUND', 'SPAWN_FAILED', 'NOT_ON_PATH', 'RUNTIME_NOT_ON_PATH',
+    'EXECUTABLE_MISSING', 'EXECUTABLE_NOT_FOUND',
+))
+# Task-level outcomes never count, and neither do the quota-family codes.
+_ROUTE_NON_FAILURE_SUFFIXES = frozenset((
+    'NO_CHANGES', 'OUTPUT_REJECTED', 'OUTPUT_INVALID', 'RESULT_INVALID',
+    'RESULT_REJECTED', 'EMPTY_RESULT', 'EMPTY_OUTPUT', 'NO_OUTPUT',
+    'ENVELOPE_INVALID', 'ENVELOPE_REJECTED', 'INVALID_ENVELOPE',
+    'SPEC_MISMATCH', 'STEPS_EXHAUSTED', 'STEP_LIMIT', 'D6_SESSION_REFUSED',
+    'D6_BINDING_INVALID', 'D6_REFUSED', 'SCOPE_REFUSED', 'SCOPE_VIOLATION',
+    'WRITE_SCOPE_VIOLATION', 'TEST_FAILED', 'TESTS_FAILED',
+    'QUOTA_EXHAUSTED', 'FREE_LIMIT', 'RATE_LIMITED', 'TIMEOUT', 'CANCELLED',
+))
+_ROUTE_FAILURE_CODES = {
+    profile: frozenset(profile.upper() + '_' + suffix
+                       for suffix in _ROUTE_FAILURE_SUFFIXES)
+    for profile in ROUTE_PAUSE_PROFILES
+}
+_ROUTE_NON_FAILURE_CODES = {
+    profile: frozenset(profile.upper() + '_' + suffix
+                       for suffix in _ROUTE_NON_FAILURE_SUFFIXES)
+    for profile in ROUTE_PAUSE_PROFILES
+}
+# The fallback for a code a route adds later: it must still name the route
+# itself, never a Task-level outcome or a quota-family condition.
+_ROUTE_FAILURE_WORDS = frozenset((
+    'START', 'STARTUP', 'EXIT', 'CONFIG', 'ENV', 'HOME', 'PROFILE', 'LOGIN',
+    'AUTH', 'FORBIDDEN', 'CREDENTIAL', 'PROVIDER', 'SERVICE', 'RUNTIME',
+    'CLI', 'SPAWN', 'EXECUTABLE', 'UNAVAILABLE', 'NOT_ON_PATH', 'MISSING',
+    'NOT_FOUND', 'NOT_INSTALLED',
+))
+# A Developer result reached the route: reset the streak before a pause.
+_ROUTE_RESULT_STATES = frozenset(('DEVELOPER_RESPONDED', 'DEVELOPER_OUTPUT_REJECTED'))
+# Keep a pause inside the store's 30-day freshness bound; the digest still
+# identifies the pause after the store later reads the entry as UNKNOWN.
+ROUTE_PAUSE_FRESH_FOR = timedelta(days=29)
+# The streak is kept in a digest family so the sidecar needs no new field. The
+# decode is bounded; a real streak is small (the Owner's N is 3).
+_ROUTE_COUNT_MAX = 10000
+_ROUTE_DIGEST_CACHE = {}
 
 
 def _profile(record):
@@ -115,34 +190,216 @@ def _reset_time(reset_at, observed):
     return reset_at
 
 
+def route_failure(record):
+    """True when one Developer record is a route-level failure (#2622)."""
+    profile, developer = _profile(record)
+    if profile not in ROUTE_PAUSE_PROFILES or type(developer) is not dict:
+        return False
+    code = developer.get('error_code')
+    if type(code) is not str:
+        return False
+    if developer.get('state') in _ROUTE_RESULT_STATES:
+        return False
+    if (code in _ROUTE_NON_FAILURE_CODES[profile] or 'TIMEOUT' in code or
+            any(token in code for token in ('QUOTA', 'RATE_LIMIT', 'FREE_LIMIT'))):
+        return False
+    if code in _ROUTE_FAILURE_CODES[profile]:
+        return True
+    # A record whose route only marked the Developer unavailable still names a
+    # route failure by its own prefix and a route word; every task-level code
+    # is excluded above.
+    return (developer.get('state') == 'DEVELOPER_UNAVAILABLE' and
+            code.startswith(profile.upper() + '_') and
+            any(word in code for word in _ROUTE_FAILURE_WORDS))
+
+
+def route_pause_after():
+    """The configured consecutive-failure limit, or None when policy is unreadable.
+
+    None keeps an existing pause and creates no new one: an unreadable policy
+    must neither silently unpause a route nor block every route permanently.
+    """
+    from . import repair_policy
+    try:
+        return repair_policy.route_failure_pause_after()
+    except LLMToolError:
+        return None
+
+
+def route_pause_resume_step(worker):
+    """The explicit PM command that clears this route's pause."""
+    return ROUTE_PAUSE_RESUME_COMMAND + ' ' + worker
+
+
+def route_pause_message(worker):
+    """The refusal message; it names the resume step (A2)."""
+    return ROUTE_PAUSE_REFUSAL_CODE + ': run ' + route_pause_resume_step(worker)
+
+
+def _route_digest(kind, worker, count):
+    key = (kind, worker, count)
+    digest = _ROUTE_DIGEST_CACHE.get(key)
+    if digest is None:
+        digest = hashlib.sha256(
+            f'route-{kind}:{worker}:{count}'.encode('utf-8')).hexdigest()
+        _ROUTE_DIGEST_CACHE[key] = digest
+    return digest
+
+
+def _route_count_for(kind, worker, evidence):
+    if type(evidence) is not str:
+        return 0
+    for count in range(1, _ROUTE_COUNT_MAX + 1):
+        if _route_digest(kind, worker, count) == evidence:
+            return count
+    return 0
+
+
+def _route_entry(store, worker):
+    reader = getattr(store, 'get_worker_observations', None)
+    if not callable(reader):
+        return None
+    try:
+        view = reader()
+        entry = view[worker][ROUTE_FAILURE_LAYER]
+    except Exception:
+        return None
+    return entry if type(entry) is dict else None
+
+
+def _route_failure_count(worker, entry):
+    """The stored consecutive failure count; an expired pause still counts."""
+    if type(entry) is not dict or entry.get('status') not in ('FAIL', 'UNKNOWN'):
+        return 0
+    evidence = entry.get('evidence_sha256')
+    if entry.get('status') == 'FAIL':
+        return _route_count_for('pause', worker, evidence)
+    count = _route_count_for('failure', worker, evidence)
+    return count or _route_count_for('pause', worker, evidence)
+
+
+def _route_pause_count(worker, entry):
+    """The pause count, or 0 when the route is not paused.
+
+    The pause lives in the digest, not only in status, so the store reading an
+    old observation as UNKNOWN at the freshness bound never clears it. Only the
+    explicit resume command writes a non-pause digest.
+    """
+    if type(entry) is not dict or entry.get('status') not in ('FAIL', 'UNKNOWN'):
+        return 0
+    evidence = entry.get('evidence_sha256')
+    if entry.get('status') == 'FAIL':
+        return _route_count_for('pause', worker, evidence)
+    if _route_count_for('failure', worker, evidence):
+        return 0
+    return _route_count_for('pause', worker, evidence)
+
+
+def route_pause_refusal(store, worker):
+    """ROUTE_PAUSE_REFUSAL_CODE while the worker's route is paused, else None."""
+    normalized = {'opencode': 'opencode-developer'}.get(worker, worker)
+    if normalized not in ROUTE_PAUSE_WORKERS:
+        return None
+    if _route_pause_count(normalized, _route_entry(store, normalized)):
+        return ROUTE_PAUSE_REFUSAL_CODE
+    return None
+
+
+def _write_route_observation(store, worker, status, observed, fresh_until, evidence,
+                             source='LOCAL_OBSERVATION'):
+    store.record_worker_observation(
+        worker_key=worker, layer=ROUTE_FAILURE_LAYER, status=status,
+        observed_at=_stamp(observed), fresh_until=_stamp(fresh_until),
+        source=source, evidence_sha256=evidence)
+
+
+def _observe_route(store, record, worker, observed):
+    """Record one route outcome; never clear a pause (only resume does)."""
+    if worker not in ROUTE_PAUSE_WORKERS:
+        return None
+    entry = _route_entry(store, worker)
+    if _route_pause_count(worker, entry):
+        return 'PAUSED'
+    developer = record.get('developer') if type(record) is dict else None
+    if route_failure(record):
+        count = _route_failure_count(worker, entry) + 1
+        limit = route_pause_after()
+        paused = limit is not None and count >= limit
+        evidence = _route_digest('pause' if paused else 'failure', worker, count)
+        _write_route_observation(
+            store, worker, 'FAIL' if paused else 'UNKNOWN', observed,
+            observed + (ROUTE_PAUSE_FRESH_FOR if paused else FRESH_FOR), evidence)
+        return 'PAUSE' if paused else 'COUNT'
+    if (type(developer) is dict and developer.get('state') in _ROUTE_RESULT_STATES):
+        if _route_failure_count(worker, entry):
+            _write_route_observation(
+                store, worker, 'PASS', observed, observed + FRESH_FOR,
+                _route_digest('reset', worker, 1))
+        return 'RESET'
+    return None
+
+
+def resume_route(store, worker, *, now=None):
+    """Clear one AGY/OpenCode route pause from the explicit PM resume command.
+
+    The resume is recorded in the existing worker availability record, never in
+    worker-dispatch.json. It writes a PASS entry whose digest is the reset
+    family, so the next route failure starts a new streak at 1.
+    """
+    normalized = {'opencode': 'opencode-developer'}.get(worker, worker)
+    if type(normalized) is not str or normalized not in ROUTE_PAUSE_WORKERS:
+        raise LLMToolError('WORKER_ROUTE_RESUME_WORKER_INVALID')
+    observed = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(
+        microsecond=0)
+    before = _route_entry(store, normalized)
+    was_paused = bool(_route_pause_count(normalized, before))
+    _write_route_observation(
+        store, normalized, 'PASS', observed, observed + FRESH_FOR,
+        _route_digest('reset', normalized, 1), source='AUTHORIZED_OPERATION')
+    return {'worker': normalized, 'was_paused': was_paused, 'paused': False,
+            'resumed_at': _stamp(observed),
+            'next_action': route_pause_resume_step(normalized)}
+
+
 def observe(store, record, *, now=None, reset_at=None):
-    """Record one outcome as a quota-layer observation; return the result or None.
+    """Record one outcome as quota and route observations.
+
+    Returns the quota result (AVAILABLE, QUOTA_EXHAUSTED or RATE_LIMITED), else
+    the route outcome ('PAUSE', 'COUNT', 'RESET', 'PAUSED') or None.
 
     FAIL for QUOTA_EXHAUSTED/RATE_LIMITED, PASS for AVAILABLE, nothing for None.
     fresh_until is min(reset, observed + FRESH_FOR) for a FAIL with a valid
     provider reset, else observed + FRESH_FOR (30 min; a provider reset only
     shortens it). PASS stays observed + FRESH_FOR. PAUSED codex-developer and
     retired company-gw are never written.
+
+    #2622: AGY and OpenCode also record their route-failure streak. A result
+    that reached the route resets it; route-level failures increment it and
+    pause at route_failure_pause_after. A pause is never cleared here.
     """
     worker = worker_key(record)
     result = classify(record)
-    if worker is None or worker in NO_WRITE_WORKERS or result is None:
+    if worker is None or worker in NO_WRITE_WORKERS:
         return None
     observed = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(
         microsecond=0)
-    status = 'PASS' if result == AVAILABLE else 'FAIL'
-    reset = _reset_time(reset_at, observed) if status == 'FAIL' else None
-    fresh_until = min(reset, observed + FRESH_FOR) if reset is not None else observed + FRESH_FOR
-    developer = record['developer']
-    digest = hashlib.sha256(json.dumps({
-        'task_id': record.get('task_id'), 'assignment_id': developer.get('assignment_id'),
-        'worker_key': worker, 'result': result,
-    }, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
-    store.record_worker_observation(
-        worker_key=worker, layer=QUOTA_LAYER, status=status,
-        observed_at=_stamp(observed), fresh_until=_stamp(fresh_until),
-        source='LOCAL_OBSERVATION', evidence_sha256=digest)
-    return result
+    if result is not None:
+        status = 'PASS' if result == AVAILABLE else 'FAIL'
+        reset = _reset_time(reset_at, observed) if status == 'FAIL' else None
+        fresh_until = (min(reset, observed + FRESH_FOR) if reset is not None
+                       else observed + FRESH_FOR)
+        developer = record['developer']
+        digest = hashlib.sha256(json.dumps({
+            'task_id': record.get('task_id'),
+            'assignment_id': developer.get('assignment_id'),
+            'worker_key': worker, 'result': result,
+        }, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
+        store.record_worker_observation(
+            worker_key=worker, layer=QUOTA_LAYER, status=status,
+            observed_at=_stamp(observed), fresh_until=_stamp(fresh_until),
+            source='LOCAL_OBSERVATION', evidence_sha256=digest)
+    route_result = _observe_route(store, record, worker, observed)
+    return result if result is not None else route_result
 
 
 _SLUG_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$')
@@ -264,34 +521,63 @@ def record_owner_recovery(store, worker, owner_relay_url, *, now=None, github_ge
     }
 
 
-def fresh_quota_fail(store, worker):
-    """Whether the worker's quota layer holds a fresh FAIL.
+def _fresh_availability(store, worker):
+    """One read of the route and quota layers: (paused, quota_fail).
 
-    Expired, absent or unreadable observations read UNKNOWN and never refuse;
-    a store without the observation reader has none.
+    A missing or unreadable reader is (False, False); it never refuses.
     """
     if type(worker) is not str or worker in NO_WRITE_WORKERS:
-        return False
+        return False, False
     reader = getattr(store, 'get_worker_observations', None)
     if not callable(reader):
-        return False
+        return False, False
     try:
         view = reader()
-        return view[worker][QUOTA_LAYER]['status'] == 'FAIL'
     except Exception:
-        return False
+        return False, False
+    paused = False
+    if worker in ROUTE_PAUSE_WORKERS:
+        try:
+            entry = view[worker][ROUTE_FAILURE_LAYER]
+        except Exception:
+            entry = None
+        paused = bool(_route_pause_count(worker, entry if type(entry) is dict else None))
+    try:
+        quota_fail = view[worker][QUOTA_LAYER]['status'] == 'FAIL'
+    except Exception:
+        quota_fail = False
+    return paused, quota_fail
+
+
+def fresh_quota_fail(store, worker):
+    """Whether the worker's quota layer holds a fresh FAIL; refuses a paused route.
+
+    Expired, absent or unreadable observations read UNKNOWN and never refuse;
+    a store without the observation reader has none. #2622: a paused AGY or
+    OpenCode route is refused here too, because this is the delegate gate's
+    read of the worker availability record. The refusal is raised (not returned)
+    so the message can name the explicit PM resume step. One read serves both
+    layers.
+    """
+    paused, quota_fail = _fresh_availability(store, worker)
+    if paused:
+        raise LLMToolError(route_pause_message(worker)) from None
+    return quota_fail
 
 
 def quota_refusal(store, worker, *, owner_assignment_ref=None, policy_task_id=None):
-    """REFUSAL_CODE on a fresh quota FAIL, else None.
+    """REFUSAL_CODE on a fresh quota FAIL, ROUTE_PAUSE_REFUSAL_CODE on a pause.
 
     Owner policy comes first: when the Owner policy refuses the worker this
     returns None, so the route's own Owner refusal is the one reported.
     """
-    if not fresh_quota_fail(store, worker):
+    paused, quota_fail = _fresh_availability(store, worker)
+    if not paused and not quota_fail:
         return None
     decision = worker_dispatch.evaluate(worker, owner_assignment_ref, policy_task_id)
-    return REFUSAL_CODE if decision.allowed else None
+    if not decision.allowed:
+        return None
+    return ROUTE_PAUSE_REFUSAL_CODE if paused else REFUSAL_CODE
 
 
 # #2367: gw-agent availability. The probe reuses the existing worker
