@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Check guidance and rule-file consistency.
 
-- CLAUDE.md acknowledges hard values in AGENTS.md (hash-pinned).
+- CLAUDE.md acknowledges hard values in AGENTS.md (hash-pinned), or imports
+  AGENTS.md with an "@AGENTS.md" line (#1502 E6).
 - Every tools/llmtool/*.json rule file matches a strict schema (#1502 WP-G).
 - Normative docs name only models whose family is configured in
   developer-routes.json for a route or a review/debug role (#1502 WP-E,
@@ -33,6 +34,8 @@ MODEL_NAME = re.compile(
     re.IGNORECASE,
 )
 CHECK_NAME = re.compile(r"^check\s+\([^)]+\)$")
+# #1502 E6: a line that is exactly "@AGENTS.md" is a Claude Code import.
+CLAUDE_IMPORTS_AGENTS = re.compile(r"^@AGENTS\.md[ \t]*$", re.MULTILINE)
 DISPATCH_VALUES = {"PAUSED", "OWNER_ASSIGNMENT_ONLY", "ALLOWED"}
 RULE_DIR = Path("tools/llmtool")
 ROUTES_PATH = RULE_DIR / "developer-routes.json"
@@ -594,6 +597,10 @@ def check(repo: str | Path = REPO) -> list[str]:
         if _comparison_value(value) in normalized_hard_values:
             continue
         findings.append(_finding("tools/llmtool/guidance-drift.json", "STALE_EXCEPTION", value))
+    if CLAUDE_IMPORTS_AGENTS.search(sources["CLAUDE.md"]):
+        # #1502 E6: CLAUDE.md imports AGENTS.md, so Claude reads every AGENTS.md
+        # hard value through the import; only the hash pin and model rules apply.
+        return list(dict.fromkeys(findings))
     claude_values = {_comparison_value(value) for value in _hard_values(sources["CLAUDE.md"])}
     for value in sorted(hard_values):
         if _comparison_value(value) in claude_values or _comparison_value(value) in exceptions:

@@ -1,0 +1,298 @@
+"""Tests for issue #2311 / PR #2335 office monitor redesign acceptance (A1-A7).
+
+Covers:
+- A1: one row per route (Claude, AGY, OpenCode, home LLM, Codex) with system state and sub-PM in charge.
+- A2: route next item, separate Owner decisions and notices without asking.
+- A3: rule file alert intact, disk refresh 5.0s live measurement.
+- A4: one general rule, fewer items.
+- A5 (v1 F1): a run binds only its own Task (a mismatched or missing Task ID never binds); the newest result is information, never counted as waiting for the PM.
+- A6 (v1 F2): route activity tied only to route's own task; reviewer rows excluded.
+- A7 (v1 F3): unresolved HELD sub-PM leases survive restart; malformed or empty task file is never successful.
+"""
+import json
+import os
+import sys
+import importlib.util
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+_PATH = Path(__file__).with_name("llmtool_monitor.py")
+_SPEC = importlib.util.spec_from_file_location("llmtool_monitor_2311_under_test", _PATH)
+mon = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = mon
+_SPEC.loader.exec_module(mon)
+
+NOW = 1_800_000_000.0
+
+_ISOLATED = tempfile.TemporaryDirectory()
+_RULE_ALERT_ISOLATED = tempfile.TemporaryDirectory()
+_RULE_ALERT_PATCH = patch.object(
+    mon, "RULE_ALERT_FILE",
+    os.path.join(_RULE_ALERT_ISOLATED.name, "rule-file-alerts.json"))
+_SUBPM_LEASE_ISOLATED = tempfile.TemporaryDirectory()
+_SUBPM_LEASE_PATCH = patch.object(
+    mon, "SUBPM_LEASE_FILE",
+    os.path.join(_SUBPM_LEASE_ISOLATED.name, "subpm-leases.json"))
+
+
+def setUpModule():
+    for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CODEX_STATE", "CLAUDE_PROJECTS",
+                 "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS", "GW_AUDIT_ROOT"):
+        setattr(mon, name, os.path.join(_ISOLATED.name, name))
+    _RULE_ALERT_PATCH.start()
+    _SUBPM_LEASE_PATCH.start()
+    mon.waiting_scan_reset()
+
+
+def tearDownModule():
+    mon.waiting_scan_reset()
+    _SUBPM_LEASE_PATCH.stop()
+    _SUBPM_LEASE_ISOLATED.cleanup()
+    _RULE_ALERT_PATCH.stop()
+    _RULE_ALERT_ISOLATED.cleanup()
+    _ISOLATED.cleanup()
+
+
+def iso_stamp(seconds: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds))
+
+
+class TestMonitor2311Acceptance(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.lease_file = os.path.join(self.tmp.name, "subpm-leases.json")
+        self.patch_lease = patch.object(mon, "SUBPM_LEASE_FILE", self.lease_file)
+        self.patch_lease.start()
+        mon.waiting_scan_reset()
+
+    def tearDown(self):
+        mon.waiting_scan_reset()
+        self.patch_lease.stop()
+        self.tmp.cleanup()
+
+    def test_a1_route_rows_and_subpm(self):
+        # A1: one row per route (Claude, AGY, OpenCode, home LLM, Codex) + names sub-PM
+        switches = {
+            "claude-developer": ("ALLOWED", "Owner", "11-01"),
+            "agy": ("ALLOWED", "Owner", "11-01"),
+            "opencode-developer": ("ALLOWED", "Owner", "11-01"),
+            "gw-agent": ("ALLOWED", "Owner", "11-01"),
+            "codex-developer": ("PAUSED", "Owner", "10-25"),
+        }
+        reasons = {"codex-developer": "codex is retired"}
+        leases = [mon.SubPmLease(NOW - 100, "2311", "WP-A", "claude-subpm-1")]
+        task = mon.RouteTask("Claude", "a1b2c3d4", True, "派工中", NOW - 50, "2311", False, NOW - 60)
+        run = mon.RouteDelegate("Claude", NOW - 40, "delegate", "a1b2c3d4" * 4)
+        board = mon.PmBoard("ok", 0, [], [], [])
+        rows = mon.route_rows([], switches, "", reasons, [task], board, leases, NOW, delegates=[run])
+        by_name = {r.name: r for r in rows}
+        self.assertEqual(set(mon.ROUTE_NAMES), {"Claude", "AGY", "OpenCode", "home LLM", "Codex"})
+        for name in mon.ROUTE_NAMES:
+            self.assertIn(name, by_name)
+        self.assertEqual(by_name["Claude"].state, mon.WORKING)
+        self.assertIn("sub-PM claude-subpm-1", by_name["Claude"].detail)
+        self.assertEqual(by_name["Codex"].state, mon.PAUSED)
+        self.assertIn("codex is retired", by_name["Codex"].detail)
+
+    def test_a2_route_next_item_and_notices_apart_from_asks(self):
+        # A2: next item from queue; owner notices listed separately from asks
+        board = mon.PmBoard("ok", 0, [], [
+            mon.PmBoardItem("#2311", "repair monitor", "AGY"),
+        ], [])
+        switches = {k: ("ALLOWED", "Owner", "11-01") for k in mon.DISPATCH_WORKERS}
+        rows = mon.route_rows([], switches, "", {}, [], board, [], NOW)
+        by_name = {r.name: r for r in rows}
+        self.assertEqual(by_name["AGY"].next, "#2311 repair monitor")
+
+        ask = [mon.OwnerPending(NOW - 30, "#2311", "WAITING", "Need Owner Decision", "waiting_owner", False)]
+        notice = [mon.OwnerNotice(NOW - 10, "#2311", "NOTICE", "FYI: spec check note")]
+        view = mon.office_view([], pending=ask, notices=notice, routes=rows, now=NOW)
+        lines = [line for line, _ in view]
+        ask_idx = next(i for i, l in enumerate(lines) if "Need Owner Decision" in l)
+        notice_idx = next(i for i, l in enumerate(lines) if "FYI: spec check note" in l)
+        self.assertTrue(lines[ask_idx].startswith("★ 等你決定"))
+        self.assertTrue(lines[notice_idx].startswith("ℹ "))
+        self.assertNotIn("★", lines[notice_idx])
+        self.assertLess(ask_idx, notice_idx)
+
+    def test_a3_disk_refresh_live_measurement(self):
+        # A3: DISK_REFRESH_SECONDS is 5.0 live reading
+        self.assertEqual(mon.DISK_REFRESH_SECONDS, 5.0)
+
+    def test_a4_one_general_rule_and_fewer_items(self):
+        # A4: one general rule instead of per-route branches; fewer items, clear state names
+        # Every route row is evaluated by the same rule in route_rows
+        switches = {
+            k: ("ALLOWED", "Owner", "11-01") if k != "gw-agent"
+            else ("ALLOWED", "Owner", "11-10")
+            for k in mon.DISPATCH_WORKERS
+        }
+        board = mon.PmBoard("ok", 0, [], [], [])
+        rows = mon.route_rows([], switches, "", {}, [], board, [], NOW)
+        self.assertEqual([r.name for r in rows], mon.ROUTE_NAMES)
+        for r in rows:
+            self.assertEqual(r.state, mon.ROUTE_FREE)
+            self.assertEqual(r.detail, "沒有工作")
+
+        # Clear state names
+        self.assertIn(mon.WORKING, ("工作中",))
+        self.assertIn(mon.UNCHECKED, ("未確認",))
+        self.assertFalse(hasattr(mon, "ROUTE_WAITING_PM"))   # no 等 PM state (#2311 items 6, 7)
+        self.assertIn(mon.ROUTE_FREE, ("可派工",))
+        self.assertIn(mon.PAUSED, ("暫停中",))
+        self.assertIn(mon.ROUTE_ONLY_OWNER, ("僅指定",))
+
+        # Office view includes routes and removes individual dispatch switch rows
+        office_with_switches = [
+            mon.OfficeRow("agy", mon.PAUSED, "paused", 10, 60, kind="worker"),
+            mon.OfficeRow("claude PM", mon.WORKING, "idle", 5, 30, role="pm"),
+        ]
+        view_without_routes = mon.office_view(office_with_switches, routes=None, now=NOW)
+        view_with_routes = mon.office_view(office_with_switches, routes=rows, now=NOW)
+        lines_with_routes = [line for line, _ in view_with_routes]
+        lines_without_routes = [line for line, _ in view_without_routes]
+        self.assertTrue(any("AGY" in l for l in lines_with_routes))
+        self.assertFalse(any(l.startswith("agy ") for l in lines_with_routes))
+
+    def test_a5_v1_f1_waiting_result_not_hidden_and_mismatched_task_id(self):
+        # A5 / Finding F1: waiting result not hidden by newer task
+        t_older = mon.RouteTask("AGY", "11111111", False, "成功回應", NOW - 200, "100", False, NOW - 250)
+        t_newer = mon.RouteTask("AGY", "22222222", True, "派工中", NOW - 50, "101", False, NOW - 60)
+        run_newer = mon.RouteDelegate("AGY", NOW - 40, "delegate", "22222222" * 4)
+        switches = {k: ("ALLOWED", "Owner", "11-01") for k in mon.DISPATCH_WORKERS}
+        rows = mon.route_rows([], switches, "", {}, [t_older, t_newer], mon.PmBoard("ok", 0, [], [], []), [], NOW,
+                              delegates=[run_newer])
+        by_name = {r.name: r for r in rows}
+        self.assertEqual(by_name["AGY"].state, mon.WORKING)
+        self.assertIn("task 22222222", by_name["AGY"].detail)
+        self.assertNotIn("等 PM", by_name["AGY"].detail)
+
+        # Idle route: the newest result is shown as information with its age,
+        # whatever its age, and the state comes from the dispatch switch only.
+        t_oldest = mon.RouteTask("AGY", "33333333", False, "失敗", NOW - 90000, "102", False, NOW - 90000)
+        rows_idle = mon.route_rows([], switches, "", {}, [t_oldest, t_older],
+                                   mon.PmBoard("ok", 0, [], [], []), [], NOW)
+        agy_idle = next(r for r in rows_idle if r.name == "AGY")
+        self.assertEqual(agy_idle.state, mon.ROUTE_FREE)
+        self.assertIn("最近結果：task 11111111 · #100 成功回應", agy_idle.detail)
+        self.assertNotIn("33333333", agy_idle.detail)
+        self.assertNotIn("等 PM", agy_idle.detail)
+        title = mon.office_view([], routes=rows_idle, now=NOW)[0][0]
+        self.assertNotIn("等 PM", title)
+
+        # Mismatched Task id never binds to an older task
+        mismatched_run = mon.RouteDelegate("AGY", NOW - 30, "delegate", "99999999" * 4)
+        bound = mon._route_bound([t_newer, t_older], [mismatched_run])
+        self.assertEqual(bound, set())
+
+        # Unidentified process (no Task ID) never binds and reports uncertainty
+        unidentified_run = mon.RouteDelegate("AGY", NOW - 30, "delegate", "")
+        self.assertEqual(mon._route_bound([t_newer, t_older], [unidentified_run]), set())
+        rows_unidentified = mon.route_rows([], switches, "", {}, [t_newer], mon.PmBoard("ok", 0, [], [], []), [], NOW,
+                                           delegates=[unidentified_run])
+        agy_unidentified = next(r for r in rows_unidentified if r.name == "AGY")
+        self.assertEqual(agy_unidentified.state, mon.UNCHECKED)
+        self.assertIn("無法確認關聯", agy_unidentified.detail)
+        self.assertIn("有未指定 Task 的派工程序執行中", agy_unidentified.detail)
+
+    def test_a6_v1_f2_activity_tied_only_to_route_own_task(self):
+        # A6 / Finding F2: reviewer rows or unrelated tasks do not make developer route working
+        office_reviewer = [
+            mon.OfficeRow("codex reviewer", mon.WORKING, "審", 30, 10, key="codex:x",
+                          role="reviewer", task="PR #5 @abcdef0"),
+            mon.OfficeRow("claude PM", mon.WORKING, "pm", 5, 10, role="pm", task="task main"),
+        ]
+        switches = {k: ("ALLOWED", "Owner", "11-01") for k in mon.DISPATCH_WORKERS}
+        rows = mon.route_rows(office_reviewer, switches, "", {}, [], mon.PmBoard("ok", 0, [], [], []), [], NOW)
+        by_name = {r.name: r for r in rows}
+        self.assertEqual(by_name["Codex"].state, mon.ROUTE_FREE)
+
+        # Only a running task matching office row activates WORKING
+        running_t = mon.RouteTask("AGY", "33333333", True, "派工中", NOW - 50, "102", False, NOW - 60)
+        office_dev = [
+            mon.OfficeRow("agy direct developer", mon.WORKING, "editing", 30, 10,
+                          role="developer", task="task 33333333"),
+        ]
+        rows2 = mon.route_rows(office_dev, switches, "", {}, [running_t], mon.PmBoard("ok", 0, [], [], []), [], NOW)
+        by_name2 = {r.name: r for r in rows2}
+        self.assertEqual(by_name2["AGY"].state, mon.WORKING)
+
+    def test_a7_v1_f3_subpm_leases_survive_restart(self):
+        # A7 / Finding F3: HELD sub-PM leases survive restart via persistence
+        lease = mon.SubPmLease(NOW - 50000, "999", "WP-Z", "subpm-survivor")
+        mon._save_subpm_leases([lease], self.lease_file)
+        loaded = mon._load_subpm_leases(self.lease_file)
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded[0].holder, "subpm-survivor")
+        self.assertEqual(loaded[0].issue, "999")
+
+        # GitHubSource loads persisted leases on initialization
+        gh = mon.GitHubSource("owner/repo", window_hours=12.0)
+        self.assertEqual([l.holder for l in gh.leases], ["subpm-survivor"])
+
+        # Finding 2: Persisted HELD leases survive restart and are not suppressed on GitHub read failure
+        with tempfile.TemporaryDirectory() as root:
+            dispatch = Path(root, "worker-dispatch.json")
+            dispatch.write_text(json.dumps({"schema_version": 1, "workers": {
+                k: {"dispatch": "ALLOWED", "decided_by": "Owner", "decided_at": "2026-11-10",
+                    "reason": "open",
+                    "evidence": ("https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6760670167"
+                                 if k == "gw-agent" else
+                                 "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6685246395")}
+                for k in mon.DISPATCH_WORKERS}}), encoding="utf-8")
+            tasks = Path(root, "tasks")
+            tasks.mkdir()
+            gh.read_failed = True
+            rows = mon.monitor_routes([], [], mon.PmBoard("ok", 0, [], [], []), gh, NOW,
+                                      canonical=root, dispatch=str(dispatch), root=str(tasks))
+            by_name = {r.name: r for r in rows}
+            self.assertIn("sub-PM", by_name)
+            subpm = by_name["sub-PM"]
+            self.assertEqual(subpm.state, mon.UNCHECKED)
+            self.assertIn("subpm-survivor", subpm.detail)
+            self.assertIn("本地復原", subpm.detail)
+            self.assertIn("GitHub 讀取未確認", subpm.detail)
+
+    def test_lease_file_is_never_read_through_a_link_and_is_screened(self):
+        lease = mon.SubPmLease(NOW - 50, "999", "WP-Z", "subpm-survivor")
+        with tempfile.TemporaryDirectory() as root:
+            real = os.path.join(root, "real.json")
+            mon._save_subpm_leases([lease], real)
+            linked = os.path.join(root, "linked.json")
+            os.symlink(real, linked)
+            self.assertEqual(mon._load_subpm_leases(linked), [])   # a link is never followed
+            self.assertEqual(len(mon._load_subpm_leases(real)), 1)
+            os.mkfifo(os.path.join(root, "fifo.json"))
+            self.assertEqual(mon._load_subpm_leases(os.path.join(root, "fifo.json")), [])
+            secret = os.path.join(root, "secret.json")
+            Path(secret).write_text(json.dumps({"schema_version": 1, "leases": [
+                {"when": NOW, "issue": "1", "wp": "token=abcdefghijklmnop", "holder": "x"}]}),
+                encoding="utf-8")
+            self.assertEqual(mon._load_subpm_leases(secret), [])
+
+    def test_a7_v1_f3_malformed_or_empty_task_file_never_successful_read(self):
+        # A7 / Finding F3: malformed or empty task file fails read and triggers shortfall
+        tasks_dir = os.path.join(self.tmp.name, "tasks")
+        os.makedirs(tasks_dir, exist_ok=True)
+        good_record = {
+            "task_id": "8" * 32,
+            "updated_at": iso_stamp(NOW - 60),
+            "developer": {"provider_type": "opencode-cli", "state": "DEVELOPER_RESPONDED"},
+            "request": "#2311 check",
+        }
+        Path(tasks_dir, "good.json").write_text(json.dumps(good_record), encoding="utf-8")
+        Path(tasks_dir, "empty.json").write_text("", encoding="utf-8")
+        Path(tasks_dir, "corrupt.json").write_text("{broken", encoding="utf-8")
+
+        entries, problem = mon.route_tasks(tasks_dir)
+        self.assertEqual(problem, mon.REMOTE_TEST_OVER_BUDGET)
+
+        waiting_entries, waiting_problem = mon.waiting_records(tasks_dir)
+        self.assertEqual(waiting_problem, mon.REMOTE_TEST_OVER_BUDGET)
+
+
+if __name__ == "__main__":
+    unittest.main()

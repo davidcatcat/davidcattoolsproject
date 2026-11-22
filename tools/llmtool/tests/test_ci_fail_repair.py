@@ -83,6 +83,16 @@ class CiFailRepairTests(unittest.TestCase):
         self.assertEqual(self._claims(), before)
         self.assertEqual(len(self.calls), calls)
 
+    def test_ci_repair_checks_exact_names(self):
+        expected = (
+            'check (Linux 3.14)',
+            'check (docs)',
+            'gateway tests (Linux 3.14)',
+            'ai-loop helper tests (Python 3.14)',
+            'check (macOS 3.13)',
+        )
+        self.assertEqual(review_repair.CI_REPAIR_CHECKS, expected)
+
     def test_valid_ci_failure_dispatches_one_claim_in_ec2_family(self):
         for name in review_repair.CI_REPAIR_CHECKS:
             with self.subTest(check=name):
@@ -115,7 +125,8 @@ class CiFailRepairTests(unittest.TestCase):
         missing.pop('excerpt')
         extra = dict(_ci(), status='completed')
         cases = {
-            'wrong check name': _ci(check_name='check (docs)'),
+            'wrong check name': _ci(check_name='check (unknown)'),
+            'wrong check shape': _ci(check_name='invalid-check-name'),
             'conclusion cancelled': _ci(conclusion='cancelled'),
             'conclusion neutral': _ci(conclusion='neutral'),
             'short head': _ci(head='c' * 39),
@@ -236,6 +247,15 @@ class CiFailRepairTests(unittest.TestCase):
         self.assertEqual(replay['claim']['repair_task_id'], before[0]['repair_task_id'])
         self.assertEqual(self._claims(), before)
         self.assertEqual(len(self.calls), 1)
+
+    def test_empty_excerpt_is_accepted_without_screen_error(self):
+        result = self.dispatch(ci_failure=_ci(excerpt=''))
+        self.assertEqual(len(self.calls), 1)
+        packet = self.calls[0]['packet']
+        self.assertTrue(packet['reviewer_text_excerpt_untrusted_data'].startswith(
+            f'{review_repair.CI_PACKET_HEADER} check=check (Linux 3.14) run=7 '
+            f'conclusion=failure head={HEAD}\n'))
+        self.assertEqual(result['claim']['state'], 'DISPATCHED')
 
 
 if __name__ == '__main__':
