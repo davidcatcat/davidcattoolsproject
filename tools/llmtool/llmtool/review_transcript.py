@@ -96,20 +96,44 @@ def verdict_blocks(session_id, config_dir, reviewer_task):
             for item in content:
                 text = item.get('text') if type(item) is dict else None
                 if type(text) is str and item.get('type') == 'text':
-                    blocks += [_verdict_lines(_MARKER + part) for part in text.split(_MARKER)[1:]]
+                    parts = text.split(_MARKER)
+                    blocks += [_verdict_lines(_MARKER + part, fenced=_opens_fence(parts[index]))
+                               for index, part in enumerate(parts[1:])]
     return blocks
 
 
-def _verdict_lines(text):
-    # Only the verdict is ever posted: stop at a code fence, or after the binding
-    # line (and an ACCEPT line right after it). Prose after it is never kept.
+def _opens_fence(before):
+    lines = [line for line in before.split('\n') if line.strip()]
+    return bool(lines) and lines[-1].lstrip().startswith('```')
+
+
+def _verdict_lines(text, *, fenced=False):
+    # #2536: the verdict is the whole text from its marker: the header, the
+    # binding and the findings and evidence that follow it (formal-verdict.md).
+    # Only a verdict opened inside a code fence ends at the closing fence.
     lines = []
     for line in text.split('\n'):
-        if line.lstrip().startswith('```') or (line != _ACCEPT and any(
-                kept.startswith('LLMTOOL-REVIEW-BINDING ') for kept in lines)):
+        if fenced and line.lstrip().startswith('```'):
             break
         lines.append(line)
     return '\n'.join(lines).rstrip()
+
+
+def _exact_header(block, binding):
+    """Marker, Verdict line, then the binding and at most one ACCEPT line, each once."""
+    lines = block.split('\n')
+    if (len(lines) < 3 or not task_completion._VERDICT_MARKER.fullmatch(lines[0]) or
+            sum(line.startswith('Verdict:') for line in lines) != 1 or
+            not lines[1].startswith('Verdict:') or
+            sum(line.startswith('LLMTOOL-REVIEW-BINDING') for line in lines) != 1 or
+            sum(line == _ACCEPT for line in lines) > 1):
+        return False
+    header = []
+    for line in lines[2:4]:
+        if line not in (binding, _ACCEPT) or line in header:
+            break
+        header.append(line)
+    return binding in header and (_ACCEPT not in lines or _ACCEPT in header)
 
 
 def select_verdict(blocks, *, task, head, version):
@@ -119,11 +143,10 @@ def select_verdict(blocks, *, task, head, version):
         task['task_id'], task['run_id'], task['task_binding']['contract_digest'], head)
     stamp = '1970-01-01T00:00:00Z'
     named = [block for block in blocks if binding in block.split('\n')]
-    # Exactly marker, Verdict line, binding and at most one ACCEPT line; else refuse.
+    # An exact header (marker, Verdict line, binding and at most one ACCEPT line,
+    # nothing between them), then the findings and evidence; else refuse.
     bound = [block for block in named
-             if len(block.split('\n')) == len(set(block.split('\n')[2:])) + 2 and
-             set(block.split('\n')[2:]) in ({binding}, {binding, _ACCEPT}) and
-             task_completion._VERDICT_MARKER.fullmatch(block.split('\n')[0]) and
+             if _exact_header(block, binding) and
              review_result._comment_verdict(
                  {'id': 0, 'body': block, 'created_at': stamp, 'updated_at': stamp},
                  head=head, version=version, task=task) is not None]
@@ -131,7 +154,12 @@ def select_verdict(blocks, *, task, head, version):
         return ('REVIEWER_VERDICT_AMBIGUOUS' if len(bound) > 1 else
                 'REVIEWER_VERDICT_NOT_EXACT' if named else
                 'REVIEWER_VERDICT_BINDING_MISMATCH'), None
-    return None, bound[0]
+    block = bound[0]
+    if (block.split('\n')[1].startswith('Verdict: FAIL') and
+            not any(line.strip().startswith('Finding') for line in block.split('\n'))):
+        # #2536: a FAIL without its findings cannot drive a repair; never post one.
+        return 'REVIEWER_VERDICT_NO_FINDINGS', None
+    return None, block
 
 
 def unposted_verdict(claim, task, *, config_dir=None, run=subprocess.run, claude=None):
