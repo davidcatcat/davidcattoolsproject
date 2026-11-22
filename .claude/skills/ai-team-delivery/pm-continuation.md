@@ -83,9 +83,9 @@ Reassignment resets no repair count, cost record or safety limit. An Owner comma
 
 A PR that changes a path in `tools/llmtool/sensitive-paths.json` is a rule-file PR. It needs formal review and exact-head CI like any other PR and no per-PR Owner approval. Check the list as installed, not the PR head, and count a rename out of a listed path. If the list cannot be read, treat the PR as a rule-file PR. `CLAUDE.md`, `AGENTS.md` and `skills/` are not listed for now.
 
-Each merge of a rule-file PR raises an alert at the top of the monitor. It stays until the Owner asks the PM to clear it; the PM then runs `scripts/llmtool_monitor.py --clear-rule-alert <PR>`. The PM never clears an alert on its own. The Owner does not need to act before the merge.
+The monitor no longer shows an alert for a rule-file merge and there is nothing to clear (Owner decision 2026-11-22, chat, relayed by the independent line). The Owner does not need to act before or after the merge.
 
-This is an accident guard, not a security boundary (S2): a same-user AI can still run `gh pr merge` or edit the alert record. Report that plainly and never claim the alert prevents it. AI never uses `sudo`, `su` or root. Accounts, passwords, credentials and keys need an explicit Owner authorization first.
+Nothing here is a security boundary (S2): a same-user AI can still run `gh pr merge`. Report that plainly and never claim the process prevents it. AI never uses `sudo`, `su` or root. Accounts, passwords, credentials and keys need an explicit Owner authorization first.
 
 ### Sub-agent PMs (Owner D8 2026-11-02)
 

@@ -1692,6 +1692,13 @@ class TaskAdvanceCiGateTests(unittest.TestCase):
         self.assertIn(files_read, calls)
         self.assertLess(calls.index(checks_read), calls.index(files_read))
 
+    def test_mac_relevant_code_pr_dispatches_reviewer_without_mac_run(self):
+        result, dispatched, _ = self.advance_with_ci(
+            ({'total_count': 1, 'check_runs': [check_run()]},
+             [{'filename': 'tools/llmtool/llmtool/module.py'}]))
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(len(dispatched), 1)
+
     def test_missing_run_waits_without_dispatch(self):
         result, dispatched, _ = self.advance_with_ci(
             ({'total_count': 0, 'check_runs': []}, [{'filename': 'src/app.py'}]))
@@ -1929,6 +1936,44 @@ class TaskAdvanceCiFailRepairTests(unittest.TestCase):
             'conclusion': 'failure', 'excerpt': CI_EXCERPT})
         self.assertIn('check-runs/1', calls)
 
+    def test_docs_only_failure_before_review_calls_repair_with_ci_failure(self):
+        docs_run = check_run(2, name='check (docs)', conclusion='failure')
+        reply = ({'total_count': 1, 'check_runs': [docs_run]},
+                 [{'filename': 'docs/guide.md'}])
+        result, dispatched, calls, repaired, gh_calls = advance_with_ci_repair(reply)
+        self.assertEqual((result['step'], result['codes']), ('CI_FAILED', []))
+        self.assertEqual(dispatched, [])
+        self.assertEqual(gh_calls, [])
+        self.assertEqual(len(repaired), 1)
+        call_args = repaired[0]
+        self.assertEqual((call_args['task_id'], call_args['executor_task'],
+                          call_args['pr_number'], call_args['retry_claim_id']),
+                         ('1' * 32, 'executor-1', 17, None))
+        self.assertNotIn('remote_test_receipt', call_args)
+        self.assertEqual(call_args['ci_failure'], {
+            'head': HEAD, 'check_name': 'check (docs)', 'check_run_id': 2,
+            'conclusion': 'failure', 'excerpt': CI_EXCERPT})
+        self.assertIn('check-runs/2', calls)
+
+    def test_gateway_and_ai_loop_failures_before_review_call_repair(self):
+        cases = (
+            ('gateway tests (Linux 3.14)', [{'filename': 'tools/api-agent-gateway/app.py'}]),
+            ('ai-loop helper tests (Python 3.14)', [{'filename': 'tools/ai-loop/loop.py'}]),
+        )
+        for check_name, files in cases:
+            with self.subTest(check=check_name):
+                failed_run = check_run(3, name=check_name, conclusion='failure')
+                other_runs = [check_run(1, name='check (Linux 3.14)')] if 'gateway' in check_name else []
+                reply = ({'total_count': 1 + len(other_runs),
+                          'check_runs': [failed_run] + other_runs}, files)
+                result, dispatched, calls, repaired, gh_calls = advance_with_ci_repair(reply)
+                self.assertEqual((result['step'], result['codes']), ('CI_FAILED', []))
+                self.assertEqual(dispatched, [])
+                self.assertEqual(gh_calls, [])
+                self.assertEqual(len(repaired), 1)
+                self.assertEqual(repaired[0]['ci_failure']['check_name'], check_name)
+                self.assertEqual(repaired[0]['ci_failure']['check_run_id'], 3)
+
     def test_mac_failure_after_pass_calls_repair_with_ci_failure(self):
         result, calls, repaired = self.mac_after_pass('failure')
         self.assertEqual((result['step'], result['codes'], result['result']),
@@ -1985,6 +2030,18 @@ class TaskAdvanceCiFailRepairTests(unittest.TestCase):
                 self.assertEqual(repaired, [])
                 self.assertFalse(any('rerun' in path or 'rerequest' in path
                                      for path in calls))
+            with self.subTest(conclusion=conclusion, check='docs'):
+                docs_run = check_run(2, name='check (docs)', conclusion=conclusion)
+                reply = ({'total_count': 1, 'check_runs': [docs_run]},
+                         [{'filename': 'docs/guide.md'}])
+                result, dispatched, calls, repaired, gh_calls = advance_with_ci_repair(reply)
+                self.assertEqual((result['step'], result['codes']),
+                                 ('WAITING_ENV', ['CI_ENV_' + conclusion.upper()]))
+                self.assertEqual(result['result'], {
+                    'check': 'check (docs)', 'check_run_id': 2, 'head': HEAD})
+                self.assertEqual((repaired, dispatched, gh_calls), ([], [], []))
+                self.assertFalse(any('rerun' in path or 'rerequest' in path
+                                     for path in calls))
 
     def test_neutral_keeps_ci_failed(self):
         result, dispatched, calls, repaired, _ = self.linux('neutral')
@@ -1996,6 +2053,58 @@ class TaskAdvanceCiFailRepairTests(unittest.TestCase):
         self.assertEqual((result['step'], result['codes']),
                          ('MERGE_REFUSED', ['MERGE_CHECKS_NOT_GREEN']))
         self.assertEqual(repaired, [])
+        docs_run = check_run(2, name='check (docs)', conclusion='neutral')
+        reply = ({'total_count': 1, 'check_runs': [docs_run]},
+                 [{'filename': 'docs/guide.md'}])
+        result, dispatched, calls, repaired, _ = advance_with_ci_repair(reply)
+        self.assertEqual((result['step'], result['codes']),
+                         ('CI_FAILED', ['LINUX_CI_FAILED']))
+        self.assertEqual((repaired, dispatched), ([], []))
+        self.assertNotIn('check-runs/2', calls)
+
+    def test_skipped_and_advisory_checks_do_not_trigger_repair(self):
+        docs_skipped = check_run(2, name='check (docs)', conclusion='skipped')
+        reply = ({'total_count': 1, 'check_runs': [docs_skipped]},
+                 [{'filename': 'docs/guide.md'}])
+        result, dispatched, calls, repaired, _ = advance_with_ci_repair(reply)
+        self.assertEqual((result['step'], result['codes']),
+                         ('CI_FAILED', ['LINUX_CI_FAILED']))
+        self.assertEqual((repaired, dispatched), ([], []))
+        self.assertNotIn('check-runs/2', calls)
+
+        advisory_fail = check_run(3, name='advisory check', conclusion='failure')
+        reply = ({'total_count': 2, 'check_runs': [check_run(1), advisory_fail]},
+                 [{'filename': 'tools/llmtool/llmtool/module.py'}])
+        result, dispatched, _, repaired, _ = advance_with_ci_repair(reply)
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(len(dispatched), 1)
+        self.assertEqual(repaired, [])
+
+    def test_ci_failure_without_output_routes_with_empty_excerpt(self):
+        run = check_run(4, name='check (docs)', conclusion='failure')
+        self.assertEqual(task_advance._ci_excerpt(run), '')
+        self.assertEqual(task_advance._ci_excerpt({'output': {'title': '   \n  '}}), '')
+        record = base_record()
+        repaired = []
+
+        def get(path):
+            if path.startswith('commits/'):
+                return {'total_count': 1, 'check_runs': [run]}
+            if path.startswith('check-runs/4'):
+                return dict(run)
+            if path.endswith('/files?per_page=100'):
+                return [{'filename': 'docs/guide.md'}]
+            return PR
+
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]):
+            result = task_advance.advance(
+                task_id=record['task_id'], store=CiGateStore(record), pr_number=17,
+                github_get=get,
+                repair_review_call=lambda **kw: repaired.append(kw) or {'repair': 'sent'})
+        self.assertEqual((result['step'], result['codes']), ('CI_FAILED', []))
+        self.assertEqual(len(repaired), 1)
+        self.assertEqual(repaired[0]['ci_failure']['excerpt'], '')
 
 
 class TaskAdvancePublishTests(unittest.TestCase):
@@ -4417,7 +4526,8 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
         closed = {'task_id': '1' * 32, 'state': 'CLOSED', 'owner_notice': None, 'root': None}
         cases = (('closed', lambda *_args: dict(closed), closed, []),
                  ('failed', lambda *_args: dict(failed), failed, ['LINEAGE_CLOSE_FAILED']),
-                 ('raised', RuntimeError('store unavailable'), failed, ['LINEAGE_CLOSE_FAILED']),
+                 ('raised', RuntimeError('store unavailable'), dict(failed, cause='UNKNOWN'),
+                  ['LINEAGE_CLOSE_FAILED']),
                  ('nothing to close', lambda *_args: None, None, []))
         for name, closure, reported, codes in cases:
             with self.subTest(name):
@@ -6463,8 +6573,11 @@ class TaskAdvanceLineageCloseTests(unittest.TestCase):
     def lineage(self, task_id):
         return self.store.get(task_id)['lineage']
 
-    def advance(self, task_id):
-        """Run advance --merge with the PASS review evidence held in memory only."""
+    def advance(self, task_id, pr_merged=False):
+        """Run advance --merge with the PASS review evidence held in memory only.
+
+        pr_merged: GitHub reports the PR already merged at HEAD (a rerun).
+        """
         real_store, real_close = self.store, task_submission_cli.lineage_close_merged
         reviewed = {
             'completion': {'executor_task_id': 'executor-1', 'state': 'WAITING_REVIEW',
@@ -6486,6 +6599,9 @@ class TaskAdvanceLineageCloseTests(unittest.TestCase):
 
         pr = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'merged': False,
               'mergeable': True, 'mergeable_state': 'clean', 'labels': [{'name': 'mac-ci'}]}
+        if pr_merged:
+            pr.update(state='closed', merged=True, mergeable=None,
+                      merge_commit_sha='e' * 40)
 
         def github_get(path):
             if path == 'branches/main':
@@ -6545,7 +6661,8 @@ class TaskAdvanceLineageCloseTests(unittest.TestCase):
         with patch.object(task_submission_cli, '_lineage_roll_up', side_effect=failing):
             first = self.advance(only)
         self.assertEqual((first['step'], first['next']), ('MERGED', 'MERGED'))
-        self.assertEqual(first['lineage'], {'code': 'LINEAGE_CLOSE_FAILED'})
+        self.assertEqual(first['lineage'], {'code': 'LINEAGE_CLOSE_FAILED',
+                                            'cause': 'LINEAGE_ROLL_UP_FAILED'})
         self.assertEqual(first['codes'], ['LINEAGE_CLOSE_FAILED'])
         self.assertEqual(self.store.get(only)['merge_attempt']['state'], 'MERGED')
         closed_line = self.lineage(only)
@@ -6567,6 +6684,49 @@ class TaskAdvanceLineageCloseTests(unittest.TestCase):
         self.assertEqual(self.lineage(root)['state'], 'CLOSED')
         self.assertEqual(self.merges, [only])
         self.assertEqual(self.closes, [only, only, only])
+
+    def test_rerun_after_a_close_that_failed_before_closing_replays_the_close(self):
+        # #2566: the merge succeeded but the close failed before CLOSED was saved
+        # (a slow split held the lineage lock). A rerun of advance --merge saw the
+        # merged PR and refused MERGE_PR_NOT_OPEN, so nothing could close it. Now
+        # the rerun merges nothing, replays the close once, and the cause is shown.
+        root = self.parked_root()
+        only = self.member(root)
+
+        @contextlib.contextmanager
+        def busy(_store):
+            from llmtool import task_store
+            task_store._fail('LINEAGE_LOCK_BUSY')
+            yield
+        with patch.object(task_submission_cli, '_lineage_lock', busy):
+            first = self.advance(only)
+        self.assertEqual((first['step'], first['codes']), ('MERGED', ['LINEAGE_CLOSE_FAILED']))
+        self.assertEqual(first['lineage'], {'code': 'LINEAGE_CLOSE_FAILED',
+                                            'cause': 'LINEAGE_LOCK_BUSY'})
+        self.assertEqual(self.lineage(only)['state'], 'OPEN')
+        self.assertEqual(self.store.get(only)['merge_attempt']['state'], 'MERGED')
+        replay = self.advance(only, pr_merged=True)
+        self.assertEqual((replay['step'], replay['codes']), ('MERGED', []))
+        self.assertTrue(replay['result']['replay'])
+        self.assertEqual(replay['lineage'], {
+            'task_id': only, 'state': 'CLOSED', 'owner_notice': None,
+            'root': {'task_id': root, 'state': 'CLOSED', 'owner_notice': None}})
+        self.assertEqual([self.lineage(only)['state'], self.lineage(root)['state']],
+                         ['CLOSED', 'CLOSED'])
+        # A further rerun closes nothing and never merges again.
+        again = self.advance(only, pr_merged=True)
+        self.assertEqual(again['codes'], ['MERGE_LINEAGE_ENDED'])
+        self.assertIsNone(again['lineage'])
+        self.assertEqual(self.merges, [only])
+
+    def test_a_merged_pr_without_a_stored_merged_attempt_is_still_refused(self):
+        # Fail closed: only a stored MERGED attempt for this PR and head replays.
+        root = self.parked_root()
+        only = self.member(root)
+        result = self.advance(only, pr_merged=True)
+        self.assertEqual((result['step'], result['codes']), ('MERGE_REFUSED', ['MERGE_PR_NOT_OPEN']))
+        self.assertEqual(self.lineage(only)['state'], 'OPEN')
+        self.assertEqual((self.merges, self.closes), ([], []))
 
     def test_a_split_after_advance_read_the_root_open_still_refuses_the_merge(self):
         # #1502 D10c2 (security v91, CWE-362): advance read the ROOT OPEN and passed
@@ -7095,7 +7255,8 @@ class EndVsAdvanceTests(unittest.TestCase):
         def inject():
             try:
                 task_submission_cli.lineage_end(self.real, child, 'DROPPED',
-                                                pm_session=self.PM, reason=self.REASON)
+                                                pm_session=self.PM, reason=self.REASON,
+                                                final=True)
             except LLMToolError as exc:
                 seen.append(getattr(exc, 'task_store_error_code', None) or str(exc))
             else:
@@ -7226,7 +7387,7 @@ class EndVsAdvanceTests(unittest.TestCase):
         root, child = self.member()
         if state in ('DROPPED', 'STOPPED'):
             task_submission_cli.lineage_end(self.real, child, state, pm_session=self.PM,
-                                            reason=self.REASON)
+                                            reason=self.REASON, final=(state == 'DROPPED'))
             return child
         if state == 'CLOSED':
             self.end_past_lease(child, 'CLOSED')()  # as lineage_close_merged writes it

@@ -197,6 +197,14 @@ class LineageOutcomeTests(unittest.TestCase):
         failed = dict(replan, state='FAILED_FINAL')
         self.assertEqual(rp.root_outcome([child('a', 'CLOSED'), child('b', 'STOPPED'), failed]),
                          'FAILED')
+        # Issue #2373: A CLOSED split child with replaces also meets the obligation.
+        successor = {'id': 'c2', 'kind': 'child', 'state': 'CLOSED', 'replaces': ['b']}
+        self.assertEqual(rp.root_outcome([child('a', 'CLOSED'), child('b', 'DROPPED'), successor]),
+                         'CLOSED')
+        self.assertEqual(rp.root_outcome([child('a', 'CLOSED'), child('b', 'DROPPED'),
+                                          dict(successor, state='OPEN')]), 'OPEN')
+        self.assertEqual(rp.root_outcome([child('a', 'CLOSED'), child('b', 'DROPPED'),
+                                          dict(successor, state='DROPPED')]), 'FAILED')
 
     def test_auth_waiting_notifies_at_once_others_after_24_hours(self):
         due = lambda reason, since: rp.waiting_notice_due(

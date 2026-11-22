@@ -38,7 +38,8 @@ def entry(status='RESERVED', report=None):
     return dict(high_debug._failed_entry(
         family='pr-17', failed_corrections=None, early_reason=REASON, head=HEAD,
         d6='executor-hd1-aaaaaaa', code=code, observed='UNKNOWN', effort='UNKNOWN',
-        usage='UNKNOWN', recorded_at=AT, model_requested=high_debug._CODEX_MODEL,
+        usage='UNKNOWN', recorded_at=AT,
+        model_requested=high_debug._debug_default_model('codex-debug'),
         rules_sha256=RULES[1]), status=status)
 
 
@@ -366,7 +367,8 @@ class RunTests(ReservationCase):
         self.eq(self.debug(quota, runner, fallback=True)[0], RUN)
         self.eq(runner.call_count, 2)
         self.eq(self.pairs(quota), [QUOTA, ('RUN_FAILED', RUN)])
-        self.eq(self.entries(quota)[1]['model_requested'], high_debug._CLAUDE_MODEL)
+        self.eq(self.entries(quota)[1]['model_requested'],
+                high_debug._debug_default_model('claude-debug'))
 
     def test_g_unclear_create_stays_reserved(self):
         for case, (create, taken) in enumerate((   # the last leaves a branch or record

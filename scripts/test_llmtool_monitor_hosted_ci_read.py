@@ -36,10 +36,6 @@ Monitor = mon.Monitor
 Snapshot = mon.Snapshot
 
 _ISOLATED = tempfile.TemporaryDirectory()
-_RULE_ALERT_ISOLATED = tempfile.TemporaryDirectory()
-_RULE_ALERT_PATCH = mock.patch.object(
-    mon, "RULE_ALERT_FILE",
-    os.path.join(_RULE_ALERT_ISOLATED.name, "rule-file-alerts.json"))
 
 
 def setUpModule():
@@ -49,12 +45,9 @@ def setUpModule():
         "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS", "GW_AUDIT_ROOT"
     ):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
-    _RULE_ALERT_PATCH.start()
 
 
 def tearDownModule():
-    _RULE_ALERT_PATCH.stop()
-    _RULE_ALERT_ISOLATED.cleanup()
     _ISOLATED.cleanup()
 
 

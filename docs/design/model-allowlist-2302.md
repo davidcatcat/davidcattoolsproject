@@ -56,7 +56,7 @@ OpenCode is not in `role_config.ROUTE_ROLES` (`18-24`). Its model comes from the
 
 ## 7. CLAUDE.md hash
 
-`guidance-drift.json` pins the sha256 of the `CLAUDE.md` bytes. Claude Developer cannot run commands and gw-agent has no shell, so either the PM computes the sha256 read-only on the D6 file at the result SHA, or the repair copies the `HASH_STALE` digest from the EC2 `test_real_repository_guidance_is_current` output. Keep the `CLAUDE.md` edit and its hash in one Task.
+`guidance-drift.json` pins the sha256 of the `AGENTS.md` and `CLAUDE.md` bytes. During normal `llmtool task advance` publication (`tools/llmtool/llmtool/task_advance.py` `_publish_task`), `tools/llmtool/llmtool/guidance_refresh.py` `refresh_guidance_hashes` automatically refreshes the recorded hash in `tools/llmtool/guidance-drift.json` from the committed file bytes at `HEAD` before recording or pushing the result, after verifying the guidance file is in the Task's approved `write_paths` and in the Task's own committed diff. Manual recovery (computing the sha256 read-only on the D6 file at the result SHA or copying the `HASH_STALE` digest from EC2 `test_real_repository_guidance_is_current` output) is only a fallback when advancing outside the normal publish path.
 
 ## 8. Unchanged by every PR
 

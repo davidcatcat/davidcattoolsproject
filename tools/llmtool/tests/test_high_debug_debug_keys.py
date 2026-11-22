@@ -163,7 +163,8 @@ class RunHighDebugTests(unittest.TestCase):
         self.assertEqual([call.args[0] for call in roles.call_args_list], ['claude-debug'])
         self.assertEqual(launched, [True])
         self.assertEqual([entry['model_requested'] for entry in store.entries],
-                         [high_debug._CODEX_MODEL, high_debug._CLAUDE_MODEL])
+                         [high_debug._debug_default_model('codex-debug'),
+                          high_debug._debug_default_model('claude-debug')])
 
 
 if __name__ == '__main__':

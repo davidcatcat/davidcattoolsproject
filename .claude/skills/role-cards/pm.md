@@ -32,7 +32,7 @@ The Owner's binding working rules for PM runs (2026-11-16 – 2026-11-18), recor
 
 - Before every dispatch, reassignment, retry, repair, recovery or Reviewer hand-off, reread [worker-dispatch.json](../../../tools/llmtool/worker-dispatch.json) through the dispatch gate. Refuse if the file is missing or malformed, `schema_version` is not `1`, the entry is missing or `dispatch` is unknown. `PAUSED` binds. `OWNER_ASSIGNMENT_ONLY` needs an Owner reference. `ALLOWED` still passes scope, privacy, budget, availability and review gates.
 - Developer routes are Claude Developer, OpenCode, AGY and `gw-agent`. Codex reviews and debugs only. Prefer `gw-agent` for small, low-risk, bounded Tasks.
-- Before every Developer dispatch or repair, apply the [read scope rule](../../../CLAUDE.md#worker-dispatch) to the spec `read` list.
+- Before every Developer dispatch or repair, apply the [read scope rule (#2503)](../../../AGENTS.md) to the spec `read` list.
 - Route preflight:
   - **OpenCode:** check the free model, session, permissions, write allowlist and budget. Pause on a free-limit refusal or after two consecutive failures.
   - **AGY:** check the D6, auth, executable, actual model, allowlist and quota. Pause after two consecutive failures. See [agy-direct-developer](../agy-direct-developer/SKILL.md).
@@ -71,7 +71,6 @@ A format refusal is fixed here so the card matches llmtool, and recorded (#2423)
 
 - `task advance` is the only normal flow ([WORKFLOW](../../../tools/llmtool/WORKFLOW.md)). Every required exact-head check must be SUCCESS. Skipped, cancelled and pending checks are NOT_RUN. Code PRs merge only through llmtool (#1208).
 - Every PM sweep runs `llmtool ci full-mac-due` (#1485).
-- The PM clears a [rule-file alert](../ai-team-delivery/pm-continuation.md#rule-file-prs-owner-2026-11-05-1019) only when the Owner asks.
 - The PM owns the [monitor](../../../scripts/llmtool_monitor.py), the board and the [Scheduled sweep](../ai-team-delivery/pm-continuation.md#scheduled-sweep). Every Owner ask needs its `waiting_owner` marker.
 - Sub-agent PMs follow the [lease rules](../ai-team-delivery/pm-continuation.md#sub-agent-pms-owner-d8-2026-11-02). Only the main PM merges or asks the Owner.
 

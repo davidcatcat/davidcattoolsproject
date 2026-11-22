@@ -805,6 +805,8 @@ def add_task_submission_parsers(actions):
     split.add_argument('root_id', metavar='ROOT', help='existing durable ROOT Task ID')
     split.add_argument('--child', required=True, action='extend', nargs='+', metavar='ID',
                        help='existing durable Task ID that becomes a child (repeatable)')
+    split.add_argument('--replaces', action='extend', nargs='+', metavar='ID',
+                       help='child Task IDs the new split child replaces')
     split.add_argument('--pm-session', required=True,
                        help='native PM session UUID (or stored pm- session ID)')
     split.add_argument('--reason', required=True, help='printable reason (1-500 characters)')
@@ -823,6 +825,8 @@ def add_task_submission_parsers(actions):
     drop.add_argument('task_id', metavar='ID', help='existing durable Task ID')
     drop.add_argument('--state', choices=('DROPPED', 'STOPPED', 'FAILED_FINAL'),
                       default='DROPPED', help='end state (default DROPPED)')
+    drop.add_argument('--final', action='store_true', default=False,
+                      help='explicit final abandonment of the lineage')
     drop.add_argument('--pm-session', required=True,
                       help='native PM session UUID (or stored pm- session ID)')
     drop.add_argument('--reason', required=True, help='printable reason (1-500 characters)')
@@ -1083,8 +1087,8 @@ def add_task_submission_parsers(actions):
                                   'runs only as the automatic fallback after Codex Debug '
                                   'reports quota exhausted or login failure'))
     dispute = actions.add_parser(
-        'dispute', help=('Record a PM dispute, deferral or arbiter ruling of one formal '
-                         'review finding; never runs a review'))
+        'dispute', help=('Record a PM dispute, deferral, withdrawal or arbiter ruling '
+                         'of one formal review finding; never runs a review'))
     dispute_actions = dispute.add_subparsers(dest='dispute_action', metavar='ACTION')
     dispute_actions.required = True
     for name, text in (('open', 'Dispute one finding of the recorded FAIL verdict'),
@@ -1109,6 +1113,20 @@ def add_task_submission_parsers(actions):
                                  help='registered D6 Reviewer task id of the arbiter run')
             command.add_argument('--reviewer-session', required=True,
                                  help='native session id of the arbiter run')
+    # #2088: the disputing PM gives up its own OPEN dispute. No ruling, no
+    # evidence URL: the finding stands and goes back to normal review repair.
+    withdraw = dispute_actions.add_parser(
+        'withdraw', help=('Withdraw your own OPEN dispute of one finding; the finding '
+                          'stands and is repaired as usual'))
+    withdraw.add_argument('task_id', help='existing durable Task ID')
+    withdraw.add_argument('--pr', required=True, type=int, help='GitHub pull request number')
+    withdraw.add_argument('--finding', required=True, help='finding ID of the verdict, e.g. F1')
+    withdraw.add_argument('--head', required=True,
+                          help='40-hex PR head of the OPEN dispute entry (selects the entry)')
+    withdraw.add_argument('--pm-session',
+                          help=('caller PM session (native UUID or pm- ID); must own '
+                                'the Task; default: CLAUDE_CODE_SESSION_ID or '
+                                'CODEX_THREAD_ID'))
     repair = actions.add_parser(
         'repair', help='Dispatch one bounded repair for the newest failed formal review')
     repair.add_argument('task_id', help='existing durable Task ID')
@@ -1215,8 +1233,10 @@ def run_task_abandon(args, *, store=None, stdout=None):
 # #1502 WP-D D10 (spec 3-2, D4): lineage helpers for task split, replan and drop.
 
 
-def _lineage_refuse(code):
-    raise LLMToolError(code) from None
+def _lineage_refuse(code, message=None):
+    exc = LLMToolError(code if message is None else message)
+    exc.task_store_error_code = code
+    raise exc from None
 
 
 LINEAGE_LOCK_NAME = '.lineage.lock'
@@ -1335,15 +1355,15 @@ def _lineage_roll_up(store, lineage_id):
     return {'task_id': lineage_id, 'state': state, 'owner_notice': None}
 
 
-def lineage_end(store, task_id, state, *, pm_session, reason):
+def lineage_end(store, task_id, state, *, pm_session, reason, final=False):
     """End one OPEN Task: DROPPED (a child), STOPPED, or FAILED_FINAL (a REPLAN)."""
     # PR #1768 v91 (CWE-362): the end and its roll-up never interleave with a split.
     with _lineage_lock(store):
         return _lineage_end_locked(store, task_id, state, pm_session=pm_session,
-                                   reason=reason)
+                                   reason=reason, final=final)
 
 
-def _lineage_end_locked(store, task_id, state, *, pm_session, reason):
+def _lineage_end_locked(store, task_id, state, *, pm_session, reason, final=False):
     from .task_store import end_lineage
     # Owner B: a child left PENDING after its ROOT commit becomes OPEN first; an
     # uncommitted one is removed. Either way no end is recorded on a reservation.
@@ -1359,6 +1379,25 @@ def _lineage_end_locked(store, task_id, state, *, pm_session, reason):
         _lineage_refuse('FAILED_FINAL_NOT_REPLAN')
     if line['state'] != 'OPEN':
         _lineage_refuse('LINEAGE_NOT_OPEN')
+    if state == 'DROPPED':
+        members = _lineage_members(store, line['lineage_id'])
+        other_open = [m for m in members if m['id'] != task_id and m.get('state') == 'OPEN']
+        if not other_open:
+            simulated = [dict(m, state='DROPPED') if m['id'] == task_id else m for m in members]
+            from . import repair_policy
+            if repair_policy.root_outcome(simulated) != 'CLOSED':
+                policy = repair_policy.load_policy()
+                child_count = sum(m.get('kind') == 'child' for m in members)
+                slots_remain = child_count < policy['child_max']
+                replan_used = sum(m.get('kind') == 'replan' for m in members)
+                replan_remains = replan_used < policy['replan_max']
+                if (slots_remain or replan_remains) and not final:
+                    _lineage_refuse(
+                        'LINEAGE_SUCCESSOR_REQUIRED',
+                        'LINEAGE_SUCCESSOR_REQUIRED: dropping the last OPEN child would end the '
+                        'lineage while next steps remain; create a successor first with task split '
+                        'or task replan, or use task drop --final --reason to abandon the lineage'
+                    )
     # PR #1789 v91 F1 (CWE-841): the end takes the Task's advance lease, so it never
     # interleaves with an advance or drive of it (LINEAGE_TASK_ADVANCING).
     end_lineage(store, task_id, dict(line, state=state, reason=reason,
@@ -1400,9 +1439,23 @@ def lineage_close_merged(store, task_id):
                     else _lineage_roll_up(store, line['lineage_id']))
             if retry and root is None:
                 return None
-    except LLMToolError:
-        return {'code': 'LINEAGE_CLOSE_FAILED'}
+    except LLMToolError as exc:
+        return {'code': 'LINEAGE_CLOSE_FAILED', 'cause': lineage_close_cause(exc)}
     return {'task_id': task_id, 'state': 'CLOSED', 'owner_notice': None, 'root': root}
+
+
+def lineage_close_cause(exc):
+    """Fixed cause code of a failed lineage close, e.g. LINEAGE_LOCK_BUSY; never data.
+
+    A TaskStore refusal carries its validated code; a lineage refusal is raised
+    with the bare code as its message. Anything else is UNKNOWN.
+    """
+    code = getattr(exc, 'task_store_error_code', None)
+    if type(code) is not str:
+        code = str(exc) if isinstance(exc, LLMToolError) else None
+    if type(code) is str and re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', code):
+        return code
+    return 'UNKNOWN'
 
 
 def _lineage_cli(store, stdout, call):
@@ -1415,7 +1468,12 @@ def _lineage_cli(store, stdout, call):
                 getattr(exc, 'completion_code', None) or str(exc))
         if type(code) is not str or re.fullmatch(r'[A-Z0-9_]{1,64}', code) is None:
             code = 'LINEAGE_REFUSED'
-        _print({'code': code}, stdout=stdout)
+        payload = {'code': code}
+        # Only an explicit refusal explanation rides with the code; a generic
+        # store diagnostic is never printed as the command's message.
+        if str(exc) and str(exc).startswith(code + ':'):
+            payload['message'] = str(exc)
+        _print(payload, stdout=stdout)
         return 1
     _print(result, stdout=stdout)
     return 0
@@ -1424,6 +1482,7 @@ def _lineage_cli(store, stdout, call):
 def run_task_drop(args, *, store=None, stdout=None):
     return _lineage_cli(store, stdout, lambda store: lineage_end(
         store, args.task_id, args.state, reason=args.reason,
+        final=getattr(args, 'final', False),
         pm_session=active_pm_inbox.pm_session_key(args.pm_session)))
 
 
@@ -1436,7 +1495,7 @@ def _lineage_new_member(store, task_id, pm_session, taken):
     return record
 
 
-def _split_checks(store, root_id, children, *, pm_session, reason, preflight):
+def _split_checks(store, root_id, children, *, pm_session, reason, preflight, replaces=None):
     """The split admission checks; return the ROOT lineage and each child's record digest.
 
     The preflight also refuses a ROOT that is not OPEN or PARKED, or whose merge
@@ -1457,6 +1516,17 @@ def _split_checks(store, root_id, children, *, pm_session, reason, preflight):
     if preflight and (line['state'] not in ('OPEN', 'PARKED') or
                       root.get('merge_attempt') is not None):
         _lineage_refuse('SPLIT_ROOT_NOT_OPEN')
+    if replaces is not None:
+        if (type(replaces) not in (list, tuple) or not replaces or len(replaces) > 3 or
+                len(set(replaces)) != len(replaces) or
+                any(type(task_id) is not str or re.fullmatch(r'[0-9a-f]{32}', task_id) is None
+                    for task_id in replaces) or
+                any(child in replaces for child in (children or ()))):
+            _lineage_refuse('SPLIT_CHILDREN_INVALID')
+        by_id = {item['id']: item for item in members}
+        if any(task_id not in by_id or by_id[task_id].get('kind') != 'child' or
+               by_id[task_id].get('state') in ('CLOSED', 'PENDING') for task_id in replaces):
+            _lineage_refuse('SPLIT_CHILDREN_INVALID')
     from .task_store import split_child_started
     digests = []
     for index, child_id in enumerate(children):
@@ -1472,13 +1542,15 @@ def _split_checks(store, root_id, children, *, pm_session, reason, preflight):
 _SPLIT_NEXT = 'PM closes the ROOT PR with a comment; the ROOT is never merged'
 
 
-def _split_op_id(root_id, children):
+def _split_op_id(root_id, children, replaces=None):
     """The split op id: fixed by the ROOT and its ordered child list, so a re-run of
     the same split names the same op (Owner B idempotence). None for bad input."""
     if (type(root_id) is not str or type(children) is not list or not children or
             any(type(child) is not str for child in children)):
         return None
     text = 'split\n' + root_id + '\n' + '\n'.join(children)
+    if replaces:
+        text += '\nreplaces\n' + '\n'.join(replaces)
     return hashlib.sha256(text.encode('utf-8')).hexdigest()[:32]
 
 
@@ -1596,7 +1668,8 @@ def _split_abort(store, root_id, reserved, op_id, error, stage):
     raise error
 
 
-def lineage_split(store, root_id, children, *, pm_session, reason, main_sha_reader=None):
+def lineage_split(store, root_id, children, *, pm_session, reason, replaces=None,
+                  main_sha_reader=None):
     """SPLIT a ROOT into child Tasks that start from the latest main; the ROOT is PARKED.
 
     Owner B prepare/commit (#1502 c6860817605): each child is first reserved
@@ -1606,14 +1679,15 @@ def lineage_split(store, root_id, children, *, pm_session, reason, main_sha_read
     in TaskStore) and counts in no lineage until the ROOT commit lists it.
     """
     from . import task_store
-    op_id = _split_op_id(root_id, children)
+    replaces = list(replaces) if replaces is not None else None
+    op_id = _split_op_id(root_id, children, replaces=replaces)
     if op_id is not None:
         resumed = _split_resume(store, root_id, children, op_id, pm_session=pm_session)
         if resumed is not None:
             return resumed
     # Preflight: early refusals that write nothing and read no main SHA.
     _line, digests = _split_checks(store, root_id, children, pm_session=pm_session,
-                                   reason=reason, preflight=True)
+                                   reason=reason, preflight=True, replaces=replaces)
     if op_id is None:
         _lineage_refuse('SPLIT_CHILDREN_INVALID')
     base_sha = (main_sha_reader or task_completion.read_authenticated_main_sha)()
@@ -1626,7 +1700,7 @@ def lineage_split(store, root_id, children, *, pm_session, reason, main_sha_read
         if [store.get(child_id).get('record_sha256') for child_id in children] != digests:
             _lineage_refuse('SPLIT_CHILD_CHANGED')
         line, _digests = _split_checks(store, root_id, children, pm_session=pm_session,
-                                       reason=reason, preflight=False)
+                                       reason=reason, preflight=False, replaces=replaces)
         root = store.get(root_id)
         # Early refusals before any reservation; the locked ROOT commit repeats both.
         if root.get('merge_attempt') is not None:
@@ -1642,7 +1716,7 @@ def lineage_split(store, root_id, children, *, pm_session, reason, main_sha_read
             for child_id, digest in zip(children, digests):
                 task_store.reserve_split_child(store, child_id, {
                     'lineage_id': root_id, 'kind': 'child', 'parent': root_id,
-                    'replaces': [], 'state': 'PENDING', 'reason': None,
+                    'replaces': list(replaces or []), 'state': 'PENDING', 'reason': None,
                     'base_sha': base_sha, 'recorded_at': now, 'split_op': op_id},
                     expected_sha256=digest)
                 reserved.append(child_id)
@@ -1679,6 +1753,7 @@ def run_task_split(args, *, store=None, stdout=None, main_sha_reader=None):
     return _lineage_cli(store, stdout, lambda store: lineage_split(
         store, args.root_id, list(args.child), reason=args.reason,
         pm_session=active_pm_inbox.pm_session_key(args.pm_session),
+        replaces=getattr(args, 'replaces', None),
         main_sha_reader=main_sha_reader))
 
 
@@ -3000,11 +3075,54 @@ def dispute_rule(store, task_id, *, pr, finding_id, outcome, reviewer, reviewer_
             'formal_pass_required': True}
 
 
-_DISPUTE_ACTIONS = ('open', 'defer', 'rule')
+def dispute_withdraw(store, task_id, *, pr, finding_id, head):
+    """#2088: the disputing PM withdraws its own OPEN dispute of one finding.
+
+    The one OPEN entry for (pr, finding, head) moves to WITHDRAWN, the store's
+    existing OPEN -> WITHDRAWN step that adds no key. Nothing is ruled: the
+    finding is not withdrawn (withdrawn_findings reads only RULED entries), so
+    the formal FAIL keeps it and review repair and High Debug on that head
+    are no longer blocked by this dispute. This is the "fix it" branch of
+    O3/E10; it never needs or names an arbiter. A replay after a landed write
+    returns the recorded state; a lost compare-and-update refuses and writes
+    nothing, so the next call re-reads.
+    """
+    from .task_store import REVIEW_DISPUTE_FINDING_ID, TaskStoreConflict
+    if (type(pr) is not int or not 1 <= pr <= 9999999 or type(finding_id) is not str or
+            REVIEW_DISPUTE_FINDING_ID.fullmatch(finding_id) is None or
+            type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None):
+        _dispute_refuse('DISPUTE_ARGUMENT_INVALID')
+    record, disputes = _dispute_task(store, task_id)
+    same = [index for index, item in enumerate(disputes)
+            if item.get('pr') == pr and item.get('finding_id') == finding_id and
+            item.get('head_sha') == head]
+    states = [disputes[index].get('state') for index in same]
+    result = {'task_id': task_id, 'state': 'WITHDRAWN', 'pr': pr, 'finding_id': finding_id,
+              'head_sha': head, 'finding_withdrawn': False}
+    open_entries = [index for index in same if disputes[index].get('state') == 'OPEN']
+    if len(open_entries) > 1:
+        _dispute_refuse('DISPUTE_RECORD_INVALID')
+    if not open_entries:
+        if 'RULED' in states:
+            _dispute_refuse('DISPUTE_ALREADY_RULED')
+        if 'WITHDRAWN' in states:
+            return dict(result, replay=True)
+        _dispute_refuse('DISPUTE_NOT_OPEN')
+    updated = list(disputes)
+    updated[open_entries[0]] = dict(disputes[open_entries[0]], state='WITHDRAWN')
+    try:
+        store.compare_and_update(task_id, expected={'record_sha256': record.get('record_sha256')},
+                                 review_disputes=updated)
+    except TaskStoreConflict:
+        _dispute_refuse('DISPUTE_WITHDRAW_CONFLICT')
+    return dict(result, replay=False)
+
+
+_DISPUTE_ACTIONS = ('open', 'defer', 'rule', 'withdraw')
 
 
 def run_task_dispute(args, *, store=None, stdout=None, current_head=None):
-    """Thin CLI adapter for ``task dispute open|defer|rule``.
+    """Thin CLI adapter for ``task dispute open|defer|rule|withdraw``.
 
     The caller's PM session must own the Task. A refusal prints only its code
     and exits 1; nothing here runs or launches a review.
@@ -3017,11 +3135,16 @@ def run_task_dispute(args, *, store=None, stdout=None, current_head=None):
         _print(pm_caller.refusal(args.task_id, exc.code), stdout=stdout)
         return 1
     action = getattr(args, 'dispute_action', None)
-    common = {'pr': args.pr, 'finding_id': args.finding,
-              'evidence_ref': args.evidence_ref, 'current_head': current_head}
     try:
         if action not in _DISPUTE_ACTIONS:
             _dispute_refuse('DISPUTE_ARGUMENT_INVALID')
+        if action == 'withdraw':
+            result = dispute_withdraw(store, args.task_id, pr=args.pr,
+                                      finding_id=args.finding, head=args.head)
+            _print(result, stdout=stdout)
+            return 0
+        common = {'pr': args.pr, 'finding_id': args.finding,
+                  'evidence_ref': args.evidence_ref, 'current_head': current_head}
         if action == 'open':
             result = dispute_open(store, args.task_id, **common)
         elif action == 'defer':
@@ -4187,6 +4310,11 @@ def _docs_only_completion_tests(pr_number, git_evidence, github_get=None):
 
 def _matching_remote_test_receipt(task, *, executor_task, source_sha, paths):
     modules = tuple(sorted({Path(path).stem for path in paths}))
+    if not modules:
+        return None, 'REMOTE_TEST_RECEIPT_MISSING'
+    # #2573: Darwin-only modules are covered by the exact-head Mac CI gate.
+    darwin = remote_test._darwin_only_modules(modules)
+    modules = tuple(module for module in modules if module not in darwin)
     if not modules:
         return None, 'REMOTE_TEST_RECEIPT_MISSING'
     for receipt in reversed(task.get('remote_test_receipts', [])):
@@ -7057,12 +7185,17 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     expected_developer = copy.deepcopy(claimed['developer'])
 
     def persist_failure(error_code, *, state='DEVELOPER_UNAVAILABLE',
-                        provider_evidence=None, interrupted=False, stderr=None):
+                        provider_evidence=None, interrupted=False, stderr=None,
+                        error_cause=None):
         # Start from the last saved record, never the in-flight one: the refused
         # write may be what carries the fault, and the saved identity is the only
         # one the store gate lets a failure state keep. A claim refused before
         # DISPATCHING therefore stays unbound, with no provider type or model.
         failed = {**expected_developer, 'state': state, 'error_code': error_code[:64]}
+        if type(error_cause) is str and _ERROR_CAUSE_CODE.fullmatch(error_cause):
+            # #2532 follow-up: the fixed code behind a refused result write
+            # (e.g. TASK_STORE_ARTIFACT_SENSITIVE); never the refused content.
+            failed['error_cause'] = error_cause
         records = [failed]
         if type(developer.get('execution')) is dict:
             # Keep what the run observed, cleanup_status above all, whenever the
@@ -7088,6 +7221,11 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         _attach_stderr_excerpt(excerpt, stderr)
         if excerpt:
             records.insert(0, {**records[0], **excerpt})
+        if 'error_cause' in failed:
+            # The cause is diagnostic only: a store that refuses it must never
+            # block the failure record itself.
+            records.append({key: value for key, value in failed.items()
+                            if key != 'error_cause'})
         for record in records:
             try:
                 store.compare_and_update(
@@ -7263,10 +7401,11 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         store.compare_and_update(
             task['task_id'], expected={'developer': expected_developer},
             developer=developer, completion=completion)
-    except Exception:
+    except Exception as exc:
         if not write_landed(developer):
             return persist_failure('DEVELOPER_RESULT_PERSISTENCE_REJECTED',
-                                   state='DEVELOPER_OUTCOME_UNKNOWN')
+                                   state='DEVELOPER_OUTCOME_UNKNOWN',
+                                   error_cause=_error_cause(exc))
     except BaseException:
         persist_interrupted()
         raise

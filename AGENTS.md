@@ -85,6 +85,16 @@ The shared rules for every AI on this repository (Owner decision E6, [#1502](htt
 
 - **Unchanged gates:** D6 ownership, task-scoped writes, data screening, independent review, exact-head CI, no F2 llmtool-owned Git mutation outside `llmtool task advance` under Owner S4 (#1019), no force operations and no paid fallback remain. Provider/profile/role/model identity never grants execution authority.
 
+## Independent development line
+
+Owner chat, relayed by the independent line. It is an exception, not an llmtool route; only Owner-stated rules belong here.
+
+- **What it is (2026-11-21, 2026-11-22):** in the owner worktrees (`davidcattoolsproject-owner*`), Claude fixes a broken llmtool without using llmtool. It is not bound by llmtool's flow or rules (Task flow, repair and Debug counts, cross-family formal review, merge gates, dispatch gates): it develops, tests, self-reviews and merges itself. 「你是獨立開發,不用llmtool規範,不醜llmtool,自己開發自己測試,自己審查,自己合併,是為了獨立修復有問題的llmtool」；「你不是使用llmtool,你不用遵循llmtool流程和規則,你是例外獨立開發」. The repository's general safety rules (no secrets, no force operations) still apply.
+- **Advisor (2026-11-22):** technical decisions go to the independent line first; only non-technical ones it cannot answer go to the Owner. 「獨立開發同時也是顧問,有任何技術上的決策,先問顧問,如果不是技術上的決策,是顧問也無法回答的,才問owner」
+- **Scope (2026-11-22):** only verified deadlocks (no legal PM command, checked against code and real records) and Owner-named work. Side-found defects become Issues for the PM. Accepted 「就先這樣」 after 「我發現獨立開發處理的也太多了,這些都是卡住嗎? 還是發散出來的bug?」
+- **Notify the PM (2026-11-22):** after each merge, tell the PM the PR, merge SHA, change, unblocked work, exact command and expected result. 「合併的單子要主動通知pm,通知接下來自己復工」
+- **No invented rules (2026-11-22):** a process rule the Owner did not state is never written or cited as one. 「我應該沒有這樣說過」
+
 ## Team and execution-resource inventory
 
 - The [AI team roster](docs/architecture/ai-team-roster.md) describes human/AI roles and independent reviewers.
@@ -123,9 +133,9 @@ The shared rules for every AI on this repository (Owner decision E6, [#1502](htt
 - For CI failures, consult the [CI Knowledge Base](docs/ci/README.md) and [debug-ci](.claude/skills/debug-ci/SKILL.md).
 - Documentation-only changes need a successful exact-head `check (docs)` job of `llmtool Linux CI` (relative links and anchors, a sensitive-content screen of added lines, SKILL.md frontmatter and the source-revision check), plus formal review (Owner decision [#352](https://github.com/davidcatcat/davidcattoolsproject/issues/352#issuecomment-6442123420)); report any missing check.
 - Independent review and exact-head CI are separate merge gates.
-- Rule-file PRs (Owner, [#1019](https://github.com/davidcatcat/davidcattoolsproject/issues/1019#issuecomment-6668770028)): a PR that changes a path in `tools/llmtool/sensitive-paths.json` (the rule files) merges without per-PR Owner approval once formal review and exact-head CI pass. Each such merge raises an alert at the top of the monitor, which stays until the Owner asks the PM to clear it. `CLAUDE.md` and `AGENTS.md` are `exact` entries and `.claude/skills/**` is a `globs` entry, so they are rule files too.
+- Rule-file PRs (Owner, [#1019](https://github.com/davidcatcat/davidcattoolsproject/issues/1019#issuecomment-6668770028)): a PR that changes a path in `tools/llmtool/sensitive-paths.json` (the rule files) merges without per-PR Owner approval once formal review and exact-head CI pass. The monitor no longer shows an alert for such a merge (Owner decision 2026-11-22, chat, relayed by the independent line). `CLAUDE.md` and `AGENTS.md` are `exact` entries and `.claude/skills/**` is a `globs` entry, so they are rule files too.
 - AI never uses `sudo`, `su` or root, including on EC2. Accounts, passwords, credentials and keys need an explicit Owner authorization first (same record). Spend, data export and scope decisions stay with the Owner as before.
-- Residual (Owner S2): a same-user AI can still merge directly or skip the alert. The alert is an accident guard, not a security boundary; never claim it prevents this.
+- Residual (Owner S2): a same-user AI can still merge directly. Nothing here is a security boundary; never claim the process prevents this.
 - Apply [Owner outcome reporting v1.1](docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md) for milestone outcomes and G1–G4 checkpoints.
 
 ### Skill routing

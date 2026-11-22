@@ -409,7 +409,13 @@ def _d6_process_status(store, executor_task):
             # The D6 binding may sit on the developer record or on the completion
             # (OpenCode, AGY and gw-agent Tasks bind through completion), so either
             # binding counts.
-            if type(developer) is dict and developer.get('state') not in _TERMINAL:
+            # #2418: DEVELOPER_UNAVAILABLE with no execution record is written only
+            # when no provider was started (for example a gw-agent policy or profile
+            # refusal before the model call), so it holds no process either.
+            # DEVELOPER_DISPATCHING and DEVELOPER_OUTCOME_UNKNOWN stay UNKNOWN.
+            if (type(developer) is dict and developer.get('state') not in _TERMINAL and
+                    not (developer.get('state') == 'DEVELOPER_UNAVAILABLE' and
+                         developer.get('execution') is None)):
                 uncertain = True
             continue
         seen = True

@@ -1258,6 +1258,7 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
         if len(fields) < 3:
             continue
         second_parent = fields[2]
+        _require_trusted_base(root, trusted_base_sha)
         if not _is_ancestor(root, second_parent, trusted_base_sha):
             continue
         merge_parents[commit] = second_parent
@@ -1336,6 +1337,8 @@ def _developer_tip(root, start_sha, head_sha, trusted_base_sha=None):
     while current != start_sha:
         raw = _git(root, ('rev-list', '--parents', '-n', '1', current), limit=4096)
         parents = raw.decode('ascii').split()[1:]
+        if len(parents) == 2:
+            _require_trusted_base(root, trusted_base_sha)
         if (len(parents) != 2 or not _is_ancestor(root, parents[1], trusted_base_sha) or
                 _merge_resolution_paths(root, current, parents[0], parents[1])):
             return current
@@ -1369,6 +1372,18 @@ def _commit_present(root, sha):
     except LLMToolError:
         return False
     return True
+
+
+def _require_trusted_base(root, trusted_base_sha):
+    """Stop with a named code when the trusted main pin commit is not local.
+
+    #2365: a head with main merges is checked against the trusted pin; when
+    GitHub main moved and the local fetch has not landed yet, the ancestry
+    read would fail as a generic GIT_INSPECTION_FAILED. Fetching main and
+    rerunning resolves it, so the code says so. Fail-closed either way.
+    """
+    if not _commit_present(root, trusted_base_sha):
+        _stop('MAIN_PIN_COMMIT_MISSING')
 
 
 def ensure_main_commit(root, main_sha):

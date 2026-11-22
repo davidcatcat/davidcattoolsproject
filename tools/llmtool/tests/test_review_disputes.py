@@ -1,6 +1,6 @@
 """#1502 WP-D D13 (section 4 items 1-12, E10): PM disputes of formal review findings.
 
-Covers the optional review_disputes record, ``task dispute open|defer|rule``,
+Covers the optional review_disputes record, ``task dispute open|defer|rule|withdraw``,
 the pure arbiter chooser and the review-repair and High Debug gates. Every
 store write in these tests goes through the real task_store dispute
 validators. No test data here is credential-shaped (Owner #763 A); the
@@ -901,9 +901,11 @@ class DisputeCliRouteTests(_Case):
 
     def test_task_actions_routes_dispute_without_a_fresh_source_check(self):
         self.assertEqual(cli.TASK_ACTIONS['dispute'], ('run_task_dispute', False))
-        for action in ('open', 'defer', 'rule'):
+        for action in ('open', 'defer', 'rule', 'withdraw'):
             argv = ['task', 'dispute', action, TASK, '--pr', str(PR), '--finding', 'F1',
                     '--evidence-ref', REF]
+            if action == 'withdraw':
+                argv[-2:] = ['--head', HEAD]
             if action == 'rule':
                 argv[-1] = RULING_REF
                 argv += ['--outcome', 'WITHDRAWN', '--reviewer', 'codex-reviewer',
@@ -951,6 +953,146 @@ class DisputeCliRouteTests(_Case):
         self.assertEqual((code, out), (1, {'task_id': TASK, 'code': 'DISPUTE_ALREADY_RULED'}))
         self.assertEqual([(item['finding_id'], item['state']) for item in self.disputes()],
                          [('F1', 'RULED'), ('F4', 'DEFERRED')])
+
+
+class DisputeWithdrawTests(_Case):
+    """#2088: the disputing PM withdraws its own OPEN dispute ("fix it", O3/E10)."""
+
+    def withdraw(self, finding_id='F1', *, head=HEAD, pr=PR, task_id=TASK):
+        return task_submission_cli.dispute_withdraw(self.store, task_id, pr=pr,
+                                                    finding_id=finding_id, head=head)
+
+    def test_withdraw_moves_the_open_entry_to_withdrawn_and_rules_nothing(self):
+        self.use(_task())
+        self.open()
+        self.assertTrue(review_repair.dispute_open_on(self.store.get(TASK), PR, HEAD))
+        result = self.withdraw()
+        self.assertEqual((result['state'], result['finding_withdrawn'], result['replay']),
+                         ('WITHDRAWN', False, False))
+        [entry] = self.disputes()
+        self.assertEqual(entry['state'], 'WITHDRAWN')
+        self.assertNotIn('ruling', entry)
+        record = self.store.get(TASK)
+        # Repair and High Debug on the head are no longer blocked, and the
+        # finding still stands: only an arbiter ruling withdraws a finding.
+        self.assertFalse(review_repair.dispute_open_on(record, PR, HEAD))
+        self.assertEqual(review_repair.withdrawn_findings(record, PR, HEAD), frozenset())
+
+    def test_a_replay_after_the_write_returns_the_recorded_state_and_writes_nothing(self):
+        self.use(_task())
+        self.open()
+        self.withdraw()
+        before = self.store.get(TASK)
+        result = self.withdraw()
+        self.assertEqual((result['state'], result['replay']), ('WITHDRAWN', True))
+        self.assertEqual(self.store.get(TASK), before)
+
+    def test_only_the_selected_open_entry_changes(self):
+        self.use(_task(disputes=[_entry('F1', head=NEW_HEAD), _entry('F3', severity='Medium'),
+                                 _entry('F4', severity='Advisory', state='DEFERRED')]))
+        self.open()
+        self.withdraw()
+        self.assertEqual([(item['finding_id'], item['head_sha'], item['state'])
+                          for item in self.disputes()],
+                         [('F1', NEW_HEAD, 'OPEN'), ('F3', HEAD, 'OPEN'),
+                          ('F4', HEAD, 'DEFERRED'), ('F1', HEAD, 'WITHDRAWN')])
+
+    def test_a_withdrawn_finding_may_be_disputed_again_and_blocks_again(self):
+        self.use(_task())
+        self.open()
+        self.withdraw()
+        self.open()
+        self.assertEqual([item['state'] for item in self.disputes()], ['WITHDRAWN', 'OPEN'])
+        self.assertTrue(review_repair.dispute_open_on(self.store.get(TASK), PR, HEAD))
+        self.withdraw()
+        self.assertEqual([item['state'] for item in self.disputes()],
+                         ['WITHDRAWN', 'WITHDRAWN'])
+
+    def test_withdraw_refuses_without_an_open_entry_of_that_head(self):
+        self.use(_task(disputes=[_entry('F4', severity='Advisory', state='DEFERRED'),
+                                 _entry('F1', head=NEW_HEAD)]))
+        self.refused('DISPUTE_NOT_OPEN', self.withdraw)            # F1 is OPEN only on NEW_HEAD
+        self.refused('DISPUTE_NOT_OPEN', self.withdraw, 'F4')      # deferred, not disputed
+        self.refused('DISPUTE_NOT_OPEN', self.withdraw, 'F2')      # never disputed
+        self.use(_task(disputes=[_entry(state='RULED', ruling='UPHELD')]))
+        self.refused('DISPUTE_ALREADY_RULED', self.withdraw)
+
+    def test_withdraw_refuses_bad_arguments_and_unusable_tasks(self):
+        self.use(_task(disputes=[_entry()]))
+        for kwargs in ({'finding_id': 'X1'}, {'head': 'abc'}, {'head': HEAD.upper()},
+                       {'pr': 0}, {'pr': True}, {'task_id': 'not-a-task'}):
+            with self.subTest(kwargs=kwargs):
+                self.refused('DISPUTE_ARGUMENT_INVALID', self.withdraw, **kwargs)
+        self.use(dict(_task(disputes=[_entry()]), abandonment={'reason': 'dropped'}))
+        self.refused('DISPUTE_TASK_ABANDONED', self.withdraw)
+        self.use(_task(disputes='broken'))
+        self.refused('DISPUTE_RECORD_INVALID', self.withdraw)
+
+    def test_a_lost_compare_and_update_refuses_and_writes_nothing(self):
+        self.use(_task(disputes=[_entry()]))
+        conflict = task_store.TaskStoreConflict.__new__(task_store.TaskStoreConflict)
+        with patch.object(self.store, 'compare_and_update', side_effect=conflict):
+            self.refused('DISPUTE_WITHDRAW_CONFLICT', self.withdraw)
+        self.assertEqual(self.disputes(), [_entry()])
+
+    def test_the_store_rejects_a_withdrawal_that_carries_a_ruling_or_changes_the_entry(self):
+        before = [_entry()]
+        for after in (dict(_entry(), state='WITHDRAWN', ruling={}),
+                      dict(_entry(), state='WITHDRAWN', severity='Low'),
+                      dict(_entry(), state='WITHDRAWN', head_sha=NEW_HEAD)):
+            with self.subTest(after=after), self.assertRaises(LLMToolError):
+                # The store runs both checks on every dispute write.
+                task_store._check_review_disputes_transition(before, [after])
+                task_store._validate_review_disputes({'review_disputes': [after]})
+        # The withdrawal itself is the store's existing OPEN -> WITHDRAWN step.
+        withdrawn = [dict(_entry(), state='WITHDRAWN')]
+        task_store._check_review_disputes_transition(before, withdrawn)
+        task_store._validate_review_disputes({'review_disputes': withdrawn})
+
+    def _main(self, argv):
+        out = io.StringIO()
+        with patch.object(task_submission_cli, 'TaskStore', return_value=self.store), \
+             patch('llmtool.pm_caller.check_caller', return_value=None), \
+             patch('llmtool.source_freshness.require_fresh_source'), \
+             patch('sys.stdout', out):
+            code = cli.main(argv)
+        return code, json.loads(out.getvalue())
+
+    def test_withdraw_through_cli_main(self):
+        self.use(_task())
+        self.open()
+        argv = ['task', 'dispute', 'withdraw', TASK, '--pr', str(PR), '--finding', 'F1',
+                '--head', HEAD]
+        code, out = self._main(argv)
+        self.assertEqual((code, out['state'], out['finding_withdrawn']), (0, 'WITHDRAWN', False))
+        self.assertEqual([item['state'] for item in self.disputes()], ['WITHDRAWN'])
+        code, out = self._main(argv[:-1] + [NEW_HEAD])
+        self.assertEqual((code, out), (1, {'task_id': TASK, 'code': 'DISPUTE_NOT_OPEN'}))
+
+    def test_withdraw_takes_no_evidence_ref_and_needs_a_head(self):
+        parser = argparse.ArgumentParser()
+        task_submission_cli.add_task_submission_parsers(parser.add_subparsers(dest='action'))
+        base = ['dispute', 'withdraw', TASK, '--pr', str(PR), '--finding', 'F1']
+        for argv in (base, base + ['--head', HEAD, '--evidence-ref', REF]):
+            with self.subTest(argv=argv), patch('sys.stderr', io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(argv)
+
+    def test_a_caller_that_does_not_own_the_task_is_refused_first(self):
+        from llmtool import pm_caller
+        self.use(_task(disputes=[_entry()]))
+        parser = argparse.ArgumentParser()
+        task_submission_cli.add_task_submission_parsers(parser.add_subparsers(dest='action'))
+        args = parser.parse_args(['dispute', 'withdraw', TASK, '--pr', str(PR),
+                                  '--finding', 'F1', '--head', HEAD])
+        error = pm_caller.PMCallerRefused.__new__(pm_caller.PMCallerRefused)
+        error.code = 'PM_CALLER_NOT_OWNER'
+        with patch.object(pm_caller, 'check_caller', side_effect=error), \
+             patch.object(pm_caller, 'refusal', return_value={'code': 'PM_CALLER_NOT_OWNER'}):
+            code = task_submission_cli.run_task_dispute(args, store=self.store,
+                                                        stdout=io.StringIO())
+        self.assertEqual(code, 1)
+        self.assertEqual(self.disputes(), [_entry()])
 
 
 class DisputeRefPartsTests(unittest.TestCase):
@@ -1286,6 +1428,7 @@ class HighDebugGateTests(unittest.TestCase):
     def test_debug_passes_the_gate_without_an_open_dispute_on_the_head(self):
         for disputes in ([], [_entry(head=NEW_HEAD)], [_entry(pr=PR + 1)],
                          [_entry(state='RULED', ruling='UPHELD')],
+                         [_entry(state='WITHDRAWN')],
                          [_entry('F2', severity='Low', state='DEFERRED')]):
             with self.subTest(disputes=disputes):
                 with self.assertRaises(_Reached):

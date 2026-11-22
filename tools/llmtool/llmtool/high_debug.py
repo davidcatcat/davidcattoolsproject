@@ -29,10 +29,8 @@ _SESSION_READ_LIMIT = 2 * 1024 * 1024
 _REPORT_LIMIT = 16384
 _EVIDENCE_LIMIT = 8192
 _RECORD_TOKEN = re.compile(r'[A-Za-z0-9._-]{1,64}\Z')
-# #1502 WP-E R1: both equal the roles registry's listed models; every launch
-# admits its model through the shared registry check first.
-_CLAUDE_MODEL = 'claude-opus-5-5'
-_CODEX_MODEL = 'gpt-6.1-sol'
+# #1502 WP-G: no Debug default model is kept here. When no model is resolved,
+# it comes from developer-routes.json's roles registry.
 _CLAUDE_EFFORT = 'medium'
 _REFUSAL_CODES = frozenset((
     'HIGH_DEBUG_RUN_FAILED', 'HIGH_DEBUG_WROTE_FILES',
@@ -96,7 +94,8 @@ def _record_body(entry, task_id, refusal_code=None, account=None):
                               for key in ('input', 'cached', 'output', 'reasoning'))
     else:
         usage_text = 'UNKNOWN'
-    is_claude = entry.get('model_requested') == _CLAUDE_MODEL or account is not None
+    is_claude = (type(entry.get('model_requested')) is str and
+                 entry['model_requested'].startswith('claude-')) or account is not None
     actor = 'Claude' if is_claude else 'Codex'
     lines = [
         f'<!-- activity: type=developer_progress actor={actor} target=PM status={marker_status} -->',
@@ -1004,7 +1003,10 @@ class _D6CreateRejected(Exception):
         self.code = code
 
 
-def _create_d6(*, task_id, base_sha, repo_root, executor_task, agent_id='codex-high-debug-gpt-6.1-sol'):
+def _create_d6(*, task_id, base_sha, repo_root, executor_task, agent_id=None):
+    if agent_id is None:
+        # #1502 WP-G: the Codex Debug agent id names the configured default.
+        agent_id = 'codex-high-debug-' + _debug_default_model('codex-debug')
     argv = [sys.executable, '-B', str(_LIFECYCLE), '--task-id', task_id,
         '--agent-id', agent_id, '--session-ref', 'pending-' + task_id,
         '--lease-ref', f'high-debug {executor_task} at {base_sha}', '--branch',
@@ -1084,6 +1086,22 @@ def _admit_debug_model(role, model):
         _refuse('ROLE_MODEL_NOT_ALLOWED')
 
 
+def _debug_default_model(role):
+    """#1502 WP-G: return the route configuration's default model for role.
+
+    The default comes from developer-routes.json's roles registry, never a value
+    copied into this module. A missing or unusable default refuses with a stable
+    code before any provider call; there is no fallback to another model.
+    """
+    try:
+        _, model = role_config._registry_default(role, None)
+    except LLMToolError:
+        # The shared admission below has always refused a config failure with
+        # this code; a missing default must not pick another model either.
+        _refuse('ROLE_MODEL_NOT_ALLOWED')
+    return model
+
+
 def _resolve_debug_role(role):
     """Resolve role; a resolver model refusal keeps the code ROLE_MODEL_NOT_ALLOWED.
 
@@ -1128,6 +1146,7 @@ def _launch_settings(role, model):
     only from it, which makes that recorded code trusted not-started evidence.
     """
     try:
+        model = _debug_default_model(role) if model is None else model
         return _admit_debug_model(role, model), _debug_timeout(role)
     except LLMToolError as error:
         refused = _LaunchRefused('High-debug diagnosis refused; details omitted')
@@ -1135,7 +1154,7 @@ def _launch_settings(role, model):
         raise refused from None
 
 
-def _run_codex(*, prompt, cwd, output_path, model=_CODEX_MODEL, codex_home=None):
+def _run_codex(*, prompt, cwd, output_path, model=None, codex_home=None):
     from . import codex_direct_developer
     model, timeout = _launch_settings('codex-debug', model)
     argv =['codex', 'exec', '--ignore-user-config', '--ignore-rules',
@@ -1154,7 +1173,7 @@ def _run_codex(*, prompt, cwd, output_path, model=_CODEX_MODEL, codex_home=None)
             stderr=subprocess.PIPE, check=False, timeout=timeout)
 
 
-def _run_claude(*, prompt, cwd, output_path, config_dir, model=_CLAUDE_MODEL):
+def _run_claude(*, prompt, cwd, output_path, config_dir, model=None):
     from .developer_routes.claude import ClaudeRoute
     model, timeout = _launch_settings('claude-debug', model)
     route = ClaudeRoute({'executable': 'claude', 'config_dir': config_dir})
@@ -1234,12 +1253,15 @@ def _claude_usage(raw_usage):
 
 def _failed_entry(*, family, failed_corrections, early_reason, head, d6, code,
                   report=None,
-                  observed, effort, usage, recorded_at, model_requested='gpt-6.1-sol',
+                  observed, effort, usage, recorded_at, model_requested=None,
                   rules_sha256=None, no_pr=None):
     """The high_debug entry recording one attempt that did not finish.
 
     ``rules_sha256`` (the digest of the rule prefix sent) is recorded when given.
+    An omitted model_requested takes the Codex Debug role's configured default.
     """
+    if model_requested is None:
+        model_requested = _debug_default_model('codex-debug')
     stored_report = code if report is None else report
     entry = {'family': family, 'failed_corrections': failed_corrections,
              'early_reason': early_reason, 'examined_sha': head, 'd6': d6,
@@ -1772,7 +1794,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
         # configuration state), never on the resolver's source label; the
         # model always comes from claude-debug itself.
         role_settings = _resolve_debug_role('claude-debug')
-        debug_model = role_settings.get('model') or _CLAUDE_MODEL
+        debug_model = role_settings.get('model') or _debug_default_model('claude-debug')
         account_settings = role_settings
         if (role_settings.get('account') is None and
                 role_settings.get('config_dir') is None):
@@ -1783,7 +1805,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
         account = account_settings['account']
         config_dir = account_settings['config_dir']
     else:
-        debug_model = _CODEX_MODEL
+        debug_model = _debug_default_model('codex-debug')
     # #1502 WP-E R1: admitted before any D6 or entry exists, so a refusal uses
     # no Debug and never triggers the quota/auth fallback.
     debug_model = _admit_debug_model(worker_key, debug_model)
@@ -1894,7 +1916,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
         if route == 'claude':
             diagnosis_root = create(task_id=d6, base_sha=head, repo_root=repo_root,
                                     executor_task=executor_task,
-                                    agent_id='claude-high-debug-claude-opus-5-5')
+                                    agent_id='claude-high-debug-' + debug_model)
         else:
             diagnosis_root = create(task_id=d6, base_sha=head, repo_root=repo_root,
                                     executor_task=executor_task)
