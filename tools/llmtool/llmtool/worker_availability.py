@@ -70,118 +70,59 @@ ROUTE_PAUSE_PROFILES = frozenset(('agy', 'opencode'))
 ROUTE_FAILURE_LAYER = 'runtime'
 ROUTE_PAUSE_REFUSAL_CODE = 'WORKER_ROUTE_PAUSED'
 ROUTE_PAUSE_RESUME_COMMAND = 'llmtool worker-route-resume'
+ROUTE_FAILURE_COUNT_MAX = 10000
 # A route-level failure is a failure of the route itself: CLI exit or startup,
 # runtime, home or config, login or authorization, or provider/service
-# unavailable. Each route lists its existing definite codes literally. There is
-# no suffix composition and no fallback word match, so a Task-level outcome can
-# never enter the streak by accident.
-#   AGY: AGY_EXIT_NONZERO, AGY_CLI_EXIT_NONZERO, AGY_START_FAILED,
-#        AGY_START_FAILURE, AGY_STARTUP_FAILED, AGY_STARTUP_FAILURE,
-#        AGY_CLI_START_FAILED, AGY_CONFIG_INVALID, AGY_LOCAL_CONFIG_INVALID,
-#        AGY_CONFIG_ERROR, AGY_CLI_CONFIG_INVALID, AGY_ENV_INVALID,
-#        AGY_ENV_ERROR, AGY_HOME_INVALID, AGY_HOME_ERROR, AGY_PROFILE_INVALID,
-#        AGY_REQUEST_INVALID, AGY_LOGIN_REQUIRED, AGY_LOGIN_FAILED,
-#        AGY_CLI_LOGIN_REQUIRED, AGY_AUTH_REQUIRED, AGY_AUTH_FAILED,
-#        AGY_AUTH_ERROR, AGY_CLI_AUTH_REQUIRED, AGY_AUTHORIZATION_REQUIRED,
-#        AGY_AUTHORIZATION_FAILED, AGY_PROVIDER_FAILED, AGY_PROVIDER_ERROR,
-#        AGY_CLI_PROVIDER_FAILED, AGY_PROVIDER_UNAVAILABLE,
-#        AGY_SERVICE_UNAVAILABLE, AGY_SERVICE_FAILED, AGY_SERVICE_ERROR,
-#        AGY_UNAVAILABLE, AGY_ROUTE_UNAVAILABLE, AGY_RUNTIME_INVALID,
-#        AGY_RUNTIME_FAILED, AGY_RUNTIME_ERROR, AGY_RUNTIME_UNAVAILABLE,
-#        AGY_RUNTIME_MISSING, AGY_CLI_FAILED, AGY_CLI_ERROR,
-#        AGY_CLI_UNAVAILABLE, AGY_CLI_NOT_FOUND, AGY_SPAWN_FAILED,
-#        AGY_NOT_ON_PATH, AGY_RUNTIME_NOT_ON_PATH, AGY_EXECUTABLE_MISSING,
-#        AGY_EXECUTABLE_NOT_FOUND.
-#   OpenCode: the same list with the OPENCODE_ route prefix, including
-#        OPENCODE_LOCAL_CONFIG_INVALID (its home/config code).
+# unavailable. Each route lists only codes that exist on main, with each
+# code's source. There is no suffix composition and no fallback word match, so
+# a Task-level outcome can never enter the streak by accident.
+#   AGY (developer_routes/agy.py): AGY_PROFILE_INVALID (:41), AGY_ENV_INVALID
+#        (:56), AGY_CONFIG_INVALID (:72). AGY_EXIT_NONZERO (task_store.py:3402)
+#        may also be a work error, so it counts only when the record states its
+#        exit diagnostic (blocked_reason 'exit_code=...').
+#   OpenCode (opencode_direct_developer.py unless noted): OPENCODE_AUTH_REQUIRED
+#        (:377), OPENCODE_PROVIDER_FAILED (:407 and :1192),
+#        OPENCODE_RUNTIME_UNAVAILABLE (:867, :897, :966, :1031),
+#        OPENCODE_HOME_UNAVAILABLE (:677), OPENCODE_CONFIG_UNAVAILABLE (:997),
+#        OPENCODE_VERSION_UNSUPPORTED (:901), and OPENCODE_RUNTIME_INVALID
+#        (opencode_foreground_host.py:384).
+# OPENCODE_HOST_TERMINATED does not exist in the read route code, so it is not
+# listed or counted. OPENCODE_FREE_LIMIT is quota and never counts.
 _ROUTE_FAILURE_CODES = {
     'agy': frozenset((
-        'AGY_EXIT_NONZERO', 'AGY_CLI_EXIT_NONZERO', 'AGY_START_FAILED',
-        'AGY_START_FAILURE', 'AGY_STARTUP_FAILED', 'AGY_STARTUP_FAILURE',
-        'AGY_CLI_START_FAILED', 'AGY_CONFIG_INVALID',
-        'AGY_LOCAL_CONFIG_INVALID', 'AGY_CONFIG_ERROR',
-        'AGY_CLI_CONFIG_INVALID', 'AGY_ENV_INVALID', 'AGY_ENV_ERROR',
-        'AGY_HOME_INVALID', 'AGY_HOME_ERROR', 'AGY_PROFILE_INVALID',
-        'AGY_REQUEST_INVALID', 'AGY_LOGIN_REQUIRED', 'AGY_LOGIN_FAILED',
-        'AGY_CLI_LOGIN_REQUIRED', 'AGY_AUTH_REQUIRED', 'AGY_AUTH_FAILED',
-        'AGY_AUTH_ERROR', 'AGY_CLI_AUTH_REQUIRED', 'AGY_AUTHORIZATION_REQUIRED',
-        'AGY_AUTHORIZATION_FAILED', 'AGY_PROVIDER_FAILED', 'AGY_PROVIDER_ERROR',
-        'AGY_CLI_PROVIDER_FAILED', 'AGY_PROVIDER_UNAVAILABLE',
-        'AGY_SERVICE_UNAVAILABLE', 'AGY_SERVICE_FAILED', 'AGY_SERVICE_ERROR',
-        'AGY_UNAVAILABLE', 'AGY_ROUTE_UNAVAILABLE', 'AGY_RUNTIME_INVALID',
-        'AGY_RUNTIME_FAILED', 'AGY_RUNTIME_ERROR', 'AGY_RUNTIME_UNAVAILABLE',
-        'AGY_RUNTIME_MISSING', 'AGY_CLI_FAILED', 'AGY_CLI_ERROR',
-        'AGY_CLI_UNAVAILABLE', 'AGY_CLI_NOT_FOUND', 'AGY_SPAWN_FAILED',
-        'AGY_NOT_ON_PATH', 'AGY_RUNTIME_NOT_ON_PATH', 'AGY_EXECUTABLE_MISSING',
-        'AGY_EXECUTABLE_NOT_FOUND')),
+        'AGY_PROFILE_INVALID', 'AGY_ENV_INVALID', 'AGY_CONFIG_INVALID',
+        'AGY_EXIT_NONZERO')),
     'opencode': frozenset((
-        'OPENCODE_EXIT_NONZERO', 'OPENCODE_CLI_EXIT_NONZERO',
-        'OPENCODE_START_FAILED', 'OPENCODE_START_FAILURE',
-        'OPENCODE_STARTUP_FAILED', 'OPENCODE_STARTUP_FAILURE',
-        'OPENCODE_CLI_START_FAILED', 'OPENCODE_CONFIG_INVALID',
-        'OPENCODE_LOCAL_CONFIG_INVALID', 'OPENCODE_CONFIG_ERROR',
-        'OPENCODE_CLI_CONFIG_INVALID', 'OPENCODE_ENV_INVALID',
-        'OPENCODE_ENV_ERROR', 'OPENCODE_HOME_INVALID', 'OPENCODE_HOME_ERROR',
-        'OPENCODE_PROFILE_INVALID', 'OPENCODE_REQUEST_INVALID',
-        'OPENCODE_LOGIN_REQUIRED', 'OPENCODE_LOGIN_FAILED',
-        'OPENCODE_CLI_LOGIN_REQUIRED', 'OPENCODE_AUTH_REQUIRED',
-        'OPENCODE_AUTH_FAILED', 'OPENCODE_AUTH_ERROR',
-        'OPENCODE_CLI_AUTH_REQUIRED', 'OPENCODE_AUTHORIZATION_REQUIRED',
-        'OPENCODE_AUTHORIZATION_FAILED', 'OPENCODE_PROVIDER_FAILED',
-        'OPENCODE_PROVIDER_ERROR', 'OPENCODE_CLI_PROVIDER_FAILED',
-        'OPENCODE_PROVIDER_UNAVAILABLE', 'OPENCODE_SERVICE_UNAVAILABLE',
-        'OPENCODE_SERVICE_FAILED', 'OPENCODE_SERVICE_ERROR',
-        'OPENCODE_UNAVAILABLE', 'OPENCODE_ROUTE_UNAVAILABLE',
-        'OPENCODE_RUNTIME_INVALID', 'OPENCODE_RUNTIME_FAILED',
-        'OPENCODE_RUNTIME_ERROR', 'OPENCODE_RUNTIME_UNAVAILABLE',
-        'OPENCODE_RUNTIME_MISSING', 'OPENCODE_CLI_FAILED',
-        'OPENCODE_CLI_ERROR', 'OPENCODE_CLI_UNAVAILABLE',
-        'OPENCODE_CLI_NOT_FOUND', 'OPENCODE_SPAWN_FAILED',
-        'OPENCODE_NOT_ON_PATH', 'OPENCODE_RUNTIME_NOT_ON_PATH',
-        'OPENCODE_EXECUTABLE_MISSING', 'OPENCODE_EXECUTABLE_NOT_FOUND')),
+        'OPENCODE_AUTH_REQUIRED', 'OPENCODE_PROVIDER_FAILED',
+        'OPENCODE_RUNTIME_INVALID', 'OPENCODE_RUNTIME_UNAVAILABLE',
+        'OPENCODE_HOME_UNAVAILABLE', 'OPENCODE_CONFIG_UNAVAILABLE',
+        'OPENCODE_VERSION_UNSUPPORTED')),
 }
 # Task-level outcomes never count, and neither do the quota-family codes.
-# This list is explicit as well; membership here always wins over the failure
-# list above.
+# This list is explicit as well and names only codes that exist on main;
+# membership here always wins over the failure list above.
 _ROUTE_NEVER_COUNT_CODES = frozenset((
-    'BLOCKED_MODEL_REPORTED',
-    'AGY_NO_CHANGES', 'AGY_OUTPUT_REJECTED', 'AGY_OUTPUT_INVALID',
-    'AGY_RESULT_INVALID', 'AGY_RESULT_REJECTED', 'AGY_EMPTY_RESULT',
-    'AGY_EMPTY_OUTPUT', 'AGY_NO_OUTPUT', 'AGY_ENVELOPE_INVALID',
-    'AGY_ENVELOPE_REJECTED', 'AGY_INVALID_ENVELOPE', 'AGY_SPEC_MISMATCH',
-    'AGY_STEPS_EXHAUSTED', 'AGY_STEP_LIMIT', 'AGY_D6_SESSION_REFUSED',
-    'AGY_D6_BINDING_INVALID', 'AGY_D6_REFUSED', 'AGY_SCOPE_REFUSED',
-    'AGY_SCOPE_VIOLATION', 'AGY_WRITE_SCOPE_VIOLATION', 'AGY_TEST_FAILED',
-    'AGY_TESTS_FAILED', 'AGY_QUOTA_EXHAUSTED', 'AGY_FREE_LIMIT',
-    'AGY_RATE_LIMITED', 'AGY_TIMEOUT', 'AGY_CANCELLED',
-    'AGY_BLOCKED_MODEL_REPORTED', 'AGY_MODEL_REPORTED_BLOCKED',
-    'OPENCODE_NO_CHANGES', 'OPENCODE_OUTPUT_REJECTED',
-    'OPENCODE_OUTPUT_INVALID', 'OPENCODE_RESULT_INVALID',
-    'OPENCODE_RESULT_REJECTED', 'OPENCODE_EMPTY_RESULT',
-    'OPENCODE_EMPTY_OUTPUT', 'OPENCODE_NO_OUTPUT',
-    'OPENCODE_ENVELOPE_INVALID', 'OPENCODE_ENVELOPE_REJECTED',
-    'OPENCODE_INVALID_ENVELOPE', 'OPENCODE_SPEC_MISMATCH',
-    'OPENCODE_STEPS_EXHAUSTED', 'OPENCODE_STEP_LIMIT',
-    'OPENCODE_D6_SESSION_REFUSED', 'OPENCODE_D6_BINDING_INVALID',
-    'OPENCODE_D6_REFUSED', 'OPENCODE_SCOPE_REFUSED',
-    'OPENCODE_SCOPE_VIOLATION', 'OPENCODE_WRITE_SCOPE_VIOLATION',
-    'OPENCODE_TEST_FAILED', 'OPENCODE_TESTS_FAILED',
-    'OPENCODE_QUOTA_EXHAUSTED', 'OPENCODE_FREE_LIMIT',
-    'OPENCODE_RATE_LIMITED', 'OPENCODE_TIMEOUT', 'OPENCODE_CANCELLED',
-    'OPENCODE_BLOCKED_MODEL_REPORTED', 'OPENCODE_MODEL_REPORTED_BLOCKED',
+    'TOOL_DENIED',
+    'AGY_REQUEST_INVALID', 'AGY_OUTPUT_INVALID', 'AGY_QUOTA_EXHAUSTED',
+    'OPENCODE_OUTPUT_INVALID', 'OPENCODE_OUTPUT_TOO_LARGE',
+    'OPENCODE_OUTPUT_INCOMPLETE', 'OPENCODE_OUTPUT_TRUNCATED',
+    'OPENCODE_STEPS_EXHAUSTED', 'OPENCODE_TIMEOUT', 'OPENCODE_SCOPE_INVALID',
+    'OPENCODE_D6_BINDING_CHANGED', 'OPENCODE_SOURCE_INVALID',
+    'OPENCODE_SOURCE_TOO_LARGE', 'OPENCODE_SOURCE_CHANGED',
+    'OPENCODE_SOURCE_UNAVAILABLE', 'OPENCODE_PROMPT_INVALID',
+    'OPENCODE_PROMPT_SENSITIVE', 'OPENCODE_PROMPT_TOO_LARGE',
+    'OPENCODE_PROMPT_DELIVERY_INCOMPLETE', 'OPENCODE_MODEL_INVALID',
+    'OPENCODE_FREE_LIMIT', 'OPENCODE_RATE_LIMITED', 'OPENCODE_BUDGET_INVALID',
+    'OPENCODE_STEPS_INVALID', 'OPENCODE_DELIVERY_CALLBACK_FAILED',
+    'OPENCODE_LAUNCH_RECORD_REJECTED', 'OPENCODE_SPAWN_AUTHORIZATION_REFUSED',
 ))
 # A Developer result reached the route: reset the streak before a pause.
 _ROUTE_RESULT_STATES = frozenset(('DEVELOPER_RESPONDED', 'DEVELOPER_OUTPUT_REJECTED'))
-# Keep a pause inside the store's 30-day freshness bound; the count is still
-# read back as a plain integer if the store later reads the entry as UNKNOWN.
+# Keep a pause inside the store's 30-day freshness bound; the pause itself is a
+# plain boolean observation field, so an expired entry still reads as paused.
 ROUTE_PAUSE_FRESH_FOR = timedelta(days=29)
-# The streak is a plain decimal integer written into the existing
-# evidence_sha256 field (64 digits, so the store's 64-hex validation accepts
-# it). The count is read with int(); there is no digest family to search. A
-# paused entry stores the pause flag plus the same count, so the pause survives
-# the store reading an old entry as UNKNOWN and no hash table is involved.
-_ROUTE_COUNT_MAX = 10000
-_ROUTE_PAUSE_FLAG = 10 ** 63
+# The count and the pause are ordinary TaskStore worker-observation fields
+# (route_failure_count and route_paused). evidence_sha256 stays a real digest.
 
 
 def _profile(record):
@@ -253,8 +194,9 @@ def route_failure(record):
     """True when one Developer record is a route-level failure (#2622).
 
     Only a literal code in that route's list counts. Task-level outcomes,
-    spec/test failures, empty results, output rejected, BLOCKED_MODEL_REPORTED
-    and the quota/free-limit/rate-limit codes are never counted.
+    spec/test failures, empty results, output rejected and the quota/free-limit/
+    rate-limit codes are never counted. AGY_EXIT_NONZERO is ambiguous, so it
+    counts only with the stated exit diagnostic, never for a bare work failure.
     """
     profile, developer = _profile(record)
     if profile not in ROUTE_PAUSE_PROFILES or type(developer) is not dict:
@@ -266,7 +208,12 @@ def route_failure(record):
         return False
     if code in _ROUTE_NEVER_COUNT_CODES:
         return False
-    return code in _ROUTE_FAILURE_CODES[profile]
+    if code not in _ROUTE_FAILURE_CODES[profile]:
+        return False
+    if code == 'AGY_EXIT_NONZERO':
+        reason = developer.get('blocked_reason')
+        return type(reason) is str and reason.startswith('exit_code=')
+    return True
 
 
 def route_pause_after():
@@ -293,28 +240,11 @@ def route_pause_message(worker):
     return ROUTE_PAUSE_REFUSAL_CODE + ': run ' + route_pause_resume_step(worker)
 
 
-def _route_count_evidence(count, *, paused=False):
-    """The plain decimal count (plus the pause flag when paused), zero padded."""
-    value = count + (_ROUTE_PAUSE_FLAG if paused else 0)
-    return str(value).zfill(64)
-
-
-def _route_evidence_value(evidence):
-    """The plain integer in the evidence field; None for junk or a legacy digest."""
-    if type(evidence) is not str or len(evidence) != 64 or not evidence.isdigit():
-        return None
-    value = int(evidence)
-    if value > _ROUTE_PAUSE_FLAG + _ROUTE_COUNT_MAX:
-        return None
-    return value
-
-
-def _route_count_from(evidence):
-    """Read the consecutive failure count (with or without the pause flag)."""
-    value = _route_evidence_value(evidence)
-    if not value:
-        return 0
-    return value - _ROUTE_PAUSE_FLAG if value >= _ROUTE_PAUSE_FLAG else value
+def _route_count_evidence(worker, count, *, paused=False):
+    """A real sha256 for the entry; count and pause are separate fields."""
+    return hashlib.sha256(
+        f'route-failure:{worker}:{int(count)}:{int(bool(paused))}'.encode('utf-8')
+    ).hexdigest()
 
 
 def _route_entry(store, worker):
@@ -333,23 +263,23 @@ def _route_failure_count(worker, entry):
     """The stored consecutive failure count; an expired pause still counts."""
     if type(entry) is not dict or entry.get('status') not in ('FAIL', 'UNKNOWN'):
         return 0
-    return _route_count_from(entry.get('evidence_sha256'))
+    count = entry.get('route_failure_count')
+    return count if (type(count) is int and
+                     0 <= count <= ROUTE_FAILURE_COUNT_MAX) else 0
 
 
 def _route_pause_count(worker, entry):
     """The pause count, or 0 when the route is not paused.
 
-    A pause is the pause flag plus the count in the plain integer evidence. It
-    is independent of the status, so the store reading an old entry as UNKNOWN
-    at the freshness bound never clears it; only the explicit resume command
-    writes a non-pause value.
+    The pause is the plain route_paused observation field. It is independent of
+    the status, so the store reading an old entry as UNKNOWN at the freshness
+    bound never clears it; only the explicit resume command clears it.
     """
     if type(entry) is not dict or entry.get('status') not in ('FAIL', 'UNKNOWN'):
         return 0
-    value = _route_evidence_value(entry.get('evidence_sha256'))
-    if value is not None and value >= _ROUTE_PAUSE_FLAG:
-        return value - _ROUTE_PAUSE_FLAG
-    return 0
+    if entry.get('route_paused') is not True:
+        return 0
+    return _route_failure_count(worker, entry)
 
 
 def route_pause_code(store, worker):
@@ -375,11 +305,12 @@ def route_pause_refusal(store, worker):
 
 
 def _write_route_observation(store, worker, status, observed, fresh_until, evidence,
-                             source='LOCAL_OBSERVATION'):
+                             count, paused, source='LOCAL_OBSERVATION'):
     store.record_worker_observation(
         worker_key=worker, layer=ROUTE_FAILURE_LAYER, status=status,
         observed_at=_stamp(observed), fresh_until=_stamp(fresh_until),
-        source=source, evidence_sha256=evidence)
+        source=source, evidence_sha256=evidence,
+        route_failure_count=count, route_paused=paused)
 
 
 def _observe_route(store, record, worker, observed):
@@ -397,13 +328,13 @@ def _observe_route(store, record, worker, observed):
         _write_route_observation(
             store, worker, 'FAIL' if paused else 'UNKNOWN', observed,
             observed + (ROUTE_PAUSE_FRESH_FOR if paused else FRESH_FOR),
-            _route_count_evidence(count, paused=paused))
+            _route_count_evidence(worker, count, paused=paused), count, paused)
         return 'PAUSE' if paused else 'COUNT'
     if (type(developer) is dict and developer.get('state') in _ROUTE_RESULT_STATES):
         if _route_failure_count(worker, entry):
             _write_route_observation(
                 store, worker, 'PASS', observed, observed + FRESH_FOR,
-                _route_count_evidence(0))
+                _route_count_evidence(worker, 0), 0, False)
         return 'RESET'
     return None
 
@@ -424,7 +355,8 @@ def resume_route(store, worker, *, now=None):
     was_paused = bool(_route_pause_count(normalized, before))
     _write_route_observation(
         store, normalized, 'PASS', observed, observed + FRESH_FOR,
-        _route_count_evidence(0), source='AUTHORIZED_OPERATION')
+        _route_count_evidence(normalized, 0), 0, False,
+        source='AUTHORIZED_OPERATION')
     return {'worker': normalized, 'was_paused': was_paused, 'paused': False,
             'resumed_at': _stamp(observed),
             'next_action': route_pause_resume_step(normalized)}
@@ -632,7 +564,10 @@ def fresh_quota_fail(store, worker):
     """
     paused, quota_fail = _fresh_availability(store, worker)
     if paused:
-        raise LLMToolError(route_pause_message(worker)) from None
+        error = LLMToolError(route_pause_message(worker))
+        error.route_pause_code = ROUTE_PAUSE_REFUSAL_CODE
+        error.route_pause_resume_step = route_pause_resume_step(worker)
+        raise error from None
     return quota_fail
 
 

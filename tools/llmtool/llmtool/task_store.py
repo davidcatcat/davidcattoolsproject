@@ -840,10 +840,17 @@ WORKER_OBSERVATION_STATUSES = frozenset(('PASS', 'FAIL', 'UNKNOWN'))
 WORKER_OBSERVATION_SOURCES = frozenset((
     'LOCAL_OBSERVATION', 'AUTHORIZED_OPERATION', 'TEST_FIXTURE',
 ))
+# #2622: the AGY and OpenCode route-failure streak is kept as ordinary
+# observation fields, never inside a digest field.
+ROUTE_FAILURE_COUNT_MAX = 10000
+_WORKER_ROUTE_FIELDS = frozenset(('route_failure_count', 'route_paused'))
+_WORKER_ROUTE_WORKERS = frozenset(('agy', 'opencode-developer'))
 _WORKER_OBSERVATION_FIELDS = frozenset((
     'worker_key', 'layer', 'status', 'observed_at', 'fresh_until', 'source',
     'evidence_sha256',
 ))
+_WORKER_OBSERVATION_ROUTE_FIELDS = (
+    _WORKER_OBSERVATION_FIELDS | _WORKER_ROUTE_FIELDS)
 _WORKER_AVAILABILITY_FIELDS = frozenset((
     'schema_version', 'observations', 'record_sha256',
 ))
@@ -5332,8 +5339,11 @@ class TaskStore:
             _fail('WORKER_AVAILABILITY_INVALID')
         seen = set()
         for observation in record['observations']:
+            observation_fields = set(observation) if type(observation) is dict else set()
+            route_fields = observation_fields - _WORKER_OBSERVATION_FIELDS
             if (type(observation) is not dict or
-                    set(observation) != _WORKER_OBSERVATION_FIELDS or
+                    observation_fields not in (_WORKER_OBSERVATION_FIELDS,
+                                               _WORKER_OBSERVATION_ROUTE_FIELDS) or
                     type(observation.get('worker_key')) is not str or
                     observation['worker_key'] not in WORKER_KEYS or
                     type(observation.get('layer')) is not str or
@@ -5343,7 +5353,15 @@ class TaskStore:
                     type(observation.get('source')) is not str or
                     observation['source'] not in WORKER_OBSERVATION_SOURCES or
                     type(observation.get('evidence_sha256')) is not str or
-                    re.fullmatch(r'[0-9a-f]{64}', observation['evidence_sha256']) is None):
+                    re.fullmatch(r'[0-9a-f]{64}', observation['evidence_sha256']) is None or
+                    (route_fields and (
+                        observation['worker_key'] not in _WORKER_ROUTE_WORKERS or
+                        observation['layer'] != 'runtime' or
+                        type(observation.get('route_failure_count')) is not int or
+                        not 0 <= observation['route_failure_count'] <= ROUTE_FAILURE_COUNT_MAX or
+                        type(observation.get('route_paused')) is not bool or
+                        (observation['route_paused'] and
+                         observation['route_failure_count'] < 1)))):
                 _fail('WORKER_AVAILABILITY_INVALID')
             key = (observation['worker_key'], observation['layer'])
             if key in seen:
@@ -5682,11 +5700,17 @@ class TaskStore:
                         'fresh_until': None, 'source': None,
                         'evidence_sha256': None,
                     }
+                    if layer == 'runtime' and worker_key in _WORKER_ROUTE_WORKERS:
+                        result[worker_key][layer].update(
+                            route_failure_count=0, route_paused=False)
                     continue
                 expiry = TaskStore._worker_timestamp(
                     item['fresh_until'], allow_future=True)
                 if expiry <= now:
                     item['status'] = 'UNKNOWN'
+                if layer == 'runtime' and worker_key in _WORKER_ROUTE_WORKERS:
+                    item.setdefault('route_failure_count', 0)
+                    item.setdefault('route_paused', False)
                 del item['worker_key']
                 del item['layer']
                 result[worker_key][layer] = item
@@ -5694,15 +5718,21 @@ class TaskStore:
 
     def record_worker_observation(self, *, worker_key, layer, status,
                                   observed_at, fresh_until, source,
-                                  evidence_sha256, expected=None):
+                                  evidence_sha256, expected=None,
+                                  route_failure_count=None, route_paused=None):
         """Persist one bounded technical observation without granting authority."""
         if expected is not None and not isinstance(expected, dict):
+            _fail('WORKER_AVAILABILITY_INVALID')
+        if (route_failure_count is None) != (route_paused is None):
             _fail('WORKER_AVAILABILITY_INVALID')
         candidate = {
             'worker_key': worker_key, 'layer': layer, 'status': status,
             'observed_at': observed_at, 'fresh_until': fresh_until,
             'source': source, 'evidence_sha256': evidence_sha256,
         }
+        if route_failure_count is not None:
+            candidate['route_failure_count'] = route_failure_count
+            candidate['route_paused'] = route_paused
         # Validate the public input before acquiring the shared metadata lock.
         now = datetime.now(timezone.utc)
         self._validate_worker_availability({
@@ -5725,7 +5755,14 @@ class TaskStore:
                 if current_item is None:
                     raise LLMToolError('WORKER_AVAILABILITY_CHANGED')
                 fields = ('status', 'observed_at', 'fresh_until', 'source', 'evidence_sha256')
-                if any(k not in expected or current_item.get(k) != expected[k] for k in fields):
+                route_expected = tuple(name for name in _WORKER_ROUTE_FIELDS
+                                       if name in expected)
+                current_compare = dict(current_item)
+                for name in route_expected:
+                    current_compare.setdefault(
+                        name, 0 if name == 'route_failure_count' else False)
+                if any(k not in expected or current_compare.get(k) != expected[k]
+                       for k in fields + route_expected):
                     raise LLMToolError('WORKER_AVAILABILITY_CHANGED')
                 for extra in ('worker_key', 'layer'):
                     if extra in expected and expected[extra] != current_item.get(extra):

@@ -112,11 +112,49 @@ class WorkerAvailabilityStoreTests(unittest.TestCase):
             dict(valid, observed_at='2026-10-24T01:02:03+00:00'),
             dict(valid, fresh_until=stamp(now - timedelta(seconds=2))),
             dict(valid, fresh_until=stamp(now + timedelta(days=31))),
+            # #2622: the route-failure fields belong only, and in pairs, to the
+            # AGY and opencode-developer runtime layer.
+            dict(valid, worker_key='agy', route_failure_count=1),
+            dict(valid, worker_key='agy', route_paused=False),
+            dict(valid, route_failure_count=1, route_paused=False),
+            dict(valid, worker_key='agy', layer='quota',
+                 route_failure_count=1, route_paused=False),
+            dict(valid, worker_key='agy', route_failure_count=True,
+                 route_paused=False),
+            dict(valid, worker_key='agy', route_failure_count=-1,
+                 route_paused=False),
+            dict(valid, worker_key='agy', route_failure_count=1, route_paused=1),
+            dict(valid, worker_key='agy', route_failure_count=0, route_paused=True),
+            dict(valid, worker_key='agy', route_failure_count=10001,
+                 route_paused=False),
         )
         for item in invalid_cases:
             with self.subTest(item=item):
                 with self.assertRaises(LLMToolError):
                     self.store.record_worker_observation(**item)
+
+    def test_route_failure_count_and_pause_fields_round_trip(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        common = dict(layer='runtime', status='FAIL',
+                      observed_at=stamp(now - timedelta(seconds=1)),
+                      fresh_until=stamp(now + timedelta(hours=1)),
+                      source='LOCAL_OBSERVATION', evidence_sha256='b' * 64)
+        saved = self.store.record_worker_observation(
+            worker_key='agy', route_failure_count=2, route_paused=False, **common)
+        entry = saved['agy']['runtime']
+        self.assertEqual((entry['route_failure_count'], entry['route_paused']),
+                         (2, False))
+        reopened = TaskStore(self.root).get_worker_observations()['agy']['runtime']
+        self.assertEqual((reopened['route_failure_count'], reopened['route_paused']),
+                         (2, False))
+
+        paused = self.store.record_worker_observation(
+            worker_key='agy', route_failure_count=3, route_paused=True, **common)
+        self.assertEqual((paused['agy']['runtime']['route_failure_count'],
+                          paused['agy']['runtime']['route_paused']), (3, True))
+        # The fields belong only to the route runtime entry.
+        self.assertNotIn('route_failure_count', saved['codex-developer']['runtime'])
+        self.assertNotIn('route_paused', saved['agy']['quota'])
 
     def test_sidecar_rejects_symlink_wrong_mode_and_corrupt_digest(self):
         self._observation()

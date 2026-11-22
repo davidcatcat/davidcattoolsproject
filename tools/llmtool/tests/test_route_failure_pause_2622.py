@@ -45,8 +45,9 @@ REPO = {'slug': 'davidcatcat/davidcattoolsproject', 'dispatch_issue': 289,
         'dispatch_evidence_pr': 1}
 
 
-def _developer(profile, code=None, state='DEVELOPER_UNAVAILABLE'):
-    return {
+def _developer(profile, code=None, state='DEVELOPER_UNAVAILABLE',
+               blocked_reason=None):
+    developer = {
         'assignment_id': ASSIGNMENT,
         'provider_profile': profile,
         'state': state,
@@ -55,10 +56,15 @@ def _developer(profile, code=None, state='DEVELOPER_UNAVAILABLE'):
         'artifact': None,
         'execution': None,
     }
+    if blocked_reason is not None:
+        developer['blocked_reason'] = blocked_reason
+    return developer
 
 
-def _record(profile, code=None, state='DEVELOPER_UNAVAILABLE'):
-    return {'task_id': TASK, 'developer': _developer(profile, code, state)}
+def _record(profile, code=None, state='DEVELOPER_UNAVAILABLE',
+            blocked_reason=None):
+    return {'task_id': TASK,
+            'developer': _developer(profile, code, state, blocked_reason)}
 
 
 class _TaskView:
@@ -104,8 +110,10 @@ class RouteFailurePauseTests(unittest.TestCase):
     def at(self, index):
         return self.now + timedelta(seconds=index)
 
-    def observe(self, store, profile, code=None, state='DEVELOPER_UNAVAILABLE', index=0):
-        return wa.observe(store, _record(profile, code, state), now=self.at(index))
+    def observe(self, store, profile, code=None, state='DEVELOPER_UNAVAILABLE',
+                index=0, blocked_reason=None):
+        return wa.observe(store, _record(profile, code, state, blocked_reason),
+                          now=self.at(index))
 
     def new_store(self):
         temp = tempfile.TemporaryDirectory()
@@ -138,9 +146,9 @@ class RouteFailurePauseTests(unittest.TestCase):
     def test_agy_pauses_after_three_consecutive_route_failures(self):
         with pause_after(3):
             for index in range(2):
-                self.observe(self.store, AGY, 'AGY_PROVIDER_FAILED', index=index)
+                self.observe(self.store, AGY, 'AGY_CONFIG_INVALID', index=index)
             self.assertIsNone(wa.route_pause_code(self.store, AGY))
-            self.observe(self.store, AGY, 'AGY_RUNTIME_FAILED', index=2)
+            self.observe(self.store, AGY, 'AGY_PROFILE_INVALID', index=2)
             self.assertEqual(wa.route_pause_code(self.store, AGY),
                              wa.ROUTE_PAUSE_REFUSAL_CODE)
             self.assertIn('worker-route-resume agy',
@@ -149,6 +157,10 @@ class RouteFailurePauseTests(unittest.TestCase):
             wa.fresh_quota_fail(self.store, AGY)
         self.assertIn(wa.ROUTE_PAUSE_REFUSAL_CODE, str(caught.exception))
         self.assertIn('worker-route-resume agy', str(caught.exception))
+        self.assertEqual(caught.exception.route_pause_code,
+                         wa.ROUTE_PAUSE_REFUSAL_CODE)
+        self.assertEqual(caught.exception.route_pause_resume_step,
+                         'llmtool worker-route-resume agy')
 
     def test_opencode_pauses_after_three_consecutive_route_failures(self):
         with pause_after(3):
@@ -161,23 +173,25 @@ class RouteFailurePauseTests(unittest.TestCase):
 
     def test_a_result_before_the_limit_resets_the_streak(self):
         with pause_after(3):
-            self.observe(self.store, AGY, 'AGY_EXIT_NONZERO', index=0)
+            self.observe(self.store, AGY, 'AGY_EXIT_NONZERO', state='BLOCKED',
+                         index=0, blocked_reason='exit_code=1')
             self.observe(self.store, AGY, 'AGY_CONFIG_INVALID', index=1)
             self.assertEqual(
                 self.observe(self.store, AGY, None, state='DEVELOPER_RESPONDED', index=2),
                 'RESET')
             self.assertIsNone(wa.route_pause_refusal(self.store, AGY))
-            self.observe(self.store, AGY, 'AGY_EXIT_NONZERO', index=3)
+            self.observe(self.store, AGY, 'AGY_EXIT_NONZERO', state='BLOCKED',
+                         index=3, blocked_reason='exit_code=1')
             self.observe(self.store, AGY, 'AGY_CONFIG_INVALID', index=4)
             self.assertIsNone(wa.route_pause_refusal(self.store, AGY))
-            self.observe(self.store, AGY, 'AGY_PROVIDER_FAILED', index=5)
+            self.observe(self.store, AGY, 'AGY_ENV_INVALID', index=5)
             self.assertEqual(wa.route_pause_code(self.store, AGY),
                              wa.ROUTE_PAUSE_REFUSAL_CODE)
 
     def test_a_result_after_a_pause_does_not_clear_it(self):
         with pause_after(2):
-            self.observe(self.store, OPENCODE, 'OPENCODE_START_FAILED', index=0)
-            self.observe(self.store, OPENCODE, 'OPENCODE_LOCAL_CONFIG_INVALID', index=1)
+            self.observe(self.store, OPENCODE, 'OPENCODE_RUNTIME_INVALID', index=0)
+            self.observe(self.store, OPENCODE, 'OPENCODE_VERSION_UNSUPPORTED', index=1)
         self.assertEqual(wa.route_pause_code(self.store, OPENCODE_WORKER),
                          wa.ROUTE_PAUSE_REFUSAL_CODE)
         self.observe(self.store, OPENCODE, None, state='DEVELOPER_RESPONDED', index=2)
@@ -186,22 +200,20 @@ class RouteFailurePauseTests(unittest.TestCase):
 
     def test_task_level_and_quota_outcomes_never_count(self):
         cases = (
-            (OPENCODE, 'OPENCODE_NO_CHANGES'),
+            (OPENCODE, 'OPENCODE_OUTPUT_INVALID'),
+            (OPENCODE, 'OPENCODE_OUTPUT_TOO_LARGE'),
+            (OPENCODE, 'OPENCODE_OUTPUT_INCOMPLETE'),
+            (OPENCODE, 'OPENCODE_OUTPUT_TRUNCATED'),
             (OPENCODE, 'OPENCODE_STEPS_EXHAUSTED'),
-            (OPENCODE, 'OPENCODE_SPEC_MISMATCH'),
-            (OPENCODE, 'OPENCODE_EMPTY_RESULT'),
-            (OPENCODE, 'OPENCODE_OUTPUT_REJECTED'),
-            (OPENCODE, 'OPENCODE_ENVELOPE_INVALID'),
             (OPENCODE, 'OPENCODE_TIMEOUT'),
-            (OPENCODE, 'OPENCODE_D6_SESSION_REFUSED'),
-            (OPENCODE, 'OPENCODE_WRITE_SCOPE_VIOLATION'),
+            (OPENCODE, 'OPENCODE_SCOPE_INVALID'),
+            (OPENCODE, 'OPENCODE_D6_BINDING_CHANGED'),
+            (OPENCODE, 'OPENCODE_PROMPT_INVALID'),
             (OPENCODE, 'OPENCODE_FREE_LIMIT'),
             (OPENCODE, 'OPENCODE_RATE_LIMITED'),
-            (OPENCODE, 'OPENCODE_BLOCKED_MODEL_REPORTED'),
-            (OPENCODE, 'BLOCKED_MODEL_REPORTED'),
             (AGY, 'AGY_QUOTA_EXHAUSTED'),
-            (AGY, 'AGY_TEST_FAILED'),
-            (AGY, 'AGY_BLOCKED_MODEL_REPORTED'),
+            (AGY, 'AGY_REQUEST_INVALID'),
+            (AGY, 'AGY_OUTPUT_INVALID'),
         )
         with pause_after(2):
             for index, (profile, code) in enumerate(cases):
@@ -214,35 +226,38 @@ class RouteFailurePauseTests(unittest.TestCase):
     def test_a_configured_limit_is_honoured(self):
         store_two = self.new_store()
         with pause_after(2):
-            self.observe(store_two, AGY, 'AGY_EXIT_NONZERO', index=0)
+            self.observe(store_two, AGY, 'AGY_CONFIG_INVALID', index=0)
             self.assertIsNone(wa.route_pause_refusal(store_two, AGY))
-            self.observe(store_two, AGY, 'AGY_EXIT_NONZERO', index=1)
+            self.observe(store_two, AGY, 'AGY_CONFIG_INVALID', index=1)
             self.assertEqual(wa.route_pause_code(store_two, AGY),
                              wa.ROUTE_PAUSE_REFUSAL_CODE)
 
         store_four = self.new_store()
         with pause_after(4):
             for index in range(3):
-                self.observe(store_four, AGY, 'AGY_EXIT_NONZERO', index=index)
+                self.observe(store_four, AGY, 'AGY_CONFIG_INVALID', index=index)
             self.assertIsNone(wa.route_pause_refusal(store_four, AGY))
-            self.observe(store_four, AGY, 'AGY_EXIT_NONZERO', index=3)
+            self.observe(store_four, AGY, 'AGY_CONFIG_INVALID', index=3)
             self.assertEqual(wa.route_pause_code(store_four, AGY),
                              wa.ROUTE_PAUSE_REFUSAL_CODE)
 
     def test_resume_clears_the_pause_and_restarts_the_streak(self):
         with pause_after(2):
-            self.observe(self.store, AGY, 'AGY_EXIT_NONZERO', index=0)
-            self.observe(self.store, AGY, 'AGY_EXIT_NONZERO', index=1)
+            self.observe(self.store, AGY, 'AGY_CONFIG_INVALID', index=0)
+            self.observe(self.store, AGY, 'AGY_CONFIG_INVALID', index=1)
         result = wa.resume_route(self.store, AGY, now=self.at(2))
         self.assertTrue(result['was_paused'])
         self.assertFalse(result['paused'])
         self.assertEqual(result['worker'], AGY)
         self.assertIsNone(wa.route_pause_refusal(self.store, AGY))
         self.assertFalse(wa.fresh_quota_fail(self.store, AGY))
+        entry = self.store.get_worker_observations()[AGY][wa.ROUTE_FAILURE_LAYER]
+        self.assertEqual((entry['status'], entry['route_failure_count'],
+                          entry['route_paused']), ('PASS', 0, False))
         with pause_after(2):
-            self.observe(self.store, AGY, 'AGY_EXIT_NONZERO', index=3)
+            self.observe(self.store, AGY, 'AGY_CONFIG_INVALID', index=3)
             self.assertIsNone(wa.route_pause_refusal(self.store, AGY))
-            self.observe(self.store, AGY, 'AGY_EXIT_NONZERO', index=4)
+            self.observe(self.store, AGY, 'AGY_CONFIG_INVALID', index=4)
             self.assertEqual(wa.route_pause_code(self.store, AGY),
                              wa.ROUTE_PAUSE_REFUSAL_CODE)
 
@@ -258,28 +273,68 @@ class RouteFailurePauseTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())['worker'], OPENCODE_WORKER)
         self.assertIsNone(wa.route_pause_refusal(self.store, OPENCODE_WORKER))
 
-    def test_the_streak_is_stored_as_a_plain_integer(self):
+    def test_the_streak_and_pause_are_plain_observation_fields(self):
         with pause_after(3):
-            self.observe(self.store, AGY, 'AGY_EXIT_NONZERO', index=0)
+            self.observe(self.store, AGY, 'AGY_CONFIG_INVALID', index=0)
             first = self.store.get_worker_observations()[AGY][wa.ROUTE_FAILURE_LAYER]
-            self.observe(self.store, AGY, 'AGY_EXIT_NONZERO', index=1)
+            self.observe(self.store, AGY, 'AGY_CONFIG_INVALID', index=1)
             second = self.store.get_worker_observations()[AGY][wa.ROUTE_FAILURE_LAYER]
-            self.observe(self.store, AGY, 'AGY_EXIT_NONZERO', index=2)
+            self.observe(self.store, AGY, 'AGY_CONFIG_INVALID', index=2)
             paused = self.store.get_worker_observations()[AGY][wa.ROUTE_FAILURE_LAYER]
-        # The existing 64-hex evidence field holds the plain decimal count; a
-        # paused entry is the integer pause flag plus that count (no hash).
-        self.assertEqual(int(first['evidence_sha256']), 1)
-        self.assertEqual(int(second['evidence_sha256']), 2)
-        self.assertEqual(int(paused['evidence_sha256']), wa._ROUTE_PAUSE_FLAG + 3)
+        self.assertEqual((first['route_failure_count'], first['route_paused']), (1, False))
+        self.assertEqual((second['route_failure_count'], second['route_paused']), (2, False))
+        self.assertEqual((paused['route_failure_count'], paused['route_paused']), (3, True))
         self.assertEqual(paused['status'], 'FAIL')
+        for entry in (first, second, paused):
+            self.assertRegex(entry['evidence_sha256'], r'^[0-9a-f]{64}$')
+            self.assertNotEqual(entry['evidence_sha256'],
+                                str(entry['route_failure_count']).zfill(64))
+
+    def test_only_existing_route_level_codes_count(self):
+        counted = (
+            (AGY, 'AGY_PROFILE_INVALID', None),
+            (AGY, 'AGY_ENV_INVALID', None),
+            (AGY, 'AGY_CONFIG_INVALID', None),
+            (AGY, 'AGY_EXIT_NONZERO', 'exit_code=1'),
+            (OPENCODE, 'OPENCODE_AUTH_REQUIRED', None),
+            (OPENCODE, 'OPENCODE_PROVIDER_FAILED', None),
+            (OPENCODE, 'OPENCODE_RUNTIME_INVALID', None),
+            (OPENCODE, 'OPENCODE_RUNTIME_UNAVAILABLE', None),
+            (OPENCODE, 'OPENCODE_HOME_UNAVAILABLE', None),
+            (OPENCODE, 'OPENCODE_CONFIG_UNAVAILABLE', None),
+            (OPENCODE, 'OPENCODE_VERSION_UNSUPPORTED', None),
+        )
+        for profile, code, reason in counted:
+            with self.subTest(code=code):
+                state = 'BLOCKED' if code == 'AGY_EXIT_NONZERO' else 'DEVELOPER_UNAVAILABLE'
+                self.assertTrue(wa.route_failure(
+                    _record(profile, code, state=state, blocked_reason=reason)))
+        # Codes the Advisor found absent from main never count.
+        for profile, code in ((AGY, 'AGY_PROVIDER_FAILED'),
+                              (AGY, 'AGY_RUNTIME_FAILED'),
+                              (OPENCODE, 'OPENCODE_START_FAILED'),
+                              (OPENCODE, 'OPENCODE_LOCAL_CONFIG_INVALID'),
+                              (OPENCODE, 'OPENCODE_HOST_TERMINATED')):
+            with self.subTest(code=code):
+                self.assertFalse(wa.route_failure(_record(profile, code)))
+
+    def test_agy_exit_nonzero_needs_the_stated_reason(self):
+        self.assertFalse(wa.route_failure(
+            _record(AGY, 'AGY_EXIT_NONZERO', state='BLOCKED')))
+        self.assertFalse(wa.route_failure(
+            _record(AGY, 'AGY_EXIT_NONZERO', state='BLOCKED',
+                    blocked_reason='work failed')))
+        self.assertTrue(wa.route_failure(
+            _record(AGY, 'AGY_EXIT_NONZERO', state='BLOCKED',
+                    blocked_reason='exit_code=1')))
 
     def test_a_pause_survives_an_expired_observation_until_resume(self):
         # Inside the store's 30-day age bound but past the 29-day pause freshness.
         old = (datetime.now(timezone.utc).replace(microsecond=0)
                - timedelta(days=29, hours=1))
         with pause_after(2):
-            wa.observe(self.store, _record(AGY, 'AGY_EXIT_NONZERO'), now=old)
-            wa.observe(self.store, _record(AGY, 'AGY_EXIT_NONZERO'),
+            wa.observe(self.store, _record(AGY, 'AGY_CONFIG_INVALID'), now=old)
+            wa.observe(self.store, _record(AGY, 'AGY_CONFIG_INVALID'),
                        now=old + timedelta(seconds=1))
         entry = self.store.get_worker_observations()[AGY][wa.ROUTE_FAILURE_LAYER]
         self.assertEqual(entry['status'], 'UNKNOWN')
@@ -290,8 +345,8 @@ class RouteFailurePauseTests(unittest.TestCase):
 
     def test_the_dispatch_gate_refuses_a_paused_agy_route_with_the_resume_step(self):
         with pause_after(2):
-            self.observe(self.store, AGY, 'AGY_PROVIDER_FAILED', index=0)
-            self.observe(self.store, AGY, 'AGY_PROVIDER_FAILED', index=1)
+            self.observe(self.store, AGY, 'AGY_CONFIG_INVALID', index=0)
+            self.observe(self.store, AGY, 'AGY_PROFILE_INVALID', index=1)
         error, delegate = self.run_delegate_gate(AGY)
         self.assertIsInstance(error, LLMToolError)
         self.assertIn(wa.ROUTE_PAUSE_REFUSAL_CODE, str(error))
@@ -318,8 +373,8 @@ class RouteFailurePauseTests(unittest.TestCase):
 
     def test_the_repair_path_refuses_a_paused_route_before_any_write(self):
         with pause_after(2):
-            self.observe(self.store, OPENCODE, 'OPENCODE_EXIT_NONZERO', index=0)
-            self.observe(self.store, OPENCODE, 'OPENCODE_EXIT_NONZERO', index=1)
+            self.observe(self.store, OPENCODE, 'OPENCODE_RUNTIME_UNAVAILABLE', index=0)
+            self.observe(self.store, OPENCODE, 'OPENCODE_RUNTIME_UNAVAILABLE', index=1)
         task = {
             'task_id': TASK,
             'developer': {'state': 'DEVELOPER_RESPONDED',
@@ -357,8 +412,8 @@ class RouteFailurePauseTests(unittest.TestCase):
 
     def test_an_unreadable_policy_neither_unpauses_nor_blocks_every_route(self):
         with pause_after(2):
-            self.observe(self.store, AGY, 'AGY_EXIT_NONZERO', index=0)
-            self.observe(self.store, AGY, 'AGY_EXIT_NONZERO', index=1)
+            self.observe(self.store, AGY, 'AGY_CONFIG_INVALID', index=0)
+            self.observe(self.store, AGY, 'AGY_CONFIG_INVALID', index=1)
         with unreadable_policy():
             # The stored pause survives a policy that cannot be read.
             self.assertEqual(wa.route_pause_code(self.store, AGY),
