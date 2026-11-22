@@ -441,6 +441,24 @@ class RuleFileSchemaTests(unittest.TestCase):
                 with self.subTest(key=key, value=value):
                     self.assertEqual(self.findings_after("policy.json", {**policy, key: value}), [])
 
+    def test_policy_schema_accepts_the_2622_route_failure_pause_key(self):
+        # #2622 (Owner decision relayed in the issue): the route-failure pause
+        # count is an optional positive integer, like the #2281 limit keys.
+        policy = self.valid["policy.json"]
+        for value in (1, 3, 10 ** 9):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    self.findings_after("policy.json", {**policy, "route_failure_pause_after": value}),
+                    [])
+        for value in (0, -1, "3", True, False, 2.5, None):
+            with self.subTest(value=value):
+                self.assertTrue(
+                    any("route_failure_pause_after must be an integer >= 1" in item
+                        for item in self.findings_after(
+                            "policy.json", {**policy, "route_failure_pause_after": value})),
+                    value,
+                )
+
     def test_repository_policy_passes_the_rule_schema(self):
         # The real policy.json, with the #2281 keys, matches the registered schema.
         repository = Path(__file__).resolve().parents[3]
