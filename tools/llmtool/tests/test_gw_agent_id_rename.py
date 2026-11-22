@@ -375,12 +375,15 @@ class RetiredIdGuardTests(unittest.TestCase):
                     and node.module == 'llmtool.worker_dispatch'
                     for alias in node.names}
         self.assertIn('stored_worker_id', imported)
-        board_tree = ast.parse((_PACKAGE / 'board_check.py').read_text(encoding='utf-8'))
-        self.assertTrue([node for node in ast.walk(board_tree)
+        board_trees = [
+            ast.parse(path.read_text(encoding='utf-8'))
+            for path in sorted(_PACKAGE.glob('board_check*.py'))
+        ]
+        self.assertTrue([node for tree in board_trees for node in ast.walk(tree)
                          if isinstance(node, ast.Attribute) and node.attr == 'stored_worker_id'
                          and isinstance(node.value, ast.Name)
                          and node.value.id == 'worker_dispatch'])
-        for tree in (stats_tree, board_tree):
+        for tree in (stats_tree, *board_trees):
             for table in ('RETIRED_WORKER_ALIASES', 'RETIRED_WORKER_IDS'):
                 self.assertEqual(list(_assignments_to(table)(tree)), [])
 
