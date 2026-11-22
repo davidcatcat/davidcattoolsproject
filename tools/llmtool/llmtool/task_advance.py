@@ -2580,11 +2580,15 @@ def decide(record, d6, pr, related):
     if developer.get('state') != 'DEVELOPER_RESPONDED':
         return 'DEVELOPER_ATTENTION'
     active_repairs = related.get('repair_claims', []) if type(related) is dict else []
+
+    def _has_unknown_repair(head):
+        return any(type(item) is dict and item.get('head_sha') == head and
+                   item.get('state') in ('DISPATCHED', 'UNKNOWN') and
+                   item.get('repair_state') == 'UNKNOWN' for item in active_repairs)
+
     dirty = type(d6) is not dict or d6.get('dirty') is True or d6.get('state') == 'DIRTY'
     current_head = d6.get('result_head') if type(d6) is dict else None
-    if dirty and any(type(item) is dict and item.get('head_sha') == current_head and
-                     item.get('state') in ('DISPATCHED', 'UNKNOWN') and
-                     item.get('repair_state') == 'UNKNOWN' for item in active_repairs):
+    if dirty and _has_unknown_repair(current_head):
         return 'REPAIR_OUTCOME_UNKNOWN'
     if dirty:
         return 'PUBLISH'
@@ -2612,6 +2616,8 @@ def decide(record, d6, pr, related):
             return 'NEEDS_ATTENTION'
         if remote_status == 'FAIL':
             return _remote_fail_action(related, result_head, d6=d6, pr=pr)
+        if _has_unknown_repair(result_head):
+            return 'REPAIR_OUTCOME_UNKNOWN'
         return 'PUBLISH'
 
     matching = [claim for claim in claims if type(claim) is dict and
