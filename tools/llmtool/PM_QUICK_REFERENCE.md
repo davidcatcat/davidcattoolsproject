@@ -4,10 +4,10 @@ An index for the Claude Integrator/PM, not a rule source (#1502 WP-H). Each item
 
 ## Dispatch
 
-- **Authority:** reread [worker-dispatch.json](worker-dispatch.json) through the dispatch gate before every dispatch, retry, repair, recovery and Reviewer hand-off; `PAUSED` refuses whatever the live health and `OWNER_ASSIGNMENT_ONLY` needs an explicit Owner assignment ([CLAUDE.md Worker dispatch](../../CLAUDE.md#worker-dispatch)).
+- **Authority:** reread [worker-dispatch.json](worker-dispatch.json) through the dispatch gate before every dispatch, retry, repair, recovery and Reviewer hand-off; `PAUSED` refuses whatever the live health and `OWNER_ASSIGNMENT_ONLY` needs an explicit Owner assignment ([AGENTS.md Current authority](../../AGENTS.md#current-authority-restructured-per-owner-decision-010-step-2)).
 - **Owner PM rules:** write only problem, observable acceptance, constraints, scopes and evidence; no solutions, code, edits, exact test values, or PM technical inferences ([PM role card](../../.claude/skills/role-cards/pm.md#owner-pm-working-rules)).
 - **Route and model:** take each Developer route's executable, model and timeout, and each Reviewer and Debug role model, from [developer-routes.json](developer-routes.json), never from memory or chat.
-- **Reviewer pairing:** the formal Reviewer comes from the other model family than the Developer ([CLAUDE.md Review](../../CLAUDE.md#review)).
+- **Reviewer pairing:** the formal Reviewer comes from the other model family than the Developer ([AGENTS.md Current authority](../../AGENTS.md#current-authority-restructured-per-owner-decision-010-step-2)).
 - **Spec preflight:** run [spec_preflight.py](scripts/spec_preflight.py) on every hand-made spec, and record or dispatch it only after a `SPEC_PREFLIGHT_OK` result ([dispatch hygiene](../../.claude/skills/ai-team-delivery/pm-continuation.md#dispatch-hygiene)).
 - **Scope:** list every write path, and every test module to run on EC2, in the read paths ([WORKFLOW.md](WORKFLOW.md), [dispatch hygiene](../../.claude/skills/ai-team-delivery/pm-continuation.md#dispatch-hygiene)).
 - **Fresh source:** fast-forward the canonical checkout to `origin/main` before dispatch, or llmtool refuses `LLMTOOL_SOURCE_STALE` ([dispatch hygiene](../../.claude/skills/ai-team-delivery/pm-continuation.md#dispatch-hygiene)).
@@ -50,7 +50,7 @@ Refusals not to retry unchanged:
 - **`CONTINUES_*` and `CONTINUATION_LINK_REQUIRED`:** the chain shape is refused with no override ([lineage_counts.py](llmtool/lineage_counts.py)).
 - **`MODULE_NOT_ADMITTED`, `RECEIPT_HEAD_UNRECORDED`, `RECEIPT_HEAD_MISMATCH`:** fix the Task read paths or the recorded result head first, since an unchanged rerun refuses again ([remote_test.py](llmtool/remote_test.py)).
 - **`MERGE_ACCEPTANCE_CARRY_*`:** ask the Owner again for the current head ([escalation](../../.claude/skills/ai-team-delivery/pm-continuation.md#escalate-only-when-continuing-is-not-allowed)).
-- **`REPAIR_CODEX_DEVELOPER_RETIRED`, `COMPANY_GW_DIRECT_RETIRED`:** the route is retired, so choose an `ALLOWED` Developer route ([CLAUDE.md Worker dispatch](../../CLAUDE.md#worker-dispatch)).
+- **`REPAIR_CODEX_DEVELOPER_RETIRED`, `COMPANY_GW_DIRECT_RETIRED`:** the route is retired, so choose an `ALLOWED` Developer route ([AGENTS.md Current authority](../../AGENTS.md#current-authority-restructured-per-owner-decision-010-step-2)).
 
 ## Limits
 
