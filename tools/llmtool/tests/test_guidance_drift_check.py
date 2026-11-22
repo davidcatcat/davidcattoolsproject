@@ -298,13 +298,15 @@ class GuidanceDriftCheckTests(unittest.TestCase):
         repository = Path(__file__).resolve().parents[3]
         self.assertEqual(check(repository), [])
 
-    def test_claude_md_agy_line_names_no_model(self):
-        # Owner #289 (2026-11-22): the CLAUDE.md AGY line names no model and
+    def test_guidance_agy_line_names_no_model(self):
+        # Owner #289 (2026-11-22): the guidance AGY line names no model and
         # says the AGY model comes from the configuration, so a model switch
-        # by configuration needs no rule-file change.
+        # by configuration needs no rule-file change. Since #1502 E6 the line
+        # lives in AGENTS.md, which CLAUDE.md imports.
         repository = Path(__file__).resolve().parents[3]
-        claude_md = (repository / "CLAUDE.md").read_text(encoding="utf-8")
-        agy_lines = [line for line in claude_md.splitlines() if line.startswith("  - AGY: ")]
+        self.assertIn("\n@AGENTS.md\n", (repository / "CLAUDE.md").read_text(encoding="utf-8"))
+        agents_md = (repository / "AGENTS.md").read_text(encoding="utf-8")
+        agy_lines = [line for line in agents_md.splitlines() if line.startswith("  - AGY: ")]
         self.assertEqual(len(agy_lines), 1)
         line = agy_lines[0]
         self.assertIn("model comes from the configuration", line)
