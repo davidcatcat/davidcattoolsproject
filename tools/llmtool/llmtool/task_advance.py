@@ -2901,8 +2901,9 @@ def _d6_snapshot(record, executor_task, allow_cwd_fallback=False, cwd=None):
             'branch': registration.branch, 'result_head': snapshot.head,
             'recorded_result_head': recorded,
             'registered_result_head': registration.result_sha, 'dirty': not clean,
-            # #2534: the integrator-registered D6 start; publish scope uses it.
-            'base_sha': getattr(registration, 'base_sha', None),
+            # #2534: the integrator-registered D6 start (registry key base_sha,
+            # D6Registration.source_sha); publish scope uses it.
+            'base_sha': registration.source_sha,
             'state': 'CLEAN' if clean else 'DIRTY',
             'registration_state': getattr(registration, 'state', None),
             'trusted_agent_id': getattr(registration, 'trusted_agent_id', getattr(registration, 'agent_id', None))}
