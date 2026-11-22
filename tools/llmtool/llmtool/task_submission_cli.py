@@ -971,6 +971,10 @@ def add_task_submission_parsers(actions):
                           help=('caller PM session (native UUID or pm- ID); must own '
                                 'the Task; default: CLAUDE_CODE_SESSION_ID or '
                                 'CODEX_THREAD_ID'))
+    gw_probe = actions.add_parser(
+        'gw-agent-probe',
+        help='Probe gw-agent availability once; never writes the repo or a Task')
+    gw_probe.add_argument('--json', action='store_true', help='output JSON (the only format)')
     complete = actions.add_parser('complete', help='Collect verified Executor evidence and return it to the original PM')
     complete.add_argument('task_id', help='existing durable Task ID')
     complete.add_argument('--executor-task', required=True, help='registered D6 Executor task id bound at delegation')
@@ -6818,10 +6822,92 @@ def _gw_agent_endpoint():
     return provider, {'max_tokens': gateway['max_output_tokens']}
 
 
+def _gw_agent_probe_call():
+    """One minimal authorized call through the existing gw-agent route.
+
+    It uses the same gateway profile, credential handling, task/authorization
+    files and API Agent Gateway run path as dispatch. The probe task has no
+    write paths, reads one relative file only for schema validity, and asks the
+    model to call no tool. Nothing is written to the repository or a Task.
+    """
+    config = load_route_config()
+    route_config = copy.deepcopy(config['routes']['gw-agent'])
+    provider, _generation = _gw_agent_endpoint()
+    gateway = gateway_profiles.load_gateway_profile()
+    model = provider.get('model') or gateway.get('model')
+    base_url = provider.get('base_url') or gateway.get('base_url')
+    if (type(model) is not str or not model or type(base_url) is not str or
+            type(route_config.get('profile')) is not dict):
+        raise RuntimeError('GW_AGENT_PROFILE_INVALID')
+    try:
+        effort = route_config.get('default_effort', 'low')
+        root = str(Path(trust.load_trust().canonical_root))
+    except Exception:
+        effort = 'low'
+        root = os.getcwd()
+    snapshot = task_completion.collect_git_snapshot(root)
+    profile = route_config['profile']
+    profile['model'] = model
+    profile['base_url'] = base_url.rstrip('/') + '/v1'
+    profile.pop('http_allow_hosts', None)
+    if urlsplit(base_url).scheme == 'http':
+        host = urlsplit(base_url).hostname
+        if host:
+            profile['http_allow_hosts'] = [host]
+    route_config['profile'] = profile
+    route_config['default_model'] = model
+    route_config['expected_served_model'] = None
+    route = GwAgentRoute(route_config)
+    route.validate_profile(model, effort)
+    task_input = {
+        'schema_version': 1, 'task_id': 'probe-' + new_id(),
+        'source_sha': snapshot.head,
+        'goal': 'Call no tool. Reply with exactly OK.',
+        'acceptance': ['The reply is OK.'],
+        'read_paths': ['README.md'], 'write_paths': [],
+        'budgets': {'max_turns': 1, 'max_input_tokens': 10000,
+                    'max_output_tokens': 1000, 'max_wall_seconds': 120,
+                    'max_tool_result_bytes': 4096, 'max_sent_bytes': 100000},
+        'egress_basis': 'Synthetic gateway availability probe; no repository content is sent.',
+        'data_class': 'synthetic', 'findings': [],
+    }
+    prompt = ('You are the gw-agent availability probe. Call no tool. '
+              'Reply with exactly OK.\nTASK_JSON=' + json.dumps(
+                  task_input, ensure_ascii=True, sort_keys=True, separators=(',', ':')))
+    try:
+        result = run_route(route, {
+            'root': snapshot.root, 'model': model, 'effort': effort,
+            'expected_branch': snapshot.branch, 'expected_head': snapshot.head,
+            'read_paths': ['README.md'], 'write_paths': [],
+            'executable': sys.executable, 'prompt': prompt,
+            'task': task_input, 'timeout': 120, 'state_dirs': (),
+        }, gate=lambda: worker_dispatch.evaluate('gw-agent'),
+            boundary=for_platform(), snapshot=capture_snapshot)
+    finally:
+        cleanup_audit_copies()
+    if result.status != 'DONE':
+        raise RuntimeError('GW_AGENT_' + result.status)
+    return {'tcp': 'PASS', 'auth': 'PASS', 'inference': 'PASS'}
+
+
+def run_task_gw_agent_probe(args, *, store=None, stdout=None, probe_call=None):
+    """Run one gw-agent availability probe and report TCP/auth/inference."""
+    store = TaskStore() if store is None else store
+    result = worker_availability.probe_gw_agent(
+        store, call=(probe_call if probe_call is not None else _gw_agent_probe_call))
+    _print(result, stdout=stdout)
+    return 0 if result.get('status') == 'PASS' else 1
+
+
 def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     """Run the company Gw Agent Gateway route against its registered D6 task."""
     from . import gw_agent_sessions
     gw_agent_sessions.sweep_quietly(store)
+    # #2367 S1: a model-capability pause, a security hold, an unrecorded hold
+    # or an active infrastructure pause refuses before any Task or D6 write.
+    refusal = worker_availability.gw_agent_refusal(store)
+    if refusal is not None:
+        raise LLMToolError(f'{refusal}: gw-agent dispatch is held; no Task or D6 write was made')
     if getattr(args, 'mode', None) != 'direct':
         raise LLMToolError('--provider gw-agent requires --mode direct')
     if getattr(args, 'context_stdin', False):
@@ -7049,7 +7135,16 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
 
     def persist_failure(error_code, *, state='DEVELOPER_UNAVAILABLE',
                         provider_evidence=None, interrupted=False, stderr=None,
-                        error_cause=None):
+                        error_cause=None, retry_after=None):
+        # #2367: file the failure class in the existing availability record
+        # before the Developer failure write, so a later admission sees the
+        # hold even when that write is what fails (S2). This never raises.
+        try:
+            worker_availability.record_gw_agent_failure(
+                store, error_code=error_code, now=None, retry_after=retry_after,
+                task_id=task.get('task_id'))
+        except Exception:
+            pass
         # Start from the last saved record, never the in-flight one: the refused
         # write may be what carries the fault, and the saved identity is the only
         # one the store gate lets a failure state keep. A claim refused before
@@ -7247,9 +7342,12 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             if not code.endswith('_' + gateway_code):
                 code = (code + '_' + gateway_code)[:64]
         code = code[:64]
+        facts = exc.facts if type(getattr(exc, 'facts', None)) is dict else {}
         return persist_failure(code, provider_evidence=(
             None if owner_gate_denied else getattr(exc, 'provider_evidence', None)),
-            stderr=getattr(exc, 'stderr_excerpt', None))
+            stderr=getattr(exc, 'stderr_excerpt', None),
+            retry_after=(getattr(exc, 'retry_after', None) or
+                         facts.get('retry_after') or facts.get('retry_after_seconds')))
     except Exception:
         return persist_failure('DEVELOPER_RESULT_UNKNOWN',
                                state='DEVELOPER_OUTCOME_UNKNOWN')
@@ -9253,6 +9351,12 @@ def run_task_delegate_checked(args, *, store=None):
         _print(pm_caller.refusal(args.task_id, exc.code), None)
         return 1
     args = _auto_direct_replacement(args, store)
+    # #2367: a gw-agent hold refuses admission before the quota/Task checks.
+    if getattr(args, 'provider', None) == 'gw-agent':
+        refusal = worker_availability.gw_agent_refusal(store)
+        if refusal is not None:
+            raise LLMToolError(
+                f'{refusal}: gw-agent dispatch is held; no Task or D6 write was made')
     # #1816: a fresh quota FAIL refuses before any Task or D6 write. An Owner
     # policy refusal comes first (quota_refusal then defers to the route).
     worker = worker_dispatch.worker_key_for(getattr(args, 'provider', None))

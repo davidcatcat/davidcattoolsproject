@@ -61,6 +61,7 @@ TASK_ACTIONS = {
     'drive': ('run_task_drive', True),
     'drop': ('run_task_drop', False),
     'github-events': ('run_task_github_events', False),
+    'gw-agent-probe': ('run_task_gw_agent_probe', False),
     'high-debug': ('run_task_high_debug', True),
     'inbox': ('run_task_inbox', False),
     'record-pm': ('run_task_record_pm', False),

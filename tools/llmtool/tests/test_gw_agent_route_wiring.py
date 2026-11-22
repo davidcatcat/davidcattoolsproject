@@ -102,6 +102,19 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                 task_submission_cli.run_task_gw_agent_delegate(args, store=store)
             sweep.assert_called_once_with(store)
 
+    def test_model_pause_refuses_before_any_task_read(self):
+        class HeldStore:
+            def get_worker_observations(self):
+                return {'gw-agent': {'inference': {'status': 'FAIL'}}}
+
+            def get(self, _task_id):
+                raise AssertionError('a pause must refuse before a Task read')
+
+        with patch('llmtool.gw_agent_sessions.sweep_quietly'):
+            with self.assertRaisesRegex(LLMToolError, 'WORKER_GW_AGENT_MODEL_PAUSED'):
+                task_submission_cli.run_task_gw_agent_delegate(
+                    Namespace(), store=HeldStore())
+
     def test_company_gateway_origin_with_path_is_refused(self):
         task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
             'state': 'PM_RESPONDED', 'response': 'PM response', 'request': 'bounded task',
