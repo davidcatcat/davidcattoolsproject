@@ -2529,8 +2529,12 @@ def _review_verdict_absent(claim, github_get):
     return True
 
 
-def _remote_test_status(record, d6):
-    """Return exact-head remote-test state, bounded excerpt, and validated receipt."""
+def _remote_test_status(record, d6, extra_modules=()):
+    """Return exact-head remote-test state, bounded excerpt, and validated receipt.
+
+    extra_modules are the exact-head test modules the PR adds or changes; with
+    the Task's declared modules they form the set a PASS receipt must cover.
+    """
     head = d6.get('result_head') if type(d6) is dict else None
     completion = record.get('completion') if type(record) is dict else None
     executor_task = completion.get('executor_task_id') if type(completion) is dict else None
@@ -2539,6 +2543,7 @@ def _remote_test_status(record, d6):
     receipts = record.get('remote_test_receipts', [])
     if type(receipts) is not list:
         receipts = []
+    required_modules = remote_test.remote_required_modules(record, extra_modules)
     for receipt in reversed(receipts):
         if (type(receipt) is not dict or
                 receipt.get('task_id') != record.get('task_id') or
@@ -2555,7 +2560,7 @@ def _remote_test_status(record, d6):
             continue
         if receipt['result'] == 'PASS':
             if remote_test.pass_receipt_covers(
-                    receipt, remote_test.remote_required_modules(record)):
+                    receipt, required_modules):
                 return 'PASS', None, receipt
             break
         if receipt['result'] in ('TIMEOUT', 'SHA_MISMATCH'):
@@ -2587,7 +2592,7 @@ def _remote_test_status(record, d6):
             return 'UNREACHABLE', None, None
         if (outcome.get('result') == 'ADMISSION_DENIED' and
                 outcome.get('code') == 'MODULE_NOT_ADMITTED' and
-                outcome.get('modules') == [] and not remote_test.remote_required_modules(record)):
+                outcome.get('modules') == [] and not required_modules):
             return 'ADMISSION_DENIED', None, None
     return None, None, None
 
@@ -2818,6 +2823,55 @@ _PR_FILE_STATUSES = frozenset(('added', 'removed', 'modified', 'renamed',
 _PR_RENAME_STATUSES = frozenset(('renamed', 'copied'))
 
 
+# #2491: an exact-head PR file list that cannot be read cannot show which test
+# modules the PR adds or changes. The pre-review EC2 gate fails closed with this
+# code; remote-test admission instead falls back to the declared modules.
+PR_CHANGED_TESTS_UNAVAILABLE = 'PR_CHANGED_TESTS_UNAVAILABLE'
+_PR_TEST_MODULE_PATH = re.compile(r'tools/llmtool/tests/(test_[a-z0-9_]{1,80})\.py\Z')
+
+
+def _pr_changed_test_modules(number, head, github_get, pr):
+    """Return (test module stems, None) the PR adds or changes at this exact head.
+
+    The PR snapshot must name this open, unmerged PR at ``head``; its complete
+    file list is read with the same fail-closed page reader as the #2473
+    docs-only gate. A PR snapshot that omits ``changed_files`` still relies on
+    that bounded reader. A removed module is not runnable at the head and is
+    left out. Missing, unreadable or inconsistent data returns
+    (None, PR_CHANGED_TESTS_UNAVAILABLE), so the caller fails closed.
+    """
+    if (type(pr) is not dict or type(number) is not int or pr.get('number') != number or
+            type(pr.get('head')) is not dict or pr['head'].get('sha') != head or
+            pr.get('state') not in (None, 'open') or pr.get('merged') is True):
+        return None, PR_CHANGED_TESTS_UNAVAILABLE
+    count = pr.get('changed_files')
+    if count is not None and (type(count) is not int or isinstance(count, bool) or count < 0):
+        return None, PR_CHANGED_TESTS_UNAVAILABLE
+    try:
+        files, files_code = _pr_files(number, github_get)
+    except Exception:
+        return None, PR_CHANGED_TESTS_UNAVAILABLE
+    if (files_code is not None or type(files) is not list or
+            (count is not None and count != len(files))):
+        return None, PR_CHANGED_TESTS_UNAVAILABLE
+    modules = set()
+    for item in files:
+        if type(item) is not dict:
+            return None, PR_CHANGED_TESTS_UNAVAILABLE
+        path, status = item.get('filename'), item.get('status')
+        if type(path) is not str or not path:
+            return None, PR_CHANGED_TESTS_UNAVAILABLE
+        match = _PR_TEST_MODULE_PATH.fullmatch(path)
+        if match is None:
+            continue
+        if status == 'removed':
+            continue
+        if type(status) is not str or status not in _PR_FILE_STATUSES:
+            return None, PR_CHANGED_TESTS_UNAVAILABLE
+        modules.add(match.group(1))
+    return tuple(sorted(modules)), None
+
+
 def _pr_docs_only(number, head, github_get):
     """#2473: True only when GitHub proves every changed path of the PR is documentation.
 
@@ -2889,14 +2943,18 @@ def _remote_test_waiting_result(task_id, number, d6, remote_status):
                          'reason': reason}}
 
 
-def _pre_review_action(record, d6, pr, related, result_head, docs_only=False):
+def _pre_review_action(record, d6, pr, related, result_head, docs_only=False,
+                       extra_modules=()):
     """Return the gate action before a Reviewer may start on this head.
 
     docs_only (#2473) is set only after _pr_docs_only proved the PR changes
     documentation alone: no EC2 result is required, and the review path's
     exact-head check (docs) gate still runs before any Reviewer is dispatched.
+    extra_modules (#2491) are the exact-head test modules the PR adds or
+    changes, so a PASS for the declared modules alone cannot dispatch review.
     """
-    remote_status, _, _ = (None, None, None) if docs_only else _remote_test_status(record, d6)
+    remote_status, _, _ = ((None, None, None) if docs_only else
+                           _remote_test_status(record, d6, extra_modules))
     # #2602 item k: the first repeat reruns on this commit; the second waits
     # for the Owner. Neither a timeout nor an unreachable runner is a repair.
     if remote_status == 'TIMEOUT':
@@ -2921,7 +2979,7 @@ def _pre_review_action(record, d6, pr, related, result_head, docs_only=False):
     return 'DISPATCH_REVIEW'
 
 
-def decide(record, d6, pr, related, docs_only=False):
+def decide(record, d6, pr, related, docs_only=False, extra_modules=()):
     """Return the next action name using only supplied snapshots."""
     if type(record) is not dict:
         return 'DEVELOPER_ATTENTION'
@@ -2953,7 +3011,8 @@ def decide(record, d6, pr, related, docs_only=False):
     matching = [claim for claim in claims if type(claim) is dict and
                 claim.get('pr') == chosen_pr and claim.get('head_sha') == result_head]
     if not matching:
-        return _pre_review_action(record, d6, pr, related, result_head, docs_only)
+        return _pre_review_action(record, d6, pr, related, result_head, docs_only,
+                                  extra_modules)
     claim = max(matching, key=lambda item: item.get('version', 0))
     if claim.get('state') == 'UNKNOWN' and _failure_reason(claim.get('failure_reason')):
         # #2486: advance may re-run the newest stored refusal once even when
@@ -2961,7 +3020,8 @@ def decide(record, d6, pr, related, docs_only=False):
         if sum(type(item) is dict and item.get('head_sha') == result_head
                for item in claims) > 1:
             return 'REVIEW_UNUSABLE_STOPPED'
-        action = _pre_review_action(record, d6, pr, related, result_head, docs_only)
+        action = _pre_review_action(record, d6, pr, related, result_head, docs_only,
+                                    extra_modules)
         return 'REVIEW_REDISPATCH' if action == 'DISPATCH_REVIEW' else action
     if claim.get('state') in ('CLAIMED', 'UNKNOWN'):
         return 'REVIEW_OUTCOME_UNKNOWN'
@@ -3928,6 +3988,19 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         if blocked_reviewer is not None:
             step = 'DISPATCH_REVIEW'
             codes.extend(('REVIEW_BLOCKED', 'REVIEWER_FALLBACK'))
+    if step == 'DISPATCH_REVIEW':
+        # #2491: before any formal review, the exact-head EC2 gate also covers
+        # every test module this PR adds or changes. Unreadable or inconsistent
+        # PR file data fails closed here; remote-test admission never refuses
+        # for that reason and falls back to the declared modules.
+        pr_test_modules, pr_test_modules_code = _pr_changed_test_modules(
+            number, d6['result_head'], get, pr)
+        if pr_test_modules_code is not None:
+            step = PR_CHANGED_TESTS_UNAVAILABLE
+            codes.append(pr_test_modules_code)
+        elif pr_test_modules:
+            step = _pre_review_action(record, d6, pr, related, d6['result_head'],
+                                      extra_modules=pr_test_modules)
     if step == 'RUN_REMOTE_TEST':
         guard()  # #1781: an EC2 run is an external action
         try:

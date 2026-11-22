@@ -373,14 +373,18 @@ def _darwin_only_modules(stems, *, manifest=None, tests_dir=None):
     return frozenset(found)
 
 
-def remote_required_modules(task):
-    """Task test modules a Linux remote receipt must cover (#2573).
+def remote_required_modules(task, extra_modules=()):
+    """Task test modules a Linux remote receipt must cover (#2573, #2491).
 
+    extra_modules are the exact-head test modules the PR adds or changes.
     Darwin-only modules are left to the exact-head Mac CI merge gate.
     """
-    declared = _task_path_modules(task)
-    darwin = _darwin_only_modules(declared)
-    return tuple(module for module in declared if module not in darwin)
+    required = set(_task_path_modules(task))
+    for module in extra_modules:
+        if type(module) is str and _MODULE.fullmatch(module):
+            required.add(module)
+    darwin = _darwin_only_modules(required)
+    return tuple(module for module in sorted(required) if module not in darwin)
 
 
 def _admitted_modules(task):
