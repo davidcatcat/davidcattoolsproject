@@ -198,6 +198,7 @@ class CiRepairOverlapAdvanceTests(unittest.TestCase):
             modules=('test_remote_test',),
             pm_assignment={'acceptance': ['Verify test_remote_test passes.']},
         )
+        record['developer']['read_paths'] = ['tools/llmtool/tests/test_remote_test.py']
         run = _failed_run('FAIL: test_case (test_remote_test.RemoteTestTests)\nAssertionError')
         result, repair, dispatch = self._advance(record, _make_github(files, run))
 
