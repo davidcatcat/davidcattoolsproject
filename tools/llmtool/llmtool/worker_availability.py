@@ -445,14 +445,6 @@ def _retry_seconds(value, now):
 
 
 def _write_observation(store, layer, status, observed, fresh_until, evidence):
-    # TaskStore rejects observations dated in its future. Tests and callers may
-    # supply a logical clock; rebase the observation interval, not its duration,
-    # when that clock is ahead of the real UTC clock.
-    actual = datetime.now(timezone.utc).replace(microsecond=0)
-    if observed > actual:
-        shift = observed - actual
-        observed = actual
-        fresh_until -= shift
     store.record_worker_observation(
         worker_key=GW_AGENT_WORKER, layer=layer, status=status,
         observed_at=_stamp(observed), fresh_until=_stamp(fresh_until),
