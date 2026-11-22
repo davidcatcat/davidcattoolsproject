@@ -116,6 +116,8 @@ def _make_github_get(head, number, *, check_runs=None, files=None):
             }
         if path == f"pulls/{number}/files?per_page=100":
             return files
+        if path == f"issues/{number}/comments?per_page=100":
+            return []
         if path == "branches/main":
             return {"commit": {"sha": main_sha}}
         if path == f"compare/{main_sha}...{head}":

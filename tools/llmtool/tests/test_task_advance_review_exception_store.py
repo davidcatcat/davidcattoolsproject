@@ -89,6 +89,8 @@ def _github_get(path):
         return {'commit': {'sha': MAIN}}
     if path == f'compare/{MAIN}...{HEAD}':
         return {'status': 'identical'}
+    if path == f'issues/{NUMBER}/comments?per_page=100':
+        return []
     raise ValueError(f'Unexpected github_get path: {path}')
 
 

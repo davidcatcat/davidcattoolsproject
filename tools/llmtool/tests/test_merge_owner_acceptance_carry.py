@@ -105,6 +105,7 @@ def fake_github(**overrides):
             'check_runs': [dict(item, id=index + 1) for index, item in enumerate(GREEN)]},
         'pulls/17/files?per_page=100': [{'filename': PRODUCT}, {'filename': TEST}],
         'pulls/17': open_pr(),
+        'issues/17/comments?per_page=100': [],
         'branches/main': {'commit': {'sha': MAIN_SHA}},
         f'compare/{MAIN_SHA}...{H1}': {'status': 'ahead'},
         COMMENT_PATH: comment(),

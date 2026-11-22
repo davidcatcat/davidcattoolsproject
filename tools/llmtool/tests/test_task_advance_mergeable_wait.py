@@ -71,6 +71,8 @@ def _make_github_get(head_sha, pulls_responses, pulls_calls):
             }
         if path == 'pulls/1/files?per_page=100':
             return [{'filename': 'docs/guide.md'}]
+        if path == 'issues/1/comments?per_page=100':
+            return []
         if path == 'pulls/1':
             pulls_calls.append(path)
             if pulls_responses:
