@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from argparse import Namespace
 
-from . import active_pm_inbox, github_events, review_dispatch, review_repair
+from . import active_pm_inbox, ci_failure_overlap, github_events, review_dispatch, review_repair
 from . import github_identity, review_result, sensitive_paths, task_completion
 from . import lineage_counts, mac_full_suite, repair_policy, review_transcript
 from . import remote_test, start_failure, task_submission_cli
@@ -1037,6 +1037,102 @@ def _mac_capacity_cancel(run, head, github_get, number=None):
     return ('WAITING_ENV', ['CI_ENV_MAC_CAPACITY_CANCELLED'], evidence)
 
 
+_UNITTEST_FAIL_RE = re.compile(r'(?:^|\n)\s*(?:FAIL|ERROR):\s+([^\s(]+)\s+\(([^()\s]+)\)')
+_TEST_PY_PATH_RE = re.compile(
+    r'(?<![A-Za-z0-9_])((?:[A-Za-z0-9_.-]+/)*test_[A-Za-z0-9_]{1,120}\.py)(?![A-Za-z0-9_])')
+_FAILED_MODULES_LINE_RE = re.compile(
+    r'(?i)(?:failing|failed)[_\s]+(?:test[_\s]+)?modules?\s*[:=]\s*([^\n]+)')
+_TEST_MODULE_TOKEN_RE = re.compile(r'(?<![A-Za-z0-9_])(test_[A-Za-z0-9_]{1,120})(?![A-Za-z0-9_])')
+
+
+def _failing_test_modules(run):
+    """Extract candidate failing test module names/paths from a check run's output."""
+    output = run.get('output') if type(run) is dict else None
+    if type(output) is not dict:
+        return []
+    parts = [output.get(key) for key in ('title', 'summary', 'text')
+             if type(output.get(key)) is str and output.get(key)]
+    if not parts:
+        return []
+    text = '\n'.join(parts)
+    found = []
+    seen = set()
+
+    def add(item):
+        if item not in seen:
+            seen.add(item)
+            found.append(item)
+
+    for match in _UNITTEST_FAIL_RE.finditer(text):
+        method, dotted = match.group(1), match.group(2)
+        segments = dotted.split('.')
+        if len(segments) > 1 and segments[-1] == method:
+            segments = segments[:-1]
+        for seg in segments:
+            if _TEST_MODULE_TOKEN_RE.fullmatch(seg) and seg != method:
+                add(seg)
+    for match in _TEST_PY_PATH_RE.finditer(text):
+        add(match.group(1))
+    for match in _FAILED_MODULES_LINE_RE.finditer(text):
+        for token in _TEST_MODULE_TOKEN_RE.finditer(match.group(1)):
+            add(token.group(1))
+    return found
+
+
+def _pr_changed_paths(number, github_get):
+    """Return all changed/previous paths for PR number, or None if unreadable."""
+    if type(number) is not int or number < 1 or not callable(github_get):
+        return None
+    files, files_code = _pr_files(number, github_get)
+    if files_code is not None or type(files) is not list or not files:
+        return None
+    paths = []
+    for item in files:
+        if type(item) is not dict:
+            return None
+        filename = item.get('filename')
+        if type(filename) is not str or not filename:
+            return None
+        paths.append(filename)
+        previous = item.get('previous_filename')
+        if previous is not None:
+            if type(previous) is not str or not previous:
+                return None
+            paths.append(previous)
+    return paths
+
+
+def _declared_test_modules(record):
+    """Return the Task's declared test modules as a tuple, or None if unreadable."""
+    try:
+        modules = remote_test.remote_required_modules(record)
+    except Exception:
+        return None
+    if modules is None:
+        return ()
+    if type(modules) not in (list, tuple, set, frozenset):
+        return None
+    result = tuple(modules)
+    if any(type(m) is not str for m in result):
+        return None
+    return result
+
+
+def _ci_failure_overlap_status(run, record, number, github_get):
+    """Return (overlap_status, failing_modules) using ci_failure_overlap.overlap."""
+    failing_modules = _failing_test_modules(run)
+    if not failing_modules:
+        return ci_failure_overlap.UNKNOWN, []
+    changed_paths = _pr_changed_paths(number, github_get)
+    if changed_paths is None:
+        return ci_failure_overlap.UNKNOWN, failing_modules
+    declared_modules = _declared_test_modules(record)
+    if declared_modules is None:
+        return ci_failure_overlap.UNKNOWN, failing_modules
+    status = ci_failure_overlap.overlap(failing_modules, changed_paths, declared_modules)
+    return status, failing_modules
+
+
 def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, related,
                       run, fail_code, github_get, repair_review_call):
     """#1502 WP-D D11: route one completed exact-head required check that did not pass.
@@ -1081,8 +1177,27 @@ def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, rela
         retry_claim_id = retry.get('repair_task_id') if type(retry) is dict else None
         if type(retry_claim_id) is not str:
             return 'CI_FAILED', [fail_code, 'REPAIR_CLAIM_UNAVAILABLE'], None
-    elif _test_family_used_up(record, number, head, store):
-        return 'STOPPED', ['TEST_FAIL_LIMIT_REACHED'], None
+    else:
+        overlap_status, failing_modules = _ci_failure_overlap_status(
+            run, record, number, github_get)
+        if overlap_status == ci_failure_overlap.NO_OVERLAP:
+            return (
+                'WAITING_ENV',
+                ['CI_FAILURE_OUTSIDE_PR_SCOPE'],
+                {
+                    'check': run['name'],
+                    'check_run_id': run['id'],
+                    'head': head,
+                    'failing_modules': failing_modules,
+                    'message': (
+                        f"Failing test modules ({', '.join(failing_modules)}) are "
+                        f"outside the PR's scope (NO_OVERLAP); no counted CI repair "
+                        f"was opened. Wait or rerun CI."
+                    ),
+                },
+            )
+        if _test_family_used_up(record, number, head, store):
+            return 'STOPPED', ['TEST_FAIL_LIMIT_REACHED'], None
     if type(d6.get('root')) is not str:
         return 'REFUSED', ['D6_BINDING_UNAVAILABLE'], None
     profile = (record.get('developer') or {}).get('provider_profile')
