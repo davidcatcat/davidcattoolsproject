@@ -28,17 +28,64 @@ def session_state(session_id, config_dir, *, run=subprocess.run, claude=None):
                None) if type(rows) is list else None
     if row is None:
         return 'UNKNOWN'
-    return 'ENDED' if row.get('state') in ('done', 'stopped') else 'RUNNING'
+    if row.get('state') in ('done', 'stopped'):
+        return 'ENDED'
+    # #2552: a background session that answered waits in 'blocked'; the caller
+    # decides from the transcript whether the turn really finished.
+    return 'BLOCKED' if row.get('state') == 'blocked' else 'RUNNING'
 
 
-def verdict_blocks(session_id, config_dir, reviewer_task):
+def _transcript_path(session_id, config_dir, reviewer_task):
     paths = glob.glob(os.path.join(glob.escape(config_dir), 'projects',
                                    '*' + reviewer_task, session_id + '.jsonl'))
     if (len(paths) != 1 or os.path.islink(paths[0]) or not os.path.isfile(paths[0]) or
             os.path.getsize(paths[0]) > 64 * 1024 * 1024):
         return None
+    return paths[0]
+
+
+def turn_complete(session_id, config_dir, reviewer_task):
+    """#2552: True only when the transcript proves the reviewer's turn finished.
+
+    A background reviewer that answered sits in `claude agents` state 'blocked'
+    (waiting for the next input), which also covers waiting on a tool approval.
+    The turn counts as finished only when the last assistant message stopped with
+    end_turn and every tool_use has a tool_result. Any doubt returns False.
+    """
+    path = _transcript_path(session_id, config_dir, reviewer_task)
+    if path is None:
+        return False
+    last_stop, pending = None, set()
+    try:
+        with open(path, encoding='utf-8', errors='replace') as handle:
+            for line in handle:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if type(entry) is not dict:
+                    continue
+                message = entry.get('message')
+                content = message.get('content') if type(message) is dict else None
+                items = content if type(content) is list else ()
+                if entry.get('type') == 'assistant' and type(message) is dict:
+                    last_stop = message.get('stop_reason')
+                    pending |= {item.get('id') for item in items
+                                if type(item) is dict and item.get('type') == 'tool_use'}
+                elif entry.get('type') == 'user':
+                    pending -= {item.get('tool_use_id') for item in items
+                                if type(item) is dict and item.get('type') == 'tool_result'}
+    except OSError:
+        return False
+    return last_stop == 'end_turn' and not pending
+
+
+def verdict_blocks(session_id, config_dir, reviewer_task):
+    path = _transcript_path(session_id, config_dir, reviewer_task)
+    if path is None:
+        return None
     blocks = []
-    with open(paths[0], encoding='utf-8', errors='replace') as handle:
+    with open(path, encoding='utf-8', errors='replace') as handle:
         for line in handle:
             try:
                 entry = json.loads(line)
@@ -101,6 +148,12 @@ def unposted_verdict(claim, task, *, config_dir=None, run=subprocess.run, claude
     if not config_dir:
         return 'UNKNOWN', 'REVIEWER_ACCOUNT_UNCONFIGURED', None
     state = session_state(session, config_dir, run=run, claude=claude)
+    if state == 'BLOCKED':
+        if not turn_complete(session, config_dir, reviewer):
+            # Waiting on a tool approval, or the turn cannot be proven over:
+            # a definite stop, never "ended without a verdict".
+            return 'BLOCKED', 'REVIEWER_WAITING_APPROVAL', None
+        state = 'ENDED'
     if state != 'ENDED':
         return state, ('REVIEWER_SESSION_UNKNOWN' if state == 'UNKNOWN' else None), None
     blocks = verdict_blocks(session, config_dir, reviewer)
