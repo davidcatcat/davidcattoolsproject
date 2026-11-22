@@ -113,11 +113,17 @@ class ClaudeRouteTests(unittest.TestCase):
         with self.assertRaises(RouteError) as caught:
             self.route.validate_request(self.request('x' * (MAX_PROMPT_BYTES + 1)))
         self.assertEqual(caught.exception.code, 'CLAUDE_REQUEST_INVALID')
-        for model, effort in (('claude', 'high'), ('opus', 'high'),
-                              ('claude-opus-5-5', 'default')):
+        # #2302 part 1: the route takes any well-formed model id (the shared
+        # admission check adds the family rule), and refuses a malformed one.
+        for model, effort in (('has space', 'high'), ('-claude', 'high'), ('', 'high'),
+                              ('claude://x', 'high'), ('claude..x', 'high'),
+                              (None, 'high'), ('claude-opus-5-5', 'default')):
             with self.assertRaises(RouteError) as caught:
                 self.route.validate_profile(model, effort)
             self.assertEqual(caught.exception.code, 'CLAUDE_PROFILE_INVALID')
+        for model in ('claude', 'opus', 'claude-opus-5-5', 'Claude-Opus', 'gemini-3.8-flash-medium',
+                      'gpt-6.1-sol', 'qwen3.8-27b'):
+            self.assertEqual(self.route.validate_profile(model, 'high'), (model, 'high'))
         route = ClaudeRoute({'executable': 'claude', 'config_dir': 'relative'})
         with self.assertRaises(RouteError) as caught:
             route.validate_request(self.request())
@@ -250,7 +256,10 @@ class ClaudeRouteTests(unittest.TestCase):
         cases = [({'claude-opus-5-5': {'outputTokens': 1},
                    'claude-helper': {'outputTokens': 3}}, 'claude-opus-5-5'),
                  ({'claude-other': {'outputTokens': 4}}, 'claude-other'),
-                 ({'other': {'outputTokens': 2}}, '\0'), ({}, None),
+                 # #2302 part 1: any well-formed reported id is compared with the
+                 # requested one; only a malformed key never verifies.
+                 ({'other': {'outputTokens': 2}}, 'other'),
+                 ({'has space': {'outputTokens': 2}}, '\0'), ({}, None),
                  ({'claude-opus-5-5': {'outputTokens': 0}}, None)]
         for models, expected in cases:
             parsed = self.route.parse_output(self.envelope(modelUsage=models), b'', '')
@@ -264,6 +273,18 @@ class ClaudeRouteTests(unittest.TestCase):
         self.route.parse_output(self.envelope(), b'', '')
         self.assertEqual(self.route.verified_model('ignored', 'claude-opus-5-5'),
                          'claude-opus-5-5')
+
+    def test_a_requested_model_of_another_vendor_verifies_only_by_its_own_usage(self):
+        # A1: the provider path decides; a different model is never accepted
+        # as the requested one (no silent fallback).
+        requested = 'gemini-3.8-flash-medium'
+        self.route.parse_output(
+            self.envelope(modelUsage={requested: {'outputTokens': 5}}), b'', '')
+        self.assertEqual(self.route.verified_model('', requested), requested)
+        self.route.parse_output(
+            self.envelope(modelUsage={'claude-opus-5-5': {'outputTokens': 5}}), b'', '')
+        self.assertEqual(self.route.verified_model('', requested), 'claude-opus-5-5')
+        self.assertNotEqual(self.route.verified_model('', requested), requested)
 
     def test_model_verification_failures_are_typed_by_run_route(self):
         for models, expected in (({'claude-other': {'outputTokens': 4}},

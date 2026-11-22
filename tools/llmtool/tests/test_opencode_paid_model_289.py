@@ -222,23 +222,21 @@ class OpenCodeModelValidatorTests(unittest.TestCase):
                 with self.assertRaises(RouteError):
                     check_route_model(self.config, 'opencode', model)
 
-    def test_other_routes_model_checks_remain_unchanged(self):
-        # A3: AGY, Claude, gw-agent and Codex roles keep their checks.
-        self.assertEqual(check_route_model(self.config, 'agy', 'gemini-4-hydrogen-medium'),
-                         'gemini-4-hydrogen-medium')
-        for bad_model in ('claude-opus-5-5', 'gpt-6.1-sol', 'opencode/paid-model'):
-            with self.subTest(route='agy', model=bad_model):
-                with self.assertRaises(RouteError) as caught:
-                    check_route_model(self.config, 'agy', bad_model)
-                self.assertEqual(caught.exception.code, 'ROLE_MODEL_NOT_ALLOWED')
-        self.assertEqual(check_route_model(self.config, 'claude', 'claude-opus-5-5'),
-                         'claude-opus-5-5')
-        for bad_model in ('gemini-3.8-flash-medium', 'gpt-6.1-sol', 'opencode/paid-model'):
-            with self.subTest(route='claude', model=bad_model):
-                with self.assertRaises(RouteError) as caught:
-                    check_route_model(self.config, 'claude', bad_model)
-                self.assertEqual(caught.exception.code, 'ROLE_MODEL_NOT_ALLOWED')
+    def test_other_routes_model_checks_follow_the_any_model_rule(self):
+        # A3: Reviewer and AI Debug roles keep their checks (below). #2302 part 1:
+        # AGY, Claude and gw-agent admit any well-formed id of a known family.
+        for route in ('agy', 'claude'):
+            for model in ('gemini-4-hydrogen-medium', 'claude-opus-5-5', 'gpt-6.1-sol'):
+                with self.subTest(route=route, model=model):
+                    self.assertEqual(check_route_model(self.config, route, model), model)
+            for bad_model in ('opencode/paid-model', 'other-unlisted-model'):
+                with self.subTest(route=route, model=bad_model):
+                    with self.assertRaises(RouteError) as caught:
+                        check_route_model(self.config, route, bad_model)
+                    self.assertEqual(caught.exception.code, 'ROLE_MODEL_NOT_ALLOWED')
         self.assertEqual(check_route_model(self.config, 'gw-agent', 'gw'), 'gw')
+        self.assertEqual(check_route_model(self.config, 'gw-agent', 'qwen3.8-27b'),
+                         'qwen3.8-27b')
         for bad_model in ('opencode/paid-model', 'other-unlisted-model'):
             with self.subTest(route='gw-agent', model=bad_model):
                 with self.assertRaises(RouteError) as caught:

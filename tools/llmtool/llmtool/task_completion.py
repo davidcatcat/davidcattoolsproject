@@ -2342,38 +2342,54 @@ def _recorded_model_family(model):
     return None
 
 
+_REVIEW_AUTHOR_ROUTES = ('claude', 'codex', 'agy', 'opencode', 'company-gw', 'gw-agent')
+
+
+def _recorded_run_family(profile, model):
+    """Return the formal Reviewer family of a recorded run model, else None.
+
+    #2302 part 1 (v91 finding 2, A1c): the family comes from the model the run
+    recorded (developer_routes.model_family), never from its route. 'claude'
+    and 'codex' are the Reviewer families; any other known family is 'other'.
+    A model whose family cannot be determined fails closed (None) on the
+    claude, codex and agy routes. The multi-vendor opencode, company-gw and
+    gw-agent routes keep their former reading of such a name (Claude or Codex
+    marker, else 'other'); a gw-agent model of unknown family is refused at
+    dispatch, so only a legacy record or a gateway-served name reaches it.
+    """
+    from .developer_routes import MODEL_FAMILY_UNKNOWN, model_family
+    if profile not in _REVIEW_AUTHOR_ROUTES:
+        return None
+    family = model_family(model)
+    if family != MODEL_FAMILY_UNKNOWN:
+        return family if family in ('claude', 'codex') else 'other'
+    if profile in ('opencode', 'company-gw', 'gw-agent'):
+        return _recorded_model_family(model) or 'other'
+    return None
+
+
 def _reviewer_author_family(developer):
     """Return the known family relevant to formal Reviewer separation.
 
-    The route profile and the recorded run model both count: a multi-model
-    route takes the family of its recorded model, and a single-family route
-    whose recorded model belongs to the other Reviewer family fails closed.
+    #2302 part 1 (v91 finding 2): a record that names its run model takes the
+    family of that model on every route, so a Claude, AGY or gw-agent run of
+    any vendor's model is separated from that vendor's Reviewer. A model of no
+    determinable family fails closed. A legacy record with no model keeps the
+    result its route profile gave before: claude, codex, the multi-vendor
+    routes as 'other', and AGY unknown.
     """
     if type(developer) is not dict:
         return None
     # A stored record may still carry the retired gw Agent id (#1502 WP-E).
     profile = worker_dispatch.stored_worker_id(developer.get('provider_profile'))
-    if profile == 'claude':
-        if _recorded_model_family(developer.get('model')) == 'codex':
-            return None
-        return 'claude'
-    elif profile == 'codex':
-        if _recorded_model_family(developer.get('model')) == 'claude':
-            return None
-        return 'codex'
-    elif profile == 'agy':
-        model = developer.get('model')
-        if type(model) is str and model.startswith('claude-'):
-            return 'claude'
-        if type(model) is str and model.startswith('gemini-'):
-            return 'other'
-        if type(model) is str and model.startswith('gpt-'):
-            return 'codex'  # #1604: OpenAI models (gpt-oss-*) share the codex family
-        return None
-    elif profile in ('opencode', 'company-gw', 'gw-agent'):
-        return _recorded_model_family(developer.get('model')) or 'other'
-    else:
-        return None
+    model = developer.get('model')
+    if type(model) is str and model:
+        return _recorded_run_family(profile, model)
+    if profile in ('claude', 'codex'):
+        return profile
+    if profile in ('opencode', 'company-gw', 'gw-agent'):
+        return 'other'
+    return None
 
 
 def _review_family_compatible(developer, reviewer_identity):

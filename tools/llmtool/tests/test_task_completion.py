@@ -3448,6 +3448,76 @@ class TaskCompletionTests(unittest.TestCase):
                         self.assertIn('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED',
                                       evidence['missing_gates'])
 
+    def test_a_codex_family_developer_model_refuses_a_codex_formal_pass(self):
+        # #2302 part 1 (A4, A1c): the Developer family is read from the model the
+        # run recorded, on every route, so a GPT/Codex model on the agy, claude
+        # or gw-agent route is the same family as the Codex Reviewer.
+        for profile in ('agy', 'claude', 'gw-agent', 'opencode'):
+            for model in ('gpt-6.1-sol', 'openai/gpt-6-luna', 'codex-mini', 'o4-mini'):
+                developer = {'provider_profile': profile, 'model': model}
+                with self.subTest(profile=profile, model=model):
+                    self.assertEqual(task_completion._reviewer_author_family(developer),
+                                     'codex')
+                    self.assertFalse(task_completion._review_family_compatible(
+                        developer, 'codex-reviewer'))
+                    self.assertTrue(task_completion._review_family_compatible(
+                        developer, 'claude-reviewer'))
+
+    def test_a_claude_family_developer_model_refuses_a_claude_formal_pass(self):
+        for profile in ('agy', 'claude', 'gw-agent', 'opencode'):
+            developer = {'provider_profile': profile, 'model': 'claude-sonnet-5-5-medium'}
+            with self.subTest(profile=profile):
+                self.assertFalse(task_completion._review_family_compatible(
+                    developer, 'claude-reviewer'))
+                self.assertTrue(task_completion._review_family_compatible(
+                    developer, 'codex-reviewer'))
+
+    def test_a_model_of_unknown_family_is_not_inferred_from_the_route(self):
+        for profile in ('claude', 'agy', 'codex'):
+            developer = {'provider_profile': profile, 'model': 'example-model-b'}
+            with self.subTest(profile=profile):
+                self.assertIsNone(task_completion._reviewer_author_family(developer))
+                for reviewer in ('claude-reviewer', 'codex-reviewer'):
+                    self.assertFalse(task_completion._review_family_compatible(
+                        developer, reviewer))
+
+    def test_approved_review_family_follows_a_recorded_codex_model_end_to_end(self):
+        result_sha, _ = self._make_result()
+        reviewer_root = self.base / 'reviewer-recorded-model'
+        self._git('worktree', 'add', '-b', 'review/recorded-model',
+                  str(reviewer_root), result_sha)
+        pr = {'state': 'open', 'merged': False, 'head': {'sha': result_sha},
+              'base': {'repo': {'full_name': 'davidcatcat/davidcattoolsproject'}},
+              'user': {'login': 'author-user'}}
+        checks = {'total_count': 1, 'check_runs': [
+            {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
+             'status': 'completed', 'conclusion': 'success'}]}
+        for profile in ('agy', 'claude', 'gw-agent'):
+            for reviewer in ('claude-reviewer', 'codex-reviewer'):
+                with self.subTest(profile=profile, reviewer=reviewer):
+                    self._write_registration(
+                        'reviewer-task', reviewer, 'native-reviewer-session',
+                        reviewer_root, 'review/recorded-model', result_sha, result_sha,
+                        native_session_id='native-reviewer-session',
+                        github_login='reviewer-user', state='REVIEW_PENDING')
+                    review = [{'state': 'APPROVED', 'commit_id': result_sha,
+                               'user': {'login': 'reviewer-user'},
+                               'submitted_at': '2026-10-21T10:00:00Z',
+                               'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
+                                       self._review_binding(head=result_sha)}]
+                    task = {'developer': {'provider_profile': profile,
+                                          'model': 'gpt-6.1-sol'}}
+                    api = self._github_response_sequence(result_sha, pr, review, checks)
+                    with patch('llmtool.task_completion._github_get', side_effect=api):
+                        evidence = task_completion.collect_github_evidence(
+                            **self._github_kwargs(result_sha, task_record=task))
+                    expected = reviewer == 'claude-reviewer'
+                    self.assertEqual(evidence['evidence']['formal_review_state'],
+                                     'ACCEPTED' if expected else 'UNVERIFIED')
+                    if not expected:
+                        self.assertIn('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED',
+                                      evidence['missing_gates'])
+
     def test_pr_comment_family_matrix_matches_formal_verdict_classifier(self):
         result_sha, _ = self._make_result()
         reviewer_root = self.base / 'reviewer-comment-family-matrix'
@@ -3525,13 +3595,22 @@ class TaskCompletionTests(unittest.TestCase):
                         developer, reviewer))
 
     def test_review_family_uses_recorded_run_model_and_conflicts_fail_closed(self):
+        # #2302 part 1 (v91 finding 2, A1c): a record that names its run model
+        # takes that model's family on every route; a legacy record with no
+        # model keeps the result its route gave before.
         missing = object()
         deepseek = 'opencode/deepseek-v4.1-flash-free#high'
         cases = []
         # company-gw-agent: a stored record with the retired id reads as gw-agent (#1502 WP-E).
         for profile in ('opencode', 'company-gw', 'company-gw-agent', 'gw-agent'):
+            # The multi-vendor opencode, company-gw and gw-agent routes keep their
+            # former reading of a name that shows no family (claude, codex and
+            # agy fail closed, below).
+            unknown_name = 'other'
             cases.extend((profile, model, family) for model, family in (
                 (deepseek, 'other'),
+                ('qwen3.8-27b', 'other'),
+                ('gemini-3.8-flash-medium', 'other'),
                 ('anthropic/claude-opus-5-5', 'claude'),
                 ('claude-opus-5-5', 'claude'),
                 ('Anthropic/Claude-Sonnet-5-5#high', 'claude'),
@@ -3540,8 +3619,8 @@ class TaskCompletionTests(unittest.TestCase):
                 ('openai/codex-mini#high', 'codex'),
                 ('o4-mini', 'codex'),
                 ('o3', 'codex'),
-                ('other-model', 'other'),
-                ('opus-5', 'other'),
+                ('other-model', unknown_name),
+                ('opus-5', unknown_name),
                 (None, 'other'),
                 (123, 'other'),
                 (missing, 'other')))
@@ -3549,29 +3628,36 @@ class TaskCompletionTests(unittest.TestCase):
             ('gpt-6-luna', 'codex'),
             ('openai/gpt-6-luna', 'codex'),
             ('o4-mini', 'codex'),
-            (deepseek, 'codex'),
-            ('claude-opus-5-5', None),
-            ('anthropic/claude-opus-5-5', None),
+            (deepseek, 'other'),
+            ('claude-opus-5-5', 'claude'),
+            ('anthropic/claude-opus-5-5', 'claude'),
+            ('other-model', None),
             (None, 'codex'),
             (missing, 'codex')))
         cases.extend(('claude', model, family) for model, family in (
             ('claude-opus-5-5', 'claude'),
             ('anthropic/claude-opus-5-5', 'claude'),
-            (deepseek, 'claude'),
-            ('gpt-6-luna', None),
-            ('openai/gpt-6-luna', None),
-            ('codex-mini', None),
-            ('o4-mini', None),
+            (deepseek, 'other'),
+            ('gemini-3.8-flash-medium', 'other'),
+            ('gpt-6-luna', 'codex'),
+            ('openai/gpt-6-luna', 'codex'),
+            ('codex-mini', 'codex'),
+            ('o4-mini', 'codex'),
+            # A model of no determinable family is never read as the route's.
+            ('example-model-b', None),
+            ('claude-gpt-6', None),
             (None, 'claude'),
             (missing, 'claude')))
         cases.extend(('agy', model, family) for model, family in (
             ('claude-sonnet-5-5-medium', 'claude'),
             ('gemini-2.5-pro', 'other'),
-            ('anthropic/claude-opus-5-5', None),
+            ('anthropic/claude-opus-5-5', 'claude'),
             ('gpt-6-luna', 'codex'),
             ('gpt-oss-120b-medium', 'codex'),
-            ('o4-mini', None),
-            (deepseek, None),
+            ('o4-mini', 'codex'),
+            (deepseek, 'other'),
+            ('qwen3.8-27b', 'other'),
+            ('example-model-b', None),
             (None, None),
             (missing, None)))
         cases.extend(('unknown-route', model, None) for model in (

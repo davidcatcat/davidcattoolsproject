@@ -1274,6 +1274,13 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertLess(len(raw), 64 * 1024)
         developer = task['developer']
         self.assertEqual(developer['model'], 'gemini-requested')
+        # #2302 part 1 (A2): the run records its requested and resolved model,
+        # where the model came from (a patched profile is a plain tuple, so
+        # UNKNOWN), the family read from the id, and the provider-reported model.
+        self.assertEqual(developer['model_provenance'], {
+            'requested_model': 'gemini-requested', 'resolved_model': 'gemini-requested',
+            'model_source': 'UNKNOWN', 'model_family': 'gemini',
+            'provider_model': 'gemini-verified'})
         self.assertEqual(developer['input_bytes'], len(raw))
         self.assertEqual(developer['context_sha256'], hashlib.sha256(raw).hexdigest())
         evidence = task['completion']['evidence']
