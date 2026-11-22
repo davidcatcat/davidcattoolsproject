@@ -114,7 +114,7 @@ def _args(**kw):
     values = dict(task_id='1' * 32, provider='agy', acceptance=['docs/ci/README.md'],
                   read_path=['tools/x.py'], write_path=['tools/x.py'], repair_packet=None,
                   high_debug_task=None, read_scope_reason=None, read_scope_check=False,
-                  timeout=None, reassign_from=None)
+                  timeout=None, reassign_from=None, cwd='/nonexistent-d6')
     values.update(kw)
     return types.SimpleNamespace(**values)
 

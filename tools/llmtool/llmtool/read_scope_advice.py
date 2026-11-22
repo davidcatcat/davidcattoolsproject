@@ -99,3 +99,102 @@ def warning(items):
             text += ': ' + value['note']
         lines.append(text)
     return '\n'.join(lines)
+
+
+# --- #2503 PR-5: companion-file advice -------------------------------------
+
+COMPANION_WRITE = 'COMPANION_WRITE'
+COMPANION_READ = 'COMPANION_READ'
+TEST_REFERENCES_WRITE = 'TEST_REFERENCES_WRITE'
+TEST_REFERENCES_MORE = 'TEST_REFERENCES_MORE'
+GUIDANCE_DRIFT_JSON = 'tools/llmtool/guidance-drift.json'
+GUIDANCE_DRIFT_CHECK = 'tools/llmtool/scripts/guidance_drift_check.py'
+_HASHED_GUIDANCE = ('CLAUDE.md', 'AGENTS.md')
+MAX_TESTS_PER_PATH = 8
+_TEST_DIRS = ('tools/llmtool/tests', 'scripts/test_*.py')
+_WORD_END = '([^A-Za-z0-9_]|$)'
+
+
+def _is_rule_json(path):
+    """A tools/llmtool/<name>.json rule file; guidance_drift_check.py holds its strict schema."""
+    parts = path.split('/')
+    return (len(parts) == 3 and parts[:2] == ['tools', 'llmtool'] and
+            parts[2].endswith('.json') and not parts[2].startswith('.'))
+
+
+def companion_items(*, read_paths, write_paths):
+    """Fixed pairings (#2503 PR-5 a): files that change or must be read together."""
+    read = set(read_paths or [])
+    write = set(write_paths or [])
+    items = []
+    if write & set(_HASHED_GUIDANCE) and GUIDANCE_DRIFT_JSON not in write:
+        items.append(item(COMPANION_WRITE, GUIDANCE_DRIFT_JSON,
+                          'records the CLAUDE.md/AGENTS.md hash; without it HASH_STALE'))
+    rule_files = sorted(path for path in write
+                        if _is_rule_json(path) and path != GUIDANCE_DRIFT_JSON)
+    if rule_files and GUIDANCE_DRIFT_CHECK not in read | write:
+        items.append(item(COMPANION_READ, GUIDANCE_DRIFT_CHECK,
+                          ('holds the strict schema for ' + ', '.join(rule_files))[:MAX_NOTE_CHARS]))
+    return items
+
+
+def _ere(text):
+    return re.sub(r'([.^$*+?()\[\]{}|\\])', r'\\\1', text)
+
+
+def reference_patterns(path):
+    """git grep -E patterns (POSIX ERE, no \\b) that reference the file at path."""
+    name = path.rsplit('/', 1)[-1]
+    patterns = ['(^|[^A-Za-z0-9_.-])' + _ere(name) + _WORD_END]
+    if name.endswith('.py'):
+        leaf = name[:-3]
+        parts = path[:-3].split('/')
+        patterns.append('(import|from) (.*[^A-Za-z0-9_.])?' + _ere(leaf) + _WORD_END)
+        if parts[:3] == ['tools', 'llmtool', 'llmtool']:
+            patterns.append(_ere('.'.join(['llmtool'] + parts[3:])) + _WORD_END)
+    return patterns
+
+
+def referencing_tests(*, root, commit, read_paths, write_paths, runner=None):
+    """Test files at commit that reference a written file but are in neither read nor write.
+
+    Bounded: one git grep per written non-test .py/.json file over
+    tools/llmtool/tests and scripts/test_*.py, at most MAX_TESTS_PER_PATH
+    results each. Any error gives no result for that file.
+    """
+    run = runner or subprocess.run
+    known = set(read_paths or []) | set(write_paths or [])
+    found = {}
+    more = []
+    for path in sorted(set(write_paths or [])):
+        name = path.rsplit('/', 1)[-1]
+        if not name.endswith(('.py', '.json')) or name.startswith('test_') or '/tests/' in path:
+            continue
+        argv = ['git', '-C', str(root), 'grep', '-l', '-E']
+        for pattern in reference_patterns(path):
+            argv += ['-e', pattern]
+        argv += [commit, '--', *_TEST_DIRS]
+        try:
+            result = run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                         timeout=20, check=False)
+        except Exception:
+            continue
+        if getattr(result, 'returncode', 2) not in (0, 1):
+            continue
+        names = []
+        for line in (result.stdout or '').splitlines():
+            test = line[len(commit) + 1:] if line.startswith(commit + ':') else line
+            if test and test not in known and test != path:
+                names.append(test)
+        leaf = name.rsplit('.', 1)[0]
+        # Tests named after the file come first; the rest follow by name.
+        ranked = sorted(set(names), key=lambda test: (leaf not in test.rsplit('/', 1)[-1], test))
+        for test in ranked[:MAX_TESTS_PER_PATH]:
+            found.setdefault(test, path)
+        if len(ranked) > MAX_TESTS_PER_PATH:
+            more.append(item(TEST_REFERENCES_MORE, path,
+                             '%d more test files reference it; shown: the first %d'
+                             % (len(ranked) - MAX_TESTS_PER_PATH, MAX_TESTS_PER_PATH)))
+    return [item(TEST_REFERENCES_WRITE, test,
+                 ('references ' + source + '; it may pin the old behaviour')[:MAX_NOTE_CHARS])
+            for test, source in sorted(found.items())] + more
