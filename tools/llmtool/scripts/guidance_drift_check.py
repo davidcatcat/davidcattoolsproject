@@ -176,6 +176,9 @@ ROUTE_TIMEOUT_CAP_SECONDS = 18000
 # The EC2 remote test timeout is not an AI run and keeps its 3600 s ceiling;
 # same value as the loader check in llmtool.developer_routes.
 REMOTE_TEST_TIMEOUT_CAP_SECONDS = 3600
+# #2281 (Owner 2026-11-21): 5 MiB is the hard ceiling for every route-level
+# byte bound; same value as llmtool.developer_routes.base.HARD_MAX_BYTE_BOUND.
+ROUTE_MAX_BYTE_BOUND = 5 * 1024 * 1024
 REPO_PATH = r"(?!/)(?!.*\\)(?!(?:.*/)?\.\.(?:/|$))[^\s]+"
 ROUTE_PROFILE = Obj(
     {"adapter": Str(), "model": Str()},
@@ -225,12 +228,12 @@ DEVELOPER_ROUTE = TimeoutPair(Obj(
         "profile": ROUTE_PROFILE,
         "authorization_ref": Str(r"https://\S+"),
         "allowed_data_classes": ListOf(Str(r"[a-z_]+"), min_items=1),
-        # #1815: same bounds as developer_routes.base max_diff_bytes_ok.
-        "max_diff_bytes": Int(1024, 512 * 1024),
-        # #2281: same rule as developer_routes.base max_prompt_bytes_ok (>= 1, no hard ceiling).
-        "max_prompt_bytes": Int(1),
-        "max_source_file_bytes": Int(1),
-        "max_source_total_bytes": Int(1),
+        # #1815, #2281: same bounds as developer_routes.base max_diff_bytes_ok.
+        "max_diff_bytes": Int(1024, ROUTE_MAX_BYTE_BOUND),
+        # #2281: same rule as developer_routes.base max_prompt_bytes_ok (1..5 MiB).
+        "max_prompt_bytes": Int(1, ROUTE_MAX_BYTE_BOUND),
+        "max_source_file_bytes": Int(1, ROUTE_MAX_BYTE_BOUND),
+        "max_source_total_bytes": Int(1, ROUTE_MAX_BYTE_BOUND),
         # #2281 L9, #2281 limit unblock: gw-agent per-Task budgets object.
         # max_wall_seconds is 10800 s, no shorter than route default_timeout (10800 s)
         # and bounded by max_timeout (18000 s). Basis: the route default timeout and

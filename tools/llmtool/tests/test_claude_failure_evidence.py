@@ -53,11 +53,13 @@ _PROSE = 'PROSE-MARKER'
 
 
 def _without_reported(view):
-    """#2503: the record or view without developer.reported (the Developer's kept reply)."""
+    """#2503: the record or view without the labelled, screened Developer text:
+    developer.reported (its kept reply) and developer.stderr_excerpt (its CLI stderr)."""
     view = json.loads(json.dumps(view))
     developer = view.get('developer') if type(view) is dict else None
     if type(developer) is dict:
         developer.pop('reported', None)
+        developer.pop('stderr_excerpt', None)
     return view
 _DROP = object()
 _EVIDENCE = 'claude_failure_evidence'
@@ -327,6 +329,17 @@ class ClaudeFailureEvidenceTests(unittest.TestCase):
                     'CLAUDE_STATUS_FAILED',
                     {'subtype': expected, 'is_error': True, 'num_turns': 12,
                      'duration_ms': 98765, 'process_exit_code': 1})
+
+    def test_real_run_keeps_the_cli_stderr_tail_for_the_pm(self):
+        # #2503: real run_route + ClaudeRoute: the CLI's stderr reaches the record as
+        # the labelled, screened developer.stderr_excerpt (never in the evidence).
+        _store, developer = self._assert_failure(
+            _process(1, _cli(subtype='error_during_execution', is_error=True, num_turns=2,
+                             duration_ms=1200), b'Error: please run /login first\n'),
+            'CLAUDE_STATUS_FAILED',
+            {'subtype': 'ERROR_DURING_EXECUTION', 'is_error': True, 'num_turns': 2,
+             'duration_ms': 1200, 'process_exit_code': 1})
+        self.assertEqual(developer['stderr_excerpt'], 'Error: please run /login first')
 
     def test_unknown_subtype_is_other(self):
         self._assert_failure(

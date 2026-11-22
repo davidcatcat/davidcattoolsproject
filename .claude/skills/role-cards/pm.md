@@ -17,6 +17,7 @@ The Owner's binding working rules for PM runs (2026-11-16 – 2026-11-18), recor
 - home LLM 測試一次跑一張 (Owner date: 2026-11-17, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
 - 沒有依據的上限全部改成可調，放進設定檔並記錄依據 (Owner date: 2026-11-17, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
 - 以後我定新規則，就同步更新規則卡 (Owner date: 2026-11-18, evidence link: [#1817 c6958001740](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740))
+- A `task advance` `RUN_REMOTE_TEST` result of `ADMISSION_DENIED` / `MODULE_NOT_ADMITTED` is the recorded step result when the Task declares no admissible EC2 module, not a refusal. A PR is blocked only when a step is `STOPPED` or `REFUSED` or the next `task advance` refuses. After an unfamiliar code, the PM runs the next `task advance` once and reads its next step before calling a PR blocked. A blocked board row quotes the refused next-step code. (Owner date: 2026-11-22, evidence links: [#2413 c7065960759](https://github.com/davidcatcat/davidcattoolsproject/issues/2413#issuecomment-7065960759), [#2413 c7065982671](https://github.com/davidcatcat/davidcattoolsproject/issues/2413#issuecomment-7065982671))
 
 ## Dispatch
 
@@ -29,6 +30,23 @@ The Owner's binding working rules for PM runs (2026-11-16 – 2026-11-18), recor
   - **`gw-agent`:** before each call, record the egress basis and budget. On a failure, step down one tier. Pause per E9. Classify availability by the [four-layer rule](../company-llm-delegation/SKILL.md#availability-classification).
 - Follow [dispatch hygiene](../ai-team-delivery/pm-continuation.md#dispatch-hygiene). A sent dispatch counts only once there is a start receipt ([Transition record](../ai-team-delivery/pm-continuation.md#transition-record)).
 - A sub-agent dispatch includes the text of the role card that sub-agent needs.
+
+## Dispatch spec format (#2423)
+
+Authority: `task_submission_cli._read_pm_record_input` (`task record-pm`) and `tools/llmtool/scripts/spec_preflight.py` `check`. `spec_lint` is a PM helper outside the repository; its rules are UNKNOWN here.
+
+- `record-pm` reads one strict JSON object with exactly `request` (string, at most 64 KiB) and `response` (string, at most 64 KiB).
+- `response` is one JSON object: `schema_version: 1`, `summary` (preflight: at most 2048 bytes) and `developer_assignment` with exactly `route`, `risk`, `goal`, `acceptance`. `record-pm` needs `risk: "LOW"` and `route` one of `gw-agent`, `opencode`, `codex`, `agy`, `claude`; `acceptance` has 1 to 16 strings.
+- `spec_preflight` refuses a spec with an `edits` key, and for `gw-agent` non-ASCII `goal`/`acceptance` text and quoted lines that end inside an open bracket.
+- `task delegate --acceptance` must equal the recorded `acceptance`, and `write_paths` must be inside `read_paths`.
+
+Example `response` (illustration):
+
+```json
+{"schema_version":1,"summary":"#1234 fix X","developer_assignment":{"route":"claude","risk":"LOW","goal":"<problem and outcome>","acceptance":["<observable result>"]}}
+```
+
+A format refusal is fixed here so the card matches llmtool, and recorded (#2423).
 
 ## Review, disputes and Debug
 

@@ -19,6 +19,8 @@ from llmtool.developer_routes import (RouteError, resolve_route_max_diff_bytes,
 from llmtool.developer_routes.agy import owner_assignment_gate
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore
+from llmtool import task_store as task_store_module
+from llmtool import developer_stderr
 
 
 import review_trust_fixture
@@ -117,7 +119,7 @@ class AgyRouteWiringTests(unittest.TestCase):
                           bind_result='BOUND', initial_native_session_id=None,
                           bound_registration_mutation=False, audit=None,
                           store=None, verified_model='gemini-test', card_git=None,
-                          ledger_record=None, pin_dispatch=None, summary='',
+                          ledger_record=None, pin_dispatch=None, summary='', stderr=None,
                           owner_ref=('https://github.com/davidcatcat/davidcattoolsproject/'
                                      'issues/289#issuecomment-1')):
         # #1502 WP-F: role cards go through the real build_role_cards(); only
@@ -209,7 +211,7 @@ class AgyRouteWiringTests(unittest.TestCase):
             task, registration, snapshot.head, test_policy='LOCAL')
         usage = ({'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5}
                  if usage is None else usage)
-        result = SimpleNamespace(session_id=session_id, model=verified_model, exit_code=0, summary=summary,
+        result = SimpleNamespace(session_id=session_id, model=verified_model, exit_code=0, summary=summary, stderr_excerpt=stderr,
             stdout_sha256='e' * 64, elapsed_ms=42, cleanup_status='CONFIRMED', usage=usage)
         allowed = SimpleNamespace(allowed=True, reason_code='OWNER_ASSIGNMENT_MATCHED')
         denied = SimpleNamespace(allowed=False, reason_code='OWNER_ASSIGNMENT_MISMATCH')
@@ -707,6 +709,68 @@ class AgyRouteWiringTests(unittest.TestCase):
             diff_bytes=b'', changed_paths=[], summary='   ')
         self.assertEqual(task['developer']['error_code'], 'AGY_EMPTY_RESULT')
         self.assertNotIn('reported', task['developer'])
+
+    # #2503: the tail of AGY's stderr is kept for the PM as developer.stderr_excerpt.
+
+    def test_agy_stderr_is_kept_on_a_recorded_result(self):
+        _status, task, _events = self._run_agy_real_store(
+            summary='done', stderr=b'notice: run_command was soft-denied in headless mode\n')
+        self.assertEqual(task['developer']['stderr_excerpt'],
+                         'notice: run_command was soft-denied in headless mode')
+
+    def test_agy_empty_stderr_adds_no_field(self):
+        _status, task, _events = self._run_agy_real_store(summary='done', stderr=b'')
+        self.assertNotIn('stderr_excerpt', task['developer'])
+
+    def test_agy_oversized_stderr_keeps_the_tail(self):
+        raw = b'progress line\n' * 1000 + b'LAST: login required'
+        _status, task, _events = self._run_agy_real_store(summary='done', stderr=raw)
+        excerpt = task['developer']['stderr_excerpt']
+        self.assertTrue(excerpt.startswith(task_submission_cli.DEVELOPER_REPLY_EARLIER_TRUNCATED))
+        self.assertTrue(excerpt.endswith('LAST: login required'))
+        self.assertLessEqual(len(excerpt.encode('utf-8')),
+                             task_store_module.DEVELOPER_STDERR_EXCERPT_MAX_BYTES)
+
+    def test_agy_unsafe_stderr_is_withheld_and_the_record_still_saved(self):
+        # The stderr screen refuses a harmless sentinel (no credential-shaped data).
+        sentinel = 'SCREEN-REFUSED-SENTINEL-2503'
+        with patch.object(developer_stderr, '_emitted_sensitive',
+                          side_effect=lambda text: sentinel in text):
+            _status, task, _events = self._run_agy_real_store(
+                summary='done', stderr=('auth error ' + sentinel).encode())
+        self.assertEqual(task['developer']['stderr_excerpt'],
+                         task_submission_cli.DEVELOPER_STDERR_WITHHELD)
+
+    def test_agy_route_failure_keeps_its_stderr(self):
+        error = RouteError('AGY_EXIT_NONZERO')
+        error.stderr_excerpt = 'Error: RESOURCE_EXHAUSTED weekly quota'
+        _status, task, _events = self._run_agy_real_store(route_error=error)
+        developer = task['developer']
+        self.assertEqual((developer['state'], developer['error_code']),
+                         ('BLOCKED', 'AGY_EXIT_NONZERO'))
+        self.assertEqual(developer['stderr_excerpt'], 'Error: RESOURCE_EXHAUSTED weekly quota')
+
+    def test_task_store_accepts_only_a_bounded_screened_stderr_excerpt(self):
+        decision = worker_dispatch.PolicyDecision(
+            worker_key='agy', allowed=True, reason_code='OWNER_POLICY_ALLOWED',
+            policy_sha256='f' * 64)
+        limit = task_store_module.DEVELOPER_STDERR_EXCERPT_MAX_BYTES
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve() / 'tasks'
+            with patch.object(task_submission_cli, '_agy_developer_profile',
+                              return_value=('gemini-test', 'high')):
+                _status, task, _events, _ = self._run_agy_delegate(
+                    store=TaskStore(root), decisions=(decision,) * 4,
+                    diff_bytes=b'', changed_paths=[], summary='BLOCKED')
+            store = TaskStore(root)
+            developer = store.get('a' * 32)['developer']
+            saved = store.update('a' * 32, developer=dict(developer, stderr_excerpt='x' * limit))
+            self.assertEqual(saved['developer']['stderr_excerpt'], 'x' * limit)
+            for bad in ('x' * (limit + 1), '', 'bad\x00text', 7, ['list']):
+                with self.subTest(bad=bad if type(bad) is not str else bad[:8]):
+                    with self.assertRaises(Exception):
+                        store.update('a' * 32, developer=dict(developer, stderr_excerpt=bad))
+            self.assertEqual(store.get('a' * 32)['developer']['stderr_excerpt'], 'x' * limit)
 
     def test_agy_screened_diff_is_reported_as_sensitive_output(self):
         marker = 'pass' + 'word'
@@ -1362,8 +1426,8 @@ class AgyRouteWiringTests(unittest.TestCase):
             self.assertEqual(status, 0)
             return prompts[0]
 
-        limit = min(64 * 1024 - 1, resolve_route_max_prompt_bytes('agy'))
-        self.assertEqual(limit, 64 * 1024 - 1)
+        limit = resolve_route_max_prompt_bytes('agy')
+        self.assertEqual(limit, 5 * 1024 * 1024)
         room = limit - len(run(0).encode('utf-8'))
         self.assertGreater(room, 0)
         fitted = run(room)

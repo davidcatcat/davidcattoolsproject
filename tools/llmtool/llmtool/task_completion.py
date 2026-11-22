@@ -56,6 +56,11 @@ _TIMEOUT = 10
 # seconds per registered test module. #1703: test_task_completion alone needs about
 # 310 s on the Mac (300 s caused TEST_RUNNER_TIMEOUT); the gw-agent wiring module ~240 s.
 _TEST_TIMEOUT = 600
+# #2543: wall-clock bound for one whole local run (all modules in sequence).
+# Without it a Task with many eligible modules ran for hours on the Owner Mac
+# while task advance held its locks. Three modules at the per-module cap; the
+# slowest measured module is ~310 s (#1703 above), so about five slow modules fit.
+_TEST_TOTAL_TIMEOUT = 3 * _TEST_TIMEOUT
 _TEST_OUTPUT_LIMIT = 256 * 1024
 # Legacy CI values, kept only for ``llmtool trust verify-legacy`` until #369
 # PR-10. The completion gate reads ``ci_trust`` from trust.json at use time
@@ -2072,7 +2077,10 @@ def _test_excerpt(home, output, code):
 
 def _run_registered_tests(root, source_sha, eligible, *, home, pycache=None):
     evidence = []
+    run_deadline = time.monotonic() + _TEST_TOTAL_TIMEOUT
     for path, kind in eligible:
+        if time.monotonic() >= run_deadline:
+            _stop('TEST_RUNNER_TIMEOUT')
         env = {'PATH': os.path.dirname(sys.executable) + ':/usr/bin:/bin',
                'LC_ALL': 'C', 'HOME': home,
                'PYTHONPATH': str(Path(root) / 'tools' / 'llmtool'),
@@ -2095,7 +2103,7 @@ def _run_registered_tests(root, source_sha, eligible, *, home, pycache=None):
         except OSError:
             _stop('TEST_RUNNER_UNAVAILABLE')
         output = bytearray()
-        deadline = time.monotonic() + _TEST_TIMEOUT
+        deadline = min(time.monotonic() + _TEST_TIMEOUT, run_deadline)
         selector = selectors.DefaultSelector()
         started = time.monotonic()
         try:

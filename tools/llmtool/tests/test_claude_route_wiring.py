@@ -15,6 +15,7 @@ from llmtool import skill_ledger
 from llmtool import skill_manifest
 from llmtool import task_advance
 from llmtool import task_store
+from llmtool import developer_stderr
 from llmtool import worker_dispatch
 from llmtool.developer_routes import (RouteError, resolve_route_max_diff_bytes,
                                      resolve_route_max_prompt_bytes)
@@ -363,7 +364,7 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         self.assertTrue(all('log_path' not in request for request in requests))
         self.assertIn('Claude Developer', prompts[0])
 
-    def _run_with_reply(self, reply, **setup):
+    def _run_with_reply(self, reply, *, stderr=None, **setup):
         # The route keeps the run's parsed CLI result, as _DiagnosedClaudeRoute does.
         cli, store, args, _registration, _evaluations, _prompts, _requests, patches, runner = (
             self._setup(**setup))
@@ -371,7 +372,13 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         def replying_runner(route, request, **kwargs):
             route.parsed_cli_result = (None if reply is None else
                                        {'type': 'result', 'result': reply})
-            return runner(route, request, **kwargs)
+            try:
+                result = runner(route, request, **kwargs)
+            except RouteError as exc:
+                exc.stderr_excerpt = stderr
+                raise
+            result.stderr_excerpt = stderr
+            return result
 
         with contextlib.ExitStack() as stack:
             for item in patches:
@@ -425,6 +432,38 @@ class ClaudeRouteWiringTests(unittest.TestCase):
             None, runner_error=RouteError('CLAUDE_TIMEOUT'))
         self.assertEqual(status, 1)
         self.assertNotIn('reported', developer)
+
+    # #2503: the tail of Claude's stderr is kept for the PM as developer.stderr_excerpt.
+
+    def test_success_keeps_the_stderr_excerpt(self):
+        _cli, status, developer = self._run_with_reply('done', stderr=b'warn: slow network\n')
+        self.assertEqual(status, 0)
+        self.assertEqual(developer['stderr_excerpt'], 'warn: slow network')
+
+    def test_route_failure_keeps_the_stderr_excerpt(self):
+        _cli, status, developer = self._run_with_reply(
+            None, stderr=b'Error: please run /login\n',
+            runner_error=RouteError('CLAUDE_EXIT_NONZERO'))
+        self.assertEqual(status, 1)
+        self.assertEqual(developer['stderr_excerpt'], 'Error: please run /login')
+
+    def test_oversized_stderr_keeps_the_tail(self):
+        _cli, _status, developer = self._run_with_reply(
+            'done', stderr=b'trace line\n' * 2000 + b'LAST: auth expired')
+        self.assertTrue(developer['stderr_excerpt'].endswith('LAST: auth expired'))
+        self.assertLessEqual(len(developer['stderr_excerpt'].encode('utf-8')), 4 * 1024)
+
+    def test_unsafe_stderr_is_withheld(self):
+        sentinel = 'SCREEN-REFUSED-SENTINEL-2503'
+        with patch.object(developer_stderr, '_emitted_sensitive',
+                          side_effect=lambda text: sentinel in text):
+            _cli, _status, developer = self._run_with_reply(
+                'done', stderr=('notice ' + sentinel).encode())
+        self.assertEqual(developer['stderr_excerpt'], developer_stderr.WITHHELD)
+
+    def test_empty_stderr_adds_no_field(self):
+        _cli, _status, developer = self._run_with_reply('done', stderr=b'')
+        self.assertNotIn('stderr_excerpt', developer)
 
     def _run_with_cards(self, cards, **git_kwargs):
         """One successful run whose cards come from real build_role_cards()."""
@@ -639,8 +678,8 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                     args, store=store, route_runner=runner), 0)
             return prompts[0]
 
-        limit = min(64 * 1024 - 1, resolve_route_max_prompt_bytes('claude'))
-        self.assertLess(limit, 64 * 1024)
+        limit = resolve_route_max_prompt_bytes('claude')
+        self.assertEqual(limit, 5 * 1024 * 1024)
         room = limit - len(run(0).encode('utf-8'))
         self.assertGreater(room, 0)
         fitted = run(room)

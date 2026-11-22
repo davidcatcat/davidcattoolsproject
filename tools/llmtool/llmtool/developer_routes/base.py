@@ -24,9 +24,13 @@ from typing import Any, Mapping
 from ..errors import LLMToolError
 from ..providers.cli_lifecycle import CLIProcessLifecycle
 from .. import authorization_workflow_grant
+from .. import developer_stderr
 from .. import task_completion
 
-MAX_STDOUT_BYTES = 1024 * 1024
+# #2281 (Owner 2026-11-21): the provider reply travels on stdout; like every
+# other AI Developer route byte bound below 5 MiB, it is raised to 5242880.
+MAX_STDOUT_BYTES = 5 * 1024 * 1024
+# Stderr stays a small diagnostic bound; it is never the Developer reply.
 MAX_STDERR_BYTES = 64 * 1024
 # Route timeouts come from developer-routes.json (default_timeout and
 # max_timeout per route). A route without registry limits keeps the former
@@ -38,25 +42,29 @@ MAX_TIMEOUT_SECONDS = DEFAULT_TIMEOUT_SECONDS
 TIMEOUT_KEYS = frozenset({'default_timeout', 'max_timeout'})
 DEFAULT_MAX_DIFF_BYTES = 64 * 1024
 MIN_MAX_DIFF_BYTES = 1024
-# #1815: the TaskStore artifact limit (task_store.MAX_ARTIFACT_BYTES).
-HARD_MAX_DIFF_BYTES = 512 * 1024
+# #1815: the TaskStore artifact limit (task_store.MAX_ARTIFACT_BYTES). #2281
+# (Owner 2026-11-21) raises it with the route ceiling to 5 MiB.
+HARD_MAX_DIFF_BYTES = 5 * 1024 * 1024
+# #2281 (Owner 2026-11-21): 5 MiB is the hard ceiling for every route-level
+# byte bound in developer-routes.json. A larger value is refused at load.
+HARD_MAX_BYTE_BOUND = 5 * 1024 * 1024
 # #2157: Developer read and write path caps per route. TaskStore stores at most
 # 32 of each per Developer record, so a route may lower the cap but not raise it.
 DEFAULT_MAX_TASK_PATHS = 32
 HARD_MAX_TASK_PATHS = 32
-DEFAULT_CLAUDE_MAX_PROMPT_BYTES = 65536
-DEFAULT_AGY_MAX_PROMPT_BYTES = 512 * 1024
-DEFAULT_OPENCODE_MAX_PROMPT_BYTES = 65536
+DEFAULT_CLAUDE_MAX_PROMPT_BYTES = HARD_MAX_BYTE_BOUND
+DEFAULT_AGY_MAX_PROMPT_BYTES = HARD_MAX_BYTE_BOUND
+DEFAULT_OPENCODE_MAX_PROMPT_BYTES = HARD_MAX_BYTE_BOUND
 DEFAULT_ROUTE_MAX_PROMPT_BYTES = {
     'claude': DEFAULT_CLAUDE_MAX_PROMPT_BYTES,
     'agy': DEFAULT_AGY_MAX_PROMPT_BYTES,
     'opencode': DEFAULT_OPENCODE_MAX_PROMPT_BYTES,
 }
-DEFAULT_OPENCODE_MAX_SOURCE_FILE_BYTES = 1024 * 1024
+DEFAULT_OPENCODE_MAX_SOURCE_FILE_BYTES = HARD_MAX_BYTE_BOUND
 DEFAULT_ROUTE_MAX_SOURCE_FILE_BYTES = {
     'opencode': DEFAULT_OPENCODE_MAX_SOURCE_FILE_BYTES,
 }
-DEFAULT_OPENCODE_MAX_SOURCE_TOTAL_BYTES = 2 * 1024 * 1024
+DEFAULT_OPENCODE_MAX_SOURCE_TOTAL_BYTES = HARD_MAX_BYTE_BOUND
 DEFAULT_ROUTE_MAX_SOURCE_TOTAL_BYTES = {
     'opencode': DEFAULT_OPENCODE_MAX_SOURCE_TOTAL_BYTES,
 }
@@ -67,35 +75,23 @@ ROUTE_LIMIT_KEYS = TIMEOUT_KEYS | {
 
 
 def max_diff_bytes_ok(value: Any) -> bool:
-    """Return True only for an int (not bool) with MIN_MAX_DIFF_BYTES <= value <= HARD_MAX_DIFF_BYTES."""
-    return type(value) is int and MIN_MAX_DIFF_BYTES <= value <= HARD_MAX_DIFF_BYTES
+    """Return True only for an int (not bool) with MIN_MAX_DIFF_BYTES <= value <= HARD_MAX_BYTE_BOUND."""
+    return type(value) is int and MIN_MAX_DIFF_BYTES <= value <= HARD_MAX_BYTE_BOUND
 
 
 def max_prompt_bytes_ok(value: Any) -> bool:
-    """Return True only for an int (not bool) >= 1.
-
-    No upper bound is enforced here; the configured value is bounded only by
-    available memory and provider limits.
-    """
-    return type(value) is int and value >= 1
+    """Return True only for an int (not bool) with 1 <= value <= HARD_MAX_BYTE_BOUND."""
+    return type(value) is int and 1 <= value <= HARD_MAX_BYTE_BOUND
 
 
 def max_source_file_bytes_ok(value: Any) -> bool:
-    """Return True only for an int (not bool) >= 1.
-
-    No upper bound is enforced here; the configured value is bounded only by
-    available memory and provider limits.
-    """
-    return type(value) is int and value >= 1
+    """Return True only for an int (not bool) with 1 <= value <= HARD_MAX_BYTE_BOUND."""
+    return type(value) is int and 1 <= value <= HARD_MAX_BYTE_BOUND
 
 
 def max_source_total_bytes_ok(value: Any) -> bool:
-    """Return True only for an int (not bool) >= 1.
-
-    No upper bound is enforced here; the configured value is bounded only by
-    available memory and provider limits.
-    """
-    return type(value) is int and value >= 1
+    """Return True only for an int (not bool) with 1 <= value <= HARD_MAX_BYTE_BOUND."""
+    return type(value) is int and 1 <= value <= HARD_MAX_BYTE_BOUND
 
 
 def max_task_paths_ok(value: Any) -> bool:
@@ -127,6 +123,9 @@ class RouteError(LLMToolError):
         self.provider_evidence = (dict(provider_evidence)
                                   if provider_evidence is not None else None)
         self.execution_facts = None
+        # #2503: run_route sets this to the screened, bounded stderr tail
+        # (developer_stderr) once the process ran; never the raw stream.
+        self.stderr_excerpt = None
 
 
 # #2281 W3: a workflow path is accepted only when the merged W1 grant module
@@ -258,6 +257,9 @@ class RouteResult:
     cleanup_status: str
     boundary: Mapping[str, Any]
     provider_evidence: Mapping[str, Any] | None = None
+    # #2503: the screened, bounded tail of the CLI's stderr (developer_stderr), never
+    # the raw stream.
+    stderr_excerpt: str | None = None
 
 
 class DeveloperRoute(ABC):
@@ -535,8 +537,8 @@ def resolve_route_max_prompt_bytes(route: Any, *,
     route is a registered route name or a DeveloperRoute; config is a
     load_route_config() result (None loads the repository file). A route
     without max_prompt_bytes returns today's default for that route
-    (65536 for claude and opencode, 524288 for agy). An invalid value, unknown str route
-    or bad config raises RouteError('ROUTE_CONFIG_INVALID').
+    (5242880 for claude, agy and opencode, #2281). An invalid value, unknown
+    str route or bad config raises RouteError('ROUTE_CONFIG_INVALID').
     """
     if isinstance(route, DeveloperRoute):
         name = getattr(route, 'name', None)
@@ -582,7 +584,7 @@ def resolve_route_max_source_file_bytes(route: Any, *,
     route is a registered route name or a DeveloperRoute; config is a
     load_route_config() result (None loads the repository file). A route
     without max_source_file_bytes returns today's default for that route
-    (1048576 for opencode). An invalid value, unknown str route or bad config
+    (5242880 for opencode). An invalid value, unknown str route or bad config
     raises RouteError('ROUTE_CONFIG_INVALID').
     """
     if isinstance(route, DeveloperRoute):
@@ -629,7 +631,7 @@ def resolve_route_max_source_total_bytes(route: Any, *,
     route is a registered route name or a DeveloperRoute; config is a
     load_route_config() result (None loads the repository file). A route
     without max_source_total_bytes returns today's default for that route
-    (2097152 for opencode). An invalid value, unknown str route or bad config
+    (5242880 for opencode). An invalid value, unknown str route or bad config
     raises RouteError('ROUTE_CONFIG_INVALID').
     """
     if isinstance(route, DeveloperRoute):
@@ -1250,7 +1252,9 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
     if log_path is not None:
         try:
             raw_log = Path(log_path).read_bytes()
-            if len(raw_log) > 4 * 1024 * 1024:
+            # #2281: the route log is read on the Developer result path, so it
+            # follows the same 5 MiB ceiling as every other route byte bound.
+            if len(raw_log) > HARD_MAX_BYTE_BOUND:
                 raise RouteError(_route_code(route, 'MODEL_UNVERIFIED'))
             log_text = raw_log.decode('utf-8')
         except RouteError:
@@ -1356,10 +1360,13 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
                                verified, value['effort'], parsed.get('usage'), changed,
                                code, stdout_hash, elapsed,
                                getattr(execute, 'last_cleanup_status', 'UNKNOWN'), dict(proof),
-                               _result_evidence(route, parsed))
+                               _result_evidence(route, parsed),
+                               stderr_excerpt=developer_stderr.safe_excerpt(stderr))
         except Exception:
             raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
     except RouteError as exc:
         if exc.execution_facts is None:
             exc.execution_facts = _post_run_execution_facts(code, stdout, started, execute)
+        if exc.stderr_excerpt is None and type(stderr) is bytes:
+            exc.stderr_excerpt = developer_stderr.safe_excerpt(stderr)
         raise

@@ -32,12 +32,14 @@ from .task_store import (TaskStore, TaskStoreConflict, new_id, _json_bytes,
                          _DIRECT_EXECUTION_FIELDS, _NO_CHANGES_MAX_TURNS,
                          _NO_CHANGES_REASON_MAX_CHARS, valid_provider_evidence,
                          CLAUDE_FAILURE_EXIT_CODE_RANGE, valid_claude_failure_evidence,
-                         valid_claude_failure_evidence_record, _valid_reported_text)
+                         valid_claude_failure_evidence_record, _valid_reported_text,
+                         DEVELOPER_STDERR_EXCERPT_MAX_BYTES)
 from . import active_pm_inbox
 from . import remote_test
 from . import task_completion
 from . import direct_reassignment
 from . import opencode_direct_developer
+from . import developer_stderr
 from . import codex_direct_developer
 from . import worker_dispatch
 from . import worker_availability
@@ -72,8 +74,13 @@ TEXT_DEVELOPER_CONTEXT_SEPARATOR = (
     '\n\nThe model has no tools, cannot read files, and all needed file content is provided below.\n\n'
 )
 
-REQUEST_LIMIT = 64 * 1024
-RESPONSE_LIMIT = 64 * 1024
+# #2281 (Owner 2026-11-21): every AI Developer route request, response and
+# reply bound below 5 MiB is raised to 5242880 end to end.
+REQUEST_LIMIT = 5 * 1024 * 1024
+RESPONSE_LIMIT = 5 * 1024 * 1024
+# #2281: the rejected-output capture keeps its own private 64 KiB bound; the
+# wider provider request/reply limits do not widen this owner-private file.
+REJECTED_OUTPUT_CAPTURE_MAX_BYTES = 64 * 1024
 _PROFILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}')
 # No production Reviewer dispatcher is installed. A future Host runtime may
 # bind this internal seam only after a separate authority/runtime grant.
@@ -155,7 +162,9 @@ def _background_read(fd):
             raise LLMToolError('background Developer exited before its launch receipt')
         header.extend(chunk)
     size = int.from_bytes(header, 'big')
-    if size > 1024 * 1024:
+    # #2281 (Owner 2026-11-21): the background Developer's result travels on
+    # this channel, so its 1 MiB bound is raised with every other reply bound.
+    if size > RESPONSE_LIMIT:
         raise LLMToolError('background Developer startup result exceeded its limit')
     raw = bytearray()
     while len(raw) < size:
@@ -642,6 +651,10 @@ def _direct_result_packet(task, developer, executor_task_id, evidence):
     }
     if 'reported' in developer:
         packet['developer_reported'] = _developer_reported_packet(developer['reported'])
+    if 'stderr_excerpt' in developer:
+        # #2503: the CLI's stderr tail, kept apart from the Developer's own claims.
+        packet['developer_stderr'] = {'label': 'Developer-runtime, unverified',
+                                      'excerpt': developer['stderr_excerpt']}
     return packet
 
 
@@ -3421,10 +3434,10 @@ def _capture_rejected_output(store, task_id, value):
     """Persist a bounded owner-private, redacted diagnostic capture; return ref and digest."""
     text = _redact_rejected_output(value)
     raw = text.encode('utf-8', 'replace')
-    truncated = len(raw) > RESPONSE_LIMIT
+    truncated = len(raw) > REJECTED_OUTPUT_CAPTURE_MAX_BYTES
     if truncated:
         marker = b'\n[TRUNCATED]\n'
-        prefix = raw[:RESPONSE_LIMIT - len(marker)].decode('utf-8', 'ignore').encode('utf-8')
+        prefix = raw[:REJECTED_OUTPUT_CAPTURE_MAX_BYTES - len(marker)].decode('utf-8', 'ignore').encode('utf-8')
         raw = prefix + marker
     store._ensure_root()
     parent = store.root / 'rejected-developer-output'
@@ -4411,7 +4424,7 @@ def _store_accepts_direct_execution(developer):
             execution['cleanup_status'] != 'CONFIRMED' or
             type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None or
             not _bounded_int(execution['elapsed_ms'], 0, 86_400_000) or
-            not _bounded_int(execution['source_bytes'], 0, 2 * 1024 * 1024) or
+            not _bounded_int(execution['source_bytes'], 0, 5 * 1024 * 1024) or
             not _bounded_int(execution['source_file_count'], 1, DEVELOPER_TASK_MAX_PATHS) or
             (manifest is not None and
              (type(manifest) is not str or
@@ -5054,8 +5067,10 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
     if prompt_size > REQUEST_LIMIT:
         raise LLMToolError('OPENCODE_SKILL_PROMPT_TOO_LARGE')
     _screen_text(prompt, REQUEST_LIMIT)
+    # #2543: same test-policy selection as AGY/Claude/gw-agent/Codex. LOCAL ran
+    # every module on the Owner Mac at completion even when EC2 admits them all.
     callback_policy = (direct_reassignment.test_policy(reassignment) if reassignment is not None
-                       else 'LOCAL')
+                       else _remote_receipt_test_policy(task, read_paths=read_paths))
     developer = {
         'assignment_id': reassignment.assignment if reassignment else new_id(),
         'selection_source': args.selection_source,
@@ -5203,6 +5218,8 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
                     'source_file_count': exc.source_file_count,
                     'source_manifest_sha256': exc.source_manifest_sha256,
                 }, getattr(exc, 'provider_evidence', None), 'opencode'))
+            # #2503: OpenCode's stderr (provider, quota or auth errors) for the PM.
+            _attach_stderr_excerpt(developer, getattr(exc, 'stderr_excerpt', None))
         else:
             developer.update(state='DEVELOPER_UNAVAILABLE',
                               error_code=exc.direct_opencode_code)
@@ -5254,7 +5271,7 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
             raise LLMToolError('OpenCode changed the registered Git identity')
         changed_paths, artifact_raw = task_completion._worktree_diff(
             registration.root, snapshot.head)
-        if len(artifact_raw) > 64 * 1024:
+        if len(artifact_raw) > 5 * 1024 * 1024:
             raise LLMToolError('OpenCode diff exceeds the supported size')
         artifact = artifact_raw.decode('utf-8', 'strict')
         rejection = _developer_output_rejection(
@@ -5264,6 +5281,7 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         # #2503: keep OpenCode's own text for the PM. It is the whole run's text
         # stream, so the end (the final answer) is kept when it must be cut.
         _attach_developer_reply(developer, getattr(result, 'text', None), keep_end=True)
+        _attach_stderr_excerpt(developer, getattr(result, 'stderr_excerpt', None))
         if rejection is not None:
             saved = _persist_developer_output_rejection(
                 store, task['task_id'], developer, rejection, result.usage, artifact,
@@ -5587,7 +5605,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         raise LLMToolError('request or response exceeds the supported size')
     card_prefix, card_prefix_sha256 = _developer_card_prefix(task, registration, 'agy')
     prompt = instructions + card_prefix + task_json
-    if len(prompt.encode('utf-8')) > min(64 * 1024 - 1, agy_max_prompt_bytes):
+    if len(prompt.encode('utf-8')) > agy_max_prompt_bytes:
         raise LLMToolError('AGY_SKILL_PROMPT_TOO_LARGE')
     provider_input_bytes = len(prompt.encode('utf-8'))
     test_policy = (direct_reassignment.test_policy(reassignment) if reassignment is not None
@@ -5643,6 +5661,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     except TaskStoreConflict:
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
     owner_gate_denied = False
+    result = None
     expected_developer = copy.deepcopy(store.get(task['task_id'])['developer'])
     try:
         developer.update(state='DEVELOPER_DISPATCHING', provider_type='agy-cli', model=model)
@@ -5752,6 +5771,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         # #2503: the PM sees AGY's own reply (for example BLOCKED with the
         # missing read paths), whether or not the worktree changed.
         _attach_developer_reply(developer, getattr(result, 'summary', None))
+        _attach_stderr_excerpt(developer, getattr(result, 'stderr_excerpt', None))
         if (type(result.session_id) is str and
                 AGY_CONVERSATION.fullmatch(result.session_id)):
             binding = _bind_codex_native_session(registration, result.session_id)
@@ -5770,6 +5790,9 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         error_code = ('AGY_DISPATCH_DENIED' if owner_gate_denied else exc.code)
         developer.update(state='BLOCKED', provider_type='agy-cli', model=model,
                          error_code=error_code, artifact=None, artifact_sha256=None)
+        # #2503: AGY's stderr (soft-deny notices, quota or auth errors) for the PM.
+        _attach_stderr_excerpt(developer, getattr(exc, 'stderr_excerpt', None) or
+                               getattr(result, 'stderr_excerpt', None))
         if owner_gate_denied:
             developer['blocked_reason'] = 'OWNER_DISPATCH_DENIED'
         elif exc.blocked_reason is not None:
@@ -5790,6 +5813,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         developer.update(state='BLOCKED', provider_type='agy-cli', model=model,
                          error_code='AGY_RESULT_UNKNOWN', artifact=None,
                          artifact_sha256=None)
+        _attach_stderr_excerpt(developer, getattr(result, 'stderr_excerpt', None))
         store.compare_and_update(task['task_id'], expected={'developer': expected_developer},
                                  developer=developer)
         _print(_task_view(store.get(task['task_id'])))
@@ -5912,7 +5936,7 @@ def _claude_no_changes_reason(text, sent_texts):
         if not value or not value.isprintable():
             return 'UNKNOWN'
         try:
-            _screen_text(value, 4 * 1024 * 1024)
+            _screen_text(value, 5 * 1024 * 1024)
         except LLMToolError:
             return 'UNKNOWN'
     try:
@@ -5959,8 +5983,8 @@ def _claude_no_changes_diagnosis(raw, sent_texts):
 # developer.reported.summary (Developer-reported, unverified). The bound is the
 # TaskStore limit for the reported object as ASCII JSON.
 CLAUDE_REPLY_MAX_REPORTED_BYTES = 8 * 1024
-# The whole reply is screened before any cut; Claude stdout is at most 1 MiB.
-_CLAUDE_REPLY_SCREEN_LIMIT = 1024 * 1024
+# The whole reply is screened before any cut (#2281: 5 MiB screen bound).
+_CLAUDE_REPLY_SCREEN_LIMIT = 5 * 1024 * 1024
 CLAUDE_REPLY_TRUNCATED = ' [truncated]'
 CLAUDE_REPLY_WITHHELD = ('[Developer reply withheld: it did not pass the credential '
                          'and character screen]')
@@ -6026,6 +6050,29 @@ def _cut_reply(summary, kept, keep_end):
     if keep_end:
         return DEVELOPER_REPLY_EARLIER_TRUNCATED + summary[len(summary) - kept:].lstrip()
     return summary[:kept].rstrip() + CLAUDE_REPLY_TRUNCATED
+
+
+# #2503: the screened stderr tail lives in developer_stderr; these names keep
+# one place for the delegate code and its tests.
+DEVELOPER_STDERR_WITHHELD = developer_stderr.WITHHELD
+
+
+def _bounded_stderr_excerpt(raw):
+    """#2503: developer_stderr.excerpt (raw stream bytes or an earlier excerpt)."""
+    return developer_stderr.excerpt(raw)
+
+
+def _attach_stderr_excerpt(developer, raw):
+    """#2503: set developer.stderr_excerpt (Developer-runtime, unverified) only to a
+    value the store accepts; never raises. raw is a route's screened excerpt or
+    the stream itself; both are screened and bounded again here."""
+    try:
+        excerpt = _bounded_stderr_excerpt(raw)
+        if (type(excerpt) is str and
+                _valid_reported_text(excerpt, DEVELOPER_STDERR_EXCERPT_MAX_BYTES)):
+            developer['stderr_excerpt'] = excerpt
+    except Exception:
+        pass
 
 
 def _claude_attach_no_change_reply(developer, raw):
@@ -6175,7 +6222,7 @@ def _claude_committed_carry(task, store, registration, snapshot, developer, comp
                              limit=4096)
         committed = task_completion._committed_changed_paths(registration.root, base, head)
         changed_paths, raw = task_completion._worktree_diff(registration.root, base)
-        if (sorted(set(changed_paths)) != committed or not raw or len(raw) > 64 * 1024 or
+        if (sorted(set(changed_paths)) != committed or not raw or len(raw) > 5 * 1024 * 1024 or
                 any(path not in write_paths for path in committed) or any(
                     (store.get(other).get('developer') or {}).get('executor_task_id') ==
                     registration.task_id and store.get(other)['developer']['state'] ==
@@ -6332,7 +6379,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
         raise LLMToolError('request or response exceeds the supported size')
     card_prefix, card_prefix_sha256 = _developer_card_prefix(task, registration, 'claude')
     prompt = instructions + card_prefix + task_json
-    if len(prompt.encode('utf-8')) > min(64 * 1024 - 1, claude_max_prompt_bytes):
+    if len(prompt.encode('utf-8')) > claude_max_prompt_bytes:
         raise LLMToolError('CLAUDE_SKILL_PROMPT_TOO_LARGE')
     provider_input_bytes = len(prompt.encode('utf-8'))
     test_policy = _remote_receipt_test_policy(task, read_paths=read_paths)
@@ -6453,6 +6500,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
             carried_reply = getattr(route, 'parsed_cli_result', None)
             _attach_developer_reply(
                 carry[0], carried_reply.get('result') if type(carried_reply) is dict else None)
+            _attach_stderr_excerpt(carry[0], getattr(result, 'stderr_excerpt', None))
             try:
                 store.compare_and_update(task['task_id'], expected={'developer': developer},
                                          developer=carry[0], completion=carry[1])
@@ -6482,12 +6530,16 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
         parsed_reply = getattr(route, 'parsed_cli_result', None)
         _attach_developer_reply(
             developer, parsed_reply.get('result') if type(parsed_reply) is dict else None)
+        _attach_stderr_excerpt(developer, getattr(result, 'stderr_excerpt', None))
     except _ClaudeCommittedCarry:
         return run_task_direct_result_event(task['task_id'], registration.task_id, store=store)
     except RouteError as exc:
         error_code = ('CLAUDE_DISPATCH_DENIED' if owner_gate_denied else exc.code)
         developer.update(state='BLOCKED', provider_type='claude-cli', model=model,
                          error_code=error_code, artifact=None, artifact_sha256=None)
+        # #2503: Claude's stderr (auth, quota or CLI errors) for the PM.
+        _attach_stderr_excerpt(developer, getattr(exc, 'stderr_excerpt', None) or
+                               getattr(result, 'stderr_excerpt', None))
         if result is not None:
             # #2275: a returned route result decides, not the error code.
             execution, usage = _claude_post_result_execution(result)
@@ -6528,6 +6580,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
         developer.update(state='BLOCKED', provider_type='claude-cli', model=model,
                          error_code='CLAUDE_RESULT_UNKNOWN', artifact=None,
                          artifact_sha256=None)
+        _attach_stderr_excerpt(developer, getattr(result, 'stderr_excerpt', None))
         if result is not None:
             # #2275: a failure after run_route returned a result (registry read,
             # Git snapshot, worktree diff, UTF-8 decoding, ...) keeps the
@@ -6787,7 +6840,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     expected_developer = copy.deepcopy(claimed['developer'])
 
     def persist_failure(error_code, *, state='DEVELOPER_UNAVAILABLE',
-                        provider_evidence=None, interrupted=False):
+                        provider_evidence=None, interrupted=False, stderr=None):
         # Start from the last saved record, never the in-flight one: the refused
         # write may be what carries the fault, and the saved identity is the only
         # one the store gate lets a failure state keep. A claim refused before
@@ -6812,6 +6865,12 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             condition = _condition_execution(provider_evidence, 'gw-agent', 'UNKNOWN')
             if condition is not None:
                 records.insert(0, {**failed, 'execution': condition})
+        # #2503: first try the record with the CLI's stderr excerpt; a refused
+        # write falls back to the records above, so it never blocks the failure.
+        excerpt = {}
+        _attach_stderr_excerpt(excerpt, stderr)
+        if excerpt:
+            records.insert(0, {**records[0], **excerpt})
         for record in records:
             try:
                 store.compare_and_update(
@@ -6943,6 +7002,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 getattr(result, 'provider_evidence', None), 'gw-agent'))
         # #2503: keep the home LLM's own final reply for the PM.
         _attach_developer_reply(developer, getattr(result, 'summary', None))
+        _attach_stderr_excerpt(developer, getattr(result, 'stderr_excerpt', None))
         site.after_result(result.session_id, task_input)
         # #1535: a D6 keeps the first gw-agent session it took. A later PM Task
         # (fresh session, #1509) or repair round there keeps that session; a D6
@@ -6970,7 +7030,8 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 code = (code + '_' + gateway_code)[:64]
         code = code[:64]
         return persist_failure(code, provider_evidence=(
-            None if owner_gate_denied else getattr(exc, 'provider_evidence', None)))
+            None if owner_gate_denied else getattr(exc, 'provider_evidence', None)),
+            stderr=getattr(exc, 'stderr_excerpt', None))
     except Exception:
         return persist_failure('DEVELOPER_RESULT_UNKNOWN',
                                state='DEVELOPER_OUTCOME_UNKNOWN')
@@ -8536,17 +8597,37 @@ def _scope_advice_items(args, store):
             if type(entries) is list:
                 reports = [item.get('report') for item in entries if type(item) is dict]
         root = getattr(args, 'cwd', None) or os.getcwd()
-        missing = read_scope_advice.missing_read_paths(
-            texts=[goal, getattr(args, 'acceptance', None),
-                   getattr(args, 'repair_packet', None), reports],
-            read_paths=getattr(args, 'read_path', None),
-            write_paths=getattr(args, 'write_path', None),
-            exists=read_scope_advice.git_exists(root))
-        return [read_scope_advice.item(read_scope_advice.READ_MISSING, path,
-                                       'named in the spec, findings or RCA but not in read')
-                for path in missing]
     except Exception:
         return []
+    read_paths = getattr(args, 'read_path', None)
+    write_paths = getattr(args, 'write_path', None)
+    items = []
+
+    def add(check):
+        # Each check is fail-open on its own; one failure never hides the others.
+        try:
+            items.extend(check())
+        except Exception:
+            pass
+
+    add(lambda: [read_scope_advice.item(read_scope_advice.READ_MISSING, path,
+                                        'named in the spec, findings or RCA but not in read')
+                 for path in read_scope_advice.missing_read_paths(
+                     texts=[goal, getattr(args, 'acceptance', None),
+                            getattr(args, 'repair_packet', None), reports],
+                     read_paths=read_paths, write_paths=write_paths,
+                     exists=read_scope_advice.git_exists(root))])
+    add(lambda: read_scope_advice.companion_items(
+        read_paths=read_paths, write_paths=write_paths))
+    add(lambda: read_scope_advice.referencing_tests(
+        root=root, commit='HEAD', read_paths=read_paths, write_paths=write_paths))
+    seen, unique = set(), []
+    for value in items:
+        key = (value['kind'], value['path'])
+        if key not in seen:
+            seen.add(key)
+            unique.append(value)
+    return unique[:read_scope_advice.MAX_ITEMS]
 
 
 def _record_scope_advice(args, store, items):
