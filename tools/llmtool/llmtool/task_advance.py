@@ -721,15 +721,11 @@ def _review_ci_gate(number, head, github_get, latest_out=None):
     required_checks = _required_linux_checks(paths, old_paths)
     if required_checks is None:
         return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
-    # Any required check failure routes to CI_FAILED
+    # Any required Linux-workflow check failure routes to CI_FAILED; the Mac
+    # check requires the post-PASS mac-ci label and stays merge-gated only.
     failed = None
     pending = False
-    all_required = list(required_checks)
-    requires_macos = _mac_ci_runs(paths + old_paths)
-    if requires_macos:
-        all_required.append('check (macOS 3.13)')
-    # #2337: CI repair path needs to cover all required checks
-    for required_name in all_required:
+    for required_name in required_checks:
         candidates = [item for item in runs if item.get('head_sha') == head and
                       item.get('name') == required_name]
         for item in candidates:

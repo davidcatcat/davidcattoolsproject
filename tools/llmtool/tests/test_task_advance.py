@@ -1690,6 +1690,13 @@ class TaskAdvanceCiGateTests(unittest.TestCase):
         self.assertIn(files_read, calls)
         self.assertLess(calls.index(checks_read), calls.index(files_read))
 
+    def test_mac_relevant_code_pr_dispatches_reviewer_without_mac_run(self):
+        result, dispatched, _ = self.advance_with_ci(
+            ({'total_count': 1, 'check_runs': [check_run()]},
+             [{'filename': 'tools/llmtool/llmtool/module.py'}]))
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(len(dispatched), 1)
+
     def test_missing_run_waits_without_dispatch(self):
         result, dispatched, _ = self.advance_with_ci(
             ({'total_count': 0, 'check_runs': []}, [{'filename': 'src/app.py'}]))
@@ -2052,6 +2059,24 @@ class TaskAdvanceCiFailRepairTests(unittest.TestCase):
                          ('CI_FAILED', ['LINUX_CI_FAILED']))
         self.assertEqual((repaired, dispatched), ([], []))
         self.assertNotIn('check-runs/2', calls)
+
+    def test_skipped_and_advisory_checks_do_not_trigger_repair(self):
+        docs_skipped = check_run(2, name='check (docs)', conclusion='skipped')
+        reply = ({'total_count': 1, 'check_runs': [docs_skipped]},
+                 [{'filename': 'docs/guide.md'}])
+        result, dispatched, calls, repaired, _ = advance_with_ci_repair(reply)
+        self.assertEqual((result['step'], result['codes']),
+                         ('CI_FAILED', ['LINUX_CI_FAILED']))
+        self.assertEqual((repaired, dispatched), ([], []))
+        self.assertNotIn('check-runs/2', calls)
+
+        advisory_fail = check_run(3, name='advisory check', conclusion='failure')
+        reply = ({'total_count': 2, 'check_runs': [check_run(1), advisory_fail]},
+                 [{'filename': 'tools/llmtool/llmtool/module.py'}])
+        result, dispatched, _, repaired, _ = advance_with_ci_repair(reply)
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(len(dispatched), 1)
+        self.assertEqual(repaired, [])
 
 
 class TaskAdvancePublishTests(unittest.TestCase):
