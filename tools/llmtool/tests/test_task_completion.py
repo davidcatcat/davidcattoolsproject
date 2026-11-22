@@ -5239,11 +5239,13 @@ class TaskCompletionTests(unittest.TestCase):
                     'direct-ready-persist-interrupt-' + type(exception).__name__)
                 original_persist = _persist_direct_callback
 
-                def interrupt_ready(store_arg, task_arg, developer_arg, callback):
+                def interrupt_ready(store_arg, task_arg, developer_arg, callback,
+                                    **kwargs):
                     if (callback.get('state') == 'WAITING_PM' and
                             callback.get('evidence', {}).get('verification_state') == 'READY'):
                         raise exception
-                    return original_persist(store_arg, task_arg, developer_arg, callback)
+                    return original_persist(store_arg, task_arg, developer_arg, callback,
+                                            **kwargs)
 
                 client = FakeClient(Reply('{"schema_version":1,"decision":"STOP",'
                                           '"summary":"Stop."}', {}))
