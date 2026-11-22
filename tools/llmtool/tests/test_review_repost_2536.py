@@ -89,8 +89,11 @@ class RepostCliTest(unittest.TestCase):
         args = SimpleNamespace(task_id=TASK['task_id'], executor_task='executor-1', pr=17,
                                version=1, repost_truncated_fail=True)
         role = {'account': None, 'config_dir': home}
+        recorded = {'state': 'REVIEW_FAIL', 'comment_id': 12}
         with mock.patch.object(review_transcript.role_config, 'resolve_role',
                                return_value=role), \
+                mock.patch.object(review_result, 'record_review_result',
+                                  return_value=recorded), \
                 mock.patch.object(task_submission_cli, '_print') as printed:
             code = task_submission_cli.run_task_review_result(
                 args, store=store, github_get=lambda _url: comments, gh_runner=gh)
@@ -101,7 +104,8 @@ class RepostCliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(posted[0], ['pr', 'comment', '17', '--body', FULL])
         self.assertIn('comment 11', posted[1][4])
-        self.assertEqual((out['state'], out['replaced_comment_id']), ('REPOSTED', 11))
+        self.assertEqual((out['state'], out['replaced_comment_id'], out['new_comment_id'],
+                          out['record_state']), ('REPOSTED', 11, 12, 'REVIEW_FAIL'))
 
     def test_cli_refusal_posts_nothing(self):
         code, posted, out = self.run_cli([_comment(FULL, 11)])
@@ -141,6 +145,76 @@ class NextAdvanceRecordsFindingsTest(unittest.TestCase):
         self.assertEqual(len(events), 2)
         self.assertEqual(review_result.blocking_findings(full), ['F1', 'F2'])
         self.assertEqual(before['review_repairs'], after['review_repairs'])
+
+
+
+class RepostThenAdvanceTest(unittest.TestCase):
+    """#2536 PR 3: from the real decide state (old header-only comment already recorded,
+    full verdict reposted), the repost command records it and advance goes to repair."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        base = rr._store(temp.name)
+        session, reviewer = SESSION, REVIEWER
+
+        class Store(rr.FamilyStore):
+            def get(self, task_id):
+                record = super().get(task_id)
+                for claim in record['review_dispatch_claim']:
+                    claim.update(native_session_id=session, reviewer_task=reviewer)
+                return record
+        self.store = Store(base, 'opencode')
+        digest = self.store.get(rr.TASK)['task_binding']['contract_digest']
+        self.header = ('<!-- activity: type=review_verdict actor=Claude target=PM status=FIX -->\n'
+                       f'Verdict: FAIL | Version: v1 | HEAD: {rr.HEAD}\n'
+                       f'LLMTOOL-REVIEW-BINDING v1 task={rr.TASK} run={rr.RUN} '
+                       f'contract={digest} head={rr.HEAD}')
+        self.full = self.header + '\n\nFinding: F1 [High] a.py:1 synthetic.'
+        self.comments = [_comment(self.header, 7)]
+        review_result.record_review_result(
+            store=self.store, task_id=rr.TASK, executor_task=rr.EXECUTOR, pr_number=rr.PR,
+            github_get=lambda _path: list(self.comments))
+
+    def decide(self):
+        from llmtool import task_advance
+        record = self.store.get(rr.TASK)
+        claims = task_advance._claims(record)
+        related = {'events': list(record.get('completion_events', [])) +
+                   task_advance._review_outcomes(record, claims,
+                                                 lambda _path: list(self.comments)),
+                   'repair_claims': []}
+        d6 = {'result_head': rr.HEAD, 'recorded_result_head': rr.HEAD, 'dirty': False}
+        pr = {'number': rr.PR, 'head': {'sha': rr.HEAD}, 'state': 'open', 'merged': False}
+        return task_advance.decide(record, d6, pr, related)
+
+    def gh(self, _root, args):
+        if args[:2] == ['pr', 'comment'] and args[4].startswith('<!-- activity: type=review_verdict'):
+            self.comments.append(_comment(args[4], 8))
+        return subprocess.CompletedProcess(args, 0, '', '')
+
+    def test_full_repost_without_record_is_stuck_unknown(self):
+        self.assertEqual(self.decide(), 'REPAIR_REVIEW')
+        self.comments.append(_comment(self.full, 8))
+        self.assertEqual(self.decide(), 'REVIEW_OUTCOME_UNKNOWN')
+
+    def test_repost_command_records_so_advance_goes_to_repair(self):
+        home = _home(self, 'Done.\n\n' + self.full)
+        args = SimpleNamespace(task_id=rr.TASK, executor_task=rr.EXECUTOR, pr=rr.PR,
+                               version=1, repost_truncated_fail=True)
+        with mock.patch.object(review_transcript.role_config, 'resolve_role',
+                               return_value={'account': None, 'config_dir': home}), \
+                mock.patch.object(task_submission_cli, '_print') as printed:
+            code = task_submission_cli.run_task_review_result(
+                args, store=self.store, github_get=lambda _path: list(self.comments),
+                gh_runner=self.gh)
+        out = printed.call_args[0][0]
+        self.assertEqual((code, out['record_state'], out['new_comment_id']),
+                         (0, 'REVIEW_FAIL', 8))
+        self.assertEqual(self.decide(), 'REPAIR_REVIEW')
+        events = [e for e in self.store.get(rr.TASK)['completion_events']
+                  if e.get('source') == 'REVIEWER']
+        self.assertEqual(len(events), 2)
 
 
 if __name__ == '__main__':
