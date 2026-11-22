@@ -1957,6 +1957,45 @@ def _publish_base_commits(git_runner, root, remote_head, recorded_main=None, *,
     return bases
 
 
+def _publish_task_scope_bases(git_runner, root, d6, bases, write_paths):
+    """#2534: bases for the per-commit scope walk, or None to keep the full walk.
+
+    The D6's registered base_sha (written by the integrator lifecycle, never
+    by the Developer) may start the walk only when it is an ancestor of HEAD,
+    the remote main tip is local, and the net change base_sha still makes
+    against its merge-base with that tip touches no path outside write_paths.
+    Any doubt returns None, so every commit is judged one by one as before.
+    """
+    base = d6.get('base_sha') if type(d6) is dict else None
+    if type(base) is not str or _HEX40.fullmatch(base) is None or base in bases:
+        return None
+    try:
+        listed = _publish_command(git_runner, root,
+            ['ls-remote', '--heads', 'origin', 'refs/heads/main'])
+        tips = [line.split()[0] for line in listed.splitlines()
+                if len(line.split()) == 2 and line.split()[1] == 'refs/heads/main' and
+                _HEX40.fullmatch(line.split()[0]) is not None]
+        if len(tips) != 1 or tips[0] not in bases:
+            return None
+        main_tip = tips[0]
+        for args in (['cat-file', '-e', f'{base}^{{commit}}'],
+                     ['merge-base', '--is-ancestor', base, 'HEAD']):
+            if getattr(git_runner(root, args), 'returncode', 1) != 0:
+                return None
+        fork = _publish_command(git_runner, root,
+            ['--no-replace-objects', 'merge-base', base, main_tip]).strip()
+        if _HEX40.fullmatch(fork) is None:
+            return None
+        net = _publish_command(git_runner, root,
+            ['--no-replace-objects', 'diff', '--no-renames', '--name-only', '-z',
+             fork, base])
+    except Exception:
+        return None
+    if any(path not in write_paths for path in net.split('\0') if path):
+        return None
+    return list(bases) + [base]
+
+
 def _publish_added_commits(git_runner, root, bases):
     """Return (commit, parents) for every commit HEAD adds over bases.
 
@@ -2148,8 +2187,16 @@ def _publish_task(record, d6, executor_task, *, git_runner=None,
     bases = _publish_base_commits(git_runner, root, remote_head, recorded_main,
                                   materialize=materialize)
     committed = _publish_added_commits(git_runner, root, bases)
+    # #2534: commits the D6 already held when the integrator registered it
+    # (base_sha) are branch history, not this Task's work. Judge them by the
+    # net content they still differ from main by; judge every later commit
+    # one by one as before. Without a usable registered base, all commits are
+    # judged one by one (fail closed).
+    task_bases = _publish_task_scope_bases(git_runner, root, d6, bases, write_paths)
+    scoped = (committed if task_bases is None else
+              _publish_added_commits(git_runner, root, task_bases))
     if any(path not in write_paths
-           for commit, parents in committed
+           for commit, parents in scoped
            for path in _publish_commit_paths(git_runner, root, commit, parents)):
         raise _PublishRefusal('PUBLISH_OUT_OF_SCOPE')
     _publish_screen_commits(git_runner, root, committed)
@@ -2854,6 +2901,8 @@ def _d6_snapshot(record, executor_task, allow_cwd_fallback=False, cwd=None):
             'branch': registration.branch, 'result_head': snapshot.head,
             'recorded_result_head': recorded,
             'registered_result_head': registration.result_sha, 'dirty': not clean,
+            # #2534: the integrator-registered D6 start; publish scope uses it.
+            'base_sha': getattr(registration, 'base_sha', None),
             'state': 'CLEAN' if clean else 'DIRTY',
             'registration_state': getattr(registration, 'state', None),
             'trusted_agent_id': getattr(registration, 'trusted_agent_id', getattr(registration, 'agent_id', None))}
