@@ -1035,6 +1035,8 @@ def add_task_submission_parsers(actions):
                                help='review verdict version (1-9999; default 1)')
     review_result.add_argument('--reviewer-session-done', action='store_true',
                                help='record REVIEW_BLOCKED when no verdict exists')
+    review_result.add_argument('--repost-truncated-fail', action='store_true',
+                               help='#2536: post the full transcript FAIL over its header-only relay')
     high_debug = actions.add_parser('high-debug', help='Run one read-only Codex or Claude diagnosis of an Executor D6')
     high_debug.add_argument('task_id')
     high_debug.add_argument('--executor-task', required=True)
@@ -2405,9 +2407,12 @@ def run_task_claude_bind_checked(args, *, store=None, stdout=None):
     return run_task_claude_bind(args, store=store, stdout=stdout)
 
 
-def run_task_review_result(args, *, store=None, github_get=None):
+def run_task_review_result(args, *, store=None, github_get=None, gh_runner=None):
     """Thin CLI adapter for the durable Reviewer result collector."""
     from .review_result import record_review_result
+    if getattr(args, 'repost_truncated_fail', False):
+        return _repost_truncated_fail(args, store=store, github_get=github_get,
+                                      gh_runner=gh_runner)
     result = record_review_result(
         store=TaskStore() if store is None else store, task_id=args.task_id,
         executor_task=args.executor_task, pr_number=args.pr,
@@ -2415,6 +2420,45 @@ def run_task_review_result(args, *, store=None, github_get=None):
         reviewer_session_done=getattr(args, 'reviewer_session_done', False),
         github_get=github_get)
     return _print(result)
+
+
+def _repost_truncated_fail(args, *, store=None, github_get=None, gh_runner=None):
+    """#2536: PM-run, audited repost of a Claude FAIL relayed without its findings.
+
+    Posts the transcript verdict unedited as a new comment for the same
+    version, then one audit note naming the replaced and new comments. The
+    next ``task advance`` records the FAIL from the newest comment. Every
+    refusal prints its code and posts nothing.
+    """
+    from . import review_result, review_transcript, task_advance
+    store = TaskStore() if store is None else store
+    task = store.get(args.task_id)
+    claim, head = review_result._claim_for(
+        task, executor_task=args.executor_task, pr_number=args.pr,
+        version=getattr(args, 'version', 1))
+    get = task_completion._github_get if github_get is None else github_get
+    comments = get(f'issues/{args.pr}/comments?per_page=100')
+    if type(comments) is list and len(comments) >= 100:
+        comments = None
+    code, block, replaced = review_transcript.truncated_fail_repost(claim, task, comments)
+    base = {'task_id': args.task_id, 'pr': args.pr, 'head': head,
+            'version': claim.get('version'), 'reviewer_task': claim.get('reviewer_task')}
+    if code is not None:
+        _print(dict(base, state='REFUSED', code=code))
+        return 1
+    runner = task_advance._publish_run_gh if gh_runner is None else gh_runner
+    root = os.getcwd()
+    task_advance._post_review_verdict_comment(runner, root, args.pr, block)
+    at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    note = ('<!-- activity: type=pm_progress actor=PM target=PM status=RECORDED -->\n'
+            f'#2536 audited repost at {at}: the Claude Reviewer v{claim.get("version")} FAIL '
+            f'for HEAD {head} (reviewer task {claim.get("reviewer_task")}) was relayed as '
+            f'header only in comment {replaced}; the full verdict from the reviewer transcript '
+            'is posted unedited just above and supersedes it. The next task advance records it.')
+    response = runner(root, ['pr', 'comment', str(args.pr), '--body', note])
+    _print(dict(base, state='REPOSTED', replaced_comment_id=replaced, at=at,
+                audit_note_posted=getattr(response, 'returncode', 1) == 0))
+    return 0
 
 
 def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
