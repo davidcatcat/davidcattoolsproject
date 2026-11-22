@@ -23,9 +23,13 @@ from .task_lifecycle import inspect_task, State, utc_time
 from .task_verification import CriterionKind, EvidenceSource, EvidenceOutcome, parse_evidence_record
 from .run_budget import (RunBudget, UsageLedger, CallPhase, BudgetCode,
                          admit_next, usage_from_provider)
+from .repair_policy import review_source_limit_bytes
 
 PACKET_LIMIT = 256 * 1024
-SOURCE_LIMIT = 128 * 1024
+# #2281 row 12 (basis #131, #165): read the optional policy key once at import.
+# The review path itself must not open files; an absent key keeps the 128 KiB
+# default, and an invalid policy refuses POLICY_INVALID instead of falling back.
+SOURCE_LIMIT = review_source_limit_bytes()
 EVIDENCE_LIMIT = 32 * 1024
 VERDICT_LIMIT = 64 * 1024
 REVIEWER_ROLES = ('llmtool-review/claude-cli', 'llmtool-worker/claude-cli')

@@ -3127,7 +3127,8 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
                 return result(args, output=f"{state['remote']}\trefs/heads/feature/task\n".encode())
             if args == ['ls-remote', '--heads', 'origin', 'refs/heads/main']:
                 return result(args, output=f'{main_head}\trefs/heads/main\n'.encode())
-            if args == ['cat-file', '-e', f'{main_head}^{{commit}}']:
+            if args in (['cat-file', '-e', f'{initial_head}^{{commit}}'],
+                        ['cat-file', '-e', f'{main_head}^{{commit}}']):
                 return result(args)
             if args == ['--no-replace-objects', 'rev-list', '--parents', 'HEAD', '--not',
                         initial_head, main_head]:
