@@ -17,13 +17,13 @@ from llmtool import remote_test, task_advance
 from llmtool.task_store import _json_bytes
 
 try:
-    from tests import test_advance_docs_only as docs
+    from tests import test_advance_docs_only_2473 as docs
     from tests import test_remote_test as remote_fixtures
 except ImportError:
     import os
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import test_advance_docs_only as docs
+    import test_advance_docs_only_2473 as docs
     import test_remote_test as remote_fixtures
 
 
