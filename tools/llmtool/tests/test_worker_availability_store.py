@@ -341,7 +341,11 @@ class GwAgentAvailabilityProbeTests(unittest.TestCase):
                           'dispatch_issue': 289, 'dispatch_evidence_pr': 1})
         repository.start()
         self.addCleanup(repository.stop)
-        self.now = datetime.now(timezone.utc).replace(microsecond=0)
+        # Timestamps passed to the probe are stored observations, and the store
+        # rejects a future observed_at, so start one minute in the past: later
+        # steps in a test stay valid observations without a fake clock.
+        self.now = (datetime.now(timezone.utc).replace(microsecond=0) -
+                    timedelta(minutes=1))
         wa._GW_AGENT_HOLD_NOT_RECORDED = False
         self.addCleanup(setattr, wa, '_GW_AGENT_HOLD_NOT_RECORDED', False)
 
