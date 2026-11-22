@@ -196,3 +196,68 @@ def unposted_verdict(claim, task, *, config_dir=None, run=subprocess.run, claude
         except LLMToolError:
             return state, 'REVIEWER_VERDICT_WITHHELD', None
     return state, code, block
+
+
+def _legacy_header(block):
+    """The text the pre-#2536 relay kept: up to the binding (and an ACCEPT right after it)."""
+    lines = []
+    for line in block.split('\n'):
+        if line.lstrip().startswith('```') or (line != _ACCEPT and any(
+                kept.startswith('LLMTOOL-REVIEW-BINDING ') for kept in lines)):
+            break
+        lines.append(line)
+    return '\n'.join(lines).rstrip()
+
+
+def truncated_fail_repost(claim, task, comments, *, config_dir=None):
+    """#2536: (code, full_block, replaced_comment_id) for a FAIL relayed without findings.
+
+    Every condition must hold, else a refusal code and nothing to post: the
+    claim names a Claude Reviewer session; its transcript yields exactly one
+    verdict bound to this Task/run/contract/HEAD/version and it is a FAIL with
+    findings; the PR holds exactly one verdict comment for that HEAD and
+    version, and it is exactly the pre-#2536 truncated header of that verdict.
+    A PASS is always refused. The block is the transcript text, unedited.
+    """
+    session, reviewer = claim.get('native_session_id'), claim.get('reviewer_task')
+    if (type(session) is not str or not _UUID.fullmatch(session) or
+            type(reviewer) is not str or not _REVIEWER.fullmatch(reviewer)):
+        return 'REPOST_NOT_CLAUDE_REVIEWER', None, None
+    if config_dir is None:
+        role = role_config.resolve_role('reviewer')
+        if claim.get('account') not in (None, role.get('account')):
+            return 'REVIEWER_ACCOUNT_CHANGED', None, None
+        config_dir = role.get('config_dir')
+    if not config_dir:
+        return 'REVIEWER_ACCOUNT_UNCONFIGURED', None, None
+    blocks = verdict_blocks(session, config_dir, reviewer)
+    if blocks is None:
+        return 'REVIEWER_TRANSCRIPT_UNAVAILABLE', None, None
+    head, version = claim.get('head_sha'), claim.get('version')
+    code, block = select_verdict(blocks, task=task, head=head, version=version)
+    if code is not None:
+        return code, None, None
+    if not block.split('\n')[1].startswith('Verdict: FAIL'):
+        return 'REPOST_ONLY_FAIL', None, None
+    if type(comments) is not list:
+        return 'REVIEW_RESULT_COMMENTS_INVALID', None, None
+    posted = []
+    for comment in comments:
+        try:
+            found = review_result._comment_verdict(comment, head=head, version=version,
+                                                   task=task) if type(comment) is dict else None
+        except Exception:
+            found = None
+        if found is not None:
+            posted.append(comment)
+    if len(posted) != 1:
+        return 'REPOST_POSTED_VERDICT_NOT_SINGLE', None, None
+    body = task_completion._canonical_verdict_body(posted[0].get('body'))
+    if body == block or body != _legacy_header(block):
+        return 'REPOST_NOT_TRUNCATED_PREFIX', None, None
+    from .task_submission_cli import _screen_text
+    try:
+        _screen_text(block, 65536)
+    except LLMToolError:
+        return 'REVIEWER_VERDICT_WITHHELD', None, None
+    return None, block, posted[0].get('id')
