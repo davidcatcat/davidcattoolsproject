@@ -6919,12 +6919,17 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     expected_developer = copy.deepcopy(claimed['developer'])
 
     def persist_failure(error_code, *, state='DEVELOPER_UNAVAILABLE',
-                        provider_evidence=None, interrupted=False, stderr=None):
+                        provider_evidence=None, interrupted=False, stderr=None,
+                        error_cause=None):
         # Start from the last saved record, never the in-flight one: the refused
         # write may be what carries the fault, and the saved identity is the only
         # one the store gate lets a failure state keep. A claim refused before
         # DISPATCHING therefore stays unbound, with no provider type or model.
         failed = {**expected_developer, 'state': state, 'error_code': error_code[:64]}
+        if type(error_cause) is str and _ERROR_CAUSE_CODE.fullmatch(error_cause):
+            # #2532 follow-up: the fixed code behind a refused result write
+            # (e.g. TASK_STORE_ARTIFACT_SENSITIVE); never the refused content.
+            failed['error_cause'] = error_cause
         records = [failed]
         if type(developer.get('execution')) is dict:
             # Keep what the run observed, cleanup_status above all, whenever the
@@ -6950,6 +6955,11 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         _attach_stderr_excerpt(excerpt, stderr)
         if excerpt:
             records.insert(0, {**records[0], **excerpt})
+        if 'error_cause' in failed:
+            # The cause is diagnostic only: a store that refuses it must never
+            # block the failure record itself.
+            records.append({key: value for key, value in failed.items()
+                            if key != 'error_cause'})
         for record in records:
             try:
                 store.compare_and_update(
@@ -7124,10 +7134,11 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         store.compare_and_update(
             task['task_id'], expected={'developer': expected_developer},
             developer=developer, completion=completion)
-    except Exception:
+    except Exception as exc:
         if not write_landed(developer):
             return persist_failure('DEVELOPER_RESULT_PERSISTENCE_REJECTED',
-                                   state='DEVELOPER_OUTCOME_UNKNOWN')
+                                   state='DEVELOPER_OUTCOME_UNKNOWN',
+                                   error_cause=_error_cause(exc))
     except BaseException:
         persist_interrupted()
         raise

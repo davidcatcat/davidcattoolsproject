@@ -3245,9 +3245,12 @@ def _validate(record, *, strict=True):
             if artifact is not None:
                 if (type(artifact) is not str or len(artifact.encode('utf-8')) > MAX_ARTIFACT_BYTES or
                         type(artifact_sha) is not str or
-                        hashlib.sha256(artifact.encode('utf-8')).hexdigest() != artifact_sha or
-                        _emitted_sensitive(_added_diff_content(artifact))):
+                        hashlib.sha256(artifact.encode('utf-8')).hexdigest() != artifact_sha):
                     _fail()
+                if _emitted_sensitive(_added_diff_content(artifact)):
+                    # #2532 follow-up: name the refusal (a fixed code, never the
+                    # content) so a Developer route can record why it was refused.
+                    _fail('TASK_STORE_ARTIFACT_SENSITIVE')
             elif artifact_sha is not None:
                 _fail()
             usage = developer['usage']
