@@ -20,6 +20,7 @@ from . import active_pm_inbox, github_events, review_dispatch, review_repair
 from . import github_identity, review_result, sensitive_paths, task_completion
 from . import lineage_counts, mac_full_suite, repair_policy, review_transcript
 from . import remote_test, start_failure, task_submission_cli
+from . import guidance_refresh
 from .ai_github_exec import AiIdentityError, verified_ai_env
 from .errors import LLMToolError
 from .task_store import TaskStore, _json_bytes, external_action_refusal
@@ -1122,7 +1123,7 @@ def _remote_test_receipt_summary(record, head):
                          if type(actions) is dict and type(actions.get('run_id')) is int and actions['run_id'] > 0
                          else None)
         if receipt['result'] == 'PASS' and not remote_test.pass_receipt_covers(
-                receipt, remote_test._task_path_modules(record)):
+                receipt, remote_test.remote_required_modules(record)):
             return None
         summary_result = ('NOT_EXECUTED'
                           if _receipt_not_executed(receipt)
@@ -2206,12 +2207,15 @@ def _publish_task(record, d6, executor_task, *, git_runner=None,
     task_bases = _publish_task_scope_bases(git_runner, root, d6, bases, write_paths)
     scoped = (committed if task_bases is None else
               _publish_added_commits(git_runner, root, task_bases))
-    if any(path not in write_paths
-           for commit, parents in scoped
-           for path in _publish_commit_paths(git_runner, root, commit, parents)):
-        raise _PublishRefusal('PUBLISH_OUT_OF_SCOPE')
+    task_paths = set(changed)
+    for commit, parents in scoped:
+        commit_paths = _publish_commit_paths(git_runner, root, commit, parents)
+        if any(path not in write_paths for path in commit_paths):
+            raise _PublishRefusal('PUBLISH_OUT_OF_SCOPE')
+        task_paths.update(commit_paths)
     _publish_screen_commits(git_runner, root, committed)
 
+    task_commits = list(scoped)
     if changed:
         _publish_command(git_runner, root, ['add', '--', *changed])
         staged = _publish_command(git_runner, root,
@@ -2231,6 +2235,24 @@ def _publish_task(record, d6, executor_task, *, git_runner=None,
         if len(own) != 1 or own[0][0] != local_head or own[0][1] != [previous_head]:
             raise _PublishRefusal('PUBLISH_COMMAND_FAILED')
         _publish_screen_commits(git_runner, root, own)
+        task_commits = own + task_commits
+
+    if any(path in guidance_refresh.GUIDANCE_FILES for path in task_paths):
+        title, _ = _publication_text(record, executor_task, branch)
+        try:
+            refreshed = guidance_refresh.refresh_guidance_hashes(
+                root=root,
+                head=local_head,
+                write_paths=write_paths,
+                task_commits=task_commits,
+                git_runner=git_runner,
+                commit_message=(f'{title} (refresh guidance hash)',
+                                f'llmtool Task {task_id}'),
+            )
+        except guidance_refresh.GuidanceRefreshError as exc:
+            raise _PublishRefusal(exc.code) from None
+        if refreshed['refreshed']:
+            local_head = refreshed['head']
     # #2367 (M1, #1317): record the Developer result head as committed and push
     # it as it is. PUBLISH never merges main into the head; a head behind main
     # or conflicting with it is handled at the merge gate (BEHIND/dirty path).
@@ -2458,7 +2480,7 @@ def _remote_test_status(record, d6):
             continue
         if receipt['result'] == 'PASS':
             if remote_test.pass_receipt_covers(
-                    receipt, remote_test._task_path_modules(record)):
+                    receipt, remote_test.remote_required_modules(record)):
                 return 'PASS', None, receipt
             break
         if receipt['result'] in ('TIMEOUT', 'SHA_MISMATCH'):
@@ -2487,7 +2509,7 @@ def _remote_test_status(record, d6):
             return 'TIMEOUT', None, None
         if (outcome.get('result') == 'ADMISSION_DENIED' and
                 outcome.get('code') == 'MODULE_NOT_ADMITTED' and
-                outcome.get('modules') == [] and not remote_test._task_path_modules(record)):
+                outcome.get('modules') == [] and not remote_test.remote_required_modules(record)):
             return 'ADMISSION_DENIED', None, None
     return None, None, None
 
@@ -3351,6 +3373,27 @@ def _closed_train_member_head(record, task_id, store):
     return None
 
 
+def _stored_merge_replay(record, number, head, pr):
+    """The replay result for an already merged Task, or None.
+
+    Only when the stored merge_attempt is MERGED for exactly this PR and head
+    and the PR snapshot GitHub returned is merged at that same head; anything
+    else returns None and the normal merge gate decides (fail closed).
+    """
+    attempt = record.get('merge_attempt') if type(record) is dict else None
+    if (type(attempt) is not dict or attempt.get('state') != 'MERGED' or
+            type(number) is not int or attempt.get('pr') != number or
+            type(head) is not str or attempt.get('head_sha') != head):
+        return None
+    pr_head = pr.get('head') if type(pr) is dict else None
+    if (type(pr) is not dict or pr.get('number', number) != number or
+            pr.get('merged') is not True or type(pr_head) is not dict or
+            pr_head.get('sha') != head):
+        return None
+    return {'step': 'MERGED', 'codes': [],
+            'result': {'pr': number, 'head': head, 'replay': True}}
+
+
 def _lineage_after_merge(result, store, task_id, record, *, merged_now=False):
     """#1502 WP-D D10f2: close a merged lineage Task once; the merge result never changes.
 
@@ -3369,7 +3412,7 @@ def _lineage_after_merge(result, store, task_id, record, *, merged_now=False):
     try:
         closed = task_submission_cli.lineage_close_merged(store, task_id)
     except Exception:
-        closed = {'code': 'LINEAGE_CLOSE_FAILED'}
+        closed = {'code': 'LINEAGE_CLOSE_FAILED', 'cause': 'UNKNOWN'}
     result['lineage'] = closed
     if type(closed) is dict and closed.get('code') == 'LINEAGE_CLOSE_FAILED':
         result.setdefault('codes', []).append('LINEAGE_CLOSE_FAILED')
@@ -3675,6 +3718,15 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         if d6.get('recorded_result_head') != d6['result_head']:
             return _ack_consumed_events(_merge_refusal('MERGE_STALE_HEAD'),
                                         record, store, d6['result_head'])
+        replay = _stored_merge_replay(record, number, d6['result_head'], pr)
+        if replay is not None:
+            # A stored MERGED attempt whose PR GitHub reports merged at that head:
+            # nothing merges again; only the lineage close is replayed (D10f2), so
+            # a close that failed after the merge (e.g. LINEAGE_LOCK_BUSY) can be
+            # retried. lineage_close_merged is idempotent.
+            replay.update(task_id=task_id, next=replay['step'])
+            _lineage_after_merge(replay, store, task_id, record)
+            return _ack_consumed_events(replay, record, store, d6['result_head'])
         merge_result = _merge_once(store=store, record=record, number=number,
             head=d6['result_head'], pr=pr, events=related['events'], github_get=get,
             gh_runner=_publish_run_gh if merge_gh_runner is None else merge_gh_runner,

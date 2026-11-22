@@ -1083,8 +1083,8 @@ def add_task_submission_parsers(actions):
                                   'runs only as the automatic fallback after Codex Debug '
                                   'reports quota exhausted or login failure'))
     dispute = actions.add_parser(
-        'dispute', help=('Record a PM dispute, deferral or arbiter ruling of one formal '
-                         'review finding; never runs a review'))
+        'dispute', help=('Record a PM dispute, deferral, withdrawal or arbiter ruling '
+                         'of one formal review finding; never runs a review'))
     dispute_actions = dispute.add_subparsers(dest='dispute_action', metavar='ACTION')
     dispute_actions.required = True
     for name, text in (('open', 'Dispute one finding of the recorded FAIL verdict'),
@@ -1109,6 +1109,20 @@ def add_task_submission_parsers(actions):
                                  help='registered D6 Reviewer task id of the arbiter run')
             command.add_argument('--reviewer-session', required=True,
                                  help='native session id of the arbiter run')
+    # #2088: the disputing PM gives up its own OPEN dispute. No ruling, no
+    # evidence URL: the finding stands and goes back to normal review repair.
+    withdraw = dispute_actions.add_parser(
+        'withdraw', help=('Withdraw your own OPEN dispute of one finding; the finding '
+                          'stands and is repaired as usual'))
+    withdraw.add_argument('task_id', help='existing durable Task ID')
+    withdraw.add_argument('--pr', required=True, type=int, help='GitHub pull request number')
+    withdraw.add_argument('--finding', required=True, help='finding ID of the verdict, e.g. F1')
+    withdraw.add_argument('--head', required=True,
+                          help='40-hex PR head of the OPEN dispute entry (selects the entry)')
+    withdraw.add_argument('--pm-session',
+                          help=('caller PM session (native UUID or pm- ID); must own '
+                                'the Task; default: CLAUDE_CODE_SESSION_ID or '
+                                'CODEX_THREAD_ID'))
     repair = actions.add_parser(
         'repair', help='Dispatch one bounded repair for the newest failed formal review')
     repair.add_argument('task_id', help='existing durable Task ID')
@@ -1400,9 +1414,23 @@ def lineage_close_merged(store, task_id):
                     else _lineage_roll_up(store, line['lineage_id']))
             if retry and root is None:
                 return None
-    except LLMToolError:
-        return {'code': 'LINEAGE_CLOSE_FAILED'}
+    except LLMToolError as exc:
+        return {'code': 'LINEAGE_CLOSE_FAILED', 'cause': lineage_close_cause(exc)}
     return {'task_id': task_id, 'state': 'CLOSED', 'owner_notice': None, 'root': root}
+
+
+def lineage_close_cause(exc):
+    """Fixed cause code of a failed lineage close, e.g. LINEAGE_LOCK_BUSY; never data.
+
+    A TaskStore refusal carries its validated code; a lineage refusal is raised
+    with the bare code as its message. Anything else is UNKNOWN.
+    """
+    code = getattr(exc, 'task_store_error_code', None)
+    if type(code) is not str:
+        code = str(exc) if isinstance(exc, LLMToolError) else None
+    if type(code) is str and re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', code):
+        return code
+    return 'UNKNOWN'
 
 
 def _lineage_cli(store, stdout, call):
@@ -3000,11 +3028,54 @@ def dispute_rule(store, task_id, *, pr, finding_id, outcome, reviewer, reviewer_
             'formal_pass_required': True}
 
 
-_DISPUTE_ACTIONS = ('open', 'defer', 'rule')
+def dispute_withdraw(store, task_id, *, pr, finding_id, head):
+    """#2088: the disputing PM withdraws its own OPEN dispute of one finding.
+
+    The one OPEN entry for (pr, finding, head) moves to WITHDRAWN, the store's
+    existing OPEN -> WITHDRAWN step that adds no key. Nothing is ruled: the
+    finding is not withdrawn (withdrawn_findings reads only RULED entries), so
+    the formal FAIL keeps it and review repair and High Debug on that head
+    are no longer blocked by this dispute. This is the "fix it" branch of
+    O3/E10; it never needs or names an arbiter. A replay after a landed write
+    returns the recorded state; a lost compare-and-update refuses and writes
+    nothing, so the next call re-reads.
+    """
+    from .task_store import REVIEW_DISPUTE_FINDING_ID, TaskStoreConflict
+    if (type(pr) is not int or not 1 <= pr <= 9999999 or type(finding_id) is not str or
+            REVIEW_DISPUTE_FINDING_ID.fullmatch(finding_id) is None or
+            type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None):
+        _dispute_refuse('DISPUTE_ARGUMENT_INVALID')
+    record, disputes = _dispute_task(store, task_id)
+    same = [index for index, item in enumerate(disputes)
+            if item.get('pr') == pr and item.get('finding_id') == finding_id and
+            item.get('head_sha') == head]
+    states = [disputes[index].get('state') for index in same]
+    result = {'task_id': task_id, 'state': 'WITHDRAWN', 'pr': pr, 'finding_id': finding_id,
+              'head_sha': head, 'finding_withdrawn': False}
+    open_entries = [index for index in same if disputes[index].get('state') == 'OPEN']
+    if len(open_entries) > 1:
+        _dispute_refuse('DISPUTE_RECORD_INVALID')
+    if not open_entries:
+        if 'RULED' in states:
+            _dispute_refuse('DISPUTE_ALREADY_RULED')
+        if 'WITHDRAWN' in states:
+            return dict(result, replay=True)
+        _dispute_refuse('DISPUTE_NOT_OPEN')
+    updated = list(disputes)
+    updated[open_entries[0]] = dict(disputes[open_entries[0]], state='WITHDRAWN')
+    try:
+        store.compare_and_update(task_id, expected={'record_sha256': record.get('record_sha256')},
+                                 review_disputes=updated)
+    except TaskStoreConflict:
+        _dispute_refuse('DISPUTE_WITHDRAW_CONFLICT')
+    return dict(result, replay=False)
+
+
+_DISPUTE_ACTIONS = ('open', 'defer', 'rule', 'withdraw')
 
 
 def run_task_dispute(args, *, store=None, stdout=None, current_head=None):
-    """Thin CLI adapter for ``task dispute open|defer|rule``.
+    """Thin CLI adapter for ``task dispute open|defer|rule|withdraw``.
 
     The caller's PM session must own the Task. A refusal prints only its code
     and exits 1; nothing here runs or launches a review.
@@ -3017,11 +3088,16 @@ def run_task_dispute(args, *, store=None, stdout=None, current_head=None):
         _print(pm_caller.refusal(args.task_id, exc.code), stdout=stdout)
         return 1
     action = getattr(args, 'dispute_action', None)
-    common = {'pr': args.pr, 'finding_id': args.finding,
-              'evidence_ref': args.evidence_ref, 'current_head': current_head}
     try:
         if action not in _DISPUTE_ACTIONS:
             _dispute_refuse('DISPUTE_ARGUMENT_INVALID')
+        if action == 'withdraw':
+            result = dispute_withdraw(store, args.task_id, pr=args.pr,
+                                      finding_id=args.finding, head=args.head)
+            _print(result, stdout=stdout)
+            return 0
+        common = {'pr': args.pr, 'finding_id': args.finding,
+                  'evidence_ref': args.evidence_ref, 'current_head': current_head}
         if action == 'open':
             result = dispute_open(store, args.task_id, **common)
         elif action == 'defer':
@@ -4187,6 +4263,11 @@ def _docs_only_completion_tests(pr_number, git_evidence, github_get=None):
 
 def _matching_remote_test_receipt(task, *, executor_task, source_sha, paths):
     modules = tuple(sorted({Path(path).stem for path in paths}))
+    if not modules:
+        return None, 'REMOTE_TEST_RECEIPT_MISSING'
+    # #2573: Darwin-only modules are covered by the exact-head Mac CI gate.
+    darwin = remote_test._darwin_only_modules(modules)
+    modules = tuple(module for module in modules if module not in darwin)
     if not modules:
         return None, 'REMOTE_TEST_RECEIPT_MISSING'
     for receipt in reversed(task.get('remote_test_receipts', [])):

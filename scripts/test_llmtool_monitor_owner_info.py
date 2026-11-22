@@ -136,34 +136,61 @@ class TestOwnerNotices(unittest.TestCase):
         ])
         self.assertEqual(notices, [])
 
-    def test_office_view_lists_notices_apart_from_asks(self):
+    def test_office_view_shows_asks_and_no_information_notices(self):
+        # Owner 2026-11-22: the screen lists only what the Owner must decide or
+        # handle; information notices (D4 NOTICE, PM INFO) are never shown.
         ask = mon.owner_pending([comment(208, NOW, ASK + "\nPick a layout")], [])
         notices = mon.owner_notices([comment(209, NOW, NOTICE + "\nSpec error found")])
-        view = mon.office_view([], pending=ask, notices=notices, now=NOW + 60)
+        view = mon.office_view([], pending=ask, notices=notices, now=NOW + 60,
+                               titles={"#208": "Monitor layout choice"})
         lines = [line for line, _ in view]
         styles = dict(view)
         ask_line = next(line for line in lines if "#208" in line)
-        notice_line = next(line for line in lines if "#209" in line)
-        self.assertTrue(ask_line.startswith("★ 等你決定"))
-        self.assertTrue(notice_line.startswith("ℹ "))
-        self.assertNotIn("★", notice_line)
-        self.assertNotIn("等你決定", notice_line)
+        self.assertTrue(ask_line.startswith("★ 等你決定：GitHub #208 Monitor layout choice（"))
+        self.assertIn("Pick a layout", ask_line)
         self.assertEqual(styles[ask_line], "!")
-        self.assertEqual(styles[notice_line], "")
-        self.assertLess(lines.index(ask_line), lines.index(notice_line))
-        self.assertIn("── 通知（只給你看，不用回覆）──", lines)
-        # The title still counts only the ask.
+        self.assertFalse(any("#209" in line or "Spec error found" in line for line in lines))
+        self.assertFalse(any("通知" in line for line in lines))
         self.assertEqual(mon.office_view([], pending=ask, notices=notices, waiting=1, now=NOW)[0][0],
                          "辦公室 · 工作中 0 · 等你 1")
 
-    def test_office_view_shows_at_most_three_notices(self):
-        notices = mon.owner_notices([comment(210 + n, NOW + n, NOTICE + f"\nNotice {n}")
-                                     for n in range(5)])
-        lines = [line for line, _ in mon.office_view([], notices=notices, now=NOW + 60)]
-        shown = [line for line in lines if line.startswith("ℹ GitHub")]
-        self.assertEqual(len(shown), mon.NOTICES_SHOWN)
-        self.assertIn("ℹ …另有 2 則較早的通知", lines)
-        self.assertFalse(any("#210" in line or "#211" in line for line in shown))
+    def test_ask_line_drops_the_record_lead_in(self):
+        ask = [mon.OwnerPending(NOW - 30, "#5", "WAITING",
+                                "actor=PM (main PM d2d52271). 要不要關閉 #5？", "waiting_owner", False)]
+        line = next(line for line, _ in mon.office_view([], pending=ask, now=NOW) if "#5" in line)
+        self.assertTrue(line.endswith("— 要不要關閉 #5？"), line)
+        self.assertNotIn("actor=", line)
+
+    def test_ask_line_without_title_is_unchanged_in_shape(self):
+        ask = [mon.OwnerPending(NOW - 30, "#6", "WAITING", "Pick one", "waiting_owner", False)]
+        line = next(line for line, _ in mon.office_view([], pending=ask, now=NOW) if "#6" in line)
+        self.assertTrue(line.startswith("★ 等你決定：GitHub #6（"), line)
+
+    def test_ask_titles_use_pr_titles_fetch_issue_titles_once_and_cap(self):
+        from types import SimpleNamespace
+        calls = []
+
+        def get(path):
+            calls.append(path)
+            if path.endswith("/issues/7"):
+                raise OSError("down")
+            return {"title": f"Issue {path.rsplit('/', 1)[1]} title"}
+        reader = SimpleNamespace(ask_titles={}, repo="o/r", _get=get)
+        pending = [mon.OwnerPending(NOW, f"#{n}", "WAITING", "x", "waiting_owner", False)
+                   for n in (1, 2, 3, 4, 5, 6, 7)]
+        pulls = [{"number": 3, "title": "PR three"}]
+        titles = mon.GitHubSource._ask_titles(reader, pending, pulls)
+        shown = [item.reference for item in pending[-mon.OWNER_SHOWN:]]
+        self.assertEqual(sorted(titles), sorted(shown))
+        self.assertEqual(titles["#3"], "PR three")          # from pulls, no fetch
+        self.assertEqual(titles["#7"], "")                  # failure: title left out
+        self.assertEqual(titles["#4"], "Issue 4 title")
+        self.assertFalse(any(path.endswith("/issues/3") for path in calls))
+        self.assertLessEqual(len(calls), mon.OWNER_SHOWN)
+        reader.ask_titles = titles
+        calls.clear()
+        mon.GitHubSource._ask_titles(reader, pending, pulls)   # cached: only the failed one again
+        self.assertEqual(calls, ["repos/o/r/issues/7"])
 
     def test_no_notices_adds_no_lines(self):
         self.assertEqual(mon.office_view([], now=NOW), mon.office_view([], notices=[], now=NOW))

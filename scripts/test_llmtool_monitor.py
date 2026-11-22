@@ -31,10 +31,6 @@ SECRETS = ("PROMPT-SECRET", "REASONING-SECRET", "TOOL-OUTPUT-SECRET", "MODEL-OUT
 
 
 _ISOLATED = tempfile.TemporaryDirectory()
-_RULE_ALERT_ISOLATED = tempfile.TemporaryDirectory()
-_RULE_ALERT_PATCH = patch.object(
-    mon, "RULE_ALERT_FILE",
-    os.path.join(_RULE_ALERT_ISOLATED.name, "rule-file-alerts.json"))
 _SUBPM_LEASE_ISOLATED = tempfile.TemporaryDirectory()
 _SUBPM_LEASE_PATCH = patch.object(
     mon, "SUBPM_LEASE_FILE",
@@ -46,7 +42,6 @@ def setUpModule():
     # changing state mid-test would add office events to unrelated assertions.
     for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CODEX_STATE", "CLAUDE_PROJECTS", "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS", "GW_AUDIT_ROOT"):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
-    _RULE_ALERT_PATCH.start()
     _SUBPM_LEASE_PATCH.start()
     mon.waiting_scan_reset()   # no WAITING folder scan from before this module
 
@@ -56,8 +51,6 @@ def tearDownModule():
     mon.waiting_scan_reset()
     _SUBPM_LEASE_PATCH.stop()
     _SUBPM_LEASE_ISOLATED.cleanup()
-    _RULE_ALERT_PATCH.stop()
-    _RULE_ALERT_ISOLATED.cleanup()
     _ISOLATED.cleanup()
 
 
@@ -1494,9 +1487,8 @@ class GitHubActivityTests(unittest.TestCase):
                     successful_source = mon.GitHubSource(
                         "o/r", runner=FakeRun((0, []), (0, [])), clock=lambda: NOW)
                     with patch.object(mon.shutil, "which", return_value="gh"):
-                        with patch.object(successful_source, "refresh_rule_alerts"):
-                            with patch.object(successful_source, "refresh_ci"):
-                                successful_source.refresh(force=True)
+                        with patch.object(successful_source, "refresh_ci"):
+                            successful_source.refresh(force=True)
                     self.assertTrue(successful_source.successful_read)
                     self.assertFalse(successful_source.read_failed)
                     expected_warning = (f"等你決定：未確認（{status}）", "!")
@@ -2540,157 +2532,16 @@ class DispatchFileAgreementTests(_GateMixin, unittest.TestCase):
         self.assertLessEqual({key for _, key, _ in mon.WORKER_ROSTER}, mon.DISPATCH_WORKERS)
 
 
-class RuleAlertTests(unittest.TestCase):
-    NOW = 1_800_000_000
-    MATCHED = "tools/llmtool/worker-dispatch.json"
+class RuleAlertRemovedTests(unittest.TestCase):
+    """Owner 2026-11-22: the monitor shows no rule-file merge alert and has no
+    clear step."""
 
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.path = os.path.join(self.tmp.name, "state", "rule-file-alerts.json")
-        rule_alert_file = patch.object(mon, "RULE_ALERT_FILE", self.path)
-        rule_alert_file.start()
-        self.addCleanup(rule_alert_file.stop)
-        self.source = mon.GitHubSource("o/r", clock=lambda: self.NOW)
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def _pull(self, number, *, merged=None, base="main", title=None):
-        stamp = datetime.fromtimestamp(merged if merged is not None else self.NOW,
-                                       timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        return {"number": number, "title": title or f"PR {number}",
-                "merged_at": stamp if merged is not None else None,
-                "base": {"ref": base}}
-
-    def _record(self, baseline=None, checked=None, alerts=None):
-        mon._save_rule_alerts(self.path, {"schema_version": 1,
-                                          "baseline": self.NOW if baseline is None else baseline,
-                                          "checked": checked or [], "alerts": alerts or []})
-
-    def _read(self):
-        return mon._load_rule_alerts(self.path)
-
-    def test_first_run_sets_baseline_and_ignores_old_merge(self):
-        calls = []
-        self.source._get = lambda path: calls.append(path)
-        self.source.refresh_rule_alerts([self._pull(1, merged=self.NOW - 10)])
-        self.assertEqual(self._read(), {"schema_version": 1, "baseline": self.NOW,
-                                        "checked": [], "alerts": []})
-        self.assertEqual(calls, [])
-
-    def test_sensitive_merge_and_rename_are_alerted_and_ordinary_is_checked(self):
-        self._record()
-        files = {
-            2: [{"filename": self.MATCHED}],
-            3: [{"filename": "README.md", "previous_filename": self.MATCHED}],
-            4: [{"filename": "README.md"}],
-        }
-        self.source._get = lambda path: files[int(path.split("/pulls/")[1].split("/")[0])]
-        self.source.refresh_rule_alerts([self._pull(n, merged=self.NOW + n) for n in (2, 3, 4)])
-        state = self._read()
-        self.assertEqual(state["checked"], [2, 3, 4])
-        self.assertEqual([alert["pr"] for alert in state["alerts"]], [2, 3])
-        self.assertEqual(state["alerts"][0]["paths"], [self.MATCHED])
-        self.assertEqual(state["alerts"][1]["paths"], [self.MATCHED])
-        self.source.refresh_rule_alerts([self._pull(n, merged=self.NOW + n) for n in (2, 3, 4)])
-        self.assertEqual([alert["pr"] for alert in self._read()["alerts"]], [2, 3])
-
-    def test_other_base_and_closed_unmerged_are_ignored(self):
-        self._record()
-        calls = []
-        self.source._get = lambda path: calls.append(path) or []
-        self.source.refresh_rule_alerts([self._pull(5, merged=self.NOW + 1, base="release"),
-                                         self._pull(6)])
-        self.assertEqual(calls, [])
-        self.assertEqual(self._read()["checked"], [])
-
-    def test_reads_at_most_five_then_continues_next_refresh(self):
-        self._record()
-        calls = []
-        self.source._get = lambda path: calls.append(path) or []
-        pulls = [self._pull(n, merged=self.NOW + n) for n in range(1, 8)]
-        self.source.refresh_rule_alerts(pulls)
-        self.assertEqual(len(calls), 5)
-        self.assertEqual(self._read()["checked"], [1, 2, 3, 4, 5])
-        self.source.refresh_rule_alerts(pulls)
-        self.assertEqual(len(calls), 7)
-        self.assertEqual(self._read()["checked"], list(range(1, 8)))
-
-    def test_failed_read_retries_and_does_not_change_refresh_health(self):
-        self._record()
-        self.source.successful_read, self.source.read_failed = True, True
-        self.source._get = lambda path: (_ for _ in ()).throw(RuntimeError("offline"))
-        self.source.refresh_rule_alerts([self._pull(8, merged=self.NOW + 1)])
-        self.assertEqual(self._read()["checked"], [])
-        self.assertEqual(self._read()["alerts"], [])
-        self.assertTrue(self.source.successful_read)
-        self.assertTrue(self.source.read_failed)
-
-    def test_too_many_files_and_unloadable_matcher_fail_closed(self):
-        self._record()
-        pulls = [self._pull(9, merged=self.NOW + 1), self._pull(10, merged=self.NOW + 2)]
-        self.source._get = lambda path: ([{}] * 100 if "/9/" in path else [])
-        self.source.refresh_rule_alerts(pulls[:1])
-        self.assertEqual(self._read()["alerts"][0]["paths"], ["<too-many-files>"])
-        self._record()
-        with patch.object(mon.importlib.util, "spec_from_file_location", return_value=None):
-            self.source._get = lambda path: [{"filename": "README.md"}]
-            self.source.refresh_rule_alerts(pulls[1:])
-        self.assertEqual(self._read()["alerts"][0]["paths"], ["<sensitive-list-unreadable>"])
-
-    def test_lines_limits_order_and_malformed_record(self):
-        self.assertEqual(mon.rule_alert_lines(), [])
-        alerts = [{"pr": n, "title": f"private title {n}", "paths": ["x"]}
-                  for n in range(1, 8)]
-        self._record(alerts=alerts)
-        lines = mon.rule_alert_lines()
-        self.assertEqual([line for line, _ in lines[:5]], [
-            f"規則檔已變更：PR #{n}，1 個檔（看過後請 PM 清除）" for n in (7, 6, 5, 4, 3)])
-        self.assertEqual(lines[-1], ("另有 2 件規則檔告警", "!"))
-        self.assertTrue(all("private title" not in line for line, _ in lines))
-        Path(self.path).write_text("{", encoding="utf-8")
-        self.assertEqual(mon.rule_alert_lines(), [("規則檔告警紀錄無法讀取", "!")])
-
-    def test_clear_removes_alert_and_preserves_checked_without_github_or_subprocess(self):
-        alert = {"pr": 12, "title": "title", "paths": [self.MATCHED]}
-        self._record(checked=[12], alerts=[alert])
-        with patch("subprocess.run", side_effect=AssertionError("subprocess")), \
-                patch("subprocess.Popen", side_effect=AssertionError("subprocess")), \
-                patch("builtins.print") as output:
-            self.assertEqual(mon.main(["--clear-rule-alert", "12"]), 0)
-        self.assertEqual(self._read()["checked"], [12])
-        self.assertEqual(self._read()["alerts"], [])
-        self.assertEqual(output.call_args.args, ("RULE_ALERT_CLEARED pr=12",))
-        self.assertEqual(mon.rule_alert_lines(), [])
-        with patch("builtins.print") as output:
-            self.assertEqual(mon.main(["--clear-rule-alert", "13"]), 1)
-        self.assertEqual(output.call_args.args, ("RULE_ALERT_NOT_FOUND pr=13",))
-
-    def test_clear_malformed_record_is_unchanged_and_save_uses_private_modes(self):
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        Path(self.path).write_bytes(b"{bad")
-        original = Path(self.path).read_bytes()
-        with patch("builtins.print") as output:
-            self.assertEqual(mon.main(["--clear-rule-alert", "12"]), 1)
-        self.assertEqual(Path(self.path).read_bytes(), original)
-        self.assertEqual(output.call_args.args, ("RULE_ALERT_RECORD_BAD",))
-        self._record()
-        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o600)
-        self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(self.path)).st_mode), 0o700)
-
-    def test_office_places_rule_alerts_after_owner_count(self):
-        from types import SimpleNamespace
-        github = SimpleNamespace(successful_read=True, read_failed=False, pending=[], window=43200,
-                                 comments_cut=False, main_health=None, main_error="")
-        self._record(alerts=[{"pr": 21, "title": "hidden", "paths": ["x"]}])
-        top = mon.office_top(github, [], 0, install=mon.rule_alert_lines() + [])
-        self.assertEqual(top[1], ("規則檔已變更：PR #21，1 個檔（看過後請 PM 清除）", "!"))
-
-    def test_persistence_and_presentation_run_no_subprocess(self):
-        self._record(alerts=[{"pr": 22, "title": "hidden", "paths": ["x"]}])
-        with patch("subprocess.run", side_effect=AssertionError("subprocess")), \
-                patch("subprocess.Popen", side_effect=AssertionError("subprocess")):
-            self.assertEqual(mon.rule_alert_lines()[0][1], "!")
+    def test_no_rule_alert_code_or_option(self):
+        for name in ("rule_alert_lines", "RULE_ALERT_FILE", "_load_rule_alerts"):
+            self.assertFalse(hasattr(mon, name), name)
+        self.assertFalse(hasattr(mon.GitHubSource, "refresh_rule_alerts"))
+        with patch("sys.stderr", __import__("io").StringIO()), self.assertRaises(SystemExit):
+            mon.main(["--clear-rule-alert", "12"])
 
 
 class InstallLinesTests(unittest.TestCase):
@@ -9836,7 +9687,7 @@ class PrBoardTests(unittest.TestCase):
         answer = self._answer(self._node(1, self.SHA, runs=[self._run(10, self.LINUX)]))
         source, run = self._source([], (0, []), (0, raw), (0, answer))
         with patch.object(mon.shutil, "which", return_value="/opt/gh"), \
-                patch.object(source, "refresh_ci"), patch.object(source, "refresh_rule_alerts"):
+                patch.object(source, "refresh_ci"):
             source.refresh(force=True)
             self.assertEqual([argv[2] for argv, _ in run.calls], ["-X", "-X", "graphql"])
             self.assertEqual(mon._check_word(source.pr_checks, 1, self.SHA, "linux"), "成功")
@@ -10301,16 +10152,14 @@ class StuckAlertTests(unittest.TestCase):
         self.assertIn(mon.BEHIND_WARNING, rendered)
         self.assertIn("── 路線 ──", rendered)
         self.assertIn("最近結果：task 96596596 成功回應", rendered)
-        notice = next(line for line in rendered.splitlines() if "#2311" in line)
-        self.assertTrue(notice.startswith("ℹ "), notice)
-        self.assertNotIn("★", notice)
-        self.assertNotIn("等你決定", notice)
+        # Owner 2026-11-22: information notices are not shown.
+        self.assertNotIn("spec error notice", rendered)
         self.assertTrue(any("macOS 超過 45 分鐘" in line for line in drawn.values()))
         self.assertTrue(any("修復已到上限：D6 wp-1（至少 2 輪）" in line for line in drawn.values()))
         self.assertFalse(any("PM 進度" in line for line in drawn.values()))
         self.assertTrue(any("辦公室 · 工作中 0 · 等你 1" in line
                             for line in drawn.values()))
-        self.assertTrue(any("ℹ GitHub #2311" in line for line in drawn.values()))
+        self.assertFalse(any("spec error notice" in line for line in drawn.values()))
         self.assertIn(mon.BEHIND_WARNING, drawn[2])
         monitor.behind = False
         drawn.clear()
@@ -11446,26 +11295,39 @@ class RouteOfficeViewTests(unittest.TestCase):
         self.assertEqual(sum(line.split()[0] in ROUTE_NAMES + ["home"] for line in lines
                              if line and not line.startswith(("⚠", "──", "辦公室"))), 5)
 
-    def test_route_view_has_fewer_lines_than_the_old_screen(self):
+    def test_route_view_shows_live_section_and_folds_gray(self):
         rows = self.switch_rows() + self.members()
         top = [("等你決定：0 件（只看最近 12 小時留言）", "")]
-        progress = ("PM 進度：上次派工 ? · 排隊 ? · 今天合併 ?", "")   # the line #2311 removed
-        before = mon.office_view(rows, top=top + [progress], width=120, now=NOW)
         routes = mon.route_rows(rows, RouteRowTests.ALLOWED, "", {}, [], RouteRowTests.BOARD, [],
                                 NOW)
         after = mon.office_view(rows, top=top, routes=routes, width=120, now=NOW)
-        self.assertLess(len(after), len(before))
         texts = [line for line, _ in after]
-        # Shown: the alert row; folded: everything that needs nobody.
+        # Owner 2026-11-22: beside the routes the 即時 section is shown by default
+        # (working sessions and the alert row); only gray rows fold.
         self.assertTrue(any(line.startswith("claude developer") for line in texts))
-        self.assertFalse(any(line.startswith(("claude PM", "mac ci runner", "EC2")) for line in texts))
-        self.assertIn("… 另有 5 項不用你處理", "\n".join(texts))
+        self.assertTrue(any(line.startswith("claude PM") for line in texts))
+        self.assertIn("── 即時（讀得到 session 紀錄） ──", texts)
+        self.assertIn("… 灰色 2 項", "\n".join(texts))
+        self.assertNotIn("不用你處理", "\n".join(texts))
         self.assertFalse(any("工作中 = 最近有動作" in line for line in texts))
         # Key a still lists every member.
         expanded = [line for line, _ in mon.office_view(rows, top=top, routes=routes, width=120,
                                                          expand=True, now=NOW)]
         for name in ("claude PM", "mac ci runner", "EC2 遠端測試"):
             self.assertTrue(any(line.lstrip("└ ").startswith(name) for line in expanded), name)
+
+    def test_sub_pm_lease_rows_show_only_expanded(self):
+        # Owner 2026-11-22: the sub-PM lease lines in the route block are only
+        # shown when expanded (key a); the route rows themselves always show.
+        rows = self.switch_rows() + self.members()
+        routes = [mon.RouteRow("Claude", mon.ROUTE_FREE, "沒有工作", "無", None),
+                  mon.RouteRow("sub-PM", mon.LEASE_HELD, "agy-pm：WP 2285-b1（#2285）", "", 3600.0)]
+        folded = [line for line, _ in mon.office_view(rows, routes=routes, width=120, now=NOW)]
+        self.assertTrue(any(line.startswith("Claude") for line in folded))
+        self.assertFalse(any(line.startswith("sub-PM") for line in folded))
+        expanded = [line for line, _ in mon.office_view(rows, routes=routes, width=120,
+                                                         expand=True, now=NOW)]
+        self.assertTrue(any(line.startswith("sub-PM") and "agy-pm" in line for line in expanded))
 
     def test_without_routes_the_view_is_unchanged(self):
         rows = self.switch_rows() + self.members()

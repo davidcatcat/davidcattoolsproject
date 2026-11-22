@@ -268,7 +268,7 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         return denied('RECEIPT_HEAD_MISMATCH')
     if pr is not None:
         store.record_published_pr(task_id, pr, recorded_head)
-    admitted = _task_path_modules(task)
+    admitted = remote_required_modules(task)
     if (type(modules) not in (tuple, list, set, frozenset) or
             any(type(module) is not str for module in modules)):
         return denied('MODULE_NOT_ADMITTED')
