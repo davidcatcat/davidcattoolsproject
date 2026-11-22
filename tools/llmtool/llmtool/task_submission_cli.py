@@ -8621,6 +8621,12 @@ def _scope_advice_items(args, store):
         read_paths=read_paths, write_paths=write_paths))
     add(lambda: read_scope_advice.referencing_tests(
         root=root, commit='HEAD', read_paths=read_paths, write_paths=write_paths))
+    provider = getattr(args, 'provider', None)
+    add(lambda: read_scope_advice.route_path_items(
+        provider, list(read_paths or []) + list(write_paths or [])))
+    add(lambda: read_scope_advice.shell_items(
+        provider, [goal, getattr(args, 'acceptance', None)]))
+    add(lambda: read_scope_advice.size_items(provider, root, read_paths, write_paths))
     seen, unique = set(), []
     for value in items:
         key = (value['kind'], value['path'])
