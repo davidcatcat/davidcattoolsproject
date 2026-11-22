@@ -114,6 +114,33 @@ class GuidanceDriftCheckTests(unittest.TestCase):
                 findings = check(self.repo)
                 self.assertTrue(any(f"MISSING_IN_CLAUDE {missing}" in item for item in findings))
 
+    def test_claude_import_of_agents_satisfies_hard_values(self):
+        # #1502 E6: an "@AGENTS.md" line imports every AGENTS.md hard value.
+        self.agents = "`https://missing.invalid/decision` `OWNER_ASSIGNMENT_ONLY` `check (docs)`\n"
+        self.claude = "# Claude\n\n@AGENTS.md\n\nClaude-only text.\n"
+        self.write_guidance()
+        self.write_config()
+        self.assertEqual(check(self.repo), [])
+
+    def test_claude_import_still_hash_pinned(self):
+        self.agents = "`ALLOWED`\n"
+        self.claude = "@AGENTS.md\n"
+        self.write_guidance()
+        self.write_config()
+        (self.repo / "AGENTS.md").write_text("`ALLOWED` changed\n", encoding="utf-8")
+        self.assertTrue(any("AGENTS.md: HASH_STALE" in item for item in check(self.repo)))
+
+    def test_import_must_be_its_own_line(self):
+        # A mention inside text or code is not an import.
+        for claude in ("See `@AGENTS.md` for rules.\n", "x @AGENTS.md\n", "@AGENTS.md.bak\n"):
+            with self.subTest(claude=claude):
+                self.agents = "`OWNER_ASSIGNMENT_ONLY`\n"
+                self.claude = claude
+                self.write_guidance()
+                self.write_config()
+                findings = check(self.repo)
+                self.assertTrue(any("MISSING_IN_CLAUDE OWNER_ASSIGNMENT_ONLY" in item for item in findings))
+
     def test_dispatch_values_are_matched_as_whole_words_in_full_source(self):
         self.agents = "Worker is PAUSED now, **ALLOWED** only, dispatch=OWNER_ASSIGNMENT_ONLY.\n"
         self.claude = "PAUSED and **ALLOWED**, dispatch=OWNER_ASSIGNMENT_ONLY.\n"

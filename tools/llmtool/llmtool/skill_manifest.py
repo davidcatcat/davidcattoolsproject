@@ -58,7 +58,9 @@ _BASE_PATHS = (
     'AGENTS.md',
     '.claude/skills/ai-team-delivery/SKILL.md',
 )
+# #1502 E6: CLAUDE.md imports AGENTS.md, so Claude reads both.
 _CLAUDE_BASE_PATHS = (
+    'AGENTS.md',
     'CLAUDE.md',
     '.claude/skills/ai-team-delivery/SKILL.md',
 )
