@@ -272,7 +272,7 @@ def gw_agent_hold_refusal(store, *, owner_assignment_ref=None, policy_task_id=No
     to the route's own Owner refusal. An unrecorded hold always refuses.
     """
     view = _gw_agent_view(store) or {}
-    hold = (_GW_AGENT_HOLD_UNRECORDED if _GW_AGENT_HOLD_NOT_RECORDED else
+    hold = (GW_AGENT_HOLD_UNRECORDED if _GW_AGENT_HOLD_NOT_RECORDED else
             GW_AGENT_SECURITY_STOP
             if view.get('authentication', {}).get('status') == 'FAIL' else
             GW_AGENT_MODEL_CAPABILITY_PAUSED
@@ -362,15 +362,18 @@ def probe_gw_agent(store, *, probe_call=None, call=None, now=None):
     if not allowed:
         return _probe_report('BLOCKED', code=reason_code, observed=observed)
     view = _gw_agent_view(store)
-    # An unrecorded hold has no trusted class, so only a passing probe may end
-    # it (S2). A recorded security or model stop still blocks before any call.
-    if not _GW_AGENT_HOLD_NOT_RECORDED and view:
+    # A recorded security or model stop always blocks before any call, even
+    # while an unrecorded hold is waiting for a probe to clear it (S1, A3).
+    if view:
         if view.get('authentication', {}).get('status') == 'FAIL':
             return _probe_report('BLOCKED', code=GW_AGENT_SECURITY_STOP,
                                  observed=observed)
         if view.get('inference', {}).get('status') == 'FAIL':
             return _probe_report('BLOCKED', code=GW_AGENT_MODEL_CAPABILITY_PAUSED,
                                  observed=observed)
+    # An unrecorded hold has no trusted class, so only a passing probe may end
+    # it (S2): backoff and probe-sourced blocks do not wedge that recovery.
+    if not _GW_AGENT_HOLD_NOT_RECORDED and view:
         runtime = view.get('runtime')
         if (type(runtime) is dict and runtime.get('status') == 'FAIL' and
                 runtime.get('source') == GW_AGENT_PROBE_SOURCE):
