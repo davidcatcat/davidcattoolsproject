@@ -66,13 +66,13 @@ class TaskAdvanceTimeoutRerunTests(unittest.TestCase):
         record['remote_test_outcomes'] = [outcome()]
         self.assertEqual(task_advance.decide(record, d6(), None, {}), 'PUBLISH')
 
-    def test_two_timeouts_return_needs_attention_after_pr(self):
+    def test_two_timeouts_return_waiting_owner_after_pr(self):
         record = base_record()
         record['remote_test_outcomes'] = [outcome(), outcome()]
         self.assertEqual(
             task_advance._pre_review_action(record, d6(), PR, {}, HEAD),
-            'NEEDS_ATTENTION')
-        self.assertEqual(task_advance.decide(record, d6(), PR, {}), 'NEEDS_ATTENTION')
+            'WAITING_OWNER')
+        self.assertEqual(task_advance.decide(record, d6(), PR, {}), 'WAITING_OWNER')
 
     def test_two_timeouts_return_publish_before_pr(self):
         record = base_record()
