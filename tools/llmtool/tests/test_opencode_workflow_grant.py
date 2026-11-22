@@ -71,7 +71,10 @@ class OpenCodeWorkflowGrantTests(unittest.TestCase):
         workflow.parent.mkdir(parents=True)
         workflow.write_text('name: ci\n', encoding='utf-8')
         (self.root / 'source.py').write_text('VALUE = 1\n', encoding='utf-8')
-        self.cli_dir = Path(tempfile.mkdtemp(prefix='llmtool-opencode-grant-cli-'))
+        # Hand the Task store and the fake CLI a canonical path (a temp path
+        # under /var on macOS is a symlink to /private/var).
+        self.cli_dir = Path(tempfile.mkdtemp(
+            prefix='llmtool-opencode-grant-cli-')).resolve()
         self.addCleanup(shutil.rmtree, self.cli_dir, True)
         self.cli = self._fake_cli()
 
@@ -100,7 +103,8 @@ class OpenCodeWorkflowGrantTests(unittest.TestCase):
         self._git('commit', '-q', '-m', 'fixture')
         return self._git('rev-parse', 'HEAD').stdout.decode('ascii').strip()
 
-    def _fake_cli(self, *, expect_read=WORKFLOW, expect_edit=False, edit=False):
+    def _fake_cli(self, *, expect_read=WORKFLOW, expect_edit=False, edit=False,
+                  edit_path=WORKFLOW):
         cli = self.cli_dir / 'opencode-fixture'
         expected_read = {'action': 'read', 'resource': expect_read,
                          'effect': 'allow'}
@@ -118,7 +122,7 @@ class OpenCodeWorkflowGrantTests(unittest.TestCase):
                              'effect': 'allow'}
             script += f"assert {expected_edit!r} in cfg['permissions']\n"
         if edit:
-            script += (f"open({WORKFLOW!r}, 'w', encoding='utf-8')"
+            script += (f"open({edit_path!r}, 'w', encoding='utf-8')"
                        ".write('name: ci-updated\\n')\n")
         script += (
             'sys.stdin.buffer.read()\n'
@@ -232,7 +236,9 @@ class OpenCodeWorkflowGrantTests(unittest.TestCase):
 
     def test_dispatch_caller_grants_read_path(self):
         commit = self._commit([self._entry('read')])
-        self.cli = self._fake_cli()
+        # Change an ordinary write path so the route records a result; the
+        # grant being exercised is the workflow read permission in the config.
+        self.cli = self._fake_cli(edit=True, edit_path='source.py')
         code, store = self._dispatch(
             self._dispatch_task(), [WORKFLOW, 'source.py'], ['source.py'], commit)
         self.assertEqual(code, 0)
@@ -240,7 +246,8 @@ class OpenCodeWorkflowGrantTests(unittest.TestCase):
 
     def test_dispatch_caller_without_issue_still_runs_ordinary_paths(self):
         commit = self._commit([])
-        self.cli = self._fake_cli(expect_read='source.py')
+        self.cli = self._fake_cli(expect_read='source.py', edit=True,
+                                  edit_path='source.py')
         code, store = self._dispatch(
             self._dispatch_task(issue=None), ['source.py'], ['source.py'], commit)
         self.assertEqual(code, 0)
