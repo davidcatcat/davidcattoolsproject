@@ -423,10 +423,57 @@ _DEVELOPER_STDERR_FIELDS = frozenset(('stderr_excerpt',))
 # only, never free text.
 _DEVELOPER_ERROR_CAUSE_FIELDS = frozenset(('error_cause',))
 _ERROR_CAUSE = re.compile(r'[A-Z][A-Z0-9_]{0,63}')
+# #1502 WP-F design section 2.7: the optional per-assignment card delivery
+# binding. PREPARED is a reservation; only commit_card_delivery() writes
+# DELIVERED. A gw-agent record carries the recorded exemption instead.
+_DEVELOPER_CARD_DELIVERY_FIELDS = frozenset(('card_delivery',))
+_CARD_DELIVERY_FIELDS = frozenset((
+    'route', 'pin_commit', 'prefix_sha256', 'session_id', 'prepared_id', 'state'))
+_CARD_DELIVERY_EXEMPTION_FIELDS = frozenset(('route', 'state'))
+_CARD_DELIVERY_ROUTES = frozenset(('claude', 'agy', 'opencode'))
+_CARD_DELIVERY_STATES = ('PREPARED', 'DELIVERED')
 _DEVELOPER_OPTIONAL_FIELDS = (frozenset((_DIRECT_DISPATCH_BOUNDARY, _DIRECT_HANDOFF_HISTORY)) |
                               _DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS |
                               _DEVELOPER_CLAUDE_FAILURE_EVIDENCE_FIELDS |
-                              _DEVELOPER_STDERR_FIELDS | _DEVELOPER_ERROR_CAUSE_FIELDS)
+                              _DEVELOPER_STDERR_FIELDS | _DEVELOPER_ERROR_CAUSE_FIELDS |
+                              _DEVELOPER_CARD_DELIVERY_FIELDS)
+
+
+def _valid_card_delivery(developer):
+    """#1502 WP-F section 2.7: strict card_delivery shape for one Developer."""
+    binding = developer.get('card_delivery')
+    if type(binding) is not dict:
+        return False
+    if set(binding) == _CARD_DELIVERY_EXEMPTION_FIELDS:
+        return (binding['route'] == 'gw-agent' and
+                binding['state'] == 'NOT_DELIVERED' and
+                developer.get('provider_profile') == 'gw-agent')
+    if set(binding) != _CARD_DELIVERY_FIELDS:
+        return False
+    route = binding['route']
+    return (type(route) is str and route in _CARD_DELIVERY_ROUTES and
+            developer.get('provider_profile') == route and
+            type(binding['pin_commit']) is str and
+            re.fullmatch(r'[0-9a-f]{40}', binding['pin_commit']) is not None and
+            _policy_digest(binding['prefix_sha256']) and
+            binding['session_id'] == developer.get('session_id') and
+            _safe_identifier(binding['session_id'], DEV_SESSION_ID) and
+            _hex32(binding['prepared_id']) and
+            binding['state'] in _CARD_DELIVERY_STATES)
+
+
+def _new_assignment_card_delivery_allowed(developer):
+    """Only a reservation, the gw-agent exemption or no binding is new.
+
+    A malformed binding is left to the strict shape check so it is refused with
+    CARD_DELIVERY_INVALID rather than a transition code.
+    """
+    binding = developer.get('card_delivery')
+    if binding is None or not _valid_card_delivery(developer):
+        return True
+    return (binding.get('state') == 'PREPARED' or
+            (binding.get('route') == 'gw-agent' and
+             binding.get('state') == 'NOT_DELIVERED'))
 
 
 def _valid_direct_handoffs(entries):
@@ -2870,6 +2917,9 @@ def _validate(record, *, strict=True):
                     frozenset(developer) - _DEVELOPER_OPTIONAL_FIELDS
                     not in _DEVELOPER_RECORD_SHAPES):
                 _fail()
+            if ('card_delivery' in developer and
+                    not _valid_card_delivery(developer)):
+                _fail('CARD_DELIVERY_INVALID')
             if (_DIRECT_DISPATCH_BOUNDARY in developer and
                     (developer.get('provider_profile') not in _DIRECT_DISPATCH_PROFILES or
                      developer.get(_DIRECT_DISPATCH_BOUNDARY) not in ('PREPARED', 'STARTING', 'STOPPED') or
@@ -4157,6 +4207,9 @@ class TaskStore:
         if type(developer) is dict and (
                 _DIRECT_DISPATCH_BOUNDARY in developer or _DIRECT_HANDOFF_HISTORY in developer):
             _fail('DIRECT_DISPATCH_BOUNDARY_FORBIDDEN')
+        if (type(developer) is dict and
+                not _new_assignment_card_delivery_allowed(developer)):
+            _fail('CARD_DELIVERY_TRANSITION_INVALID')
         record = dict(record)
         # The owner gate runs first: a denied developer is cleared, so the
         # record gains no D6 and its audited denial never waits on, or is
@@ -4631,6 +4684,36 @@ class TaskStore:
         return self._record_direct_launch(
             task_id, assignment_id=assignment_id, pid=pid, start_time=start_time,
             pgid=pgid, provider_profile='agy', trusted_flag='trusted_agy_launch')
+
+    def commit_card_delivery(self, task_id, prepared_id=None, *, expected_developer=None):
+        """Move one PREPARED card delivery binding to DELIVERED by compare-and-set.
+
+        #1502 WP-F design sections 2.2 and 2.7. This is the only write that may
+        change ``developer.card_delivery`` under one assignment. It changes no
+        other logical field. A second call for the same reservation, or any
+        call after the stored binding left PREPARED, conflicts and writes
+        nothing. An uncertain write (the replace persisted but a later fsync
+        failed) raises TASK_STORE_UNAVAILABLE and is reconciled by a fresh read,
+        never by replaying this call.
+        """
+        if not _hex32(prepared_id):
+            _fail('CARD_DELIVERY_INVALID')
+        current = self.get(task_id)
+        developer = current.get('developer')
+        if expected_developer is not None and developer != expected_developer:
+            raise TaskStoreConflict() from None
+        if type(developer) is not dict:
+            _fail('CARD_DELIVERY_TRANSITION_INVALID')
+        binding = developer.get('card_delivery')
+        if (type(binding) is not dict or
+                binding.get('prepared_id') != prepared_id or
+                binding.get('state') != 'PREPARED'):
+            raise TaskStoreConflict() from None
+        delivered = dict(binding, state='DELIVERED')
+        replacement = dict(developer, card_delivery=delivered)
+        return self._update(task_id, expected={'developer': developer},
+                            changes={'developer': replacement},
+                            trusted_card_delivery=True)
 
     def reconcile_direct_repair_claim(self, root, claim, repair, packet):
         """Finalize a verified replacement on the existing repair claim."""
@@ -5986,7 +6069,7 @@ class TaskStore:
                        trusted_completion_events=False, trusted_abandonment=False,
                        abandonment_pm_session_id=None, trusted_pm_session_adoption=False,
                        trusted_codex_launch=False, trusted_opencode_launch=False,
-                       trusted_agy_launch=False,
+                       trusted_agy_launch=False, trusted_card_delivery=False,
                        trusted_split=None, split_child_max=None, high_debug_finalize=None,
                        trusted_file_ops_evidence=False, trusted_file_ops_reservation=False,
                        d6_unchanged=None, direct_dispatch_boundary=None,
@@ -5998,6 +6081,8 @@ class TaskStore:
             _fail()
         if high_debug_finalize is not None and set(changes) != {'high_debug'}:
             _fail('HIGH_DEBUG_IMMUTABLE')
+        if trusted_card_delivery and set(changes) != {'developer'}:
+            _fail('CARD_DELIVERY_TRANSITION_INVALID')
         if 'continues' in changes:
             # #1502 WP-D L1: continues is written once, when record-pm creates the Task.
             _fail('TASK_CONTINUES_IMMUTABLE')
@@ -6164,6 +6249,35 @@ class TaskStore:
                 after = new.get(_DIRECT_DISPATCH_BOUNDARY)
                 old_history = old.get(_DIRECT_HANDOFF_HISTORY, [])
                 new_history = new.get(_DIRECT_HANDOFF_HISTORY, [])
+                old_card = old.get('card_delivery')
+                new_card = new.get('card_delivery')
+                new_assignment = old.get('assignment_id') != new.get('assignment_id')
+                if trusted_card_delivery:
+                    # #1502 WP-F section 2.7: the one dedicated move changes
+                    # only card_delivery, PREPARED -> DELIVERED, for one
+                    # reservation and one assignment.
+                    if (set(changes) != {'developer'} or
+                            old.get('assignment_id') != new.get('assignment_id') or
+                            set(old) != set(new) or
+                            any(old.get(key) != new.get(key)
+                                for key in old if key != 'card_delivery') or
+                            type(old_card) is not dict or
+                            old_card.get('state') != 'PREPARED' or
+                            type(new_card) is not dict or
+                            set(new_card) != set(old_card) or
+                            any(old_card.get(key) != new_card.get(key)
+                                for key in old_card if key != 'state') or
+                            new_card.get('state') != 'DELIVERED'):
+                        _fail('CARD_DELIVERY_TRANSITION_INVALID')
+                elif new_assignment:
+                    if (type(new) is dict and 'card_delivery' in new and
+                            not _new_assignment_card_delivery_allowed(new)):
+                        _fail('CARD_DELIVERY_TRANSITION_INVALID')
+                elif new_card != old_card:
+                    # Ordinary writes keep the stored binding (or its absence)
+                    # byte-for-byte; a stale PREPARED write after the move is
+                    # one such refused downgrade.
+                    _fail('CARD_DELIVERY_TRANSITION_INVALID')
                 if direct_reassign_verify is not None:
                     old_completion = current.get('completion') or {}
                     new_completion = changes.get('completion') or {}
