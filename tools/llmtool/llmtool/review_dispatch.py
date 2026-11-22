@@ -20,10 +20,8 @@ from .errors import LLMToolError
 from . import developer_routes, github_identity, role_config, skill_manifest, task_completion, worker_dispatch
 
 
-# #1502 WP-E R1: the fallbacks equal the roles registry's listed models and,
-# like every resolved model, pass the shared registry check before launch.
-_CODEX_REVIEW_MODEL = 'gpt-6.1-sol'
-_CLAUDE_REVIEW_MODEL = 'claude-sonnet-5-5'
+# #1502 WP-G: no Reviewer default model is kept here. When no model is
+# resolved, it comes from developer-routes.json's roles registry.
 _CODEX_REVIEW_EFFORT = 'high'
 # #2281: the Codex Reviewer run timeout comes from role_timeout('codex-reviewer');
 # this fallback names the same 3 h role default, not a separate value.
@@ -171,6 +169,29 @@ def _resolve_reviewer_role(reviewer_key):
         elif code == role_config.ROLE_MODEL_NOT_ALLOWED:
             exc.review_dispatch_code = 'ROLE_MODEL_NOT_ALLOWED'
         raise
+
+
+def _review_default_model(reviewer_key):
+    """#1502 WP-G: return the route configuration's default model for reviewer_key.
+
+    The default comes from developer-routes.json's roles registry, never a value
+    copied into this module. A missing or unusable default refuses with a stable
+    code before any provider call; there is no fallback to another model.
+    """
+    try:
+        _, model = role_config._registry_default(reviewer_key, None)
+    except LLMToolError as error:
+        if getattr(error, 'role_config_code', None) == role_config.ROUTE_CONFIG_UNAVAILABLE:
+            _refuse('ROUTE_CONFIG_UNAVAILABLE')
+        _refuse('ROLE_MODEL_NOT_ALLOWED')
+    return model
+
+
+def _review_model(reviewer_key, model):
+    """Return an explicit admitted model, else the role's configured default."""
+    if model is None:
+        model = _review_default_model(reviewer_key)
+    return _admit_review_model(reviewer_key, model)
 
 
 def _policy(task, reviewer_key):
@@ -327,9 +348,9 @@ def _create_d6(*, task_id, base_sha, repo_root, executor_task, github_login,
         _refuse('REVIEWER_D6_CREATE_FAILED', reason='REVIEWER_D6_CREATE_FAILED')
 
 
-def _codex_argv(executable, reviewer_root, *, model=_CODEX_REVIEW_MODEL,
+def _codex_argv(executable, reviewer_root, *, model=None,
                 effort=_CODEX_REVIEW_EFFORT):
-    model = _admit_review_model('codex-reviewer', model)
+    model = _review_model('codex-reviewer', model)
     return [executable, '--no-daemon', '--ask-for-approval', 'never', 'exec',
             '--ignore-user-config', '--ignore-rules', '--ephemeral',
             '--strict-config', '--color', 'never', '--json', '--model',
@@ -818,9 +839,9 @@ def _record_codex_quota(raw_stdout):
 
 
 def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
-                    model=_CODEX_REVIEW_MODEL, effort=_CODEX_REVIEW_EFFORT,
+                    model=None, effort=_CODEX_REVIEW_EFFORT,
                     config_dir=None):
-    model = _admit_review_model('codex-reviewer', model)
+    model = _review_model('codex-reviewer', model)
     try:
         timeout = developer_routes.role_timeout('codex-reviewer')
     except developer_routes.RouteError:
@@ -1629,7 +1650,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
     if reviewer_key == 'codex-reviewer':
         if reviewer_role.get('provider') not in (None, 'codex'):
             _refuse('REVIEWER_CONFIG_INVALID')
-        codex_model = reviewer_role.get('model') or _CODEX_REVIEW_MODEL
+        codex_model = reviewer_role.get('model') or _review_default_model('codex-reviewer')
         codex_effort = reviewer_role.get('effort') or _CODEX_REVIEW_EFFORT
         # #1502 WP-E R1: admitted before the claim, so a refusal records nothing.
         codex_model = _admit_review_model('codex-reviewer', codex_model)
@@ -1640,9 +1661,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             _refuse('REVIEWER_CONFIG_INVALID')
         account_mode = ('ROLES' if reviewer_role['source'] == 'roles' else 'CODEX_CLI')
     else:
-        codex_model, codex_effort = _CODEX_REVIEW_MODEL, _CODEX_REVIEW_EFFORT
-        claude_model = _admit_review_model(
-            'claude-reviewer', reviewer_role.get('model') or _CLAUDE_REVIEW_MODEL)
+        codex_model, codex_effort = None, None
+        claude_model = _review_model('claude-reviewer', reviewer_role.get('model'))
         account_mode = {
             'roles': 'ROLES', 'env': 'EXPLICIT', 'cli': 'EXPLICIT',
             'pm_runtime': 'LEGACY', 'builtin': 'BUILTIN_DEFAULT',

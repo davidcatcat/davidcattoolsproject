@@ -50,7 +50,8 @@ def debug_entry(status='RESERVED'):
     return dict(high_debug._failed_entry(
         family='pr-17', failed_corrections=None, early_reason=REASON, head=SOURCE,
         d6='executor-hd1-ccccccc', code=code, observed='UNKNOWN', effort='UNKNOWN',
-        usage='UNKNOWN', recorded_at=AT, model_requested=high_debug._CODEX_MODEL,
+        usage='UNKNOWN', recorded_at=AT,
+        model_requested=high_debug._debug_default_model('codex-debug'),
         rules_sha256='c' * 64), status=status)
 
 

@@ -343,7 +343,8 @@ class HighDebugTests(unittest.TestCase):
             '<!-- activity: type=developer_progress actor=Codex target=PM status=WAITING -->')
         for field in ('Task: ' + 'a' * 32, 'D6: executor-hd1-aaaaaaa',
                       'Family: family', 'Examined SHA: ' + 'a' * 40,
-                      'Requested model: gpt-6.1-sol', 'Observed model: UNKNOWN',
+                      'Requested model: ' + high_debug._debug_default_model('codex-debug'),
+                      'Observed model: UNKNOWN',
                       'Effort: UNKNOWN', 'Status: RCA_CONFIRMED', 'Report SHA-256:',
                       'Usage: UNKNOWN'):
             self.assertIn(field, body)
@@ -1785,7 +1786,8 @@ class HighDebugTests(unittest.TestCase):
             report, created_agent_id=created_agents)
         mock_eval.assert_called_with('claude-debug', None, 'a' * 32)
         mock_resolve.assert_called_with('claude-debug')
-        self.assertEqual(created_agents, ['claude-high-debug-claude-opus-5-5'])
+        self.assertEqual(created_agents, [
+            'claude-high-debug-' + high_debug._debug_default_model('claude-debug')])
         self.assertEqual(len(store.entries), 1)
         entry = store.entries[0]
         self.assertEqual(entry['status'], 'RCA_CONFIRMED')
@@ -1982,12 +1984,16 @@ class HighDebugTests(unittest.TestCase):
         # recorded Codex RUN_FAILED plus Claude's reservation.
         self.assertEqual(launches, [1, 2])
         self.assertEqual(created, [('executor-hd1-aaaaaaa', None),
-                                   ('executor-hd2-aaaaaaa', 'claude-high-debug-claude-opus-5-5')])
+                                   ('executor-hd2-aaaaaaa',
+                                    'claude-high-debug-' +
+                                    high_debug._debug_default_model('claude-debug'))])
         self.assertEqual([entry['status'] for entry in store.entries],
                          ['RUN_FAILED', 'RCA_CONFIRMED'])
         self.assertEqual(store.entries[0]['report'], 'HIGH_DEBUG_QUOTA_EXHAUSTED')
-        self.assertEqual(store.entries[0]['model_requested'], high_debug._CODEX_MODEL)
-        self.assertEqual(store.entries[1]['model_requested'], high_debug._CLAUDE_MODEL)
+        self.assertEqual(store.entries[0]['model_requested'],
+                         high_debug._debug_default_model('codex-debug'))
+        self.assertEqual(store.entries[1]['model_requested'],
+                         high_debug._debug_default_model('claude-debug'))
         self.assertEqual(json.loads(output.getvalue())['status'], 'RCA_CONFIRMED')
         # The grant was spent by that one Claude run; none is left behind.
         self.assertEqual(high_debug._CLAUDE_GRANTS, set())
@@ -2120,7 +2126,8 @@ class HighDebugTests(unittest.TestCase):
                 read_registration=lambda *_args, **_kwargs: registration)
         self.assertEqual(len(launches), 2)
         self.assertEqual(store.entries[0]['report'], 'HIGH_DEBUG_AUTH_FAILED')
-        self.assertEqual(store.entries[1]['model_requested'], high_debug._CLAUDE_MODEL)
+        self.assertEqual(store.entries[1]['model_requested'],
+                         high_debug._debug_default_model('claude-debug'))
         self.assertEqual(json.loads(output.getvalue())['status'], 'RCA_CONFIRMED')
         self.assertEqual(high_debug._CLAUDE_GRANTS, set())
 
@@ -2195,7 +2202,8 @@ class HighDebugTests(unittest.TestCase):
         self.assertIn('--tools', argv)
         self.assertEqual(argv[argv.index('--tools') + 1], 'Read,Glob,Grep')
         self.assertIn('--model', argv)
-        self.assertEqual(argv[argv.index('--model') + 1], 'claude-opus-5-5')
+        self.assertEqual(argv[argv.index('--model') + 1],
+                         high_debug._debug_default_model('claude-debug'))
         self.assertIn('--strict-mcp-config', argv)
         # #2281 (Owner 2026-11-19): the claude-debug role defaults to 10800 s.
         self.assertEqual(kwargs['timeout'], 10800)
@@ -2242,8 +2250,9 @@ class HighDebugTests(unittest.TestCase):
     # Owner #2302 P2: an unlisted model of the Debug role's own family is
     # admitted, so the refused models below are of another family or malformed.
     def test_claude_debug_other_family_and_cross_family_models_refused_before_d6(self):
-        for model in ('gemini-unlisted-model', high_debug._CODEX_MODEL,
-                      'anthropic/' + high_debug._CLAUDE_MODEL):
+        for model in ('gemini-unlisted-model',
+                      high_debug._debug_default_model('codex-debug'),
+                      'anthropic/' + high_debug._debug_default_model('claude-debug')):
             with self.subTest(model=model):
                 self.assertEqual(self._debug_refusal(route='claude', resolved={
                     'source': 'roles', 'account': 'debug-account',
@@ -2251,8 +2260,10 @@ class HighDebugTests(unittest.TestCase):
                     'ROLE_MODEL_NOT_ALLOWED')
 
     def test_codex_debug_other_family_and_cross_family_models_refused_before_d6(self):
-        for model in ('gemini-unlisted-model', high_debug._CLAUDE_MODEL):
-            with self.subTest(model=model), patch.object(high_debug, '_CODEX_MODEL', model):
+        for model in ('gemini-unlisted-model',
+                      high_debug._debug_default_model('claude-debug')):
+            with self.subTest(model=model), patch.object(
+                    high_debug, '_debug_default_model', return_value=model):
                 self.assertEqual(self._debug_refusal(route='codex'),
                                  'ROLE_MODEL_NOT_ALLOWED')
 
@@ -2278,7 +2289,8 @@ class HighDebugTests(unittest.TestCase):
                     read_registration=reader)
         # Admission passed with the listed model; the run then stopped at the D6.
         self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_D6_UNAVAILABLE')
-        admit.assert_called_once_with('codex-debug', high_debug._CODEX_MODEL)
+        admit.assert_called_once_with(
+            'codex-debug', high_debug._debug_default_model('codex-debug'))
         reader.assert_called_once()
         create.assert_not_called()
         runner.assert_not_called()
@@ -2294,19 +2306,20 @@ class HighDebugTests(unittest.TestCase):
             config = user_config_path(home)
             config.parent.mkdir(parents=True)
             config.write_text(json.dumps({'roles': {'claude-debug': {
-                'model': high_debug._CODEX_MODEL}}}), encoding='utf-8')
+                'model': high_debug._debug_default_model('codex-debug')}}}),
+                encoding='utf-8')
             code = self._debug_refusal(
                 route='claude', resolve=lambda role: real(role, environ={}, home=home))
         self.assertEqual(code, 'ROLE_MODEL_NOT_ALLOWED')
 
     def test_run_codex_and_run_claude_refuse_other_family_and_cross_family_at_launch(self):
+        codex = high_debug._debug_default_model('codex-debug')
+        claude = high_debug._debug_default_model('claude-debug')
         cases = (
-            (high_debug._run_codex, {}, ('gemini-unlisted-model', high_debug._CLAUDE_MODEL,
-                                         'openai/' + high_debug._CODEX_MODEL,
-                                         high_debug._CODEX_MODEL.upper())),
+            (high_debug._run_codex, {}, ('gemini-unlisted-model', claude,
+                                         'openai/' + codex, codex.upper())),
             (high_debug._run_claude, {'config_dir': '/safe/claude'},
-             ('gemini-unlisted-model', high_debug._CODEX_MODEL,
-              high_debug._CLAUDE_MODEL.upper(), None)),
+             ('gemini-unlisted-model', codex, claude.upper())),
         )
         with tempfile.TemporaryDirectory() as directory:
             output_path = str(Path(directory) / 'report.md')
@@ -2327,7 +2340,8 @@ class HighDebugTests(unittest.TestCase):
                 high_debug._run_codex(prompt='diagnosis', cwd=directory,
                                       output_path=str(Path(directory) / 'report.md'))
         argv = run.call_args.args[0]
-        self.assertEqual(argv[argv.index('-m') + 1], high_debug._CODEX_MODEL)
+        self.assertEqual(argv[argv.index('-m') + 1],
+                         high_debug._debug_default_model('codex-debug'))
 
     def test_model_refusal_never_triggers_the_debug_fallback(self):
         # A Codex launch refused for its model does not switch to Claude.
@@ -2338,9 +2352,10 @@ class HighDebugTests(unittest.TestCase):
         self.assertNotIn('ROLE_MODEL_NOT_ALLOWED', high_debug._CLAUDE_DEBUG_UNAVAILABLE)
         real = high_debug.run_high_debug
         # An other-family and a cross-family Codex Debug model: no switch to Claude.
-        for model in ('gemini-unlisted-model', high_debug._CLAUDE_MODEL):
+        for model in ('gemini-unlisted-model',
+                      high_debug._debug_default_model('claude-debug')):
             with self.subTest(route='codex', model=model), \
-                 patch.object(high_debug, '_CODEX_MODEL', model), \
+                 patch.object(high_debug, '_debug_default_model', return_value=model), \
                  patch.object(high_debug.worker_dispatch, 'evaluate',
                               return_value=SimpleNamespace(allowed=True)), \
                  patch.object(high_debug, 'run_high_debug', wraps=real) as wrapped:
@@ -2358,7 +2373,8 @@ class HighDebugTests(unittest.TestCase):
                 codex_attempt.code = 'HIGH_DEBUG_QUOTA_EXHAUSTED'
                 high_debug._refuse('HIGH_DEBUG_QUOTA_EXHAUSTED')
             return real(route=route, **rest)
-        for model in ('gemini-unlisted-model', high_debug._CODEX_MODEL):
+        for model in ('gemini-unlisted-model',
+                      high_debug._debug_default_model('codex-debug')):
             with self.subTest(route='claude', model=model), \
                  patch.object(high_debug, 'run_high_debug', side_effect=staged), \
                  patch.object(high_debug.worker_dispatch, 'evaluate',
@@ -2383,18 +2399,21 @@ class HighDebugTests(unittest.TestCase):
             with self.subTest(source=source):
                 self._poster.reset_mock()
                 debug = {'source': source, 'account': None, 'config_dir': None,
-                         'provider': 'claude', 'model': high_debug._CLAUDE_MODEL}
+                         'provider': 'claude',
+                         'model': high_debug._debug_default_model('claude-debug')}
                 _result, store, _eval, mock_resolve = self._run_claude_case(
                     report, resolve=lambda role: debug if role == 'claude-debug' else reviewer)
                 calls = [call.args for call in mock_resolve.call_args_list]
                 self.assertEqual(calls[0], ('claude-debug',))
                 self.assertIn(('reviewer',), calls)
-                self.assertEqual(store.entries[0]['model_requested'], high_debug._CLAUDE_MODEL)
+                self.assertEqual(store.entries[0]['model_requested'],
+                                 high_debug._debug_default_model('claude-debug'))
                 self.assertIn('Account: reviewer-account', self._poster.call_args.args[1])
         # A claude-debug account is used as is, even under the 'builtin' label.
         self._poster.reset_mock()
         own = {'source': 'builtin', 'account': 'debug-account', 'config_dir': '/safe/debug',
-               'provider': 'claude', 'model': high_debug._CLAUDE_MODEL}
+               'provider': 'claude',
+               'model': high_debug._debug_default_model('claude-debug')}
         _result, _store, _eval, mock_resolve = self._run_claude_case(
             report, resolve=lambda role: own if role == 'claude-debug' else reviewer)
         calls = [call.args for call in mock_resolve.call_args_list]

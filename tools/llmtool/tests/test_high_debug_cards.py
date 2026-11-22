@@ -251,10 +251,12 @@ class PromptAndEntryTests(_CardsCase):
         codex_entry, claude_entry = claude_store.entries
         self.assertEqual((codex_entry['status'], codex_entry['report']),
                          ('RUN_FAILED', 'HIGH_DEBUG_QUOTA_EXHAUSTED'))
-        self.assertEqual(codex_entry['model_requested'], high_debug._CODEX_MODEL)
+        self.assertEqual(codex_entry['model_requested'],
+                         high_debug._debug_default_model('codex-debug'))
         self.assertEqual(codex_entry['rules_sha256'], digest)
         self.assertEqual(claude_entry['status'], 'RUN_FAILED')
-        self.assertEqual(claude_entry['model_requested'], high_debug._CLAUDE_MODEL)
+        self.assertEqual(claude_entry['model_requested'],
+                         high_debug._debug_default_model('claude-debug'))
         self.assertEqual(claude_entry['rules_sha256'], digest)
         self.assertEqual(high_debug._CLAUDE_GRANTS, set())
 

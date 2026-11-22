@@ -307,15 +307,17 @@ class ConsumerAdmissionTests(unittest.TestCase):
                     self.assertEqual(code(caught.exception), 'ROLE_MODEL_NOT_ALLOWED')
 
     def test_consumer_builtin_fallback_models_are_the_listed_models(self):
-        # A fallback used when no model is resolved still passes the check, so
-        # it must equal the registry entry (otherwise every launch would fail).
+        # #1502 WP-G: a default used when no model is resolved comes from the
+        # route configuration's roles registry, not from the consumer module.
         from llmtool import high_debug, review_dispatch
-        self.assertEqual(review_dispatch._CODEX_REVIEW_MODEL,
+        self.assertEqual(review_dispatch._review_default_model('codex-reviewer'),
                          listed(self.config, 'codex-reviewer'))
-        self.assertEqual(review_dispatch._CLAUDE_REVIEW_MODEL,
+        self.assertEqual(review_dispatch._review_default_model('claude-reviewer'),
                          listed(self.config, 'claude-reviewer'))
-        self.assertEqual(high_debug._CODEX_MODEL, listed(self.config, 'codex-debug'))
-        self.assertEqual(high_debug._CLAUDE_MODEL, listed(self.config, 'claude-debug'))
+        self.assertEqual(high_debug._debug_default_model('codex-debug'),
+                         listed(self.config, 'codex-debug'))
+        self.assertEqual(high_debug._debug_default_model('claude-debug'),
+                         listed(self.config, 'claude-debug'))
 
     def test_model_refusal_is_never_a_debug_fallback_code(self):
         from llmtool import high_debug
