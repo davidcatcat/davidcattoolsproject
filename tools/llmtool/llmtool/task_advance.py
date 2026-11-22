@@ -3351,6 +3351,27 @@ def _closed_train_member_head(record, task_id, store):
     return None
 
 
+def _stored_merge_replay(record, number, head, pr):
+    """The replay result for an already merged Task, or None.
+
+    Only when the stored merge_attempt is MERGED for exactly this PR and head
+    and the PR snapshot GitHub returned is merged at that same head; anything
+    else returns None and the normal merge gate decides (fail closed).
+    """
+    attempt = record.get('merge_attempt') if type(record) is dict else None
+    if (type(attempt) is not dict or attempt.get('state') != 'MERGED' or
+            type(number) is not int or attempt.get('pr') != number or
+            type(head) is not str or attempt.get('head_sha') != head):
+        return None
+    pr_head = pr.get('head') if type(pr) is dict else None
+    if (type(pr) is not dict or pr.get('number', number) != number or
+            pr.get('merged') is not True or type(pr_head) is not dict or
+            pr_head.get('sha') != head):
+        return None
+    return {'step': 'MERGED', 'codes': [],
+            'result': {'pr': number, 'head': head, 'replay': True}}
+
+
 def _lineage_after_merge(result, store, task_id, record, *, merged_now=False):
     """#1502 WP-D D10f2: close a merged lineage Task once; the merge result never changes.
 
@@ -3369,7 +3390,7 @@ def _lineage_after_merge(result, store, task_id, record, *, merged_now=False):
     try:
         closed = task_submission_cli.lineage_close_merged(store, task_id)
     except Exception:
-        closed = {'code': 'LINEAGE_CLOSE_FAILED'}
+        closed = {'code': 'LINEAGE_CLOSE_FAILED', 'cause': 'UNKNOWN'}
     result['lineage'] = closed
     if type(closed) is dict and closed.get('code') == 'LINEAGE_CLOSE_FAILED':
         result.setdefault('codes', []).append('LINEAGE_CLOSE_FAILED')
@@ -3675,6 +3696,15 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         if d6.get('recorded_result_head') != d6['result_head']:
             return _ack_consumed_events(_merge_refusal('MERGE_STALE_HEAD'),
                                         record, store, d6['result_head'])
+        replay = _stored_merge_replay(record, number, d6['result_head'], pr)
+        if replay is not None:
+            # A stored MERGED attempt whose PR GitHub reports merged at that head:
+            # nothing merges again; only the lineage close is replayed (D10f2), so
+            # a close that failed after the merge (e.g. LINEAGE_LOCK_BUSY) can be
+            # retried. lineage_close_merged is idempotent.
+            replay.update(task_id=task_id, next=replay['step'])
+            _lineage_after_merge(replay, store, task_id, record)
+            return _ack_consumed_events(replay, record, store, d6['result_head'])
         merge_result = _merge_once(store=store, record=record, number=number,
             head=d6['result_head'], pr=pr, events=related['events'], github_get=get,
             gh_runner=_publish_run_gh if merge_gh_runner is None else merge_gh_runner,
