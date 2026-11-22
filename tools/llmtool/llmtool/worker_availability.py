@@ -345,9 +345,19 @@ def _observation(view, layer):
         return None
 
 
-def _active_fail(view, layer):
+def _active_fail(view, layer, now=None):
     entry = _observation(view, layer)
-    return type(entry) is dict and entry.get('status') == 'FAIL'
+    if type(entry) is not dict or entry.get('status') != 'FAIL':
+        return False
+    if now is None:
+        return True
+    # The stored view marks freshness at read time; a caller's bounded time
+    # (a probe or a later admission) must also see an expired FAIL as inactive.
+    try:
+        return (datetime.strptime(entry.get('fresh_until'), '%Y-%m-%dT%H:%M:%SZ')
+                .replace(tzinfo=timezone.utc) > now)
+    except (TypeError, ValueError):
+        return True
 
 
 def _failure_class(value):
@@ -515,9 +525,9 @@ def record_gw_agent_success(store, *, now=None, evidence=None):
     view = _observation_view(store)
     failed = False
     for layer in GW_AGENT_PROBE_LAYERS:
-        if layer == GW_AGENT_MODEL_LAYER and _active_fail(view, layer):
+        if layer == GW_AGENT_MODEL_LAYER and _active_fail(view, layer, now):
             continue  # S1: a model pause is never cleared by a probe
-        if layer == GW_AGENT_RATE_LAYER and _active_fail(view, layer):
+        if layer == GW_AGENT_RATE_LAYER and _active_fail(view, layer, now):
             continue  # an unexpired Retry-After is not cleared by a probe
         try:
             _write_observation(store, layer, 'PASS', now, fresh, digest)
@@ -633,13 +643,13 @@ def gw_agent_refusal(store, *, now=None):
     if view == 'UNAVAILABLE':
         return 'WORKER_GW_AGENT_AVAILABILITY_UNKNOWN'
     now = _utc_now(now)
-    if _active_fail(view, GW_AGENT_SECURITY_LAYER):
+    if _active_fail(view, GW_AGENT_SECURITY_LAYER, now):
         return GW_AGENT_REFUSALS['security']
-    if _active_fail(view, GW_AGENT_MODEL_LAYER):
+    if _active_fail(view, GW_AGENT_MODEL_LAYER, now):
         return GW_AGENT_REFUSALS['model']
-    if _active_fail(view, GW_AGENT_INFRA_LAYER):
+    if _active_fail(view, GW_AGENT_INFRA_LAYER, now):
         return GW_AGENT_REFUSALS['infrastructure']
-    if _active_fail(view, GW_AGENT_RATE_LAYER):
+    if _active_fail(view, GW_AGENT_RATE_LAYER, now):
         return GW_AGENT_REFUSALS['rate_limit']
     if _task_failure_unresolved(store, now, view):
         return GW_AGENT_REFUSALS['unrecorded']
@@ -684,13 +694,13 @@ def probe_gw_agent(store, *, call=None, now=None):
     if view == 'UNAVAILABLE':
         return _probe_report('UNKNOWN', now, provider_call=False,
                              reason='AVAILABILITY_UNAVAILABLE')
-    if _active_fail(view, GW_AGENT_SECURITY_LAYER):
+    if _active_fail(view, GW_AGENT_SECURITY_LAYER, now):
         return _probe_report('FAIL', now, provider_call=False, auth='FAIL',
                              reason=GW_AGENT_REFUSALS['security'])
-    if _active_fail(view, GW_AGENT_MODEL_LAYER):
+    if _active_fail(view, GW_AGENT_MODEL_LAYER, now):
         return _probe_report('FAIL', now, provider_call=False, inference='FAIL',
                              reason=GW_AGENT_REFUSALS['model'])
-    if _active_fail(view, GW_AGENT_RATE_LAYER):
+    if _active_fail(view, GW_AGENT_RATE_LAYER, now):
         return _probe_report('UNKNOWN', now, provider_call=False,
                              reason=GW_AGENT_REFUSALS['rate_limit'])
     if _task_failure_unresolved(store, now, view, classes=('security', 'model')):
