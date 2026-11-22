@@ -33,7 +33,21 @@ The first three effective formal-review repairs can proceed without High Debug.
 If the third repair receives another formal FAIL, the fourth repair requires
 an applicable confirmed RCA. The fifth repair has the same requirement.
 A work lineage, including ROOT, split children, REPLAN and continuations,
-shares three effective High Debug runs. A confirmed RCA can cover the same
+shares three effective High Debug runs.
+
+### Work lineage drop and replace
+
+Without `--final`, `llmtool task drop` is refused with
+`LINEAGE_SUCCESSOR_REQUIRED` when it would make the ROOT FAILED while a legal
+next step still exists (child slots left, or the lineage REPLAN unused); the
+refusal performs no write. With `--final`, the drop is the explicit final
+abandonment of the lineage. `--replaces` in `llmtool task split` and
+`llmtool task replan` lists the child Task IDs the new split child (or the
+REPLAN) replaces; in a replan the REPLAN must include the child it replaces,
+and any CLOSED member's `replaces` then covers the replaced child. See
+[#2373](https://github.com/davidcatcat/davidcattoolsproject/issues/2373) for the agreed change.
+
+A confirmed RCA can cover the same
 blocking findings on a continuation when the previous Task and the current
 formal review provide matching evidence. An unconfirmed diagnosis or changed
 findings require fresh evidence. Uncertain launches count toward the budget.
