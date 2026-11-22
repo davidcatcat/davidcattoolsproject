@@ -16,6 +16,8 @@ import hashlib
 import json
 import re
 
+from .errors import LLMToolError
+
 # Section 2 check 2. Each code below is raised by run_route before the provider
 # process starts (confirmed at source 89dbd330, developer_routes/base.py:774-928):
 # - CLAUDE_PROFILE_INVALID: ClaudeRoute.validate_profile (claude.py:68), called by
@@ -254,7 +256,52 @@ def _ci_identity_sha256(base):
     return _sha256_text(canonical(identity))
 
 
-def _matches(packet, claim, root):
+def inherited_rca(store, root, packet, *, source_task_id=None, report_sha256=None):
+    """Find a related RCA with matching formal findings and run evidence."""
+    from . import high_debug, lineage_counts, review_result, task_submission_cli
+    try:
+        members = lineage_counts.debug_lineage_members(store, root)
+        if not members:
+            return None
+        target = review_result.diagnosis_findings(
+            root, packet['failed_head'], packet['executor_task'], pr=packet['pr'],
+            version=packet['version'], excerpt=packet.get('reviewer_text_excerpt_untrusted_data'))
+        if target is None:
+            return None
+        for task_id, task in members.items():
+            if (task_id == root['task_id'] or
+                    source_task_id is not None and task_id != source_task_id):
+                continue
+            executor = (task.get('completion') or {}).get('executor_task_id')
+            for entry in reversed(task.get('high_debug', [])):
+                if entry.get('status') != 'RCA_CONFIRMED' or entry.get('no_pr') is True:
+                    continue
+                if report_sha256 is not None and entry.get('report_sha256') != report_sha256:
+                    continue
+                family = re.fullmatch(r'pr-([1-9][0-9]*)', entry.get('family', ''))
+                if family is None:
+                    continue
+                head = entry['examined_sha']
+                d6 = entry.get('d6', '')
+                attempt = re.search(r'-hd([1-9][0-9]*)-[0-9a-f]{7}\Z', d6)
+                if (not isinstance(executor, str) or attempt is None or
+                        d6 != high_debug._d6_name(executor, int(attempt[1]), head)):
+                    continue
+                findings = review_result.diagnosis_findings(
+                    task, head, executor, before=entry['recorded_at'], pr=int(family.group(1)))
+                if findings != target:
+                    continue
+                try:
+                    task_submission_cli._require_bound_high_debug_run(task, task_id, entry, executor)
+                except ValueError:
+                    continue
+                return task_id, entry
+    except (LLMToolError, AttributeError, KeyError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _matches(packet, claim, root, store):
     if not (repair_packet_shape_ok(packet) and type(claim) is dict and type(root) is dict):
         return False
     # Identity: P matches the claim C and its root Task R.
@@ -285,7 +332,7 @@ def _matches(packet, claim, root):
     stored_digest = claim.get('packet_sha256')
     if digest is None or type(stored_digest) is not str or digest != stored_digest:
         return False
-    # High Debug binding (repair 2 and 3).
+    # Existing claims retain the RCA binding recorded when they were created.
     if 'high_debug_report_sha256' not in claim:
         return not any(field in packet for field in _PACKET_HIGH_DEBUG_FIELDS)
     report_sha256 = claim['high_debug_report_sha256']
@@ -293,28 +340,46 @@ def _matches(packet, claim, root):
             packet.get('high_debug_report_sha256') != report_sha256 or
             'high_debug_report_untrusted_data' not in packet):
         return False
+    source_task = claim.get('high_debug_source_task')
+    if source_task is not None:
+        source = inherited_rca(store, root, packet, source_task_id=source_task,
+                               report_sha256=report_sha256)
+        return (source is not None and packet['high_debug_report_untrusted_data'] ==
+                source[1]['report'][:HIGH_DEBUG_EXCERPT_MAX_CHARS])
+    return bool(local_rca_entries(packet, claim, root))
+
+
+def local_rca_entries(packet, claim, root):
+    """Local runs that match the claim's family, digest, report and permitted HEAD."""
     family = claim.get('family', f"pr-{claim.get('pr')}")
+    bound_heads = {claim.get('head_sha')}
+    for earlier in root.get('review_repair_claims', []):
+        if earlier.get('family', f"pr-{earlier.get('pr')}") != family:
+            continue
+        if earlier.get('attempt') >= claim.get('attempt', 0):
+            break
+        bound_heads.add(earlier.get('head_sha'))
     entries = root.get('high_debug', [])
     if type(entries) is not list:
-        return False
-    return any(type(entry) is dict and entry.get('family') == family and
+        return []
+    return [entry for entry in entries if type(entry) is dict and entry.get('family') == family and
                entry.get('no_pr') is not True and
                entry.get('status') == 'RCA_CONFIRMED' and
-               entry.get('examined_sha') == claim.get('head_sha') and
-               entry.get('report_sha256') == report_sha256 and
+               entry.get('examined_sha') in bound_heads and
+               entry.get('report_sha256') == claim.get('high_debug_report_sha256') and
                type(entry.get('report')) is str and
                packet['high_debug_report_untrusted_data'] ==
                entry['report'][:HIGH_DEBUG_EXCERPT_MAX_CHARS]
-               for entry in entries)
+               ]
 
 
-def repair_packet_matches(packet, claim, root):
+def repair_packet_matches(packet, claim, root, store=None):
     """Section 4 "Packet binding": True only when packet P is bound to claim C of root R.
 
     Pure. Any miss, malformed input or error gives False; the caller refuses
     START_RETRY_REPAIR_PACKET_MISMATCH.
     """
     try:
-        return _matches(packet, claim, root) is True
+        return _matches(packet, claim, root, store) is True
     except Exception:
         return False

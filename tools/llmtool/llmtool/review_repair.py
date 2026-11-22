@@ -1,11 +1,13 @@
 """Bounded, event driven repair dispatch for a failed formal review."""
 
 from datetime import datetime, timezone
+import contextlib
 import hashlib
 import io
 import json
 import re
 import shutil
+import threading
 from argparse import Namespace
 
 from . import review_result, run_budget, task_completion, worker_availability, worker_dispatch
@@ -96,7 +98,9 @@ def withdrawn_findings(task, pr, head):
 
 # Formal Reviewer keys and their model families, in the fixed choice order.
 ARBITER_REVIEWERS = (('claude-reviewer', 'claude'), ('codex-reviewer', 'codex'))
-_PROFILE_FAMILIES = {'claude': 'claude', 'codex': 'codex', 'agy': 'gemini',
+# AGY is deliberately absent: since Owner #289 it serves Gemini and Claude ids,
+# so developer_family resolves its family from the recorded model.
+_PROFILE_FAMILIES = {'claude': 'claude', 'codex': 'codex',
                      'opencode': 'opencode', 'gw-agent': 'gw-agent', 'company-gw': 'gw-agent'}
 _REVIEW_ACCOUNT_MODES = {'CODEX_CLI': 'codex-reviewer',
                          'EXPLICIT_CLAUDE_CONFIG_DIR': 'claude-reviewer',
@@ -104,22 +108,43 @@ _REVIEW_ACCOUNT_MODES = {'CODEX_CLI': 'codex-reviewer',
 _VERDICT_ACTOR = re.compile(r'<!-- activity: type=review_verdict actor=(Claude|Codex) ')
 
 
+# Model-name markers, in the fixed order used for a route that can serve more
+# than one vendor's model.
+_MODEL_FAMILY_MARKERS = (('claude', 'claude'), ('gpt', 'codex'),
+                         ('codex', 'codex'), ('gemini', 'gemini'))
+
+
+def _named_model_family(model):
+    """The family a recorded model name shows, or None when it shows none."""
+    if type(model) is not str:
+        return None
+    lowered = model.lower()
+    for marker, named in _MODEL_FAMILY_MARKERS:
+        if marker in lowered:
+            return named
+    return None
+
+
 def developer_family(developer):
     """The actual model family of a Task's Developer, or None when unknown.
 
-    A route that can serve another vendor's model (OpenCode, gw-agent) takes
-    the family of the recorded model when its name shows one.
+    A route that can serve another vendor's model (AGY, OpenCode, gw-agent)
+    takes the family of the recorded model when its name shows one. Security
+    repair (Codex security v91 F1, CWE-863): the AGY route serves both Gemini
+    and Claude ids, so its family is never the route name alone; an AGY run
+    with an unrecorded or unnamed model is UNKNOWN (None), and choose_arbiter
+    refuses rather than pairing a same-family arbiter with it.
     """
     if type(developer) is not dict:
         return None
-    family = _PROFILE_FAMILIES.get(developer.get('provider_profile'))
+    profile = developer.get('provider_profile')
+    family = _PROFILE_FAMILIES.get(profile)
     model = developer.get('model')
+    if profile == 'agy':
+        named = _named_model_family(model)
+        return named if named in ('claude', 'gemini') else None
     if family in ('opencode', 'gw-agent') and type(model) is str:
-        lowered = model.lower()
-        for marker, named in (('claude', 'claude'), ('gpt', 'codex'), ('codex', 'codex'),
-                              ('gemini', 'gemini')):
-            if marker in lowered:
-                return named
+        return _named_model_family(model) or family
     return family
 
 
@@ -182,6 +207,92 @@ def _update_claim_state(store, task_id, claim, state):
     _refuse('REPAIR_CLAIM_UNAVAILABLE')
 
 
+_LOCAL_DISPATCH_GUARD = threading.Lock()
+_LOCAL_DISPATCH_LOCKS = {}
+
+
+@contextlib.contextmanager
+def _local_dispatch_lock(repair_task_id):
+    """Process-local stand-in for a store that is not a TaskStore (no other process)."""
+    from .task_store import LINEAGE_LOCK_TIMEOUT_SECONDS
+    with _LOCAL_DISPATCH_GUARD:
+        lock = _LOCAL_DISPATCH_LOCKS.setdefault(repair_task_id, threading.Lock())
+    if not lock.acquire(timeout=LINEAGE_LOCK_TIMEOUT_SECONDS):
+        raise LLMToolError('REPAIR_DISPATCH_LOCK_BUSY')
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def _repair_dispatch_guard(store, repair_task_id):
+    """#2475 F2: take one repair Task's dispatch lock; return an ExitStack that releases it.
+
+    The lock is held across the delegate call and the claim's final state write,
+    so one continuation has one dispatcher at a time. A lock that cannot be
+    taken refuses REPAIR_CLAIM_UNAVAILABLE and changes nothing.
+    """
+    from .task_store import TaskStore
+    stack = contextlib.ExitStack()
+    try:
+        if isinstance(store, TaskStore):
+            stack.enter_context(store.repair_dispatch_lock(repair_task_id))
+        else:
+            stack.enter_context(_local_dispatch_lock(repair_task_id))
+    except Exception:
+        stack.close()
+        _refuse('REPAIR_CLAIM_UNAVAILABLE')
+    return stack
+
+
+def _replay_claimed_test_repair(*, store, task_id, existing, developer, packet,
+                                executor_task, profile, dispatch_adapter,
+                                delegate_callable, packet_version):
+    """Replay the delegation of one CLAIMED EC2/CI claim whose repair Task has no Developer.
+
+    #2475 F2: the dispatch lock is taken first and the claim and the repair Task
+    are read again under it. A competing caller that already took the dispatch is
+    seen as a DISPATCHED claim or a Developer assignment, and this call delegates
+    nothing; so a loser can never move a claim the winner is finishing.
+    """
+    repair_task_id = existing['repair_task_id']
+    guard = _repair_dispatch_guard(store, repair_task_id)
+    with guard:
+        try:
+            current = store.get(task_id)
+            repair_task = store.get(repair_task_id)
+        except Exception:
+            _refuse('REPAIR_CLAIM_UNAVAILABLE')
+        claims = current.get('review_repair_claims') if type(current) is dict else None
+        fresh = next((item for item in claims
+                      if type(item) is dict and item.get('repair_task_id') == repair_task_id),
+                     None) if type(claims) is list else None
+        if type(fresh) is not dict or type(repair_task) is not dict:
+            _refuse('REPAIR_CLAIM_UNAVAILABLE')
+        if fresh.get('state') != 'CLAIMED' or repair_task.get('developer') is not None:
+            dispatched = fresh.get('state') == 'DISPATCHED'
+            return {'claim': fresh, 'repair_task_id': repair_task_id,
+                    'attempt': fresh.get('attempt'), 'replayed': dispatched,
+                    'next_action': (f"review-dispatch --version {packet_version + 1}"
+                                    if dispatched else f"task delegate {repair_task_id}")}
+        adapter = dispatch_adapter
+        if adapter is None:
+            adapter = lambda **request: _delegate_repair(
+                **request, delegate=delegate_callable, store=store)
+        try:
+            result = adapter(task=repair_task, developer=developer, packet=packet,
+                             executor_task=executor_task, provider_profile=profile,
+                             model=developer.get('model'))
+        except Exception:
+            _update_claim_state(store, task_id, fresh, 'UNKNOWN')
+            raise
+        _update_claim_state(store, task_id, fresh, 'DISPATCHED')
+        claim = dict(fresh, state='DISPATCHED')
+        return {'result': result, 'attempt': claim['attempt'],
+                'repair_task_id': repair_task_id, 'claim': claim, 'replayed': True,
+                'next_action': f"review-dispatch --version {packet_version + 1}"}
+
+
 def _worker_key(profile):
     return {'company-gw': 'company-gw', 'gw-agent': 'gw-agent',
             'opencode': 'opencode-developer', 'claude': 'claude-developer',
@@ -223,7 +334,10 @@ def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
         egress_basis=developer.get('egress_basis'), repair_packet=packet,
         data_class=data_class,
     )
-    return invoke(args, store=store)
+    # #2503: the repair keeps its read scope; files the findings name outside it are
+    # shown and recorded as advice. The advice never changes or blocks the repair.
+    return task_submission_cli._delegate_with_scope_advice(
+        args, store, lambda: invoke(args, store=store))
 
 
 def _record_repair_task(*, task, developer, packet, attempt, store, repair_task_id=None,
@@ -524,15 +638,13 @@ def _policy():
         _refuse('REPAIR_POLICY_INVALID')
 
 
-def _review_gate(task, attempts, packet, family, policy, counts=None, *, body=None):
+def _review_gate(task, attempts, packet, family, policy, counts=None, *, body=None, inherited=None, debug_used=0):
     """#1502 WP-D (O2, D1, D3): admit one review repair from the valid FAILs per HEAD.
 
     Each earlier review repair claim stands for a valid FAIL on its HEAD and the
     current FAIL adds its own HEAD, so a re-review of one HEAD never counts twice.
-    A FAIL whose IDs show no blocking finding is not valid. The second repair needs
-    an RCA_CONFIRMED Debug of this family on the failed HEAD; that entry is returned.
-    #2367 A2: repairs 3 to repair_max need no new Debug; the family's newest
-    Debug (RCA_CONFIRMED) covers them and is returned and bound the same way.
+    A FAIL whose IDs show no blocking finding is invalid. The fourth and fifth
+    repairs require an applicable confirmed RCA, which is returned for binding.
 
     D14 (spec section 7): the policy decides before the repair limit. A Task whose
     repair_max repairs are used escalates by kind at its next valid FAIL (ROOT
@@ -572,6 +684,8 @@ def _review_gate(task, attempts, packet, family, policy, counts=None, *, body=No
         fail_count = repair_policy.review_fail_count(heads)
     else:
         new_fail, fail_count = True, repair_policy.UNKNOWN
+    if spent and not new_fail:
+        _refuse('REPAIR_LIMIT_REACHED')
     if spent and new_fail and type(fail_count) is int:
         # No repair is left, so this new valid FAIL is at least the escalation FAIL.
         fail_count = max(fail_count, policy['review_fail_max'])
@@ -579,25 +693,50 @@ def _review_gate(task, attempts, packet, family, policy, counts=None, *, body=No
                if type(entry) is dict and entry.get('family') == family and
                entry.get('no_pr') is not True and
                entry.get('status') in ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED')]
-    on_head = [entry for entry in entries
-               if entry.get('examined_sha') == packet['failed_head']]
+    executor = packet.get('executor_task')
+    pr = packet.get('pr')
+    target = review_result.diagnosis_findings(
+        task, packet['failed_head'], executor, pr=pr, version=packet.get('version'),
+        excerpt=packet.get('reviewer_text_excerpt_untrusted_data'))
+    on_head = [item for item in entries if item.get('examined_sha') == packet['failed_head']]
     entry = on_head[-1] if on_head else None
-    if entry is None and used >= 2:
-        # #2367 A2: from repair #3 on, the family's newest Debug on a HEAD of
-        # its earlier claims covers the repair (the same HEADs the TaskStore
-        # accepts for the bound digest): an RCA_CONFIRMED needs no new Debug;
-        # a newer Debug that did not confirm a cause escalates. Repair #2
-        # keeps D1 (a Debug on its own failed HEAD).
+    if entry is not None:
+        original = review_result.diagnosis_findings(
+            task, entry['examined_sha'], executor, before=entry.get('recorded_at'), pr=pr)
+        if target is not None:
+            if original != target:
+                entry = None
+        elif used >= repair_policy.REVIEW_REPAIRS_WITHOUT_DEBUG:
+            # Older unstructured verdicts can bind the exact review on the
+            # same HEAD. Missing evidence or edited review text cannot do so.
+            options = {'pr': pr, 'version': packet.get('version'),
+                       'excerpt': packet.get('reviewer_text_excerpt_untrusted_data')}
+            current_body = review_result.diagnosis_review_body(
+                task, packet['failed_head'], executor, **options)
+            before_body = review_result.diagnosis_review_body(
+                task, packet['failed_head'], executor, before=entry.get('recorded_at'), **options)
+            if current_body is None or before_body != current_body:
+                entry = None
+    if entry is None and target is not None and used >= repair_policy.REVIEW_REPAIRS_WITHOUT_DEBUG:
+        # Reuse an earlier same-family report only for the same formally bound findings.
         claim_heads = {claim.get('head_sha') for claim in attempts if type(claim) is dict}
-        covering = [item for item in entries if item.get('examined_sha') in claim_heads]
-        if covering:
-            entry = covering[-1]
+        for item in reversed(entries):
+            if item['status'] != 'RCA_CONFIRMED' or item['examined_sha'] not in claim_heads:
+                continue
+            original = review_result.diagnosis_findings(
+                task, item['examined_sha'], executor, before=item.get('recorded_at'), pr=pr)
+            if original == target:
+                entry = item
+                break
+    if (entry is None or entry['status'] != 'RCA_CONFIRMED') and inherited is not None:
+        entry = inherited
     lineage = task.get('lineage')
     try:
         action = repair_policy.review_action(
             kind=lineage.get('kind') if type(lineage) is dict else 'root',
-            fail_count=fail_count,
-            debug_status=entry['status'] if entry else None, policy=policy)
+            fail_count=fail_count, repair_count=repair_count,
+            debug_status=entry['status'] if entry else None, group_debug_used=debug_used,
+            policy=policy)
     except LLMToolError:
         _refuse('REPAIR_LINEAGE_INVALID')
     if spent and action in ('REPAIR', 'DEBUG'):
@@ -693,6 +832,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
             completion.get('executor_task_id') != executor_task or
             developer.get('state') not in ('DEVELOPER_RESPONDED', 'DEVELOPER_OUTPUT_REJECTED')):
         _refuse('REPAIR_DEVELOPER_BINDING_INVALID')
+    from . import direct_reassignment
+    developer = direct_reassignment.authoring_route(store, task, developer, executor_task)
     profile = developer.get('provider_profile')
     claude_cli = (profile == 'claude' and
                   developer.get('backend_session_semantics') == 'CLI_REPORTED_SESSION_ID')
@@ -725,13 +866,16 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     if not test_failure and dispute_open_on(task, pr_number, packet['failed_head']):
         _refuse('REPAIR_DISPUTE_OPEN')
     policy_task = executor_task if claude_cli else task_id
-    decision = worker_dispatch.evaluate(
-        worker, developer.get('owner_assignment_ref'), policy_task)
-    if not decision.allowed:
-        _refuse(decision.reason_code)
-    # #1816: after the Owner policy, before any claim, Task or D6 write.
-    if worker_availability.fresh_quota_fail(store, worker):
-        _refuse(worker_availability.REFUSAL_CODE)
+    def require_original_worker():
+        decision = worker_dispatch.evaluate(
+            worker, developer.get('owner_assignment_ref'), policy_task)
+        if not decision.allowed:
+            _refuse(decision.reason_code)
+        # #1816: after the Owner policy, before any claim, Task or D6 write.
+        if worker_availability.fresh_quota_fail(store, worker):
+            _refuse(worker_availability.REFUSAL_CODE)
+    if not auto:
+        require_original_worker()
     base_family = f'pr-{pr_number}' if family is None else family
     if (type(base_family) is not str or
             re.fullmatch(r'[a-z0-9._-]{1,64}', base_family) is None or
@@ -811,15 +955,62 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     if retry_claim_id is not None and retry_claim is None:
         _refuse('REPAIR_CLAIM_UNAVAILABLE')
     if existing is not None and existing is not retry_claim:
+        # #2438: an already-counted direct repair can continue on a replacement
+        # assignment. The delegate serializes the old controller and handoff,
+        # then applies its ordinary scope, policy, quota and D6 checks.
+        repair_task = None
+        if dispatch_adapter is None or (test_failure and existing.get('state') == 'CLAIMED'):
+            try:
+                repair_task = store.get(existing['repair_task_id'])
+            except (LLMToolError, KeyError):
+                pass
+        repair_developer = repair_task.get('developer') if type(repair_task) is dict else None
+        history = (repair_developer.get('direct_handoffs') or []
+                   if type(repair_developer) is dict else [])
+        if history and repair_developer.get('state') == 'DEVELOPER_RESPONDED':
+            direct_reassignment.reconcile_claim(
+                store, existing['repair_task_id'], history[-1]['old_assignment'])
+            saved = store.get(task_id)
+            bound = next(claim for claim in saved['review_repair_claims']
+                         if claim['repair_task_id'] == existing['repair_task_id'])
+            return {'claim': bound, 'repair_task_id': existing['repair_task_id'],
+                    'attempt': bound['attempt'], 'replayed': True, 'next_action': 'task advance'}
+        if (direct_reassignment.replacement_candidate(repair_developer) and
+                (repair_developer.get('provider_profile') == profile or
+                 (history and history[-1]['old_profile'] == profile))):
+            if (auto and not test_failure and
+                    repair_developer.get('dispatch_boundary') != 'PREPARED'):
+                _auto_replay_claim(store, task, task_id, existing)
+            value = _delegate_repair(task=repair_task, developer=developer, packet=packet,
+                                     executor_task=executor_task, delegate=delegate_callable,
+                                     store=store)
+            saved = store.get(task_id)
+            bound = next(claim for claim in saved['review_repair_claims']
+                         if claim['repair_task_id'] == existing['repair_task_id'])
+            return {'result': value, 'claim': bound, 'attempt': existing['attempt'],
+                    'repair_task_id': existing['repair_task_id'], 'replayed': True,
+                    'next_action': 'task advance'}
+        if auto:
+            require_original_worker()
         if auto and not test_failure:
             # v91 F1: an auto replay is decided under the chain lock too.
             existing = _auto_replay_claim(store, task, task_id, existing)
+        if (test_failure and existing.get('state') == 'CLAIMED' and
+                type(repair_task) is dict and repair_task.get('developer') is None):
+            # #2475 F2: serialized per repair Task; the claim is read again under the lock.
+            return _replay_claimed_test_repair(
+                store=store, task_id=task_id, existing=existing, developer=developer,
+                packet=packet, executor_task=executor_task, profile=profile,
+                dispatch_adapter=dispatch_adapter, delegate_callable=delegate_callable,
+                packet_version=packet_version)
         task_id_for_repair = existing.get('repair_task_id')
         dispatched = existing.get('state') == 'DISPATCHED'
         return {'claim': existing, 'repair_task_id': task_id_for_repair,
                 'replayed': dispatched,
                 'next_action': (f"review-dispatch --version {packet_version + 1}"
                                 if dispatched else f"task delegate {task_id_for_repair}")}
+    if auto:
+        require_original_worker()
     # #1502 WP-D: limits from policy.json; review repairs pass the counting gate.
     # L1 (I1, I2, I6): the counts cover the whole continuation chain; a link in
     # doubt makes them UNKNOWN, which counts as the limit. The replay above
@@ -855,11 +1046,24 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                 _refuse('REVIEW_REPAIR_PM_REQUIRED')
         counts = lineage_counts.lineage_counts(store, task, base_family=base_family,
                                                include_successors=True)
+        if not test_failure and retry_claim is None:
+            heads = counts.get('review_heads')
+            replaced_failure = any(item.get('head_sha') == packet['failed_head'] and
+                                   item.get('state') == 'FAILED' for item in attempts)
+            if (type(heads) is dict and packet['failed_head'] in heads and
+                    not replaced_failure and counts['review_repairs'] < _policy()['repair_max']):
+                _refuse('REPAIR_HEAD_ALREADY_CLAIMED')
         rca_entry = None
+        inherited = None
         if not test_failure:
+            from . import high_debug, start_failure
+            debug_used, _ = lineage_counts.chain_debug_used(
+                store, task, task.get('high_debug', []), high_debug._debug_entry_used)
+            inherited = start_failure.inherited_rca(store, task, packet)
             body = body_holder[0] if body_holder else None
             rca_entry = _review_gate(task, attempts, packet, family, _policy(), counts=counts,
-                                     body=body)
+                                     body=body, inherited=inherited[1] if inherited else None,
+                                     debug_used=debug_used)
             if rca_entry is not None:
                 packet = dict(packet,
                               high_debug_report_untrusted_data=rca_entry['report'][:6000],
@@ -890,6 +1094,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         }
         if rca_entry is not None:
             claim['high_debug_report_sha256'] = rca_entry['report_sha256']
+            if inherited is not None and rca_entry is inherited[1]:
+                claim['high_debug_source_task'] = inherited[0]
         next_claims = list(claims)
         if retry_claim is not None:
             retry_index = next((index for index, item in enumerate(next_claims)
@@ -928,11 +1134,19 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
             worker, developer.get('owner_assignment_ref'), policy_task)
         if not decision.allowed:
             _refuse_unclaimed(decision.reason_code, repair_task_id)
+        # #2475 F2: this dispatch's lock is taken before the claim is visible. The
+        # repair Task ID is new, so nobody else holds its lock and this cannot
+        # wait; a replay of the claim then waits for this dispatch to finish.
+        try:
+            dispatch_guard = _repair_dispatch_guard(store, repair_task_id)
+        except LLMToolError:
+            _refuse_unclaimed('REPAIR_CLAIM_UNAVAILABLE', repair_task_id)
         try:
             store.compare_and_update(
                 task_id, expected={'record_sha256': task['record_sha256']},
                 review_repair_claims=next_claims)
         except Exception:
+            dispatch_guard.close()
             _refuse_unclaimed('REPAIR_CLAIM_UNAVAILABLE', repair_task_id)
     finally:
         release_chain()
@@ -943,16 +1157,19 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         adapter = lambda **request: _delegate_repair(
             **request, delegate=delegate_callable, store=store)
     try:
-        # Revalidate after recording so a D6 moved during repair Task creation
-        # cannot redirect the provider; the pre-write head check above ensures
-        # unregistered or already-moved worktrees consume no repair attempt.
-        result = adapter(task=repair_task, developer=developer, packet=packet,
-                         executor_task=executor_task, provider_profile=profile,
-                         model=developer.get('model'))
-    except Exception:
-        _update_claim_state(store, task_id, claim, 'UNKNOWN')
-        raise
-    _update_claim_state(store, task_id, claim, 'DISPATCHED')
+        try:
+            # Revalidate after recording so a D6 moved during repair Task creation
+            # cannot redirect the provider; the pre-write head check above ensures
+            # unregistered or already-moved worktrees consume no repair attempt.
+            result = adapter(task=repair_task, developer=developer, packet=packet,
+                             executor_task=executor_task, provider_profile=profile,
+                             model=developer.get('model'))
+        except Exception:
+            _update_claim_state(store, task_id, claim, 'UNKNOWN')
+            raise
+        _update_claim_state(store, task_id, claim, 'DISPATCHED')
+    finally:
+        dispatch_guard.close()
     claim['state'] = 'DISPATCHED'
     response = {'result': result, 'attempt': claim['attempt'],
                 'repair_task_id': repair_task['task_id'],

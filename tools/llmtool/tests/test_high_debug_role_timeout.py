@@ -34,8 +34,9 @@ class DebugRoleTimeoutTests(unittest.TestCase):
                  patch.object(high_debug.subprocess, 'run') as run:
                 launch(directory)
             run.assert_called_once()
-            self.assertEqual(run.call_args.kwargs['timeout'], 1800)
-            self.assertEqual(developer_routes.DEFAULT_ROLE_TIMEOUT_SECONDS, 1800)
+            # #2281 (Owner 2026-11-19): AI Debug runs default to 3 hours.
+            self.assertEqual(run.call_args.kwargs['timeout'], 10800)
+            self.assertEqual(developer_routes.DEFAULT_ROLE_TIMEOUT_SECONDS, 10800)
 
     def test_configured_role_timeout_is_passed_to_launch(self):
         for role, launch in _CASES:

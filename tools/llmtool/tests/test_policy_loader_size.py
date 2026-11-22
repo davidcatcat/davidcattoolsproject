@@ -61,8 +61,20 @@ class PolicyLoaderSizeTests(unittest.TestCase):
             rp.load_policy(self._write(text))
         self.assertEqual(str(caught.exception), 'POLICY_INVALID')
 
-    def test_repository_policy_is_unchanged(self):
-        self.assertEqual(rp.load_policy(), dict(GOOD, timeout_continuation_max=1))
+    def test_repository_policy_loads_all_limits(self):
+        # #2281 L0b added the limit-table keys (rows 2, 15, 16) and L7 row 17
+        # (the D6 writer lease, 24 hours); the rest is as before.
+        self.assertEqual(rp.load_policy(), dict(
+            GOOD, parent_debug_max=3, timeout_continuation_max=1, spec_preflight_large_file_lines=2000,
+            merge_train_members_max=6, merge_train_files_per_pr_max=100,
+            revert_scope_prs_max=5, d6_writer_lease_hours=24))
+
+    def test_repository_policy_is_well_within_the_bound(self):
+        # #2281 L0b: with every optional key present the file stays far below
+        # _MAX_BYTES, so the bound never refuses a valid policy.
+        with open(rp.policy_path(), 'rb') as stream:
+            size = len(stream.read())
+        self.assertLess(size, rp._MAX_BYTES // 8)
         self.assertEqual(rp.policy_path().name, 'policy.json')
 
 

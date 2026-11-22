@@ -272,6 +272,15 @@ class AppendRemoteTestReceiptTest(unittest.TestCase):
         self.assertEqual(self.reread()['remote_test_receipts'][0]['module_results'],
                          _module_results())
 
+    def test_large_receipt_persists_every_module_result(self):
+        names = [f'test_case_{index:03d}' for index in range(100)]
+        receipt = self.receipt()
+        receipt.update(modules=names, final=['OK'] * len(names), ran_total=len(names),
+                       module_results=[dict(module=name, ran=1, skipped=0, final='OK')
+                                       for name in names])
+        receipt = _seal(receipt)
+        self.assert_appended(receipt, [receipt])
+
     def test_replaying_the_same_receipt_is_idempotent(self):
         receipt = self.receipt()
         self.assert_appended(receipt, [receipt])

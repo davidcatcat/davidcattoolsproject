@@ -36,12 +36,17 @@ __all__ = [
     'for_platform',
 ]
 
-DEFAULT_ROLE_TIMEOUT_SECONDS = 1800
+# #2281 (Owner 2026-11-19): Reviewer and AI Debug runs default to 3 hours;
+# a role entry's timeout may be at most HARD_TIMEOUT_CAP_SECONDS (5 hours).
+DEFAULT_ROLE_TIMEOUT_SECONDS = 10800
+# The EC2 remote test timeout is not an AI run: its default and its former
+# 3600 s ceiling stay as they were before the AI run cap was raised.
 DEFAULT_REMOTE_TEST_TIMEOUT_SECONDS = 1800
+_REMOTE_TEST_TIMEOUT_CAP_SECONDS = 3600
 
 
-def _timeout_value_ok(v):
-    return type(v) is int and 1 <= v <= HARD_TIMEOUT_CAP_SECONDS
+def _timeout_value_ok(v, cap=HARD_TIMEOUT_CAP_SECONDS):
+    return type(v) is int and 1 <= v <= cap
 
 _MAX_ALLOWED_MODELS = 16
 _GENERIC_MODEL_PATTERN = r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}'
@@ -105,15 +110,51 @@ def _claude_role_model_ok(value):
     return _family_model_ok(value, _CLAUDE_FAMILY_PATTERN, _CODEX_FAMILY_MARKERS)
 
 
-# Owner #2302 P2: the AGY route runs Gemini-family models only. Same allowlist
+# Owner #2302 P2: the AGY route runs Gemini-family models. Same allowlist
 # rules as the role families: full identifier, lower case, no prefix.
 _GEMINI_FAMILY_PATTERN = r'gemini-[a-z0-9][a-z0-9.-]{0,120}'
+# Owner #289: AGY itself serves Claude ids of the form
+# claude-<name>-<version>-<effort> where effort is low, medium or high
+# (agy models lists claude-sonnet-5-5-{low,medium,high} and
+# claude-opus-5-5-{low,medium,high}). The effort suffix is mandatory, so a
+# bare Claude id stays refused on this route.
+# The version is one or more numeric groups (for example 5-5 or 5.5), so an
+# effort word can never stand in for it: 'claude-sonnet-medium-high' and
+# 'claude-sonnet-5-5-medium-high' are malformed and stay refused.
+_AGY_CLAUDE_FAMILY_PATTERN = (
+    r'claude-[a-z][a-z0-9]*-[0-9]+(?:\.[0-9]+)*(?:-[0-9]+(?:\.[0-9]+)*)*'
+    r'-(?:low|medium|high)')
+# Owner #289: the Gemini family that shares the AGY route. A Claude id that
+# names it is another family's identifier, so it stays refused (symmetry with
+# the Gemini branch, which refuses Claude and Codex markers).
+_GEMINI_FAMILY_MARKERS = ('gemini',)
 
 
 def _agy_model_ok(value):
-    """An AGY route model: a Gemini family identifier, never another family."""
-    return _family_model_ok(value, _GEMINI_FAMILY_PATTERN,
-                            _CLAUDE_FAMILY_MARKERS + _CODEX_FAMILY_MARKERS)
+    """An AGY route model: a Gemini id, or a Claude id with a served effort.
+
+    Owner #289: the Claude ids AGY serves (claude-<name>-<version>-<effort>)
+    are admitted alongside Gemini ids. Codex/GPT ids, other families, bare
+    Claude ids without a numeric version and effort suffix, and malformed ids
+    stay refused. No owner override relaxes this check (route_has_family_check).
+    """
+    import re
+
+    # Security repair (AGY #289 review F1): the route check caps the whole
+    # identifier at 128 characters, the same bound AgyRoute.validate_profile
+    # enforces. The pattern alone has no total length limit, so an otherwise
+    # well-formed Claude id with a very long numeric version would pass here.
+    if type(value) is not str or not 1 <= len(value) <= 128:
+        return False
+    if _family_model_ok(value, _GEMINI_FAMILY_PATTERN,
+                        _CLAUDE_FAMILY_MARKERS + _CODEX_FAMILY_MARKERS):
+        return True
+    if re.fullmatch(_AGY_CLAUDE_FAMILY_PATTERN, value) is None:
+        return False
+    # Defence in depth: no marker of another vendor's family anywhere in a
+    # Claude identifier.
+    foreign = _CODEX_FAMILY_MARKERS + _GEMINI_FAMILY_MARKERS
+    return not any(marker in value.casefold() for marker in foreign)
 
 
 # Owner #2302 P2, Owner #289: a route accepts any model of its own provider family
@@ -200,8 +241,8 @@ def registry_default_model(entry):
 def _gw_agent_budgets_ok(budgets, profile=None):
     """Return True when budgets has valid gw-agent budget keys and ranges (#2281 L9).
 
-    #2281: max_wall_seconds is no shorter than the route default timeout (1800 s)
-    and bounded by max_timeout (3600 s). Basis: the route default timeout and
+    #2281: max_wall_seconds is no shorter than the route default timeout (10800 s)
+    and bounded by max_timeout (18000 s). Basis: the route default timeout and
     the two recorded 600 s stops (N3 and N1, AI Debug RCA_CONFIRMED on #2302)
     where runs were ended by the whole-run wall budget before the route default
     timeout.
@@ -430,7 +471,8 @@ def load_route_config(path=None):
             type(value.get('routes')) is not dict):
         raise RouteError('ROUTE_CONFIG_INVALID')
     if 'remote_test_timeout' in value:
-        if not _timeout_value_ok(value['remote_test_timeout']):
+        if not _timeout_value_ok(value['remote_test_timeout'],
+                                 _REMOTE_TEST_TIMEOUT_CAP_SECONDS):
             raise RouteError('ROUTE_CONFIG_INVALID')
     routes = value['routes']
     if ('agy' not in routes or set(routes) - {'agy', 'claude', 'gw-agent', 'opencode'} or

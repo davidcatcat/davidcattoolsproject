@@ -1217,7 +1217,8 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         return text.encode()
 
     def test_lease_expiry_is_computed_and_refreshed_on_recorded_result(self):
-        self.assertEqual(lifecycle.LEASE_SECONDS, 24 * 60 * 60)
+        # #2281 L7: the length comes from policy.json and is still 24 hours.
+        self.assertEqual(lifecycle._lease_seconds(), 24 * 60 * 60)
         self.assertEqual(lifecycle._lease_expiry(1_000_000),
                          time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                        time.gmtime(1_000_000 + 24 * 60 * 60)))
@@ -1244,8 +1245,8 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         finished = time.time()
         after = lifecycle._read_registry_record(record_path)
         expires = lifecycle._parse_utc(after["lease_expires_at"])
-        self.assertGreaterEqual(expires, started + lifecycle.LEASE_SECONDS)
-        self.assertLessEqual(expires, finished + lifecycle.LEASE_SECONDS)
+        self.assertGreaterEqual(expires, started + 24 * 60 * 60)
+        self.assertLessEqual(expires, finished + 24 * 60 * 60)
         self.assertEqual(lifecycle.lease_status(after), "LEASE_ACTIVE")
 
     def test_expired_lease_without_live_process_releases_and_keeps_worktree(self):
@@ -1537,8 +1538,8 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         # A new registration carries a writer lease about 24 h from creation.
         expires = lifecycle._parse_utc(record["lease_expires_at"])
         self.assertIsNotNone(expires)
-        self.assertLessEqual(expires - time.time(), lifecycle.LEASE_SECONDS)
-        self.assertGreater(expires - time.time(), lifecycle.LEASE_SECONDS - 600)
+        self.assertLessEqual(expires - time.time(), 24 * 60 * 60)
+        self.assertGreater(expires - time.time(), 24 * 60 * 60 - 600)
         self.assertEqual(lifecycle.lease_status(record), "LEASE_ACTIVE")
         trust = lifecycle._load_trust()
         self.assertEqual(record["trust_sha256"], trust["sha256"])

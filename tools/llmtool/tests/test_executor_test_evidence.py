@@ -2,7 +2,7 @@
 import unittest
 
 from llmtool.errors import LLMToolError
-from llmtool.executor_test_evidence import MAX_REMOTE_MODULES, expected_remote_modules
+from llmtool.executor_test_evidence import expected_remote_modules
 
 TESTS = 'tools/llmtool/tests/'
 
@@ -27,13 +27,12 @@ class ExpectedRemoteModulesTests(unittest.TestCase):
         paths = ['tools/llmtool/llmtool/task_store.py', TESTS + 'tui_pty_driver.py']
         self.assertEqual(expected_remote_modules(paths, []), ((), (), ()))
 
-    def test_more_than_the_limit_makes_every_remote_path_unsupported(self):
-        paths = [TESTS + 'test_m%d.py' % index for index in range(MAX_REMOTE_MODULES + 1)]
+    def test_large_remote_module_set_remains_supported(self):
+        paths = [TESTS + f'test_m{index:03}.py' for index in range(100)]
         remote, tui, unsupported = expected_remote_modules(paths, [])
-        self.assertEqual(len(remote), MAX_REMOTE_MODULES + 1)
-        self.assertEqual(unsupported, tuple(sorted(paths)))
-        limit = expected_remote_modules(paths[:MAX_REMOTE_MODULES], [])
-        self.assertEqual(limit[2], ())
+        self.assertEqual(remote, tuple(path.rsplit('/', 1)[-1][:-3] for path in paths))
+        self.assertEqual(tui, ())
+        self.assertEqual(unsupported, ())
 
     def test_malformed_input_refuses(self):
         for read, write in ((None, []), ([], 'a.py'), ([7], []), ([], [None])):

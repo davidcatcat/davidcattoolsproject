@@ -181,7 +181,8 @@ def pending(task_id):
 
 def receipt(task_id, d6_task, head=HEAD):
     value = {'task_id': task_id, 'run_id': RUN, 'executor_task': d6_task,
-             'source_sha': head, 'result': 'PASS', 'modules': ['tests.test_x']}
+             'source_sha': head, 'result': 'PASS', 'modules': ['test_x'],
+             'ran_total': 1, 'final': ['OK'], 'failures': []}
     value['receipt_digest'] = hashlib.sha256(_json_bytes(value)).hexdigest()
     return value
 

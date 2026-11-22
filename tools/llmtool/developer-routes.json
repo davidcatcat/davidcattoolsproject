@@ -3,13 +3,13 @@
   "routes": {
     "agy": {
       "executable": "agy",
-      "default_model": "gemini-3.8-flash-medium",
-      "allowed_models": ["gemini-3.8-flash-medium"],
+      "default_model": "gemini-4-hydrogen-medium",
+      "allowed_models": ["gemini-4-hydrogen-medium"],
       "default_effort": "medium",
       "denied_dirs": [".gemini"],
       "state_dirs": {"policy": "private-temp-only"},
-      "default_timeout": 1800,
-      "max_timeout": 3600,
+      "default_timeout": 10800,
+      "max_timeout": 18000,
       "max_diff_bytes": 262144,
       "max_prompt_bytes": 524288
     },
@@ -20,8 +20,8 @@
       "default_effort": "high",
       "denied_dirs": [".claude"],
       "state_dirs": {"policy": "private-temp-only"},
-      "default_timeout": 1800,
-      "max_timeout": 3600,
+      "default_timeout": 10800,
+      "max_timeout": 18000,
       "max_diff_bytes": 262144,
       "max_prompt_bytes": 65536
     },
@@ -37,7 +37,7 @@
         "model": "gw",
         "context_cap_tokens": 32768,
         "max_output_tokens": 16384,
-        "timeout_seconds": 1800,
+        "timeout_seconds": 10800,
         "allowed_data_classes": ["synthetic", "public_repo"],
         "data_class_map": {"SYNTHETIC": "synthetic", "PUBLIC_REPO": "public_repo"}
       },
@@ -47,20 +47,20 @@
         "max_turns": 512,
         "max_input_tokens": 262144,
         "max_output_tokens": 65536,
-        "max_wall_seconds": 1800,
+        "max_wall_seconds": 10800,
         "max_tool_result_bytes": 262144,
         "max_sent_bytes": 16777216
       },
-      "default_timeout": 1800,
-      "max_timeout": 3600
+      "default_timeout": 10800,
+      "max_timeout": 18000
     },
     "opencode": {
       "executable": "opencode",
       "default_model": "opencode/deepseek-v4.1-flash-free",
       "allowed_models": ["opencode/deepseek-v4.1-flash-free"],
       "default_effort": "high",
-      "default_timeout": 1800,
-      "max_timeout": 3600,
+      "default_timeout": 10800,
+      "max_timeout": 18000,
       "max_diff_bytes": 262144,
       "max_prompt_bytes": 65536,
       "max_source_file_bytes": 1048576,

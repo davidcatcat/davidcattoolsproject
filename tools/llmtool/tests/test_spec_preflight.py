@@ -274,7 +274,7 @@ class SpecPreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as repo:
             (Path(repo) / "small.txt").write_text("one\ntwo\n", encoding="utf-8")
             (Path(repo) / "large.txt").write_text(
-                "line\n" * spec_preflight.LARGE_FILE_LINES, encoding="utf-8")
+                "line\n" * spec_preflight.DEFAULT_LARGE_FILE_LINES, encoding="utf-8")
             small = dict(self.spec, provider="gw-agent", write=["small.txt"])
             self.assertEqual(self.run_main_with_stderr(small, ("--repo", repo)),
                              (0, "SPEC_PREFLIGHT_OK\n", ""))

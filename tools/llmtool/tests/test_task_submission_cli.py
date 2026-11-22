@@ -1,3 +1,4 @@
+import copy
 import io
 import hashlib
 import json
@@ -1613,6 +1614,254 @@ class TaskSubmissionCLITests(unittest.TestCase):
         values.update(changes)
         return Namespace(**values)
 
+    def _auto_reassign(self, phase, *, original='agy', refusal=None, repair=False):
+        from test_task_store import TaskStoreTests, remote_test_receipt
+        from llmtool import review_repair
+
+        task = self._pm_task_with_opencode_assignment()
+        target = 'opencode' if original == 'agy' else 'agy'
+        agents = submission_cli.direct_reassignment.AGENTS
+        args = self._opencode_delegate_args(task, provider=original,
+                                            mode='direct' if original == 'agy' else 'proposal',
+                                            cwd=str(self.executor_root))
+        store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+        registry = self._executor_record_path()
+        record = json.loads(registry.read_text(encoding='utf-8'))
+        record['trusted_agent_id'] = agents[original]
+        registry.write_text(json.dumps(record), encoding='utf-8')
+        old = TaskStoreTests._developer_assignment(provider=original)
+        old.update(source_sha=self.executor_head, read_paths=args.read_path,
+                   write_paths=args.write_path, acceptance=args.acceptance,
+                   egress_basis=args.egress_basis,
+                   execution=None, backend_session_semantics='CLI_REPORTED_SESSION_ID')
+        if original == 'agy':
+            old['owner_assignment_ref'] = None
+        completion = {
+            'state': 'WAITING_EXECUTOR', 'executor_task_id': args.executor_task,
+            'reviewer_task_id': None, 'evidence': {
+                'task_id': task['task_id'], 'run_id': task['run_id'],
+                'contract_digest': task['task_binding']['contract_digest'],
+                'executor_identity': agents[original], 'executor_session_ref': record['session_ref'],
+                'executor_native_session_id': None, 'executor_native_session': 'UNKNOWN',
+                'execution_mode': 'DIRECT_D6', 'root': str(self.executor_root),
+                'common_dir': self.executor_common_dir, 'branch': record['branch'],
+                'source_sha': self.executor_head, 'result_head': None,
+            }, 'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+            'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+        }
+        root = None
+        if repair:
+            root = self._pm_task_with_opencode_assignment()
+
+        with patch.dict(os.environ, {'HOME': str(self.home)}):
+            if repair:
+                root_completion = copy.deepcopy(completion)
+                root_completion['evidence'].update(
+                    task_id=root['task_id'], run_id=root['run_id'],
+                    contract_digest=root['task_binding']['contract_digest'])
+                root_dev = dict(old, assignment_id=new_id(), session_id='dev-' + new_id())
+                store.d6_bind_compare_and_update(
+                    root['task_id'], executor_task_id=args.executor_task,
+                    expected={'developer': None}, developer=root_dev, completion=root_completion)
+                root_dev = store.prepare_direct_dispatch(
+                    root['task_id'], expected_developer=root_dev,
+                    developer=dict(root_dev, state='DEVELOPER_DISPATCHING',
+                                   provider_type='agy-cli', model='gemini-test'))['developer']
+                root_dev = store.authorize_direct_spawn(
+                    root['task_id'], expected_developer=root_dev)['developer']
+                diff = ('diff --git a/sample.py b/sample.py\n--- a/sample.py\n'
+                        '+++ b/sample.py\n@@ -1 +1 @@\n-VALUE = 0\n+VALUE = 1\n')
+                root = store.compare_and_update(
+                    root['task_id'], expected={'developer': root_dev},
+                    developer=dict(root_dev, state='DEVELOPER_RESPONDED', artifact=diff,
+                                   artifact_sha256=hashlib.sha256(diff.encode()).hexdigest(),
+                                   execution={'status': 'DONE',
+                                              'native_session_id': 'conversation_12345678',
+                                              'process_exit_code': 0, 'stdout_sha256': 'a' * 64,
+                                              'elapsed_ms': 12, 'cleanup_status': 'CONFIRMED',
+                                              'usage_source': 'UNKNOWN', 'source_bytes': None,
+                                              'source_file_count': None,
+                                              'source_manifest_sha256': None}))
+                receipt = remote_test_receipt(
+                    root, result='FAIL', exit_code=1, source_sha=self.executor_head,
+                    fetch_head=self.executor_head, executor_task=args.executor_task,
+                    failure_excerpt='FAIL: test_example',
+                    final=['FAILED (failures=1)'], failures=['test_task_store'])
+                store.append_remote_test_receipt(root['task_id'], receipt)
+                packet = review_repair._remote_test_failure(
+                    root, executor_task=args.executor_task, pr_number=2436, receipt=receipt)
+                digest = hashlib.sha256(json.dumps(packet, ensure_ascii=True, sort_keys=True,
+                                                  separators=(',', ':')).encode()).hexdigest()
+                claim = {'executor_task': args.executor_task, 'pr': 2436,
+                         'head_sha': self.executor_head, 'version': 1, 'attempt': 1,
+                         'family': 'pr-2436-ec2', 'state': 'CLAIMED',
+                         'repair_task_id': task['task_id'], 'comment_id': None,
+                         'packet_sha256': digest, 'claimed_at': '2026-11-20T00:00:00Z'}
+                claimed = store.get(root['task_id'])
+                store.compare_and_update(root['task_id'],
+                    expected={'record_sha256': claimed['record_sha256']},
+                    review_repair_claims=[claim])
+            store.d6_bind_compare_and_update(
+                task['task_id'], executor_task_id=args.executor_task,
+                expected={'developer': None}, developer=old, completion=completion)
+            if phase in ('PREPARED', 'STARTING', 'STOPPED'):
+                prepared = store.prepare_direct_dispatch(
+                    task['task_id'], expected_developer=old,
+                    developer=dict(old, state='DEVELOPER_DISPATCHING', provider_type=original + '-cli',
+                                   model='gemini-test' if original == 'agy' else 'opencode/test-free',
+                                   max_tokens=None if original == 'agy' else 4096))['developer']
+                if phase in ('STARTING', 'STOPPED'):
+                    store.authorize_direct_spawn(task['task_id'], expected_developer=prepared)
+                if phase == 'STOPPED':
+                    launched = store.record_opencode_launch(task['task_id'],
+                        assignment_id=old['assignment_id'], pid=321, start_time='123456',
+                        pgid=321)['developer']
+                    outcome = dict(launched, state='DEVELOPER_OUTCOME_UNKNOWN',
+                                   error_code='OPENCODE_PROMPT_DELIVERY_INCOMPLETE')
+                    outcome['execution'] = {key: value for key, value in launched['execution'].items()
+                                            if not key.startswith('child_')}
+                    outcome['execution'].update(status='UNKNOWN', cleanup_status='CONFIRMED',
+                                                process_exit_code=1)
+                    store.record_direct_stop(task['task_id'], expected_developer=launched,
+                                             developer=outcome)
+
+        def launch_opencode(**kwargs):
+            if refusal == 'concurrent':
+                from llmtool import task_store
+                with patch.object(task_store, 'LINEAGE_LOCK_TIMEOUT_SECONDS', 0.05):
+                    with self.assertRaises(LLMToolError) as refused:
+                        run_task_delegate(args, store=TaskStore(store.root))
+                self.assertEqual(refused.exception.task_store_error_code,
+                                 'DIRECT_DISPATCH_LEASE_BUSY')
+            kwargs['spawn_authorization']()
+            kwargs['launch_callback'](321, '123456', 321)
+            (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+            return self._opencode_result()
+
+        def launch_agy(_route, request, *, gate, on_launch, **_kwargs):
+            self.assertTrue(gate().allowed)
+            on_launch()
+            (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+            return SimpleNamespace(session_id='conversation_12345678', model=request['model'],
+                                   exit_code=0, stdout_sha256='a' * 64, elapsed_ms=12,
+                                   cleanup_status='CONFIRMED', usage=None)
+
+        if refusal == 'dirty':
+            (self.executor_root / 'sample.py').write_text('VALUE = 3\n')
+        if refusal == 'scope':
+            args.egress_basis = 'Unrelated fixture context.'
+        if refusal == 'paused':
+            import worker_policy_fixture
+            worker_policy_fixture.update(self.policy_path, 'opencode-developer', 'PAUSED')
+
+        def bind_native(_registration, session):
+            if not repair:
+                return 'UNAVAILABLE'
+            self._set_executor_native_session(session)
+            return 'BOUND'
+
+        bind_direct = (patch.object(submission_cli, '_bind_direct_native_session',
+                                    side_effect=_REAL_DIRECT_BIND)
+                       if repair else patch.object(submission_cli, '_bind_direct_native_session',
+                                                  return_value=False))
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+             patch.object(submission_cli.opencode_direct_developer, 'run',
+                          side_effect=launch_opencode) as opencode_launch, \
+             patch.object(submission_cli, 'run_route', side_effect=launch_agy) as agy_launch, \
+             patch.object(submission_cli, '_agy_developer_profile', return_value=('gemini-test', 'high')), \
+             patch.object(submission_cli.shutil, 'which', return_value='/usr/bin/fake-cli'), \
+             bind_direct, \
+             patch.object(submission_cli, '_bind_codex_native_session', side_effect=bind_native), \
+             patch.object(submission_cli, 'run_task_direct_result_event', return_value=0), \
+             redirect_stdout(io.StringIO()):
+            if refusal == 'interrupted_handoff':
+                with patch.object(submission_cli.direct_reassignment, '_install_successor',
+                                  side_effect=KeyboardInterrupt):
+                    with self.assertRaises(KeyboardInterrupt):
+                        run_task_delegate(args, store=store)
+                pending = store.get(task['task_id'])['developer']
+                self.assertEqual(pending['state'], 'DEVELOPER_PENDING')
+                self.assertEqual(pending['provider_profile'], target)
+                self.assertEqual(json.loads(registry.read_text())['trusted_agent_id'],
+                                 agents[original])
+                opencode_launch.assert_not_called()
+            expected = {
+                'dirty': 'D6_SOURCE_BINDING_MISMATCH',
+                'scope': 'DIRECT_REASSIGN_SCOPE_MISMATCH',
+                'paused': 'DIRECT_REASSIGN_NO_AUTHORIZED_ALTERNATE',
+            }.get(refusal)
+            if phase == 'STARTING':
+                expected = 'DIRECT_CHILD_SPAWN_OUTCOME_UNVERIFIED'
+            if expected is not None:
+                with self.assertRaisesRegex(LLMToolError, expected):
+                    run_task_delegate(args, store=store)
+                opencode_launch.assert_not_called()
+                agy_launch.assert_not_called()
+                self.assertEqual(store.get(task['task_id'])['developer']['assignment_id'],
+                                 old['assignment_id'])
+                return
+            if repair:
+                rescued = review_repair.repair_review(
+                    store=store, task_id=root['task_id'], executor_task=args.executor_task,
+                    pr_number=2436, auto=True, remote_test_receipt=receipt)
+                self.assertEqual(rescued['repair_task_id'], task['task_id'])
+                self.assertEqual(rescued['claim'], dict(claim, state='DISPATCHED'))
+                self.assertEqual(store.get(root['task_id'])['review_repair_claims'],
+                                 [dict(claim, state='DISPATCHED')])
+                continued = store.get(root['task_id'])
+                selected = submission_cli.direct_reassignment.authoring_route(
+                    store, continued, continued['developer'], args.executor_task)
+                self.assertEqual(selected['provider_profile'], 'opencode')
+            else:
+                self.assertEqual(run_task_delegate(args, store=store), 0)
+            (opencode_launch if target == 'opencode' else agy_launch).assert_called_once()
+            (agy_launch if target == 'opencode' else opencode_launch).assert_not_called()
+        persisted = store.get(task['task_id'])
+        assigned = persisted['developer']
+        self.assertEqual(assigned['provider_profile'], target)
+        self.assertEqual(assigned['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(assigned['direct_handoffs'][-1]['old_assignment'], old['assignment_id'])
+        self.assertNotEqual(assigned['assignment_id'], old['assignment_id'])
+        self.assertEqual(persisted['completion']['executor_task_id'], args.executor_task)
+        self.assertEqual(json.loads(registry.read_text())['trusted_agent_id'], agents[target])
+        self.assertIn('REASSIGN', [entry['action'] for entry in persisted['dispatch_audit']
+                                   if entry.get('assignment_id') == assigned['assignment_id']])
+
+    def test_auto_reassign_pending_launches_other_developer(self):
+        self._auto_reassign('PENDING')
+
+    def test_auto_reassign_prepared_launches_other_developer(self):
+        self._auto_reassign('PREPARED')
+
+    def test_auto_reassign_refuses_post_spawning_without_pid(self):
+        self._auto_reassign('STARTING')
+
+
+    def test_auto_reassign_opencode_prepared_launches_agy(self):
+        self._auto_reassign('PREPARED', original='opencode')
+
+    def test_auto_reassign_confirmed_stop_launches_agy(self):
+        self._auto_reassign('STOPPED', original='opencode')
+
+    def test_auto_reassign_refuses_paused_alternate(self):
+        self._auto_reassign('PREPARED', refusal='paused')
+
+    def test_auto_reassign_refuses_dirty_workspace(self):
+        self._auto_reassign('PREPARED', refusal='dirty')
+
+    def test_auto_reassign_refuses_changed_egress(self):
+        self._auto_reassign('PREPARED', refusal='scope')
+
+
+    def test_auto_reassign_preserves_real_ec2_claim(self):
+        self._auto_reassign('PREPARED', repair=True)
+
+    def test_auto_reassign_resume_does_not_replace_pending_successor(self):
+        self._auto_reassign('PREPARED', refusal='interrupted_handoff')
+
+    def test_auto_reassign_contender_cannot_start_another_writer(self):
+        self._auto_reassign('PREPARED', refusal='concurrent')
+
     def test_opencode_delegate_refuses_claude_reserved_d6_before_assignment(self):
         task = self._pm_task_with_opencode_assignment()
         registry_path = (Path(self.executor_common_dir) / 'llmtool-worktrees' /
@@ -1654,6 +1903,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
             self.assertEqual(kwargs['read_paths'], ['sample.py'])
             self.assertEqual(kwargs['write_paths'], ['sample.py'])
             self.assertIn(task['task_id'], kwargs['prompt'])
+            kwargs['spawn_authorization']()
             kwargs['launch_callback'](321, '123456', 321)
             (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
             return DirectResult(0, 'ses_Abc123', 'Updated fixture.',
@@ -1701,6 +1951,14 @@ class TaskSubmissionCLITests(unittest.TestCase):
         with redirect_stdout(io.StringIO()), patch('sys.stderr', io.StringIO()), \
                 self.assertRaises(SystemExit):
             parser.parse_args(base + ['--timeout', 'soon'])
+        # #2281 (Owner 2026-11-19): the help names the 5-hour hard cap.
+        task_action = next(action for action in parser._actions
+                           if action.dest == 'command').choices['task']
+        delegate = task_action._subparsers._group_actions[0].choices['delegate']
+        timeout_help = next(action.help for action in delegate._actions
+                            if action.dest == 'timeout')
+        self.assertIn('never above 18000', timeout_help)
+        self.assertNotIn('3600', timeout_help)
 
     def test_delegate_refuses_bad_timeout_before_task_read_or_fork(self):
         import copy
@@ -1709,8 +1967,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
         shipped = developer_routes.load_route_config()
 
         def short_route(route):
-            # Every shipped route has max_timeout 3600; a copy of the registry
-            # whose route has max_timeout 600 keeps the route-max refusal checked.
+            # Every shipped route has max_timeout 18000 (#2281: 5 hours); a copy of
+            # the registry whose route has max_timeout 600 keeps the route-max
+            # refusal checked.
             config = copy.deepcopy(shipped)
             config['routes'][route].update(default_timeout=600, max_timeout=600)
             return patch.object(developer_routes, 'load_route_config',
@@ -1719,8 +1978,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
         # (provider, timeout, code, route whose registry max_timeout is 600).
         cases = (('agy', 601, 'TIMEOUT_OVER_ROUTE_MAX', 'agy'),
                  ('gw-agent', 1200, 'TIMEOUT_OVER_ROUTE_MAX', 'gw-agent'),
-                 ('claude', 3601, 'TIMEOUT_OVER_HARD_CAP', None),
-                 ('opencode', 7200, 'TIMEOUT_OVER_HARD_CAP', None),
+                 ('claude', 18001, 'TIMEOUT_OVER_HARD_CAP', None),
+                 ('opencode', 36000, 'TIMEOUT_OVER_HARD_CAP', None),
                  ('claude', 0, 'TIMEOUT_INVALID', None),
                  ('opencode', -5, 'TIMEOUT_INVALID', None),
                  ('codex', 600, 'TIMEOUT_ROUTE_UNSUPPORTED', None))
@@ -1746,15 +2005,16 @@ class TaskSubmissionCLITests(unittest.TestCase):
         shipped = developer_routes.load_route_config()
 
         def short_route(route):
-            # Every shipped route has max_timeout 3600; a copy of the registry
-            # whose route has max_timeout 600 keeps the route-max refusal checked.
+            # Every shipped route has max_timeout 18000 (#2281: 5 hours); a copy of
+            # the registry whose route has max_timeout 600 keeps the route-max
+            # refusal checked.
             config = copy.deepcopy(shipped)
             config['routes'][route].update(default_timeout=600, max_timeout=600)
             return patch.object(developer_routes, 'load_route_config',
                                 side_effect=lambda *a, **k: copy.deepcopy(config))
 
         # (delegate, timeout, code, route whose registry max_timeout is 600).
-        cases = ((submission_cli.run_task_claude_delegate, 3601,
+        cases = ((submission_cli.run_task_claude_delegate, 18001,
                   'TIMEOUT_OVER_HARD_CAP', None),
                  (submission_cli.run_task_agy_delegate, 601,
                   'TIMEOUT_OVER_ROUTE_MAX', 'agy'),
@@ -1776,18 +2036,26 @@ class TaskSubmissionCLITests(unittest.TestCase):
                                 str(raised.exception))
 
     def test_route_timeout_helper_uses_route_limits(self):
+        # #2281 (Owner 2026-11-19): omitted resolves to the 3 h default (10800 s);
+        # values up to the 5 h maximum (18000 s) pass; above it is refused.
         for route in submission_cli.TIMEOUT_ROUTES:
             with self.subTest(route=route):
-                self.assertEqual(submission_cli._delegate_timeout(Namespace(), route), 1800)
+                self.assertEqual(submission_cli._delegate_timeout(Namespace(), route), 10800)
                 self.assertEqual(
-                    submission_cli._delegate_timeout(Namespace(timeout=None), route), 1800)
+                    submission_cli._delegate_timeout(Namespace(timeout=None), route), 10800)
                 self.assertEqual(
                     submission_cli._delegate_timeout(Namespace(timeout=600), route), 600)
         for route in submission_cli.TIMEOUT_ROUTES:
-            for requested in (1200, 1800, 3600):
+            for requested in (1200, 1800, 3600, 3601, 7200, 10800, 18000):
                 with self.subTest(route=route, requested=requested):
                     self.assertEqual(submission_cli._delegate_timeout(
                         Namespace(timeout=requested), route), requested)
+        for route in submission_cli.TIMEOUT_ROUTES:
+            with self.subTest(route=route, requested=18001), \
+                    self.assertRaises(LLMToolError) as raised:
+                submission_cli._delegate_timeout(Namespace(timeout=18001), route)
+            self.assertTrue(str(raised.exception).startswith('TIMEOUT_OVER_HARD_CAP:'),
+                            str(raised.exception))
 
     def assert_opencode_timeout_passed_and_recorded(self, requested, expected):
         task = self._pm_task_with_opencode_assignment()
@@ -1814,13 +2082,17 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(stored['developer']['state'], 'DEVELOPER_UNAVAILABLE')
 
     def test_opencode_delegate_without_timeout_uses_route_default(self):
-        self.assert_opencode_timeout_passed_and_recorded(None, 1800)
+        self.assert_opencode_timeout_passed_and_recorded(None, 10800)
 
     def test_opencode_delegate_passes_and_records_1200(self):
         self.assert_opencode_timeout_passed_and_recorded(1200, 1200)
 
     def test_opencode_delegate_passes_and_records_1800(self):
         self.assert_opencode_timeout_passed_and_recorded(1800, 1800)
+
+    def test_opencode_delegate_passes_and_records_18000(self):
+        # #2281: the 5 h maximum is accepted and recorded in the Task store.
+        self.assert_opencode_timeout_passed_and_recorded(18000, 18000)
 
     def test_opencode_completion_cas_succeeds_and_preserves_newer_record(self):
         result = DirectResult(0, 'ses_Abc123', 'Updated fixture.', None,
@@ -1860,6 +2132,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                     return original_compare(task_id, expected=expected, **changes)
 
                 def execute(**kwargs):
+                    kwargs['spawn_authorization']()
                     kwargs['launch_callback'](321, '123456', 321)
                     (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
                     return result
@@ -2120,7 +2393,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 ('source-bytes-too-large', set_(source_bytes=2 * 1024 * 1024 + 1)),
                 ('source-bytes-bool', set_(source_bytes=True)),
                 ('source-files-zero', set_(source_file_count=0)),
-                ('source-files-too-many', set_(source_file_count=33)),
+                # #2281: one source entry per read path, at most 1024 paths.
+                ('source-files-too-many', set_(source_file_count=1025)),
                 ('source-files-bool', set_(source_file_count=True)),
                 ('manifest-uppercase', set_(source_manifest_sha256='B' * 64)),
                 ('manifest-short', set_(source_manifest_sha256='b' * 63)),
@@ -2148,7 +2422,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 ('elapsed-none', set_(elapsed_ms=None)),
                 ('source-bytes-zero', set_(source_bytes=0)),
                 ('source-bytes-max', set_(source_bytes=2 * 1024 * 1024)),
-                ('source-files-max', set_(source_file_count=32))):
+                ('source-files-33', set_(source_file_count=33)),
+                ('source-files-max', set_(source_file_count=1024))):
             with self.subTest(field=name):
                 run = self._opencode_bind_run(self._opencode_result(), mutate=mutate)
                 self.assertEqual(run['calls'], ['ses_Abc123'])
@@ -2340,6 +2615,69 @@ class TaskSubmissionCLITests(unittest.TestCase):
                         reviewer_adapter=None)
                 subprocess.run(['/usr/bin/git', 'checkout', '--', 'README.md', 'sample.py'],
                                cwd=self.executor_root, check=True, capture_output=True)
+
+    def test_opencode_task_with_33_and_1024_paths_runs_end_to_end_2281(self):
+        # #2281 (Owner 2026-11-19): a Developer Task lists up to 1024 read and
+        # 1024 write paths. Delegate records the scope, the direct result is
+        # checked against it, and completion accepts it.
+        for count in (33, 1024):
+            with self.subTest(count=count):
+                task = self._pm_task_with_opencode_assignment()
+                output = io.StringIO()
+                paths = sorted(['README.md'] +
+                               [f'notes-{i:04d}.md' for i in range(count - 1)])
+
+                def execute(**kwargs):
+                    self.assertEqual(kwargs['read_paths'], paths)
+                    self.assertEqual(kwargs['write_paths'], paths)
+                    (self.executor_root / 'README.md').write_text(
+                        'Updated executor documentation.\n')
+                    # The adapter reports one source entry per read path.
+                    return DirectResult(0, 'ses_Abc123', 'Updated documentation.', None,
+                        'UNKNOWN', 'a' * 64, 32, 'CONFIRMED', 'opencode v2.0.32',
+                        10, len(paths), 'b' * 64)
+
+                args = self._opencode_delegate_args(
+                    task, read_path=list(reversed(paths)), write_path=list(paths))
+                with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                        patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                              side_effect=execute), redirect_stdout(output):
+                    run_task_delegate(args)
+                developer = json.loads(output.getvalue())['developer']
+                callback = developer['direct_result_callback']
+                self.assertEqual(callback['evidence']['verification_state'], 'READY',
+                                 output.getvalue()[-2000:])
+                self.assertEqual(callback['evidence']['tests'][0]['changed_paths'],
+                                 ['README.md'])
+                store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+                saved = store.get(task['task_id'])['developer']
+                self.assertEqual(saved['read_paths'], paths)
+                self.assertEqual(saved['write_paths'], paths)
+                complete = Namespace(task_id=task['task_id'],
+                    executor_task='executor-task-1', reviewer_task=None, pr=None)
+                with patch('llmtool.task_submission_cli.run_task_direct_result_event',
+                           return_value=0) as resume:
+                    self.assertEqual(run_task_complete(complete, store=store), 0)
+                resume.assert_called_once()
+                subprocess.run(['/usr/bin/git', 'checkout', '--', 'README.md'],
+                               cwd=self.executor_root, check=True, capture_output=True)
+
+    def test_opencode_task_with_1025_paths_is_refused_before_any_run_2281(self):
+        for reads, writes in ((1025, 1), (1024, 1025)):
+            with self.subTest(reads=reads, writes=writes):
+                task = self._pm_task_with_opencode_assignment()
+                names = sorted(['README.md'] +
+                               [f'notes-{i:04d}.md' for i in range(1024)])
+                args = self._opencode_delegate_args(
+                    task, read_path=names[:reads], write_path=names[:writes])
+                with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                        patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                              side_effect=AssertionError('OpenCode run')), \
+                        self.assertRaisesRegex(LLMToolError, 'PATH_LIMIT_EXCEEDED'):
+                    run_task_delegate(args)
+                saved = TaskStore(self.home / '.local' / 'state' / 'llmtool' / 'tasks').get(
+                    task['task_id'])
+                self.assertIsNone(saved['developer'])
 
     def _write_opencode_developer_model(self, model, *, steps=None):
         config = self.home / '.config/llmtool/config.yaml'
@@ -2873,6 +3211,10 @@ class TaskSubmissionCLITests(unittest.TestCase):
 
             def __getattr__(self, name):
                 return getattr(self.store, name)
+
+            def prepare_direct_dispatch(self, task_id, **kwargs):
+                self._before_write(kwargs)
+                return self.store.prepare_direct_dispatch(task_id, **kwargs)
 
             def update(self, task_id, **kwargs):
                 self._before_write(kwargs)
@@ -4924,7 +5266,7 @@ class DirectRouteChildLivenessTests(unittest.TestCase):
 
     def _recover(self, store, task_id, *, agent, start='123456'):
         args = Namespace(task_id=task_id, executor_task='executor-one')
-        snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo'})()
+        snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo', 'head': 'a' * 40})()
         registration = type('Registration', (), {
             'task_id': 'executor-one', 'trusted_agent_id': agent})()
         with patch.object(submission_cli.task_completion, 'collect_git_snapshot',
@@ -4983,10 +5325,11 @@ class DirectRouteChildLivenessTests(unittest.TestCase):
                      patch.object(submission_cli.os, 'getpgid', return_value=321), \
                      patch.object(submission_cli.task_completion, 'collect_git_snapshot',
                                   return_value=type('Snapshot', (), {
-                                      'common_dir': '/repo/.git', 'root': '/repo'})()), \
+                                      'common_dir': '/repo/.git', 'root': '/repo', 'head': 'a' * 40})()), \
                      patch.object(submission_cli.task_completion, 'bind_executor_task',
                                   return_value=(type('Registration', (), {
-                                      'task_id': 'executor-one', 'trusted_agent_id': agent})(), None)):
+                                      'task_id': 'executor-one', 'trusted_agent_id': agent})(),
+                                                SimpleNamespace(head='a' * 40))):
                     with self.assertRaisesRegex(LLMToolError,
                                                 'DIRECT_CHILD_OUTCOME_UNKNOWN'):
                         submission_cli._recover_direct_child_dispatch(
@@ -5001,7 +5344,7 @@ class DirectRouteChildLivenessTests(unittest.TestCase):
             with self.subTest(profile=profile):
                 store, task_id = self._store(profile)
                 args = Namespace(task_id=task_id, executor_task='executor-one')
-                snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo'})()
+                snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo', 'head': 'a' * 40})()
                 registration = type('Registration', (), {
                     'task_id': 'executor-one', 'trusted_agent_id': agent})()
                 with patch.object(submission_cli.task_completion, 'collect_git_snapshot',
@@ -5051,7 +5394,7 @@ class DirectRouteChildLivenessTests(unittest.TestCase):
                         self.assertEqual(raced_record['developer'], newer)
                         self.assertEqual(store.get(task_id)['developer'], newer)
                     return original(_task_id, expected=expected, **changes)
-                snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo'})()
+                snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo', 'head': 'a' * 40})()
                 registration = type('Registration', (), {
                     'task_id': 'executor-one', 'trusted_agent_id': agent})()
                 with patch.object(submission_cli.task_completion, 'collect_git_snapshot',
@@ -5230,7 +5573,7 @@ class DispatcherPreflightRefusalTests(unittest.TestCase):
 class DelegateRepairCapTests(unittest.TestCase):
     # #2367: a D6 takes 1 + repair_max review runs (the original run and 5
     # effective repairs); this many prior runs refuse the next one. Below it,
-    # repair #2 needs a High Debug and its RCA_CONFIRMED covers later repairs.
+    # repairs #4 and #5 require an applicable confirmed RCA.
     REVIEW_LIMIT = 1 + repair_policy.load_policy()['repair_max']
 
     def setUp(self):
@@ -5374,10 +5717,15 @@ class DelegateRepairCapTests(unittest.TestCase):
             self.assertEqual(run_task_delegate(args, store=self.store), 7)
         route.assert_called_once()
 
-    def test_repair_two_without_high_debug_refuses_before_route_call(self):
-        # #1502 WP-D D7: two prior runs make this repair #2, which needs a
-        # confirmed root cause.
-        self._prior_assignments(2)
+    def test_third_repair_without_high_debug_calls_route(self):
+        self._prior_assignments(3)
+        task = self._task()
+        with patch.object(submission_cli, 'run_task_opencode_delegate', return_value=7) as route:
+            self.assertEqual(run_task_delegate(self._args(task, 'opencode'), store=self.store), 7)
+        route.assert_called_once()
+
+    def test_fourth_repair_without_high_debug_refuses_before_route_call(self):
+        self._prior_assignments(4)
         task = self._task()
         with patch.object(submission_cli, 'run_task_opencode_delegate') as route:
             with self.assertRaisesRegex(LLMToolError,
@@ -5723,7 +6071,7 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertNotIn('repair_cap_override', self.store.get(task['task_id']))
 
     def test_valid_high_debug_ref_without_task_is_task_required(self):
-        self._prior_assignments(2)
+        self._prior_assignments(4)
         task = self._task()
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-123'
         args = self._args(task, 'opencode', high_debug_ref=ref)
@@ -5735,7 +6083,7 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertNotIn('repair_cap_override', self.store.get(task['task_id']))
 
     def test_invalid_high_debug_refs_refuse(self):
-        self._prior_assignments(2)
+        self._prior_assignments(4)
         task = self._task()
         refs = (
             'http://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-123',
@@ -5777,6 +6125,60 @@ class DelegateRepairCapTests(unittest.TestCase):
         task = self._task()
         self.assertIsNone(submission_cli._check_delegate_repair_cap(
             self._args(task, 'opencode'), self.store))
+
+
+class DeveloperTaskPathLimitTests(unittest.TestCase):
+    """#2281 (Owner 2026-11-19): a Developer Task lists up to 1024 read and write paths."""
+
+    @staticmethod
+    def names(count):
+        return [f'src/file{i:04d}.py' for i in range(count)]
+
+    def refused(self, read_paths, write_paths):
+        with self.assertRaises(LLMToolError) as caught:
+            submission_cli._assignment_paths(read_paths, write_paths)
+        return str(caught.exception)
+
+    def test_every_developer_scope_check_uses_1024(self):
+        self.assertEqual(submission_cli.DEVELOPER_TASK_MAX_PATHS, 1024)
+        self.assertEqual(opencode_direct_developer.MAX_TASK_PATHS, 1024)
+        self.assertEqual(submission_cli.task_completion._TASK_PATH_LIMIT, 1024)
+        # The Task store scope and the direct run's source_file_count use it too.
+        from llmtool import task_store
+        self.assertEqual(task_store.DEVELOPER_TASK_MAX_PATHS, 1024)
+
+    def test_scope_of_32_33_and_1024_paths_is_accepted(self):
+        for count in (32, 33, 1024):
+            paths = self.names(count)
+            for writes in (paths[:1], paths):
+                with self.subTest(count=count, writes=len(writes)):
+                    read, write = submission_cli._assignment_paths(
+                        list(reversed(paths)), list(reversed(writes)))
+                    self.assertEqual(read, paths)
+                    self.assertEqual(write, writes)
+
+    def test_1025_read_or_write_paths_keep_the_existing_code(self):
+        paths = self.names(1025)
+        for reads, writes in ((paths, paths[:1]), (paths[:1024], paths), (paths, paths)):
+            with self.subTest(reads=len(reads), writes=len(writes)):
+                self.assertIn('PATH_LIMIT_EXCEEDED', self.refused(reads, writes))
+
+    def test_other_path_rules_are_unchanged_at_1024_paths(self):
+        base = self.names(1023)
+        cases = (
+            (base + ['../outside.py'], ['src/file0000.py'], 'PATH_OUTSIDE_REPO'),
+            (base + ['/abs.py'], ['src/file0000.py'], 'PATH_OUTSIDE_REPO'),
+            (base + ['a' * 513], ['src/file0000.py'], 'PATH_INVALID'),
+            (base + ['src//double.py'], ['src/file0000.py'], 'PATH_INVALID'),
+            (base + ['src/café.py'], ['src/file0000.py'], 'PATH_INVALID'),
+            (base + ['src/file0000.py'], ['src/file0000.py'], 'DUPLICATE_PATH'),
+            (base + ['src/extra.py'], ['src/not-read.py'], 'WRITE_PATH_NOT_IN_READ_PATHS'),
+            ([], ['src/file0000.py'], 'PATH_LIST_EMPTY'),
+            (tuple(base), ['src/file0000.py'], 'PATH_LIST_INVALID'),
+        )
+        for reads, writes, code in cases:
+            with self.subTest(code=code, path=reads[-1] if reads else None):
+                self.assertIn(code, self.refused(reads, writes))
 
 
 if __name__ == '__main__':

@@ -65,14 +65,14 @@ class RemoteTestWorkflowTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, raw)
 
-    def test_single_job_gate_runner_and_timeout(self):
+    def test_single_job_gate_and_runner(self):
         _, parsed = _load_workflow()
         jobs = parsed["jobs"]
         self.assertEqual(set(jobs), {"remote-test"})
         job = jobs["remote-test"]
         self.assertEqual(job["name"], "remote-test")
         self.assertEqual(job["runs-on"], "ubuntu-24.04")
-        self.assertEqual(job["timeout-minutes"], 15)
+        self.assertNotIn("timeout-minutes", job)
         for forbidden_key in ("environment", "concurrency", "permissions", "strategy"):
             self.assertNotIn(forbidden_key, job)
 
@@ -207,6 +207,17 @@ class RemoteTestWorkflowTests(unittest.TestCase):
                         },
                     )
 
+            for count in (1, 8, 9, 11, 17, 25, 100):
+                with self.subTest(module_count=count):
+                    modules = " ".join(f"test_m{index:03}" for index in range(count))
+                    out_file = Path(tmp) / f"github_output_{count}"
+                    res = subprocess.run(
+                        ["bash", "-c", input_step["run"]],
+                        env={**valid_env, "INPUT_MODULES": modules, "GITHUB_OUTPUT": str(out_file)},
+                        capture_output=True, text=True, check=False)
+                    self.assertEqual(res.returncode, 0, res.stderr or res.stdout)
+                    self.assertIn("modules=" + modules, out_file.read_text().splitlines())
+
             invalid_cases = [
                 {"INPUT_SHA": "a" * 39},
                 {"INPUT_SHA": "A" * 40},
@@ -221,7 +232,8 @@ class RemoteTestWorkflowTests(unittest.TestCase):
                 {"INPUT_MODULES": "test_dup test_dup"},
                 {"INPUT_MODULES": "bad_module"},
                 {"INPUT_MODULES": "test_Upper"},
-                {"INPUT_MODULES": " ".join(f"test_m{i}" for i in range(9))},
+                {"INPUT_MODULES": "test_alpha;false"},
+                {"INPUT_MODULES": "test_alpha\ntest_beta"},
             ]
             for override in invalid_cases:
                 with self.subTest(override=override):
