@@ -1,5 +1,5 @@
 import copy
-import hashlib
+import io
 import json
 import shutil
 import subprocess
@@ -11,7 +11,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from llmtool import task_submission_cli
+from llmtool.errors import LLMToolError
 from llmtool.opencode_direct_developer import DirectOpenCodeError, run
+from llmtool.task_store import TaskStore
 
 GRANT_PATH = 'tools/llmtool/workflow-grants.json'
 WORKFLOW = '.github/workflows/ci.yml'
@@ -151,24 +153,30 @@ class OpenCodeWorkflowGrantTests(unittest.TestCase):
                          'OPENCODE_SCOPE_INVALID')
 
     def _dispatch_task(self, *, issue=ISSUE):
-        task_id, run_id = 'a' * 32, 'b' * 32
+        """Create the Task through the real record-pm creation path.
+
+        The Issue is persisted by that path; it is never injected into a
+        fabricated record after creation (F1).
+        """
         request = 'Bounded workflow-grant dispatch task.'
-        task = task_submission_cli._record(
-            task_id, run_id, 'pm-' + 'c' * 32, 'pm-profile', request,
-            state='PM_RESPONDED', provider_type='codex-cli', model='pm-model',
-            backend='EPHEMERAL_SINGLE_CALL',
-            request_sha=hashlib.sha256(request.encode('utf-8')).hexdigest())
-        assignment = {'schema_version': 1, 'route': 'opencode', 'risk': 'LOW',
-                      'goal': 'Update the granted workflow file.',
-                      'acceptance': ['bounded']}
-        task.update(
-            pm_route_binding={'type': 'codex-cli', 'model': 'pm-model',
-                              'base_url': None},
-            response=json.dumps({'schema_version': 1, 'summary': 'Bounded.',
-                                 'developer_assignment': assignment}),
-            pm_assignment=assignment)
-        if issue is not None:
-            task['issue'] = issue
+        response = json.dumps({
+            'schema_version': 1, 'summary': 'Bounded.',
+            'developer_assignment': {
+                'route': 'opencode', 'risk': 'LOW',
+                'goal': 'Update the granted workflow file.',
+                'acceptance': ['bounded'],
+            },
+        })
+        store = TaskStore(self.cli_dir / 'task-store')
+        task = task_submission_cli.run_task_record_pm(
+            Namespace(stdin_json=True, issue=issue), store=store,
+            input_stream=io.StringIO(json.dumps({
+                'request': request, 'response': response})),
+            return_record=True)
+        if issue is None:
+            self.assertNotIn('issue', task)
+        else:
+            self.assertEqual(task['issue'], issue)
         return task
 
     def _dispatch(self, task, read_paths, write_paths, commit):
@@ -229,6 +237,33 @@ class OpenCodeWorkflowGrantTests(unittest.TestCase):
             self._dispatch_task(), [WORKFLOW, 'source.py'], ['source.py'], commit)
         self.assertEqual(code, 0)
         self.assertEqual(store.task['developer']['state'], 'DEVELOPER_RESPONDED')
+
+    def test_dispatch_caller_without_issue_still_runs_ordinary_paths(self):
+        commit = self._commit([])
+        self.cli = self._fake_cli(expect_read='source.py')
+        code, store = self._dispatch(
+            self._dispatch_task(issue=None), ['source.py'], ['source.py'], commit)
+        self.assertEqual(code, 0)
+        self.assertEqual(store.task['developer']['state'], 'DEVELOPER_RESPONDED')
+
+    def test_task_creation_refuses_an_invalid_issue(self):
+        response = json.dumps({
+            'schema_version': 1, 'summary': 'Bounded.',
+            'developer_assignment': {
+                'route': 'opencode', 'risk': 'LOW',
+                'goal': 'Update the granted workflow file.',
+                'acceptance': ['bounded'],
+            },
+        })
+        envelope = json.dumps({'request': 'Bounded task.', 'response': response})
+        for index, issue in enumerate((0, -1, True, '2281')):
+            with self.subTest(issue=issue):
+                store = TaskStore(self.cli_dir / ('invalid-issue-' + str(index)))
+                with self.assertRaises(LLMToolError):
+                    task_submission_cli.run_task_record_pm(
+                        Namespace(stdin_json=True, issue=issue), store=store,
+                        input_stream=io.StringIO(envelope), return_record=True)
+                self.assertFalse(store.root.exists())
 
     def test_dispatch_caller_grants_write_path(self):
         commit = self._commit([self._entry('read'), self._entry('write')])
