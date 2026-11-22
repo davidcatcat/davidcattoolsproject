@@ -120,56 +120,9 @@ NO_EXPAND = frozenset({"Claude Desktop", "Antigravity App (AGY)"})
 DISK_REFRESH_SECONDS = 5.0   # #2311: a live reading, at the office rebuild cadence (one statfs call)
 DISK_WARNING_PERCENT = 95
 DISK_ATTENTION_PERCENT = 95
-RULE_ALERT_FILE = os.path.join(os.path.expanduser("~"), ".local/state/llmtool/rule-file-alerts.json")
-
-
-def _load_rule_alerts(path):
-    """Load the small local rule-alert record; return None when it is absent."""
-    try:
-        with open(path, "rb") as stream:
-            raw = stream.read()
-    except FileNotFoundError:
-        return None
-    value = json.loads(raw.decode("utf-8"))
-    if (type(value) is not dict or set(value) != {"schema_version", "baseline", "checked", "alerts"}
-            or type(value["schema_version"]) is not int or value["schema_version"] != 1
-            or type(value["baseline"]) is not int or type(value["checked"]) is not list
-            or type(value["alerts"]) is not list):
-        raise ValueError("invalid rule-alert record")
-    if any(type(number) is not int for number in value["checked"]):
-        raise ValueError("invalid checked PR")
-    alerts = value["alerts"]
-    for alert in alerts:
-        if (type(alert) is not dict or set(alert) != {"pr", "title", "paths"}
-                or type(alert["pr"]) is not int or type(alert["title"]) is not str
-                or type(alert["paths"]) is not list
-                or any(type(path) is not str for path in alert["paths"])):
-            raise ValueError("invalid rule alert")
-    return {"schema_version": 1, "baseline": value["baseline"],
-            "checked": value["checked"][-500:], "alerts": alerts}
-
-
-def _save_rule_alerts(path, state):
-    """Atomically write the rule-alert record with private file and directory modes."""
-    parent = os.path.dirname(os.path.abspath(path))
-    os.makedirs(parent, mode=0o700, exist_ok=True)
-    os.chmod(parent, 0o700)
-    fd, temporary = tempfile.mkstemp(prefix=".rule-file-alerts-", dir=parent)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            fd = -1
-            json.dump(state, stream, ensure_ascii=False, separators=(",", ":"))
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        if fd >= 0:
-            os.close(fd)
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+# Owner 2026-11-22: the monitor no longer shows rule-file merge alerts (no
+# alert line, no clear step); rule-file PRs still merge after formal review
+# and exact-head CI.
 
 
 class StyleKey(str):
@@ -180,29 +133,6 @@ class StyleKey(str):
         value = super().__new__(cls, base)
         value.colour = colour
         return value
-
-
-# Rule-file merge alerts (#1502 WP-G, E8) are drawn in their own colour pair,
-# distinct from every other alert and status colour.
-RULE_ALERT_STYLE = StyleKey("!", "rule")
-
-
-def rule_alert_lines(path=None) -> list[tuple[str, str]]:
-    if path is None:
-        path = RULE_ALERT_FILE
-    try:
-        state = _load_rule_alerts(path)
-    except Exception:
-        return [("規則檔告警紀錄無法讀取", RULE_ALERT_STYLE)]
-    if state is None or not state["alerts"]:
-        return []
-    alerts = list(reversed(state["alerts"]))
-    lines = [(f"規則檔已變更：PR #{alert['pr']}，{len(alert['paths'])} 個檔（看過後請 PM 清除）",
-              RULE_ALERT_STYLE)
-             for alert in alerts[:5]]
-    if len(alerts) > 5:
-        lines.append((f"另有 {len(alerts) - 5} 件規則檔告警", RULE_ALERT_STYLE))
-    return lines
 
 
 @dataclass(frozen=True)
@@ -2344,6 +2274,7 @@ class GitHubSource:
         self._full_read_at: float | None = None
         self._comment_updated: float | None = None
         self.pending: list[OwnerPending] = []
+        self.ask_titles: dict[str, str] = {}   # Owner 11-22: "#N" -> title of each ★ ask
         self.notices: list[OwnerNotice] = []   # #2311: Owner notices, shown apart from asks
         self.leases: list[SubPmLease] = _load_subpm_leases()  # #2311: HELD sub-agent PM leases across restarts
         self.scope = ""   # what the ★ list could see, said next to it
@@ -2375,74 +2306,30 @@ class GitHubSource:
         self.settled = None   # monotonic time the last attempt ended
         self.wait = GITHUB_REFRESH   # seconds between attempts; grows while gh keeps failing
 
-    def refresh_rule_alerts(self, pulls, path=None) -> None:
-        """Check at most five newly merged main PRs against the canonical path list."""
-        if path is None:
-            path = RULE_ALERT_FILE
-        try:
-            state = _load_rule_alerts(path)
-            if state is None:
-                _save_rule_alerts(path, {"schema_version": 1, "baseline": int(self.clock()),
-                                         "checked": [], "alerts": []})
-                return
-            checked = set(state["checked"])
-            candidates = []
-            for pull in pulls:
-                if type(pull) is not dict or type(pull.get("number")) is not int:
-                    continue
-                number = pull["number"]
-                base = pull.get("base")
-                if (number in checked or type(base) is not dict
-                        or base.get("ref") != "main"):
-                    continue
-                merged_at = _github_time(pull.get("merged_at"))
-                if not merged_at or merged_at < state["baseline"]:
-                    continue
-                candidates.append((merged_at, number, pull))
-            candidates.sort(key=lambda item: (item[0], item[1]))
-            matcher = None
-            matcher_path = os.path.join(canonical_root(), "tools", "llmtool", "llmtool",
-                                        "sensitive_paths.py")
+    def _ask_titles(self, pending, pulls) -> dict:
+        """Owner 2026-11-22: "#N" -> plain title for the shown ★ asks. PR titles come
+        from the pulls already read; at most OWNER_SHOWN Issue titles per read are
+        fetched once and cached. Any failure leaves the title out."""
+        titles = {}
+        for pull in pulls if type(pulls) is list else []:
+            if type(pull) is dict and type(pull.get("number")) is int:
+                titles[f"#{pull['number']}"] = _headline(pull.get("title"))
+        wanted = [item.reference for item in (pending or [])[-OWNER_SHOWN:]]
+        known = {ref: title for ref, title in self.ask_titles.items() if ref in wanted and title}
+        fetched = 0
+        for ref in wanted:
+            if ref in titles or ref in known:
+                continue
+            if fetched >= OWNER_SHOWN or not ref[1:].isdigit():
+                continue
+            fetched += 1
             try:
-                spec = importlib.util.spec_from_file_location("llmtool_monitor_sensitive_paths",
-                                                              matcher_path)
-                if spec is None or spec.loader is None:
-                    raise ImportError("sensitive matcher unavailable")
-                matcher = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(matcher)
-                if not callable(getattr(matcher, "sensitive_matches", None)):
-                    raise ImportError("sensitive matcher unavailable")
+                issue = self._get(f"repos/{self.repo}/issues/{ref[1:]}")
             except Exception:
-                matcher = None
-
-            for _, number, pull in candidates[:5]:
-                try:
-                    files = self._get(f"repos/{self.repo}/pulls/{number}/files?per_page=100")
-                except Exception:
-                    break
-                if type(files) is not list:
-                    break
-                if len(files) >= 100:
-                    paths = ["<too-many-files>"]
-                elif matcher is None:
-                    paths = ["<sensitive-list-unreadable>"]
-                else:
-                    try:
-                        paths = list(matcher.sensitive_matches(files))
-                    except Exception:
-                        paths = ["<sensitive-list-unreadable>"]
-                if paths:
-                    title = pull.get("title")
-                    state["alerts"].append({"pr": number,
-                                             "title": title if type(title) is str else "",
-                                             "paths": paths})
-                state["checked"].append(number)
-                state["checked"] = state["checked"][-500:]
-                checked.add(number)
-            _save_rule_alerts(path, state)
-        except Exception:
-            # This auxiliary local alert must never affect GitHub refresh health.
-            return
+                continue
+            if type(issue) is dict:
+                known[ref] = _headline(issue.get("title"))
+        return {ref: (titles.get(ref) or known.get(ref) or "") for ref in wanted}
 
     def _get(self, path: str):
         if self.direct and time.monotonic() >= self._direct_paused:
@@ -2631,7 +2518,6 @@ class GitHubSource:
                               "&direction=desc&per_page=100")
             if type(pulls) is not list:
                 raise ValueError("pulls page")
-            self.refresh_rule_alerts(pulls)
             board_page_count = len(pulls)
             updated_times = []
             for pull in pulls:
@@ -2660,6 +2546,7 @@ class GitHubSource:
                      + (f"（只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則）" if more else "")
                      + "；監控開著時，更早還沒回覆的也會留著")
             self.events, self.pending, self.branch_prs, self.scope = events, pending, prs, scope
+            self.ask_titles = self._ask_titles(pending, pulls)
             # A lease claim posted before the window but edited within it (the
             # API's since= is the update time) still settles or renews its lease.
             edited = [item for item in raw if type(item) is dict and "created_at" in item
@@ -5454,11 +5341,9 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=
                      int(github.window // 3600) if github is not None else 12, prs, owner_cut)
 
 
-def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
-    def append_header(text, style=""):
-        lines = _wrap(text, width) if width is not None else [text]
-        out.extend((line, style) for line in lines)
-
+def board_counts(work: WorkBoard) -> str:
+    """The 白板 counts line; also pinned in the fixed header of every tab
+    (Owner 2026-11-22). Unknown parts are '?'."""
     today = len(work.done) if work.github_known else "?"
     owner_known = work.github_known and not GITHUB_IDENTITY_STATUS
     known_running = len(work.running)
@@ -5470,10 +5355,20 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
                    f"{other_owner}{'+' if work.owner_cut else ''}")
     owner_count = ("?" if not owner_known or (work.owner_cut and not work.owner) else
                    f"{len(work.owner)}{'+' if work.owner_cut else ''}（等你決定 {waiting_count}，其他 Owner 請求 {other_count}）")
-    counts = (f"今天合併 {today} · 進行中 {known_running if work.github_known else '?'} · "
-              f"等 PM {sum(item.next == 'PM' for item in work.running + work.queue + work.blocked) if work.github_known and work.board_known else '?'} · "
-              f"等你 {owner_count} · 排隊 {len(work.queue) if work.board_known else '?'} · "
-              f"卡住 {len(work.blocked) if work.board_known else '?'}")
+    return (f"今天合併 {today} · 進行中 {known_running if work.github_known else '?'} · "
+            f"等 PM {sum(item.next == 'PM' for item in work.running + work.queue + work.blocked) if work.github_known and work.board_known else '?'} · "
+            f"等你 {owner_count} · 排隊 {len(work.queue) if work.board_known else '?'} · "
+            f"卡住 {len(work.blocked) if work.board_known else '?'}")
+
+
+def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
+    def append_header(text, style=""):
+        lines = _wrap(text, width) if width is not None else [text]
+        out.extend((line, style) for line in lines)
+
+    counts = board_counts(work)
+    today = len(work.done) if work.github_known else "?"
+    owner_known = work.github_known and not GITHUB_IDENTITY_STATUS
     out = []
     append_header("工作白板", "title")
     append_header(counts)
@@ -10382,6 +10277,17 @@ def route_view(routes: list[RouteRow], width: int | None = None) -> list[tuple[s
     return out
 
 
+# Owner 2026-11-22: an ask line says what is asked in plain words, not the
+# record's opening ("actor=PM (main PM …). …"): that lead-in is dropped.
+ASK_LEAD = re.compile(r"^(?:actor=\S+\s*(?:\([^)]*\))?[.:：]?\s*)+")
+
+
+def _ask_text(summary) -> str:
+    if type(summary) is not str:
+        return ""
+    return ASK_LEAD.sub("", summary.strip()).strip()
+
+
 def office_view(rows: list[OfficeRow], error: str | None = None,
                 width: int | None = None, expand: bool = False,
                 pending: list[OwnerPending] | None = None,
@@ -10391,7 +10297,8 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
                 parts: dict[int, list[tuple[str, bool]]] | None = None,
                 entries: list[dict[str, typing.Any]] | None = None,
                 routes: list[RouteRow] | None = None,
-                notices: list[OwnerNotice] | None = None) -> list[tuple[str, str]]:
+                notices: list[OwnerNotice] | None = None,
+                titles: dict[str, str] | None = None) -> list[tuple[str, str]]:
     """[(line, style)]: style is "title", "!", "+", "dim", "section" or "".
     parts, if given, gets {line index: [(text, highlighted)]} for each runner
     row line holding a CI reference (the TUI draws those bright white).
@@ -10416,24 +10323,23 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
     for text, style in top or []:
         add(text, style)
     pending = list(pending or [])
-    texts = [f"★ 等你決定：GitHub {item.reference}（{_short_ago(max(0.0, now - item.when))}）"
+    titles = dict(titles or {})
+    texts = [f"★ 等你決定：GitHub {item.reference}"
+             + (f" {titles[item.reference]}" if titles.get(item.reference) else "")
+             + f"（{_short_ago(max(0.0, now - item.when))}）"
              + ("（UNGATED_OWNER_ASK：未經提問閘門）" if getattr(item, "ungated", False) else "")
-             + (f" — {item.summary}" if item.summary else "")
+             + (f" — {_ask_text(item.summary)}" if _ask_text(item.summary) else "")
              for item in pending[-OWNER_SHOWN:]]
     if len(pending) > OWNER_SHOWN:
         texts.append(f"★ …另有 {len(pending) - OWNER_SHOWN} 筆較早的等你決定")
     for text in texts:
         add(text, "!")
-    notices = list(notices or [])
-    if notices:
-        out.append(("── 通知（只給你看，不用回覆）──", "section"))
-        for item in notices[-NOTICES_SHOWN:]:
-            add(f"ℹ GitHub {item.reference}（{_short_ago(max(0.0, now - item.when))}）"
-                + (f" — {item.summary}" if item.summary else ""), "")
-        if len(notices) > NOTICES_SHOWN:
-            add(f"ℹ …另有 {len(notices) - NOTICES_SHOWN} 則較早的通知", "dim")
+    # Owner 2026-11-22: information-only notices are not shown; this screen lists
+    # only what the Owner must decide or handle (the ★ asks and the rule alert).
     if routes is not None:
-        out += route_view(routes, width)
+        # Owner 2026-11-22: the sub-PM lease rows are only shown expanded ('a').
+        out += route_view(routes if expand else
+                          [route for route in routes if route.name != "sub-PM"], width)
         kept = []
         for row in rows:   # the routes say what these rows said; their alerts stay
             if not _switch_row(row):
@@ -10483,7 +10389,9 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
     for text in [f"⚠ {text}" for text in alerts] + notes:
         out += [(("  " if i else "") + piece, "!") for i, piece in
                 enumerate(_wrap(text, width - 2) if width else [text])]
-    tree = _tree(rows, fold=not expand, only_alerts=routes is not None and not expand)
+    # Owner 2026-11-22: the 即時 section is shown by default again beside the routes;
+    # only gray rows fold, as before #2580.
+    tree = _tree(rows, fold=not expand)
     name_cols = max([_width(prefix + _shown(row)) for prefix, row in tree if prefix != "—"],
                     default=0) + 2
     # The detail column is as wide as the longest detail, up to DETAIL_MAX and
@@ -10567,10 +10475,11 @@ def office_lines(rows: list[OfficeRow], error: str | None = None,
                  waiting: int | None = None,
                  top: list[tuple[str, str]] | None = None,
                  routes: list[RouteRow] | None = None,
-                 notices: list[OwnerNotice] | None = None) -> list[str]:
+                 notices: list[OwnerNotice] | None = None,
+                 titles: dict[str, str] | None = None) -> list[str]:
     return [line for line, _ in office_view(rows, error, width, expand, pending,
                                              scope=scope, waiting=waiting, top=top,
-                                             routes=routes, notices=notices)]
+                                             routes=routes, notices=notices, titles=titles)]
 
 
 def office_events(old: dict, rows: list[OfficeRow]) -> tuple[dict, list[tuple[str, str]]]:
@@ -10628,10 +10537,11 @@ def run_once(github: "GitHubSource | None" = None) -> int:
                                  top=office_top(github, mon.quota, time.time(),
                                                 stuck=stuck_lines(mon, time.time()),
                                                 waiting=waiting_task_lines(mon, time.time()),
-                                                install=rule_alert_lines() + install_lines(github),
+                                                install=install_lines(github),
                                                 incidents=mon.incidents),
                                  routes=getattr(mon, "routes", None),
-                                 notices=owner_notice_list(github))))
+                                 notices=owner_notice_list(github),
+                                 titles=getattr(github, "ask_titles", None))))
     print("\n".join(line for line, _ in board_view(
         work_board(github, mon.pm_board, time.time(), ec2=mon.ec2_heads,
                    reviewing=pr_reviewing(mon.office), office=mon.office,
@@ -10763,6 +10673,31 @@ def body_lines(stdscr) -> int:
     return max(1, stdscr.getmaxyx()[0] - 4)
 
 
+HEADER_COUNTS_SECONDS = DISK_REFRESH_SECONDS   # the pinned counts are rebuilt at most this often
+
+
+def header_counts(mon, now: float) -> str:
+    """Owner 2026-11-22: the 白板 counts pinned in the fixed header of every tab.
+    Built from the already-loaded board and GitHub data (no new reads), at most
+    once per HEADER_COUNTS_SECONDS; '?' parts when unknown."""
+    cached = getattr(mon, "_header_counts", None)
+    if cached is not None and 0 <= now - cached[0] < HEADER_COUNTS_SECONDS:
+        return cached[1]
+    try:
+        text = board_counts(work_board(mon.github, mon.pm_board, now,
+                                       ec2=getattr(mon, "ec2_heads", None),
+                                       reviewing=pr_reviewing(mon.office),
+                                       office=mon.office,
+                                       office_known=not bool(mon.office_error)))
+    except Exception:
+        text = "今天合併 ? · 進行中 ? · 等 PM ? · 等你 ? · 排隊 ? · 卡住 ?"
+    try:
+        mon._header_counts = (now, text)
+    except Exception:
+        pass
+    return text
+
+
 def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=False) -> int:
     """One repaint of the current view (the loop above decides when);
     returns the scroll offset clamped to the view."""
@@ -10787,9 +10722,12 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
              if mon.stale else "")
     behind = behind_line(mon)
     board = pm_board_stale_line(getattr(mon, "pm_board_stamp", None), time.time())
+    counts = header_counts(mon, time.time())
     if alert or stale or behind or board:
-        put(2, "  ·  ".join(item for item in (stale, behind, board, alert) if item),
+        put(2, "  ·  ".join(item for item in (counts, stale, behind, board, alert) if item),
             colors.get("!", 0) | curses.A_BOLD)
+    else:
+        put(2, counts, 0)
     if view == "log":
         entries = list(mon.log)
         offset = max(0, min(offset, len(entries) - body))
@@ -10846,10 +10784,11 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
                             top=office_top(mon.github, mon.quota, time.time(),
                                            stuck=stuck_lines(mon, time.time()),
                                            waiting=waiting_task_lines(mon, time.time()),
-                                           install=rule_alert_lines() + install_lines(mon.github),
+                                           install=install_lines(mon.github),
                                            incidents=mon.incidents),
                             routes=getattr(mon, "routes", None),
-                            notices=owner_notice_list(mon.github))
+                            notices=owner_notice_list(mon.github),
+                            titles=getattr(mon.github, "ask_titles", None))
         offset = max(0, min(offset, len(lines) - body))
         styles = {"title": colors.get("title", 0) | curses.A_BOLD, "!": colors.get("!", 0),
                   "+": colors.get("+", 0), "dim": curses.A_DIM, "section": curses.A_BOLD}
@@ -11273,33 +11212,11 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"turn off the read-only gh api Activity on {DEFAULT_GITHUB_REPO} (no network)")
     parser.add_argument("--gh-cli", action="store_true",
                         help="read GitHub only through `gh api` processes (never holds gh's token; more CPU)")
-    parser.add_argument("--clear-rule-alert", type=int, metavar="PR",
-                        help="clear one local sensitive-path alert by PR number")
     parser.add_argument("--codex-quota", action="store_true",
                         help="print the Codex quota status as one JSON line, then exit")
     args = parser.parse_args(argv)
     if args.codex_quota:
         print(json.dumps(read_codex_quota(time.time()), ensure_ascii=False))
-        return 0
-    if args.clear_rule_alert is not None:
-        try:
-            state = _load_rule_alerts(RULE_ALERT_FILE)
-        except Exception:
-            print("RULE_ALERT_RECORD_BAD")
-            return 1
-        number = args.clear_rule_alert
-        if state is None or not any(alert["pr"] == number for alert in state["alerts"]):
-            print(f"RULE_ALERT_NOT_FOUND pr={number}")
-            return 1
-        state["alerts"] = [alert for alert in state["alerts"] if alert["pr"] != number]
-        if number not in state["checked"]:
-            state["checked"] = (state["checked"] + [number])[-500:]
-        try:
-            _save_rule_alerts(RULE_ALERT_FILE, state)
-        except Exception:
-            print("RULE_ALERT_RECORD_BAD")
-            return 1
-        print(f"RULE_ALERT_CLEARED pr={number}")
         return 0
     if not 0.5 <= args.interval <= 60:
         parser.error("--interval must be between 0.5 and 60 seconds")
