@@ -9989,6 +9989,39 @@ def _capture_trusted_main_pin(task, source_sha):
     return _validate_trusted_main_pin(pin, task, source_sha)
 
 
+def _direct_result_main_pin(task, developer, evidence):
+    """Capture the authenticated main pin a direct result needs to publish (#2367).
+
+    A direct result is an uncommitted D6 worktree. Its first publish needs a
+    published base that survives main moving past the D6 base, so it records
+    the same validated pin the task-complete path records. Capture is best
+    effort: without a pin the publish base lookup still fails closed.
+    """
+    source_sha = developer.get('source_sha') if type(developer) is dict else None
+    if type(source_sha) is not str:
+        return None
+    try:
+        pin = _capture_trusted_main_pin(task, source_sha)
+    except Exception:
+        return None
+    try:
+        task_completion.ensure_main_commit(evidence.get('root'), pin['sha'])
+    except Exception:
+        pass
+    return pin
+
+
+def _completion_with_trusted_main_pin(task, pin):
+    """Return this Task's completion carrying one validated main pin, or None."""
+    completion = task.get('completion') if type(task) is dict else None
+    if pin is None or type(completion) is not dict:
+        return None
+    evidence = completion.get('evidence')
+    if type(evidence) is not dict:
+        return None
+    return {**completion, 'evidence': {**evidence, 'trusted_main_pin': pin}}
+
+
 def run_task_complete(args, *, store=None, reviewer_adapter=None):
     """Verify an Executor result and make one non-replayable original-profile PM call.
 
@@ -10377,11 +10410,16 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
     return 0 if returned['pm_recommendation'] is not None else 1
 
 
-def _persist_direct_callback(store, task, developer, callback):
+def _persist_direct_callback(store, task, developer, callback, *, completion=None):
     updated = dict(developer)
     updated['direct_result_callback'] = callback
-    return store.compare_and_update(task['task_id'],
-        expected={'developer': developer}, developer=updated)
+    expected = {'developer': developer}
+    updates = {}
+    if completion is not None:
+        expected['completion'] = task.get('completion')
+        updates['completion'] = completion
+    return store.compare_and_update(task['task_id'], expected=expected,
+                                    developer=updated, **updates)
 
 
 def _persist_direct_interruption(store, task_id, phase, *, error_code=None):
@@ -10928,6 +10966,7 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
         raise LLMToolError('direct result PM call already claimed or completed; replay refused')
 
     evidence = dict(callback['evidence'])
+    main_pin = None
     if callback['state'] == 'WAITING_EXECUTOR' and evidence['verification_state'] == 'NOT_STARTED':
         claimed = dict(callback)
         claimed['state'] = 'VERIFYING_EXECUTOR'
@@ -10958,6 +10997,9 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
             # Tests can run long enough for the D6 record or files to change.
             # Recollect the full registration and worktree snapshot before READY.
             _recollect_direct_worktree(task, developer, callback, result)
+            # Capture the authenticated main pin only for a fully verified
+            # result, so a failed verification never leaves publish evidence.
+            main_pin = _direct_result_main_pin(task, developer, evidence)
             evidence.update({
                 'verification_state': 'READY', 'result': result, 'tests': tests,
                 'review_pr_ci': {'stage': 'EXECUTOR_RESULT',
@@ -11001,13 +11043,22 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
             return 1
         ready = {**callback, 'state': 'WAITING_PM', 'evidence': evidence,
                  'missing_gates': [], 'pm_error_code': None}
+        pinned_completion = _completion_with_trusted_main_pin(task, main_pin)
         try:
-            _persist_direct_callback(store, task, developer, ready)
+            _persist_direct_callback(store, task, developer, ready,
+                                     completion=pinned_completion)
         except (KeyboardInterrupt, CLIHostTermination) as exc:
             _persist_direct_interruption(store, task_id, 'EXECUTOR')
             raise exc
         except Exception:
-            raise LLMToolError('verified direct result could not be persisted') from None
+            if pinned_completion is None:
+                raise LLMToolError('verified direct result could not be persisted') from None
+            # Keep the verified result even if the pin cannot share its write;
+            # the publish base lookup then stays fail closed without a pin.
+            try:
+                _persist_direct_callback(store, task, developer, ready)
+            except Exception:
+                raise LLMToolError('verified direct result could not be persisted') from None
         task = store.get(task_id)
         developer = task['developer']
         callback = developer['direct_result_callback']
@@ -11038,6 +11089,26 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
     else:
         raise LLMToolError('direct Executor callback is not in a retryable state')
 
+    completion = task.get('completion')
+    completion_evidence = (completion.get('evidence')
+                           if type(completion) is dict else None)
+    already_pinned = (type(completion_evidence) is dict and
+                      type(completion_evidence.get('trusted_main_pin')) is dict)
+    if not already_pinned and evidence.get('verification_state') == 'READY':
+        # A result verified before #2367 can still gain the pin on a retry.
+        if main_pin is None:
+            main_pin = _direct_result_main_pin(task, developer, evidence)
+        pinned_completion = _completion_with_trusted_main_pin(task, main_pin)
+        if pinned_completion is not None:
+            try:
+                saved = _persist_direct_callback(store, task, developer, callback,
+                                                 completion=pinned_completion)
+                task, developer = saved, saved['developer']
+                callback = developer['direct_result_callback']
+                evidence = callback['evidence']
+            except Exception:
+                pass
+
     result = evidence['result']
     packet = _direct_result_packet(task, developer, executor_task_id, evidence)
     content = json.dumps(packet, ensure_ascii=True, sort_keys=True, separators=(',', ':'))
@@ -11048,7 +11119,9 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
         ready = {**callback, 'state': 'PM_EVIDENCE_READY',
                  'pm_dispatch': 'NOT_STARTED', 'pm_error_code': None}
         try:
-            _persist_direct_callback(store, task, developer, ready)
+            _persist_direct_callback(store, task, developer, ready,
+                                     completion=_completion_with_trusted_main_pin(
+                                         task, main_pin))
         except Exception:
             raise LLMToolError('verified direct result could not be persisted') from None
         _record_ready_event(store, task_id)
