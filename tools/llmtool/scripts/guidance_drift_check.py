@@ -337,6 +337,10 @@ RULE_SCHEMAS: dict[str, Any] = {
         "merge_train_files_per_pr_max": Int(1),
         "revert_scope_prs_max": Int(1),
         "d6_writer_lease_hours": Int(1),
+        # #2622 (Owner decision relayed in the issue): consecutive route
+        # failures after which a Developer route pauses; same optional
+        # positive-integer rule as the keys above.
+        "route_failure_pause_after": Int(1),
     }),
     "worker-dispatch.json": Obj({
         "schema_version": Const(1),

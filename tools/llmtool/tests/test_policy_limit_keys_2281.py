@@ -74,6 +74,9 @@ ROW19_KEY = 'ai_debug_excerpt_max_chars'
 # #2537: the per-Task gw-agent turn cap; omitted from the repository
 # policy.json (default repair_policy.GW_AGENT_MAX_TURNS).
 TURN_CAP_KEY = 'gw_agent_max_turns'
+# #2622 (Owner decision relayed in the issue): consecutive route failures after
+# which a Developer route pauses; set in the repository policy.json.
+ROUTE_FAILURE_KEY = 'route_failure_pause_after'
 
 
 class PolicyLimitKeysTests(unittest.TestCase):
@@ -95,7 +98,7 @@ class PolicyLimitKeysTests(unittest.TestCase):
                          {*LIMITS, *LATER_LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY,
                           PACKET_ROW12_KEY, SOURCE_ROW12_KEY, ROW12_KEY,
                           ROW13_KEY, ROW13_RETRY_KEY, ROW14_KEY, ROW19_KEY,
-                          TURN_CAP_KEY})
+                          TURN_CAP_KEY, ROUTE_FAILURE_KEY})
         # Optional: none of them is required by the loader.
         self.assertFalse(set(LIMITS) & set(rp.POLICY_KEYS))
         self.assertFalse(set(LIMITS) & set(rp.OPTIONAL_POLICY_LIMITS))
@@ -110,6 +113,9 @@ class PolicyLimitKeysTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertIs(type(policy[key]), int)
                 self.assertEqual(policy[key], value)
+        # #2622 (Owner decision relayed in the issue): the route-failure pause
+        # count is recorded in the repository policy.json.
+        self.assertEqual(policy[ROUTE_FAILURE_KEY], 3)
         # Row 18 is not in the repository policy.json; the repository file is
         # still accepted because the keys are optional.
         for key in (ROW18_KEY, EXPIRY_ROW18_KEY, PACKET_ROW12_KEY,
@@ -186,7 +192,7 @@ class PolicyLimitKeysTests(unittest.TestCase):
     def test_no_upper_validation_bound(self):
         for key in (*LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY, PACKET_ROW12_KEY,
                     SOURCE_ROW12_KEY, ROW12_KEY, ROW13_KEY, ROW13_RETRY_KEY,
-                    ROW14_KEY):
+                    ROW14_KEY, ROUTE_FAILURE_KEY):
             for value in (1001, 10 ** 9):
                 with self.subTest(key=key, value=value):
                     self.assertEqual(
@@ -196,7 +202,7 @@ class PolicyLimitKeysTests(unittest.TestCase):
     def test_invalid_value_refuses_policy_invalid(self):
         for key in (*LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY, PACKET_ROW12_KEY,
                     SOURCE_ROW12_KEY, ROW12_KEY, ROW13_KEY, ROW13_RETRY_KEY,
-                    ROW14_KEY):
+                    ROW14_KEY, ROUTE_FAILURE_KEY):
             for value in (0, -1, -2000, '5', True, False, 2.5, None, [5], {'value': 5}):
                 with self.subTest(key=key, value=value):
                     self._refuses({**BASE, **LIMITS, key: value})
@@ -373,10 +379,11 @@ class PolicyLimitKeysTests(unittest.TestCase):
         policy = rp.load_policy()
         self.assertEqual({key: policy[key] for key in BASE}, dict(BASE, parent_debug_max=3))
         self.assertEqual(policy['timeout_continuation_max'], 1)
-        # Row 12 (and row 18) are omitted from the repository policy.json, so
-        # the set of repository keys is unchanged by this piece.
+        # Row 12 (and row 18) are omitted from the repository policy.json;
+        # #2622 adds route_failure_pause_after at its Owner value, 3.
         self.assertEqual(set(policy), {*BASE, 'timeout_continuation_max', *LIMITS,
-                                       *LATER_LIMITS})
+                                       *LATER_LIMITS, ROUTE_FAILURE_KEY})
+        self.assertEqual(policy[ROUTE_FAILURE_KEY], 3)
         self.assertNotIn(PACKET_ROW12_KEY, policy)
         self.assertNotIn(SOURCE_ROW12_KEY, policy)
         self.assertNotIn(ROW12_KEY, policy)
