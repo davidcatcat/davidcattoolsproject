@@ -20,6 +20,9 @@ try:
     from tests import test_advance_docs_only as docs
     from tests import test_remote_test as remote_fixtures
 except ImportError:
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import test_advance_docs_only as docs
     import test_remote_test as remote_fixtures
 
@@ -215,6 +218,9 @@ class PreReviewGateTests(unittest.TestCase):
                 calls.append(path)
                 head = HEAD if len(calls) == 1 else OTHER_HEAD
                 return dict(docs.pr_snapshot(head={'sha': head}), changed_files=1)
+            if path == f'pulls/{NUMBER}/files?per_page=100':
+                return [{'filename': 'tools/llmtool/tests/test_changed.py',
+                         'status': 'modified'}]
             raise AssertionError(path)
 
         modules, code = task_advance._pr_changed_test_modules(NUMBER, HEAD, get)

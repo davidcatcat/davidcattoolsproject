@@ -327,8 +327,11 @@ def _task_path_modules(task):
 def _pr_changed_test_modules(files):
     """#2491: test module stems a PR adds or changes in a complete file list.
 
-    A removed test module is not runnable. A malformed entry returns None, so
-    the caller treats the file data as unreadable instead of under-requiring.
+    A removed test module is not runnable. A non-dict entry or a non-string
+    path returns None, so the caller treats the file data as unreadable. A
+    test path whose status is absent is still required, because its absence
+    cannot prove the module unchanged; any other path without a status is not
+    a test module either way.
     """
     if type(files) is not list:
         return None
@@ -337,11 +340,18 @@ def _pr_changed_test_modules(files):
         if type(item) is not dict:
             return None
         path, status = item.get('filename'), item.get('status')
-        if type(path) is not str or type(status) is not str:
+        if type(path) is not str:
             return None
+        match = _PR_TEST_MODULE_PATH.fullmatch(path)
+        if type(status) is not str:
+            # A legacy or partial entry without a status cannot prove the
+            # module unchanged, so a listed test path is still required. Any
+            # other path is not a test module either way.
+            if match is not None:
+                modules.add(match.group(1))
+            continue
         if status not in _PR_CHANGED_TEST_STATUSES:
             continue
-        match = _PR_TEST_MODULE_PATH.fullmatch(path)
         if match is not None:
             modules.add(match.group(1))
     return frozenset(modules)
@@ -376,6 +386,15 @@ def _pr_test_modules(number, head, github_get):
             type(count) is not int or isinstance(count, bool) or
             count != len(files)):
         return frozenset(), _PR_TEST_FILES_INCOMPLETE
+    # The exact-head recheck after the file read, as _pr_docs_only does: a
+    # head that moved while the files were read is not this exact head.
+    try:
+        after = github_get(f'pulls/{number}')
+    except Exception:
+        return frozenset(), _PR_TEST_FILES_UNAVAILABLE
+    after_head = after.get('head') if type(after) is dict else None
+    if type(after_head) is not dict or after_head.get('sha') != head:
+        return frozenset(), _PR_TEST_FILES_HEAD_MISMATCH
     modules = _pr_changed_test_modules(files)
     if modules is None:
         return frozenset(), _PR_TEST_FILES_UNAVAILABLE
@@ -476,7 +495,8 @@ def _admitted_modules(task, *, changed_modules=()):
         return tuple(sorted(set(declared) | changed))
     completion = task.get('completion')
     evidence = completion.get('evidence') if type(completion) is dict else None
-    callback = task.get('developer', {}).get('direct_result_callback') if type(task.get('developer')) is dict else None
+    developer = task.get('developer')
+    callback = developer.get('direct_result_callback') if type(developer) is dict else None
     callback_evidence = callback.get('evidence') if type(callback) is dict else None
     if (type(callback) is dict and type(callback_evidence) is dict and
             (callback.get('state') == 'PM_EVIDENCE_READY' or
@@ -494,3 +514,16 @@ def _admitted_modules(task, *, changed_modules=()):
         if match:
             names.add(match.group(1))
     return tuple(sorted(names))
+
+
+def _admitted_remote_modules(task, *, changed_modules=()):
+    """#2491: the module set remote-test admission accepts.
+
+    Declared modules, or the completion-evidence tests this path admitted when
+    none are declared, plus the readable exact-head PR changed test modules.
+    Darwin-only modules are left to Mac CI exactly as remote_required_modules
+    leaves them (#2573).
+    """
+    admitted = _admitted_modules(task, changed_modules=changed_modules)
+    darwin = _darwin_only_modules(admitted)
+    return tuple(module for module in admitted if module not in darwin)

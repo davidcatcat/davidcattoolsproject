@@ -3905,7 +3905,6 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                     'pr': number, 'head': d6['result_head']}
     result, codes, refusal_dict = None, [], None
     redispatch_reason = None
-    ci_routed = False
     rerun_version = None
     rerun_claim = None
     rerun_contract = None
@@ -3942,27 +3941,56 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         if blocked_reviewer is not None:
             step = 'DISPATCH_REVIEW'
             codes.extend(('REVIEW_BLOCKED', 'REVIEWER_FALLBACK'))
+    changed_modules = frozenset()
+    changed_gate = False
     if step == 'DISPATCH_REVIEW' and not docs_only and type(number) is int:
         # #2491: the pre-review EC2 gate covers the Task's declared test
         # modules plus every runnable test module the PR adds or changes at its
         # exact head. A PR whose changed-file data is missing, unreadable,
         # incomplete or not for the exact head is not satisfied: no review is
         # dispatched and the explicit reader code is reported. Readable data
-        # that adds a module simply sends the step back to the EC2 run.
+        # that adds a module is decided after the CI gate, so a CI failure
+        # keeps its existing repair or stop path.
         changed_modules, files_code = _pr_changed_test_modules(
             number, d6['result_head'], get)
         if files_code is not None:
             step = 'EC2_GATE_UNSATISFIED'
             codes.append(files_code)
         elif changed_modules:
-            declared = remote_test.remote_required_modules(record)
-            required = remote_test.remote_required_modules(
-                record, changed_modules=changed_modules)
-            if set(required) - set(declared):
-                remote_status, _, _ = _remote_test_status(
-                    record, d6, required_modules=required)
-                if remote_status != 'PASS':
-                    step = 'RUN_REMOTE_TEST'
+            changed_gate = True
+    if step == 'DISPATCH_REVIEW' and type(number) is int:
+        gate_latest = {}
+        gate_step, ci_code = _review_ci_gate(number, d6['result_head'], get,
+                                             latest_out=gate_latest)
+        if gate_step is not None:
+            step = gate_step
+            if ci_code is not None:
+                codes.append(ci_code)
+        failed_name = gate_latest.get('name')
+        if (step == 'CI_FAILED' and failed_name in _LINUX_FLAG_CHECKS and
+                gate_latest.get('conclusion') in ('failure', 'timed_out', *_CI_ENV_CONCLUSIONS)):
+            # #1502 WP-D D11, #2337: route the newest exact-head required check run before review.
+            check_run = _read_check_run(d6['result_head'], failed_name,
+                                        gate_latest.get('id'), get)
+            if check_run is None:
+                codes.append('CI_CHECK_RUN_UNAVAILABLE')
+            else:
+                routed = _route_ci_failure(
+                    store=store, record=record, task_id=task_id,
+                    executor_task=executor_task, number=number, d6=d6, related=related,
+                    run=check_run, fail_code='LINUX_CI_FAILED', github_get=get,
+                    repair_review_call=repair_review_call)
+                if routed is not None:
+                    step, codes, result = routed[0], list(routed[1]), routed[2]
+    if changed_gate and step == 'DISPATCH_REVIEW':
+        declared = remote_test.remote_required_modules(record)
+        required = remote_test.remote_required_modules(
+            record, changed_modules=changed_modules)
+        if set(required) - set(declared):
+            remote_status, _, _ = _remote_test_status(
+                record, d6, required_modules=required)
+            if remote_status != 'PASS':
+                step = 'RUN_REMOTE_TEST'
     if step == 'RUN_REMOTE_TEST':
         guard()  # #1781: an EC2 run is an external action
         try:
@@ -3990,33 +4018,6 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                         codes.append('REMOTE_TEST_COMMENT_FAILED')
         except Exception as exc:
             codes.append(_refusal(exc, 'remote_test_code'))
-    elif step == 'DISPATCH_REVIEW':
-        gate_latest = {}
-        gate_step, ci_code = _review_ci_gate(number, d6['result_head'], get,
-                                             latest_out=gate_latest)
-        if gate_step is not None:
-            step = gate_step
-            if ci_code is not None:
-                codes.append(ci_code)
-        failed_name = gate_latest.get('name')
-        if (step == 'CI_FAILED' and failed_name in _LINUX_FLAG_CHECKS and
-                gate_latest.get('conclusion') in ('failure', 'timed_out', *_CI_ENV_CONCLUSIONS)):
-            # #1502 WP-D D11, #2337: route the newest exact-head required check run before review.
-            check_run = _read_check_run(d6['result_head'], failed_name,
-                                        gate_latest.get('id'), get)
-            if check_run is None:
-                codes.append('CI_CHECK_RUN_UNAVAILABLE')
-            else:
-                routed = _route_ci_failure(
-                    store=store, record=record, task_id=task_id,
-                    executor_task=executor_task, number=number, d6=d6, related=related,
-                    run=check_run, fail_code='LINUX_CI_FAILED', github_get=get,
-                    repair_review_call=repair_review_call)
-                if routed is not None:
-                    step, codes, result = routed[0], list(routed[1]), routed[2]
-                    ci_routed = True
-    if ci_routed:
-        pass   # _route_ci_failure already set the step, codes and result.
     elif step == 'DISPATCH_REVIEW':
         rerun_recorded = True
         if rerun_version is not None:
