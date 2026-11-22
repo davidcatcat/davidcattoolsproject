@@ -963,15 +963,32 @@ def authorize_task_store_change(current, changes, expected=None, d6_unchanged=No
                 decision = PolicyDecision(worker_key, False, 'WORKER_START_RETRY_LIMIT',
                                           decision.policy_sha256)
         if action == 'COMMITTED_RESULT_CARRY':
-            prior = sum(1 for item in audit if type(item) is dict and
-                        item.get('action') == action and
-                        item.get('assignment_id') in (None, old_developer.get('assignment_id')))
-            reason = ('WORKER_COMMITTED_CARRY_LIMIT' if prior >= MAX_COMMITTED_CARRIES else
-                      None if _committed_carry_valid(current, changes, expected, old_developer,
-                                                     new_developer)
-                      else 'WORKER_COMMITTED_CARRY_PRECONDITION')
-            if reason is not None:
-                decision = PolicyDecision(worker_key, False, reason, decision.policy_sha256)
+            # #2281 row 14 (basis #1148): the carry limit comes from the
+            # committed_result_carries_max policy key (repair_policy); a policy
+            # without the key keeps the hard-coded MAX_COMMITTED_CARRIES. An
+            # unreadable or invalid policy refuses under its own code and is
+            # never silently replaced by the old hard-coded value.
+            from . import repair_policy
+            try:
+                limit = repair_policy.committed_result_carries_max()
+            except LLMToolError:
+                limit = None
+            if type(limit) is not int or limit < 0:
+                decision = PolicyDecision(worker_key, False,
+                                          'WORKER_COMMITTED_CARRY_POLICY_INVALID',
+                                          decision.policy_sha256)
+            else:
+                prior = sum(1 for item in audit if type(item) is dict and
+                            item.get('action') == action and
+                            item.get('assignment_id') in (None,
+                                                          old_developer.get('assignment_id')))
+                reason = ('WORKER_COMMITTED_CARRY_LIMIT' if prior >= limit else
+                          None if _committed_carry_valid(current, changes, expected,
+                                                         old_developer, new_developer)
+                          else 'WORKER_COMMITTED_CARRY_PRECONDITION')
+                if reason is not None:
+                    decision = PolicyDecision(worker_key, False, reason,
+                                              decision.policy_sha256)
         if action in ('RETRY', 'RECOVERY', 'REPAIR') and type(old_developer) is dict:
             expected_old_state = {
                 'RETRY': (),
