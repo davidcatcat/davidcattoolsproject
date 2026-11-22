@@ -64,6 +64,20 @@ FORMAL SECURITY/FUNCTIONAL/QA ACCEPT
   and `review_result.record_review_result` accept only `kind='formal'` and refuse others
   with `REVIEW_KIND_UNSUPPORTED`.
 
+## Late security verdicts and split children (#2542)
+
+Per the ruling at [#2542](https://github.com/davidcatcat/davidcattoolsproject/issues/2542#issuecomment-7078378897):
+
+- Security re-review after a bound general PASS: the security verdict is posted on the PR
+  before the general verdict the gate reads; when it arrives late (after the general PASS
+  is bound), the PM dispatches a new general formal version after it, so the newest
+  general verdict is again the bound one.
+- Split child and ROOT security FAILs: a formal or security verdict binds one PR and one
+  exact HEAD, so ROOT FAILs do not bind a split child mechanically. The PM copies each
+  open ROOT security finding that falls in the child's scope into the child's acceptance,
+  and the child's own security review checks them; a ROOT finding outside every child's
+  scope stays recorded on the ROOT and is not silently dropped.
+
 ## Codex reply shape
 
 `review_dispatch._parse_codex_review_inner` reads the Codex CLI JSONL stream (the CLI writes

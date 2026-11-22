@@ -66,6 +66,7 @@ MAX_ARTIFACT_BYTES = 5 * 1024 * 1024
 # read path) has the same bound. Same value as
 # task_submission_cli.DEVELOPER_TASK_MAX_PATHS.
 DEVELOPER_TASK_MAX_PATHS = 1024
+MAX_TASK_ISSUE = 2 ** 31 - 1
 TASK_ID =re.compile(r'[0-9a-f]{32}')
 D6_TASK_ID = re.compile(r'[a-z0-9][a-z0-9-]{0,95}')
 SESSION_ID = re.compile(r'pm-[a-z0-9-]{1,60}')
@@ -117,7 +118,7 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'published_pr', 'repair_cap_override', 'publish_operations',
     'review_exception', 'lineage', 'review_disputes', 'waiting', 'continues',
     'file_ops', 'file_ops_evidence', 'file_ops_reservation',
-    'start_failures', 'repair_packet', 'read_scope_advice'))
+    'start_failures', 'repair_packet', 'read_scope_advice', 'issue'))
 # #2188 design section 3: the append-only archive of failed Claude starts.
 MAX_START_FAILURES = 2
 _START_FAILURE_ENTRY_FIELDS = frozenset((
@@ -2307,6 +2308,11 @@ def _validate(record, *, strict=True):
         keys.discard('continues')
         if not _hex32(record['continues']) or record['continues'] == record.get('task_id'):
             _fail('TASK_CONTINUES_INVALID')
+    if 'issue' in keys:
+        # #1817 W2a F1: optional host-recorded GitHub Issue number; records without it stay valid.
+        keys.discard('issue')
+        if type(record['issue']) is not int or not 1 <= record['issue'] <= MAX_TASK_ISSUE:
+            _fail('TASK_ISSUE_INVALID')
     if 'file_ops' in keys:
         keys.discard('file_ops')
         _validate_file_ops(record)
@@ -5998,6 +6004,9 @@ class TaskStore:
         if 'continues' in changes:
             # #1502 WP-D L1: continues is written once, when record-pm creates the Task.
             _fail('TASK_CONTINUES_IMMUTABLE')
+        if 'issue' in changes:
+            # #1817 W2a F1: issue is written once, when submit/record-pm creates the Task.
+            _fail('TASK_ISSUE_IMMUTABLE')
         if 'file_ops' in changes:
             _fail('TASK_FILE_OPS_IMMUTABLE')
         if 'file_ops_evidence' in changes and (
@@ -6493,7 +6502,7 @@ class TaskStore:
             _check_start_failures_write(current, changes)
             immutable = {'schema_version', 'task_id', 'run_id', 'pm_session_id',
                          'created_at', 'task_contract', 'task_binding', 'record_sha256',
-                         'continues', 'file_ops'}
+                         'continues', 'file_ops', 'issue'}
             writable = FIELDS - immutable
             if trusted_pm_session_adoption:
                 writable = writable | {'pm_session_id'}
