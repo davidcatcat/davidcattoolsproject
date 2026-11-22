@@ -268,7 +268,13 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         return denied('RECEIPT_HEAD_MISMATCH')
     if pr is not None:
         store.record_published_pr(task_id, pr, recorded_head)
-    admitted = remote_required_modules(task)
+    # #2491: a readable exact-head PR file list adds its changed test modules
+    # to admission. With no PR, an unreadable list, or an exact-head doubt,
+    # admission stays on the declared modules and never refuses for that.
+    changed_modules = frozenset()
+    if pr is not None and (get is not None or not review_bound):
+        changed_modules = _pr_changed_modules_for_admission(pr, recorded_head, get)
+    admitted = remote_required_modules(task, changed_modules=changed_modules)
     if (type(modules) not in (tuple, list, set, frozenset) or
             any(type(module) is not str for module in modules)):
         return denied('MODULE_NOT_ADMITTED')

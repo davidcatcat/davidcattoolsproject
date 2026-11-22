@@ -503,6 +503,17 @@ def _pr_files(number, github_get):
     return None, PR_FILES_TOO_MANY
 
 
+def _pr_changed_test_modules(number, head, github_get):
+    """#2491: the test modules the PR adds or changes at exactly head.
+
+    Return (modules, None) only when the PR is at head and its complete file
+    list is readable; otherwise (frozenset(), explicit_code). It is the same
+    fail-closed file reader _pr_docs_only uses (#2473); this is the one copy of
+    the exact-head decision, owned by remote_test.
+    """
+    return remote_test._pr_test_modules(number, head, github_get)
+
+
 # #1502 WP-G gate 2 (sec v93): llmtool-linux-ci.yml's 'changes' job sets four
 # independent flags (code, docs, gateway, ai_loop) with linux_flags() from
 # tools/llmtool/scripts/ci_path_classes.py, and each enabled flag runs its own
@@ -2529,13 +2540,15 @@ def _review_verdict_absent(claim, github_get):
     return True
 
 
-def _remote_test_status(record, d6):
+def _remote_test_status(record, d6, required_modules=None):
     """Return exact-head remote-test state, bounded excerpt, and validated receipt."""
     head = d6.get('result_head') if type(d6) is dict else None
     completion = record.get('completion') if type(record) is dict else None
     executor_task = completion.get('executor_task_id') if type(completion) is dict else None
     if type(head) is not str or type(executor_task) is not str:
         return None, None, None
+    required = (remote_test.remote_required_modules(record)
+                if required_modules is None else tuple(required_modules))
     receipts = record.get('remote_test_receipts', [])
     if type(receipts) is not list:
         receipts = []
@@ -2554,8 +2567,7 @@ def _remote_test_status(record, d6):
         if type(claimed) is not str or claimed != digest:
             continue
         if receipt['result'] == 'PASS':
-            if remote_test.pass_receipt_covers(
-                    receipt, remote_test.remote_required_modules(record)):
+            if remote_test.pass_receipt_covers(receipt, required):
                 return 'PASS', None, receipt
             break
         if receipt['result'] in ('TIMEOUT', 'SHA_MISMATCH'):
@@ -2587,7 +2599,7 @@ def _remote_test_status(record, d6):
             return 'UNREACHABLE', None, None
         if (outcome.get('result') == 'ADMISSION_DENIED' and
                 outcome.get('code') == 'MODULE_NOT_ADMITTED' and
-                outcome.get('modules') == [] and not remote_test.remote_required_modules(record)):
+                outcome.get('modules') == [] and not required):
             return 'ADMISSION_DENIED', None, None
     return None, None, None
 
@@ -3874,12 +3886,14 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             {'task_id': task_id, 'step': 'D6_BINDING_UNAVAILABLE', 'result': None,
              'next': 'D6_BINDING_UNAVAILABLE', 'codes': [code]}, record, store, None)
     step = decide(record, d6, pr, related)
+    docs_only = False
     if step in _EC2_DERIVED_STEPS and _pr_docs_only(number, d6['result_head'], get):
         # #2473: a docs-only PR needs no EC2 result, whatever the EC2 record
         # says (none, FAIL, TIMEOUT, SHA_MISMATCH). The check (docs) gate below
         # still runs before any Reviewer is dispatched. A head with a Reviewer
         # claim decides identically with docs_only, so those steps are unchanged.
         step = decide(record, d6, pr, related, docs_only=True)
+        docs_only = True
     # A crash after GitHub creates the PR can leave the Task without its binding.
     # Only an exact-head open PR recovered from this D6 branch may fill it.
     if (recovered_pr and step not in ('PUBLISH', 'DEVELOPER_ATTENTION') and
@@ -3928,6 +3942,27 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         if blocked_reviewer is not None:
             step = 'DISPATCH_REVIEW'
             codes.extend(('REVIEW_BLOCKED', 'REVIEWER_FALLBACK'))
+    if step == 'DISPATCH_REVIEW' and not docs_only and type(number) is int:
+        # #2491: the pre-review EC2 gate covers the Task's declared test
+        # modules plus every runnable test module the PR adds or changes at its
+        # exact head. A PR whose changed-file data is missing, unreadable,
+        # incomplete or not for the exact head is not satisfied: no review is
+        # dispatched and the explicit reader code is reported. Readable data
+        # that adds a module simply sends the step back to the EC2 run.
+        changed_modules, files_code = _pr_changed_test_modules(
+            number, d6['result_head'], get)
+        if files_code is not None:
+            step = 'EC2_GATE_UNSATISFIED'
+            codes.append(files_code)
+        elif changed_modules:
+            declared = remote_test.remote_required_modules(record)
+            required = remote_test.remote_required_modules(
+                record, changed_modules=changed_modules)
+            if set(required) - set(declared):
+                remote_status, _, _ = _remote_test_status(
+                    record, d6, required_modules=required)
+                if remote_status != 'PASS':
+                    step = 'RUN_REMOTE_TEST'
     if step == 'RUN_REMOTE_TEST':
         guard()  # #1781: an EC2 run is an external action
         try:

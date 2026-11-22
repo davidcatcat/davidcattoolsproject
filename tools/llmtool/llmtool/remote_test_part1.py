@@ -24,6 +24,16 @@ _SHA = re.compile(r'[0-9a-f]{40}\Z')
 _REF = re.compile(r'(?:refs/pull/[0-9]+/head|[A-Za-z0-9][A-Za-z0-9._/-]{0,99})\Z')
 _MODULE = re.compile(r'test_[a-z0-9_]{1,80}\Z')
 _TASK = re.compile(r'[a-z0-9][a-z0-9-]{0,95}\Z')
+# #2491: PR changed test modules are read with the existing fail-closed file
+# reader in task_advance (_pr_files); these are the codes its doubt produces.
+_PR_TEST_FILES_UNAVAILABLE = 'PR_FILES_UNAVAILABLE'
+_PR_TEST_FILES_TOO_MANY = 'PR_FILES_TOO_MANY'
+_PR_TEST_FILES_INCOMPLETE = 'PR_FILES_INCOMPLETE'
+_PR_TEST_FILES_HEAD_MISMATCH = 'PR_FILES_HEAD_MISMATCH'
+_PR_TEST_MODULE_PATH = re.compile(
+    r'tools/llmtool/tests/(test_[a-z0-9_]{1,80})\.py\Z')
+_PR_CHANGED_TEST_STATUSES = frozenset(
+    ('added', 'modified', 'renamed', 'copied', 'changed'))
 _NONCE = re.compile(r'[0-9a-f]{32}\Z')
 _HOSTED_WORKFLOW_PATH = '.github/workflows/llmtool-remote-test.yml'
 _HOSTED_JOB_NAME = 'remote-test'
@@ -314,6 +324,76 @@ def _task_path_modules(task):
     return tuple(sorted(Path(path).stem for path in declared_paths))
 
 
+def _pr_changed_test_modules(files):
+    """#2491: test module stems a PR adds or changes in a complete file list.
+
+    A removed test module is not runnable. A malformed entry returns None, so
+    the caller treats the file data as unreadable instead of under-requiring.
+    """
+    if type(files) is not list:
+        return None
+    modules = set()
+    for item in files:
+        if type(item) is not dict:
+            return None
+        path, status = item.get('filename'), item.get('status')
+        if type(path) is not str or type(status) is not str:
+            return None
+        if status not in _PR_CHANGED_TEST_STATUSES:
+            continue
+        match = _PR_TEST_MODULE_PATH.fullmatch(path)
+        if match is not None:
+            modules.add(match.group(1))
+    return frozenset(modules)
+
+
+def _pr_test_modules(number, head, github_get):
+    """#2491: the test modules a PR adds or changes at exactly head.
+
+    Return (modules, None) only when the PR is at head and its complete file
+    list is readable with the same fail-closed reader task advance uses for
+    docs-only PRs (#2473). Any doubt returns (frozenset(), code).
+    """
+    if type(number) is not int or not 1 <= number <= 9999999:
+        return frozenset(), _PR_TEST_FILES_UNAVAILABLE
+    try:
+        pr = github_get(f'pulls/{number}')
+    except Exception:
+        return frozenset(), _PR_TEST_FILES_UNAVAILABLE
+    pr_head = pr.get('head') if type(pr) is dict else None
+    if type(pr_head) is not dict or pr_head.get('sha') != head:
+        return frozenset(), _PR_TEST_FILES_HEAD_MISMATCH
+    from . import task_advance
+    files, code = task_advance._pr_files(number, github_get)
+    if code == task_advance.PR_FILES_TOO_MANY:
+        return frozenset(), _PR_TEST_FILES_TOO_MANY
+    if code is not None:
+        return frozenset(), _PR_TEST_FILES_UNAVAILABLE
+    if type(files) is not list:
+        return frozenset(), _PR_TEST_FILES_UNAVAILABLE
+    count = pr.get('changed_files')
+    if 'changed_files' in pr and (
+            type(count) is not int or isinstance(count, bool) or
+            count != len(files)):
+        return frozenset(), _PR_TEST_FILES_INCOMPLETE
+    modules = _pr_changed_test_modules(files)
+    if modules is None:
+        return frozenset(), _PR_TEST_FILES_UNAVAILABLE
+    return modules, None
+
+
+def _pr_changed_modules_for_admission(pr, head, get=None):
+    """#2491: readable exact-head PR changed test modules, else declared only."""
+    if type(pr) is not int or not 1 <= pr <= 9999999:
+        return frozenset()
+    get = _github_get if get is None else get
+    try:
+        modules, code = _pr_test_modules(pr, head, get)
+    except Exception:
+        return frozenset()
+    return modules if code is None else frozenset()
+
+
 _MAC_MANIFEST = Path(__file__).resolve().parents[1] / 'ci' / 'mac-modules.txt'
 _TESTS_DIR = Path(__file__).resolve().parents[1] / 'tests'
 
@@ -373,20 +453,27 @@ def _darwin_only_modules(stems, *, manifest=None, tests_dir=None):
     return frozenset(found)
 
 
-def remote_required_modules(task):
-    """Task test modules a Linux remote receipt must cover (#2573).
+def remote_required_modules(task, *, changed_modules=()):
+    """Task test modules a Linux remote receipt must cover (#2573, #2491).
 
-    Darwin-only modules are left to the exact-head Mac CI merge gate.
+    The set is the Task's declared test modules plus every runnable test
+    module the PR adds or changes at its exact head. Darwin-only modules are
+    left to the exact-head Mac CI merge gate.
     """
     declared = _task_path_modules(task)
-    darwin = _darwin_only_modules(declared)
-    return tuple(module for module in declared if module not in darwin)
+    changed = {module for module in changed_modules
+               if type(module) is str and _MODULE.fullmatch(module)}
+    stems = set(declared) | changed
+    darwin = _darwin_only_modules(stems)
+    return tuple(module for module in sorted(stems) if module not in darwin)
 
 
-def _admitted_modules(task):
+def _admitted_modules(task, *, changed_modules=()):
+    changed = {module for module in changed_modules
+               if type(module) is str and _MODULE.fullmatch(module)}
     declared = _task_path_modules(task)
     if declared:
-        return declared
+        return tuple(sorted(set(declared) | changed))
     completion = task.get('completion')
     evidence = completion.get('evidence') if type(completion) is dict else None
     callback = task.get('developer', {}).get('direct_result_callback') if type(task.get('developer')) is dict else None
@@ -399,8 +486,8 @@ def _admitted_modules(task):
         evidence = callback_evidence
     tests = evidence.get('tests') if type(evidence) is dict else None
     if type(tests) is not list:
-        return ()
-    names = set()
+        return tuple(sorted(changed))
+    names = set(changed)
     for test in tests:
         path = test.get('path') if type(test) is dict else None
         match = re.fullmatch(r'tools/llmtool/tests/(test_[a-z0-9_]{1,80})\.py', path or '')

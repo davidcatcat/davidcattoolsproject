@@ -625,7 +625,10 @@ class RemoteTestTests(unittest.TestCase):
             result = self.run_it(pr=425)
 
         self.assertEqual(result['result'], 'PASS')
-        github_get.assert_called_once_with('pulls/425')
+        github_get.assert_any_call('pulls/425')
+        # #2491: admission also asks for the PR file list; the same fake answer
+        # is not a list, so admission stays on the declared modules.
+        github_get.assert_any_call('pulls/425/files?per_page=100')
         self.assertEqual(len(self.calls), 1)
 
     def test_pr_without_completion_review_denies_mismatch_or_read_failure_before_ssh(self):
@@ -679,7 +682,10 @@ class RemoteTestTests(unittest.TestCase):
 
         self.assertEqual(result['result'], 'PASS')
         self.assertEqual(len(self.calls), 1)
-        github.assert_called_once_with('pulls/425')
+        github.assert_any_call('pulls/425')
+        # #2491: admission also reads the exact-head PR file list; this fake
+        # answer is not a list, so admission falls back to the declared modules.
+        github.assert_any_call('pulls/425/files?per_page=100')
         check.assert_called_once()
         self.assertEqual(check.call_args.kwargs['recorded_head'], OTHER)
         self.assertEqual(check.call_args.kwargs['head'], SHA)
