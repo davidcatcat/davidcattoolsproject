@@ -6133,10 +6133,10 @@ class TaskStore:
                     dict(item, state='DISPATCHED') if item.get('repair_task_id') == repair_id
                     else item for item in current['review_repair_claims']]}
             if ec2_claim_recovery is not None:
-                # #2475: E1-EC2 + no-launch evidence on the record read under this lock.
+                # #2475/#2492: no-launch evidence on the record read under this lock.
                 from . import review_repair_recovery
                 repair_id, executor, pr_number, registered_d6, process_status = ec2_claim_recovery
-                review_repair_recovery.verify_ec2_recovery(
+                review_repair_recovery.verify_no_launch_recovery(
                     self, current, repair_id, executor_task=executor, pr_number=pr_number,
                     registered_d6=registered_d6, process_status=process_status)
                 changes = {'review_repair_claims': [

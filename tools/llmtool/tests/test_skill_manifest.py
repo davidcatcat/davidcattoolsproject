@@ -163,13 +163,13 @@ class SkillManifestTests(unittest.TestCase):
         self.assertIn('AGENTS.md', default_paths)
         self.assertNotIn('CLAUDE.md', default_paths)
         self.assertIn('CLAUDE.md', claude_paths)
-        self.assertNotIn('AGENTS.md', claude_paths)
+        self.assertIn('AGENTS.md', claude_paths)  # #1502 E6 import
         self.assertIn('.claude/skills/ai-team-delivery/pm-continuation.md', claude_pm_paths)
         self.assertIn('.claude/skills/ai-team-delivery/pm-continuation-reference.md', claude_pm_paths)
         self.assertIn('AGENTS.md', default_pm_paths)
         self.assertNotIn('CLAUDE.md', default_pm_paths)
         self.assertIn('CLAUDE.md', claude_pm_paths)
-        self.assertNotIn('AGENTS.md', claude_pm_paths)
+        self.assertIn('AGENTS.md', claude_pm_paths)  # #1502 E6 import
         self.assertIn('.claude/skills/ai-team-delivery/pm-continuation.md', claude_pm_paths)
         self.assertIn('.claude/skills/ai-team-delivery/pm-continuation-reference.md', claude_pm_paths)
         self.assertNotEqual(default['manifest_sha256'], claude['manifest_sha256'])
