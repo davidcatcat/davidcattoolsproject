@@ -1415,13 +1415,41 @@ def _lineage_end_locked(store, task_id, state, *, pm_session, reason, final=Fals
             'owner_notice': lineage_owner_notice(task_id, state, reason)}
 
 
-def _lineage_close_due(record):
-    """The lineage of a merged OPEN or CLOSED lineage Task; None when nothing is due."""
-    line, attempt = record.get('lineage'), record.get('merge_attempt')
-    if (type(line) is not dict or line.get('state') not in ('OPEN', 'CLOSED') or
-            type(attempt) is not dict or attempt.get('state') != 'MERGED'):
+def recorded_github_merge(record):
+    """The (pr, merge_sha) of a merge llmtool recorded for the Task's published PR, else None.
+
+    task advance records an ACKED GITHUB 'merge' event only after it verified
+    the PR merged at the reviewed PASS head (_merged_review_target). A PR merged
+    outside `advance --merge` has that event but no merge_attempt.
+    """
+    published = record.get('published_pr') if type(record) is dict else None
+    events = record.get('completion_events') if type(record) is dict else None
+    if type(published) is not dict or type(published.get('pr')) is not int or type(events) is not list:
         return None
-    return line
+    for event in reversed(events):
+        if (type(event) is dict and event.get('source') == 'GITHUB' and
+                event.get('marker_type') == 'merge' and event.get('marker_status') == 'MERGED' and
+                event.get('issue_number') == published['pr'] and
+                type(event.get('merge_sha')) is str and
+                re.fullmatch(r'[0-9a-f]{40}', event['merge_sha']) is not None):
+            return published['pr'], event['merge_sha']
+    return None
+
+
+def _lineage_close_due(record):
+    """The lineage of a merged OPEN or CLOSED lineage Task; None when nothing is due.
+
+    Merged means a MERGED merge_attempt, or (#2491) a merge task advance
+    verified and recorded for the Task's published PR (recorded_github_merge).
+    """
+    line, attempt = record.get('lineage'), record.get('merge_attempt')
+    if type(line) is not dict or line.get('state') not in ('OPEN', 'CLOSED'):
+        return None
+    if type(attempt) is dict and attempt.get('state') == 'MERGED':
+        return line
+    if recorded_github_merge(record) is not None:
+        return line
+    return None
 
 
 def lineage_close_merged(store, task_id):
