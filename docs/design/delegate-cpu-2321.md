@@ -21,36 +21,39 @@ The execution flow for direct Developer dispatch originates in `tools/llmtool/ll
 The routes `agy`, `claude`, and `gw-agent` share the unified execution contract implemented in `tools/llmtool/llmtool/developer_routes/base.py`.
 
 1. **Dispatch Call Sites in `tools/llmtool/llmtool/task_submission_cli.py`**:
-   - **`agy`**: `run_task_agy_delegate` (lines 5359–5621) invokes `execute(route, ...)` at line 5525.
-   - **`claude`**: `run_task_claude_delegate` (lines 5870–6220) invokes `execute(route, ...)` at line 6202.
-   - **`gw-agent`**: `run_task_gw_agent_delegate` (lines 6218–6670) invokes `execute(route, ...)` at line 6649.
+   - **`agy`**: `run_task_agy_delegate` (lines 5497–5814) invokes `execute(route, ...)` at line 5706.
+   - **`claude`**: `run_task_claude_delegate` (lines 6207–6564) invokes `execute(route, ...)` at line 6431.
+   - **`gw-agent`**: `run_task_gw_agent_delegate` (lines 6575–6994) invokes `execute(route, ...)` at line 6900.
 
 2. **Route Runner Orchestration in `tools/llmtool/llmtool/developer_routes/base.py`**:
-   - `run_route(...)` (lines 961–1256) prepares private temporary environments, verifies write boundaries, and invokes the runner at line 1115:
+   - `run_route(...)` (lines 965–1269) prepares private temporary environments, verifies write boundaries, and invokes the runner at lines 1122–1128:
      ```python
      execute = runner or _default_runner
-     code, stdout, stderr = execute(argv, value['root'], env, value['timeout'])
+     runner_args = (argv, value['root'], env, value['timeout'])
+     if on_child is None:
+         code, stdout, stderr = execute(*runner_args)
+     else:
+         code, stdout, stderr = execute(*runner_args, on_child=on_child)
      ```
-   - When no custom runner is injected, execution uses `_default_runner` (lines 574–620).
+   - When no custom runner is injected, execution uses `_default_runner` (lines 576–621).
 
-3. **Wait Loop in `_default_runner` (`tools/llmtool/llmtool/developer_routes/base.py` lines 582–610)**:
-   - Spawns the CLI child process with `stdin=subprocess.DEVNULL`:
+3. **Wait Loop in `_default_runner` (`tools/llmtool/llmtool/developer_routes/base.py` lines 584–613)**:
+   - Spawns the CLI child process with `stdin=subprocess.DEVNULL` (lines 584–587):
      ```python
-     process = subprocess.Popen(
-         argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-         shell=False, close_fds=True, start_new_session=True
-     )
+     process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                shell=False, close_fds=True, start_new_session=True)
      lifecycle.own(process)
      ```
-   - Sets `stdout` and `stderr` to non-blocking mode and registers both with `selectors.DefaultSelector()` (lines 588–590):
+   - Sets `stdout` and `stderr` to non-blocking mode and registers both with `selectors.DefaultSelector()` (lines 588, 592–594):
      ```python
      selector = selectors.DefaultSelector()
+     ...
      for stream, name in ((process.stdout, 'stdout'), (process.stderr, 'stderr')):
          os.set_blocking(stream.fileno(), False)
          selector.register(stream, selectors.EVENT_READ, name)
      ```
-   - **The Wait Loop (lines 591–605)**:
+   - **The Wait Loop (lines 595–609)**:
      ```python
      while selector.get_map():
          lifecycle.check()
@@ -68,7 +71,7 @@ The routes `agy`, `claude`, and `gw-agent` share the unified execution contract 
                      raise RouteError('ROUTE_OUTPUT_TOO_LARGE')
                  target.extend(chunk)
      ```
-   - **Process Exit Reap (lines 606–609)**:
+   - **Process Exit Reap (lines 610–613)**:
      After all registered streams reach EOF and are unregistered from the selector, `_default_runner` reaps the child leader process directly via:
      ```python
      remaining = deadline - time.monotonic()
@@ -84,40 +87,40 @@ The routes `agy`, `claude`, and `gw-agent` share the unified execution contract 
 The `opencode` route implements a dedicated direct CLI adapter in `tools/llmtool/llmtool/opencode_direct_developer.py` rather than using `_default_runner`.
 
 1. **Dispatch Call Site in `tools/llmtool/llmtool/task_submission_cli.py`**:
-   - `run_task_opencode_delegate` (lines 4893–5201) delegates execution at line 5046:
+   - `run_task_opencode_delegate` (lines 4980–5339) delegates execution at lines 5175–5181:
      ```python
      result = opencode_direct_developer.run(
          root=registration.root, read_paths=read_paths,
          write_paths=write_paths, prompt=prompt,
          dispatch_store=store, dispatch_task_id=task['task_id'], steps=steps,
          prelaunch_validate=validate_prelaunch_d6_binding, model=model,
-         launch_callback=record_opencode_launch, timeout_seconds=timeout
-     )
+         launch_callback=record_opencode_launch,
+         spawn_authorization=authorize_opencode_spawn, timeout_seconds=timeout)
      ```
-   - In background execution mode (`--background`, lines 7951–8016), `_run_background_delegate` (lines 231–307) performs a double fork; the parent process waits synchronously via `_background_read(read_fd)` (line 291), while the detached child executes `run_task_opencode_delegate` and enters `opencode_direct_developer.run`.
+   - In background execution mode (`--background`, `run_task_delegate` lines 8623–8688), `_run_background_delegate` (lines 233–308) performs a double fork; the parent process waits synchronously via `_background_read(read_fd)` (line 293), while the detached child executes `run_task_opencode_delegate` (lines 272–274) and enters `opencode_direct_developer.run`.
 
-2. **Wait Loop in `opencode_direct_developer.py` (lines 850–1050)**:
-   - Spawns the CLI child process with `stdin=subprocess.PIPE` (lines 939–942):
+2. **Wait Loop in `opencode_direct_developer.py` (`run`, lines 979–1062)**:
+   - Spawns the CLI child process with `stdin=subprocess.PIPE` (lines 979–984):
      ```python
-     process = subprocess.Popen(
-         argv, cwd=str(root), env=env,
+     process = subprocess.Popen(argv, cwd=str(root), env=env,
          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
          stderr=subprocess.PIPE, bufsize=0, shell=False,
-         close_fds=True, start_new_session=True
-     )
+         close_fds=True, start_new_session=True)
+     started_at = _utc_now()
      lifecycle.own(process)
      ```
-   - **Stream Registration (lines 954–960)**:
+   - **Stream Registration (lines 994–1000)**:
      Unlike `_default_runner`, `opencode_direct_developer.py` registers `stdin` in addition to `stdout` and `stderr`:
      ```python
      selector = selectors.DefaultSelector()
-     for stream, name in ((process.stdout, 'stdout'), (process.stderr, 'stderr')):
+     for stream, name in ((process.stdout, 'stdout'),
+                          (process.stderr, 'stderr')):
          os.set_blocking(stream.fileno(), False)
          selector.register(stream, selectors.EVENT_READ, name)
      os.set_blocking(process.stdin.fileno(), False)
      selector.register(process.stdin, selectors.EVENT_WRITE, 'stdin')
      ```
-   - **The Wait Loop (lines 964–1020)**:
+   - **The Wait Loop (lines 1003–1059)**:
      ```python
      while selector.get_map():
          lifecycle.check()
@@ -127,7 +130,8 @@ The `opencode` route implements a dedicated direct CLI adapter in `tools/llmtool
          for key, _ in selector.select(min(remaining, 0.1)):
              if key.data == 'stdin':
                  try:
-                     written = os.write(key.fileobj.fileno(), payload[offset:offset + 8192])
+                     written = os.write(key.fileobj.fileno(),
+                                        payload[offset:offset + 8192])
                  except (BlockingIOError, InterruptedError):
                      continue
                  except OSError:
@@ -171,13 +175,13 @@ The `opencode` route implements a dedicated direct CLI adapter in `tools/llmtool
                      if _has_structured_tool_denial(complete):
                          _reject('TOOL_DENIED')
      ```
-   - **Post-Selector Exit Wait Without Reap (lines 1021–1023)**:
+   - **Post-Selector Exit Wait Without Reap (lines 1060–1062)**:
      ```python
      if not delivered:
          _reject('OPENCODE_PROMPT_DELIVERY_INCOMPLETE')
      _await_exit_without_reap(process, deadline=work_deadline)
      ```
-     where `_await_exit_without_reap` (lines 626–634) calls `_observe_exit_without_reap(process, remaining, deadline)`:
+     where `_await_exit_without_reap` (lines 660–667) calls `_observe_exit_without_reap(process, remaining, deadline)`:
      ```python
      def _await_exit_without_reap(process, *, deadline):
          remaining = max(0, deadline - time.monotonic())
@@ -199,7 +203,7 @@ The wait implementation in `opencode_direct_developer.py` differs from `_default
 | :--- | :--- | :--- |
 | **`stdin` Lifecycle & Registration** | `stdin=subprocess.DEVNULL`. Stdin is never registered in the selector; prompt is supplied via CLI arguments or files. | `stdin=subprocess.PIPE`. `stdin` is registered in `selector` with `EVENT_WRITE` until the prompt is fully written, then closed and unregistered. |
 | **In-Loop Stream Processing** | Raw chunk accumulation into bytearrays with cap enforcement (`MAX_STDOUT_BYTES` = 1MB, `MAX_STDERR_BYTES` = 64KB). | Raw chunk accumulation with higher caps (`MAX_OUTPUT_BYTES` = 16MB) **plus** incremental line-by-line scanning of `stdout` for `_has_structured_tool_denial` (`TOOL_DENIED`). |
-| **Post-Stream Exit Waiting** | Calls `process.wait(timeout=remaining)` (base.py line 609), directly reaping the child process leader. | Calls `_await_exit_without_reap` (opencode_direct_developer.py line 1023), observing exit via non-reaping wait checks (`_observe_exit_without_reap`) so PID/PGID tracking remains valid for `CLIProcessLifecycle`. |
+| **Post-Stream Exit Waiting** | Calls `process.wait(timeout=remaining)` (`base.py` line 613), directly reaping the child process leader. | Calls `_await_exit_without_reap` (`opencode_direct_developer.py` line 1062), observing exit via non-reaping wait checks (`_observe_exit_without_reap`) so PID/PGID tracking remains valid for `CLIProcessLifecycle`. |
 | **Error & Exception Types** | Raises `RouteError` (`ROUTE_OUTPUT_TOO_LARGE`, `TIMEOUT`, `RUNNER_FAILED`). | Raises `DirectOpenCodeError` (`OPENCODE_TIMEOUT`, `OPENCODE_OUTPUT_TOO_LARGE`, `TOOL_DENIED`, `OPENCODE_PROMPT_DELIVERY_INCOMPLETE`). |
 
 ---
@@ -211,7 +215,7 @@ The wait implementation in `opencode_direct_developer.py` differs from `_default
 The following facts are established directly by inspection of the source code:
 
 1. **Fixed 100 ms Polling Slices**:
-   Both `_default_runner` (base.py line 596) and `opencode_direct_developer.run` (opencode_direct_developer.py line 969) invoke `selector.select(min(remaining, 0.1))`. The timeout argument passed to the kernel polling mechanism is capped at 0.1 seconds.
+   Both `_default_runner` (`base.py` line 600) and `opencode_direct_developer.run` (`opencode_direct_developer.py` line 1008) invoke `selector.select(min(remaining, 0.1))`. The timeout argument passed to the kernel polling mechanism is capped at 0.1 seconds.
 2. **Loop Iteration Work**:
    Every iteration of the `while selector.get_map():` loop executes:
    - `lifecycle.check()`: reads signal state (`self.signum is not None`).
@@ -223,7 +227,7 @@ The following facts are established directly by inspection of the source code:
 4. **Necessary Condition for High CPU**:
    High CPU utilization within `llmtool task delegate` can only occur if `selector.select()` is returning immediately (or after a near-zero interval) rather than blocking for 100 ms, or if a high volume of events continuously triggers chunk reads and loop processing.
 5. **OpenCode Stdin Writable State**:
-   In `opencode_direct_developer.py` (lines 959–960), `stdin` is registered with `selectors.EVENT_WRITE`. Under POSIX semantics, an OS pipe buffer with available space is continuously ready for writing. As long as `stdin` remains registered, `selector.select()` will report `stdin` ready immediately with 0 ms sleep until all bytes are delivered at lines 984–993.
+   In `opencode_direct_developer.py` (lines 999–1000), `stdin` is registered with `selectors.EVENT_WRITE`. Under POSIX semantics, an OS pipe buffer with available space is continuously ready for writing. As long as `stdin` remains registered, `selector.select()` will report `stdin` ready immediately with 0 ms sleep until all bytes are delivered at lines 1023–1032.
 
 ---
 
@@ -236,7 +240,7 @@ The following mechanisms are plausible explanations for elevated CPU consumption
 - **Hypothesis 2: Spurious Readiness or Level-Triggered Spinning on Pipe EOF [UNVERIFIED]**:
   On macOS (`selectors.KqueueSelector`), pipes monitored with `KQ_FILTER_READ` enter a ready state when the peer closes the write end or reaches EOF. If there is any lag, unhandled state, or race condition between a stream reporting EOF and being unregistered via `selector.unregister(key.fileobj)`, or if one stream remains open while the other spins on EOF, `select()` returns immediately on every call.
 - **Hypothesis 3: High-Frequency Sub-Process Stream Chunks [UNVERIFIED]**:
-  If the child developer process (`agy`, `claude`, or `opencode`) writes small chunks of output, ANSI progress indicators, or unbuffered debug logs to `stdout`/`stderr`, `selector.select()` wakes upon every chunk. In OpenCode, every newline in `stdout` triggers string slicing and `_has_structured_tool_denial` regex evaluation (lines 1009–1020), amplifying user-space CPU usage.
+  If the child developer process (`agy`, `claude`, or `opencode`) writes small chunks of output, ANSI progress indicators, or unbuffered debug logs to `stdout`/`stderr`, `selector.select()` wakes upon every chunk. In OpenCode, every newline in `stdout` triggers string slicing and `_has_structured_tool_denial` regex evaluation (`opencode_direct_developer.py` lines 1048–1059), amplifying user-space CPU usage.
 - **Hypothesis 4: Short Remaining Time or Clock Precision Artifacts [UNVERIFIED]**:
   If `remaining` approaches zero or clock queries produce negative or zero values, `min(remaining, 0.1)` collapses to `0`, converting the selector into a non-blocking poll.
 - **Hypothesis 5: Process Attribution Misidentification [UNVERIFIED]**:
@@ -270,7 +274,7 @@ Process lifecycle management is governed by `CLIProcessLifecycle` (`tools/llmtoo
 1. **Ownership & Process Groups**:
    Processes are spawned with `start_new_session=True` and owned via `lifecycle.own(process)` (lines 304–330). This pins the process leader and its process group ID (`pgid == process.pid`).
 2. **Signal Handling & Deferred Cancellation**:
-   The lifecycle installs signal handlers for `SIGINT`, `SIGTERM`, and `SIGHUP` (lines 265–271). In `_record(signum, frame)` (lines 235–240), the handler explicitly **does not raise an exception**:
+   The lifecycle installs signal handlers for `SIGINT`, `SIGTERM`, and `SIGHUP` (lines 264–271). In `_record(signum, frame)` (lines 235–239), the handler explicitly **does not raise an exception**:
    ```python
    def _record(self, signum, frame):
        # No raising, killing, waiting, I/O or cleanup in a handler. In particular,
@@ -278,9 +282,9 @@ Process lifecycle management is governed by `CLIProcessLifecycle` (`tools/llmtoo
        if self.signum is None:
            self.signum = signum
    ```
-   This prevents unwinding between process creation and ownership assignment. Cancellation is detected only when user-space code calls `lifecycle.check()` (line 332), which raises `_Cancelled()` if `self.signum is not None`.
+   This prevents unwinding between process creation and ownership assignment. Cancellation is detected only when user-space code calls `lifecycle.check()` (lines 332–334), which raises `_Cancelled()` if `self.signum is not None`.
 3. **Descendant Teardown**:
-   When exiting the `with lifecycle:` context or upon `lifecycle.stop()` (lines 336–342), `bounded_terminate(process, deadline)` is executed:
+   When exiting the `with lifecycle:` context (`__exit__`, lines 343–360) or upon `lifecycle.stop()` (lines 336–341), `bounded_terminate(process, deadline)` (lines 119–184) is executed:
    - Delivers `SIGKILL` to the entire process group: `os.killpg(process.pid, signal.SIGKILL)`.
    - Reaps the process leader: `process.wait()`.
    - Verifies the absence of all remaining group descendants via `_group_absent_until(process.pid, deadline)`.
@@ -305,7 +309,7 @@ Retain the single-threaded `DefaultSelector` loop, but increase the timeout slic
 - **Cancellation-Delay Risk**:
   - *Under PEP 475*, Python automatically retries interrupted system calls (such as `kevent`/`select`) on `EINTR` if the signal handler does not raise an exception.
   - Because `CLIProcessLifecycle._record` only records `self.signum = signum` without raising, `select()` will *not* return to Python when a signal arrives; it will continue sleeping in the kernel until the timeout expires or stream data arrives.
-  - **In Variant 1A (Full Timeout, up to 3600s)**: If the child process is quiet and a `SIGINT` (Ctrl-C) or `SIGTERM` arrives, `selector.select()` will block for the entire remaining task duration (minutes or hours). `lifecycle.check()` will not execute, and the process will not respond to cancellation. **Variant 1A presents an unacceptable cancellation-delay risk.**
+  - **In Variant 1A (Full Timeout, up to `HARD_TIMEOUT_CAP_SECONDS` = 18000s)**: If the child process is quiet and a `SIGINT` (Ctrl-C) or `SIGTERM` arrives, `selector.select()` will block for the entire remaining task duration (minutes or hours). `lifecycle.check()` will not execute, and the process will not respond to cancellation. **Variant 1A presents an unacceptable cancellation-delay risk.**
   - **In Variant 1B (Bounded 1.0s Slice)**: The maximum delay between signal arrival and cancellation detection via `lifecycle.check()` is strictly bounded to 1.0 second. This provides acceptable cancellation responsiveness while reducing idle iteration frequency by 90% (from 10 Hz to 1 Hz) if `select` is blocking.
 - **Process Ownership & Descendant Cleanup**:
   - **In Variant 1A**: *Risk: High.* When cancellation is delayed because `select()` blocks for minutes or hours, child and descendant processes continue executing un-terminated in the background. If an external orchestrator or CI supervisor escalates cancellation by sending `SIGKILL` to the unresponsive parent process (after a typical 5–10s grace period), `lifecycle.__exit__` is never executed; `bounded_terminate` is completely bypassed, leaving orphaned descendant processes running indefinitely in the D6 worktree. Furthermore, if the selector sleeps until the overall deadline expires, the finite cleanup reserve (`deadline + 5`) is exhausted before `bounded_terminate` is invoked, preventing confirmed verification and degrading cleanup status to `UNKNOWN`.
@@ -359,7 +363,7 @@ Use Python's runtime C-level mechanism: `signal.set_wakeup_fd(wake_w, warn_on_fu
 Address the specific conditions that cause `selector.select()` to return immediately without blocking, while strictly maintaining prompt delivery and stream invariants:
 
 1. **Preserving OpenCode Stdin Delivery Invariants**:
-   - In `opencode_direct_developer.py` (lines 984–993), `stdin` must remain registered with `EVENT_WRITE` continuously while `offset < len(payload)` so that the selector wakes whenever the kernel pipe buffer has space.
+   - In `opencode_direct_developer.py` (lines 1023–1032), `stdin` must remain registered with `EVENT_WRITE` continuously while `offset < len(payload)` so that the selector wakes whenever the kernel pipe buffer has space.
    - Once `offset >= len(payload)`, `stdin` is unregistered from the selector and closed immediately (`key.fileobj.close()`).
    - *Rejection of Partial-Write Unregistration*: Unregistering `stdin` after a partial write without an external scheduling mechanism or timer would stall prompt delivery until timeout (`OPENCODE_TIMEOUT`), because no subsequent event would schedule the next write slice while the child process blocks waiting for prompt input. Therefore, `stdin` must remain registered until all prompt bytes are delivered.
 2. **Cooperative Spin Backoff**:
@@ -383,7 +387,7 @@ Prior discussions considered adopting standard library `subprocess.Popen.communi
 1. **Thread Blocking on Orphaned Pipes**:
    Worker threads blocked on synchronous `stream.read()` cannot be interrupted by Python signals. If a child process hangs or spawns descendants that inherit open pipe descriptors, reader threads hang indefinitely, preventing the main thread from completing cleanup or exiting.
 2. **Violation of Main-Thread Signal Contracts**:
-   `CLIProcessLifecycle` requires execution on the main thread to install and restore signal handlers (cli_lifecycle.py lines 40–42, 247–250). Delegating process waiting to background threads breaks signal ownership invariants.
+   `CLIProcessLifecycle` requires execution on the main thread to install and restore signal handlers (`cli_lifecycle.py` lines 40–41, 247–250). Delegating process waiting to background threads breaks signal ownership invariants.
 3. **Deadlock in Teardown**:
    If the main thread attempts to terminate the process group while reader threads are actively blocked on file descriptors, deadlocks or race conditions on pipe closure can occur, preventing `bounded_terminate` from confirming group absence (`_group_absent_until`).
 
@@ -395,7 +399,7 @@ Prior discussions considered adopting standard library `subprocess.Popen.communi
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **CPU Reduction** | [UNVERIFIED] Reduces CPU only if idle 100ms polling is the cause; ineffective if readiness triggers immediate return | [UNVERIFIED] Reduces CPU only if idle 100ms polling is the cause; ineffective if readiness triggers immediate return | [UNVERIFIED] Reduces CPU only if idle 100ms polling is the cause; ineffective if readiness triggers immediate return | [UNVERIFIED] Caps loop frequency to 50–100 Hz even under continuous readiness; unverified until profiled | [UNVERIFIED] Eliminates polling; unverified |
 | **Architectural Complexity** | Trivial (1 line) | Trivial (1 line) | Moderate (`set_wakeup_fd` + fd lifecycle) | Low (cooperative sleep on 0-byte return) | High (threading model rewrite) |
-| **Cancellation-Delay Risk** | **HIGH** (blocks up to 3600s on signal due to PEP 475) | **LOW** (max 1.0s delay to detect cancellation) | **NONE** (instant wakeup via pipe) | **LOW** (max ~120ms delay) | **HIGH** (threads block on pipe) |
+| **Cancellation-Delay Risk** | **HIGH** (blocks up to 18000s on signal due to PEP 475) | **LOW** (max 1.0s delay to detect cancellation) | **NONE** (instant wakeup via pipe) | **LOW** (max ~120ms delay) | **HIGH** (threads block on pipe) |
 | **Descendant Cleanup Risk** | **HIGH** (descendants run un-terminated during delay; external SIGKILL orphans group; deadline exhausted) | **LOW** (max 1.0s delay allows prompt `bounded_terminate`) | **LOW** (must clean up global fd and pipe descriptors in `finally`) | **NONE** (single-threaded `bounded_terminate` unaffected) | **HIGH** (thread hangs, orphaned descendants) |
 | **Result Integrity Risk** | None | None | None | None | Low |
 | **OpenCode Applicability** | Ineffective if stdin/EOF spins | Ineffective if stdin/EOF spins | Ineffective if stdin/EOF spins | Directly addresses spin without breaking stdin delivery | High rewrite cost |
@@ -417,5 +421,5 @@ Any architectural fix must be **conditional on empirical profiling evidence** ob
    - **If profiling confirms idle loop polling frequency is the primary cause**:
      Adopt **Candidate Fix 1B** (raising the selector slice to a bounded 1.0 second). This reduces loop iteration overhead by 90% during idle periods, strictly bounds cancellation delay to at most 1.0 second under PEP 475, and avoids the complexity of global wakeup pipes while preserving `CLIProcessLifecycle` descendant cleanup.
    - **If profiling confirms continuous stream readiness (e.g. pipe spin or OpenCode stdin readiness)**:
-     Adopt **Candidate Fix 3** (cooperative spin backoff while maintaining continuous `stdin` registration until delivery completes at opencode_direct_developer.py:984–993). This caps CPU consumption to <= 50–100 iterations per second without stalling prompt delivery or altering process ownership contracts.
+     Adopt **Candidate Fix 3** (cooperative spin backoff while maintaining continuous `stdin` registration until delivery completes at `opencode_direct_developer.py:1023–1032`). This caps CPU consumption to <= 50–100 iterations per second without stalling prompt delivery or altering process ownership contracts.
    - Candidate Fix 1A and Threaded `communicate()` are firmly rejected due to unacceptable descendant cleanup and cancellation-delay risks.
