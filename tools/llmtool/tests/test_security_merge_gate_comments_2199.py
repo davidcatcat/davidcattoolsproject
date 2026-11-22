@@ -289,9 +289,101 @@ def _member(task_id, pr, head):
             'remote_test_receipt_digest': 'abcdef12'}
 
 
+def _filler(start, count):
+    return [{'id': start + i, 'body': 'EC2 tracking note', 'created_at': '2026-11-23T00:00:00Z',
+             'updated_at': '2026-11-23T00:00:00Z'} for i in range(count)]
+
+
+def _run_merge_paged(pages):
+    """Merge once with PR comments served page by page (pages[i] is page i+1).
+
+    A page entry that is callable is called (it may raise)."""
+    pr, base_get = _fake_github(comments=pages[0])
+    reads = []
+
+    def github_get(path):
+        prefix = 'issues/17/comments?per_page=100&page='
+        if path.startswith(prefix):
+            page = int(path[len(prefix):])
+            reads.append(page)
+            payload = pages[page - 1] if page - 1 < len(pages) else []
+            return payload() if callable(payload) else copy.deepcopy(payload)
+        if path == 'issues/17/comments?per_page=100':
+            reads.append(1)
+        return base_get(path)
+
+    claim = {'pr': 17, 'head_sha': HEAD, 'version': 2, 'state': 'COMPLETED',
+             'review_result': {'verdict': 'PASS'}}
+    event = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 2, 'outcome': 'REVIEW_PASS'}
+    record = {'task_id': '1' * 32, 'record_sha256': 'r' * 64, 'review_dispatch_claim': [claim]}
+    calls = []
+
+    class Store:
+        def compare_and_update(self, *args, **kwargs):
+            pass
+
+    def gh_runner(_root, args):
+        calls.append(list(args))
+        return type('Result', (), {'returncode': 0})()
+
+    result = task_advance._merge_once(store=Store(), record=record, number=17, head=HEAD,
+                                      pr=pr, events=[event], github_get=github_get,
+                                      gh_runner=gh_runner, root='/repo')
+    return result, calls, reads
+
+
+class PaginatedSecurityCommentGateTests(unittest.TestCase):
+    """PR #2623 advisory F1: a PR with 100+ comments is read page by page."""
+
+    def test_pass_on_page_two_merges(self):
+        page2 = _filler(200, 5) + [_verdict_comment(999, 'PASS', HEAD, version=91)]
+        result, calls, reads = _run_merge_paged([_filler(1, 100), page2])
+        self.assertEqual(result['step'], 'MERGED', result)
+        self.assertEqual(reads[:2], [1, 2])
+        self.assertEqual(sum(call[:2] == ['pr', 'merge'] for call in calls), 1)
+
+    def test_no_verdict_across_full_pages_merges(self):
+        result, calls, reads = _run_merge_paged([_filler(1, 100), _filler(101, 100), []])
+        self.assertEqual(result['step'], 'MERGED', result)
+        self.assertEqual(reads[:3], [1, 2, 3])
+
+    def test_fail_on_page_two_refused(self):
+        page2 = [_verdict_comment(999, 'FAIL', HEAD, version=91)]
+        result, calls, _reads = _run_merge_paged([_filler(1, 100), page2])
+        self.assertEqual(result['step'], 'MERGE_REFUSED')
+        self.assertEqual(result['codes'], ['MERGE_SECURITY_REVIEW_NOT_PASS'])
+        self.assertEqual([c for c in calls if c[:2] == ['pr', 'merge']], [])
+
+    def test_page_two_read_failure_fails_closed(self):
+        def boom():
+            raise RuntimeError('page 2 unavailable')
+
+        for label, page2 in (('raises', boom), ('non_list', {'message': 'x'}),
+                             ('oversized', _filler(200, 101))):
+            with self.subTest(label=label):
+                result, calls, _reads = _run_merge_paged([_filler(1, 100), page2])
+                self.assertEqual(result['step'], 'MERGE_REFUSED')
+                self.assertEqual(result['codes'], ['MERGE_SECURITY_REVIEW_UNKNOWN'])
+                self.assertIn('page by page', result['result']['message'])
+                self.assertEqual([c for c in calls if c[:2] == ['pr', 'merge']], [])
+
+    def test_too_many_pages_fails_closed(self):
+        pages = [_filler(i * 100, 100) for i in range(task_advance.review_dispatch._VERDICT_COMMENT_PAGES)]
+        result, calls, reads = _run_merge_paged(pages)
+        self.assertEqual(result['codes'], ['MERGE_SECURITY_REVIEW_UNKNOWN'])
+        self.assertEqual(len(reads), task_advance.review_dispatch._VERDICT_COMMENT_PAGES)
+        self.assertEqual([c for c in calls if c[:2] == ['pr', 'merge']], [])
+
+    def test_empty_first_page_merges(self):
+        result, calls, reads = _run_merge_paged([[]])
+        self.assertEqual(result['step'], 'MERGED', result)
+        self.assertEqual(reads, [1])
+
+
 class _TrainGitHub:
     def __init__(self):
         self.pulls, self.files, self.checks, self.comments = {}, {}, {}, {}
+        self.comment_pages = {}  # PR -> [page 2, page 3, ...]
 
     def __call__(self, path):
         parts = path.split('/')
@@ -302,6 +394,10 @@ class _TrainGitHub:
         if parts[0] == 'commits' and path.endswith('/check-runs?per_page=100'):
             runs = self.checks[parts[1]]
             return {'total_count': len(runs), 'check_runs': copy.deepcopy(runs)}
+        if parts[0] == 'issues' and '/comments?per_page=100&page=' in path:
+            number, page = int(parts[1]), int(path.rsplit('=', 1)[1])
+            pages = self.comment_pages.get(number, [])
+            return copy.deepcopy(pages[page - 2]) if page - 2 < len(pages) else []
         if parts[0] == 'issues' and path.endswith('/comments?per_page=100'):
             payload = self.comments.get(int(parts[1]), [])
             if callable(payload):
@@ -435,6 +531,15 @@ class MergeTrainSecurityCommentGateTests(unittest.TestCase):
                 self.assertEqual(result['result']['task_id'], TASK_A)
                 _assert_has_next_step(self, result)
                 self.assertEqual([c for c in self.gh.calls if c[:2] == ['pr', 'merge']], [])
+
+    def test_member_security_fail_on_page_two_refused(self):
+        self.github.comments[PR_A] = _filler(1, 100)
+        self.github.comment_pages[PR_A] = [[_verdict_comment(999, 'FAIL', self.head_a, version=91)]]
+        result = self._merge()
+        self.assertEqual(result['step'], 'MERGE_REFUSED')
+        self.assertEqual(result['codes'], ['MERGE_SECURITY_REVIEW_NOT_PASS'])
+        self.assertEqual(result['result']['task_id'], TASK_A)
+        self.assertEqual([c for c in self.gh.calls if c[:2] == ['pr', 'merge']], [])
 
     def test_members_with_no_security_verdict_merge(self):
         self.github.comments[PR_A] = [_verdict_comment(1, 'PASS', self.head_a, version=2)]

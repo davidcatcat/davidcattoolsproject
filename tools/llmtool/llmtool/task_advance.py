@@ -503,6 +503,37 @@ def _pr_files(number, github_get):
     return None, PR_FILES_TOO_MANY
 
 
+_ISSUE_COMMENTS_PER_PAGE = 100
+_ISSUE_COMMENTS_UNAVAILABLE = 'ISSUE_COMMENTS_UNAVAILABLE'
+_ISSUE_COMMENTS_TOO_MANY = 'ISSUE_COMMENTS_TOO_MANY'
+
+
+def _issue_comments(number, github_get):
+    """Return (comments, None) for every PR issue comment, or (None, code).
+
+    #2199 F1 (PR #2623 advisory): same paging as _pr_files. Page 1 keeps the
+    historical path; page N > 1 adds ``&page=N``; a short page ends the read.
+    At most review_dispatch._VERDICT_COMMENT_PAGES reads (the bound the verdict
+    poster already uses). A read error or malformed page gives
+    ISSUE_COMMENTS_UNAVAILABLE; a full last page gives ISSUE_COMMENTS_TOO_MANY.
+    """
+    comments = []
+    for page in range(1, review_dispatch._VERDICT_COMMENT_PAGES + 1):
+        path = f'issues/{number}/comments?per_page={_ISSUE_COMMENTS_PER_PAGE}'
+        if page > 1:
+            path += f'&page={page}'
+        try:
+            batch = github_get(path)
+        except Exception:
+            return None, _ISSUE_COMMENTS_UNAVAILABLE
+        if type(batch) is not list or len(batch) > _ISSUE_COMMENTS_PER_PAGE:
+            return None, _ISSUE_COMMENTS_UNAVAILABLE
+        comments.extend(batch)
+        if len(batch) < _ISSUE_COMMENTS_PER_PAGE:
+            return comments, None
+    return None, _ISSUE_COMMENTS_TOO_MANY
+
+
 # #1502 WP-G gate 2 (sec v93): llmtool-linux-ci.yml's 'changes' job sets four
 # independent flags (code, docs, gateway, ai_loop) with linux_flags() from
 # tools/llmtool/scripts/ci_path_classes.py, and each enabled flag runs its own
@@ -1250,9 +1281,12 @@ def _security_merge_refusal(code, *, number=None, head=None, task_id=None):
             'Ensure PR comments and security review records are readable and complete '
             'with a recorded PASS security verdict at this exact head, or publish a new head.'
         )
+        limit = review_dispatch._VERDICT_COMMENT_PAGES * _ISSUE_COMMENTS_PER_PAGE
         message = (
-            f'{target} has unreadable, incomplete, or mismatched security review data. '
-            f'Next step: {next_step}'
+            f'{target} has unreadable, incomplete, or mismatched security review data '
+            f'(all PR comments are read page by page, up to {limit}; a read error, a '
+            f'malformed page, more than {limit} comments, or a malformed security verdict '
+            f'comment refuses). Next step: {next_step}'
         )
     result = {'message': message, 'next_step': next_step}
     if task_id is not None:
@@ -1275,8 +1309,6 @@ def _security_comment_code(comments, head):
         return 'MERGE_SECURITY_REVIEW_UNKNOWN'
     if not comments:
         return None
-    if len(comments) >= 100:
-        return 'MERGE_SECURITY_REVIEW_UNKNOWN'
     for comment in comments:
         if type(comment) is not dict:
             return 'MERGE_SECURITY_REVIEW_UNKNOWN'
@@ -1403,7 +1435,9 @@ def _merge_security_claim(record, number, head, events, github_get=None):
             return 'MERGE_SECURITY_REVIEW_UNKNOWN'
         if type(number) is not int or number < 1 or type(head) is not str or _HEX40.fullmatch(head) is None:
             return 'MERGE_SECURITY_REVIEW_UNKNOWN'
-        comments = github_get(f'issues/{number}/comments?per_page=100')
+        comments, _code = _issue_comments(number, github_get)
+        if comments is None:
+            return 'MERGE_SECURITY_REVIEW_UNKNOWN'
         return _security_comment_code(comments, head)
     except Exception:
         return 'MERGE_SECURITY_REVIEW_UNKNOWN'
