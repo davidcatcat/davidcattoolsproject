@@ -4702,7 +4702,7 @@ def review_verdicts(comments) -> dict:
 
 
 PM_BOARD = os.path.expanduser("~/.local/state/llmtool/pm-board.json")
-PM_BOARD_STALE = 1800
+PM_BOARD_STALE = 900
 PM_BOARD_LIMIT = 64 * 1024
 PM_BOARD_REF = re.compile(r"(?:PR )?#[0-9]{1,7}")
 

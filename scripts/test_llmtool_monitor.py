@@ -8346,11 +8346,12 @@ class WorkBoardTests(unittest.TestCase):
             self.assertEqual(mon.read_pm_board(NOW, str(path)).status, "undated")
 
     def test_pm_board_future_stamp_is_undated_but_equal_and_stale_are_controls(self):
+        self.assertEqual(mon.PM_BOARD_STALE, 900)
         self.assertEqual(self._board(updated_at="2099-01-01T00:00:00Z").status, "undated")
         self.assertEqual(self._board(updated_at=self.STAMP).status, "ok")
-        stale_stamp = datetime.fromtimestamp(NOW - mon.PM_BOARD_STALE - 1, timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%SZ")
-        self.assertEqual(self._board(updated_at=stale_stamp).status, "stale")
+        for age, status in ((899, "ok"), (900, "ok"), (901, "stale")):
+            stamp = datetime.fromtimestamp(NOW - age, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self.assertEqual(self._board(updated_at=stamp).status, status, age)
 
     def test_pm_board_validates_item_shape_and_caps_each_list_at_50(self):
         entries = [{"ref": f"#{i}", "what": "word " * 20, "next": "", "reason": "note " * 20}
