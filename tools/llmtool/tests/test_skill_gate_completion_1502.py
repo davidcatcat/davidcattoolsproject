@@ -126,6 +126,11 @@ class CompletionGateTest(_LedgerCase):
         self.path.write_bytes(b''.join(lines))
         self.refused(task(), skill_ledger.DELIVERY_LEDGER_UNREADABLE)
 
+    def test_missing_ledger_is_unpinned_and_creates_nothing(self):
+        self.assertFalse(self.path.exists())
+        self.assertEqual(skill_gate.check_completion(task()), 'NOT_PINNED')
+        self.assertEqual(list(self.path.parent.iterdir()), [])
+
     def test_task_without_run_id_has_no_pin(self):
         record = task()
         record['run_id'] = None

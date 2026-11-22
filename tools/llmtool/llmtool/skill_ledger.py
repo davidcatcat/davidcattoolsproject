@@ -1300,6 +1300,13 @@ def run_delivery_status(task_id, run_id, route):
     """
     if not _status_args_valid((task_id, run_id, route)):
         return {'status': STATUS_UNVERIFIED, 'reason': DELIVERY_LEDGER_UNREADABLE}
+    try:
+        # No ledger file at all: no pin can exist. Create nothing (no parent
+        # directory, no lock file) for a read-only status.
+        if not os.path.lexists(_path()):
+            return {'status': 'NO_PIN', 'reason': None}
+    except OSError:
+        return {'status': STATUS_UNVERIFIED, 'reason': DELIVERY_LEDGER_UNREADABLE}
 
     def evaluate(_path, records):
         rows = [item for item in records if type(item) is dict and
