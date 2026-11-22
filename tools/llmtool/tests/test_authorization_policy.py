@@ -421,6 +421,9 @@ class NoProductionAuthorityTests(unittest.TestCase):
         # R-A/R-B: exact reviewed additions, no filename-wide exemption.
         self.assertEqual(issuers, {('review_authority.py', 'ProductionReviewIssuer', 'HostIssuer')})
         self.assertEqual(imports, {
+            # #2281 W3: the shared Developer route request contract reads the
+            # workflow grant only through the merged W1 module.
+            ('base.py', '', frozenset({'authorization_workflow_grant'})),
             ('review_authority.py', 'authorization_policy', frozenset({
                 'HostIssuer', 'IssuerClass', 'Decision', 'ProviderReviewBinding',
                 'ProviderObservedState', 'decide_provider_review'})),
