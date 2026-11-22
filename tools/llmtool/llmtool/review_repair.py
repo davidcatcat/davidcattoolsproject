@@ -886,7 +886,7 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         # #1816: after the Owner policy, before any claim, Task or D6 write.
         # #2622: a paused AGY/OpenCode route refuses the repair here too, with
         # the explicit resume step in the refusal.
-        pause = worker_availability.route_pause_refusal(store, worker)
+        pause = worker_availability.route_pause_code(store, worker)
         if pause is not None:
             error = LLMToolError(worker_availability.route_pause_message(worker))
             error.review_repair_code = pause
