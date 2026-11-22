@@ -26,6 +26,7 @@ The Owner's binding working rules for PM runs (2026-11-16 – 2026-11-18), recor
 - 已被取代的舊 PR 確認後續版本包含必要內容後關閉並標記 superseded；不得為了讓 PR 好完成而不斷拆出新的 Issue、ROOT、REPLAN 或治理需求。 (Owner date: 2026-11-22, evidence link: [#1817 c7076653433](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-7076653433))
 - 每天一次收斂檢查：開始時 Open Issue／PR 數、新增數、完成或合併數、以 superseded／duplicate／not planned 關閉數、淨變化、最卡的真正死結；功能完成、PR 合併、Issue 結案、已被取代分開報告；新增多於關閉時說明原因。 (Owner date: 2026-11-22, evidence link: [#1817 c7076653433](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-7076653433))
 - 只有需要新增 Owner 授權、變更安全邊界或無法從現有規則判定的政策衝突才升級 Owner（Advisor → Owner）；正常修復與既有程序不送 Owner 裁決。 (Owner date: 2026-11-22, evidence link: [#1817 c7076653433](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-7076653433))
+- 獨立開發同時也是顧問；任何技術上的決策先問顧問，只有不是技術上的決策、顧問也無法回答的，才問 Owner。 (Owner date: 2026-11-22, evidence link: [#1817 c7076921959](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-7076921959))
 
 ## Dispatch
 
