@@ -2449,16 +2449,32 @@ def _repost_truncated_fail(args, *, store=None, github_get=None, gh_runner=None)
     runner = task_advance._publish_run_gh if gh_runner is None else gh_runner
     root = os.getcwd()
     task_advance._post_review_verdict_comment(runner, root, args.pr, block)
+    # #2536 PR 3: record the reposted verdict now. The header-only comment's
+    # event stays in the Task, so task advance never reaches RECORD_REVIEW_RESULT
+    # again; without this record it stops at REVIEW_OUTCOME_UNKNOWN.
+    try:
+        recorded = review_result.record_review_result(
+            store=store, task_id=args.task_id, executor_task=args.executor_task,
+            pr_number=args.pr, version=claim.get('version'), github_get=get)
+        record_state = recorded.get('state') if type(recorded) is dict else None
+        record_code = None
+    except LLMToolError as exc:
+        recorded, record_state = None, None
+        record_code = getattr(exc, 'review_dispatch_code', None) or 'REVIEW_RESULT_FAILED'
     at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    new_comment = recorded.get('comment_id') if type(recorded) is dict else None
     note = ('<!-- activity: type=pm_progress actor=PM target=PM status=RECORDED -->\n'
             f'#2536 audited repost at {at}: the Claude Reviewer v{claim.get("version")} FAIL '
             f'for HEAD {head} (reviewer task {claim.get("reviewer_task")}) was relayed as '
             f'header only in comment {replaced}; the full verdict from the reviewer transcript '
-            'is posted unedited just above and supersedes it. The next task advance records it.')
+            f'is posted unedited as comment {new_comment} and supersedes it. Recorded: '
+            f'{record_state or record_code}.')
     response = runner(root, ['pr', 'comment', str(args.pr), '--body', note])
     _print(dict(base, state='REPOSTED', replaced_comment_id=replaced, at=at,
+                new_comment_id=new_comment, record_state=record_state,
+                record_code=record_code,
                 audit_note_posted=getattr(response, 'returncode', 1) == 0))
-    return 0
+    return 0 if record_state == 'REVIEW_FAIL' else 1
 
 
 def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
