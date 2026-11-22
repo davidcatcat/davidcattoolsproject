@@ -47,6 +47,7 @@ from . import gateway_profiles
 from . import repair_policy
 from .developer_output_normalize import _HUNK
 from . import role_config
+from . import skill_gate
 from . import skill_ledger
 from . import skill_manifest
 from . import source_freshness
@@ -10547,6 +10548,7 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
         raise LLMToolError('task completion binding is unavailable')
     if completion['pm_dispatch'] in ('CLAIMED', 'UNKNOWN', 'RETURNED'):
         raise LLMToolError('original PM request already claimed or completed; replay refused')
+    skill_gate.check_completion(task)  # #1502 WP-F: card-delivery evidence
     developer = task['developer']
     claude_route = (developer.get('provider_profile') == 'claude' and
                     developer.get('backend_session_semantics') == 'NO_NATIVE_SESSION_ID_EXPOSED')
@@ -11380,6 +11382,7 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
             developer['execution'].get('process_exit_code') != 0 or
             (task.get('pm_route_binding') is None and not _active_pm_runtime(task))):
         raise LLMToolError('direct Executor result callback is unavailable')
+    skill_gate.check_completion(task)  # #1502 WP-F: card-delivery evidence
     task_completion.validate_task_binding(
         stored_binding=task['task_binding'], task_id=task['task_id'],
         run_id=task['run_id'],
