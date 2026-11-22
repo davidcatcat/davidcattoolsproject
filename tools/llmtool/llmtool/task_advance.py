@@ -20,6 +20,7 @@ from . import active_pm_inbox, github_events, review_dispatch, review_repair
 from . import github_identity, review_result, sensitive_paths, task_completion
 from . import lineage_counts, mac_full_suite, repair_policy, review_transcript
 from . import remote_test, start_failure, task_submission_cli
+from . import guidance_refresh
 from .ai_github_exec import AiIdentityError, verified_ai_env
 from .errors import LLMToolError
 from .task_store import TaskStore, _json_bytes, external_action_refusal
@@ -2195,12 +2196,15 @@ def _publish_task(record, d6, executor_task, *, git_runner=None,
     task_bases = _publish_task_scope_bases(git_runner, root, d6, bases, write_paths)
     scoped = (committed if task_bases is None else
               _publish_added_commits(git_runner, root, task_bases))
-    if any(path not in write_paths
-           for commit, parents in scoped
-           for path in _publish_commit_paths(git_runner, root, commit, parents)):
-        raise _PublishRefusal('PUBLISH_OUT_OF_SCOPE')
+    task_paths = set(changed)
+    for commit, parents in scoped:
+        commit_paths = _publish_commit_paths(git_runner, root, commit, parents)
+        if any(path not in write_paths for path in commit_paths):
+            raise _PublishRefusal('PUBLISH_OUT_OF_SCOPE')
+        task_paths.update(commit_paths)
     _publish_screen_commits(git_runner, root, committed)
 
+    task_commits = list(scoped)
     if changed:
         _publish_command(git_runner, root, ['add', '--', *changed])
         staged = _publish_command(git_runner, root,
@@ -2220,6 +2224,24 @@ def _publish_task(record, d6, executor_task, *, git_runner=None,
         if len(own) != 1 or own[0][0] != local_head or own[0][1] != [previous_head]:
             raise _PublishRefusal('PUBLISH_COMMAND_FAILED')
         _publish_screen_commits(git_runner, root, own)
+        task_commits = own + task_commits
+
+    if any(path in guidance_refresh.GUIDANCE_FILES for path in task_paths):
+        title, _ = _publication_text(record, executor_task, branch)
+        try:
+            refreshed = guidance_refresh.refresh_guidance_hashes(
+                root=root,
+                head=local_head,
+                write_paths=write_paths,
+                task_commits=task_commits,
+                git_runner=git_runner,
+                commit_message=(f'{title} (refresh guidance hash)',
+                                f'llmtool Task {task_id}'),
+            )
+        except guidance_refresh.GuidanceRefreshError as exc:
+            raise _PublishRefusal(exc.code) from None
+        if refreshed['refreshed']:
+            local_head = refreshed['head']
     # #2367 (M1, #1317): record the Developer result head as committed and push
     # it as it is. PUBLISH never merges main into the head; a head behind main
     # or conflicting with it is handled at the merge gate (BEHIND/dirty path).
