@@ -80,6 +80,27 @@ class Ec2Waiting2602Tests(unittest.TestCase):
             'task_id': '1' * 32, 'pr': 17, 'head': HEAD,
             'reason': 'REMOTE_TEST_TIMEOUT'})
 
+    def test_sha_mismatch_receipt_still_needs_attention(self):
+        record = base_record()
+        record['remote_test_receipts'] = [receipt(record, result='SHA_MISMATCH')]
+        self.assertEqual(
+            task_advance._remote_test_status(record, d6())[0], 'SHA_MISMATCH')
+        self.assertEqual(
+            task_advance._pre_review_action(record, d6(), PR, {}, HEAD),
+            'NEEDS_ATTENTION')
+        self.assertEqual(task_advance.decide(record, d6(), PR, {}), 'NEEDS_ATTENTION')
+
+    def test_not_executed_receipt_still_needs_attention(self):
+        record = base_record()
+        record['remote_test_receipts'] = [
+            receipt(record, result='FAIL', ran_total=0, failures=[])]
+        self.assertEqual(
+            task_advance._remote_test_status(record, d6())[0], 'NOT_EXECUTED')
+        self.assertEqual(
+            task_advance._pre_review_action(record, d6(), PR, {}, HEAD),
+            'NEEDS_ATTENTION')
+        self.assertEqual(task_advance.decide(record, d6(), PR, {}), 'NEEDS_ATTENTION')
+
     def test_first_timeout_still_reruns(self):
         record = base_record()
         record['remote_test_outcomes'] = [outcome()]
