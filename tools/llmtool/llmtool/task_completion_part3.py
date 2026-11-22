@@ -11,19 +11,17 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import time
 
 from . import source_freshness
 from .errors import LLMToolError
-from .task_completion import (
-    _D6_EVIDENCE_STATES,
-    _GIT_LIMIT,
-    _HEX40,
-    _PROPOSAL_FILE_LIMIT,
-    _TEST_REGISTRY,
-    _TIMEOUT,
-)
+
+# #2281 A2: the parent module is already in sys.modules while it imports this
+# part, so constant reads through it keep a patch on the task_completion path
+# effective here too.
+_m = sys.modules[__package__ + '.task_completion']
 
 
 def _stop(*args, **kwargs):
@@ -131,7 +129,7 @@ def read_authenticated_main_sha():
             type(response.get('object')) is not dict or
             response['object'].get('type') != 'commit' or
             type(response['object'].get('sha')) is not str or
-            _HEX40.fullmatch(response['object']['sha']) is None):
+            _m._HEX40.fullmatch(response['object']['sha']) is None):
         _stop('MAIN_REF_PIN_INVALID')
     return response['object']['sha']
 
@@ -169,7 +167,7 @@ def head_adds_only_main(root, recorded_head, head):
 
     Main is read afresh for each decision. Anything unreadable is not admitted.
     """
-    if any(type(sha) is not str or _HEX40.fullmatch(sha) is None
+    if any(type(sha) is not str or _m._HEX40.fullmatch(sha) is None
            for sha in (recorded_head, head)):
         return False
     try:
@@ -242,7 +240,7 @@ def _is_ancestor(root, ancestor, descendant):
     result = subprocess.run(['/usr/bin/git', '-c', 'core.useReplaceRefs=false',
         '-C', root, 'merge-base', '--is-ancestor', ancestor, descendant],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, timeout=_TIMEOUT,
+        stderr=subprocess.DEVNULL, timeout=_m._TIMEOUT,
         env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'GIT_CONFIG_NOSYSTEM': '1',
              'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_OPTIONAL_LOCKS': '0',
              'GIT_NO_LAZY_FETCH': '1', 'GIT_NO_REPLACE_OBJECTS': '1'},
@@ -259,9 +257,9 @@ def _collect_registered_result_diff(*, task_id, expected_common_dir, expected_ro
                                      artifact_segments=None, trusted_base_sha=None):
     """Share D6, ENV2, HEAD, ancestry, scope and diff-hash checks across routes."""
     registration = read_d6_registration(task_id, expected_common_dir,
-                                        allowed_states=_D6_EVIDENCE_STATES)
+                                        allowed_states=_m._D6_EVIDENCE_STATES)
     if (registration.root != expected_root or registration.branch != expected_branch or
-            type(source_sha) is not str or _HEX40.fullmatch(source_sha) is None or
+            type(source_sha) is not str or _m._HEX40.fullmatch(source_sha) is None or
             registration.trusted_agent_id != expected_agent or
             registration.session_ref != expected_session_ref or
             registration.native_session_id != expected_native_session_id):
@@ -302,7 +300,7 @@ def _collect_registered_result_diff(*, task_id, expected_common_dir, expected_ro
         _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID' if artifact_segments is not None
               else 'RESULT_SCOPE_MISMATCH')
     patch = _git(registration.root, ('diff', '--binary', '--no-ext-diff', '--no-textconv',
-                '--no-renames', source_sha, snapshot.head, '--'), limit=_GIT_LIMIT)
+                '--no-renames', source_sha, snapshot.head, '--'), limit=_m._GIT_LIMIT)
     return registration, snapshot, paths, developer_paths, patch
 
 
@@ -316,7 +314,7 @@ def _segment_shape_valid(segment):
     """
     return type(segment) is tuple and (len(segment) == 4 or (
         len(segment) == 5 and segment[0] is None and segment[1] is None and
-        type(segment[4]) is str and _HEX40.fullmatch(segment[4]) is not None))
+        type(segment[4]) is str and _m._HEX40.fullmatch(segment[4]) is not None))
 
 
 def _verify_recorded_segment(root, start_sha, end_sha, recorded_head, trusted_base_sha):
@@ -329,7 +327,7 @@ def _verify_recorded_segment(root, start_sha, end_sha, recorded_head, trusted_ba
     """
     from . import task_completion as _m
     try:
-        if (type(recorded_head) is not str or _HEX40.fullmatch(recorded_head) is None or
+        if (type(recorded_head) is not str or _m._HEX40.fullmatch(recorded_head) is None or
                 recorded_head == start_sha or
                 not _m._is_ancestor(root, start_sha, recorded_head) or
                 _developer_tip(root, recorded_head, end_sha,
@@ -354,8 +352,8 @@ def _verify_artifact_segments(root, segments, start, write_paths, trusted_base_s
             _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
         segment_artifact, segment_digest, start_sha, end_sha = segment[:4]
         if (start_sha != previous_end or
-                type(start_sha) is not str or _HEX40.fullmatch(start_sha) is None or
-                type(end_sha) is not str or _HEX40.fullmatch(end_sha) is None):
+                type(start_sha) is not str or _m._HEX40.fullmatch(start_sha) is None or
+                type(end_sha) is not str or _m._HEX40.fullmatch(end_sha) is None):
             _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
         try:
             _git(root, ('merge-base', '--is-ancestor', start_sha, end_sha), limit=4096)
@@ -460,7 +458,7 @@ def _review_binding_line(task_id, run_id, contract_digest, result_sha):
 def _registered_test(path):
     if type(path) is not str:
         return None
-    for pattern, kind in _TEST_REGISTRY:
+    for pattern, kind in _m._TEST_REGISTRY:
         if pattern.fullmatch(path):
             return kind
     return None

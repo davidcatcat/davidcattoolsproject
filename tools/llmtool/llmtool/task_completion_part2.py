@@ -14,24 +14,16 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 
 from .errors import LLMToolError
 from .test_output_excerpts import select_test_excerpts
-from .task_completion import (    BOOTSTRAP_SOURCES,
-    ENV2_PASS_MARKER_SCHEMA1_KEYS,
-    ENV2_PASS_MARKER_SCHEMA2_KEYS,
-    REQUIRED_BOOTSTRAP_SOURCES,
-    _GIT_LIMIT,
-    _HEX40,
-    _HEX64,
-    _PROPOSAL_FILE_LIMIT,
-    _PROPOSAL_TREE_LIMIT,
-    _REGISTRY_LIMIT,
-    _TASK_ID,
-    _TEST_REGISTRY,
-    _TIMEOUT,
-)
+
+# #2281 A2: the parent module is already in sys.modules while it imports this
+# part, so constant reads through it keep a patch on the task_completion path
+# effective here too.
+_m = sys.modules[__package__ + '.task_completion']
 
 
 def _stop(*args, **kwargs):
@@ -92,7 +84,7 @@ class D6Registration:
 
 def read_d6_registration(task_id, common_dir, *, allowed_states=('ACTIVE',)):
     """Read one bounded owner-only D6 record without following links."""
-    if (type(task_id) is not str or _TASK_ID.fullmatch(task_id) is None or
+    if (type(task_id) is not str or _m._TASK_ID.fullmatch(task_id) is None or
             type(common_dir) is not str or not os.path.isabs(common_dir) or
             os.path.realpath(common_dir) != common_dir or not common_dir.endswith('/.git')):
         _stop('D6_REGISTRY_ID_INVALID')
@@ -106,14 +98,14 @@ def read_d6_registration(task_id, common_dir, *, allowed_states=('ACTIVE',)):
         before = os.fstat(fd)
         if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or
                 stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1 or
-                before.st_size > _REGISTRY_LIMIT):
+                before.st_size > _m._REGISTRY_LIMIT):
             os.close(fd)
             _stop('D6_REGISTRY_INVALID')
         with os.fdopen(fd, 'rb') as stream:
-            raw = stream.read(_REGISTRY_LIMIT + 1)
+            raw = stream.read(_m._REGISTRY_LIMIT + 1)
             again = os.fstat(stream.fileno())
         after = path.lstat()
-        if (len(raw) > _REGISTRY_LIMIT or
+        if (len(raw) > _m._REGISTRY_LIMIT or
                 (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) !=
                 (again.st_dev, again.st_ino, again.st_size, again.st_mtime_ns) or
                 (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)):
@@ -134,8 +126,8 @@ def read_d6_registration(task_id, common_dir, *, allowed_states=('ACTIVE',)):
             not os.path.isabs(value['root_realpath']) or
             os.path.realpath(value['root_realpath']) != value['root_realpath'] or
             type(value.get('branch')) is not str or not value['branch'] or
-            type(value.get('base_sha')) is not str or _HEX40.fullmatch(value['base_sha']) is None or
-            type(value.get('head_sha')) is not str or _HEX40.fullmatch(value['head_sha']) is None):
+            type(value.get('base_sha')) is not str or _m._HEX40.fullmatch(value['base_sha']) is None or
+            type(value.get('head_sha')) is not str or _m._HEX40.fullmatch(value['head_sha']) is None):
         _stop('D6_REGISTRY_INVALID')
     identity = value.get('physical_identity')
     identity_keys = set(identity) if type(identity) is dict else None
@@ -169,7 +161,7 @@ def read_d6_registration(task_id, common_dir, *, allowed_states=('ACTIVE',)):
     approved_tooling_sha = value.get('env2_approved_tooling_sha')
     if approved_tooling_sha is not None and (
             type(approved_tooling_sha) is not str or
-            _HEX40.fullmatch(approved_tooling_sha) is None or
+            _m._HEX40.fullmatch(approved_tooling_sha) is None or
             approved_tooling_sha != value['head_sha']):
         _stop('D6_REGISTRY_INVALID')
     return D6Registration(task_id, value['trusted_agent_id'], value['session_ref'],
@@ -191,9 +183,9 @@ def validate_env2_pass_marker(registration, *, expected_root, current_head, writ
     if type(marker) is not dict:
         _stop('D6_ENV2_PASS_MARKER_INVALID')
     marker_keys = set(marker)
-    if marker_keys == ENV2_PASS_MARKER_SCHEMA1_KEYS:
+    if marker_keys == _m.ENV2_PASS_MARKER_SCHEMA1_KEYS:
         expected_version = 1
-    elif marker_keys == ENV2_PASS_MARKER_SCHEMA2_KEYS:
+    elif marker_keys == _m.ENV2_PASS_MARKER_SCHEMA2_KEYS:
         expected_version = 2
     else:
         _stop('D6_ENV2_PASS_MARKER_INVALID')
@@ -201,18 +193,18 @@ def validate_env2_pass_marker(registration, *, expected_root, current_head, writ
             marker['schema_version'] != expected_version or
             marker['result'] != 'PASS' or marker['task_id'] != registration.task_id or
             marker['root_realpath'] != expected_root or expected_root != registration.root or
-            type(current_head) is not str or _HEX40.fullmatch(current_head) is None or
+            type(current_head) is not str or _m._HEX40.fullmatch(current_head) is None or
             marker['submitted_head_sha'] != current_head or
             marker['current_head_sha'] != current_head or
             current_head != registration.result_sha or
             marker['tooling_sha'] != (registration.env2_approved_tooling_sha or
                                       registration.source_sha) or
             type(marker['tooling_sha']) is not str or
-            _HEX40.fullmatch(marker['tooling_sha']) is None or
+            _m._HEX40.fullmatch(marker['tooling_sha']) is None or
             type(marker['environment_fingerprint']) is not str or
             fingerprint_re.fullmatch(marker['environment_fingerprint']) is None or
             type(marker['report_sha256']) is not str or
-            _HEX64.fullmatch(marker['report_sha256']) is None):
+            _m._HEX64.fullmatch(marker['report_sha256']) is None):
         _stop('D6_ENV2_PASS_MARKER_MISMATCH')
 
     report_path = Path(expected_root) / 'tools' / 'llmtool' / '.d6-bootstrap-report.json'
@@ -281,7 +273,7 @@ def validate_env2_pass_marker(registration, *, expected_root, current_head, writ
         _stop('D6_ENV2_PASS_MARKER_MISMATCH')
 
     carried_from = marker.get('carried_from_head_sha')
-    if (type(carried_from) is not str or _HEX40.fullmatch(carried_from) is None or
+    if (type(carried_from) is not str or _m._HEX40.fullmatch(carried_from) is None or
             carried_from == current_head):
         _stop('D6_ENV2_PASS_MARKER_MISMATCH')
     try:
@@ -297,14 +289,14 @@ def validate_env2_pass_marker(registration, *, expected_root, current_head, writ
     if (type(allowed) is not list or not allowed or
             any(type(p) is not str for p in allowed) or
             allowed != sorted(set(allowed)) or
-            not set(allowed).issubset(BOOTSTRAP_SOURCES) or
+            not set(allowed).issubset(_m.BOOTSTRAP_SOURCES) or
             not set(allowed).issubset(set(write_paths))):
         _stop('D6_ENV2_PASS_MARKER_MISMATCH')
 
     try:
         diff_raw = _git(expected_root, ('diff', '--name-only', '-z', '--no-ext-diff',
                                         '--no-textconv', '--no-renames', marker['tooling_sha'],
-                                        current_head, '--', *sorted(BOOTSTRAP_SOURCES)),
+                                        current_head, '--', *sorted(_m.BOOTSTRAP_SOURCES)),
                         limit=1024 * 1024)
         diff_paths = sorted(set(p for p in diff_raw.decode('utf-8', 'strict').split('\x00') if p))
     except (LLMToolError, UnicodeError):
@@ -313,7 +305,7 @@ def validate_env2_pass_marker(registration, *, expected_root, current_head, writ
         _stop('D6_ENV2_PASS_MARKER_MISMATCH')
 
     try:
-        for req_path in sorted(REQUIRED_BOOTSTRAP_SOURCES):
+        for req_path in sorted(_m.REQUIRED_BOOTSTRAP_SOURCES):
             if _tree_entry(expected_root, current_head, req_path) is None:
                 _stop('D6_ENV2_PASS_MARKER_MISMATCH')
     except LLMToolError:
@@ -340,11 +332,11 @@ def validate_env2_pass_marker(registration, *, expected_root, current_head, writ
             type(venv_identity['inode']) is not int or isinstance(venv_identity['inode'], bool) or
             type(venv_identity['uid']) is not int or isinstance(venv_identity['uid'], bool) or
             type(venv_identity['pyvenv_cfg_sha256']) is not str or
-            _HEX64.fullmatch(venv_identity['pyvenv_cfg_sha256']) is None or
+            _m._HEX64.fullmatch(venv_identity['pyvenv_cfg_sha256']) is None or
             type(venv_identity['interpreter_realpath']) is not str or
             not venv_identity['interpreter_realpath'] or
             type(venv_identity['site_packages_sha256']) is not str or
-            _HEX64.fullmatch(venv_identity['site_packages_sha256']) is None):
+            _m._HEX64.fullmatch(venv_identity['site_packages_sha256']) is None):
         _stop('D6_ENV2_PASS_MARKER_MISMATCH')
 
     stat_obj = venv_identity['interpreter_stat']
@@ -388,7 +380,7 @@ def _proposal_blob_size(root, tree_sha, path):
     if not re.fullmatch(rb'(0|[1-9][0-9]{0,12})', raw_size):
         _stop('DEVELOPER_ARTIFACT_CHECK_UNKNOWN')
     size = int(raw_size)
-    if size > _GIT_LIMIT:
+    if size > _m._GIT_LIMIT:
         _stop('DEVELOPER_ARTIFACT_BLOB_TOO_LARGE')
     return size
 
@@ -417,7 +409,7 @@ def _test_excerpt(home, output, code):
 def _worktree_diff(root, source_sha):
     """Return a bounded source diff including safe untracked files."""
     tracked_patch = _git(root, ('diff', '--binary', '--no-ext-diff', '--no-textconv',
-        '--no-renames', source_sha, '--'), limit=_GIT_LIMIT)
+        '--no-renames', source_sha, '--'), limit=_m._GIT_LIMIT)
     tracked_raw = _git(root, ('diff', '--name-only', '-z', '--no-ext-diff',
         '--no-textconv', '--no-renames', source_sha, '--'), limit=1024 * 1024)
     untracked_raw = _git(root, ('ls-files', '--others', '--exclude-standard', '-z'),
@@ -427,7 +419,7 @@ def _worktree_diff(root, source_sha):
         untracked = [path for path in untracked_raw.decode('utf-8', 'strict').split('\x00') if path]
     except UnicodeError:
         _stop('WORKTREE_PATH_INVALID')
-    if len(untracked) > _PROPOSAL_FILE_LIMIT or len(set(untracked)) != len(untracked):
+    if len(untracked) > _m._PROPOSAL_FILE_LIMIT or len(set(untracked)) != len(untracked):
         _stop('WORKTREE_UNTRACKED_FILES')
     extra = []
     for path in untracked:
@@ -442,11 +434,11 @@ def _worktree_diff(root, source_sha):
         except OSError:
             _stop('WORKTREE_FILE_UNAVAILABLE')
         if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or
-                before.st_size > _GIT_LIMIT):
+                before.st_size > _m._GIT_LIMIT):
             _stop('WORKTREE_FILE_UNSUPPORTED')
         raw = _git(root, ('diff', '--no-index', '--binary', '--no-ext-diff',
             '--no-textconv', '--no-renames', '/dev/null', path),
-            limit=_GIT_LIMIT, allow_exit_1=True)
+            limit=_m._GIT_LIMIT, allow_exit_1=True)
         try:
             after = target.lstat()
         except OSError:
@@ -468,10 +460,10 @@ def _worktree_diff(root, source_sha):
             _stop('WORKTREE_FILE_UNSUPPORTED')
         extra.append(text.encode('utf-8'))
     paths = tuple(sorted(tracked | set(untracked)))
-    if len(paths) > _PROPOSAL_FILE_LIMIT:
+    if len(paths) > _m._PROPOSAL_FILE_LIMIT:
         _stop('WORKTREE_SCOPE_MISMATCH')
     patch = tracked_patch + b''.join(extra)
-    if len(patch) > _GIT_LIMIT:
+    if len(patch) > _m._GIT_LIMIT:
         _stop('GIT_EVIDENCE_TOO_LARGE')
     return paths, patch
 

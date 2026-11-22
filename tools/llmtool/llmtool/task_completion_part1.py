@@ -9,15 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import re
+import sys
 
-from .task_completion import (
-    _FORMAL_ACCEPT,
-    _HEX64,
-    _PROPOSAL_FILE_LIMIT,
-    _REVIEW_VERDICTS,
-    _VERDICT_MARKER,
-    _VERDICT_STATUS,
-)
+# #2281 A2: the parent module is already in sys.modules while it imports this
+# part, so constant reads through it keep a patch on the task_completion path
+# effective here too.
+_m = sys.modules[__package__ + '.task_completion']
 
 
 def _stop(*args, **kwargs):
@@ -232,7 +229,7 @@ def validate_review_repair_intent(repair_intent, handoff, review_return):
         _stop('REVIEW_REPAIR_BINDING_INVALID')
     value = dict(repair_intent)
     claimed_digest = value.pop('intent_sha256')
-    if type(claimed_digest) is not str or _HEX64.fullmatch(claimed_digest) is None:
+    if type(claimed_digest) is not str or _m._HEX64.fullmatch(claimed_digest) is None:
         _stop('REVIEW_REPAIR_DIGEST_MISMATCH')
     actual_digest = hashlib.sha256(_canonical_json_bytes(
         value, 'REVIEW_REPAIR_BINDING_INVALID')).hexdigest()
@@ -337,7 +334,7 @@ def _committed_changed_paths(root, source_sha, result_sha):
         paths = sorted(set(path for path in raw.decode('utf-8', 'strict').split('\x00') if path))
     except UnicodeError:
         _stop('TEST_PATH_INVALID')
-    if not paths or len(paths) > _PROPOSAL_FILE_LIMIT:
+    if not paths or len(paths) > _m._PROPOSAL_FILE_LIMIT:
         _stop('TEST_PATH_INVALID')
     return paths
 
@@ -376,14 +373,14 @@ def validate_review_dispatch_receipt(intent, receipt):
             any(receipt.get(key) != intent.get(key) for key in (
                 'dispatch_id', 'task_id', 'run_id', 'contract_digest', 'source_sha',
                 'result_head', 'diff_sha256', 'developer_task_id')) or
-            type(receipt['verdict']) is not str or receipt['verdict'] not in _REVIEW_VERDICTS or
-            type(receipt['security']) is not str or receipt['security'] not in _REVIEW_VERDICTS or
-            type(receipt['functional']) is not str or receipt['functional'] not in _REVIEW_VERDICTS or
+            type(receipt['verdict']) is not str or receipt['verdict'] not in _m._REVIEW_VERDICTS or
+            type(receipt['security']) is not str or receipt['security'] not in _m._REVIEW_VERDICTS or
+            type(receipt['functional']) is not str or receipt['functional'] not in _m._REVIEW_VERDICTS or
             type(receipt['execution_status']) is not str or
             receipt['execution_status'] not in ('SUCCEEDED', 'FAILED', 'BLOCKED',
                                                  'UNKNOWN', 'NOT_DISPATCHED') or
             (packet_digest is not None and
-             (type(packet_digest) is not str or _HEX64.fullmatch(packet_digest) is None)) or
+             (type(packet_digest) is not str or _m._HEX64.fullmatch(packet_digest) is None)) or
             (current and receipt['execution_status'] == 'SUCCEEDED' and
              packet_digest is None) or
             type(receipt['code']) is not str or
@@ -407,7 +404,7 @@ def validate_review_dispatch_receipt(intent, receipt):
                 receipt['reviewer_identity'] == intent['developer_identity'] or
                 receipt['reviewer_session_ref'] == intent['developer_session_ref'] or
                 type(receipt['findings_sha256']) is not str or
-                _HEX64.fullmatch(receipt['findings_sha256']) is None or
+                _m._HEX64.fullmatch(receipt['findings_sha256']) is None or
                 receipt['provenance'] != 'TRUSTED_REVIEW_ADAPTER'):
             _stop('REVIEWER_NOT_INDEPENDENT')
         if receipt['execution_status'] == 'SUCCEEDED':
@@ -499,14 +496,14 @@ def is_formal_claude_pass(body, *, task_id, run_id, contract_digest, result_sha)
     raw_lines = [line for line in body.splitlines() if line.strip()]
     if len(raw_lines) < 2:
         return False
-    marker = _VERDICT_MARKER.fullmatch(raw_lines[0])
-    status = _VERDICT_STATUS.fullmatch(raw_lines[1])
+    marker = _m._VERDICT_MARKER.fullmatch(raw_lines[0])
+    status = _m._VERDICT_STATUS.fullmatch(raw_lines[1])
     binding_line = _review_binding_line(task_id, run_id, contract_digest, result_sha)
     lines = [line.strip() for line in raw_lines]
     return (marker is not None and status is not None and
             marker.group(1) == 'Claude' and marker.group(2) == 'PASS' and
             status.group(1) == 'PASS' and status.group(2) == result_sha and
-            _FORMAL_ACCEPT in lines and binding_line in lines)
+            _m._FORMAL_ACCEPT in lines and binding_line in lines)
 
 
 

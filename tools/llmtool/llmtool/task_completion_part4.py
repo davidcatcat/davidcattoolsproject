@@ -11,18 +11,16 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 
 from .errors import LLMToolError
-from .task_completion import (
-    _GITHUB_ACTIONS_APP_ID,
-    _GIT_LIMIT,
-    _HEX40,
-    _MAC_CHECK,
-    _PROPOSAL_FILE_LIMIT,
-    _PROPOSAL_TREE_LIMIT,
-    _TIMEOUT,
-)
+
+# #2281 A2: the parent module is already in sys.modules while it imports this
+# part, so constant reads through it keep a patch on the task_completion path
+# effective here too.
+_m = sys.modules[__package__ + '.task_completion']
+_UNSET = object()
 
 
 def _stop(*args, **kwargs):
@@ -82,11 +80,11 @@ def verify_artifact_applied(root, artifact, artifact_sha256, source_sha, result_
                             changed_paths, write_paths, *, scope_paths=None):
     """Apply the proposal in a bounded temp tree and compare result blobs/modes."""
     if (type(artifact) is not str or not artifact or
-            len(artifact.encode('utf-8')) > _GIT_LIMIT or
+            len(artifact.encode('utf-8')) > _m._GIT_LIMIT or
             type(artifact_sha256) is not str or
             hashlib.sha256(artifact.encode('utf-8')).hexdigest() != artifact_sha256 or
-            type(source_sha) is not str or _HEX40.fullmatch(source_sha) is None or
-            type(result_sha) is not str or _HEX40.fullmatch(result_sha) is None):
+            type(source_sha) is not str or _m._HEX40.fullmatch(source_sha) is None or
+            type(result_sha) is not str or _m._HEX40.fullmatch(result_sha) is None):
         _stop('DEVELOPER_ARTIFACT_BINDING_INVALID')
     patch_paths = []
     for line in artifact.splitlines():
@@ -96,7 +94,7 @@ def verify_artifact_applied(root, artifact, artifact_sha256, source_sha, result_
                 _stop('DEVELOPER_ARTIFACT_INVALID')
             patch_paths.append(match.group(1))
     scope_paths = patch_paths if scope_paths is None else scope_paths
-    if (not patch_paths or len(patch_paths) > _PROPOSAL_FILE_LIMIT or
+    if (not patch_paths or len(patch_paths) > _m._PROPOSAL_FILE_LIMIT or
             len(patch_paths) != len(set(patch_paths)) or
             set(patch_paths) != set(changed_paths) or
             not set(scope_paths).issubset(set(write_paths))):
@@ -111,7 +109,7 @@ def verify_artifact_applied(root, artifact, artifact_sha256, source_sha, result_
     for path in patch_paths:
         total_blob_bytes += _proposal_blob_size(root, source_sha, path)
         total_blob_bytes += _proposal_blob_size(root, result_sha, path)
-        if total_blob_bytes > _PROPOSAL_TREE_LIMIT:
+        if total_blob_bytes > _m._PROPOSAL_TREE_LIMIT:
             _stop('DEVELOPER_ARTIFACT_TREE_TOO_LARGE')
     env = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C',
            'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
@@ -137,7 +135,7 @@ def verify_artifact_applied(root, artifact, artifact_sha256, source_sha, result_
                  '--binary', '--whitespace=nowarn', '-'],
                 cwd=temp_root, input=artifact.encode('utf-8'),
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=_TIMEOUT, env=env, shell=False, check=False)
+                timeout=_m._TIMEOUT, env=env, shell=False, check=False)
             if proc.returncode != 0:
                 _stop('DEVELOPER_ARTIFACT_NOT_APPLIED')
             for path in patch_paths:
@@ -165,9 +163,11 @@ def verify_artifact_applied(root, artifact, artifact_sha256, source_sha, result_
 def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
                              workflow_name, check_name, runner_names,
                              runner_labels=None, mode='self-hosted',
-                             app_id=_GITHUB_ACTIONS_APP_ID,
+                             app_id=_UNSET,
                              pr_merged=False, pr_head_ref=None):
-    if type(app_id) is not int or app_id != _GITHUB_ACTIONS_APP_ID:
+    if app_id is _UNSET:
+        app_id = _m._GITHUB_ACTIONS_APP_ID
+    if type(app_id) is not int or app_id != _m._GITHUB_ACTIONS_APP_ID:
         _stop('TRUST_CI_INVALID')
     slug = _trusted_slug()
     workflow = _github_get('actions/workflows/' + workflow_path.rsplit('/', 1)[-1])
@@ -335,7 +335,7 @@ def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None,
         from . import task_advance  # imported here: task_advance imports this module
         if not task_advance._mac_ci_runs(changed_paths):
             selected = [workflow for workflow in selected
-                        if workflow[field] != _MAC_CHECK]
+                        if workflow[field] != _m._MAC_CHECK]
     if not selected:
         _stop('TRUST_CI_INVALID')
     results = []
