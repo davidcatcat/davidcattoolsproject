@@ -417,10 +417,15 @@ _DIRECT_HANDOFF_HISTORY = 'direct_handoffs'
 # #2503: optional bounded, screened tail of the Developer CLI's stderr
 # (Developer-runtime, unverified), kept for the PM on any recorded outcome.
 _DEVELOPER_STDERR_FIELDS = frozenset(('stderr_excerpt',))
+# #2532: optional fixed code of the failure behind a coarse error_code (for
+# example the TaskStore code behind OPENCODE_RESULT_EVIDENCE_UNKNOWN). A code
+# only, never free text.
+_DEVELOPER_ERROR_CAUSE_FIELDS = frozenset(('error_cause',))
+_ERROR_CAUSE = re.compile(r'[A-Z][A-Z0-9_]{0,63}')
 _DEVELOPER_OPTIONAL_FIELDS = (frozenset((_DIRECT_DISPATCH_BOUNDARY, _DIRECT_HANDOFF_HISTORY)) |
                               _DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS |
                               _DEVELOPER_CLAUDE_FAILURE_EVIDENCE_FIELDS |
-                              _DEVELOPER_STDERR_FIELDS)
+                              _DEVELOPER_STDERR_FIELDS | _DEVELOPER_ERROR_CAUSE_FIELDS)
 
 
 def _valid_direct_handoffs(entries):
@@ -723,7 +728,12 @@ WORKER_AVAILABILITY_NAME = '.worker-availability.json'
 WORKER_AVAILABILITY_LOCK_NAME = '.worker-availability.lock'
 WORKER_AVAILABILITY_MAX_BYTES = 32 * 1024
 WORKER_AVAILABILITY_MAX_AGE_DAYS = 30
-TASK_UPDATE_LOCK_TIMEOUT_SECONDS = 2.0
+# #2532: parallel Developer routes contend for the same per-Task and sidecar
+# locks. Measured on the Owner Mac (2026-11-22, real 264 KB record): one update
+# holds its lock 0.27-0.32 s; with 3 writers on one lock the longest wait was
+# 1.38 s, so 2 s left no margin. 10 s matches LINEAGE_LOCK_TIMEOUT_SECONDS and
+# stays bounded: a holder past it still fails closed TASK_STORE_BUSY.
+TASK_UPDATE_LOCK_TIMEOUT_SECONDS = 10.0
 TASK_UPDATE_LOCK_POLL_SECONDS = 0.01
 # An unlocked read reopens a record replaced under it at most this many times.
 TASK_READ_ATTEMPTS = 3
@@ -939,7 +949,9 @@ def _fail(code='TASK_STORE_INVALID', *, holder_task_id=None):
         category = 'UNAVAILABLE'
     else:
         category = 'INVALID'
-    message = 'task store unavailable; details omitted'
+    # #2532: the fixed code is shown (it is a validated constant, never data);
+    # other details stay omitted.
+    message = f'task store unavailable: {safe_code}; details omitted'
     if safe_code == 'TASK_D6_ALREADY_BOUND' and _safe_identifier(holder_task_id, TASK_ID):
         message = f'{safe_code}: D6 is held by Task {holder_task_id}'
     error = LLMToolError(message)
@@ -2884,6 +2896,10 @@ def _validate(record, *, strict=True):
             if ('stderr_excerpt' in developer and
                     not _valid_reported_text(developer['stderr_excerpt'],
                                              DEVELOPER_STDERR_EXCERPT_MAX_BYTES)):
+                _fail()
+            if ('error_cause' in developer and
+                    (type(developer['error_cause']) is not str or
+                     _ERROR_CAUSE.fullmatch(developer['error_cause']) is None)):
                 _fail()
             if ('data_class' in developer and
                     (developer.get('provider_profile') != 'gw-agent' or

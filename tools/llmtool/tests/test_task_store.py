@@ -2624,8 +2624,10 @@ class TaskStoreTests(unittest.TestCase):
             with self.subTest(code=code, holder_task_id=holder_task_id):
                 with self.assertRaises(LLMToolError) as caught:
                     task_store_module._fail(code, holder_task_id=holder_task_id)
+                # #2532: the fixed code is shown; every other detail stays omitted.
                 self.assertEqual(str(caught.exception),
-                                 'task store unavailable; details omitted')
+                                 f'task store unavailable: {code}; details omitted')
+                self.assertNotIn('private', str(caught.exception))
                 self.assertEqual(caught.exception.task_store_error_code, code)
 
     def test_d6_binding_with_many_finished_tasks_does_not_hold_lock_over_full_scan(self):
