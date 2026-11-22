@@ -1182,6 +1182,7 @@ def _merge_pass_claim(record, number, head, events):
     for claim in _claims(record):
         if (type(claim) is not dict or claim.get('pr') != number or
                 claim.get('head_sha') != head or
+                review_result.review_kind(claim) != 'formal' or
                 claim.get('state') not in ('COMPLETED', 'DISPATCHED') or
                 type(claim.get('version')) is not int):
             continue
@@ -1189,6 +1190,7 @@ def _merge_pass_claim(record, number, head, events):
         outcome = next((event.get('outcome') or event.get('state') for event in events
                         if type(event) is dict and event.get('source') == 'REVIEWER' and
                         event.get('source_sha') == head and
+                        review_result.review_kind(event) == 'formal' and
                         event.get('version') == claim['version']), None)
         if outcome is None:
             continue
@@ -1208,11 +1210,12 @@ def _merge_pass_claim(record, number, head, events):
     if not passes:
         return 'MERGE_REVIEW_NOT_PASS'
     top = max(passes)
-    # Any newer claim on this PR and head, in any state and with or without a
-    # REVIEWER event, vetoes the PASS; so does a claim with no integer version.
+    # Any newer formal claim on this PR and head, in any state and with or without
+    # a REVIEWER event, vetoes the PASS; so does a claim with no integer version.
     for claim in _claims(record):
         if (type(claim) is not dict or claim.get('pr') != number or
-                claim.get('head_sha') != head):
+                claim.get('head_sha') != head or
+                review_result.review_kind(claim) != 'formal'):
             continue
         version = claim.get('version')
         if type(version) is not int or version > top:
@@ -1221,10 +1224,79 @@ def _merge_pass_claim(record, number, head, events):
            for item in candidates):
         return 'MERGE_REVIEW_NOT_PASS'
     if any(type(event) is dict and event.get('source') == 'REVIEWER' and
-           event.get('source_sha') == head and type(event.get('version')) is int and
+           event.get('source_sha') == head and
+           review_result.review_kind(event) == 'formal' and
+           type(event.get('version')) is int and
            event['version'] > top for event in events):
         return 'MERGE_NEWER_REVIEW_EXISTS'
     return top
+
+
+def _merge_security_claim(record, number, head, events):
+    """Refuse when any security verdict at (number, head) is not PASS, failing closed."""
+    try:
+        if type(record) is not dict:
+            return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+        raw_claims = record.get('review_dispatch_claim')
+        if raw_claims is None:
+            claims = []
+        elif type(raw_claims) is dict:
+            claims = [raw_claims]
+        elif type(raw_claims) is list:
+            claims = raw_claims
+        else:
+            return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+        if events is None:
+            event_list = []
+        elif type(events) is list:
+            event_list = events
+        else:
+            return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+        for claim in claims:
+            if type(claim) is not dict:
+                return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+            if claim.get('pr') != number or claim.get('head_sha') != head:
+                continue
+            kind = review_result.review_kind(claim)
+            if kind is None:
+                return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+            if kind != 'security':
+                continue
+            if claim.get('state') != 'COMPLETED':
+                return 'MERGE_SECURITY_REVIEW_NOT_PASS'
+            result = claim.get('review_result')
+            if type(result) is not dict:
+                return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+            if 'head' in result and result.get('head') != head:
+                return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+            verdict = result.get('verdict')
+            if verdict == 'PASS':
+                continue
+            if verdict in ('FIX', 'FAIL', 'BLOCKED'):
+                return 'MERGE_SECURITY_REVIEW_NOT_PASS'
+            return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+        for event in event_list:
+            if type(event) is not dict:
+                return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+            if event.get('source') != 'REVIEWER' or event.get('source_sha') != head:
+                continue
+            kind = review_result.review_kind(event)
+            if kind is None:
+                return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+            session_id = event.get('session_id')
+            if type(session_id) is str and session_id.startswith('secreview-') and kind != 'security':
+                return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+            if kind != 'security':
+                continue
+            outcome = event.get('outcome') or event.get('state')
+            if outcome == 'REVIEW_PASS':
+                continue
+            if outcome in ('REVIEW_FAIL', 'REVIEW_BLOCKED'):
+                return 'MERGE_SECURITY_REVIEW_NOT_PASS'
+            return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+        return None
+    except Exception:
+        return 'MERGE_SECURITY_REVIEW_UNKNOWN'
 
 
 # A recorded Owner acceptance is a PM relay comment in this repository.
@@ -1539,6 +1611,9 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         review_version = _merge_pass_claim(record, number, head, events)
         if type(review_version) is not int:
             return _merge_refusal(review_version or 'MERGE_REVIEW_NOT_PASS')
+    security_code = _merge_security_claim(record, number, head, events)
+    if security_code is not None:
+        return _merge_refusal(security_code)
     acceptance_out = {}
     code = _merge_checks(record, number, head, pr, github_get,
                          allow_missing_macos=True, owner_acceptance=owner_acceptance,
@@ -3047,7 +3122,7 @@ def _review_outcomes(record, claims, github_get):
     outcomes = []
     task = record
     for claim in claims:
-        if type(claim) is not dict:
+        if type(claim) is not dict or result_module.review_kind(claim) != 'formal':
             continue
         number, version, head = claim.get('pr'), claim.get('version'), claim.get('head_sha')
         events = [event for event in record.get('completion_events', [])
