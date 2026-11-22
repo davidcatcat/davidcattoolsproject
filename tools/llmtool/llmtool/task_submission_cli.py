@@ -5706,7 +5706,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         result = execute(route, {
             'root': registration.root, 'model': model, 'effort': effort,
             'expected_branch': registration.branch, 'expected_head': snapshot.head,
-            'write_paths': write_paths, 'executable': executable,
+            'read_paths': read_paths, 'write_paths': write_paths, 'executable': executable,
             'prompt': prompt, 'log_path': 'agy.log', 'timeout': timeout,
             'state_dirs': (),
         }, gate=route_gate, boundary=GatedBoundary(),
@@ -6431,7 +6431,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
         result = execute(route, {
             'root': registration.root, 'model': model, 'effort': effort,
             'expected_branch': registration.branch, 'expected_head': snapshot.head,
-            'write_paths': write_paths, 'executable': executable,
+            'read_paths': read_paths, 'write_paths': write_paths, 'executable': executable,
             'prompt': prompt, 'timeout': timeout, 'state_dirs': (),
         }, gate=route_gate, boundary=GatedBoundary(), snapshot=capture_snapshot)
         _record_skill_delivery(task, registration, snapshot, 'claude', model,
@@ -6899,7 +6899,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         try:
             result = execute(route, {'root': registration.root, 'model': model, 'effort': effort,
                 'expected_branch': registration.branch, 'expected_head': snapshot.head,
-                'write_paths': write_paths, 'executable': sys.executable,
+                'read_paths': read_paths, 'write_paths': write_paths, 'executable': sys.executable,
                 'prompt': prompt, 'task': task_input, 'timeout': timeout,
                 'state_dirs': (), **site.route_fields()}, gate=route_gate, boundary=for_platform(),
                 snapshot=capture_snapshot,
