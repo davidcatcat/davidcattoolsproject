@@ -144,6 +144,34 @@ class CommittedCarryGateTests(unittest.TestCase):
         self.assertEqual((audit['action'], audit['decision'], audit['assignment_id']),
                          ('COMMITTED_RESULT_CARRY', 'ALLOWED', 'f' * 32))
 
+    def test_an_invalid_carry_limit_policy_refuses_the_carry(self):
+        # #2281 row 14, design rule 4 (PR #2531): fail closed. An invalid
+        # committed_result_carries_max value ends the committed-result carry
+        # in the existing POLICY_INVALID policy refusal, not a silent
+        # fallback to the old hard-coded limit (which would have admitted
+        # this first carry, as with any non-invalid policy).
+        from llmtool import repair_policy
+        from llmtool.errors import LLMToolError
+        source = json.loads(repair_policy.policy_path().read_text())
+        source['committed_result_carries_max'] = 'two'
+        stream = tempfile.NamedTemporaryFile('w', suffix='.json', delete=False)
+        self.addCleanup(stream.close)
+        self.addCleanup(Path(stream.name).unlink)
+        stream.write(json.dumps(source))
+        stream.close()
+        with patch.object(repair_policy, 'policy_path',
+                          return_value=Path(stream.name)):
+            with self.assertRaises(LLMToolError) as policy_refused:
+                repair_policy.committed_result_carries_max()
+            self.assertIn('POLICY_INVALID', str(policy_refused.exception))
+            with self.assertRaises(wd.WorkerDispatchDenied) as caught:
+                self.write(*self.carry(), self.dispatching)
+        self.assertNotIn(caught.exception.dispatch_code,
+                         ('WORKER_COMMITTED_CARRY_PRECONDITION',
+                          'WORKER_COMMITTED_CARRY_LIMIT',
+                          'WORKER_REASSIGN_PRECONDITION'))
+        self.assertEqual(self.store.get(TASK)['developer']['source_sha'], HEAD)
+
     def test_a_carry_that_starts_a_reviewer_handoff_keeps_the_normal_gates(self):
         developer, completion = self.carry()
         developer['direct_result_callback']['review_handoff'] = {'dispatch_state': 'DISPATCHING'}
