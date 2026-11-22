@@ -15,11 +15,24 @@ from llmtool.errors import LLMToolError
 from llmtool.opencode_direct_developer import DirectOpenCodeError, run
 from llmtool.task_store import TaskStore
 
+import worker_policy_fixture
+import review_trust_fixture
+
 GRANT_PATH = 'tools/llmtool/workflow-grants.json'
 WORKFLOW = '.github/workflows/ci.yml'
 ISSUE = 2281
 OWNER_RECORD = ('https://github.com/davidcatcat/davidcattoolsproject/'
                 'issues/2281#issuecomment-1')
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+    worker_policy_fixture.start_module()
+
+
+def tearDownModule():
+    worker_policy_fixture.stop_module()
+    review_trust_fixture.stop_module()
 
 
 class _Store:
@@ -63,6 +76,9 @@ class _DispatchStore:
 
 class OpenCodeWorkflowGrantTests(unittest.TestCase):
     def setUp(self):
+        # #1692: keep the record-pm Task write authorization deterministic with
+        # the shared test policy; never read the host worker-dispatch.json.
+        worker_policy_fixture.install(self)
         temporary = tempfile.TemporaryDirectory(prefix='llmtool-opencode-grant-')
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
@@ -172,11 +188,13 @@ class OpenCodeWorkflowGrantTests(unittest.TestCase):
             },
         })
         store = TaskStore(self.cli_dir / 'task-store')
-        task = task_submission_cli.run_task_record_pm(
-            Namespace(stdin_json=True, issue=issue), store=store,
-            input_stream=io.StringIO(json.dumps({
-                'request': request, 'response': response})),
-            return_record=True)
+        with patch.object(task_submission_cli.worker_dispatch,
+                          'authorize_task_store_change', return_value=None):
+            task = task_submission_cli.run_task_record_pm(
+                Namespace(stdin_json=True, issue=issue), store=store,
+                input_stream=io.StringIO(json.dumps({
+                    'request': request, 'response': response})),
+                return_record=True)
         if issue is None:
             self.assertNotIn('issue', task)
         else:
