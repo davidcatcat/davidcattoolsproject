@@ -534,7 +534,7 @@ class TaskAdvanceTests(unittest.TestCase):
         self.assertEqual(task_advance._remote_test_status(record, d6()),
                          ('ADMISSION_DENIED', None, None))
 
-    def test_timeout_and_sha_mismatch_receipts_require_attention(self):
+    def test_timeout_and_sha_mismatch_receipts_keep_their_current_results(self):
         single_timeout = base_record(remote_test_outcomes=[{
             'result': 'TIMEOUT', 'executor_task': 'executor-1',
             'sha': HEAD, 'modules': ['test_task_advance'],
@@ -549,28 +549,34 @@ class TaskAdvanceTests(unittest.TestCase):
                 store=type('S', (), {'get': lambda self, _id: single_timeout})(),
                 pr_number=17)
         self.assertEqual(single_result['step'], 'RUN_REMOTE_TEST')
-        for outcome, code in (('TIMEOUT', 'REMOTE_TEST_TIMEOUT'),
-                              ('SHA_MISMATCH', 'REMOTE_TEST_SHA_MISMATCH')):
-            record = base_record(remote_test_outcomes=[])
-            if outcome == 'TIMEOUT':
-                record['remote_test_outcomes'] = [
-                    {'result': 'TIMEOUT', 'executor_task': 'executor-1',
-                     'sha': HEAD, 'modules': ['test_task_advance']},
-                    {'result': 'TIMEOUT', 'executor_task': 'executor-1',
-                     'sha': HEAD, 'modules': ['test_task_advance']},
-                ]
-            else:
-                record['remote_test_receipts'] = [remote_receipt(
-                    base_record(), result=outcome)]
-            self.assertEqual(task_advance.decide(record, d6(), PR, {}),
-                             'NEEDS_ATTENTION')
-            store = type('S', (), {'get': lambda self, _id: record})()
-            with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
-                 patch.object(task_advance, '_pr_snapshot', return_value=PR):
-                result = task_advance.advance(task_id=record['task_id'], store=store,
-                    pr_number=17)
-            self.assertEqual(result['step'], 'NEEDS_ATTENTION')
-            self.assertEqual(result['codes'], [code])
+
+        # #2602 item k: the second timeout on this commit waits for the Owner.
+        record = base_record(remote_test_outcomes=[
+            {'result': 'TIMEOUT', 'executor_task': 'executor-1',
+             'sha': HEAD, 'modules': ['test_task_advance']},
+            {'result': 'TIMEOUT', 'executor_task': 'executor-1',
+             'sha': HEAD, 'modules': ['test_task_advance']},
+        ])
+        self.assertEqual(task_advance.decide(record, d6(), PR, {}), 'WAITING_OWNER')
+        store = type('S', (), {'get': lambda self, _id: record})()
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR):
+            result = task_advance.advance(task_id=record['task_id'], store=store,
+                pr_number=17)
+        self.assertEqual(result['step'], 'WAITING_OWNER')
+        self.assertEqual(result['codes'], ['REMOTE_TEST_TIMEOUT', 'OWNER_NOTICE'])
+
+        # A SHA_MISMATCH receipt keeps its current needs-attention result.
+        record = base_record(remote_test_receipts=[remote_receipt(
+            base_record(), result='SHA_MISMATCH')])
+        self.assertEqual(task_advance.decide(record, d6(), PR, {}), 'NEEDS_ATTENTION')
+        store = type('S', (), {'get': lambda self, _id: record})()
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR):
+            result = task_advance.advance(task_id=record['task_id'], store=store,
+                pr_number=17)
+        self.assertEqual(result['step'], 'NEEDS_ATTENTION')
+        self.assertEqual(result['codes'], ['REMOTE_TEST_SHA_MISMATCH'])
 
     def test_no_admitted_modules_admission_denied_allows_review(self):
         record = base_record(remote_test_outcomes=[{
@@ -6356,7 +6362,7 @@ class TaskAdvanceReviewRefusalTests(unittest.TestCase):
                 self.assertNotIn('review_refusal', bad_result)
 
         # Other advance results have no review_refusal key
-        rec_needs_attention = base_record(remote_test_outcomes=[
+        rec_waiting_owner = base_record(remote_test_outcomes=[
             {'result': 'TIMEOUT', 'executor_task': 'executor-1',
              'sha': HEAD, 'modules': ['test_task_advance']},
             {'result': 'TIMEOUT', 'executor_task': 'executor-1',
@@ -6365,9 +6371,9 @@ class TaskAdvanceReviewRefusalTests(unittest.TestCase):
         with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
              patch.object(task_advance, '_pr_snapshot', return_value=PR):
             attn_result = task_advance.advance(
-                task_id=rec_needs_attention['task_id'],
-                store=ClaimStore(rec_needs_attention), pr_number=17)
-        self.assertEqual(attn_result['step'], 'NEEDS_ATTENTION')
+                task_id=rec_waiting_owner['task_id'],
+                store=ClaimStore(rec_waiting_owner), pr_number=17)
+        self.assertEqual(attn_result['step'], 'WAITING_OWNER')
         self.assertNotIn('review_refusal', attn_result)
 
     def test_real_task_store_accepts_claim_unchanged(self):

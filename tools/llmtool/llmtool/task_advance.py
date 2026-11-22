@@ -2582,11 +2582,37 @@ def _remote_test_status(record, d6):
             continue
         if outcome.get('result') == 'TIMEOUT':
             return 'TIMEOUT', None, None
+        if (outcome.get('result') == 'UNAVAILABLE' and
+                outcome.get('code') in _UNREACHABLE_OUTCOME_CODES):
+            return 'UNREACHABLE', None, None
         if (outcome.get('result') == 'ADMISSION_DENIED' and
                 outcome.get('code') == 'MODULE_NOT_ADMITTED' and
                 outcome.get('modules') == [] and not remote_test.remote_required_modules(record)):
             return 'ADMISSION_DENIED', None, None
     return None, None, None
+
+
+# #2602 item k: an EC2 run that could not reach the runner is retried once on
+# the same commit, then waited on with an Owner notice, never counted as a repair.
+_UNREACHABLE_OUTCOME_CODES = frozenset(('SSH_UNAVAILABLE', 'SSH_FAILED'))
+
+
+def _remote_test_unreachable_count(record, d6):
+    """Count exact-head EC2 outcomes where the runner could not be reached."""
+    head = d6.get('result_head') if type(d6) is dict else None
+    completion = record.get('completion') if type(record) is dict else None
+    executor_task = completion.get('executor_task_id') if type(completion) is dict else None
+    if type(head) is not str or type(executor_task) is not str:
+        return 0
+    outcomes = record.get('remote_test_outcomes', [])
+    if type(outcomes) is not list:
+        return 0
+    return sum(1 for outcome in outcomes
+               if type(outcome) is dict and
+               outcome.get('executor_task') == executor_task and
+               outcome.get('sha') == head and
+               outcome.get('result') == 'UNAVAILABLE' and
+               outcome.get('code') in _UNREACHABLE_OUTCOME_CODES)
 
 
 def _remote_test_timeout_count(record, d6):
@@ -2848,8 +2874,19 @@ def _pr_docs_only(number, head, github_get):
 
 # #2473: steps the pre-review EC2 record can produce; a docs-only PR re-decides them.
 _EC2_DERIVED_STEPS = frozenset((
-    'RUN_REMOTE_TEST', 'REPAIR_REVIEW', 'NEEDS_ATTENTION', 'WAITING_REPAIR',
-    'REPAIR_RETRY', 'DEVELOPER_START_FAILED', 'REPAIR_OUTCOME_UNKNOWN'))
+    'RUN_REMOTE_TEST', 'REPAIR_REVIEW', 'NEEDS_ATTENTION', 'WAITING_OWNER',
+    'WAITING_REPAIR', 'REPAIR_RETRY', 'DEVELOPER_START_FAILED',
+    'REPAIR_OUTCOME_UNKNOWN'))
+
+
+def _remote_test_waiting_result(task_id, number, d6, remote_status):
+    """Codes and result for a repeated timeout or unreachable-runner wait."""
+    reason = ('REMOTE_TEST_UNREACHABLE' if remote_status == 'UNREACHABLE'
+              else 'REMOTE_TEST_TIMEOUT')
+    head = d6.get('result_head') if type(d6) is dict else None
+    return [reason, 'OWNER_NOTICE'], {
+        'owner_notice': {'task_id': task_id, 'pr': number, 'head': head,
+                         'reason': reason}}
 
 
 def _pre_review_action(record, d6, pr, related, result_head, docs_only=False):
@@ -2860,10 +2897,16 @@ def _pre_review_action(record, d6, pr, related, result_head, docs_only=False):
     exact-head check (docs) gate still runs before any Reviewer is dispatched.
     """
     remote_status, _, _ = (None, None, None) if docs_only else _remote_test_status(record, d6)
+    # #2602 item k: the first repeat reruns on this commit; the second waits
+    # for the Owner. Neither a timeout nor an unreachable runner is a repair.
     if remote_status == 'TIMEOUT':
         if _remote_test_timeout_count(record, d6) == 1:
             return 'RUN_REMOTE_TEST'
-        return 'NEEDS_ATTENTION'
+        return 'WAITING_OWNER'
+    if remote_status == 'UNREACHABLE':
+        if _remote_test_unreachable_count(record, d6) == 1:
+            return 'RUN_REMOTE_TEST'
+        return 'WAITING_OWNER'
     if remote_status == 'SHA_MISMATCH':
         return 'NEEDS_ATTENTION'
     if remote_status == 'NOT_EXECUTED':
@@ -4267,6 +4310,11 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         codes.append(step)
         result = _start_failed_repair(
             related, d6.get('result_head') if type(d6) is dict else None)
+    elif step == 'WAITING_OWNER':
+        remote_status, _, _ = _remote_test_status(record, d6)
+        waiting_codes, result = _remote_test_waiting_result(
+            task_id, number, d6, remote_status)
+        codes.extend(waiting_codes)
     elif step == 'NEEDS_ATTENTION':
         remote_status, _, _ = _remote_test_status(record, d6)
         if remote_status == 'NOT_EXECUTED':
