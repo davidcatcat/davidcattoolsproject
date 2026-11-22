@@ -2,7 +2,7 @@
 
 @AGENTS.md
 
-Claude's entrypoint. The line above imports [AGENTS.md](AGENTS.md), the single shared source of rules and skill routing for every AI (Owner decision E6, [#1502](https://github.com/davidcatcat/davidcattoolsproject/issues/1502)). Do not copy shared rules here; change AGENTS.md instead. This file holds only rules that apply to Claude alone.
+Claude's entrypoint. The line above imports [AGENTS.md](AGENTS.md), the single shared source of rules and skill routing for every AI (Owner decision E6, [#1502](https://github.com/davidcatcat/davidcattoolsproject/issues/1502)). Do not copy shared rules here; change AGENTS.md instead. This file holds only rules that apply to Claude alone; where one of them differs from AGENTS.md, it wins for Claude.
 
 ## Claude only
 
