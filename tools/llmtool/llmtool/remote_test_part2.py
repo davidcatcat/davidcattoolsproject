@@ -161,10 +161,11 @@ def _record_outcome(store, task_id, task, *, result, code, executor_task, sha, m
                     persisted=True, delivery='NOT_DELIVERED_INBOX_UNAVAILABLE', event_id=None)
 
 
-def _fresh_pr_head(pr):
+def _fresh_pr_head(pr, *, get=None):
     """Return this PR's current head SHA from GitHub, or None if unreadable."""
+    github_get = _github_get if get is None else get
     try:
-        pr_data = _github_get(f'pulls/{pr}')
+        pr_data = github_get(f'pulls/{pr}')
     except Exception:
         return None
     head = pr_data.get('head') if type(pr_data) is dict else None
@@ -247,7 +248,7 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
                 older_heads.append(head)
     pr_head = None
     if pr is not None and (older_heads or not review_bound):
-        pr_head = _fresh_pr_head(pr)
+        pr_head = _fresh_pr_head(pr, get=get)
         if pr_head is None:
             return denied('RECEIPT_HEAD_MISMATCH' if older_heads
                           else 'RECEIPT_HEAD_UNRECORDED')
