@@ -8013,6 +8013,15 @@ def _launched_run_did_no_work(developer, d6_unchanged=None):
         # vouch for it (a later run moves the D6), and a missing, partial or
         # contradictory record must never be excused by a clean tree.
         return _quota_progress_shows_no_change(developer)
+    if (developer.get('provider_profile') == 'claude' and state == 'BLOCKED' and
+            error_code == 'CLAUDE_NO_CHANGES'):
+        # #2302 (#2415): llmtool itself records CLAUDE_NO_CHANGES only after it
+        # confirmed the D6 HEAD did not move and the run's worktree diff was
+        # empty, so the record alone proves this run did no work. Like a
+        # quota-stopped run (#2367 P0-B), a live D6 probe cannot vouch for it
+        # once a later run moves the D6; requiring one turned a no-work run
+        # into an effective repair and raised a false High Debug requirement.
+        return True
     source_sha = developer.get('source_sha')
     if (type(source_sha) is not str or
             re.fullmatch(r'[0-9a-f]{40}', source_sha) is None or
