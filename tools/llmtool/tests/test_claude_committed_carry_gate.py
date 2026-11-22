@@ -123,14 +123,23 @@ class CommittedCarryGateTests(unittest.TestCase):
         self.assert_denied(self.carry(), 'WORKER_COMMITTED_CARRY_LIMIT')
 
     def test_a_policy_allowing_two_carries_admits_the_second_carry(self):
-        # #2281 row 14 (PR #2531): with the optional key raised to two, the second
-        # committed-result carry for the same assignment is not refused with the
-        # carry limit reason.
-        policy = json.loads(wd._POLICY_PATH.read_text())
-        policy['committed_result_carries_max'] = 2
-        wd._POLICY_PATH.write_text(json.dumps(policy))
-        self.assert_denied(self.carry(record=False), 'WORKER_COMMITTED_CARRY_PRECONDITION')
-        saved = self.write(*self.carry(), self.dispatching)
+        # #2281 row 14 (PR #2531): the carry limit follows the optional
+        # committed_result_carries_max key read by the policy loader; with it
+        # set to two, the second committed-result carry for the same assignment
+        # is not refused with the carry limit reason.
+        from llmtool import repair_policy
+        source = json.loads(repair_policy.policy_path().read_text())
+        source['committed_result_carries_max'] = 2
+        stream = tempfile.NamedTemporaryFile('w', suffix='.json', delete=False)
+        self.addCleanup(stream.close)
+        self.addCleanup(Path(stream.name).unlink)
+        stream.write(json.dumps(source))
+        stream.close()
+        with patch.object(repair_policy, 'policy_path',
+                          return_value=Path(stream.name)):
+            self.assert_denied(self.carry(record=False),
+                               'WORKER_COMMITTED_CARRY_PRECONDITION')
+            saved = self.write(*self.carry(), self.dispatching)
         audit = saved['dispatch_audit'][-1]
         self.assertEqual((audit['action'], audit['decision'], audit['assignment_id']),
                          ('COMMITTED_RESULT_CARRY', 'ALLOWED', 'f' * 32))
