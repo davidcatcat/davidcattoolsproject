@@ -19,6 +19,7 @@ from unittest.mock import Mock, patch
 
 from llmtool import (
     gw_agent_sessions,
+    repair_policy,
     review_dispatch,
     task_advance,
     task_completion,
@@ -1094,7 +1095,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         # Per-Task budgets come from the gw-agent route in developer-routes.json (#2281 L9).
         self.assertEqual(seen['task']['budgets']['max_input_tokens'], 262144)
         self.assertEqual(seen['task']['budgets']['max_output_tokens'], 65536)
-        self.assertEqual(seen['task']['budgets']['max_turns'], 512)
+        # #2537: the route allows 512 turns; each Task gets the policy cap (64).
+        self.assertEqual(seen['task']['budgets']['max_turns'], 64)
         # #2281 (PR #2390 F1): the wall budget is the resolved run timeout
         # (route default 10800 s), not the fixture's route budget of 1800 s.
         self.assertEqual(seen['task']['budgets']['max_wall_seconds'], 10800)
@@ -1253,7 +1255,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         # 8 * 32768 = 262144; 4 * 16384 = 65536
         self.assertEqual(seen_requests[0]['task']['budgets']['max_input_tokens'], 262144)
         self.assertEqual(seen_requests[0]['task']['budgets']['max_output_tokens'], 65536)
-        self.assertEqual(seen_requests[0]['task']['budgets']['max_turns'], 512)
+        # #2537: the per-Task turn cap (64) applies below the route's 512.
+        self.assertEqual(seen_requests[0]['task']['budgets']['max_turns'], 64)
         # #2281 (PR #2390 F1): the wall budget is the resolved run timeout
         # (route default 10800 s), not the fixture's route budget of 1800 s.
         self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], 10800)
@@ -2238,7 +2241,8 @@ class GwAgentRealStoreTests(unittest.TestCase):
         # 8 * 32768 = 262144; 4 * 16384 = 65536
         self.assertEqual(seen_requests[0]['task']['budgets']['max_input_tokens'], 262144)
         self.assertEqual(seen_requests[0]['task']['budgets']['max_output_tokens'], 65536)
-        self.assertEqual(seen_requests[0]['task']['budgets']['max_turns'], 512)
+        # #2537: the per-Task turn cap (64) applies below the route's 512.
+        self.assertEqual(seen_requests[0]['task']['budgets']['max_turns'], 64)
         # #2281 (PR #2390 F1): the wall budget is the resolved run timeout
         # (route default 10800 s), not the fixture's route budget of 1800 s.
         self.assertEqual(seen_requests[0]['task']['budgets']['max_wall_seconds'], 10800)
@@ -3120,6 +3124,84 @@ class GwAgentRealStoreTests(unittest.TestCase):
                 else:
                     self.assertNotIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
                                      completion['missing_gates'])
+
+    # #2537: the per-Task turn cap. These run the real route, gateway process
+    # and TaskStore; only the model behind the gateway's HTTP endpoint is fake.
+
+    def _policy_file(self, extra):
+        data = json.loads(repair_policy.policy_path().read_text(encoding='utf-8'))
+        data.pop('gw_agent_max_turns', None)
+        data.update(extra)
+        path = self.base / f'policy-{len(extra)}-{sorted(extra.items())!r}.json'
+        path.write_text(json.dumps(data), encoding='utf-8')
+        return path
+
+    def _capped_run(self, target, policy_extra):
+        """Delegate once under a policy; return (code, task, gateway task budgets)."""
+        self._fresh_store()
+        seen = []
+
+        def runner(route, request, **kwargs):
+            seen.append(copy.deepcopy(request['task']['budgets']))
+            return task_submission_cli.run_route(route, request, **kwargs)
+
+        with patch.object(repair_policy, 'policy_path',
+                          return_value=self._policy_file(policy_extra)):
+            code, task = self._delegate(target, route_runner=runner)
+        self.assertEqual(len(seen), 1)
+        return code, task, seen[0]
+
+    def test_turn_cap_defaults_to_64_below_the_route_budget(self):
+        self.assertEqual(load_route_config()['routes']['gw-agent']['budgets']['max_turns'],
+                         512)
+        self.assertEqual(repair_policy.GW_AGENT_MAX_TURNS, 64)
+        self.assertNotIn('gw_agent_max_turns', repair_policy.load_policy())
+        _code, task, budgets = self._capped_run('gw-agent-cap-default.txt', {})
+        self.assertEqual(budgets['max_turns'], min(512, 64))
+        self._assert_success_persisted(task, 'gw-agent-cap-default.txt')
+
+    def test_configured_turn_cap_is_honoured_and_never_raises_the_route_budget(self):
+        for configured, expected in ((40, 40), (512, 512), (1000, 512)):
+            with self.subTest(configured=configured):
+                self._release_d6()
+                target = f'gw-agent-cap-{configured}.txt'
+                _code, task, budgets = self._capped_run(
+                    target, {'gw_agent_max_turns': configured})
+                self.assertEqual(budgets['max_turns'], expected)
+                self._assert_success_persisted(task, target)
+                (self.root / target).unlink()
+
+    def test_invalid_turn_cap_refuses_before_any_task_mutation(self):
+        for bad in (0, -1, 'many', True):
+            with self.subTest(bad=bad):
+                self._fresh_store()
+                with patch.object(repair_policy, 'policy_path',
+                                  return_value=self._policy_file({'gw_agent_max_turns': bad})), \
+                     self.assertRaisesRegex(LLMToolError, 'POLICY_INVALID'):
+                    self._delegate('gw-agent-cap-bad.txt', route_runner=self._unused_runner)
+                task = self._reloaded()
+                self.assertEqual(task['state'], 'PM_RESPONDED')
+                self.assertIsNone(task.get('developer'))
+                self.server.script.clear()
+
+    def test_loop_past_the_cap_ends_with_the_definite_turn_budget_code(self):
+        # A model that keeps calling tools without finishing (the #2537 loop)
+        # is stopped by the gateway at the cap, never left to the wall timeout.
+        target = 'gw-agent-cap-loop.txt'
+        cap = 3
+        self.server.script.extend(
+            self.reply(self.tool_call('list_dir', path='.'), model='qwen3.8-27b')
+            for _ in range(cap + 2))
+        code, task, budgets = self._capped_run(target, {'gw_agent_max_turns': cap})
+        self.assertEqual(budgets['max_turns'], cap)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(len(self.server.requests), cap)
+        developer = task['developer']
+        self.assertEqual(developer['error_code'],
+                         'DEVELOPER_GW_AGENT_BUDGET_EXCEEDED_TURN_BUDGET_EXCEEDED')
+        self.assertNotEqual(developer['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertNotIn('UNKNOWN', developer['state'])
+        self.assertFalse((self.root / target).exists())
 
 
 if __name__ == '__main__':
