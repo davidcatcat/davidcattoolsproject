@@ -268,7 +268,14 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         return denied('RECEIPT_HEAD_MISMATCH')
     if pr is not None:
         store.record_published_pr(task_id, pr, recorded_head)
-    admitted = remote_required_modules(task)
+        github_get = _github_get if get is None else get
+        from .task_advance import _exact_head_pr_files
+        pr_files, files_code = _exact_head_pr_files(pr, sha, github_get)
+        if files_code is not None:
+            return denied(files_code)
+    else:
+        return denied('PR_FILES_UNAVAILABLE')
+    admitted = remote_required_modules(task, pr_files=pr_files)
     if (type(modules) not in (tuple, list, set, frozenset) or
             any(type(module) is not str for module in modules)):
         return denied('MODULE_NOT_ADMITTED')

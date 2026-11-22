@@ -1091,7 +1091,7 @@ def _receipt_not_executed(receipt):
             receipt.get('failures') == [])
 
 
-def _remote_test_receipt_summary(record, head):
+def _remote_test_receipt_summary(record, head, *, pr_files=None):
     receipts = record.get('remote_test_receipts', []) if type(record) is dict else []
     if type(receipts) is not list:
         return None
@@ -1123,7 +1123,7 @@ def _remote_test_receipt_summary(record, head):
                          if type(actions) is dict and type(actions.get('run_id')) is int and actions['run_id'] > 0
                          else None)
         if receipt['result'] == 'PASS' and not remote_test.pass_receipt_covers(
-                receipt, remote_test.remote_required_modules(record)):
+                receipt, remote_test.remote_required_modules(record, pr_files=pr_files)):
             return None
         summary_result = ('NOT_EXECUTED'
                           if _receipt_not_executed(receipt)
@@ -2529,8 +2529,10 @@ def _review_verdict_absent(claim, github_get):
     return True
 
 
-def _remote_test_status(record, d6):
+def _remote_test_status(record, d6, *, pr_files=None, pr_files_code=None):
     """Return exact-head remote-test state, bounded excerpt, and validated receipt."""
+    if pr_files_code is not None:
+        return None, None, None
     head = d6.get('result_head') if type(d6) is dict else None
     completion = record.get('completion') if type(record) is dict else None
     executor_task = completion.get('executor_task_id') if type(completion) is dict else None
@@ -2555,7 +2557,7 @@ def _remote_test_status(record, d6):
             continue
         if receipt['result'] == 'PASS':
             if remote_test.pass_receipt_covers(
-                    receipt, remote_test.remote_required_modules(record)):
+                    receipt, remote_test.remote_required_modules(record, pr_files=pr_files)):
                 return 'PASS', None, receipt
             break
         if receipt['result'] in ('TIMEOUT', 'SHA_MISMATCH'):
@@ -2584,7 +2586,8 @@ def _remote_test_status(record, d6):
             return 'TIMEOUT', None, None
         if (outcome.get('result') == 'ADMISSION_DENIED' and
                 outcome.get('code') == 'MODULE_NOT_ADMITTED' and
-                outcome.get('modules') == [] and not remote_test.remote_required_modules(record)):
+                outcome.get('modules') == [] and
+                not remote_test.remote_required_modules(record, pr_files=pr_files)):
             return 'ADMISSION_DENIED', None, None
     return None, None, None
 
@@ -2792,58 +2795,89 @@ _PR_FILE_STATUSES = frozenset(('added', 'removed', 'modified', 'renamed',
 _PR_RENAME_STATUSES = frozenset(('renamed', 'copied'))
 
 
-def _pr_docs_only(number, head, github_get):
-    """#2473: True only when GitHub proves every changed path of the PR is documentation.
+def _exact_head_pr_files(number, head, github_get):
+    """Read and validate the complete PR changed-file list at one exact head.
 
-    The complete file list is read for this PR number, both paths of every
-    rename are classified with the CI path classifier, the list must match the
-    PR's own file count, and the PR must be open and unmerged at the exact head
-    both before and after the read. Any doubt returns False, which keeps the EC2
-    decision.
+    Returns (files, None) only when GitHub proves the PR is open and unmerged
+    at ``head`` both before and after reading all pages, the list is non-empty
+    and matches ``changed_files`` on both snapshots, and every item/rename is
+    well-formed. Otherwise returns (None, explicit_code).
     """
     try:
         if type(number) is not int or type(head) is not str or _HEX40.fullmatch(head) is None:
-            return False
+            return None, _PR_FILES_UNAVAILABLE
         before = github_get(f'pulls/{number}')
         if not _pr_open_for_head(before, number, head):
-            return False
+            before_head = before.get('head') if type(before) is dict else None
+            if (type(before) is dict and before.get('number') == number and
+                    before.get('state') == 'open' and before.get('merged') is False and
+                    type(before_head) is dict and before_head.get('sha') != head):
+                return None, 'PR_FILES_HEAD_MISMATCH'
+            return None, _PR_FILES_UNAVAILABLE
         count = before.get('changed_files')
         files, files_code = _pr_files(number, github_get)
-        if files_code is not None or type(files) is not list or not files:
-            return False
+        if files_code is not None:
+            return None, files_code
+        if type(files) is not list or not files:
+            return None, _PR_FILES_UNAVAILABLE
         if type(count) is not int or isinstance(count, bool) or count != len(files):
-            return False
-        names, seen = [], set()
+            return None, _PR_FILES_UNAVAILABLE
+        seen = set()
         for item in files:
             if type(item) is not dict:
-                return False
+                return None, _PR_FILES_UNAVAILABLE
             path, status = item.get('filename'), item.get('status')
             if (type(path) is not str or not path or path in seen or
-                    type(status) is not str or status not in _PR_FILE_STATUSES):
-                return False
+                    type(status) is not str or status not in _PR_FILE_STATUSES or
+                    '\0' in path):
+                return None, _PR_FILES_UNAVAILABLE
             seen.add(path)
-            names.append(path)
             previous = item.get('previous_filename')
             if status in _PR_RENAME_STATUSES and type(previous) is not str:
-                return False
+                return None, _PR_FILES_UNAVAILABLE
             if previous is not None:
-                if (type(previous) is not str or not previous or previous in seen):
-                    return False
+                if (type(previous) is not str or not previous or previous in seen or
+                        '\0' in previous):
+                    return None, _PR_FILES_UNAVAILABLE
                 seen.add(previous)
-                names.append(previous)
-        if any('\0' in name for name in names):
-            return False
-        classify = _ci_path_classes().classify_path
-        if any(classify(name) != 'docs' for name in names):
-            return False
         after = github_get(f'pulls/{number}')
         if not _pr_open_for_head(after, number, head):
-            return False
+            after_head = after.get('head') if type(after) is dict else None
+            if (type(after) is dict and after.get('number') == number and
+                    after.get('state') == 'open' and after.get('merged') is False and
+                    type(after_head) is dict and after_head.get('sha') != head):
+                return None, 'PR_FILES_HEAD_MISMATCH'
+            return None, _PR_FILES_UNAVAILABLE
         after_count = after.get('changed_files')
-        return (type(after_count) is int and not isinstance(after_count, bool) and
-                after_count == len(files))
+        if type(after_count) is not int or isinstance(after_count, bool) or after_count != len(files):
+            return None, _PR_FILES_UNAVAILABLE
+        return files, None
+    except Exception:
+        return None, _PR_FILES_UNAVAILABLE
+
+
+def _files_are_docs_only(files):
+    """True only when every path and rename source in validated files is docs."""
+    if type(files) is not list or not files:
+        return False
+    names = []
+    for item in files:
+        names.append(item['filename'])
+        if item.get('previous_filename') is not None:
+            names.append(item['previous_filename'])
+    try:
+        classify = _ci_path_classes().classify_path
+        return all(classify(name) == 'docs' for name in names)
     except Exception:
         return False
+
+
+def _pr_docs_only(number, head, github_get):
+    """#2473: True only when GitHub proves every changed path of the PR is documentation."""
+    files, files_code = _exact_head_pr_files(number, head, github_get)
+    if files_code is not None:
+        return False
+    return _files_are_docs_only(files)
 
 
 # #2473: steps the pre-review EC2 record can produce; a docs-only PR re-decides them.
@@ -2852,14 +2886,17 @@ _EC2_DERIVED_STEPS = frozenset((
     'REPAIR_RETRY', 'DEVELOPER_START_FAILED', 'REPAIR_OUTCOME_UNKNOWN'))
 
 
-def _pre_review_action(record, d6, pr, related, result_head, docs_only=False):
+def _pre_review_action(record, d6, pr, related, result_head, docs_only=False,
+                       *, pr_files=None, pr_files_code=None):
     """Return the gate action before a Reviewer may start on this head.
 
     docs_only (#2473) is set only after _pr_docs_only proved the PR changes
     documentation alone: no EC2 result is required, and the review path's
     exact-head check (docs) gate still runs before any Reviewer is dispatched.
     """
-    remote_status, _, _ = (None, None, None) if docs_only else _remote_test_status(record, d6)
+    remote_status, _, _ = (
+        (None, None, None) if docs_only
+        else _remote_test_status(record, d6, pr_files=pr_files, pr_files_code=pr_files_code))
     if remote_status == 'TIMEOUT':
         if _remote_test_timeout_count(record, d6) == 1:
             return 'RUN_REMOTE_TEST'
@@ -2878,7 +2915,7 @@ def _pre_review_action(record, d6, pr, related, result_head, docs_only=False):
     return 'DISPATCH_REVIEW'
 
 
-def decide(record, d6, pr, related, docs_only=False):
+def decide(record, d6, pr, related, docs_only=False, *, pr_files=None, pr_files_code=None):
     """Return the next action name using only supplied snapshots."""
     if type(record) is not dict:
         return 'DEVELOPER_ATTENTION'
@@ -2910,7 +2947,8 @@ def decide(record, d6, pr, related, docs_only=False):
     matching = [claim for claim in claims if type(claim) is dict and
                 claim.get('pr') == chosen_pr and claim.get('head_sha') == result_head]
     if not matching:
-        return _pre_review_action(record, d6, pr, related, result_head, docs_only)
+        return _pre_review_action(record, d6, pr, related, result_head, docs_only,
+                                  pr_files=pr_files, pr_files_code=pr_files_code)
     claim = max(matching, key=lambda item: item.get('version', 0))
     if claim.get('state') == 'UNKNOWN' and _failure_reason(claim.get('failure_reason')):
         # #2486: advance may re-run the newest stored refusal once even when
@@ -2918,7 +2956,8 @@ def decide(record, d6, pr, related, docs_only=False):
         if sum(type(item) is dict and item.get('head_sha') == result_head
                for item in claims) > 1:
             return 'REVIEW_UNUSABLE_STOPPED'
-        action = _pre_review_action(record, d6, pr, related, result_head, docs_only)
+        action = _pre_review_action(record, d6, pr, related, result_head, docs_only,
+                                    pr_files=pr_files, pr_files_code=pr_files_code)
         return 'REVIEW_REDISPATCH' if action == 'DISPATCH_REVIEW' else action
     if claim.get('state') in ('CLAIMED', 'UNKNOWN'):
         return 'REVIEW_OUTCOME_UNKNOWN'
@@ -3831,12 +3870,15 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             {'task_id': task_id, 'step': 'D6_BINDING_UNAVAILABLE', 'result': None,
              'next': 'D6_BINDING_UNAVAILABLE', 'codes': [code]}, record, store, None)
     step = decide(record, d6, pr, related)
-    if step in _EC2_DERIVED_STEPS and _pr_docs_only(number, d6['result_head'], get):
-        # #2473: a docs-only PR needs no EC2 result, whatever the EC2 record
-        # says (none, FAIL, TIMEOUT, SHA_MISMATCH). The check (docs) gate below
-        # still runs before any Reviewer is dispatched. A head with a Reviewer
-        # claim decides identically with docs_only, so those steps are unchanged.
-        step = decide(record, d6, pr, related, docs_only=True)
+    pr_files, pr_files_code = None, None
+    if step in _EC2_DERIVED_STEPS or step in ('DISPATCH_REVIEW', 'REVIEW_REDISPATCH'):
+        # #2473, #2491: read the exact-head PR changed files once so both the
+        # docs-only check and the EC2 module set (declared + PR-changed) use the
+        # same fail-closed snapshot.
+        pr_files, pr_files_code = _exact_head_pr_files(number, d6['result_head'], get)
+        docs_only = pr_files_code is None and _files_are_docs_only(pr_files)
+        step = decide(record, d6, pr, related, docs_only=docs_only,
+                      pr_files=pr_files, pr_files_code=pr_files_code)
     # A crash after GitHub creates the PR can leave the Task without its binding.
     # Only an exact-head open PR recovered from this D6 branch may fill it.
     if (recovered_pr and step not in ('PUBLISH', 'DEVELOPER_ATTENTION') and
@@ -3893,13 +3935,16 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             code = remote_result.get('code') if type(remote_result) is dict else None
             if type(code) is str and re.fullmatch(r'[A-Z0-9_]{1,64}', code):
                 codes.append(code)
+            elif pr_files_code is not None:
+                codes.append(pr_files_code)
             result = {'task_id': task_id, 'executor_task': executor_task,
                       'head': d6['result_head']}
             try:
                 fresh_record = store.get(task_id)
             except Exception:
                 fresh_record = None
-            summary = _remote_test_receipt_summary(fresh_record, d6['result_head'])
+            summary = _remote_test_receipt_summary(fresh_record, d6['result_head'],
+                                                   pr_files=pr_files)
             if summary is not None:
                 result['remote_test'] = summary
                 if number is not None:

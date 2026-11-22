@@ -316,6 +316,8 @@ def _task_path_modules(task):
 
 _MAC_MANIFEST = Path(__file__).resolve().parents[1] / 'ci' / 'mac-modules.txt'
 _TESTS_DIR = Path(__file__).resolve().parents[1] / 'tests'
+_TEST_MODULE_PATH = re.compile(r'tools/llmtool/tests/(test_[a-z0-9_]{1,80})\.py')
+_CHANGED_TEST_STATUSES = frozenset(('added', 'modified', 'renamed', 'copied', 'changed'))
 
 
 def _darwin_skip(decorator):
@@ -373,14 +375,37 @@ def _darwin_only_modules(stems, *, manifest=None, tests_dir=None):
     return frozenset(found)
 
 
-def remote_required_modules(task):
-    """Task test modules a Linux remote receipt must cover (#2573).
+def _pr_changed_test_modules(pr_files):
+    """Return sorted runnable test module stems added or changed at the PR head."""
+    if type(pr_files) is not list:
+        return ()
+    names = set()
+    for item in pr_files:
+        if type(item) is not dict:
+            continue
+        status = item.get('status')
+        path = item.get('filename')
+        if status not in _CHANGED_TEST_STATUSES or type(path) is not str:
+            continue
+        match = _TEST_MODULE_PATH.fullmatch(path)
+        if match:
+            names.add(match.group(1))
+    return tuple(sorted(names))
 
-    Darwin-only modules are left to the exact-head Mac CI merge gate.
+
+def remote_required_modules(task, *, pr_files=None):
+    """Task test modules a Linux remote receipt must cover (#2573, #2491).
+
+    Includes the Task's declared test modules together with every runnable
+    test module the PR adds or changes at its exact head. Darwin-only modules
+    are left to the exact-head Mac CI merge gate.
     """
-    declared = _task_path_modules(task)
-    darwin = _darwin_only_modules(declared)
-    return tuple(module for module in declared if module not in darwin)
+    declared = set(_task_path_modules(task))
+    if pr_files is not None:
+        declared.update(_pr_changed_test_modules(pr_files))
+    ordered = tuple(sorted(declared))
+    darwin = _darwin_only_modules(ordered)
+    return tuple(module for module in ordered if module not in darwin)
 
 
 def _admitted_modules(task):
