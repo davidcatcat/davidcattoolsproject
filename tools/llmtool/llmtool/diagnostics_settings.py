@@ -69,14 +69,34 @@ def _absolute(value, windows=False):
     return path
 
 
+def _check_parent_not_group_or_other_writable(path):
+    """Refuse a POSIX LLMTOOL_HOME whose parent is group- or other-writable.
+
+    Only an existing, stat-able parent has observable permissions; a missing
+    parent carries no group/other write risk and leaves the location unchanged.
+    """
+    try:
+        mode = os.stat(path.parent).st_mode
+    except OSError:
+        return
+    if mode & 0o022:  # S_IWGRP | S_IWOTH
+        raise LLMToolError('diagnostics home parent is group- or other-writable')
+
+
 def resolve_diagnostics_home(*, environ=None, platform=None, home=None):
-    """Location only. No expansion/interpolation, I/O, or persistence selection."""
+    """Location only. No expansion/interpolation or persistence selection."""
     env = os.environ if environ is None else environ
     system = sys.platform if platform is None else platform
     windows = system == 'win32'
+    if 'LLMTOOL_HOME' in env:
+        try:
+            path = _absolute(env['LLMTOOL_HOME'], windows)
+        except (ValueError, UnicodeError):
+            raise LLMToolError('diagnostics home requires a safe absolute location') from None
+        if not windows:
+            _check_parent_not_group_or_other_writable(path)
+        return path
     try:
-        if 'LLMTOOL_HOME' in env:
-            return _absolute(env['LLMTOOL_HOME'], windows)
         if windows:
             return _absolute(env.get('LOCALAPPDATA', ''), True) / 'llmtool'
         base = _absolute(str(Path.home() if home is None else home))
