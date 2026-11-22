@@ -1020,7 +1020,12 @@ def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, rela
         if mac_capacity is not None:
             return mac_capacity
     action = _remote_fail_action(related, head)
-    if action in ('WAITING_REPAIR', 'REPAIR_OUTCOME_UNKNOWN'):
+    if action == 'REPAIR_OUTCOME_UNKNOWN':
+        unknown = _unknown_repair_detail(related, head)
+        if unknown is not None:
+            return action, [action, unknown['reason']], unknown
+        return action, [action], None
+    if action == 'WAITING_REPAIR':
         return action, [action], None
     if action == 'DEVELOPER_START_FAILED':
         # #2188: the PM decides; no automatic retry and no new repair claim.
@@ -2550,7 +2555,9 @@ def _remote_fail_action(related, result_head):
         if state in ('RUNNING', 'PENDING'):
             return 'WAITING_REPAIR'
         if state == 'UNKNOWN':
-            return 'REPAIR_OUTCOME_UNKNOWN'
+            # #2325: a launched run that provably ended with no change is retried.
+            return ('REPAIR_RETRY' if _unknown_retry_allowed(current_repair)
+                    else 'REPAIR_OUTCOME_UNKNOWN')
         if state == 'RECORD_UNAVAILABLE':
             return 'DEVELOPER_ATTENTION'
         if state == 'RESPONDED':
@@ -2615,6 +2622,56 @@ def derive_repair_state(repair_record):
             return 'BLOCKED'
         return 'UNKNOWN'
     return 'UNKNOWN'
+
+
+def unknown_repair_reason(repair_record, claim, d6, pr):
+    """#2325: why a launched repair with an unknown outcome may not be retried.
+
+    Returns None only when every fact shows the run ended and left nothing
+    behind: the repair Developer state is DEVELOPER_OUTCOME_UNKNOWN, its
+    execution cleanup is CONFIRMED, the D6 is clean and both its observed and
+    recorded result heads are the claim head, and the PR head (when known) is
+    the claim head. Anything else returns the fixed reason code, and the claim
+    stays REPAIR_OUTCOME_UNKNOWN. A repair Task that never reached a Developer
+    is never retried here (#2492 item 1 = B; its recovery is separate).
+    """
+    developer = repair_record.get('developer') if type(repair_record) is dict else None
+    if type(developer) is not dict or developer.get('state') != 'DEVELOPER_OUTCOME_UNKNOWN':
+        return 'REPAIR_NOT_LAUNCHED_OR_STATE_CHANGED'
+    execution = developer.get('execution')
+    if type(execution) is not dict or execution.get('cleanup_status') != 'CONFIRMED':
+        return 'REPAIR_CLEANUP_NOT_CONFIRMED'
+    head = claim.get('head_sha') if type(claim) is dict else None
+    if (type(head) is not str or type(d6) is not dict or d6.get('dirty') is not False or
+            d6.get('result_head') != head or d6.get('recorded_result_head') != head):
+        return 'REPAIR_D6_DIRTY_OR_MOVED'
+    if pr is not None:
+        pr_head = pr.get('head') if type(pr) is dict else None
+        if type(pr_head) is not dict or pr_head.get('sha') != head:
+            return 'REPAIR_PR_HEAD_MOVED'
+    return None
+
+
+def _unknown_retry_allowed(claim):
+    """True only when the related claim carries a checked None unknown_reason."""
+    return (type(claim) is dict and 'unknown_reason' in claim and
+            claim['unknown_reason'] is None)
+
+
+def _unknown_repair_detail(related, head):
+    """#2325: the reason and the next PM command for a REPAIR_OUTCOME_UNKNOWN stop."""
+    repairs = related.get('repair_claims', []) if type(related) is dict else []
+    current = next((item for item in reversed(repairs if type(repairs) is list else [])
+                    if type(item) is dict and item.get('head_sha') == head), None)
+    if (type(current) is not dict or current.get('state') != 'DISPATCHED' or
+            current.get('repair_state') != 'UNKNOWN'):
+        return None
+    reason = current.get('unknown_reason') or 'REPAIR_OUTCOME_CHECK_FAILED'
+    repair_task = current.get('repair_task_id')
+    if type(repair_task) is not str or re.fullmatch(r'[0-9a-f]{32}', repair_task) is None:
+        return {'reason': reason}
+    return {'reason': reason, 'repair_task_id': repair_task,
+            'next_command': f'llmtool task brief {repair_task}'}
 
 
 def _pr_open_for_head(pr, number, head):
@@ -2788,7 +2845,9 @@ def decide(record, d6, pr, related, docs_only=False):
                 return 'WAITING_REPAIR'
             if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
                     current_repair.get('repair_state') == 'UNKNOWN'):
-                return 'REPAIR_OUTCOME_UNKNOWN'
+                # #2325: same rule as the EC2 path.
+                return ('REPAIR_RETRY' if _unknown_retry_allowed(current_repair)
+                        else 'REPAIR_OUTCOME_UNKNOWN')
             if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
                     current_repair.get('repair_state') == 'RECORD_UNAVAILABLE'):
                 return 'DEVELOPER_ATTENTION'
@@ -3542,7 +3601,13 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                             if type(repair_record) is dict else 'RECORD_UNAVAILABLE')
         except Exception:
             repair_state = 'RECORD_UNAVAILABLE'
-        repair_claims.append(dict(claim, repair_state=repair_state))
+        extra = {}
+        if repair_state == 'UNKNOWN' and claim.get('state') == 'DISPATCHED':
+            try:
+                extra['unknown_reason'] = unknown_repair_reason(repair_record, claim, d6, pr)
+            except Exception:
+                extra['unknown_reason'] = 'REPAIR_OUTCOME_CHECK_FAILED'
+        repair_claims.append(dict(claim, repair_state=repair_state, **extra))
     related['repair_claims'] = repair_claims
     try:
         review_outcomes = _review_outcomes(record, _claims(record), get)
@@ -4056,6 +4121,12 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             codes.append('DEVELOPER_ATTENTION')
     elif step in ('REPAIR_OUTCOME_UNKNOWN', 'REPAIR_RESULT_NOT_PUBLISHED'):
         codes.append(step)
+        if step == 'REPAIR_OUTCOME_UNKNOWN':
+            unknown = _unknown_repair_detail(
+                related, d6.get('result_head') if type(d6) is dict else None)
+            if unknown is not None:
+                codes.append(unknown['reason'])
+                result = unknown
     elif step == 'DEVELOPER_START_FAILED':
         # #2188 section 7 item 3: stop for the PM. No automatic retry, no new
         # repair claim; the PM decides on `task retry-start`.
