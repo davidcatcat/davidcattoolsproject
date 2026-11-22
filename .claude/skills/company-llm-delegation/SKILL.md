@@ -121,7 +121,7 @@ Home LLM work grows by a ladder (Owner 2026-11-10, #120). The PM logs every call
 
 - `spec_preflight.py` (`LADDER_SIZES`, `spec_tier`) computes the tier from write files, context bytes and turns (reads + 2 x writes + 1); any new file makes it at least T4.
 - Promote one tier after 3 first-try SOLVED in a row at the current tier. On failure step down one size tier; pause only after 2 consecutive failures at the lowest tier.
-- Repairs follow D1: two in total, the second only after an AI Debug with a confirmed cause (O4).
+- Repairs follow D1 (O4): 5 effective repairs each for review and EC2/CI test repairs; AI Debug first becomes required after the third effective review repair receives a formal FAIL, and its `RCA_CONFIRMED` covers later repairs of the same problem.
 - Until T2 is stable (3 first-try SOLVED in a row at T2), no Task above T2.
 - One contiguous region per Task.
 - In agent mode (gw-agent), name the line ranges to read; never ask for a whole large file. Put new tests in a new file.

@@ -456,13 +456,16 @@ class StartFailureStoreTests(unittest.TestCase):
         self.assertEqual(start_failure.decode_repair_packet(saved['repair_packet']), packet)
 
     def test_packet_byte_bound(self):
-        self.assertEqual(task_store.REPAIR_PACKET_MAX_BYTES, 65536)
+        self.assertEqual(task_store.REPAIR_PACKET_MAX_BYTES, 5 * 1024 * 1024)
         self.assertGreaterEqual(task_store.REPAIR_PACKET_MAX_BYTES,
                                 claude_route.MAX_PROMPT_BYTES)
         record = self.store.get(self._task()['task_id'])
-        TaskStore._encoded(dict(record, repair_packet=sized_packet_text(65536)))
+        # A canonical packet's excerpts are bounded (2000/6000 chars), so no
+        # valid packet reaches 5 MiB; the old 64 KiB ceiling no longer applies.
+        TaskStore._encoded(dict(record, repair_packet=sized_packet_text(65537)))
         with self.assertRaises(LLMToolError) as caught:
-            TaskStore._encoded(dict(record, repair_packet=sized_packet_text(65537)))
+            TaskStore._encoded(dict(record,
+                                    repair_packet='z' * (5 * 1024 * 1024 + 1)))
         self.assertStoreCode(caught, 'REPAIR_PACKET_INVALID')
 
     def test_invalid_packet_text_is_refused(self):
