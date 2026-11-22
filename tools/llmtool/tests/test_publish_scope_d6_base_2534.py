@@ -9,6 +9,7 @@ as before, and any doubt keeps the full walk (fail closed).
 
 import os
 import unittest
+from unittest.mock import patch
 
 from llmtool import task_advance
 import test_task_advance
@@ -64,6 +65,46 @@ class PublishScopeD6BaseTests(unittest.TestCase):
         return task_advance._publish_task(record, d6_binding, self.EXECUTOR_TASK,
             git_runner=self.git_runner, gh_runner=self.gh,
             record_result_call=self.record_result)
+
+    def snapshot_from_registry(self, registered_base):
+        """The advance path: _d6_snapshot over a real D6Registration (no hand-built d6)."""
+        from llmtool import task_completion
+        registration = task_completion.D6Registration(
+            self.EXECUTOR_TASK, 'opencode-developer', 'session-ref', self.root,
+            os.path.join(self.tmp.name, 'canonical', '.git'), self.BRANCH,
+            registered_base, None, 'ACTIVE', 'LOCKED', 1, 1, os.getuid(),
+            None, None, None, None)
+        record = {'task_id': self.TASK_ID, 'completion': {'evidence': {
+            'common_dir': os.path.join(self.tmp.name, 'canonical', '.git')}}}
+        with patch.object(task_completion, 'read_d6_registration', return_value=registration):
+            return task_advance._d6_snapshot(record, self.EXECUTOR_TASK)
+
+    def publish_through_snapshot(self, registered_base):
+        d6 = self.snapshot_from_registry(registered_base)
+        self.assertEqual(d6.get('base_sha'), registered_base)
+        record = {'task_id': self.TASK_ID, 'developer': {'write_paths': self.WRITE_PATHS}}
+        return task_advance._publish_task(record, d6, self.EXECUTOR_TASK,
+            git_runner=self.git_runner, gh_runner=self.gh,
+            record_result_call=self.record_result)
+
+    def test_advance_snapshot_carries_registry_base_and_merge_commit_base_publishes(self):
+        # The real #2534 shape: the registered base is a merge commit (main
+        # merged into the old PR branch) and the branch was never pushed.
+        base = self.old_branch_history()
+        parents = self.git(['rev-list', '--parents', '-n', '1', base], cwd=self.root).split()
+        self.assertEqual(len(parents), 3)
+        self.write('allowed.txt', 'task change\n')
+        result = self.publish_through_snapshot(base)
+        self.assertEqual(len(self.recorded), 1)
+        self.assertIsInstance(result, dict)
+
+    def test_advance_snapshot_with_base_not_on_main_still_refuses(self):
+        base = self.old_branch_history(squash_onto_main=False)
+        self.write('allowed.txt', 'task change\n')
+        with self.assertRaises(task_advance._PublishRefusal) as caught:
+            self.publish_through_snapshot(base)
+        self.assertEqual(caught.exception.args[0], 'PUBLISH_OUT_OF_SCOPE')
+        self.assertEqual(self.recorded, [])
 
     def assert_out_of_scope(self, base_sha):
         with self.assertRaises(task_advance._PublishRefusal) as caught:
