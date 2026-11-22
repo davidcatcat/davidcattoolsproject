@@ -1641,7 +1641,7 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         # lock in this same write; a ROOT parked since `record` was read is refused.
         # #1781 (I4): so is a split reservation that landed since then.
         code = getattr(exc, 'task_store_error_code', None)
-        if code == 'TASK_STORE_INVALID':
+        if code in ('TASK_STORE_INVALID', 'TASK_STORE_ARTIFACT_SENSITIVE'):
             # #1362: the stored record fails strict re-validation on this write
             # (for example a legacy docs-only test entry). That is not a race.
             return _merge_refusal('MERGE_RECORD_INVALID')

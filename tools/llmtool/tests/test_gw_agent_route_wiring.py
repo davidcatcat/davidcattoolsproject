@@ -2019,6 +2019,32 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(task['developer']['stderr_excerpt'], developer_stderr.WITHHELD)
 
+    def test_sensitive_artifact_refusal_records_its_cause(self):
+        # #2532 follow-up: a result the store screen refuses keeps the fixed
+        # cause code, never the refused content.
+        sentinel = 'ARTIFACT-SCREEN-SENTINEL-2532'
+        with patch.object(task_store, '_emitted_sensitive',
+                          side_effect=lambda text: sentinel in text), \
+                patch.object(task_submission_cli, 'run_task_direct_result_event') as callback:
+            code, task = self._delegate('gw-agent-artifact-sensitive.md',
+                                        content=sentinel + '\n')
+        callback.assert_not_called()
+        developer = task['developer']
+        self.assertEqual(code, 1)
+        self.assertEqual(developer['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(developer['error_code'], 'DEVELOPER_RESULT_PERSISTENCE_REJECTED')
+        self.assertEqual(developer['error_cause'], 'TASK_STORE_ARTIFACT_SENSITIVE')
+        self.assertIsNone(developer['artifact'])
+        self.assertNotIn(sentinel, json.dumps(task))
+
+    def test_rejected_write_without_code_records_unclassified_cause(self):
+        target = 'gw-agent-rejected-cause.md'
+        with patch.object(task_submission_cli, 'run_task_direct_result_event'):
+            code, task = self._delegate(target, reject_responded=True)
+        self.assertEqual(code, 1)
+        # TaskStoreConflict carries TASK_STORE_CONFLICT as its fixed code.
+        self.assertEqual(task['developer']['error_cause'], 'TASK_STORE_CONFLICT')
+
     def test_route_failure_keeps_its_stderr(self):
         code, task = self._delegate(
             'gw-agent-stderr-fail.md', route_runner=self._stderr_runner(
