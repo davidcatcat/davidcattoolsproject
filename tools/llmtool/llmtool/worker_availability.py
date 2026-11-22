@@ -555,6 +555,7 @@ def _task_failure_unresolved(store, now, view, *, classes=None):
         task_ids = list(lister())
     except Exception:
         return False
+    developers = []
     for task_id in task_ids:
         try:
             record = store.get(task_id)
@@ -564,18 +565,28 @@ def _task_failure_unresolved(store, now, view, *, classes=None):
         if (type(developer) is not dict or
                 developer.get('provider_profile') != GW_AGENT_WORKER):
             continue
+        try:
+            created_at = datetime.strptime(
+                developer.get('created_at'), '%Y-%m-%dT%H:%M:%SZ').replace(
+                tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        developers.append((developer, created_at))
+    # A later successful gw-agent run proves the route worked after an older
+    # failure, so that failure no longer needs a hold or probe. Without this,
+    # failures recorded before this check existed (already handled at the
+    # time) would hold gw-agent for MAX_RESET_WINDOW.
+    successes = [created_at for developer, created_at in developers
+                 if developer.get('state') == 'DEVELOPER_RESPONDED' and
+                 developer.get('error_code') is None]
+    latest_success = max(successes) if successes else None
+    for developer, created_at in developers:
         failure = classify_gw_agent_failure(developer.get('error_code'))
         if failure == 'unknown' or (classes is not None and failure not in classes):
             continue
-        created = developer.get('created_at')
-        if type(created) is not str:
-            continue
-        try:
-            created_at = datetime.strptime(created, '%Y-%m-%dT%H:%M:%SZ').replace(
-                tzinfo=timezone.utc)
-        except ValueError:
-            continue
         if now - created_at > MAX_RESET_WINDOW:
+            continue
+        if latest_success is not None and latest_success > created_at:
             continue
         if failure == 'security':
             entry = (None if view in (None, 'UNAVAILABLE')
