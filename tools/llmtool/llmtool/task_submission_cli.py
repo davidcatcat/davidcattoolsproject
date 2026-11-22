@@ -4032,6 +4032,24 @@ def _route_failure_execution(exc, condition):
     return base
 
 
+_ERROR_CAUSE_ATTRS = ('task_store_error_code', 'completion_code', 'route_code',
+                      'review_dispatch_code', 'remote_test_code')
+_ERROR_CAUSE_CODE = re.compile(r'[A-Z][A-Z0-9_]{0,63}')
+
+
+def _error_cause(exc):
+    """#2532: the fixed code behind a coarse result-evidence failure, or UNCLASSIFIED.
+
+    Only a validated constant code is kept (never the message), so the PM can
+    tell a TaskStore lock timeout (TASK_STORE_BUSY) from other failures.
+    """
+    for name in _ERROR_CAUSE_ATTRS:
+        value = getattr(exc, name, None)
+        if type(value) is str and _ERROR_CAUSE_CODE.fullmatch(value):
+            return value
+    return 'UNCLASSIFIED'
+
+
 def _direct_execution(result, *, status='SUCCEEDED', evidence=False):
     execution = {
         'status': status,
@@ -5351,6 +5369,7 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
             provider_type='opencode-cli', model=model,
             max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
             error_code='OPENCODE_RESULT_EVIDENCE_UNKNOWN',
+            error_cause=_error_cause(exc),
             execution=_direct_execution(result, status='UNKNOWN', evidence=True))
         if not isinstance(exc, Exception):
             try:
