@@ -1399,9 +1399,23 @@ def lineage_close_merged(store, task_id):
                     else _lineage_roll_up(store, line['lineage_id']))
             if retry and root is None:
                 return None
-    except LLMToolError:
-        return {'code': 'LINEAGE_CLOSE_FAILED'}
+    except LLMToolError as exc:
+        return {'code': 'LINEAGE_CLOSE_FAILED', 'cause': lineage_close_cause(exc)}
     return {'task_id': task_id, 'state': 'CLOSED', 'owner_notice': None, 'root': root}
+
+
+def lineage_close_cause(exc):
+    """Fixed cause code of a failed lineage close, e.g. LINEAGE_LOCK_BUSY; never data.
+
+    A TaskStore refusal carries its validated code; a lineage refusal is raised
+    with the bare code as its message. Anything else is UNKNOWN.
+    """
+    code = getattr(exc, 'task_store_error_code', None)
+    if type(code) is not str:
+        code = str(exc) if isinstance(exc, LLMToolError) else None
+    if type(code) is str and re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', code):
+        return code
+    return 'UNKNOWN'
 
 
 def _lineage_cli(store, stdout, call):

@@ -4415,7 +4415,8 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
         closed = {'task_id': '1' * 32, 'state': 'CLOSED', 'owner_notice': None, 'root': None}
         cases = (('closed', lambda *_args: dict(closed), closed, []),
                  ('failed', lambda *_args: dict(failed), failed, ['LINEAGE_CLOSE_FAILED']),
-                 ('raised', RuntimeError('store unavailable'), failed, ['LINEAGE_CLOSE_FAILED']),
+                 ('raised', RuntimeError('store unavailable'), dict(failed, cause='UNKNOWN'),
+                  ['LINEAGE_CLOSE_FAILED']),
                  ('nothing to close', lambda *_args: None, None, []))
         for name, closure, reported, codes in cases:
             with self.subTest(name):
@@ -6461,8 +6462,11 @@ class TaskAdvanceLineageCloseTests(unittest.TestCase):
     def lineage(self, task_id):
         return self.store.get(task_id)['lineage']
 
-    def advance(self, task_id):
-        """Run advance --merge with the PASS review evidence held in memory only."""
+    def advance(self, task_id, pr_merged=False):
+        """Run advance --merge with the PASS review evidence held in memory only.
+
+        pr_merged: GitHub reports the PR already merged at HEAD (a rerun).
+        """
         real_store, real_close = self.store, task_submission_cli.lineage_close_merged
         reviewed = {
             'completion': {'executor_task_id': 'executor-1', 'state': 'WAITING_REVIEW',
@@ -6484,6 +6488,9 @@ class TaskAdvanceLineageCloseTests(unittest.TestCase):
 
         pr = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'merged': False,
               'mergeable': True, 'mergeable_state': 'clean', 'labels': [{'name': 'mac-ci'}]}
+        if pr_merged:
+            pr.update(state='closed', merged=True, mergeable=None,
+                      merge_commit_sha='e' * 40)
 
         def github_get(path):
             if path == 'branches/main':
@@ -6543,7 +6550,8 @@ class TaskAdvanceLineageCloseTests(unittest.TestCase):
         with patch.object(task_submission_cli, '_lineage_roll_up', side_effect=failing):
             first = self.advance(only)
         self.assertEqual((first['step'], first['next']), ('MERGED', 'MERGED'))
-        self.assertEqual(first['lineage'], {'code': 'LINEAGE_CLOSE_FAILED'})
+        self.assertEqual(first['lineage'], {'code': 'LINEAGE_CLOSE_FAILED',
+                                            'cause': 'LINEAGE_ROLL_UP_FAILED'})
         self.assertEqual(first['codes'], ['LINEAGE_CLOSE_FAILED'])
         self.assertEqual(self.store.get(only)['merge_attempt']['state'], 'MERGED')
         closed_line = self.lineage(only)
@@ -6565,6 +6573,49 @@ class TaskAdvanceLineageCloseTests(unittest.TestCase):
         self.assertEqual(self.lineage(root)['state'], 'CLOSED')
         self.assertEqual(self.merges, [only])
         self.assertEqual(self.closes, [only, only, only])
+
+    def test_rerun_after_a_close_that_failed_before_closing_replays_the_close(self):
+        # #2566: the merge succeeded but the close failed before CLOSED was saved
+        # (a slow split held the lineage lock). A rerun of advance --merge saw the
+        # merged PR and refused MERGE_PR_NOT_OPEN, so nothing could close it. Now
+        # the rerun merges nothing, replays the close once, and the cause is shown.
+        root = self.parked_root()
+        only = self.member(root)
+
+        @contextlib.contextmanager
+        def busy(_store):
+            from llmtool import task_store
+            task_store._fail('LINEAGE_LOCK_BUSY')
+            yield
+        with patch.object(task_submission_cli, '_lineage_lock', busy):
+            first = self.advance(only)
+        self.assertEqual((first['step'], first['codes']), ('MERGED', ['LINEAGE_CLOSE_FAILED']))
+        self.assertEqual(first['lineage'], {'code': 'LINEAGE_CLOSE_FAILED',
+                                            'cause': 'LINEAGE_LOCK_BUSY'})
+        self.assertEqual(self.lineage(only)['state'], 'OPEN')
+        self.assertEqual(self.store.get(only)['merge_attempt']['state'], 'MERGED')
+        replay = self.advance(only, pr_merged=True)
+        self.assertEqual((replay['step'], replay['codes']), ('MERGED', []))
+        self.assertTrue(replay['result']['replay'])
+        self.assertEqual(replay['lineage'], {
+            'task_id': only, 'state': 'CLOSED', 'owner_notice': None,
+            'root': {'task_id': root, 'state': 'CLOSED', 'owner_notice': None}})
+        self.assertEqual([self.lineage(only)['state'], self.lineage(root)['state']],
+                         ['CLOSED', 'CLOSED'])
+        # A further rerun closes nothing and never merges again.
+        again = self.advance(only, pr_merged=True)
+        self.assertEqual(again['codes'], ['MERGE_LINEAGE_ENDED'])
+        self.assertIsNone(again['lineage'])
+        self.assertEqual(self.merges, [only])
+
+    def test_a_merged_pr_without_a_stored_merged_attempt_is_still_refused(self):
+        # Fail closed: only a stored MERGED attempt for this PR and head replays.
+        root = self.parked_root()
+        only = self.member(root)
+        result = self.advance(only, pr_merged=True)
+        self.assertEqual((result['step'], result['codes']), ('MERGE_REFUSED', ['MERGE_PR_NOT_OPEN']))
+        self.assertEqual(self.lineage(only)['state'], 'OPEN')
+        self.assertEqual((self.merges, self.closes), ([], []))
 
     def test_a_split_after_advance_read_the_root_open_still_refuses_the_merge(self):
         # #1502 D10c2 (security v91, CWE-362): advance read the ROOT OPEN and passed

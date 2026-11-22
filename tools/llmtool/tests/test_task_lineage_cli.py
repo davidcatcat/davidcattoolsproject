@@ -189,7 +189,7 @@ class LineageMergedTests(LineageCase):
         cli._lineage_roll_up = failing
         try:
             self.assertEqual(cli.lineage_close_merged(self.store, only),
-                             {'code': 'LINEAGE_CLOSE_FAILED'})
+                             {'code': 'LINEAGE_CLOSE_FAILED', 'cause': 'LINEAGE_ROLL_UP_FAILED'})
         finally:
             cli._lineage_roll_up = real
         self.assertEqual(self.state(only), 'CLOSED')
@@ -525,7 +525,7 @@ class LineageSplitRaceTests(LineageCase):
             closes.append(cli.lineage_close_merged(self.store, done))
         with self.holding_the_lock(rivals):
             self.split(root, [first])
-        self.assertEqual(closes, [{'code': 'LINEAGE_CLOSE_FAILED'}])
+        self.assertEqual(closes, [{'code': 'LINEAGE_CLOSE_FAILED', 'cause': 'LINEAGE_LOCK_BUSY'}])
         self.assertEqual([self.state(child), self.state(done), self.state(parked)],
                          ['OPEN', 'OPEN', 'PARKED'])
         # Once the split released the lock, both run.
@@ -811,7 +811,7 @@ class LineageEndVsAdvanceTests(LineageCase):
         merged(self.store, member)
         with self.store.advance_lease(other):
             self.assertEqual(cli.lineage_close_merged(self.store, member),
-                             {'code': 'LINEAGE_CLOSE_FAILED'})
+                             {'code': 'LINEAGE_CLOSE_FAILED', 'cause': 'LINEAGE_TASK_ADVANCING'})
         self.assertEqual([self.state(member), self.state(other)], ['CLOSED', 'PARKED'])
         self.assertEqual(cli.lineage_close_merged(self.store, member)['root']['state'], 'CLOSED')
 
