@@ -191,7 +191,9 @@ class PmBoardStaleTests(unittest.TestCase):
         monitor = _monitor()
         del monitor.pm_board_stamp
         drawn = _paint(monitor, "table")
-        self.assertNotIn(2, drawn)
+        # Row 2 carries the pinned counts (Owner 2026-11-22) but no stale warning.
+        self.assertTrue(drawn[2][0].startswith("今天合併 "))
+        self.assertNotIn("PM board stale", drawn[2][0])
 
 
 class _FakeCurses:
@@ -224,6 +226,37 @@ class RuleAlertGoneTests(unittest.TestCase):
         texts = [text for text, _ in drawn.values()]
         self.assertIn("quota warning", texts)
         self.assertFalse(any("規則檔" in text for text in texts))
+
+
+class HeaderCountsTests(unittest.TestCase):
+    """Owner 2026-11-22: the 白板 counts are pinned in the fixed header of every tab."""
+
+    def test_counts_line_on_every_tab(self):
+        expected = mon.board_counts(mon.work_board(None, mon.PmBoard("missing", None, [], [], []),
+                                                   NOW))
+        self.assertTrue(expected.startswith("今天合併 ? · 進行中 ? · "), expected)
+        for view in ("log", "tasks", "processes", "office", "board"):
+            with self.subTest(view=view):
+                drawn = _paint(_monitor(log=[], d6=[], records=[], opencode_route="",
+                                        opencode_route_failed=False), view, {})
+                self.assertEqual(drawn[2][0], expected)
+
+    def test_counts_share_the_row_with_header_alerts(self):
+        drawn = _paint(_monitor(stale=True, log=[]), "log", {})
+        line = drawn[2][0]
+        self.assertTrue(line.startswith("今天合併 "), line)
+        self.assertIn("監控程式已更新", line)
+
+    def test_counts_are_built_at_most_once_per_interval(self):
+        monitor = _monitor(log=[])
+        with patch.object(mon, "work_board", wraps=mon.work_board) as built:
+            _paint(monitor, "log", {})
+            _paint(monitor, "log", {})
+        self.assertEqual(built.call_count, 1)
+
+    def test_board_tab_counts_match_the_header(self):
+        work = mon.work_board(None, mon.PmBoard("missing", None, [], [], []), NOW)
+        self.assertIn((mon.board_counts(work), ""), mon.board_view(work))
 
 
 if __name__ == "__main__":

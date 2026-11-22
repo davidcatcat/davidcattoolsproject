@@ -5341,11 +5341,9 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=
                      int(github.window // 3600) if github is not None else 12, prs, owner_cut)
 
 
-def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
-    def append_header(text, style=""):
-        lines = _wrap(text, width) if width is not None else [text]
-        out.extend((line, style) for line in lines)
-
+def board_counts(work: WorkBoard) -> str:
+    """The 白板 counts line; also pinned in the fixed header of every tab
+    (Owner 2026-11-22). Unknown parts are '?'."""
     today = len(work.done) if work.github_known else "?"
     owner_known = work.github_known and not GITHUB_IDENTITY_STATUS
     known_running = len(work.running)
@@ -5357,10 +5355,20 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
                    f"{other_owner}{'+' if work.owner_cut else ''}")
     owner_count = ("?" if not owner_known or (work.owner_cut and not work.owner) else
                    f"{len(work.owner)}{'+' if work.owner_cut else ''}（等你決定 {waiting_count}，其他 Owner 請求 {other_count}）")
-    counts = (f"今天合併 {today} · 進行中 {known_running if work.github_known else '?'} · "
-              f"等 PM {sum(item.next == 'PM' for item in work.running + work.queue + work.blocked) if work.github_known and work.board_known else '?'} · "
-              f"等你 {owner_count} · 排隊 {len(work.queue) if work.board_known else '?'} · "
-              f"卡住 {len(work.blocked) if work.board_known else '?'}")
+    return (f"今天合併 {today} · 進行中 {known_running if work.github_known else '?'} · "
+            f"等 PM {sum(item.next == 'PM' for item in work.running + work.queue + work.blocked) if work.github_known and work.board_known else '?'} · "
+            f"等你 {owner_count} · 排隊 {len(work.queue) if work.board_known else '?'} · "
+            f"卡住 {len(work.blocked) if work.board_known else '?'}")
+
+
+def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
+    def append_header(text, style=""):
+        lines = _wrap(text, width) if width is not None else [text]
+        out.extend((line, style) for line in lines)
+
+    counts = board_counts(work)
+    today = len(work.done) if work.github_known else "?"
+    owner_known = work.github_known and not GITHUB_IDENTITY_STATUS
     out = []
     append_header("工作白板", "title")
     append_header(counts)
@@ -10665,6 +10673,31 @@ def body_lines(stdscr) -> int:
     return max(1, stdscr.getmaxyx()[0] - 4)
 
 
+HEADER_COUNTS_SECONDS = DISK_REFRESH_SECONDS   # the pinned counts are rebuilt at most this often
+
+
+def header_counts(mon, now: float) -> str:
+    """Owner 2026-11-22: the 白板 counts pinned in the fixed header of every tab.
+    Built from the already-loaded board and GitHub data (no new reads), at most
+    once per HEADER_COUNTS_SECONDS; '?' parts when unknown."""
+    cached = getattr(mon, "_header_counts", None)
+    if cached is not None and 0 <= now - cached[0] < HEADER_COUNTS_SECONDS:
+        return cached[1]
+    try:
+        text = board_counts(work_board(mon.github, mon.pm_board, now,
+                                       ec2=getattr(mon, "ec2_heads", None),
+                                       reviewing=pr_reviewing(mon.office),
+                                       office=mon.office,
+                                       office_known=not bool(mon.office_error)))
+    except Exception:
+        text = "今天合併 ? · 進行中 ? · 等 PM ? · 等你 ? · 排隊 ? · 卡住 ?"
+    try:
+        mon._header_counts = (now, text)
+    except Exception:
+        pass
+    return text
+
+
 def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=False) -> int:
     """One repaint of the current view (the loop above decides when);
     returns the scroll offset clamped to the view."""
@@ -10689,9 +10722,12 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
              if mon.stale else "")
     behind = behind_line(mon)
     board = pm_board_stale_line(getattr(mon, "pm_board_stamp", None), time.time())
+    counts = header_counts(mon, time.time())
     if alert or stale or behind or board:
-        put(2, "  ·  ".join(item for item in (stale, behind, board, alert) if item),
+        put(2, "  ·  ".join(item for item in (counts, stale, behind, board, alert) if item),
             colors.get("!", 0) | curses.A_BOLD)
+    else:
+        put(2, counts, 0)
     if view == "log":
         entries = list(mon.log)
         offset = max(0, min(offset, len(entries) - body))

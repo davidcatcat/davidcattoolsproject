@@ -32,7 +32,7 @@ The Owner's binding working rules for PM runs (2026-11-16 – 2026-11-18), recor
 
 - Before every dispatch, reassignment, retry, repair, recovery or Reviewer hand-off, reread [worker-dispatch.json](../../../tools/llmtool/worker-dispatch.json) through the dispatch gate. Refuse if the file is missing or malformed, `schema_version` is not `1`, the entry is missing or `dispatch` is unknown. `PAUSED` binds. `OWNER_ASSIGNMENT_ONLY` needs an Owner reference. `ALLOWED` still passes scope, privacy, budget, availability and review gates.
 - Developer routes are Claude Developer, OpenCode, AGY and `gw-agent`. Codex reviews and debugs only. Prefer `gw-agent` for small, low-risk, bounded Tasks.
-- Before every Developer dispatch or repair, apply the [read scope rule](../../../CLAUDE.md#worker-dispatch) to the spec `read` list.
+- Before every Developer dispatch or repair, apply the [read scope rule (#2503)](../../../AGENTS.md) to the spec `read` list.
 - Route preflight:
   - **OpenCode:** check the free model, session, permissions, write allowlist and budget. Pause on a free-limit refusal or after two consecutive failures.
   - **AGY:** check the D6, auth, executable, actual model, allowlist and quota. Pause after two consecutive failures. See [agy-direct-developer](../agy-direct-developer/SKILL.md).
