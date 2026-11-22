@@ -439,9 +439,11 @@ def make_packet(ready, final, expect, snapshot, approval, observation, bundle, *
             hashlib.sha256(diff['content'].encode()).hexdigest() != diff['sha256'] or
             '\x00' in diff['content'] or 'GIT binary patch' in diff['content']):
         reject('REVIEW_PACKET_BINDING_INVALID')
+    from .repair_policy import review_source_limit_bytes
+    source_limit = review_source_limit_bytes()
     size = len(diff['content'].encode()) + sum(s['byte_length'] for s in sources)
-    if size > SOURCE_LIMIT:
-        reject('REVIEW_PACKET_TOO_LARGE', component='diff_source', limit=SOURCE_LIMIT)
+    if size > source_limit:
+        reject('REVIEW_PACKET_TOO_LARGE', component='diff_source', limit=source_limit)
     evidence = bundle['evidence']
     if type(evidence) is not list or not 1 <= len(evidence) <= 128:
         reject('REVIEW_EVIDENCE_NOT_VERIFIED')
