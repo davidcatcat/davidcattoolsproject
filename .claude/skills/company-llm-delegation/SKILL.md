@@ -117,8 +117,10 @@ Home LLM work grows by a ladder (Owner 2026-11-10, #120). The PM logs every call
 | T3 | Code and tests in two files; at most 6 KB of context; at most 12 gw-agent turns |
 | T4 | A new file, or up to 3 files; at most 10 KB of context; at most 16 gw-agent turns |
 | T5 | A small feature: up to 4 files; at most 16 KB of context; at most 16 gw-agent turns |
-| T6 | Up to 5 files; at most 24 KB of context; at most 16 gw-agent turns. Every edit needs a line hint, an anchor and the full new text |
+| T6 | Up to 5 files; at most 24 KB of context; at most 16 gw-agent turns |
 
+- gw-agent Developer specs state goals only, with no line numbers or answers (Owner 2026-11-18, [issue #1817](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6958001740)).
+- The gw-agent turn cap is per Task, not per tier: the optional policy key `gw_agent_max_turns` ([PR #2568](https://github.com/davidcatcat/davidcattoolsproject/pull/2568); default stated in [issue #2603](https://github.com/davidcatcat/davidcattoolsproject/issues/2603)). The per-tier turn values in the table are sizing inputs, not the enforced cap.
 - `spec_preflight.py` (`LADDER_SIZES`, `spec_tier`) computes the tier from write files, context bytes and turns (reads + 2 x writes + 1); any new file makes it at least T4.
 - Promote one tier after 3 first-try SOLVED in a row at the current tier. On failure step down one size tier; pause only after 2 consecutive failures at the lowest tier.
 - Repairs follow D1 (O4): 5 effective repairs each for review and EC2/CI test repairs; AI Debug first becomes required after the third effective review repair receives a formal FAIL, and its `RCA_CONFIRMED` covers later repairs of the same problem.
