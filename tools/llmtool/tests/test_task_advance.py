@@ -7255,7 +7255,8 @@ class EndVsAdvanceTests(unittest.TestCase):
         def inject():
             try:
                 task_submission_cli.lineage_end(self.real, child, 'DROPPED',
-                                                pm_session=self.PM, reason=self.REASON)
+                                                pm_session=self.PM, reason=self.REASON,
+                                                final=True)
             except LLMToolError as exc:
                 seen.append(getattr(exc, 'task_store_error_code', None) or str(exc))
             else:
@@ -7386,7 +7387,7 @@ class EndVsAdvanceTests(unittest.TestCase):
         root, child = self.member()
         if state in ('DROPPED', 'STOPPED'):
             task_submission_cli.lineage_end(self.real, child, state, pm_session=self.PM,
-                                            reason=self.REASON)
+                                            reason=self.REASON, final=(state == 'DROPPED'))
             return child
         if state == 'CLOSED':
             self.end_past_lease(child, 'CLOSED')()  # as lineage_close_merged writes it
