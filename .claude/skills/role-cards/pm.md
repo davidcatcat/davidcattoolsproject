@@ -46,6 +46,7 @@ Authority: `task_submission_cli._read_pm_record_input` (`task record-pm`) and `t
 
 - `record-pm` reads one strict JSON object with exactly `request` (string, at most 64 KiB) and `response` (string, at most 64 KiB).
 - `response` is one JSON object: `schema_version: 1`, `summary` (preflight: at most 2048 bytes) and `developer_assignment` with exactly `route`, `risk`, `goal`, `acceptance`. `record-pm` needs `risk: "LOW"` and `route` one of `gw-agent`, `opencode`, `codex`, `agy`, `claude`; `acceptance` has 1 to 16 strings.
+- What `risk` means ([#1925](https://github.com/davidcatcat/davidcattoolsproject/issues/1925), ruling [#1925 c7082715207](https://github.com/davidcatcat/davidcattoolsproject/issues/1925#issuecomment-7082715207)): it is the work level the automated dispatch flow accepts (only LOW at present), not the Task's real risk assessment. The real risk goes honestly into the spec's limits or risk notes (for example: touches security, rule files or accounts), and review and security review judge from that note.
 - `spec_preflight` refuses a spec with an `edits` key, and for `gw-agent` non-ASCII `goal`/`acceptance` text and quoted lines that end inside an open bracket.
 - `task delegate --acceptance` must equal the recorded `acceptance`, and `write_paths` must be inside `read_paths`.
 
