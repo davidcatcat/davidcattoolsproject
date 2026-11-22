@@ -1232,7 +1232,103 @@ def _merge_pass_claim(record, number, head, events):
     return top
 
 
-def _merge_security_claim(record, number, head, events):
+_VERDICT_VERSION_RE = re.compile(r'Version:\s*v([0-9]+)\b')
+_SECURITY_VERSION_MIN = 91
+
+
+def _security_merge_refusal(code, *, number=None, head=None, task_id=None):
+    """Build a MERGE_REFUSED dict for a security gate refusal with an explicit next step."""
+    target = f'PR #{number} head {head}' if number is not None and head is not None else 'this PR head'
+    if code == 'MERGE_SECURITY_REVIEW_NOT_PASS':
+        next_step = (
+            'Fix the security findings and publish a new head, or record a PASS '
+            'security verdict at this exact head.'
+        )
+        message = f'{target} has a non-PASS security verdict. Next step: {next_step}'
+    else:
+        next_step = (
+            'Ensure PR comments and security review records are readable and complete '
+            'with a recorded PASS security verdict at this exact head, or publish a new head.'
+        )
+        message = (
+            f'{target} has unreadable, incomplete, or mismatched security review data. '
+            f'Next step: {next_step}'
+        )
+    result = {'message': message, 'next_step': next_step}
+    if task_id is not None:
+        result['task_id'] = task_id
+    if number is not None:
+        result['pr'] = number
+    if head is not None:
+        result['head'] = head
+    return {'step': 'MERGE_REFUSED', 'codes': [code], 'result': result}
+
+
+def _security_comment_code(comments, head):
+    """Refuse when any security verdict comment (v91+) at head is not PASS, failing closed."""
+    if type(comments) is not list or len(comments) >= 100:
+        return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+    for comment in comments:
+        if type(comment) is not dict:
+            return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+        body = comment.get('body')
+        if type(body) is not str:
+            return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+        raw_lines = [line.strip() for line in body.splitlines() if line.strip()]
+        marker = task_completion._VERDICT_MARKER.fullmatch(raw_lines[0]) if raw_lines else None
+        has_verdict_prefix = any(line.startswith('Verdict:') for line in raw_lines)
+        has_binding_prefix = any(line.startswith('LLMTOOL-REVIEW-BINDING ') for line in raw_lines)
+        ver_nums = [int(v) for v in _VERDICT_VERSION_RE.findall(body)]
+        has_sec_version = any(v >= _SECURITY_VERSION_MIN for v in ver_nums)
+        if not (marker is not None or has_verdict_prefix or has_binding_prefix or has_sec_version):
+            continue
+        if len(body.encode('utf-8', 'replace')) > 65536:
+            if has_sec_version or marker is not None or has_binding_prefix or head in body:
+                return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+            continue
+        status_line = (review_result._VERDICT_VERSION_HEAD.fullmatch(raw_lines[1])
+                       if len(raw_lines) >= 2 else None)
+        any_status = next((m for line in raw_lines
+                           if (m := review_result._VERDICT_VERSION_HEAD.fullmatch(line)) is not None),
+                          None)
+        binding = next((m for line in raw_lines
+                        if (m := review_result._CODEX_BINDING.fullmatch(line)) is not None),
+                       None)
+        if any_status is None:
+            if ver_nums and all(v < _SECURITY_VERSION_MIN for v in ver_nums) and not has_sec_version:
+                continue
+            return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+        status, raw_version, raw_head = any_status.groups()
+        ver = int(raw_version)
+        if ver < _SECURITY_VERSION_MIN:
+            continue
+        if binding is not None and binding.group(4) != raw_head:
+            return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+        if raw_head != head:
+            continue
+        if len(raw_lines) < 2 or status_line is None or marker is None or marker.group(2) != status:
+            if status in ('FIX', 'FAIL', 'BLOCKED'):
+                return 'MERGE_SECURITY_REVIEW_NOT_PASS'
+            return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+        comment_id = comment.get('id')
+        if type(comment_id) is not int or isinstance(comment_id, bool) or comment_id < 0:
+            return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+        created_at = comment.get('created_at')
+        updated_at = comment.get('updated_at', created_at)
+        if (type(created_at) is not str or type(updated_at) is not str or
+                not created_at or not updated_at):
+            return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+        if updated_at != created_at:
+            return 'MERGE_SECURITY_REVIEW_NOT_PASS'
+        if status == 'PASS':
+            continue
+        if status in ('FIX', 'FAIL', 'BLOCKED'):
+            return 'MERGE_SECURITY_REVIEW_NOT_PASS'
+        return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+    return None
+
+
+def _merge_security_claim(record, number, head, events, github_get=None):
     """Refuse when any security verdict at (number, head) is not PASS, failing closed."""
     try:
         if type(record) is not dict:
@@ -1294,7 +1390,12 @@ def _merge_security_claim(record, number, head, events):
             if outcome in ('REVIEW_FAIL', 'REVIEW_BLOCKED'):
                 return 'MERGE_SECURITY_REVIEW_NOT_PASS'
             return 'MERGE_SECURITY_REVIEW_UNKNOWN'
-        return None
+        if not callable(github_get):
+            return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+        if type(number) is not int or number < 1 or type(head) is not str or _HEX40.fullmatch(head) is None:
+            return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+        comments = github_get(f'issues/{number}/comments?per_page=100')
+        return _security_comment_code(comments, head)
     except Exception:
         return 'MERGE_SECURITY_REVIEW_UNKNOWN'
 
@@ -1611,9 +1712,9 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         review_version = _merge_pass_claim(record, number, head, events)
         if type(review_version) is not int:
             return _merge_refusal(review_version or 'MERGE_REVIEW_NOT_PASS')
-    security_code = _merge_security_claim(record, number, head, events)
+    security_code = _merge_security_claim(record, number, head, events, github_get=github_get)
     if security_code is not None:
-        return _merge_refusal(security_code)
+        return _security_merge_refusal(security_code, number=number, head=head)
     acceptance_out = {}
     code = _merge_checks(record, number, head, pr, github_get,
                          allow_missing_macos=True, owner_acceptance=owner_acceptance,

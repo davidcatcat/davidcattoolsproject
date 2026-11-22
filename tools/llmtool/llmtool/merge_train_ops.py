@@ -362,6 +362,22 @@ def _merge_locked(train_id, store, github_get, gh_runner, root, train_root):
     for member in record['members']:
         if not _member_unchanged(member, store, github_get):
             return _refused(TRAIN_MEMBER_CHANGED, {'task_id': member['task_id']})
+        try:
+            member_record = store.get(member['task_id'])
+            events = list(member_record.get('completion_events', []))
+            try:
+                events = events + task_advance._review_outcomes(
+                    member_record, task_advance._claims(member_record), github_get)
+            except Exception:
+                pass
+            security_code = task_advance._merge_security_claim(
+                member_record, member['pr'], member['head'], events, github_get=github_get)
+        except Exception:
+            security_code = 'MERGE_SECURITY_REVIEW_UNKNOWN'
+        if security_code is not None:
+            return task_advance._security_merge_refusal(
+                security_code, task_id=member['task_id'],
+                number=member['pr'], head=member['head'])
 
     # Train-head CI only; member-head checks are never read here.
     code = task_advance._merge_checks({}, train_pr, train_head, pr, github_get,

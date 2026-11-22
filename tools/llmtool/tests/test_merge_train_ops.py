@@ -81,7 +81,7 @@ class FakeGitHub:
     """Serves fixed GitHub reads and records every path read."""
 
     def __init__(self):
-        self.pulls, self.files, self.checks = {}, {}, {}
+        self.pulls, self.files, self.checks, self.comments = {}, {}, {}, {}
         self.reads, self.hooks = [], {}
 
     def __call__(self, path):
@@ -97,6 +97,8 @@ class FakeGitHub:
         if parts[0] == 'commits' and path.endswith('/check-runs?per_page=100'):
             runs = self.checks[parts[1]]
             return {'total_count': len(runs), 'check_runs': copy.deepcopy(runs)}
+        if parts[0] == 'issues' and path.endswith('/comments?per_page=100'):
+            return copy.deepcopy(self.comments.get(int(parts[1]), []))
         raise LookupError(path)
 
 
