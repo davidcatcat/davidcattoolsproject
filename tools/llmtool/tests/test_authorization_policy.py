@@ -429,6 +429,10 @@ class NoProductionAuthorityTests(unittest.TestCase):
                 'ProviderObservedState', 'decide_provider_review'})),
             ('review_authority.py', 'authorization_ledger', frozenset({'ReceiptLedger', 'LedgerError'})),
             ('review_handoff.py','authorization_ledger',frozenset({'ReceiptLedger'})),
+            # #2281 W2a: the OpenCode direct Developer route consults the W1
+            # workflow-grant module for exact granted paths. Intended, reviewed
+            # dependency; it grants no other authority here.
+            ('opencode_direct_developer.py', '', frozenset({'authorization_workflow_grant'})),
         })
         # R-C: base relative dependencies plus only the accepted lazy increments.
         self.assertEqual(d1_imports, {
