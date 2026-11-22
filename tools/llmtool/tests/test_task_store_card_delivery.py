@@ -343,7 +343,14 @@ class CardDeliveryStoreTests(unittest.TestCase):
         self.assertEqual(saved['developer']['card_delivery']['state'], 'DELIVERED')
 
     def test_legacy_record_without_the_binding_round_trips_unchanged(self):
-        task_id = self._create()
+        # A v1 record predates developer, pm_assignment, completion and the
+        # optional card_delivery field entirely; create it as written.
+        legacy = _task_record()
+        legacy['schema_version'] = 1
+        for field in ('developer', 'pm_assignment', 'completion', 'pm_route_binding'):
+            legacy.pop(field)
+        task_id = legacy['task_id']
+        self.store.create(legacy)
         path = self.root / (task_id + '.json')
         before = path.read_bytes()
         loaded = self.store.get(task_id)
