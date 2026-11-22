@@ -28,9 +28,7 @@ NOW = 1_794_000_000   # an injected wall clock (whole seconds, so mtimes compare
 
 # Never read the developer's real PM board or rule-alert record.
 _ISOLATED = tempfile.TemporaryDirectory()
-_PATCHES = (patch.object(mon, "PM_BOARD", os.path.join(_ISOLATED.name, "pm-board.json")),
-            patch.object(mon, "RULE_ALERT_FILE",
-                         os.path.join(_ISOLATED.name, "rule-file-alerts.json")))
+_PATCHES = (patch.object(mon, "PM_BOARD", os.path.join(_ISOLATED.name, "pm-board.json")),)
 
 
 def setUpModule():
@@ -213,95 +211,19 @@ class _FakeCurses:
         return n << 8
 
 
-class RuleAlertColourTests(unittest.TestCase):
-    def setUp(self):
-        self._dir = tempfile.TemporaryDirectory()
-        self.path = os.path.join(self._dir.name, "rule-file-alerts.json")
-        self._patch = patch.object(mon, "RULE_ALERT_FILE", self.path)
-        self._patch.start()
-
-    def tearDown(self):
-        self._patch.stop()
-        self._dir.cleanup()
-
-    def _record(self, count):
-        alerts = [{"pr": n, "title": f"title {n}", "paths": ["x"]} for n in range(1, count + 1)]
-        Path(self.path).write_text(json.dumps({"schema_version": 1, "baseline": 0,
-                                               "checked": [], "alerts": alerts}),
-                                   encoding="utf-8")
-
-    def test_rule_pair_differs_from_every_other_colour(self):
-        fake = _FakeCurses()
-        colors = mon.init_colors(fake)
-        others = {key: value for key, value in colors.items() if key != "rule"}
-        self.assertIn("!", others)
-        self.assertNotIn(colors["rule"], others.values())
-        self.assertNotIn(colors["rule"], {value | curses.A_BOLD for value in others.values()})
-        rule_pair = colors["rule"] >> 8
-        self.assertNotIn(fake.pairs[rule_pair],
-                         [pair for n, pair in fake.pairs.items() if n != rule_pair])
-
-    def test_rule_colour_stays_distinct_with_few_pairs(self):
-        for pairs in (11, 9):
-            with self.subTest(pairs=pairs):
-                colors = mon.init_colors(_FakeCurses(pairs=pairs, colours=8))
-                others = [value for key, value in colors.items() if key != "rule"]
-                self.assertNotIn(colors["rule"], others)
-                self.assertNotIn(colors["rule"], [value | curses.A_BOLD for value in others])
-
-    def test_every_rule_row_carries_the_rule_style(self):
-        self._record(7)
-        lines = mon.rule_alert_lines()
-        self.assertEqual(len(lines), 6)
-        for _, style in lines:
-            self.assertEqual(getattr(style, "colour", ""), "rule")
-            self.assertEqual(style, "!")   # plain output and older callers see no change
-        Path(self.path).write_text("{", encoding="utf-8")
-        (_, style), = mon.rule_alert_lines()
-        self.assertEqual(getattr(style, "colour", ""), "rule")
-
-    def test_other_top_rows_do_not_carry_the_rule_style(self):
-        self._record(1)
-        top = mon.office_top(None, ["quota"], NOW, stuck=["stuck"],
-                             install=mon.rule_alert_lines())
-        styled = [line for line, style in top if getattr(style, "colour", "") == "rule"]
-        self.assertEqual(styled, ["規則檔已變更：PR #1，1 個檔（看過後請 PM 清除）"])
-
-    def test_office_paint_draws_rule_rows_with_their_own_colour(self):
-        self._record(1)
-        colors = mon.init_colors(_FakeCurses())
-        drawn = _paint(_monitor(quota=["quota warning"]), "office", colors)
-        rule_text = "規則檔已變更：PR #1，1 個檔（看過後請 PM 清除）"
-        rule_attr = colors["rule"] | curses.A_BOLD
-        rows = {text: attr for text, attr in drawn.values()}
-        self.assertEqual(rows[rule_text], rule_attr)
-        self.assertEqual(rows["quota warning"], colors["!"])
-        others = [attr for text, attr in drawn.values() if text != rule_text]
-        self.assertNotIn(rule_attr, others)
-
-    def test_wrapped_rule_rows_keep_their_colour(self):
-        self._record(1)
-        colors = mon.init_colors(_FakeCurses())
-        drawn = _paint(_monitor(), "office", colors, screen=_Screen(height=40, width=24))
-        rule_attr = colors["rule"] | curses.A_BOLD
-        rule_text = "規則檔已變更：PR #1，1 個檔（看過後請 PM 清除）"
-        # office_view wraps top rows at (screen width - 1) - 2 columns and indents
-        # the continuation lines; _wrap drops the space at a break point.
-        wrapped = mon._wrap(rule_text, max(10, 24 - 1 - 2))
-        self.assertGreater(len(wrapped), 1)
-        expected = [wrapped[0], *("  " + piece for piece in wrapped[1:])]
-        styled = [text for _, (text, attr) in sorted(drawn.items()) if attr == rule_attr]
-        self.assertEqual(styled, expected)   # every wrapped line keeps the rule pair
-        self.assertEqual("".join(styled).replace(" ", ""), rule_text.replace(" ", ""))
-        unstyled = [text.strip() for text, attr in drawn.values() if attr != rule_attr]
-        for piece in wrapped:
-            self.assertNotIn(piece, unstyled)
-
-    def test_without_colours_rule_rows_paint_like_before(self):
-        self._record(1)
-        drawn = _paint(_monitor(), "office", {})
-        rows = {text: attr for text, attr in drawn.values()}
-        self.assertEqual(rows["規則檔已變更：PR #1，1 個檔（看過後請 PM 清除）"], 0)
+class RuleAlertGoneTests(unittest.TestCase):
+    def test_office_paint_shows_no_rule_file_alert_even_with_an_old_record(self):
+        # Owner 2026-11-22: no rule-file merge alert at the top of the monitor.
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}):
+            state = Path(home, ".local/state/llmtool")
+            state.mkdir(parents=True)
+            (state / "rule-file-alerts.json").write_text(json.dumps(
+                {"schema_version": 1, "baseline": 0, "checked": [],
+                 "alerts": [{"pr": 1, "title": "t", "paths": ["x"]}]}), encoding="utf-8")
+            drawn = _paint(_monitor(quota=["quota warning"]), "office", {})
+        texts = [text for text, _ in drawn.values()]
+        self.assertIn("quota warning", texts)
+        self.assertFalse(any("規則檔" in text for text in texts))
 
 
 if __name__ == "__main__":

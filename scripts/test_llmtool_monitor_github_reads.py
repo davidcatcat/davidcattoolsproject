@@ -20,20 +20,13 @@ _SUBPM_LEASE_ISOLATED = tempfile.TemporaryDirectory()
 _SUBPM_LEASE_PATCH = mock.patch.object(
     monitor, "SUBPM_LEASE_FILE",
     os.path.join(_SUBPM_LEASE_ISOLATED.name, "subpm-leases.json"))
-_RULE_ALERT_ISOLATED = tempfile.TemporaryDirectory()
-_RULE_ALERT_PATCH = mock.patch.object(
-    monitor, "RULE_ALERT_FILE",
-    os.path.join(_RULE_ALERT_ISOLATED.name, "rule-file-alerts.json"))
 
 
 def setUpModule():
     _SUBPM_LEASE_PATCH.start()
-    _RULE_ALERT_PATCH.start()
 
 
 def tearDownModule():
-    _RULE_ALERT_PATCH.stop()
-    _RULE_ALERT_ISOLATED.cleanup()
     _SUBPM_LEASE_PATCH.stop()
     _SUBPM_LEASE_ISOLATED.cleanup()
 
@@ -171,7 +164,6 @@ class GitHubSourceIncrementalReadsTest(unittest.TestCase):
 
         with (
             mock.patch.object(source, "_get", side_effect=fake_get),
-            mock.patch.object(source, "refresh_rule_alerts"),   # no local alert file is written
         ):
             source.refresh(force=True)
             self.assertEqual([(l.issue, l.holder) for l in source.leases],

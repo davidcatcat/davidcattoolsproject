@@ -28,10 +28,6 @@ _SPEC.loader.exec_module(mon)
 NOW = 1_800_000_000.0
 
 _ISOLATED = tempfile.TemporaryDirectory()
-_RULE_ALERT_ISOLATED = tempfile.TemporaryDirectory()
-_RULE_ALERT_PATCH = patch.object(
-    mon, "RULE_ALERT_FILE",
-    os.path.join(_RULE_ALERT_ISOLATED.name, "rule-file-alerts.json"))
 _SUBPM_LEASE_ISOLATED = tempfile.TemporaryDirectory()
 _SUBPM_LEASE_PATCH = patch.object(
     mon, "SUBPM_LEASE_FILE",
@@ -42,7 +38,6 @@ def setUpModule():
     for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CODEX_STATE", "CLAUDE_PROJECTS",
                  "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS", "GW_AUDIT_ROOT"):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
-    _RULE_ALERT_PATCH.start()
     _SUBPM_LEASE_PATCH.start()
     mon.waiting_scan_reset()
 
@@ -51,8 +46,6 @@ def tearDownModule():
     mon.waiting_scan_reset()
     _SUBPM_LEASE_PATCH.stop()
     _SUBPM_LEASE_ISOLATED.cleanup()
-    _RULE_ALERT_PATCH.stop()
-    _RULE_ALERT_ISOLATED.cleanup()
     _ISOLATED.cleanup()
 
 
@@ -112,11 +105,9 @@ class TestMonitor2311Acceptance(unittest.TestCase):
         view = mon.office_view([], pending=ask, notices=notice, routes=rows, now=NOW)
         lines = [line for line, _ in view]
         ask_idx = next(i for i, l in enumerate(lines) if "Need Owner Decision" in l)
-        notice_idx = next(i for i, l in enumerate(lines) if "FYI: spec check note" in l)
         self.assertTrue(lines[ask_idx].startswith("★ 等你決定"))
-        self.assertTrue(lines[notice_idx].startswith("ℹ "))
-        self.assertNotIn("★", lines[notice_idx])
-        self.assertLess(ask_idx, notice_idx)
+        # Owner 2026-11-22: information notices are not shown at all.
+        self.assertFalse(any("FYI: spec check note" in l for l in lines))
 
     def test_a3_disk_refresh_live_measurement(self):
         # A3: DISK_REFRESH_SECONDS is 5.0 live reading
