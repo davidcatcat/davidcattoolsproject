@@ -19,6 +19,7 @@ import json
 import re
 
 from .errors import LLMToolError
+from . import repair_policy
 from . import worker_dispatch
 
 AVAILABLE = 'AVAILABLE'
@@ -299,7 +300,7 @@ def quota_refusal(store, worker, *, owner_assignment_ref=None, policy_task_id=No
 # refused while a hold is active. Failure classes are kept apart:
 #   runtime        infrastructure pause, cleared by a passing probe
 #   endpoint       rate limit (HTTP 429), cleared by Retry-After or a probe
-#   inference      model capability, stepped down once then paused at the
+#   inference      model capability, stepped down then paused at the
 #                  lowest tier (never cleared by a probe, per S1)
 #   task_acceptance security/authorization hold (never auto-recovered)
 GW_AGENT_WORKER = 'gw-agent'
@@ -320,7 +321,26 @@ GW_AGENT_REFUSALS = {
 GW_AGENT_HOLD_FRESH_FOR = timedelta(days=29)  # under WORKER_AVAILABILITY_MAX_AGE_DAYS
 _MODEL_STEP_TWO = hashlib.sha256(b'gw-agent-model-failure:2').hexdigest()
 _MODEL_STEP_ONE = hashlib.sha256(b'gw-agent-model-failure:1').hexdigest()
+_MODEL_PAUSE = hashlib.sha256(b'gw-agent-model-pause').hexdigest()
 _GW_HOLD_WRITE_FAILED = {}
+
+
+def _model_step_digest(step):
+    return hashlib.sha256(f'gw-agent-model-step:{step}'.encode('utf-8')).hexdigest()
+
+
+def _prior_model_step(prior, pause_after):
+    if type(prior) is not dict:
+        return 0
+    if prior.get('status') == 'FAIL':
+        return pause_after
+    digest = prior.get('evidence_sha256')
+    if digest == _MODEL_STEP_ONE:
+        return 1
+    for step in range(1, max(pause_after, 32)):
+        if digest == _model_step_digest(step):
+            return step
+    return 0
 
 
 def _store_key(store):
@@ -458,8 +478,9 @@ def record_gw_agent_failure(store, failure_class=None, *, error_code=None,
     """Record one gw-agent failure in the existing worker availability record.
 
     infrastructure pauses dispatch until a probe passes. rate_limit honours
-    Retry-After. security stays held. model steps down once and pauses on the
-    second consecutive failure at the lowest tier (S1). unknown writes nothing.
+    Retry-After. security stays held. model steps down until the configured
+    consecutive-failure threshold at the lowest tier (S1), then pauses.
+    unknown writes nothing.
     A hold that cannot be recorded marks the store so a later admission is
     refused until a hold or a passing probe is durably recorded (S2).
     """
@@ -476,18 +497,21 @@ def record_gw_agent_failure(store, failure_class=None, *, error_code=None,
     evidence = hashlib.sha256(
         ('gw-agent:' + failure_class + ':' + (task_id or '')).encode('utf-8')).hexdigest()
     if failure_class == 'model':
+        pause_after = repair_policy.route_failure_pause_after()
         view = _observation_view(store)
         prior = None if view in (None, 'UNAVAILABLE') else _observation(
             view, GW_AGENT_MODEL_LAYER)
-        count = 2
-        if tier != 'lowest' or type(prior) is not dict or (
-                prior.get('status') != 'FAIL' and
-                prior.get('evidence_sha256') != _MODEL_STEP_ONE):
+        if type(prior) is dict and prior.get('status') == 'FAIL':
+            count = pause_after
+        elif tier != 'lowest':
             count = 1
-        status = 'FAIL' if count >= 2 else 'UNKNOWN'
-        evidence = _MODEL_STEP_TWO if count >= 2 else _MODEL_STEP_ONE
+        else:
+            count = min(_prior_model_step(prior, pause_after) + 1, pause_after)
+        paused = count >= pause_after
+        status = 'FAIL' if paused else 'UNKNOWN'
+        evidence = _MODEL_PAUSE if paused else _model_step_digest(count)
         layer, fresh = GW_AGENT_MODEL_LAYER, _hold_fresh_until(now)
-        action = 'PAUSE' if count >= 2 else 'STEP_DOWN'
+        action = 'PAUSE' if paused else 'STEP_DOWN'
     elif failure_class == 'security':
         count, layer, fresh = 2, GW_AGENT_SECURITY_LAYER, _hold_fresh_until(now)
         status, action = 'FAIL', 'SECURITY_HOLD'
@@ -613,7 +637,7 @@ def _task_failure_unresolved(store, now, view, *, classes=None):
                 return True
             if entry.get('status') == 'FAIL':
                 continue  # the active-pause check already refused
-            if entry.get('evidence_sha256') == _MODEL_STEP_TWO:
+            if entry.get('evidence_sha256') in (_MODEL_PAUSE, _MODEL_STEP_TWO):
                 return True
             continue
         layer = (GW_AGENT_INFRA_LAYER if failure == 'infrastructure'
