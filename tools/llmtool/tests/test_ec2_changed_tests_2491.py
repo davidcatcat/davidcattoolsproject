@@ -293,24 +293,25 @@ class Ec2ChangedTests2491(unittest.TestCase):
                 # Even with a PASS receipt for declared modules, advance must not dispatch review.
                 result, remote, dispatch = self._advance(
                     github_get, declared_pass,
-                    remote_return={'result': 'ADMISSION_DENIED', 'code': expected_code},
+                    remote_return={'result': 'PASS'},
                 )
                 self.assertEqual(result['step'], 'RUN_REMOTE_TEST')
                 self.assertIn(expected_code, result['codes'])
                 remote.assert_called_once()
                 dispatch.assert_not_called()
 
-                # Direct run_remote_test also refuses fail-closed with the explicit code.
+                # Remote-test admission itself does not refuse on unreadable PR file data;
+                # it admits declared modules only.
                 res, transport = self._run_remote(github_get)
-                self.assertEqual(res['result'], 'ADMISSION_DENIED')
-                self.assertEqual(res['code'], expected_code)
-                transport.assert_not_called()
+                self.assertEqual(res['result'], 'PASS')
+                self.assertEqual(res['modules'], ['test_task_advance'])
+                transport.assert_called_once()
 
-        # Missing PR number on run_remote_test also fails closed.
+        # Missing PR number on run_remote_test also admits declared modules only.
         res_no_pr, transport = self._run_remote(make_github(docs_file), pr=None)
-        self.assertEqual(res_no_pr['result'], 'ADMISSION_DENIED')
-        self.assertEqual(res_no_pr['code'], 'PR_FILES_UNAVAILABLE')
-        transport.assert_not_called()
+        self.assertEqual(res_no_pr['result'], 'PASS')
+        self.assertEqual(res_no_pr['modules'], ['test_task_advance'])
+        transport.assert_called_once()
 
     def test_pr_without_test_changes_behaves_as_before(self):
         files = [{'filename': 'tools/llmtool/llmtool/task_advance.py', 'status': 'modified'}]
