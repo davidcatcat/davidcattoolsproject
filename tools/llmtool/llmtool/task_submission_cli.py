@@ -5067,8 +5067,10 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
     if prompt_size > REQUEST_LIMIT:
         raise LLMToolError('OPENCODE_SKILL_PROMPT_TOO_LARGE')
     _screen_text(prompt, REQUEST_LIMIT)
+    # #2543: same test-policy selection as AGY/Claude/gw-agent/Codex. LOCAL ran
+    # every module on the Owner Mac at completion even when EC2 admits them all.
     callback_policy = (direct_reassignment.test_policy(reassignment) if reassignment is not None
-                       else 'LOCAL')
+                       else _remote_receipt_test_policy(task, read_paths=read_paths))
     developer = {
         'assignment_id': reassignment.assignment if reassignment else new_id(),
         'selection_source': args.selection_source,

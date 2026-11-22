@@ -508,6 +508,26 @@ class OpenCodeRouteWiringTests(unittest.TestCase):
         # gw-agent has no card delivery; its runs record NOT_DELIVERED instead.
         self.assertNotIn('gw-agent', submission_cli._SKILL_CARD_ROUTES)
 
+    # #2543: OpenCode picks its test policy like AGY/Claude, never a fixed LOCAL.
+
+    def _policy_run(self, policy):
+        selector = patch.object(submission_cli, '_remote_receipt_test_policy',
+                                return_value=policy)
+        run = self._run(extra={'selector': selector})
+        return run
+
+    def test_fully_admitted_modules_select_remote_receipt(self):
+        run = self._policy_run('REMOTE_RECEIPT')
+        run.mocks['selector'].assert_called_once()
+        self.assertEqual(run.mocks['selector'].call_args.kwargs['read_paths'], ['src.py'])
+        self.assertEqual(run.mocks['callback'].call_args.kwargs['test_policy'],
+                         'REMOTE_RECEIPT')
+
+    def test_not_admitted_modules_keep_the_local_policy(self):
+        run = self._policy_run('LOCAL')
+        run.mocks['selector'].assert_called_once()
+        self.assertEqual(run.mocks['callback'].call_args.kwargs['test_policy'], 'LOCAL')
+
 
 if __name__ == '__main__':
     unittest.main()
