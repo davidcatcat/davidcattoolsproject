@@ -249,6 +249,7 @@ class GuidanceRefreshTests(unittest.TestCase):
         self.write_rel("tools/llmtool/guidance-drift.json", json.dumps(stale_config, indent=2) + "\n")
         self.git(["add", "--", "tools/llmtool/guidance-drift.json"], cwd=self.root)
         self.git(["commit", "-m", "stale drift"], cwd=self.root)
+        self.git(["push", "origin", f"HEAD:refs/heads/{self.BRANCH}"], cwd=self.root)
         base_head = self.head()
         before_config = self.read_rel("tools/llmtool/guidance-drift.json")
 
@@ -268,6 +269,7 @@ class GuidanceRefreshTests(unittest.TestCase):
         self.write_rel("tools/llmtool/guidance-drift.json", json.dumps(stale_config, indent=2) + "\n")
         self.git(["add", "--", "tools/llmtool/guidance-drift.json"], cwd=self.root)
         self.git(["commit", "-m", "stale agents"], cwd=self.root)
+        self.git(["push", "origin", f"HEAD:refs/heads/{self.BRANCH}"], cwd=self.root)
 
         updated_claude = self.claude_text + "Only claude changed.\n"
         self.write_rel("CLAUDE.md", updated_claude)
