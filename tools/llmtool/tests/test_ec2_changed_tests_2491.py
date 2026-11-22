@@ -188,8 +188,10 @@ class PreReviewGateTests(unittest.TestCase):
                 publish_gh_runner=lambda *_args: SimpleNamespace(returncode=0))
 
     def test_unreadable_or_mismatched_pr_files_block_review_with_code(self):
-        def unreadable(_path):
-            raise OSError('unavailable')
+        def unreadable(path):
+            if path.startswith(f'pulls/{PR}/files?per_page='):
+                raise OSError('unavailable')
+            return changed_tests_get()(path)
 
         dispatch = Mock(return_value={'state': 'DISPATCHED'})
         blocked = self.advance(record(receipts=[receipt((DECLARED,))]),

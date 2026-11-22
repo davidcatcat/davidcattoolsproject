@@ -684,13 +684,15 @@ def _merge_main_gate(head, github_get, pr):
     return 'MERGE_CHECKS_UNAVAILABLE', None
 
 
-def _review_ci_gate(number, head, github_get, latest_out=None):
+def _review_ci_gate(number, head, github_get, latest_out=None, read_out=None):
     """Require every required exact-head Linux workflow check to pass before review.
 
     latest_out, when a dict, gets the newest completed non-success run so a
-    CI_FAILED result can be routed (#1502 WP-D D11). A PR whose file list
-    cannot be read completely (more than GitHub's 3000-file limit) returns
-    STOPPED with PR_FILES_TOO_MANY instead of waiting forever (#1502 WP-G).
+    CI_FAILED result can be routed (#1502 WP-D D11). read_out, when a dict, gets
+    whether the exact-head check-run read was usable, so the #2491 changed-test
+    decision only follows a readable CI read. A PR whose file list cannot be
+    read completely (more than GitHub's 3000-file limit) returns STOPPED with
+    PR_FILES_TOO_MANY instead of waiting forever (#1502 WP-G).
     """
     try:
         checks = github_get(f'commits/{head}/check-runs?per_page=100')
@@ -699,11 +701,14 @@ def _review_ci_gate(number, head, github_get, latest_out=None):
     files, files_code = _pr_files(number, github_get)
     if files_code == PR_FILES_TOO_MANY:
         return 'STOPPED', PR_FILES_TOO_MANY
-    if (files_code is not None or type(checks) is not dict or
-            type(checks.get('check_runs')) is not list or
-            type(checks.get('total_count')) is not int or
-            checks['total_count'] < len(checks['check_runs']) or
-            checks['total_count'] < 0 or len(checks['check_runs']) > 100):
+    checks_readable = (type(checks) is dict and
+            type(checks.get('check_runs')) is list and
+            type(checks.get('total_count')) is int and
+            checks['total_count'] >= len(checks['check_runs']) and
+            checks['total_count'] >= 0 and len(checks['check_runs']) <= 100)
+    if read_out is not None:
+        read_out['checks_readable'] = checks_readable
+    if (files_code is not None or not checks_readable):
         return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
     paths, old_paths = [], []
     for item in files:
@@ -3988,19 +3993,55 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         if blocked_reviewer is not None:
             step = 'DISPATCH_REVIEW'
             codes.extend(('REVIEW_BLOCKED', 'REVIEWER_FALLBACK'))
+    gate_latest = {}
+    ci_code = None
+    gate_read = {}
     if step == 'DISPATCH_REVIEW':
-        # #2491: before any formal review, the exact-head EC2 gate also covers
-        # every test module this PR adds or changes. Unreadable or inconsistent
-        # PR file data fails closed here; remote-test admission never refuses
-        # for that reason and falls back to the declared modules.
-        pr_test_modules, pr_test_modules_code = _pr_changed_test_modules(
-            number, d6['result_head'], get, pr)
-        if pr_test_modules_code is not None:
-            step = PR_CHANGED_TESTS_UNAVAILABLE
-            codes.append(pr_test_modules_code)
-        elif pr_test_modules:
-            step = _pre_review_action(record, d6, pr, related, d6['result_head'],
-                                      extra_modules=pr_test_modules)
+        gate_step, ci_code = _review_ci_gate(
+            number, d6['result_head'], get, latest_out=gate_latest,
+            read_out=gate_read)
+        if gate_step is not None:
+            step = gate_step
+            if ci_code is not None:
+                codes.append(ci_code)
+        failed_name = gate_latest.get('name')
+        if (step == 'CI_FAILED' and failed_name in _LINUX_FLAG_CHECKS and
+                gate_latest.get('conclusion') in ('failure', 'timed_out', *_CI_ENV_CONCLUSIONS)):
+            # #1502 WP-D D11, #2337: route the newest exact-head required check run before review.
+            check_run = _read_check_run(d6['result_head'], failed_name,
+                                        gate_latest.get('id'), get)
+            if check_run is None:
+                codes.append('CI_CHECK_RUN_UNAVAILABLE')
+            else:
+                routed = _route_ci_failure(
+                    store=store, record=record, task_id=task_id,
+                    executor_task=executor_task, number=number, d6=d6, related=related,
+                    run=check_run, fail_code='LINUX_CI_FAILED', github_get=get,
+                    repair_review_call=repair_review_call)
+                if routed is not None:
+                    step, codes, result = routed[0], list(routed[1]), routed[2]
+                    ci_routed = True
+        # #2491: after the exact-head CI read, before any formal review, the EC2
+        # gate also covers every test module the PR adds or changes. Unreadable
+        # or inconsistent PR file data fails closed here; remote-test admission
+        # never refuses for that reason and falls back to the declared modules.
+        # A CI read that itself failed keeps its existing WAITING_CI outcome.
+        if (step in ('DISPATCH_REVIEW', 'WAITING_CI') and type(pr) is dict and
+                gate_read.get('checks_readable') is True):
+            pr_test_modules, pr_test_modules_code = _pr_changed_test_modules(
+                number, d6['result_head'], get, pr)
+            if pr_test_modules_code is not None:
+                step = PR_CHANGED_TESTS_UNAVAILABLE
+                if ci_code is not None and ci_code in codes:
+                    codes.remove(ci_code)
+                codes.append(pr_test_modules_code)
+            elif pr_test_modules:
+                action = _pre_review_action(record, d6, pr, related, d6['result_head'],
+                                            extra_modules=pr_test_modules)
+                if action != 'DISPATCH_REVIEW' or step == 'DISPATCH_REVIEW':
+                    if action == 'RUN_REMOTE_TEST' and ci_code in codes:
+                        codes.remove(ci_code)
+                    step = action
     if step == 'RUN_REMOTE_TEST':
         guard()  # #1781: an EC2 run is an external action
         try:
@@ -4028,31 +4069,6 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                         codes.append('REMOTE_TEST_COMMENT_FAILED')
         except Exception as exc:
             codes.append(_refusal(exc, 'remote_test_code'))
-    elif step == 'DISPATCH_REVIEW':
-        gate_latest = {}
-        gate_step, ci_code = _review_ci_gate(number, d6['result_head'], get,
-                                             latest_out=gate_latest)
-        if gate_step is not None:
-            step = gate_step
-            if ci_code is not None:
-                codes.append(ci_code)
-        failed_name = gate_latest.get('name')
-        if (step == 'CI_FAILED' and failed_name in _LINUX_FLAG_CHECKS and
-                gate_latest.get('conclusion') in ('failure', 'timed_out', *_CI_ENV_CONCLUSIONS)):
-            # #1502 WP-D D11, #2337: route the newest exact-head required check run before review.
-            check_run = _read_check_run(d6['result_head'], failed_name,
-                                        gate_latest.get('id'), get)
-            if check_run is None:
-                codes.append('CI_CHECK_RUN_UNAVAILABLE')
-            else:
-                routed = _route_ci_failure(
-                    store=store, record=record, task_id=task_id,
-                    executor_task=executor_task, number=number, d6=d6, related=related,
-                    run=check_run, fail_code='LINUX_CI_FAILED', github_get=get,
-                    repair_review_call=repair_review_call)
-                if routed is not None:
-                    step, codes, result = routed[0], list(routed[1]), routed[2]
-                    ci_routed = True
     if ci_routed:
         pass   # _route_ci_failure already set the step, codes and result.
     elif step == 'DISPATCH_REVIEW':
