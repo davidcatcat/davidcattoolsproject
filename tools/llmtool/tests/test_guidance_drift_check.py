@@ -420,13 +420,13 @@ class RuleFileSchemaTests(unittest.TestCase):
 
     def test_max_prompt_bytes_accepted(self):
         routes = fixture_routes()
-        routes["routes"]["fixture"]["max_prompt_bytes"] = 65536
+        routes["routes"]["fixture"]["max_prompt_bytes"] = 5242880
         self.assertEqual(self.findings_after("developer-routes.json", routes), [])
 
     def test_max_source_bytes_accepted(self):
         routes = fixture_routes()
-        routes["routes"]["fixture"]["max_source_file_bytes"] = 1048576
-        routes["routes"]["fixture"]["max_source_total_bytes"] = 2097152
+        routes["routes"]["fixture"]["max_source_file_bytes"] = 5242880
+        routes["routes"]["fixture"]["max_source_total_bytes"] = 5242880
         self.assertEqual(self.findings_after("developer-routes.json", routes), [])
 
     def test_budgets_accepted(self):

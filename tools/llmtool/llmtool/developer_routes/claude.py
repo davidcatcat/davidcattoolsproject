@@ -14,7 +14,7 @@ from .. import github_identity
 _MODEL = re.compile(r'claude-[a-z0-9][a-z0-9.-]{0,120}\Z')
 _EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 _QUOTA = re.compile(r'quota|rate.?limit|usage limit|overloaded|spend.?limit', re.IGNORECASE)
-MAX_PROMPT_BYTES = 65536
+MAX_PROMPT_BYTES = 5 * 1024 * 1024
 # #2275: Claude CLI result subtypes kept as structured run evidence. Any other
 # subtype string is OTHER; the CLI string itself is never kept.
 CLI_SUBTYPES = {

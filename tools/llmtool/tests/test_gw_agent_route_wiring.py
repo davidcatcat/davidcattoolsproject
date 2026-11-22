@@ -2815,7 +2815,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
                 ('elapsed-float', set_(elapsed_ms=32.0)),
                 ('source-bytes-negative', set_(**{**source, 'source_bytes': -1})),
                 ('source-bytes-too-large',
-                 set_(**{**source, 'source_bytes': 2 * 1024 * 1024 + 1})),
+                 set_(**{**source, 'source_bytes': 5 * 1024 * 1024 + 1})),
                 ('source-bytes-bool', set_(**{**source, 'source_bytes': True})),
                 ('source-files-zero', set_(**{**source, 'source_file_count': 0})),
                 # #2281: one source entry per read path, at most 1024 paths.
