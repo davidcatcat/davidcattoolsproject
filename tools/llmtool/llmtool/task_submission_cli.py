@@ -4251,6 +4251,11 @@ def _matching_remote_test_receipt(task, *, executor_task, source_sha, paths):
     modules = tuple(sorted({Path(path).stem for path in paths}))
     if not modules:
         return None, 'REMOTE_TEST_RECEIPT_MISSING'
+    # #2573: Darwin-only modules are covered by the exact-head Mac CI gate.
+    darwin = remote_test._darwin_only_modules(modules)
+    modules = tuple(module for module in modules if module not in darwin)
+    if not modules:
+        return None, 'REMOTE_TEST_RECEIPT_MISSING'
     for receipt in reversed(task.get('remote_test_receipts', [])):
         if (type(receipt) is not dict or receipt.get('task_id') != task.get('task_id') or
                 receipt.get('run_id') != task.get('run_id') or
