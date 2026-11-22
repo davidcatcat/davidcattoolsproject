@@ -53,6 +53,8 @@ Every Owner decision request names exactly one reserved row from this table. The
 | R-STOP | Conflict with an Owner stop, pause or report-back command | The link to the relayed Owner command |
 | R-OTHER | No row fits, but continuing looks unsafe or unauthorized | Why no row fits |
 
+Owner acceptance binds the requirement and the allowed change scope, not only the PR number (Owner decision 2026-11-09, [Issue #1329](https://github.com/davidcatcat/davidcattoolsproject/issues/1329)). A PR number and HEAD are execution and verification evidence only.
+
 Each ask carries one structured record with these fields:
 
 - `reserved_row`: one ID from the table.

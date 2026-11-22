@@ -6239,5 +6239,51 @@ class FileOpsTaskStoreTests(unittest.TestCase):
         self.assertEqual(file_ops.ops_sha256(json_str.encode('utf-8')), hash1)
 
 
+class IssueTaskStoreTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve() / 'tasks'
+        self.store = TaskStore(self.root)
+
+    def test_valid_issue_is_stored_validated_and_preserved_across_updates(self):
+        for issue in (1, 2281, task_store_module.MAX_TASK_ISSUE):
+            with self.subTest(issue=issue):
+                rec = record()
+                rec['issue'] = issue
+                created = self.store.create(rec)
+                self.assertEqual(created['issue'], issue)
+                loaded = self.store.get(created['task_id'])
+                self.assertEqual(loaded['issue'], issue)
+                updated = self.store.update(created['task_id'], state='PM_UNAVAILABLE', error_code='PM_UNAVAILABLE')
+                self.assertEqual(updated['issue'], issue)
+                self.assertEqual(self.store.get(created['task_id'])['issue'], issue)
+
+    def test_invalid_issue_is_refused_and_writes_nothing(self):
+        invalid_values = (None, 0, -1, True, False, '2281', 1.5,
+                          task_store_module.MAX_TASK_ISSUE + 1)
+        for value in invalid_values:
+            with self.subTest(issue=value):
+                rec = record()
+                rec['issue'] = value
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.create(rec)
+                self.assertEqual(caught.exception.task_store_error_code, 'TASK_ISSUE_INVALID')
+                self.assertNotIn(rec['task_id'], self.store.task_ids())
+
+    def test_issue_is_immutable_after_creation(self):
+        with_issue = self.store.create(dict(record(), issue=2281))
+        without_issue = self.store.create(record())
+        for task_id, candidate in ((with_issue['task_id'], 2282),
+                                   (without_issue['task_id'], 2281)):
+            with self.subTest(task_id=task_id, candidate=candidate):
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.update(task_id, issue=candidate)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_ISSUE_IMMUTABLE')
+        self.assertEqual(self.store.get(with_issue['task_id'])['issue'], 2281)
+        self.assertNotIn('issue', self.store.get(without_issue['task_id']))
+
+
 if __name__ == '__main__':
     unittest.main()
