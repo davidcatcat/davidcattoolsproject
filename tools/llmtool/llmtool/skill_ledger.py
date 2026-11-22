@@ -1284,3 +1284,47 @@ def not_delivered_status(task_id, run_id, role, route):
         return _refused(DELIVERY_REVOKED if revoked else DELIVERY_EXEMPTION_MISSING)
     return _read_for_status(evaluate)
 
+
+
+def run_delivery_status(task_id, run_id, route):
+    """Read-only status of one Developer run's card delivery (#1502 WP-F minimal gate).
+
+    Unlike card_receipt_status() (the prepared/confirmed producer flow, not
+    shipped), this reads the evidence the routes write today: the dispatch pin
+    from pin_dispatch() and the post-run CONTROLLER_DELIVERED receipt from
+    record_card_delivery(), or the gw-agent NOT_DELIVERED row. Returns a dict
+    {'status', 'reason'}; status is VERIFIED, NOT_DELIVERED (a recorded
+    exemption row exists), NO_PIN (no dispatch pin for this run) or UNVERIFIED
+    with a SKILL_DELIVERY_* reason. Appends nothing; like check() it may repair
+    a torn append under the lock. Receipt expiry is ignored (design Q2).
+    """
+    if not _status_args_valid((task_id, run_id, route)):
+        return {'status': STATUS_UNVERIFIED, 'reason': DELIVERY_LEDGER_UNREADABLE}
+
+    def evaluate(_path, records):
+        rows = [item for item in records if type(item) is dict and
+                item.get('task_id') == task_id and item.get('run_id') == run_id and
+                item.get('route') == route and
+                str(item.get('role', '')).lower() == 'developer']
+        if any(item.get('entry_type') == NOT_DELIVERED for item in rows):
+            return {'status': NOT_DELIVERED, 'reason': None}
+        pin = _find_pin(records, task_id, run_id, route)
+        receipts = [item for item in rows
+                    if item.get('evidence_level') == CONTROLLER_DELIVERED and
+                    item.get('entry_type') not in (NOT_DELIVERED, DISPATCH_PIN, CARD_PREPARED, 'REVOCATION')]
+        if not receipts:
+            if pin is None:
+                return {'status': 'NO_PIN', 'reason': None}
+            return {'status': STATUS_UNVERIFIED, 'reason': DELIVERY_RECEIPT_MISSING}
+        item = receipts[-1]
+        if _revoked(records, item.get('receipt_id')):
+            return {'status': STATUS_UNVERIFIED, 'reason': DELIVERY_REVOKED}
+        if not _card_receipt_pinned(records, item):
+            return {'status': STATUS_UNVERIFIED, 'reason': DELIVERY_PIN_MISMATCH}
+        return {'status': STATUS_VERIFIED, 'reason': None,
+                'receipt_id': item.get('receipt_id')}
+
+    try:
+        return _locked_records(evaluate)
+    except SkillLedgerError:
+        return {'status': STATUS_UNVERIFIED, 'reason': DELIVERY_LEDGER_UNREADABLE}
