@@ -1380,6 +1380,17 @@ class HighDebugRunBindingTests(unittest.TestCase):
                     'pm_response': None, 'pm_recommendation': None,
                     'pm_usage': None, 'pm_error_code': None,
                 })
+            # #2602 (a): a --pr Debug needs the FAIL it diagnoses at this head.
+            # This test covers binding, so it records the formal FAIL fixture.
+            record['review_dispatch_claim'] = [{
+                'review_kind': 'formal', 'executor_task': _EXECUTOR_TASK, 'pr': 938,
+                'version': 1, 'head_sha': _HEAD, 'state': 'COMPLETED',
+                'updated_at': '2026-11-07T00:00:00Z',
+                'review_result': {
+                    'task_id': _HIGH_DEBUG_TASK, 'head': _HEAD, 'verdict': 'FAIL',
+                    'review_text': 'Finding: F1 [High] synthetic.py:1 synthetic finding\n',
+                },
+            }]
             store.create(record)
 
             def read_registration(executor_task, common_dir, *, allowed_states):
