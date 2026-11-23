@@ -145,6 +145,23 @@ class AbandonNeverStartedTests(unittest.TestCase):
             executor_task=EXECUTOR + '-starting')
         self._assert_abandon_refused(starting)
 
+        delivered_task = self._make_direct_task(
+            profile='agy', state='DEVELOPER_DISPATCHING',
+            executor_task=EXECUTOR + '-delivered')
+        delivered_dev = dict(
+            delivered_task['developer'],
+            card_delivery={
+                'route': 'agy',
+                'pin_commit': HEAD,
+                'prefix_sha256': 'b' * 64,
+                'session_id': delivered_task['developer']['session_id'],
+                'prepared_id': 'c' * 32,
+                'state': 'DELIVERED',
+            })
+        self.store.update(delivered_task['task_id'], developer=delivered_dev)
+        self._assert_abandon_refused(self.store.get(delivered_task['task_id']))
+
+    def test_terminal_developer_tasks_accepted_before_change_remain_abandonable(self):
         responded_task = self._make_direct_task(
             profile='agy', state='DEVELOPER_DISPATCHING',
             executor_task=EXECUTOR + '-responded')
@@ -155,7 +172,11 @@ class AbandonNeverStartedTests(unittest.TestCase):
             artifact=artifact,
             artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
         self.store.update(responded_task['task_id'], developer=responded_dev)
-        self._assert_abandon_refused(self.store.get(responded_task['task_id']))
+        saved = self.store.abandon(
+            responded_task['task_id'], pm_session_id=responded_task['pm_session_id'],
+            reason='Release D6 after responded run')
+        self.assertEqual(saved['abandonment']['reason'], 'Release D6 after responded run')
+        self.assertEqual(task_status.derive_state(saved), 'ABANDONED')
 
     def test_task_with_bound_process_or_dirty_d6_is_refused(self):
         task = self._make_direct_task(profile='agy', state='DEVELOPER_DISPATCHING')
