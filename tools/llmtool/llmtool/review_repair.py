@@ -35,6 +35,8 @@ def _is_prelaunch_coded_refusal(exc, store, repair_task_id):
     code = getattr(exc, 'review_repair_code', None) or getattr(exc, 'code', None)
     if type(code) is not str or re.fullmatch(r'[A-Z0-9_]{1,64}', code) is None:
         return False
+    if code == 'DELEGATE_TEXT_SENSITIVE':
+        return False
     try:
         repair_task = store.get(repair_task_id)
     except Exception:

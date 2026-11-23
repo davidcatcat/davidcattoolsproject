@@ -349,7 +349,10 @@ def _screen_text(value, limit):
             unicodedata.category(c) == 'Cf' for c in value):
         raise LLMToolError('request or response contains unsupported control characters')
     if _emitted_sensitive(value):
-        raise LLMToolError('request or response contains recognizable credential material; redact it first')
+        error = LLMToolError(
+            'request or response contains recognizable credential material; redact it first')
+        error.code = 'DELEGATE_TEXT_SENSITIVE'
+        raise error
     return value
 
 
@@ -462,6 +465,8 @@ def _screen_prelaunch_text(value, limit, code='DELEGATE_TEXT_INVALID'):
     try:
         return _screen_text(value, limit)
     except LLMToolError as exc:
+        if getattr(exc, 'code', None) == 'DELEGATE_TEXT_SENSITIVE':
+            raise
         raise _prelaunch_error(str(exc), code) from None
 
 

@@ -384,6 +384,65 @@ class RepairDispatchCodedRefusalTests(unittest.TestCase):
                 self.assertEqual(acc_claims[0]['state'], 'CLAIMED')
                 self.assertIsNone(store_acc.get(acc_claims[0]['repair_task_id']).get('developer'))
 
+    def test_sensitive_delegate_text_refusal_is_distinguishable_and_not_replayed(self):
+        reg = self._registration()
+        snap = self._snapshot()
+        record = _ec2_agy_record()
+        record['developer']['egress_basis'] = 'synthetic-sensitive-marker'
+        store = _RepairStore(self.temp.name, record)
+        seen = []
+
+        def fake_sensitive(value):
+            seen.append(value)
+            return value == 'synthetic-sensitive-marker'
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                task_advance, '_d6_snapshot', return_value=self._d6()))
+            stack.enter_context(mock.patch.object(
+                review_repair, '_registered_d6', return_value=(reg, snap)))
+            stack.enter_context(mock.patch.object(
+                review_repair.worker_dispatch, 'evaluate',
+                return_value=types.SimpleNamespace(
+                    allowed=True, reason_code='OWNER_POLICY_ALLOWED')))
+            stack.enter_context(mock.patch.object(
+                task_submission_cli.worker_dispatch, 'evaluate',
+                return_value=types.SimpleNamespace(
+                    allowed=True, reason_code='OWNER_POLICY_ALLOWED')))
+            stack.enter_context(mock.patch.object(
+                active_pm_inbox, 'observe_claude_session', return_value='/repo'))
+            stack.enter_context(mock.patch.object(
+                task_submission_cli, '_delegate_d6_binding',
+                return_value=(reg, snap)))
+            stack.enter_context(mock.patch.object(
+                task_submission_cli, '_scope_advice_items', return_value=[]))
+            stack.enter_context(mock.patch.object(
+                task_submission_cli, '_emitted_sensitive', side_effect=fake_sensitive))
+
+            first = task_advance.advance(
+                task_id=TASK, store=store, pr_number=PR,
+                github_get=self._github_get)
+
+            self.assertEqual(first['step'], 'REPAIR_REVIEW')
+            self.assertEqual(first['codes'], ['DELEGATE_TEXT_SENSITIVE'])
+            claims = store.get(TASK)['review_repair_claims']
+            self.assertEqual(len(claims), 1)
+            self.assertEqual(claims[0]['state'], 'UNKNOWN')
+            self.assertEqual(claims[0]['attempt'], 1)
+            repair_id = claims[0]['repair_task_id']
+            self.assertIsNone(store.get(repair_id).get('developer'))
+
+            calls_before = len(seen)
+            second = task_advance.advance(
+                task_id=TASK, store=store, pr_number=PR,
+                github_get=self._github_get)
+            self.assertEqual(len(seen), calls_before)
+            self.assertFalse(second['result']['replayed'])
+            claims_after = store.get(TASK)['review_repair_claims']
+            self.assertEqual(len(claims_after), 1)
+            self.assertEqual(claims_after[0]['state'], 'UNKNOWN')
+            self.assertEqual(claims_after[0]['attempt'], 1)
+
     def test_uncoded_exception_after_possible_launch_still_records_unknown(self):
         reg = self._registration()
         snap = self._snapshot()
