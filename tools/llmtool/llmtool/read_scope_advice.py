@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 from datetime import datetime, timezone
 
 # Same path shape as tools/llmtool/scripts/spec_preflight.py REPO_PATH_PATTERN.
@@ -109,6 +110,7 @@ TEST_REFERENCES_WRITE = 'TEST_REFERENCES_WRITE'
 TEST_REFERENCES_MORE = 'TEST_REFERENCES_MORE'
 # #2602u: a test outside write that directly exercises a changed name.
 TEST_LOCKS_CHANGE = 'TEST_LOCKS_CHANGE'
+TEST_REFERENCES_CAPPED = 'TEST_REFERENCES_CAPPED'
 GUIDANCE_DRIFT_JSON = 'tools/llmtool/guidance-drift.json'
 GUIDANCE_DRIFT_CHECK = 'tools/llmtool/scripts/guidance_drift_check.py'
 _HASHED_GUIDANCE = ('CLAUDE.md', 'AGENTS.md')
@@ -204,6 +206,17 @@ def _module_referencing_tests(*, root, commit, read_paths, write_paths, runner=N
 
 # --- #2602u: list only the tests that exercise the names a spec changes ------
 
+MAX_PRECISE_IDENTIFIERS = 16  # Bound per-dispatch identifier fan-out from spec texts (CWE-400).
+MAX_PRECISE_GREPS = 16  # Bound git grep subprocess count per precise search (CWE-400).
+PRECISE_SEARCH_MAX_SECONDS = 15.0  # Bound total elapsed time of precise search (CWE-400).
+PRECISE_CALL_TIMEOUT_SECONDS = 20  # Per-call timeout cap for precise search git calls (CWE-400).
+
+
+class _PreciseSearchCapped(Exception):
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
 _CHANGE_VERB = re.compile(
     r'\b(?:add|adjust|change|edit|extend|fix|introduce|modify|move|refactor|'
     r'remove|rename|replace|update)\b', re.IGNORECASE)
@@ -223,16 +236,28 @@ _STOP_WORDS = frozenset('''
 '''.split())
 
 
-def _module_sources(run, root, commit, write_paths):
+def _module_sources(run, root, commit, write_paths, *, deadline=None):
     """Sources at commit of the written non-test Python modules; {} on any read error."""
     sources = {}
     for path in sorted(set(write_paths or [])):
         name = path.rsplit('/', 1)[-1]
         if not name.endswith('.py') or name.startswith('test_') or '/tests/' in path:
             continue
-        result = run(['git', '-C', str(root), 'show', '%s:%s' % (commit, path)],
-                     stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                     timeout=20, check=False)
+        call_timeout = PRECISE_CALL_TIMEOUT_SECONDS
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _PreciseSearchCapped('time limit %.1fs reached' % PRECISE_SEARCH_MAX_SECONDS)
+            call_timeout = min(PRECISE_CALL_TIMEOUT_SECONDS, remaining)
+        try:
+            result = run(['git', '-C', str(root), 'show', '%s:%s' % (commit, path)],
+                         stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                         timeout=call_timeout, check=False)
+        except subprocess.TimeoutExpired:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise _PreciseSearchCapped(
+                    'time limit %.1fs reached' % PRECISE_SEARCH_MAX_SECONDS) from None
+            raise
         if getattr(result, 'returncode', 2) != 0:
             continue
         sources[path] = result.stdout or ''
@@ -288,7 +313,9 @@ def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, 
     given = [text for text in _texts(texts) if text.strip()]
     if not given:
         return None
-    definitions, callable_names = _defined_names(_module_sources(run, root, commit, write_paths))
+    deadline = time.monotonic() + PRECISE_SEARCH_MAX_SECONDS
+    definitions, callable_names = _defined_names(
+        _module_sources(run, root, commit, write_paths, deadline=deadline))
     names = []
     for text in given:
         for name in _candidate_names(text, definitions):
@@ -296,10 +323,19 @@ def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, 
                 names.append(name)
     if not names:
         return None
+    if len(names) > MAX_PRECISE_IDENTIFIERS:
+        raise _PreciseSearchCapped(
+            'identifier limit %d reached (%d matched)' % (MAX_PRECISE_IDENTIFIERS, len(names)))
     write = {path.strip('/') for path in write_paths or [] if type(path) is str}
     found = {}
     more = []
+    greps = 0
     for name in names:
+        if greps >= MAX_PRECISE_GREPS:
+            raise _PreciseSearchCapped('git grep limit %d reached' % MAX_PRECISE_GREPS)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _PreciseSearchCapped('time limit %.1fs reached' % PRECISE_SEARCH_MAX_SECONDS)
         if name in callable_names:
             # A function or class is exercised by a call, not by an import alone.
             pattern = '(^|[^A-Za-z0-9_])' + _ere(name) + '[[:space:]]*\\('
@@ -307,8 +343,15 @@ def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, 
             pattern = '(^|[^A-Za-z0-9_])' + _ere(name) + '([^A-Za-z0-9_]|$)'
         argv = ['git', '-C', str(root), 'grep', '-l', '-E', '-e', pattern,
                 commit, '--', *_TEST_DIRS]
-        result = run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                     timeout=20, check=False)
+        greps += 1
+        try:
+            result = run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                         timeout=min(PRECISE_CALL_TIMEOUT_SECONDS, remaining), check=False)
+        except subprocess.TimeoutExpired:
+            if time.monotonic() >= deadline:
+                raise _PreciseSearchCapped(
+                    'time limit %.1fs reached' % PRECISE_SEARCH_MAX_SECONDS) from None
+            raise
         if getattr(result, 'returncode', 2) not in (0, 1):
             raise RuntimeError('git grep failed for ' + name)
         tests = []
@@ -349,6 +392,12 @@ def referencing_tests(*, root, commit, read_paths, write_paths, runner=None, tex
                 texts=texts, runner=runner)
             if precise is not None:
                 return precise
+        except _PreciseSearchCapped as exc:
+            note = ('precise test search was capped (%s); using module-level list'
+                    % exc.reason)[:MAX_NOTE_CHARS]
+            return _module_referencing_tests(
+                root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
+                runner=runner) + [item(TEST_REFERENCES_CAPPED, None, note)]
         except Exception:
             pass
     return _module_referencing_tests(
