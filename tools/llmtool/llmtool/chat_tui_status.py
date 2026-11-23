@@ -64,6 +64,22 @@ def task_name(record):
     return first if len(first) <= NAME_WIDTH else first[:NAME_WIDTH - 1] + "…"
 
 
+def _formal_claim(claims):
+    """Latest formal claim of review_dispatch_claim (dispute ruling claims removed).
+
+    A ruling claim is identified by purpose key dispute_ruling; a list of only
+    ruling claims (or a single ruling-claim dict) yields no claim at all.
+    """
+    if claims is None:
+        return None
+    if type(claims) is dict:
+        claims = [] if claims.get("purpose") == "dispute_ruling" else [claims]
+    else:
+        claims = [claim for claim in claims
+                  if type(claim) is not dict or claim.get("purpose") != "dispute_ruling"]
+    return _latest(claims)
+
+
 def _review_handoff(record):
     developer = _dict(record.get("developer")) or {}
     callback = _dict(developer.get("direct_result_callback")) or {}
@@ -242,7 +258,7 @@ def reviewer(record):
         accepted = review_ci.get("formal_review_state") == "ACCEPTED"
         return identity, ("PASS (formal review ACCEPTED)" if accepted
                           else value(review_ci, "formal_review_state"))
-    claim = _latest(record.get("review_dispatch_claim"))
+    claim = _formal_claim(record.get("review_dispatch_claim"))
     if claim is not None:
         return ("task " + value(claim, "reviewer_task") + ", claim " + value(claim, "state"),
                 NOT_AVAILABLE + " (no review receipt recorded)")
@@ -571,7 +587,7 @@ def background_items(records):
             claim = _latest(record.get("review_repair_claims"))
             started_at = claim.get("claimed_at") if claim is not None else None
         elif derived == "WAITING_REVIEW":
-            claim = _latest(record.get("review_dispatch_claim"))
+            claim = _formal_claim(record.get("review_dispatch_claim"))
             started_at = claim.get("claimed_at") if claim is not None else None
         else:
             started_at = developer.get("created_at")
