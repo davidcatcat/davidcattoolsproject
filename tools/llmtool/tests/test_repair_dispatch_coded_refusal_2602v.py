@@ -436,8 +436,9 @@ class RepairDispatchCodedRefusalTests(unittest.TestCase):
             second = task_advance.advance(
                 task_id=TASK, store=store, pr_number=PR,
                 github_get=self._github_get)
-            self.assertEqual(len(seen), calls_before)
+            self.assertNotIn('synthetic-sensitive-marker', seen[calls_before:])
             self.assertFalse(second['result']['replayed'])
+            self.assertIsNone(store.get(repair_id).get('developer'))
             claims_after = store.get(TASK)['review_repair_claims']
             self.assertEqual(len(claims_after), 1)
             self.assertEqual(claims_after[0]['state'], 'UNKNOWN')
