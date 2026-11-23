@@ -10231,8 +10231,31 @@ def _recorded_repair_head(developer, *, executor_task):
     return result['head_sha']
 
 
+def _repair_made_no_commit(root, head, next_head, trusted_base_sha):
+    """True when no Developer commit lies between a repair claim head and the next chain head.
+
+    The two heads are equal, or (#2631) with a trusted main sha the next head
+    adds only clean trusted-main merges on top of the claim head. Anything
+    else, including any git error, is False: the repair stays in the chain
+    and its segment is verified (fail closed).
+    """
+    if (type(head) is not str or type(next_head) is not str or
+            re.fullmatch(r'[0-9a-f]{40}', head) is None):
+        return False
+    if head == next_head:
+        return True
+    if trusted_base_sha is None:
+        return False
+    try:
+        return (task_completion._is_ancestor(root, head, next_head) and
+                task_completion._developer_tip(root, head, next_head,
+                                               trusted_base_sha) == head)
+    except Exception:
+        return False
+
+
 def _completion_repair_artifact_segments(task, store, *, executor_task, common_dir,
-                                         root, branch, source_sha):
+                                         root, branch, source_sha, trusted_base_sha=None):
     """Bind the original and repair proposals to consecutive D6 heads.
 
     Repairs are the root Task's review and EC2 repair claims and, since #1886,
@@ -10294,8 +10317,14 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
                 invalid()
         registration = task_completion.read_d6_registration(
             executor_task, common_dir, allowed_states=task_completion._D6_EVIDENCE_STATES)
+        # #2631: a PM continuation on the same D6 starts from a later head than
+        # the D6 base; the collector already accepts a source that descends
+        # from the registered base (D6_TASK_BINDING_MISMATCH otherwise).
         if (registration.root != root or registration.branch != branch or
-                registration.source_sha != source_sha):
+                type(source_sha) is not str or
+                (registration.source_sha != source_sha and
+                 not task_completion._is_ancestor(registration.root,
+                                                  registration.source_sha, source_sha))):
             invalid()
         # #1745: a repair whose Task has no usable Developer result (refused,
         # BLOCKED, outcome unknown, never delegated) is skipped only when it
@@ -10334,13 +10363,19 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
                 registration.root)
         dispatched = []
         for index, (head, developer) in enumerate(entries):
-            if developer is not None:
-                dispatched.append((head, developer))
-                continue
             next_head = (entries[index + 1][0]
                          if index + 1 < len(entries) else registration.result_sha)
+            if developer is not None and not _repair_made_no_commit(
+                    registration.root, head, next_head, trusted_base_sha):
+                dispatched.append((head, developer))
+                continue
+            # #1745: a repair that made no commit is skipped. #2631: this also
+            # covers a repair whose responded result the PM never applied, and
+            # a chain head reached from the claim head only through clean
+            # trusted-main merges (no Developer commit in between).
             if (type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None or
-                    head != next_head):
+                    not _repair_made_no_commit(registration.root, head, next_head,
+                                               trusted_base_sha)):
                 invalid()
         artifacts = [((None, None) if record_only else
                       (original.get('artifact'), original.get('artifact_sha256'))) +
@@ -10408,7 +10443,8 @@ def _repair_head_admitted(task, store, evidence, *, executor_task, head):
         segments = _completion_repair_artifact_segments(
             task, store, executor_task=executor_task,
             common_dir=evidence.get('common_dir'), root=root,
-            branch=evidence.get('branch'), source_sha=developer['source_sha'])
+            branch=evidence.get('branch'), source_sha=developer['source_sha'],
+            trusted_base_sha=main_sha)
         if segments is None:
             return False
         common = dict(
@@ -10646,7 +10682,8 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
         artifact_segments = _completion_repair_artifact_segments(
             task, store, executor_task=args.executor_task,
             common_dir=initial.get('common_dir'), root=initial.get('root'),
-            branch=initial.get('branch'), source_sha=developer['source_sha'])
+            branch=initial.get('branch'), source_sha=developer['source_sha'],
+            trusted_base_sha=main_pin['sha'])
         if claude_route:
             git_evidence = task_completion.collect_claude_result(
                 task_id=args.executor_task, expected_common_dir=initial.get('common_dir'),
