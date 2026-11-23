@@ -501,6 +501,7 @@ def _failed_event(task, *, executor_task, pr_number, github_get, body_holder=Non
                 event.get('state') != 'PENDING'):
             continue
         matching_claims = [item for item in claims if type(item) is dict and
+                           'purpose' not in item and
                            item.get('executor_task') == executor_task and
                            item.get('pr') == pr_number and
                            item.get('head_sha') == event.get('source_sha') and

@@ -1542,6 +1542,24 @@ def _post_under_lock(*, fd, directory, name, task, task_id, claim, text, login_r
     return output
 
 
+def _refuse_version_used(claims, *, executor_task, pr_number, version, kind, message):
+    from . import review_result
+    pr_versions = [
+        claim['version'] for claim in claims
+        if type(claim) is dict and
+        claim.get('executor_task') == executor_task and
+        claim.get('pr') == pr_number and
+        type(claim.get('version')) is int and
+        (review_result.review_kind(claim) == kind or 'purpose' in claim)
+    ]
+    next_version = (max(pr_versions) + 1) if pr_versions else (1 if kind == 'formal' else 91)
+    if kind == 'formal' and next_version > 90:
+        _refuse('REVIEW_VERSION_RANGE_INVALID')
+    elif kind == 'security' and next_version > 9999:
+        _refuse('REVIEW_VERSION_RANGE_INVALID')
+    _refuse('REVIEW_DISPATCH_VERSION_USED', message.format(next_version=next_version))
+
+
 def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                     create_d6=None, dispatch_session=None, bind_session=None,
                     prompt_renderer=None, codex_runner=None, reviewer=None,
@@ -1575,8 +1593,15 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
               list(stored_claims) if type(stored_claims) is list else [])
     identity = (pr_number, head, version)
     prior = next((claim for claim in claims if
+                  type(claim) is dict and
                   (claim.get('pr'), claim.get('head_sha'), claim.get('version')) == identity), None)
     if prior is not None:
+        if 'purpose' in prior:
+            _refuse_version_used(
+                claims, executor_task=executor_task, pr_number=pr_number,
+                version=version, kind=kind,
+                message=f'Review version {version} is already used for PR {pr_number} '
+                        'by a ruling claim; use version {next_version}.')
         from . import review_result
         if prior.get('executor_task') != executor_task or review_result.review_kind(prior) != kind:
             _refuse('REVIEW_DISPATCH_CLAIM_MISMATCH')
@@ -1616,25 +1641,13 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                  claim.get('head_sha') != head), None)
     if used is not None:
         from . import review_result
-        if review_result.review_kind(used) != kind:
+        if 'purpose' not in used and review_result.review_kind(used) != kind:
             _refuse('REVIEW_DISPATCH_CLAIM_MISMATCH')
-        pr_versions = [
-            claim['version'] for claim in claims
-            if type(claim) is dict and
-            claim.get('executor_task') == executor_task and
-            claim.get('pr') == pr_number and
-            type(claim.get('version')) is int and
-            review_result.review_kind(claim) == kind
-        ]
-        next_version = (max(pr_versions) + 1) if pr_versions else (1 if kind == 'formal' else 91)
-        if kind == 'formal' and next_version > 90:
-            _refuse('REVIEW_VERSION_RANGE_INVALID')
-        elif kind == 'security' and next_version > 9999:
-            _refuse('REVIEW_VERSION_RANGE_INVALID')
-        _refuse(
-            'REVIEW_DISPATCH_VERSION_USED',
-            f'Review version {version} is already used for PR {pr_number} '
-            f'on another head; use version {next_version}.')
+        _refuse_version_used(
+            claims, executor_task=executor_task, pr_number=pr_number,
+            version=version, kind=kind,
+            message=f'Review version {version} is already used for PR {pr_number} '
+                    'on another head; use version {next_version}.')
     reviewer_role = _resolve_reviewer_role(reviewer_key)
     config_dir = reviewer_role['config_dir'] if reviewer_role is not None else None
     # #1777 (CWE-863): the Claude Reviewer never runs under another provider's
