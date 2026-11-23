@@ -138,8 +138,8 @@ class ReviewRepairLongVerdictTests(unittest.TestCase):
 
         record = self.store.get(TASK)
         record['review_disputes'] = [{
-            'pr': PR, 'head_sha': HEAD, 'finding_id': 'F2', 'state': 'RULED',
-            'ruling': {'outcome': 'WITHDRAWN', 'head_sha': HEAD}
+            'pr': PR, 'head_sha': HEAD, 'review_version': 1, 'finding_id': 'F2',
+            'state': 'RULED', 'ruling': {'outcome': 'WITHDRAWN', 'head_sha': HEAD}
         }]
         self.store = TempTaskStore(self.temp.name, record)
 
@@ -165,12 +165,12 @@ class ReviewRepairLongVerdictTests(unittest.TestCase):
 
         record = self.store.get(TASK)
         record['review_disputes'] = [{
-            'pr': PR, 'head_sha': HEAD, 'finding_id': 'F2', 'state': 'RULED',
-            'ruling': {'outcome': 'WITHDRAWN', 'head_sha': HEAD}
+            'pr': PR, 'head_sha': HEAD, 'review_version': 1, 'finding_id': 'F2',
+            'state': 'RULED', 'ruling': {'outcome': 'WITHDRAWN', 'head_sha': HEAD}
         }]
         self.store = TempTaskStore(self.temp.name, record)
 
-        result = self.dispatch(github_get=lambda _path: [comment])
+        result =self.dispatch(github_get=lambda _path: [comment])
         self.assertEqual(result['claim']['attempt'], 1)
         self.assertEqual(len(self.calls), 1)
 
