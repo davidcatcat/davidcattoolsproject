@@ -43,6 +43,9 @@ class GuidanceRefreshArtifactTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = self.tmp.name
         _git(self.root, 'init', '-q', '-b', 'main')
+        # refresh_guidance_hashes commits with plain `git`: give the repo an identity
+        _git(self.root, 'config', 'user.name', 't')
+        _git(self.root, 'config', 'user.email', 't@example.invalid')
         self.agents, self.claude = b'# shared rules\n', b'@AGENTS.md\n'
         (Path(self.root) / 'AGENTS.md').write_bytes(self.agents)
         (Path(self.root) / 'CLAUDE.md').write_bytes(self.claude)
