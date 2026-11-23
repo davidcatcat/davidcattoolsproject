@@ -2,10 +2,10 @@
 
 Events come from what TaskStore records already hold: completion (inbox) events
 and their tombstones, GitHub marker fields, dispatch audit, remote test receipts
-and outcomes, review and repair claims, and High Debug entries. Nothing here
-writes, reconciles, acknowledges or polls; in particular the inbox read that
-records missing events is never called. An event Core would record but has not
-yet stored is shown as NOT YET RECORDED and is never presented as stored.
+and outcomes, dispute entries, review and repair claims, and High Debug entries.
+Nothing here writes, reconciles, acknowledges or polls; in particular the inbox
+read that records missing events is never called. An event Core would record but
+has not yet stored is shown as NOT YET RECORDED and is never presented as stored.
 """
 
 from datetime import datetime, timezone
@@ -46,6 +46,24 @@ def _time(entry, key):
 
 def _event(when, kind, text, recorded=True):
     return {"time": when, "kind": kind, "text": text, "recorded": recorded}
+
+
+def _dispute_entry_state(record, claim):
+    """Entry state of the dispute entry this claim arbitrates; nothing else."""
+    disputes = record.get("review_disputes")
+    if type(disputes) is not list:
+        return UNKNOWN
+    matches = [entry for entry in disputes
+               if type(entry) is dict
+               and entry.get("arbiter_claim")
+               == {"reviewer_task": claim.get("reviewer_task"),
+                   "version": claim.get("version")}]
+    if len(matches) != 1:
+        return UNKNOWN
+    state = matches[0].get("state")
+    if state in ("OPEN", "RULED", "DEFERRED", "WITHDRAWN", "SUPERSEDED"):
+        return state
+    return UNKNOWN
 
 
 def _completion_events(record):
@@ -141,11 +159,22 @@ def _other_events(record):
                              + ", run " + run
                              + ", sha " + value(item, "sha")[:12]))
     for item in _items(record.get("review_dispatch_claim")):
-        text = ("review claim PR #" + value(item, "pr") + " v" + value(item, "version") + " "
-                + value(item, "state") + ", reviewer task " + value(item, "reviewer_task"))
-        events.append(_event(_time(item, "claimed_at"), "REVIEW", text + " (claimed)"))
+        if "purpose" in item:
+            dispute = item.get("dispute") if type(item.get("dispute")) is dict else None
+            text = ("dispute arbiter claim PR #" + value(item, "pr") + " finding "
+                    + (value(dispute, "finding_id") if dispute is not None else UNKNOWN)
+                    + " v" + value(item, "version") + " "
+                    + value(item, "state") + ", reviewer task " + value(item, "reviewer_task")
+                    + " (dispute " + _dispute_entry_state(record, item)
+                    + "; not a formal review)")
+            kind = "DISPUTE"
+        else:
+            text = ("review claim PR #" + value(item, "pr") + " v" + value(item, "version") + " "
+                    + value(item, "state") + ", reviewer task " + value(item, "reviewer_task"))
+            kind = "REVIEW"
+        events.append(_event(_time(item, "claimed_at"), kind, text + " (claimed)"))
         if _time(item, "updated_at") and item["updated_at"] != item.get("claimed_at"):
-            events.append(_event(item["updated_at"], "REVIEW", text + " (updated)"))
+            events.append(_event(item["updated_at"], kind, text + " (updated)"))
     for item in _items(record.get("review_repair_claims")):
         events.append(_event(_time(item, "claimed_at"), "REPAIR",
                              "repair claim PR #" + value(item, "pr") + " v" + value(item, "version")
