@@ -1399,6 +1399,12 @@ class HighDebugGateTests(unittest.TestCase):
     def debug(self, disputes):
         record = trr._record()
         record['review_disputes'] = disputes
+        record['review_dispatch_claim'] = [{
+            'review_kind': 'formal', 'executor_task': EXECUTOR, 'pr': PR, 'version': 1,
+            'head_sha': HEAD, 'state': 'COMPLETED',
+            'updated_at': '2026-11-20T00:00:00Z',
+            'review_result': {'task_id': TASK, 'head': HEAD, 'verdict': 'FAIL',
+                              'review_text': 'Finding: F1 [High] synthetic.py:1 finding\n'}}]
         store = SimpleNamespace(get=lambda _task_id: record)
         registration = SimpleNamespace(result_sha=HEAD, root='/registered/d6',
                                        common_dir='/canonical/.git')

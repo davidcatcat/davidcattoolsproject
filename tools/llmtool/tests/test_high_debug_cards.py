@@ -18,6 +18,8 @@ from llmtool import high_debug, skill_manifest
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore
 
+from test_high_debug import _review_fail_claim
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CORE = skill_manifest.COMMON_CORE_CARD_PATH
 DEBUG = skill_manifest.DEBUG_CARD_PATH
@@ -75,6 +77,7 @@ class _Store:
         self.served.add(task_id)
         return {'task_id': task_id, 'run_id': 'b' * 32,
                 'review_repair_claims': [{'family': 'family', 'pr': 17}] * 2,
+                'review_dispatch_claim': [_review_fail_claim(task_id)],
                 'completion': {'executor_task_id': 'executor',
                                'evidence': {'common_dir': '/tmp/ignored'}},
                 'high_debug': list(self.entries)}

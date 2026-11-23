@@ -56,6 +56,17 @@ def _fixture_value():
     return 'synthetic-' + 'fixture'
 
 
+def _review_fail_claim(task_id='a' * 32, *, head='a' * 40, executor='executor', pr=17,
+                       verdict='FAIL',
+                       text='Finding: F1 [High] synthetic.py:1 synthetic finding\n'):
+    """A formal review claim at ``head`` for the #2602 (a) head-FAIL gate."""
+    return {'review_kind': 'formal', 'executor_task': executor, 'pr': pr, 'version': 1,
+            'head_sha': head, 'state': 'COMPLETED',
+            'updated_at': '2026-11-20T00:00:00Z',
+            'review_result': {'task_id': task_id, 'head': head,
+                              'verdict': verdict, 'review_text': text}}
+
+
 class HighDebugTests(unittest.TestCase):
     def setUp(self):
         self.unposted_root = tempfile.TemporaryDirectory()
@@ -2518,6 +2529,7 @@ class _Store:
                 'review_repair_claims': [
                     {'family': 'family', 'pr': 17},
                     {'family': 'family', 'pr': 17}],
+                'review_dispatch_claim': [_review_fail_claim(task_id)],
                 'completion': {'executor_task_id': 'executor',
                                'evidence': {'common_dir': '/tmp/ignored'}},
                 'high_debug': list(self.entries)}

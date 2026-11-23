@@ -76,6 +76,11 @@ _SCREEN_SOURCE_LIMIT = 4 * 1024 * 1024
 _SCREEN_BATCH_KEYS = frozenset(('event', 'task_id', 'family', 'd6', 'refusal_id',
                                 'hits_sha256', 'source_sha256', 'batch', 'batches',
                                 'hits', 'classification', 'ref', 'recorded_at'))
+# #2602 (a): with --pr, a Debug may run only for the FAIL it is meant to explain.
+_HEAD_FAIL_REQUIRED = 'HIGH_DEBUG_FAIL_REQUIRED'
+# Stored remote-test receipts add these bookkeeping fields to the receipt body.
+_RECEIPT_BOOKKEEPING = frozenset(('task_id', 'run_id', 'executor_task', 'pm_session',
+                                  'command_digest', 'receipt_digest'))
 
 
 def _record_body(entry, task_id, refusal_code=None, account=None):
@@ -1584,6 +1589,64 @@ def _target_ok(pr_number, issue_number, family, failed_corrections):
     return family != 'no-pr'
 
 
+def _review_fail_at_head(task, head, executor_task, pr_number):
+    """#2602 (a): True only when review_result reads a bound formal FAIL at head."""
+    from . import review_result
+    try:
+        return review_result.diagnosis_findings(
+            task, head, executor_task, pr=pr_number) is not None
+    except Exception:
+        return False
+
+
+def _remote_test_fail_at_head(task, head, executor_task):
+    """#2602 (a): True only when a stored FAIL remote-test receipt binds head and executor."""
+    try:
+        from . import remote_test
+    except Exception:
+        return False
+    receipts = task.get('remote_test_receipts')
+    if type(receipts) is not list:
+        return False
+    for receipt in receipts:
+        if (type(receipt) is not dict or receipt.get('result') != 'FAIL' or
+                receipt.get('executor_task') != executor_task or
+                receipt.get('source_sha') != head):
+            continue
+        modules = receipt.get('modules')
+        if type(modules) is not list or not modules:
+            continue
+        canonical = {key: value for key, value in receipt.items()
+                     if key not in _RECEIPT_BOOKKEEPING}
+        try:
+            raw = json.dumps(canonical, sort_keys=True).encode('utf-8')
+            parsed = remote_test._validate_remote_receipt(
+                raw, sha=head, modules=tuple(modules))
+        except Exception:
+            continue
+        if (type(parsed) is dict and parsed.get('result') == 'FAIL' and
+                parsed.get('source_sha') == head):
+            return True
+    return False
+
+
+def _require_head_fail(task, head, executor_task, pr_number, family):
+    """#2602 (a): refuse a --pr Debug unless its exact head holds the FAIL to explain.
+
+    The review family uses the existing diagnosis-findings reader; the -ec2
+    family uses the existing remote-test receipt reader. A missing or unreadable
+    FAIL refuses (fail closed), before any count, record or D6 is created. The
+    PR-less --issue entry is unchanged.
+    """
+    if pr_number is None:
+        return
+    if family.endswith('-ec2'):
+        if not _remote_test_fail_at_head(task, head, executor_task):
+            _refuse(_HEAD_FAIL_REQUIRED, 'next=run_the_tests_first')
+    elif not _review_fail_at_head(task, head, executor_task, pr_number):
+        _refuse(_HEAD_FAIL_REQUIRED, 'next=run_the_formal_review_first')
+
+
 def _no_pr_repo_root():
     """#1943 WP-5: the trusted canonical repository root for a no-PR Debug, else refuse."""
     try:
@@ -1847,6 +1910,8 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None, issue_numbe
     from .review_repair import dispute_open_on
     if pr_number is not None and dispute_open_on(task, pr_number, head):
         _refuse('DEBUG_DISPUTE_OPEN')
+    # #2602 (a): only a runner that has the FAIL at this exact head may diagnose it.
+    _require_head_fail(task, head, executor_task, pr_number, family)
     entries = task.get('high_debug', [])
     if type(entries) is not list or len(entries) >= 8: _refuse('HIGH_DEBUG_LIMIT')
     _admit_debug(task, entries)
