@@ -13,6 +13,7 @@ before any provider launch is possible. Verifies:
    never replayed.
 """
 import contextlib
+import dataclasses
 import hashlib
 import json
 import tempfile
@@ -41,6 +42,15 @@ def tearDownModule():
 class _RepairStore(TempTaskStore):
     """TempTaskStore with the direct-dispatch CAS methods used by AGY delegate."""
 
+    def create(self, record):
+        return self.put(record)
+
+    def completion_d6_task_ids(self, executor_task_id):
+        return [
+            tid for tid in self.task_ids()
+            if (self.get(tid).get('completion') or {}).get('executor_task_id') == executor_task_id
+        ]
+
     def d6_bind_compare_and_update(self, task_id, *, executor_task_id, expected,
                                    **changes):
         return self.compare_and_update(task_id, expected=expected, **changes)
@@ -51,10 +61,24 @@ class _RepairStore(TempTaskStore):
             developer=developer)
 
 
+@dataclasses.dataclass
+class _Registration:
+    task_id: str
+    root: str
+    common_dir: str
+    branch: str
+    source_sha: str
+    result_sha: str
+    trusted_agent_id: str
+    session_ref: str
+    native_session_id: object = None
+
+
 def _ec2_agy_record():
     record = _record()
     record['schema_version'] = 2
     record['state'] = 'PM_RESPONDED'
+    record['developer']['created_at'] = '2026-10-27T00:00:00Z'
     record['response'] = json.dumps({
         'schema_version': 1,
         'summary': 'AGY repair fixture.',
@@ -93,7 +117,7 @@ class RepairDispatchCodedRefusalTests(unittest.TestCase):
         }
 
     def _registration(self):
-        return types.SimpleNamespace(
+        return _Registration(
             task_id=EXECUTOR, root='/registered/d6', common_dir='/tmp/git',
             branch='feat/task', source_sha=HEAD, result_sha=HEAD,
             trusted_agent_id='agy-developer', session_ref='s-1',
@@ -196,6 +220,17 @@ class RepairDispatchCodedRefusalTests(unittest.TestCase):
 
             # Once origin/main catches up, the next task advance continues the
             # same repair Task without --recover-claim and without recounting.
+            bound_session = {'done': False}
+
+            def fake_bind_session(_reg, _session_id):
+                bound_session['done'] = True
+                return 'BOUND'
+
+            def fake_read_d6(*_a, **_kw):
+                if bound_session['done']:
+                    return dataclasses.replace(reg, native_session_id=route_result.session_id)
+                return reg
+
             stack.enter_context(mock.patch.object(
                 skill_manifest, 'build_role_cards', return_value=cards))
             stack.enter_context(mock.patch.object(
@@ -208,7 +243,7 @@ class RepairDispatchCodedRefusalTests(unittest.TestCase):
                 task_submission_cli, '_record_skill_delivery', return_value=None))
             stack.enter_context(mock.patch.object(
                 task_submission_cli.task_completion, 'read_d6_registration',
-                return_value=reg))
+                side_effect=fake_read_d6))
             stack.enter_context(mock.patch.object(
                 task_submission_cli.task_completion, 'collect_git_snapshot',
                 return_value=snap))
@@ -221,7 +256,7 @@ class RepairDispatchCodedRefusalTests(unittest.TestCase):
                 return_value=False))
             stack.enter_context(mock.patch.object(
                 task_submission_cli, '_bind_codex_native_session',
-                return_value='BOUND'))
+                side_effect=fake_bind_session))
             stack.enter_context(mock.patch.object(
                 task_submission_cli, 'run_task_direct_result_event',
                 return_value=0))
