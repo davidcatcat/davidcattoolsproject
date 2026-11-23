@@ -32,10 +32,13 @@ _MERGE_LINEAGE_CODES = {'TASK_LINEAGE_PENDING': 'TASK_LINEAGE_PENDING',
                         'TASK_LINEAGE_UNKNOWN': 'MERGE_LINEAGE_UNKNOWN'}
 
 class _PublishRefusal(Exception):
-    def __init__(self, code, operation=None):
+    def __init__(self, code, operation=None, *, message=None, details=None):
         self.code = code
         # Set only for a refusal after this publish's own gh pr create (#1139).
         self.operation = operation
+        # #2602: a bounded explanation and structured fields for the PM.
+        self.message = message
+        self.details = details
 
 
 _ACTIVITY_MARKER = '<!-- activity: type=task actor=PM target=PR status=TRACKING -->'
@@ -2254,7 +2257,7 @@ def _publish_recorded_main_pin(record):
 
 
 def _publish_base_commits(git_runner, root, remote_head, recorded_main=None, *,
-                          materialize=None):
+                          materialize=None, main_out=None):
     """Return the published commits that bound what HEAD adds (#2367 A-sec).
 
     Only published commits count: this branch's head and the main tip from
@@ -2265,7 +2268,9 @@ def _publish_base_commits(git_runner, root, remote_head, recorded_main=None, *,
     ``materialize`` may make the recorded pin's commit local (a direct-route
     result verifies its pin before its first publish); it is never used for
     the unauthenticated remote tip. With no base the added commits are
-    unknown, so publish fails closed.
+    unknown, so publish fails closed. main_out, when a list, gets the
+    published main tips, so publish can tell a branch with no new commit
+    (#2602 D2).
     """
     bases = []
 
@@ -2300,8 +2305,12 @@ def _publish_base_commits(git_runner, root, remote_head, recorded_main=None, *,
             raise _PublishRefusal('PUBLISH_REMOTE_UNAVAILABLE')
         if parts[1] != 'refs/heads/main':
             continue
+        if type(main_out) is list and parts[0] not in main_out:
+            main_out.append(parts[0])
         add_if_present(parts[0])
     if type(recorded_main) is str and _HEX40.fullmatch(recorded_main) is not None:
+        if type(main_out) is list and recorded_main not in main_out:
+            main_out.append(recorded_main)
         add_if_present(recorded_main, fetch_ok=True)
     if not bases:
         raise _PublishRefusal('PUBLISH_BINDING_UNAVAILABLE')
@@ -2457,6 +2466,37 @@ def _publish_screen_commits(git_runner, root, commits):
             raise _PublishRefusal('DEVELOPER_OUTPUT_SENSITIVE')
 
 
+_OUT_OF_SCOPE_PATHS_MAX = 20
+
+
+def _out_of_scope_details(paths):
+    """A bounded sorted path list and the total count of out-of-scope paths."""
+    ordered = sorted({path for path in paths if type(path) is str and path})
+    return {'out_of_scope_paths': ordered[:_OUT_OF_SCOPE_PATHS_MAX],
+            'out_of_scope_count': len(ordered)}
+
+
+def _out_of_scope_refusal(paths):
+    details = _out_of_scope_details(paths)
+    shown = ', '.join(details['out_of_scope_paths'][:5])
+    count = details['out_of_scope_count']
+    more = '' if count <= 5 else f' (+{count - 5} more)'
+    return _PublishRefusal(
+        'PUBLISH_OUT_OF_SCOPE',
+        message=(f'PUBLISH_OUT_OF_SCOPE: {count} path(s) outside write_paths: '
+                 f'{shown}{more}. Next step: add them to developer.write_paths or '
+                 f'remove them, then run task advance again.'),
+        details=details)
+
+
+def _no_new_commit_refusal():
+    return _PublishRefusal(
+        'PUBLISH_NO_NEW_COMMIT',
+        message=('PUBLISH_NO_NEW_COMMIT: the Developer result adds no commit over its '
+                 'base (the branch may equal main). Next step: ask the Developer for a '
+                 'changed commit, then run llmtool task advance again.'))
+
+
 def _publish_task(record, d6, executor_task, *, git_runner=None,
                   gh_runner=None, record_result_call=None):
     """Commit scoped D6 changes, record the result, push and open or reuse a PR."""
@@ -2500,7 +2540,8 @@ def _publish_task(record, d6, executor_task, *, git_runner=None,
     changed = sorted({path for raw in (tracked, untracked)
                       for path in raw.split('\0') if path})
     if any(path not in write_paths for path in changed):
-        raise _PublishRefusal('PUBLISH_OUT_OF_SCOPE')
+        raise _out_of_scope_refusal(
+            [path for path in changed if path not in write_paths])
 
     remote_sha = _publish_command(git_runner, root,
         ['ls-remote', '--heads', 'origin', f'refs/heads/{branch}']).strip()
@@ -2535,8 +2576,9 @@ def _publish_task(record, d6, executor_task, *, git_runner=None,
     if (recorded_main is not None and
             type(developer.get('direct_result_callback')) is dict):
         materialize = materialize_main
+    main_bases = []
     bases = _publish_base_commits(git_runner, root, remote_head, recorded_main,
-                                  materialize=materialize)
+                                  materialize=materialize, main_out=main_bases)
     committed = _publish_added_commits(git_runner, root, bases)
     # #2534: commits the D6 already held when the integrator registered it
     # (base_sha) are branch history, not this Task's work. Judge them by the
@@ -2547,11 +2589,21 @@ def _publish_task(record, d6, executor_task, *, git_runner=None,
     scoped = (committed if task_bases is None else
               _publish_added_commits(git_runner, root, task_bases))
     task_paths = set(changed)
+    out_of_scope = set()
+    scan_error = None
     for commit, parents in scoped:
-        commit_paths = _publish_commit_paths(git_runner, root, commit, parents)
-        if any(path not in write_paths for path in commit_paths):
-            raise _PublishRefusal('PUBLISH_OUT_OF_SCOPE')
+        try:
+            commit_paths = _publish_commit_paths(git_runner, root, commit, parents)
+        except _PublishRefusal as exc:
+            # Keep an out-of-scope refusal found in an earlier commit first.
+            scan_error = exc
+            break
+        out_of_scope.update(path for path in commit_paths if path not in write_paths)
         task_paths.update(commit_paths)
+    if out_of_scope:
+        raise _out_of_scope_refusal(out_of_scope)
+    if scan_error is not None:
+        raise scan_error
     _publish_screen_commits(git_runner, root, committed)
 
     task_commits = list(scoped)
@@ -2561,7 +2613,8 @@ def _publish_task(record, d6, executor_task, *, git_runner=None,
             ['diff', '--cached', '--no-renames', '--name-only', '-z', 'HEAD'])
         staged_paths = [path for path in staged.split('\0') if path]
         if not staged_paths or any(path not in write_paths for path in staged_paths):
-            raise _PublishRefusal('PUBLISH_OUT_OF_SCOPE')
+            raise _out_of_scope_refusal(
+                [path for path in staged_paths if path not in write_paths])
         title, _ = _publication_text(record, executor_task, branch)
         previous_head = local_head
         _publish_command(git_runner, root,
@@ -2575,6 +2628,13 @@ def _publish_task(record, d6, executor_task, *, git_runner=None,
             raise _PublishRefusal('PUBLISH_COMMAND_FAILED')
         _publish_screen_commits(git_runner, root, own)
         task_commits = own + task_commits
+
+    # #2602 D2: a Developer result with no commit over its base (for example a
+    # branch equal to main) cannot become a PR. Stop here with a definite code
+    # and next step instead of failing later as PUBLISH_GITHUB_FAILED.
+    if (not changed and not committed and
+            (remote_head is None or local_head in main_bases)):
+        raise _no_new_commit_refusal()
 
     if any(path in guidance_refresh.GUIDANCE_FILES for path in task_paths):
         title, _ = _publication_text(record, executor_task, branch)
@@ -2620,6 +2680,10 @@ def _publish_task(record, d6, executor_task, *, git_runner=None,
 def _publish_refusal_result(store, task_id, refusal):
     """Return a publish refusal; one after this call's create keeps its record."""
     result = {'task_id': task_id, 'codes': [refusal.code]}
+    if type(refusal.message) is str and refusal.message:
+        result['message'] = refusal.message
+    if type(refusal.details) is dict and refusal.details:
+        result.update(refusal.details)
     operation = refusal.operation
     if type(operation) is not dict:
         return result
@@ -3385,7 +3449,11 @@ def _refusal(exc, attribute):
     code = getattr(exc, attribute, None)
     if type(code) is str and re.fullmatch(r'[A-Z0-9_]{1,64}', code):
         return code
-    return 'TASK_ADVANCE_REFUSED'
+    # #2602 E1/E2: keep a reason (the exception type name, never its message),
+    # bounded and code-shaped, instead of a bare TASK_ADVANCE_REFUSED.
+    name = getattr(type(exc), '__name__', '')
+    fixed = re.sub(r'[^A-Z0-9_]+', '_', str(name).upper()).strip('_')
+    return fixed[:64] or 'TASK_ADVANCE_REFUSED'
 
 
 def _pr_number(record, requested):
