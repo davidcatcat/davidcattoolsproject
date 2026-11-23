@@ -100,7 +100,10 @@ def _repairing(record):
         return None
     reviews = record.get("review_dispatch_claim")
     reviews = [reviews] if type(reviews) is dict else reviews if type(reviews) is list else []
-    newer = [r for r in reviews if type(r) is dict and type(r.get("version")) is int
+    # Purpose-carrying claims (e.g. dispute rulings) are not formal reviews: skip them
+    # when comparing versions, else a higher-version ruling would drop REPAIRING.
+    newer = [r for r in reviews if type(r) is dict and "purpose" not in r
+             and type(r.get("version")) is int
              and type(repair.get("version")) is int and r["version"] > repair["version"]]
     return None if newer else repair
 
