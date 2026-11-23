@@ -7213,7 +7213,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             str(route_config.get('package_path')) + ' differs from ' +
             str(GATEWAY_SOURCE_DIR) + '; refresh it from main, for example: '
             'rsync -a --delete --exclude __pycache__ ' + str(GATEWAY_SOURCE_DIR) +
-            '/ ' + str(route_config.get('package_path')) + '/api_agent_gateway/')
+            '/ ' + str(route_config.get('package_path')) + '/' + GATEWAY_SOURCE_DIR.name + '/')
     # #1502 WP-E, #1773 (CWE-863): after the gateway validation, the role
     # resolver checks the role model and supplies the effort, and the model the
     # gateway profile will actually serve is checked against allowed_models (or
