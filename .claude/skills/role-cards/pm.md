@@ -2,7 +2,7 @@
 
 Role: Integrator/PM and sub-agent PMs. Source: [#1502](https://github.com/davidcatcat/davidcattoolsproject/issues/1502) WP-F design §3.6.
 
-This card holds the PM-only rules. The common core stays in [AGENTS.md](../../../AGENTS.md) and [CLAUDE.md](../../../CLAUDE.md). Procedures stay in [pm-continuation](../ai-team-delivery/pm-continuation.md), its [reference](../ai-team-delivery/pm-continuation-reference.md), [owner-escalation](../ai-team-delivery/owner-escalation.md) and [defect-triage](../ai-team-delivery/defect-triage.md). This card links to them and does not copy them. Read this card at [PM takeover](../ai-team-delivery/pm-continuation.md#pm-takeover). Operator quick index: [PM Quick Reference](../../../tools/llmtool/PM_QUICK_REFERENCE.md). There is no llmtool delivery evidence for PM runs yet (待後續). Until WP-H slims `AGENTS.md`/`CLAUDE.md`, they carry the same rules. If the texts differ, they win and this card gets fixed.
+This card holds the PM-only rules. The common core stays in [AGENTS.md](../../../AGENTS.md). Procedures stay in [pm-continuation](../ai-team-delivery/pm-continuation.md), its [reference](../ai-team-delivery/pm-continuation-reference.md), [owner-escalation](../ai-team-delivery/owner-escalation.md) and [defect-triage](../ai-team-delivery/defect-triage.md). This card links to them and does not copy them. Read this card at [PM takeover](../ai-team-delivery/pm-continuation.md#pm-takeover). Operator quick index: [PM Quick Reference](../../../tools/llmtool/PM_QUICK_REFERENCE.md). There is no llmtool delivery evidence for PM runs yet (待後續). Until WP-H slims `AGENTS.md`/`CLAUDE.md`, they carry the same rules. If the texts differ, they win and this card gets fixed.
 
 ## Owner PM working rules
 
@@ -85,9 +85,3 @@ A format refusal is fixed here so the card matches llmtool, and recorded (#2423)
 6. **Write a reviewed design doc first** for concurrency and multi-Task features: locks, shared state, parallel Tasks and merge trains.
 7. **Sync the canonical repo before dispatch** with `git merge --ff-only origin/main`. Otherwise dispatch fails with `LLMTOOL_SOURCE_STALE`.
 8. **A waiter for an EC2 run uses `pgrep -f '[.]venv/bin/llmtool task remote-test'`.** That pattern matches the executable path. A bare or bracketed pattern also matches the waiter's own command line and the Developer prompt text.
-
-## WP-F decisions (PM)
-
-- The card path `.claude/skills/role-cards/` is accepted.
-- `gw-agent` rule delivery needs a gateway `task.json` schema change. That change is out of WP-F scope and is a follow-up. Until it ships, the dispatch spec states the Developer card rules.
-- The CLI auto-load probe is a separate PM step before WP-H. Auto-load is never delivery.
