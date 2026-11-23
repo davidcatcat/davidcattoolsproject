@@ -217,6 +217,11 @@ class _PreciseSearchCapped(Exception):
         super().__init__(reason)
         self.reason = reason
 
+
+def _check_deadline(deadline):
+    if deadline is not None and time.monotonic() >= deadline:
+        raise _PreciseSearchCapped('time limit %.1fs reached' % PRECISE_SEARCH_MAX_SECONDS)
+
 _CHANGE_VERB = re.compile(
     r'\b(?:add|adjust|change|edit|extend|fix|introduce|modify|move|refactor|'
     r'remove|rename|replace|update)\b', re.IGNORECASE)
@@ -254,10 +259,9 @@ def _module_sources(run, root, commit, write_paths, *, deadline=None):
                          stdin=subprocess.DEVNULL, capture_output=True, text=True,
                          timeout=call_timeout, check=False)
         except subprocess.TimeoutExpired:
-            if deadline is not None and time.monotonic() >= deadline:
-                raise _PreciseSearchCapped(
-                    'time limit %.1fs reached' % PRECISE_SEARCH_MAX_SECONDS) from None
+            _check_deadline(deadline)
             raise
+        _check_deadline(deadline)
         if getattr(result, 'returncode', 2) != 0:
             continue
         sources[path] = result.stdout or ''
@@ -348,10 +352,9 @@ def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, 
             result = run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                          timeout=min(PRECISE_CALL_TIMEOUT_SECONDS, remaining), check=False)
         except subprocess.TimeoutExpired:
-            if time.monotonic() >= deadline:
-                raise _PreciseSearchCapped(
-                    'time limit %.1fs reached' % PRECISE_SEARCH_MAX_SECONDS) from None
+            _check_deadline(deadline)
             raise
+        _check_deadline(deadline)
         if getattr(result, 'returncode', 2) not in (0, 1):
             raise RuntimeError('git grep failed for ' + name)
         tests = []

@@ -153,6 +153,60 @@ class ReadScopeCapTest(unittest.TestCase):
         self.assertEqual(items[-1]['kind'], advice.TEST_REFERENCES_CAPPED)
         self.assertIn('time', items[-1]['note'])
 
+    def test_final_grep_returning_after_deadline_falls_back_with_time_cap_note(self):
+        source = _module_source(1)
+        now = [0.0]
+
+        def runner(argv, **kwargs):
+            if _is_module_grep(argv):
+                return types.SimpleNamespace(returncode=0, stdout=f'HEAD:{TEST_A}\n')
+            if argv[3] == 'show':
+                return types.SimpleNamespace(returncode=0, stdout=source)
+            now[0] += advice.PRECISE_SEARCH_MAX_SECONDS + 1.0
+            return types.SimpleNamespace(returncode=0, stdout=f'HEAD:{TEST_B}\n')
+
+        with mock.patch.object(advice.time, 'monotonic', side_effect=lambda: now[0]):
+            items = advice.referencing_tests(
+                root='/fake', commit='HEAD', read_paths=[], write_paths=[WIDGET],
+                runner=runner, texts=['Update fn_00()'])
+        fallback = advice.referencing_tests(
+            root='/fake', commit='HEAD', read_paths=[], write_paths=[WIDGET],
+            runner=runner)
+
+        self.assertEqual(items[:-1], fallback)
+        self.assertEqual(items[-1]['kind'], advice.TEST_REFERENCES_CAPPED)
+        self.assertIsNone(items[-1]['path'])
+        self.assertIn('capped', items[-1]['note'])
+        self.assertIn('time', items[-1]['note'])
+        task_store._validate_read_scope_advice([advice.entry(items, None, None)])
+
+    def test_module_show_returning_after_deadline_falls_back_with_time_cap_note(self):
+        source = _module_source(1)
+        now = [0.0]
+
+        def runner(argv, **kwargs):
+            if _is_module_grep(argv):
+                return types.SimpleNamespace(returncode=0, stdout=f'HEAD:{TEST_A}\n')
+            if argv[3] == 'show':
+                now[0] += advice.PRECISE_SEARCH_MAX_SECONDS + 1.0
+                return types.SimpleNamespace(returncode=0, stdout=source)
+            raise AssertionError('git grep should not start after deadline')
+
+        with mock.patch.object(advice.time, 'monotonic', side_effect=lambda: now[0]):
+            items = advice.referencing_tests(
+                root='/fake', commit='HEAD', read_paths=[], write_paths=[WIDGET],
+                runner=runner, texts=['Update fn_00()'])
+        fallback = advice.referencing_tests(
+            root='/fake', commit='HEAD', read_paths=[], write_paths=[WIDGET],
+            runner=runner)
+
+        self.assertEqual(items[:-1], fallback)
+        self.assertEqual(items[-1]['kind'], advice.TEST_REFERENCES_CAPPED)
+        self.assertIsNone(items[-1]['path'])
+        self.assertIn('capped', items[-1]['note'])
+        self.assertIn('time', items[-1]['note'])
+        task_store._validate_read_scope_advice([advice.entry(items, None, None)])
+
     def test_within_bounds_matches_precise_output_and_historical_no_texts(self):
         source = _module_source(3)
 
