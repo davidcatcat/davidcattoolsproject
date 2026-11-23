@@ -2124,7 +2124,10 @@ class GitHubActivityTests(unittest.TestCase):
              patch.object(mon.time, "time", return_value=NOW), \
              patch("sys.stdout", __import__("io").StringIO()) as out:
             self.assertEqual(mon.main(["--once", "--github"]), 0)
-        self.assertEqual(len(run.calls), 5)
+        # The sixth read is the open-Issues page of the 白板 (Owner 2026-11-24).
+        self.assertEqual(len(run.calls), 6)
+        self.assertEqual(sum(f"repos/{mon.DEFAULT_GITHUB_REPO}/issues?state=open" in argv[4]
+                             for argv, _ in run.calls), 1)
         self.assertTrue(all(argv[1:4] == ["api", "-X", "GET"] for argv, _ in run.calls))
         self.assertTrue(all(mon.DEFAULT_GITHUB_REPO in argv[4] for argv, _ in run.calls))
         runs_calls = [argv for argv, _ in run.calls
