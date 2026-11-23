@@ -750,6 +750,7 @@ class BootstrapSourceAllowanceTests(unittest.TestCase):
 
     def test_publish_task_passes_task_write_paths(self):
         write_paths = ["tools/llmtool/pyproject.toml", "src/mod.py"]
+        new_head = "1" * 40
         record = {
             "task_id": "task-publish-1",
             "developer": {"write_paths": write_paths},
@@ -765,7 +766,8 @@ class BootstrapSourceAllowanceTests(unittest.TestCase):
         # remote's own main tip (a missing base fails closed with
         # PUBLISH_BINDING_UNAVAILABLE), records the result first and never
         # fetches or merges main, so the fake answers the main ls-remote and
-        # offers no fetch or merge.
+        # offers no fetch or merge. The Developer result is one commit over
+        # that tip, so #2602 D2's no-new-commit stop does not apply.
         git_outputs = {
             ("rev-parse", "--show-toplevel"): str(self.source) + "\n",
             ("branch", "--show-current"): "feature-branch\n",
@@ -776,8 +778,9 @@ class BootstrapSourceAllowanceTests(unittest.TestCase):
             ("ls-remote", "--heads", "origin", "refs/heads/main"):
                 f"{self.base}\trefs/heads/main\n",
             ("cat-file", "-e", f"{self.base}^{{commit}}"): "",
-            ("--no-replace-objects", "rev-list", "--parents", "HEAD", "--not", self.base): "",
-            ("rev-parse", "--verify", "HEAD"): self.base + "\n",
+            ("--no-replace-objects", "rev-list", "--parents", "HEAD", "--not", self.base):
+                f"{new_head} {self.base}\n",
+            ("rev-parse", "--verify", "HEAD"): new_head + "\n",
             ("push", "origin", "HEAD:refs/heads/feature-branch"): "",
         }
         events = []
@@ -788,7 +791,10 @@ class BootstrapSourceAllowanceTests(unittest.TestCase):
             key = tuple(args)
             events.append(("git", key))
             if key == push_args:
-                git_outputs[branch_ref] = f"{self.base}\trefs/heads/feature-branch\n"
+                git_outputs[branch_ref] = f"{new_head}\trefs/heads/feature-branch\n"
+            if new_head in key:
+                # Reads of the Developer's committed result: no visible change.
+                return subprocess.CompletedProcess(args, 0, "", "")
             if key in git_outputs:
                 return subprocess.CompletedProcess(args, 0, git_outputs[key], "")
             # Any other command (for example a main fetch or merge) fails.
@@ -799,7 +805,7 @@ class BootstrapSourceAllowanceTests(unittest.TestCase):
         def fake_record_result(**kwargs):
             recorded_calls.append(kwargs)
             events.append(("record",))
-            return self.base
+            return new_head
 
         d6_binding["branch"] = "feature-branch"
         with patch.object(task_advance, "_publish_pr", return_value=99):
@@ -809,7 +815,7 @@ class BootstrapSourceAllowanceTests(unittest.TestCase):
                 gh_runner=lambda *_a: subprocess.CompletedProcess([], 0, b"", b""),
                 record_result_call=fake_record_result)
 
-        self.assertEqual(published, {"pr": 99, "head": self.base})
+        self.assertEqual(published, {"pr": 99, "head": new_head})
         self.assertEqual(len(recorded_calls), 1)
         self.assertEqual(recorded_calls[0]["write_paths"], write_paths)
         self.assertEqual(recorded_calls[0]["task_id"], "task-publish-1")
