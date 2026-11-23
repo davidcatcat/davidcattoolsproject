@@ -170,7 +170,7 @@ class ReviewRepairLongVerdictTests(unittest.TestCase):
         }]
         self.store = TempTaskStore(self.temp.name, record)
 
-        result =self.dispatch(github_get=lambda _path: [comment])
+        result = self.dispatch(github_get=lambda _path: [comment])
         self.assertEqual(result['claim']['attempt'], 1)
         self.assertEqual(len(self.calls), 1)
 
