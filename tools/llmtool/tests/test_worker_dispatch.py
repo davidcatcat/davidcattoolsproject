@@ -397,8 +397,8 @@ class WorkerDispatchTests(unittest.TestCase):
             {'codex-developer': 'PAUSED', 'claude-developer': 'ALLOWED',
              'opencode-developer': 'ALLOWED', 'agy': 'ALLOWED',
              'company-gw': 'PAUSED', 'gw-agent': 'ALLOWED',
-             # #289 c7070193668: the Owner allowed the Claude formal Reviewer.
-             'claude-reviewer': 'ALLOWED', 'codex-reviewer': 'ALLOWED',
+             # #289 c7106823913: the Owner paused the Claude formal Reviewer.
+             'claude-reviewer': 'PAUSED', 'codex-reviewer': 'ALLOWED',
              'codex-debug': 'ALLOWED', 'claude-debug': 'ALLOWED'})
         with self._real_policy():
             decisions = {key: worker_dispatch.evaluate(key) for key in policy['workers']}
@@ -408,33 +408,35 @@ class WorkerDispatchTests(unittest.TestCase):
                 self.assertNotEqual(decision.reason_code, 'WORKER_POLICY_INVALID')
         self.assertEqual(decisions['agy'].reason_code, 'OWNER_POLICY_ALLOWED')
         self.assertTrue(decisions['agy'].allowed)
+        self.assertFalse(decisions['claude-reviewer'].allowed)
+        self.assertEqual(decisions['claude-reviewer'].reason_code, 'OWNER_PAUSED')
 
-    # #289 (Owner decision relayed on c7070193668): the real policy allows the
-    # Claude formal Reviewer for OpenCode, AGY and home LLM authors; Codex remains
-    # the Reviewer for Claude-authored changes. These tests read the live
-    # worker-dispatch.json through the real reader, parser and gate.
-    _CLAUDE_REVIEWER_ALLOW_REF = ('https://github.com/davidcatcat/davidcattoolsproject/'
-                                  'issues/289#issuecomment-7070193668')
+    # #289 (Owner decision relayed on c7106823913): the real policy pauses the
+    # Claude formal Reviewer, so every formal review goes to codex-reviewer.
+    # These tests read the live worker-dispatch.json through the real reader,
+    # parser and gate.
+    _CLAUDE_REVIEWER_PAUSE_REF = ('https://github.com/davidcatcat/davidcattoolsproject/'
+                                  'issues/289#issuecomment-7106823913')
 
-    def test_real_policy_claude_reviewer_row_is_owner_allowed(self):
+    def test_real_policy_claude_reviewer_row_is_owner_paused(self):
         raw = Path(worker_dispatch._DEFAULT_POLICY_PATH).read_bytes()
         policy = worker_dispatch._parse_policy(raw)
         row = policy['workers']['claude-reviewer']
         self.assertEqual(set(row), {'dispatch', 'decided_by', 'decided_at', 'reason',
                                     'evidence'})
-        self.assertEqual(row['dispatch'], 'ALLOWED')
+        self.assertEqual(row['dispatch'], 'PAUSED')
         self.assertEqual(row['decided_by'], 'Owner')
-        self.assertEqual(row['decided_at'], '2026-11-22')
-        self.assertEqual(row['evidence'], self._CLAUDE_REVIEWER_ALLOW_REF)
-        for phrase in ('claude2', 'formal Reviewer', 'OpenCode, AGY and home LLM',
-                       'codex-reviewer', 'Claude-authored'):
-            self.assertIn(phrase, row['reason'])
+        self.assertEqual(row['decided_at'], '2026-11-23')
+        self.assertEqual(row['evidence'], self._CLAUDE_REVIEWER_PAUSE_REF)
+        self.assertEqual(
+            row['reason'],
+            'Owner paused claude-reviewer, so every formal review goes to codex-reviewer')
         self.assertLessEqual(len(row['reason']), 512)
         with self._real_policy():
-            allowed = worker_dispatch.evaluate('claude-reviewer')
+            paused = worker_dispatch.evaluate('claude-reviewer')
             codex = worker_dispatch.evaluate('codex-reviewer')
-        self.assertTrue(allowed.allowed)
-        self.assertEqual(allowed.reason_code, 'OWNER_POLICY_ALLOWED')
+        self.assertFalse(paused.allowed)
+        self.assertEqual(paused.reason_code, 'OWNER_PAUSED')
         self.assertTrue(codex.allowed)
         self.assertEqual(codex.reason_code, 'OWNER_POLICY_ALLOWED')
 
@@ -448,18 +450,24 @@ class WorkerDispatchTests(unittest.TestCase):
     # test_gw_agent_route_wiring.RealPolicyReviewerFallbackTests: importing
     # task_advance here would make ci_mac_modules select this module for #781
     # (test_ci_mac_modules uses it as the unrelated control).
-    def test_real_policy_admits_claude_reviewer_and_keeps_codex_for_claude_authors(self):
+    def test_real_policy_refuses_claude_reviewer_and_keeps_codex_for_claude_authors(self):
         from llmtool import review_dispatch
         # A non-Claude, non-Codex author (family "other").
         task = self._review_task('gemini-2.5-pro')
         # Control: under the shared all-ALLOWED policy the default is claude-reviewer.
         self.assertEqual(review_dispatch._select_reviewer(task), 'claude-reviewer')
         with self._real_policy():
-            # The real row admits an explicit claude-reviewer request.
-            self.assertEqual(review_dispatch._select_reviewer(task, 'claude-reviewer'),
-                             'claude-reviewer')
-            # The default Reviewer for this author is claude-reviewer, and it is admitted.
-            self.assertEqual(review_dispatch._select_reviewer(task), 'claude-reviewer')
+            # The paused row refuses an explicit claude-reviewer request.
+            with self.assertRaises(LLMToolError) as explicit_refused:
+                review_dispatch._select_reviewer(task, 'claude-reviewer')
+            self.assertEqual(explicit_refused.exception.review_dispatch_code,
+                             'REVIEWER_NOT_ALLOWED')
+            # The default Reviewer for this author is claude-reviewer, and it is refused.
+            with self.assertRaises(LLMToolError) as default_refused:
+                review_dispatch._select_reviewer(task)
+            self.assertEqual(default_refused.exception.review_dispatch_code,
+                             'REVIEWER_NOT_ALLOWED')
+            # An explicit codex-reviewer request is admitted.
             self.assertEqual(review_dispatch._select_reviewer(task, 'codex-reviewer'),
                              'codex-reviewer')
             # A Claude-authored Task keeps its codex-reviewer default.

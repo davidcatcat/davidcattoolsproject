@@ -1435,13 +1435,12 @@ class GwAgentShippedServedModelTests(unittest.TestCase):
 
 
 class RealPolicyReviewerFallbackTests(unittest.TestCase):
-    """#289 c7070193668: the live worker-dispatch.json allows claude-reviewer.
+    """#289 c7106823913: the live worker-dispatch.json pauses claude-reviewer.
 
-    Owner decision (#289 c7070144907, B on c7070193668): claude-reviewer on
-    account claude2 is the formal Reviewer for OpenCode, AGY and home LLM
-    authored changes; codex-reviewer stays the Reviewer for Claude-authored
-    changes. Decisions go through the real reader, parser and gate on the
-    repository policy file; only the trusted repository config is pinned.
+    Owner order relayed on #289: the Claude formal Reviewer is paused too, so
+    every formal review goes to codex-reviewer. Decisions go through the real
+    reader, parser and gate on the repository policy file; only the trusted
+    repository config is pinned.
     """
 
     def setUp(self):
@@ -1459,36 +1458,58 @@ class RealPolicyReviewerFallbackTests(unittest.TestCase):
     def _task(developer):
         return {'task_id': 'a' * 32, 'run_id': 'b' * 32, 'developer': developer}
 
-    def test_gw_agent_author_review_uses_claude_reviewer(self):
+    def test_gw_agent_author_review_refuses_claude_reviewer_and_admits_codex(self):
         task = self._task({'provider_profile': 'gw-agent'})
-        # The real row admits an explicit claude-reviewer request.
-        self.assertEqual(review_dispatch._select_reviewer(task, 'claude-reviewer'),
-                         'claude-reviewer')
-        # The default Reviewer for a gw-agent author is claude-reviewer, admitted.
-        self.assertEqual(review_dispatch._select_reviewer(task), 'claude-reviewer')
-        # codex-reviewer stays admitted as an explicit cross-family choice.
+        # The paused row refuses an explicit claude-reviewer request.
+        with self.assertRaises(LLMToolError) as explicit_refused:
+            review_dispatch._select_reviewer(task, 'claude-reviewer')
+        self.assertEqual(explicit_refused.exception.review_dispatch_code,
+                         'REVIEWER_NOT_ALLOWED')
+        # The default Reviewer for a gw-agent author is claude-reviewer, refused.
+        with self.assertRaises(LLMToolError) as default_refused:
+            review_dispatch._select_reviewer(task)
+        self.assertEqual(default_refused.exception.review_dispatch_code,
+                         'REVIEWER_NOT_ALLOWED')
+        # An explicit codex-reviewer request is admitted.
         self.assertEqual(review_dispatch._select_reviewer(task, 'codex-reviewer'),
                          'codex-reviewer')
 
-    def test_other_family_and_opencode_authors_use_claude_reviewer(self):
+    def test_other_family_and_opencode_authors_refuse_claude_reviewer(self):
         for developer in ({'provider_profile': 'agy', 'model': 'gemini-2.5-pro'},
                           {'provider_profile': 'opencode'}):
             with self.subTest(developer=developer):
                 task = self._task(developer)
-                self.assertEqual(review_dispatch._select_reviewer(task), 'claude-reviewer')
+                with self.assertRaises(LLMToolError) as explicit_refused:
+                    review_dispatch._select_reviewer(task, 'claude-reviewer')
+                self.assertEqual(explicit_refused.exception.review_dispatch_code,
+                                 'REVIEWER_NOT_ALLOWED')
+                with self.assertRaises(LLMToolError) as default_refused:
+                    review_dispatch._select_reviewer(task)
+                self.assertEqual(default_refused.exception.review_dispatch_code,
+                                 'REVIEWER_NOT_ALLOWED')
+                # An explicit codex-reviewer request is admitted.
+                self.assertEqual(review_dispatch._select_reviewer(task, 'codex-reviewer'),
+                                 'codex-reviewer')
 
-    def test_codex_authored_task_uses_claude_reviewer_never_codex(self):
-        # Family separation still forbids codex-reviewer for a Codex-family
-        # author; with claude-reviewer allowed the default now has a Reviewer.
+    def test_codex_authored_task_refuses_claude_reviewer(self):
+        # The default claude-reviewer is refused by the paused row; family
+        # separation still forbids codex-reviewer for a Codex-family author.
         task = self._task({'provider_profile': 'agy', 'model': 'gpt-6-luna'})
-        self.assertEqual(review_dispatch._select_reviewer(task), 'claude-reviewer')
+        with self.assertRaises(LLMToolError) as default_refused:
+            review_dispatch._select_reviewer(task)
+        self.assertEqual(default_refused.exception.review_dispatch_code,
+                         'REVIEWER_NOT_ALLOWED')
+        with self.assertRaises(LLMToolError) as explicit_refused:
+            review_dispatch._select_reviewer(task, 'claude-reviewer')
+        self.assertEqual(explicit_refused.exception.review_dispatch_code,
+                         'REVIEWER_NOT_ALLOWED')
         with self.assertRaises(LLMToolError) as same_family:
             review_dispatch._select_reviewer(task, 'codex-reviewer')
         self.assertEqual(same_family.exception.review_dispatch_code, 'REVIEWER_SAME_FAMILY')
 
     def test_claude_authored_task_keeps_codex_reviewer(self):
-        # Claude-authored changes keep codex-reviewer; claude-reviewer is the
-        # same family and stays refused.
+        # Claude-authored changes keep codex-reviewer; claude-reviewer is paused
+        # and same-family, so the family refusal comes first.
         task = self._task({'provider_profile': 'claude'})
         self.assertEqual(review_dispatch._select_reviewer(task), 'codex-reviewer')
         with self.assertRaises(LLMToolError) as same_family:
