@@ -59,11 +59,12 @@ class PreciseReferencesTest(unittest.TestCase):
         return [(item['kind'], item['path']) for item in items]
 
     def test_u1_no_texts_keeps_the_module_level_list(self):
-        expected = [(advice.TEST_REFERENCES_WRITE, CALL),
+        # The module-level listing is sorted by test path; U1 keeps that order.
+        expected = [(advice.TEST_REFERENCES_WRITE, OTHER),
+                    (advice.TEST_REFERENCES_WRITE, CALL),
                     (advice.TEST_REFERENCES_WRITE, ADOPT),
                     (advice.TEST_REFERENCES_WRITE, IMPORT),
-                    (advice.TEST_REFERENCES_WRITE, LIMIT),
-                    (advice.TEST_REFERENCES_WRITE, OTHER)]
+                    (advice.TEST_REFERENCES_WRITE, LIMIT)]
         self.assertEqual(self.kinds(self.refs()), expected)
         self.assertEqual(self.kinds(self.refs(texts=None)), expected)
         self.assertEqual(self.kinds(self.refs(texts=[])), expected)
