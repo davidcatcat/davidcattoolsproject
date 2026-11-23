@@ -408,6 +408,8 @@ class WorkerDispatchTests(unittest.TestCase):
                 self.assertNotEqual(decision.reason_code, 'WORKER_POLICY_INVALID')
         self.assertEqual(decisions['agy'].reason_code, 'OWNER_POLICY_ALLOWED')
         self.assertTrue(decisions['agy'].allowed)
+        self.assertFalse(decisions['claude-reviewer'].allowed)
+        self.assertEqual(decisions['claude-reviewer'].reason_code, 'OWNER_PAUSED')
 
     # #289 (Owner decision relayed on c7106823913): the real policy pauses the
     # Claude formal Reviewer, so every formal review goes to codex-reviewer.
