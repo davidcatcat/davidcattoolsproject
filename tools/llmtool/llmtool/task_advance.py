@@ -1723,7 +1723,8 @@ def _is_ruling_comment(comment, body):
     or versioned) and the Codex binding line, in that order. The binding head
     equals the header HEAD (not necessarily the current PR head), the marker
     status equals the header outcome, the body has exactly one Ruling line, no
-    Verdict: line and no verdict version-and-head line, is at most 65536 UTF-8
+    review_verdict marker line, no Verdict: line and no verdict version-and-head
+    line, is at most 65536 UTF-8
     bytes, and was never edited. Anything else is not a ruling comment and is
     classified as a possible security verdict.
     """
@@ -1754,6 +1755,9 @@ def _is_ruling_comment(comment, body):
             return False
         for line in (item.strip() for item in body.splitlines() if item.strip()):
             if line.startswith('Verdict:'):
+                return False
+            if (task_completion._VERDICT_MARKER.fullmatch(line) is not None or
+                    'type=review_verdict' in line):
                 return False
             if review_result._VERDICT_VERSION_HEAD.fullmatch(line) is not None:
                 return False

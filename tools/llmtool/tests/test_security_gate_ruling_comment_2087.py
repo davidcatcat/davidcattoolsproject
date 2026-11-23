@@ -290,6 +290,24 @@ class RulingCommentNotSkippedTests(_GateAsserts, unittest.TestCase):
         ruling = _ruling_comment(extra_lines=('Reasons follow.', line))
         self.assertRefused(_run_merge_once([ruling]), NOT_PASS)
 
+    def test_ruling_with_added_review_verdict_marker_line_not_skipped(self):
+        # A review_verdict marker line anywhere in a ruling, with no Verdict: line,
+        # is a malformed mixed comment. On main its binding line gives UNKNOWN.
+        for actor in ('Codex', 'Claude'):
+            for status in ('PASS', 'FIX', 'FAIL'):
+                marker = (f'<!-- activity: type=review_verdict actor={actor} '
+                          f'target=PM status={status} -->')
+                for label, lines in (
+                    ('after_binding', (marker,)),
+                    ('after_free_text', ('Reasons follow.', marker)),
+                    ('indented', (f'  {marker}',)),
+                    ('trailing_text', (f'{marker} extra',)),
+                ):
+                    with self.subTest(actor=actor, status=status, label=label):
+                        ruling = _ruling_comment(extra_lines=lines)
+                        self.assertFalse(task_advance._is_ruling_comment(ruling, ruling['body']))
+                        self.assertRefused(_run_merge_once([ruling]), UNKNOWN)
+
     def test_binding_head_differs_from_header_head_not_skipped(self):
         for header in ('versioned', 'legacy'):
             with self.subTest(header=header):
