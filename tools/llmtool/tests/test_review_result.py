@@ -551,6 +551,33 @@ class StableFindingIdTests(unittest.TestCase):
         self.assertEqual(review_result.diagnosis_findings(task, head, 'developer-d6'),
                          ('High a.py:2 wrong authorization target',))
 
+    def test_diagnosis_reads_a_codex_fix_as_the_formal_fail_and_nothing_else(self):
+        # A Codex Reviewer stores verdict FIX for a posted "Verdict: FAIL" (#2666 v3).
+        head = 'a' * 40
+        text = ('Verdict: FAIL | Version: v3 | HEAD: ' + head +
+                '\nFinding: F1 [High] a.py:2 refusal replaced')
+        claim = {'state': 'COMPLETED', 'executor_task': 'developer-d6',
+                 'head_sha': head, 'version': 3, 'pr': 2666, 'updated_at': '2026-11-24T00:00:00Z',
+                 'review_result': {'head': head, 'task_id': 'task', 'verdict': 'FIX',
+                                   'review_text': text}}
+        task = {'task_id': 'task', 'review_dispatch_claim': [claim]}
+        self.assertEqual(review_result.diagnosis_review_body(task, head, 'developer-d6', pr=2666),
+                         text)
+        self.assertEqual(review_result.diagnosis_findings(task, head, 'developer-d6', pr=2666),
+                         ('High a.py:2 refusal replaced',))
+        from llmtool import high_debug
+        self.assertTrue(high_debug._review_fail_at_head(task, head, 'developer-d6', 2666))
+        for verdict in ('PASS', 'BLOCKED', 'fix', None):
+            with self.subTest(verdict=verdict):
+                claim['review_result']['verdict'] = verdict
+                self.assertIsNone(review_result.diagnosis_review_body(task, head, 'developer-d6'))
+                self.assertFalse(high_debug._review_fail_at_head(task, head, 'developer-d6', 2666))
+        claim['review_result']['verdict'] = 'FIX'
+        for state in ('DISPATCHED', 'UNKNOWN'):
+            with self.subTest(state=state):
+                claim['state'] = state
+                self.assertIsNone(review_result.diagnosis_review_body(task, head, 'developer-d6'))
+
     def test_only_low_findings_leave_no_blocking_finding(self):
         self.assertEqual(review_result.blocking_findings(
             'Finding: F1 [Low] a.py:1 x\nFinding: F2 [Advisory] a.py:2 y\n'), [])
