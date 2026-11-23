@@ -107,6 +107,8 @@ COMPANION_WRITE = 'COMPANION_WRITE'
 COMPANION_READ = 'COMPANION_READ'
 TEST_REFERENCES_WRITE = 'TEST_REFERENCES_WRITE'
 TEST_REFERENCES_MORE = 'TEST_REFERENCES_MORE'
+# #2602u: a test outside write that directly exercises a changed name.
+TEST_LOCKS_CHANGE = 'TEST_LOCKS_CHANGE'
 GUIDANCE_DRIFT_JSON = 'tools/llmtool/guidance-drift.json'
 GUIDANCE_DRIFT_CHECK = 'tools/llmtool/scripts/guidance_drift_check.py'
 _HASHED_GUIDANCE = ('CLAUDE.md', 'AGENTS.md')
@@ -155,7 +157,7 @@ def reference_patterns(path):
     return patterns
 
 
-def referencing_tests(*, root, commit, read_paths, write_paths, runner=None):
+def _module_referencing_tests(*, root, commit, read_paths, write_paths, runner=None):
     """Test files at commit that reference a written file but are in neither read nor write.
 
     Bounded: one git grep per written non-test .py/.json file over
@@ -198,6 +200,159 @@ def referencing_tests(*, root, commit, read_paths, write_paths, runner=None):
     return [item(TEST_REFERENCES_WRITE, test,
                  ('references ' + source + '; it may pin the old behaviour')[:MAX_NOTE_CHARS])
             for test, source in sorted(found.items())] + more
+
+
+# --- #2602u: list only the tests that exercise the names a spec changes ------
+
+_CHANGE_VERB = re.compile(
+    r'\b(?:add|adjust|change|edit|extend|fix|introduce|modify|move|refactor|'
+    r'remove|rename|replace|update)\b', re.IGNORECASE)
+_CODE_NAME = re.compile(r'`\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^`]*\))?\s*`')
+_CALL_NAME = re.compile(r'(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\s*\(')
+_IDENTIFIER = re.compile(r'(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]{2,})(?![A-Za-z0-9_])')
+_DEFINED_NAME = re.compile(
+    r'^[ \t]*(?:async[ \t]+)?(?:def|class)[ \t]+([A-Za-z_][A-Za-z0-9_]*)', re.MULTILINE)
+_ASSIGNED_NAME = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)[ \t]*=', re.MULTILINE)
+# After a change verb these are prose, not names the spec is changing.
+_STOP_WORDS = frozenset('''
+    add adjusted after and are before change changed changes editing edits for
+    from function functions into item items its kind kinds list lists module
+    modules new not note notes only path paths test tests text texts the their
+    them then this to update updated updates use used using value values when
+    with
+'''.split())
+
+
+def _module_sources(run, root, commit, write_paths):
+    """Sources at commit of the written non-test Python modules; {} on any read error."""
+    sources = {}
+    for path in sorted(set(write_paths or [])):
+        name = path.rsplit('/', 1)[-1]
+        if not name.endswith('.py') or name.startswith('test_') or '/tests/' in path:
+            continue
+        result = run(['git', '-C', str(root), 'show', '%s:%s' % (commit, path)],
+                     stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                     timeout=20, check=False)
+        if getattr(result, 'returncode', 2) != 0:
+            continue
+        sources[path] = result.stdout or ''
+    return sources
+
+
+def _defined_names(sources):
+    """Names defined in the given module sources; paths by name, plus the callable names."""
+    definitions = {}
+    callable_names = set()
+
+    def add(name, path):
+        paths = definitions.setdefault(name, [])
+        if path not in paths:
+            paths.append(path)
+
+    for path, source in sources.items():
+        for match in _DEFINED_NAME.finditer(source or ''):
+            name = match.group(1)
+            callable_names.add(name)
+            add(name, path)
+        for match in _ASSIGNED_NAME.finditer(source or ''):
+            add(match.group(1), path)
+    return definitions, callable_names
+
+
+def _candidate_names(text, definitions):
+    """Names in one text that are defined in a written module, in first-seen order."""
+    found = []
+
+    def add(name):
+        if name in definitions and name not in found:
+            found.append(name)
+
+    for match in _CODE_NAME.finditer(text):
+        add(match.group(1))
+    for match in _CALL_NAME.finditer(text):
+        add(match.group(1))
+    for verb in _CHANGE_VERB.finditer(text):
+        for match in _IDENTIFIER.finditer(text[verb.end():verb.end() + 80]):
+            name = match.group(1)
+            if name.lower() not in _STOP_WORDS:
+                add(name)
+    return found
+
+
+def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, runner=None):
+    """Tests that directly exercise names the spec texts change; None when no name is found.
+
+    Any error propagates to referencing_tests(), which keeps the module-level list.
+    """
+    run = runner or subprocess.run
+    given = [text for text in _texts(texts) if text.strip()]
+    if not given:
+        return None
+    definitions, callable_names = _defined_names(_module_sources(run, root, commit, write_paths))
+    names = []
+    for text in given:
+        for name in _candidate_names(text, definitions):
+            if name not in names:
+                names.append(name)
+    if not names:
+        return None
+    write = {path.strip('/') for path in write_paths or [] if type(path) is str}
+    found = {}
+    more = []
+    for name in names:
+        if name in callable_names:
+            # A function or class is exercised by a call, not by an import alone.
+            pattern = '(^|[^A-Za-z0-9_])' + _ere(name) + '[[:space:]]*\\('
+        else:
+            pattern = '(^|[^A-Za-z0-9_])' + _ere(name) + '([^A-Za-z0-9_]|$)'
+        argv = ['git', '-C', str(root), 'grep', '-l', '-E', '-e', pattern,
+                commit, '--', *_TEST_DIRS]
+        result = run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                     timeout=20, check=False)
+        if getattr(result, 'returncode', 2) not in (0, 1):
+            raise RuntimeError('git grep failed for ' + name)
+        tests = []
+        for line in (result.stdout or '').splitlines():
+            test = line[len(commit) + 1:] if line.startswith(commit + ':') else line
+            if test and test not in tests:
+                tests.append(test)
+        tests.sort()
+        for test in tests[:MAX_TESTS_PER_PATH]:
+            if test not in write:
+                found.setdefault(test, [])
+                if name not in found[test]:
+                    found[test].append(name)
+        if len(tests) > MAX_TESTS_PER_PATH:
+            more.append(item(TEST_REFERENCES_MORE, (definitions.get(name) or [None])[0],
+                             ('%d test files directly exercise %s; shown: the first %d'
+                              % (len(tests), name, MAX_TESTS_PER_PATH))[:MAX_NOTE_CHARS]))
+    return [item(TEST_LOCKS_CHANGE, test,
+                 ('may lock the behaviour the acceptance changes; it belongs in write under '
+                  'the locked-test rule; directly exercises ' +
+                  ', '.join(found[test]))[:MAX_NOTE_CHARS])
+            for test in sorted(found)] + more
+
+
+def referencing_tests(*, root, commit, read_paths, write_paths, runner=None, texts=None):
+    """Test files to show the PM for the files being written.
+
+    Without texts (the historical input) this returns exactly the module-level
+    reference list. With texts (the goal and acceptance), it returns only tests
+    that directly exercise names the texts change, and falls back to the
+    module-level list when no changed name can be identified or the new logic
+    errors. The advice stays fail-open either way.
+    """
+    if texts is not None:
+        try:
+            precise = _precise_referencing_tests(
+                root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
+                texts=texts, runner=runner)
+            if precise is not None:
+                return precise
+        except Exception:
+            pass
+    return _module_referencing_tests(
+        root=root, commit=commit, read_paths=read_paths, write_paths=write_paths, runner=runner)
 
 
 # --- #2503 PR-6: route capability and size advice ----------------------------
