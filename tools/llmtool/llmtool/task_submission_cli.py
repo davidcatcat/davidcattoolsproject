@@ -457,6 +457,14 @@ def _prelaunch_error(message, code):
     return error
 
 
+def _screen_prelaunch_text(value, limit, code='DELEGATE_TEXT_INVALID'):
+    """Screen pre-launch delegate text and convert bare refusals to coded pre-launch errors."""
+    try:
+        return _screen_text(value, limit)
+    except LLMToolError as exc:
+        raise _prelaunch_error(str(exc), code) from None
+
+
 def _validate_acceptance_scope(acceptance):
     if type(acceptance) is not list:
         raise _prelaunch_error('developer acceptance scope is invalid',
@@ -467,7 +475,7 @@ def _validate_acceptance_scope(acceptance):
             f'PM_RESPONSE_ACCEPTANCE_COUNT: {count} items (allowed 1-16)',
             'PM_RESPONSE_ACCEPTANCE_COUNT')
     # #2281 limit row 8: no per-item byte cap; the response bound holds.
-    return [_screen_text(item, RESPONSE_LIMIT) for item in acceptance]
+    return [_screen_prelaunch_text(item, RESPONSE_LIMIT) for item in acceptance]
 
 
 def _strict_json_object(raw):
@@ -5953,11 +5961,14 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise _prelaunch_error('developer acceptance scope is invalid',
                                'DEVELOPER_ACCEPTANCE_INVALID')
-    acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
-    egress_basis = _screen_text(args.egress_basis, 512)
-    request = _screen_text(task['request'], REQUEST_LIMIT)
-    _screen_text(task['response'], RESPONSE_LIMIT)
-    config = load_route_config()
+    acceptance = [_screen_prelaunch_text(item, RESPONSE_LIMIT) for item in args.acceptance]
+    egress_basis = _screen_prelaunch_text(args.egress_basis, 512)
+    request = _screen_prelaunch_text(task['request'], REQUEST_LIMIT)
+    _screen_prelaunch_text(task['response'], RESPONSE_LIMIT)
+    try:
+        config = load_route_config()
+    except RouteError as exc:
+        raise _prelaunch_error(str(exc), exc.code) from None
     route_config = dict(config['routes']['agy'])
     agy_profile = _agy_developer_profile(route_config)
     model, effort = agy_profile
@@ -5966,7 +5977,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         raise _prelaunch_error('AGY executable is unavailable', 'AGY_EXECUTABLE_UNAVAILABLE')
     route_config['executable'] = executable
     route = AgyRoute(route_config)
-    pm_goal = (_screen_text(assignment.get('goal'), REQUEST_LIMIT)
+    pm_goal = (_screen_prelaunch_text(assignment.get('goal'), REQUEST_LIMIT)
                if args.selection_source == 'PM' else request)
     prompt_packet = {
         'task_id': task['task_id'], 'run_id': task['run_id'],
@@ -5988,8 +5999,11 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     task_json = '\nTASK_JSON=' + json.dumps(prompt_packet, ensure_ascii=True, sort_keys=True,
                                             separators=(',', ':'))
     prompt = instructions + task_json
-    agy_max_prompt_bytes = resolve_route_max_prompt_bytes('agy', config=config)
-    _screen_text(prompt, agy_max_prompt_bytes)
+    try:
+        agy_max_prompt_bytes = resolve_route_max_prompt_bytes('agy', config=config)
+    except RouteError as exc:
+        raise _prelaunch_error(str(exc), exc.code) from None
+    _screen_prelaunch_text(prompt, agy_max_prompt_bytes)
     if len(prompt.encode('utf-8')) > agy_max_prompt_bytes:
         raise _prelaunch_error('request or response exceeds the supported size',
                                'AGY_PROMPT_TOO_LARGE')

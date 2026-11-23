@@ -318,6 +318,62 @@ class RepairDispatchCodedRefusalTests(unittest.TestCase):
             self.assertEqual(claims[0]['state'], 'CLAIMED')
             self.assertIsNone(store.get(claims[0]['repair_task_id']).get('developer'))
 
+    def test_prelaunch_screen_text_refusal_reports_code_and_stays_claimed(self):
+        reg = self._registration()
+        snap = self._snapshot()
+        bad_record = _ec2_agy_record()
+        bad_record['developer']['egress_basis'] = 'invalid\x00basis'
+        store = _RepairStore(self.temp.name, bad_record)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                task_advance, '_d6_snapshot', return_value=self._d6()))
+            stack.enter_context(mock.patch.object(
+                review_repair, '_registered_d6', return_value=(reg, snap)))
+            stack.enter_context(mock.patch.object(
+                review_repair.worker_dispatch, 'evaluate',
+                return_value=types.SimpleNamespace(
+                    allowed=True, reason_code='OWNER_POLICY_ALLOWED')))
+            stack.enter_context(mock.patch.object(
+                task_submission_cli.worker_dispatch, 'evaluate',
+                return_value=types.SimpleNamespace(
+                    allowed=True, reason_code='OWNER_POLICY_ALLOWED')))
+            stack.enter_context(mock.patch.object(
+                active_pm_inbox, 'observe_claude_session', return_value='/repo'))
+            stack.enter_context(mock.patch.object(
+                task_submission_cli, '_delegate_d6_binding',
+                return_value=(reg, snap)))
+            stack.enter_context(mock.patch.object(
+                task_submission_cli, '_scope_advice_items', return_value=[]))
+
+            first = task_advance.advance(
+                task_id=TASK, store=store, pr_number=PR,
+                github_get=self._github_get)
+
+            self.assertEqual(first['step'], 'REPAIR_REVIEW')
+            self.assertEqual(first['codes'], ['DELEGATE_TEXT_INVALID'])
+            claims = store.get(TASK)['review_repair_claims']
+            self.assertEqual(len(claims), 1)
+            self.assertEqual(claims[0]['state'], 'CLAIMED')
+            self.assertEqual(claims[0]['attempt'], 1)
+            repair_id = claims[0]['repair_task_id']
+            self.assertIsNone(store.get(repair_id).get('developer'))
+
+            # Acceptance text screening in _validate_acceptance_scope also stays coded and CLAIMED.
+            bad_acceptance = _ec2_agy_record()
+            bad_acceptance['developer']['acceptance'] = ['invalid\x00acceptance']
+            bad_acceptance['pm_assignment']['acceptance'] = ['invalid\x00acceptance']
+            with tempfile.TemporaryDirectory() as acc_dir:
+                store_acc = _RepairStore(acc_dir, bad_acceptance)
+                acc_res = task_advance.advance(
+                    task_id=TASK, store=store_acc, pr_number=PR,
+                    github_get=self._github_get)
+                self.assertEqual(acc_res['step'], 'REPAIR_REVIEW')
+                self.assertEqual(acc_res['codes'], ['DELEGATE_TEXT_INVALID'])
+                acc_claims = store_acc.get(TASK)['review_repair_claims']
+                self.assertEqual(len(acc_claims), 1)
+                self.assertEqual(acc_claims[0]['state'], 'CLAIMED')
+                self.assertIsNone(store_acc.get(acc_claims[0]['repair_task_id']).get('developer'))
+
     def test_uncoded_exception_after_possible_launch_still_records_unknown(self):
         reg = self._registration()
         snap = self._snapshot()
