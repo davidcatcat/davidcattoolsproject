@@ -8,7 +8,7 @@ from unittest import mock
 
 import test_task_store
 import worker_policy_fixture
-from llmtool import review_repair, task_status
+from llmtool import review_repair, task_status, worker_dispatch
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore, new_id
 
@@ -34,6 +34,10 @@ class AbandonNeverStartedTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.store = TaskStore(Path(self.temp.name).resolve() / 'tasks')
         self.policy_path = worker_policy_fixture.install(self)
+        dispatch_patch = mock.patch.object(
+            worker_dispatch, 'authorize_task_store_change', return_value=None)
+        dispatch_patch.start()
+        self.addCleanup(dispatch_patch.stop)
 
     def _d6_completion(self, executor_task=EXECUTOR):
         return {
@@ -126,7 +130,8 @@ class AbandonNeverStartedTests(unittest.TestCase):
         self.assertEqual(task_status.derive_state(saved), 'ABANDONED')
 
     def test_task_with_execution_record_is_refused(self):
-        task = self._make_direct_task(profile='agy', state='DEVELOPER_DISPATCHING')
+        task = self._make_direct_task(
+            profile='agy', state='DEVELOPER_DISPATCHING', boundary='STARTING')
         self.store.record_agy_launch(
             task['task_id'], assignment_id=task['developer']['assignment_id'],
             pid=999999, start_time='Mon Jan 01 00:00:00 2026', pgid=999999)
