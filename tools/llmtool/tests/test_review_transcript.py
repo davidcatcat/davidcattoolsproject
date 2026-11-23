@@ -261,7 +261,14 @@ class FullVerdictTest(unittest.TestCase):
         # #2602 item i: the FAIL repost path reads the session and transcript
         # from the config directory of the account recorded on the claim.
         expected = fail_verdict('', 'Finding: F1 [High] a.py:1 synthetic.')
-        posted = review_transcript._legacy_header(expected)
+        # #2602 item i: the posted comment stands on its own as the single
+        # posted verdict for the claim's version and head: line 1 the
+        # review_verdict activity marker, line 2 exactly the verdict first
+        # line, a non-negative integer id, and (actor Claude) a TASK
+        # developer that is not Claude-family, so the comment is recognised
+        # and only the transcript read supplies the full verdict.
+        posted = ('<!-- activity: type=review_verdict actor=Claude target=PM status=FAIL -->\n'
+                  f'Verdict: FAIL | Version: v1 | HEAD: {HEAD}')
         x = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, x)
         os.makedirs(os.path.join(x, 'projects', '-tasks-' + REVIEWER))
