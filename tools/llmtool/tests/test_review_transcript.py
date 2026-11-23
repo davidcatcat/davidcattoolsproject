@@ -262,13 +262,14 @@ class FullVerdictTest(unittest.TestCase):
         # from the config directory of the account recorded on the claim.
         expected = fail_verdict('', 'Finding: F1 [High] a.py:1 synthetic.')
         # #2602 item i: the posted comment stands on its own as the single
-        # posted verdict for the claim's version and head: line 1 the
-        # review_verdict activity marker, line 2 exactly the verdict first
-        # line, a non-negative integer id, and (actor Claude) a TASK
-        # developer that is not Claude-family, so the comment is recognised
-        # and only the transcript read supplies the full verdict.
-        posted = ('<!-- activity: type=review_verdict actor=Claude target=PM status=FAIL -->\n'
-                  f'Verdict: FAIL | Version: v1 | HEAD: {HEAD}')
+        # posted verdict for the claim's version and head: a non-negative
+        # integer id, a non-empty created_at, and a body equal to the
+        # truncated legacy header of the transcript verdict -- exactly the
+        # first three lines, the review_verdict activity marker (status
+        # FIX), the Verdict line, and the LLMTOOL-REVIEW-BINDING line -- so
+        # the comment is recognised and only the transcript read supplies
+        # the full verdict.
+        posted = '\n'.join(expected.split('\n')[:3])
         x = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, x)
         os.makedirs(os.path.join(x, 'projects', '-tasks-' + REVIEWER))
@@ -278,7 +279,7 @@ class FullVerdictTest(unittest.TestCase):
                 'content': [{'type': 'text', 'text': expected}]}}) + '\n')
         claim = {'native_session_id': SESSION, 'reviewer_task': REVIEWER,
                  'head_sha': HEAD, 'version': 1}
-        comments = [{'id': 1, 'body': posted}]
+        comments = [{'id': 1, 'created_at': '2025-06-01T12:00:00Z', 'body': posted}]
         role = {'account': 'claude2', 'config_dir': x}
         with mock.patch.object(review_transcript.role_config, 'resolve_role',
                                return_value=role) as resolve:
