@@ -56,6 +56,17 @@ INSPECTION_ENV_NAMES = frozenset(ENV_OPTIONS) | {
 CONFIG_LIMIT = 64 * 1024
 # #2281 (Owner 2026-11-19): a provider timeout_seconds may be at most 5 hours.
 MAX_TIMEOUT_SECONDS = 18000.0
+# #2602 item (r): an unchanged config file is parsed once per process. The key
+# binds the absolute path and the file identity, so a rewrite (new inode, size,
+# mtime or ctime) is parsed again. Only successful parses are cached; malformed
+# files keep raising on every call. Nothing is persisted.
+_YAML_CACHE = {}
+_YAML_CACHE_LIMIT = 64
+
+
+def _file_identity(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+            info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
 def yaml_module():
@@ -72,6 +83,31 @@ def user_config_path(home=None):
 
 def _read_yaml(path, label):
     yaml = yaml_module()
+    cache_path = os.path.abspath(os.fspath(path))
+    try:
+        before = path.stat()
+    except OSError:
+        before = None
+    if before is not None:
+        cached = _YAML_CACHE.get((cache_path, _file_identity(before)))
+        if cached is not None:
+            return copy.deepcopy(cached)
+
+    def remember(value):
+        # Cache only a parse whose file did not change while it was read.
+        if before is None:
+            return value
+        try:
+            after = path.stat()
+        except OSError:
+            return value
+        if _file_identity(before) != _file_identity(after):
+            return value
+        key = (cache_path, _file_identity(after))
+        if key not in _YAML_CACHE and len(_YAML_CACHE) >= _YAML_CACHE_LIMIT:
+            _YAML_CACHE.pop(next(iter(_YAML_CACHE)))
+        _YAML_CACHE[key] = copy.deepcopy(value)
+        return value
 
     class StrictLoader(yaml.SafeLoader):
         def compose_node(self, parent, index):
@@ -108,10 +144,10 @@ def _read_yaml(path, label):
     except (yaml.YAMLError, UnicodeError, RecursionError, ValueError):
         raise LLMToolError(label + ": malformed YAML") from None
     if value is None:
-        return {}
+        return remember({})
     if not isinstance(value, dict):
         raise LLMToolError(label + ": expected a YAML mapping")
-    return value
+    return remember(value)
 
 
 def _fields(value, allowed, label):
