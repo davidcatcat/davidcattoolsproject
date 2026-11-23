@@ -56,7 +56,7 @@ class TaskStatusMergeAttemptTests(unittest.TestCase):
     def test_non_merged_merge_attempt_keeps_running(self):
         with tempfile.TemporaryDirectory() as root:
             value = record(root, state='PM_PENDING',
-                           merge_attempt=dict(_MERGE_ATTEMPT, state='PENDING'))
+                           merge_attempt=dict(_MERGE_ATTEMPT, state='CLAIMED'))
             self.assertEqual(task_status.derive_state(value), 'RUNNING')
             self.assertEqual(_summary_states(root)[value['task_id']], 'RUNNING')
 
