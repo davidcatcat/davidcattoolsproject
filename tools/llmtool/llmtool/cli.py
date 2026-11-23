@@ -195,6 +195,7 @@ def parser_for_cli():
     add_roles_parser(sub)
     add_dispatch_check_parser(sub)
     add_worker_quota_recovered_parser(sub)
+    add_worker_route_resume_parser(sub)
     add_board_check_parser(sub)
     from .mac_full_due import add_ci_parser
     add_ci_parser(sub)
@@ -603,6 +604,31 @@ def run_worker_quota_recovered(args, store=None):
         return 2
 
 
+def add_worker_route_resume_parser(subparsers):
+    parser = subparsers.add_parser(
+        'worker-route-resume',
+        help='Clear an AGY or OpenCode pause after consecutive route failures')
+    parser.add_argument('worker', help='agy, opencode or opencode-developer')
+    return parser
+
+
+def run_worker_route_resume(args, store=None):
+    from .task_store import TaskStore
+    from .worker_availability import resume_route
+    if store is None:
+        store = getattr(args, 'store', None)
+    if store is None:
+        store = TaskStore()
+    try:
+        result = resume_route(store, args.worker)
+        print(json.dumps(result, separators=(',', ':'), ensure_ascii=True))
+        return 0
+    except LLMToolError as exc:
+        code = getattr(exc, 'code', None) or str(exc)
+        print(code, file=sys.stderr)
+        return 2
+
+
 def main(argv=None):
     try:
         args = parser_for_cli().parse_args(argv)
@@ -615,6 +641,8 @@ def main(argv=None):
             return run_dispatch_check(args)
         if args.command == 'worker-quota-recovered':
             return run_worker_quota_recovered(args)
+        if args.command == 'worker-route-resume':
+            return run_worker_route_resume(args)
         if args.command == 'board-check':
             return run_board_check(args)
         if args.command == 'ci':
@@ -776,7 +804,11 @@ def main(argv=None):
                 re.fullmatch(r'[A-Z0-9_]{1,64}', refusal_code)):
             line = 'llmtool: ' + refusal_label + ' refused: ' + refusal_code
             detail = getattr(exc, 'high_debug_detail', None)
-            if (getattr(args, 'action', None) == 'high-debug' and
+            step = getattr(exc, 'route_pause_resume_step', None)
+            if (type(step) is str and
+                    re.fullmatch(r'[A-Za-z0-9_ .:/-]{1,128}', step)):
+                line += ' (' + step + ')'
+            elif (getattr(args, 'action', None) == 'high-debug' and
                     type(detail) is str and len(detail) <= 128 and
                     re.fullmatch(r'[A-Za-z0-9_,= .:-]+', detail)):
                 line += ' (' + detail + ')'
