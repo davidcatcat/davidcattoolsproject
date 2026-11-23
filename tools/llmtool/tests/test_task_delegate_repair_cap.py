@@ -23,6 +23,8 @@ from llmtool import task_store as task_store_module
 from llmtool import task_submission_cli
 from llmtool.errors import LLMToolError
 
+from test_high_debug import _review_fail_claim
+
 
 _POLICY = repair_policy.load_policy()
 # The original run and three repairs precede the first required RCA.
@@ -1381,17 +1383,22 @@ class HighDebugRunBindingTests(unittest.TestCase):
                     'pm_usage': None, 'pm_error_code': None,
                 })
             # #2602 (a): a --pr Debug needs the FAIL it diagnoses at this head.
-            # This test covers binding, so it records the formal FAIL fixture.
-            record['review_dispatch_claim'] = [{
-                'review_kind': 'formal', 'executor_task': _EXECUTOR_TASK, 'pr': 938,
-                'version': 1, 'head_sha': _HEAD, 'state': 'COMPLETED',
-                'updated_at': '2026-11-07T00:00:00Z',
-                'review_result': {
-                    'task_id': _HIGH_DEBUG_TASK, 'head': _HEAD, 'verdict': 'FAIL',
-                    'review_text': 'Finding: F1 [High] synthetic.py:1 synthetic finding\n',
-                },
-            }]
+            # This test covers binding, so it exposes the formal FAIL fixture
+            # the same way test_high_debug_reservation does: the stored record
+            # stays valid and each read carries the bound FAIL claim.
             store.create(record)
+            read_record = store.get
+
+            def get(task_id):
+                loaded = read_record(task_id)
+                if type(loaded) is dict:
+                    loaded = dict(loaded)
+                    loaded.setdefault('review_dispatch_claim', [
+                        _review_fail_claim(_HIGH_DEBUG_TASK, head=_HEAD,
+                                           executor=_EXECUTOR_TASK, pr=938)])
+                return loaded
+
+            store.get = get
 
             def read_registration(executor_task, common_dir, *, allowed_states):
                 self.assertEqual(executor_task, _EXECUTOR_TASK)
