@@ -143,9 +143,36 @@ class RulingClaimCliReadersTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.store = task_store.TaskStore(Path(self.temp.name).resolve())
 
+    def _append_completed_claim(self, rec, completed_claim):
+        existing = list(rec.get('review_dispatch_claim') or [])
+        claimed = dict(
+            completed_claim,
+            state='CLAIMED',
+            native_session_id=None,
+            updated_at=completed_claim['claimed_at'],
+        )
+        claimed.pop('review_result', None)
+        rec = self.store.compare_and_update(
+            TASK, expected={'record_sha256': rec['record_sha256']},
+            review_dispatch_claim=existing + [claimed])
+        if completed_claim.get('state') != 'COMPLETED':
+            return rec
+        return self.store.compare_and_update(
+            TASK, expected={'record_sha256': rec['record_sha256']},
+            review_dispatch_claim=existing + [completed_claim])
+
     def _create_record(self, *, claims=None, disputes=None):
-        base, contract_digest = _base_record(claims=claims, disputes=disputes)
+        base, contract_digest = _base_record(claims=None)
+        base.pop('review_dispatch_claim', None)
         rec = self.store.create(base)
+        if disputes is not None:
+            rec = self.store.compare_and_update(
+                TASK, expected={'record_sha256': rec['record_sha256']},
+                review_disputes=disputes)
+        if claims is None:
+            claims = [_formal_claim(contract_digest)]
+        for claim in claims:
+            rec = self._append_completed_claim(rec, claim)
         return rec, contract_digest
 
     def _open_dispute(self, *, review_version=1):
@@ -181,9 +208,7 @@ class RulingClaimCliReadersTests(unittest.TestCase):
         # Adding a COMPLETED ruling claim at version 2 (via real TaskStore) leaves
         # the formal v1 FAIL verdict selected.
         ruling = _ruling_claim(digest, version=2, state='COMPLETED')
-        updated = self.store.compare_and_update(
-            TASK, expected={'record_sha256': rec['record_sha256']},
-            review_dispatch_claim=rec['review_dispatch_claim'] + [ruling])
+        updated = self._append_completed_claim(rec, ruling)
         claim2, findings2 = task_submission_cli._dispute_fail_verdict(updated, PR, HEAD)
         self.assertEqual(claim2['version'], 1)
         self.assertEqual(findings2, {'F1': 'High'})
@@ -222,9 +247,7 @@ class RulingClaimCliReadersTests(unittest.TestCase):
             disputes=[self._open_dispute(review_version=1)],
         )
         ruling = _ruling_claim(digest, version=2, state='COMPLETED', outcome='UPHELD')
-        self.store.compare_and_update(
-            TASK, expected={'record_sha256': rec['record_sha256']},
-            review_dispatch_claim=rec['review_dispatch_claim'] + [ruling])
+        self._append_completed_claim(rec, ruling)
 
         ruling_body = ruling['review_result']['review_text']
         comment = {
@@ -295,9 +318,7 @@ class RulingClaimCliReadersTests(unittest.TestCase):
 
         # Formal claim with matching args returns True.
         formal = _formal_claim(digest, version=1, status='PASS')
-        updated = self.store.compare_and_update(
-            TASK, expected={'record_sha256': rec_ruling_only['record_sha256']},
-            review_dispatch_claim=[formal, ruling])
+        updated = self._append_completed_claim(rec_ruling_only, formal)
         self.assertTrue(task_submission_cli._claude_review_claim_matches(
             updated, FORMAL_REVIEWER, PR, HEAD, FORMAL_SESSION))
 
