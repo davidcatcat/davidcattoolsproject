@@ -55,7 +55,8 @@ class AbandonNeverStartedTests(unittest.TestCase):
         }
 
     def _make_direct_task(self, *, profile='agy', state='DEVELOPER_DISPATCHING',
-                          boundary=None, execution=None, executor_task=EXECUTOR):
+                          boundary=None, execution=None, executor_task=EXECUTOR,
+                          prepared_card_id=None):
         task = test_task_store.TaskStoreTests._codex_dispatch_task(self)
         task['pm_assignment'] = dict(task['pm_assignment'], route=profile)
         self.store.create(task)
@@ -67,6 +68,15 @@ class AbandonNeverStartedTests(unittest.TestCase):
             pending['owner_assignment_ref'] = None
         if profile == 'opencode':
             pending['execution'] = None
+        if prepared_card_id is not None:
+            pending['card_delivery'] = {
+                'route': profile,
+                'pin_commit': HEAD,
+                'prefix_sha256': 'b' * 64,
+                'session_id': pending['session_id'],
+                'prepared_id': prepared_card_id,
+                'state': 'PREPARED',
+            }
         completion = self._d6_completion(executor_task) if executor_task else None
         self.store.compare_and_update(
             task['task_id'], expected={'developer': None},
@@ -147,18 +157,8 @@ class AbandonNeverStartedTests(unittest.TestCase):
 
         delivered_task = self._make_direct_task(
             profile='agy', state='DEVELOPER_DISPATCHING',
-            executor_task=EXECUTOR + '-delivered')
-        delivered_dev = dict(
-            delivered_task['developer'],
-            card_delivery={
-                'route': 'agy',
-                'pin_commit': HEAD,
-                'prefix_sha256': 'b' * 64,
-                'session_id': delivered_task['developer']['session_id'],
-                'prepared_id': 'c' * 32,
-                'state': 'DELIVERED',
-            })
-        self.store.update(delivered_task['task_id'], developer=delivered_dev)
+            executor_task=EXECUTOR + '-delivered', prepared_card_id='c' * 32)
+        self.store.commit_card_delivery(delivered_task['task_id'], 'c' * 32)
         self._assert_abandon_refused(self.store.get(delivered_task['task_id']))
 
     def test_terminal_developer_tasks_accepted_before_change_remain_abandonable(self):

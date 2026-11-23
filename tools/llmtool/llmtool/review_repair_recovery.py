@@ -531,8 +531,9 @@ def verify_abandon_never_started(store, task, *, registered_d6=None, process_sta
     if developer is None and completion is None and not (
             task.get('merge_attempt') is not None or task.get('published_pr') is not None):
         return
-    if type(developer) is dict and developer.get('state') not in (
-            'DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING'):
+    if type(developer) is dict and (
+            developer.get('provider_profile') == 'gw-agent' or
+            developer.get('state') not in ('DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING')):
         return
     if _abandon_has_start_evidence(task):
         _refuse_abandon_start_evidence()
