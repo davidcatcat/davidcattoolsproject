@@ -360,13 +360,23 @@ class RepairDispatchCodedRefusalTests(unittest.TestCase):
 
             # Acceptance text screening in _validate_acceptance_scope also stays coded and CLAIMED.
             bad_acceptance = _ec2_agy_record()
-            bad_acceptance['developer']['acceptance'] = ['invalid\x00acceptance']
-            bad_acceptance['pm_assignment']['acceptance'] = ['invalid\x00acceptance']
             with tempfile.TemporaryDirectory() as acc_dir:
                 store_acc = _RepairStore(acc_dir, bad_acceptance)
-                acc_res = task_advance.advance(
-                    task_id=TASK, store=store_acc, pr_number=PR,
-                    github_get=self._github_get)
+                real_record_repair = review_repair._record_repair_task
+
+                def record_with_invalid_acceptance(**kw):
+                    saved = real_record_repair(**kw)
+                    saved['pm_assignment']['acceptance'] = ['invalid\x00acceptance']
+                    store_acc.put(saved)
+                    return saved
+
+                with mock.patch.object(
+                    review_repair, '_record_repair_task',
+                    side_effect=record_with_invalid_acceptance,
+                ):
+                    acc_res = task_advance.advance(
+                        task_id=TASK, store=store_acc, pr_number=PR,
+                        github_get=self._github_get)
                 self.assertEqual(acc_res['step'], 'REPAIR_REVIEW')
                 self.assertEqual(acc_res['codes'], ['DELEGATE_TEXT_INVALID'])
                 acc_claims = store_acc.get(TASK)['review_repair_claims']

@@ -1302,6 +1302,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                                        repair_task_id=repair_task_id)
         except LLMToolError as error:
             error.review_repair_unclaimed_task_id = repair_task_id
+            if not getattr(error, 'review_repair_code', None) and not getattr(error, 'code', None):
+                error.review_repair_code = 'REPAIR_TASK_RECORD_UNAVAILABLE'
             raise
         except Exception:
             _refuse_unclaimed('REPAIR_TASK_RECORD_UNAVAILABLE', repair_task_id)
