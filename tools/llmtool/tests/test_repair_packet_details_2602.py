@@ -147,7 +147,10 @@ class RepairPacketDetails2602Tests(unittest.TestCase):
             if path == 'check-runs/42':
                 return check_run
             if path == f'pulls/{PR}/files?per_page=100':
-                return [{'filename': 'tools/llmtool/llmtool/review_repair.py', 'status': 'modified'}]
+                return [
+                    {'filename': 'tools/llmtool/llmtool/review_repair.py', 'status': 'modified'},
+                    {'filename': 'tools/llmtool/tests/test_alpha.py', 'status': 'modified'},
+                ]
             return {'number': PR, 'head': {'sha': HEAD}, 'state': 'open', 'merged': False}
 
         result, dispatched = self._advance_repair(record, github_get=github_get)
