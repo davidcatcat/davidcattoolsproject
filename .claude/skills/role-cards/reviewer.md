@@ -22,6 +22,7 @@ This card holds only Reviewer rules. The common core stays in [AGENTS.md](../../
 ## Output
 
 - Follow the [formal verdict format](../ai-team-delivery/formal-verdict.md) and the [Transition record](../ai-team-delivery/pm-continuation.md#transition-record) rule: a new comment that starts with the whole-line `review_verdict` marker(s), then the first line `Verdict: PASS|FAIL|BLOCKED | Version: vN | HEAD: <full-commit-sha>`. Never edit or replace an older verdict.
+- The formal verdict lists every acceptance item (A1 to An) and every original contract item, each marked met or not met with its evidence. Any item not met is a blocking FAIL; a PASS without this item-by-item check is not allowed. The list is added to the verdict body after the first line; the verdict first line and the `review_verdict` marker keep their existing format.
 - Say whether the review is formal or advisory.
 - List actionable findings with severity, file and line evidence, reproducibility and disposition, one per line as `Finding: F<n> [<severity>] <file:line> <text>` (see the format file).
 - Keep evidence types apart: source review, test, CI and runtime evidence are separate results.
