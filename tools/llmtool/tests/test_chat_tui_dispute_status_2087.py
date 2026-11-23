@@ -14,7 +14,7 @@ import unittest
 from llmtool import chat_tui_status
 from llmtool.chat_tui_task import NOT_AVAILABLE
 
-from .test_dispute_store_schema import (
+from test_dispute_store_schema import (
     ARBITER_REVIEWER,
     FORMAL_REVIEWER,
     STAMP_1,
@@ -97,6 +97,22 @@ class DisputeTuiStatusTests(unittest.TestCase):
         self.assertEqual(chat_tui_status.background_items([rec]),
                          chat_tui_status.background_items([formal_only]))
         self.assertIn(FORMAL_REVIEWER, chat_tui_status.summary_text(rec))
+
+    def test_reviewer_line_skips_any_purposed_claim(self):
+        store = self._new_store()
+        rec = store.get(TASK)
+        # Any claim dict with a purpose key is skipped, whatever its value:
+        # a claim with another purpose is not a formal claim either.
+        purposed = dict(rec, review_dispatch_claim=[
+            dict(rec['review_dispatch_claim'][1], purpose='dispute_appeal')])
+        self.assertEqual(purposed['review_dispatch_claim'][0].get('purpose'),
+                         'dispute_appeal')
+
+        who, _verdict = self._reviewer_line(purposed)
+        self.assertEqual(self._reviewer_line(purposed),
+                         self._reviewer_line(rec))
+        self.assertIn(FORMAL_REVIEWER, who)
+        self.assertNotIn(ARBITER_REVIEWER, who)
 
 
 if __name__ == '__main__':

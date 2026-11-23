@@ -65,18 +65,19 @@ def task_name(record):
 
 
 def _formal_claim(claims):
-    """Latest formal claim of review_dispatch_claim (dispute ruling claims removed).
+    """Latest formal claim of review_dispatch_claim (purposed claims removed).
 
-    A ruling claim is identified by purpose key dispute_ruling; a list of only
-    ruling claims (or a single ruling-claim dict) yields no claim at all.
+    Any claim dict carrying a purpose key, whatever its value, is not a formal
+    claim (fail closed for future purposes); a list of only such claims (or a
+    single purposed-claim dict) yields no claim at all.
     """
     if claims is None:
         return None
     if type(claims) is dict:
-        claims = [] if claims.get("purpose") == "dispute_ruling" else [claims]
+        claims = [] if "purpose" in claims else [claims]
     else:
         claims = [claim for claim in claims
-                  if type(claim) is not dict or claim.get("purpose") != "dispute_ruling"]
+                  if type(claim) is not dict or "purpose" not in claim]
     return _latest(claims)
 
 
