@@ -80,11 +80,48 @@ class UnpostedVerdictTest(unittest.TestCase):
         self.assertEqual(review_transcript.unposted_verdict(
             claim, TASK, config_dir=home, claude='claude', run=ended),
             ('ENDED', 'REVIEWER_TRANSCRIPT_UNAVAILABLE', None))
-        role = {'account': 'claude2', 'config_dir': home}
-        with mock.patch.object(review_transcript.role_config, 'resolve_role', return_value=role):
+        # #2602 item i: a claim that records its reviewer account reads that
+        # account's config directory through role resolution with a one-shot
+        # account override; a claim without a recorded account keeps the
+        # reviewer role resolved at collection time; a recorded account the
+        # role configuration refuses is refused and nothing else is read.
+        x = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, x)
+        os.makedirs(os.path.join(x, 'projects', '-tasks-' + REVIEWER))
+        with open(os.path.join(x, 'projects', '-tasks-' + REVIEWER,
+                               SESSION + '.jsonl'), 'w') as handle:
+            handle.write(json.dumps({'type': 'assistant', 'message': {
+                'content': [{'type': 'text', 'text': verdict()}]}}) + '\n')
+        role = {'account': 'claude2', 'config_dir': x}
+        with mock.patch.object(review_transcript.role_config, 'resolve_role',
+                               return_value=role) as resolve:
+            self.assertEqual(review_transcript.unposted_verdict(
+                dict(claim, account='claude2'), TASK, claude='claude', run=ended),
+                ('ENDED', None, verdict()))
+            self.assertEqual(resolve.call_args,
+                             mock.call('reviewer', cli={'account': 'claude2'}))
+        with mock.patch.object(review_transcript.role_config, 'resolve_role',
+                               return_value={'config_dir': home}) as resolve:
+            self.assertEqual(review_transcript.unposted_verdict(
+                claim, TASK, claude='claude', run=ended),
+                ('ENDED', 'REVIEWER_TRANSCRIPT_UNAVAILABLE', None))
+            self.assertEqual(resolve.call_args, mock.call('reviewer'))
+        refused = review_transcript.LLMToolError('synthetic')
+        refused.role_config_code = 'ROLE_CONFIG_OVERRIDE_INVALID'
+        run = mock.Mock()
+        with mock.patch.object(review_transcript.role_config, 'resolve_role',
+                               side_effect=refused) as resolve:
+            self.assertEqual(review_transcript.unposted_verdict(
+                dict(claim, account='other'), TASK, run=run),
+                ('UNKNOWN', 'ROLE_CONFIG_OVERRIDE_INVALID', None))
+            self.assertEqual(resolve.call_args,
+                             mock.call('reviewer', cli={'account': 'other'}))
+        run.assert_not_called()
+        with mock.patch.object(review_transcript.role_config, 'resolve_role',
+                               side_effect=review_transcript.LLMToolError('synthetic')):
             self.assertEqual(review_transcript.unposted_verdict(
                 dict(claim, account='other'), TASK, claude='claude', run=ended),
-                ('UNKNOWN', 'REVIEWER_ACCOUNT_CHANGED', None))
+                ('UNKNOWN', 'REVIEWER_ACCOUNT_UNCONFIGURED', None))
         self.assertEqual(review_transcript.unposted_verdict(
             dict(claim, native_session_id='not-a-uuid'), TASK, config_dir=home, run=ended),
             ('NOT_APPLICABLE', None, None))
@@ -219,3 +256,49 @@ class FullVerdictTest(unittest.TestCase):
         expected = fail_verdict('', 'Finding: F1 [High] a.py:1 synthetic.')
         self.assertEqual(self.relay('Post:\n```\n' + expected + '\n```\nAfter the fence.'),
                          ('ENDED', None, expected))
+
+    def test_truncated_fail_reads_the_recorded_account_directory(self):
+        # #2602 item i: the FAIL repost path reads the session and transcript
+        # from the config directory of the account recorded on the claim.
+        expected = fail_verdict('', 'Finding: F1 [High] a.py:1 synthetic.')
+        # #2602 item i: the posted comment stands on its own as the single
+        # posted verdict for the claim's version and head: a non-negative
+        # integer id, a non-empty created_at, and a body equal to the
+        # truncated legacy header of the transcript verdict -- exactly the
+        # first three lines, the review_verdict activity marker (status
+        # FIX), the Verdict line, and the LLMTOOL-REVIEW-BINDING line -- so
+        # the comment is recognised and only the transcript read supplies
+        # the full verdict.
+        posted = '\n'.join(expected.split('\n')[:3])
+        x = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, x)
+        os.makedirs(os.path.join(x, 'projects', '-tasks-' + REVIEWER))
+        with open(os.path.join(x, 'projects', '-tasks-' + REVIEWER,
+                               SESSION + '.jsonl'), 'w') as handle:
+            handle.write(json.dumps({'type': 'assistant', 'message': {
+                'content': [{'type': 'text', 'text': expected}]}}) + '\n')
+        claim = {'native_session_id': SESSION, 'reviewer_task': REVIEWER,
+                 'head_sha': HEAD, 'version': 1}
+        comments = [{'id': 1, 'created_at': '2025-06-01T12:00:00Z', 'body': posted}]
+        role = {'account': 'claude2', 'config_dir': x}
+        with mock.patch.object(review_transcript.role_config, 'resolve_role',
+                               return_value=role) as resolve:
+            self.assertEqual(review_transcript.truncated_fail_repost(
+                dict(claim, account='claude2'), TASK, comments),
+                (None, expected, 1))
+            self.assertEqual(resolve.call_args,
+                             mock.call('reviewer', cli={'account': 'claude2'}))
+        with mock.patch.object(review_transcript.role_config, 'resolve_role',
+                               return_value={'config_dir': x}) as resolve:
+            self.assertEqual(review_transcript.truncated_fail_repost(claim, TASK, comments),
+                             (None, expected, 1))
+            self.assertEqual(resolve.call_args, mock.call('reviewer'))
+        refused = review_transcript.LLMToolError('synthetic')
+        refused.role_config_code = 'ROLE_CONFIG_OVERRIDE_INVALID'
+        with mock.patch.object(review_transcript.role_config, 'resolve_role',
+                               side_effect=refused) as resolve:
+            self.assertEqual(review_transcript.truncated_fail_repost(
+                dict(claim, account='other'), TASK, comments),
+                ('ROLE_CONFIG_OVERRIDE_INVALID', None, None))
+            self.assertEqual(resolve.call_args,
+                             mock.call('reviewer', cli={'account': 'other'}))
