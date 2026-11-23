@@ -19,7 +19,7 @@ The Debug Task must return the [mandatory High Debug report](high-debug-report.m
 
 ## Retry and reassignment
 
-Before every retry or reassignment, reread and validate `worker-dispatch.json`, record the decision, and confirm task scope, privacy/data permission, budget, current technical availability and independent-review gates. A missing/unreadable or malformed file, `schema_version` other than `1`, missing Worker entry, or absent/unrecognized exact-case `dispatch` value means refuse and record why. Only `PAUSED`, `OWNER_ASSIGNMENT_ONLY` and `ALLOWED` are valid: `PAUSED` refuses regardless of provider health; `OWNER_ASSIGNMENT_ONLY` requires an explicit Owner assignment; `ALLOWED` proceeds only through all remaining gates.
+Before every retry or reassignment, reread and validate `worker-dispatch.json`, record the decision, and confirm task scope, privacy/data permission, budget, current technical availability and independent-review gates, applying the [worker-dispatch.json validation rule](../../../AGENTS.md#current-authority-restructured-per-owner-decision-010-step-2) stated under **Worker dispatch** in the AGENTS.md Current authority section.
 
 Retry only for a transient cause and within the existing Task budget. Never replay UNKNOWN or non-replayable operations. Reassign only to a permitted, freshly available Worker after the previous writer has verifiably released the D6. Do not use a paid fallback unless already authorized. These checks do not expand authority or change the [Owner escalation rule](owner-escalation.md).
 
