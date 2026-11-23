@@ -138,6 +138,8 @@ class GwAgentSessionResume2602Tests(unittest.TestCase):
         validated = self.route.validate_request(request)
         tmpdir = tempfile.mkdtemp(prefix='gw-agent-resume-2602-')
         self.addCleanup(shutil.rmtree, tmpdir, True)
+        # run_route supplies the private tmpdir through this request key.
+        validated['_route_tmpdir'] = tmpdir
         with mock.patch.object(self.route, '_load_credential', return_value=None):
             self.route.prepare_files(tmpdir, validated)
             authorization = json.loads(
