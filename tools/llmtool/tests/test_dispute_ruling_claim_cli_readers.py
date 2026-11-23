@@ -144,12 +144,8 @@ class RulingClaimCliReadersTests(unittest.TestCase):
         self.store = task_store.TaskStore(Path(self.temp.name).resolve())
 
     def _create_record(self, *, claims=None, disputes=None):
-        base, contract_digest = _base_record(claims=claims, disputes=None)
+        base, contract_digest = _base_record(claims=claims, disputes=disputes)
         rec = self.store.create(base)
-        if disputes is not None:
-            rec = self.store.compare_and_update(
-                TASK, expected={'record_sha256': rec['record_sha256']},
-                review_disputes=disputes)
         return rec, contract_digest
 
     def _open_dispute(self, *, review_version=1):
@@ -177,7 +173,7 @@ class RulingClaimCliReadersTests(unittest.TestCase):
     # --- A2: _dispute_fail_verdict ---
 
     def test_dispute_fail_verdict_baseline_and_purpose_exclusion(self):
-        rec, digest = self._create_record()
+        rec, digest = self._create_record(disputes=[self._open_dispute(review_version=1)])
         claim, findings = task_submission_cli._dispute_fail_verdict(rec, PR, HEAD)
         self.assertEqual(claim['version'], 1)
         self.assertEqual(findings, {'F1': 'High'})
@@ -209,7 +205,10 @@ class RulingClaimCliReadersTests(unittest.TestCase):
     def test_dispute_fail_verdict_refuses_when_only_ruling_claim_exists(self):
         _, digest = _base_record()
         ruling_only = _ruling_claim(digest, version=1, state='COMPLETED')
-        rec, _ = self._create_record(claims=[ruling_only])
+        rec, _ = self._create_record(
+            claims=[ruling_only],
+            disputes=[self._open_dispute(review_version=1)],
+        )
         with self.assertRaises(LLMToolError) as caught:
             task_submission_cli._dispute_fail_verdict(rec, PR, HEAD)
         self.assertEqual(caught.exception.dispute_code, 'DISPUTE_NO_FAIL_VERDICT')
@@ -278,7 +277,10 @@ class RulingClaimCliReadersTests(unittest.TestCase):
     def test_claude_review_claim_matches_excludes_ruling_claims(self):
         _, digest = _base_record()
         ruling = _ruling_claim(digest, version=2, state='COMPLETED')
-        rec_ruling_only, _ = self._create_record(claims=[ruling])
+        rec_ruling_only, _ = self._create_record(
+            claims=[ruling],
+            disputes=[self._open_dispute(review_version=1)],
+        )
 
         # Ruling claim's own Reviewer Task, PR, head and session return False.
         self.assertFalse(task_submission_cli._claude_review_claim_matches(
