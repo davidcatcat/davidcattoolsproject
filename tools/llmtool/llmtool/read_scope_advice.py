@@ -398,9 +398,10 @@ def referencing_tests(*, root, commit, read_paths, write_paths, runner=None, tex
         except _PreciseSearchCapped as exc:
             note = ('precise test search was capped (%s); using module-level list'
                     % exc.reason)[:MAX_NOTE_CHARS]
-            return _module_referencing_tests(
+            fallback = _module_referencing_tests(
                 root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
-                runner=runner) + [item(TEST_REFERENCES_CAPPED, None, note)]
+                runner=runner)
+            return fallback[:max(0, MAX_ITEMS - 1)] + [item(TEST_REFERENCES_CAPPED, None, note)]
         except Exception:
             pass
     return _module_referencing_tests(

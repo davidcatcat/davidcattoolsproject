@@ -1,12 +1,13 @@
 """#2602 item u-sec: aggregate bounds on precise referencing-tests search."""
 
+import re
 import subprocess
 import types
 import unittest
 from unittest import mock
 
 from llmtool import read_scope_advice as advice
-from llmtool import task_store
+from llmtool import task_store, task_submission_cli
 
 WIDGET = 'tools/llmtool/llmtool/widget.py'
 TEST_A = 'tools/llmtool/tests/test_widget_a.py'
@@ -239,6 +240,57 @@ class ReadScopeCapTest(unittest.TestCase):
         self.assertEqual([(i['kind'], i['path']) for i in historical],
                          [(advice.TEST_REFERENCES_WRITE, TEST_A),
                           (advice.TEST_REFERENCES_WRITE, TEST_B)])
+
+    def test_cap_note_survives_caller_max_items_when_fallback_fills_limit(self):
+        total = advice.MAX_PRECISE_IDENTIFIERS + 1
+        source = _module_source(total)
+        modules = [f'tools/llmtool/llmtool/mod_{i}.py' for i in range(8)]
+
+        def runner(argv, **kwargs):
+            if argv[3] == 'show':
+                spec = argv[4]
+                return types.SimpleNamespace(
+                    returncode=0, stdout=source if spec.endswith('mod_0.py') else '')
+            if _is_module_grep(argv):
+                match = re.search(r'mod_(\d+)\\\.py', argv[7])
+                idx = int(match.group(1))
+                out = ''.join(
+                    f'HEAD:tools/llmtool/tests/test_mod_{idx}_{j}.py\n'
+                    for j in range(advice.MAX_TESTS_PER_PATH)
+                )
+                return types.SimpleNamespace(returncode=0, stdout=out)
+            raise AssertionError(f'unexpected git call: {argv}')
+
+        fallback = advice.referencing_tests(
+            root='/fake', commit='HEAD', read_paths=[], write_paths=modules,
+            runner=runner)
+        self.assertEqual(len(fallback), advice.MAX_ITEMS)
+
+        goal = 'Update ' + ', '.join(f'fn_{i:02d}()' for i in range(total))
+        args = types.SimpleNamespace(
+            task_id='1' * 32, provider='agy', acceptance=['none'],
+            repair_packet=None, high_debug_task=None,
+            read_path=[], write_path=modules,
+            read_scope_reason=None, read_scope_check=False, cwd='/fake')
+        store = mock.Mock()
+        store.get.return_value = {'pm_assignment': {'goal': goal}}
+
+        with (mock.patch.object(advice.subprocess, 'run', side_effect=runner),
+              mock.patch.object(advice, 'missing_read_paths', return_value=[]),
+              mock.patch.object(advice, 'companion_items', return_value=[]),
+              mock.patch.object(advice, 'route_path_items', return_value=[]),
+              mock.patch.object(advice, 'shell_items', return_value=[]),
+              mock.patch.object(advice, 'size_items', return_value=[])):
+            result = task_submission_cli._scope_advice_items(args, store)
+
+        self.assertLessEqual(len(result), advice.MAX_ITEMS)
+        self.assertEqual(len(result), advice.MAX_ITEMS)
+        capped = [item for item in result if item['kind'] == advice.TEST_REFERENCES_CAPPED]
+        self.assertEqual(len(capped), 1)
+        self.assertEqual(result[:-1], fallback[:advice.MAX_ITEMS - 1])
+        self.assertEqual(result[-1]['kind'], advice.TEST_REFERENCES_CAPPED)
+        self.assertIsNone(result[-1]['path'])
+        task_store._validate_read_scope_advice([advice.entry(result, None, None)])
 
 
 if __name__ == '__main__':
