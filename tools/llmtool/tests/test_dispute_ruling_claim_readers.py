@@ -195,20 +195,50 @@ class DisputeRulingClaimReadersTests(unittest.TestCase):
     def _new_store(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        return task_store.TaskStore(Path(temp.name).resolve())
+        return task_store.TaskStore(Path(temp.name).resolve() / 'store')
 
     def _create_store_with_claims(self, claims, *, events=None, with_dispute=True):
         store = self._new_store()
         base, contract_digest = _base_task_record()
+        formal_claims = [c for c in claims if 'purpose' not in c]
+        ruling_claims = [c for c in claims if 'purpose' in c]
+        if formal_claims:
+            base['review_dispatch_claim'] = formal_claims
         rec = store.create(base)
-        changes = {'review_dispatch_claim': claims}
-        if events is not None:
-            changes['completion_events'] = events
         if with_dispute:
-            changes['review_disputes'] = [_dispute_entry()]
-        saved = store.compare_and_update(
-            TASK, expected={'record_sha256': rec['record_sha256']}, **changes)
-        return store, saved, contract_digest
+            rec = store.compare_and_update(
+                TASK, expected={'record_sha256': rec['record_sha256']},
+                review_disputes=[_dispute_entry()])
+        for arbiter in ruling_claims:
+            claimed = {
+                key: value for key, value in arbiter.items()
+                if key != 'review_result'
+            }
+            claimed['state'] = 'CLAIMED'
+            claimed['native_session_id'] = None
+            current_claims = list(rec.get('review_dispatch_claim') or [])
+            rec = store.compare_and_update(
+                TASK, expected={'record_sha256': rec['record_sha256']},
+                review_dispatch_claim=current_claims + [claimed])
+            if arbiter['state'] != 'CLAIMED':
+                rec = store.compare_and_update(
+                    TASK, expected={'record_sha256': rec['record_sha256']},
+                    review_dispatch_claim=current_claims + [arbiter])
+        if events:
+            for ev in events:
+                store.record_completion_event(
+                    TASK,
+                    event_id=ev['event_id'],
+                    run_id=ev['run_id'],
+                    session_id=ev['session_id'],
+                    source=ev['source'],
+                    source_sha=ev['source_sha'],
+                    sequence=ev['sequence'],
+                    payload_sha256=ev['payload_sha256'],
+                    review_kind=ev.get('review_kind'),
+                )
+            rec = store.get(TASK)
+        return store, rec, contract_digest
 
     def _arbiter_variants(self, contract_digest):
         return (
@@ -262,7 +292,9 @@ class DisputeRulingClaimReadersTests(unittest.TestCase):
                 patch.object(review_dispatch, '_resolve_github_login', return_value='reviewer-user'):
             base_out = review_dispatch.dispatch_review(
                 store=base_store, task_id=TASK, executor_task=EXECUTOR, pr_number=PR, version=1,
-                comment_lister=lambda _pr: [_verdict_comment(contract_digest, verdict='FAIL', version=1)],
+                comment_lister=lambda _pr: [
+                    dict(_verdict_comment(contract_digest, verdict='FAIL', version=1),
+                         user={'login': 'reviewer-user'})],
                 comment_poster=lambda *args: base_posters.append(args))
         self.assertEqual(base_out['version'], 1)
         self.assertEqual(base_posters, [])
