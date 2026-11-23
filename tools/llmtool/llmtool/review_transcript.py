@@ -119,6 +119,31 @@ def _verdict_lines(text, *, fenced=False):
     return '\n'.join(lines).rstrip()
 
 
+def _claim_config_dir(claim):
+    """#2602 item i: the config directory a claim binds review evidence to.
+
+    A claim that recorded the reviewer account it ran as reads that account's
+    config directory through the role configuration (a one-shot account
+    override); the session id and reviewer task stay bound to the claim. An
+    unconfigured or invalid recorded account is refused by the role
+    configuration error and never falls back to another account. A claim
+    without a recorded account keeps the reviewer role resolved at
+    collection time.
+    """
+    recorded = claim.get('account')
+    if recorded is None:
+        return role_config.resolve_role('reviewer').get('config_dir')
+    try:
+        return role_config.resolve_role('reviewer',
+                                        cli={'account': recorded}).get('config_dir')
+    except LLMToolError as error:
+        # The session id and reviewer task are not re-bound; refuse the claim
+        # with the role configuration's definite error code (never another
+        # account's directory).
+        return ('REFUSED', getattr(error, 'role_config_code', None)
+                or 'REVIEWER_ACCOUNT_UNCONFIGURED')
+
+
 def _exact_header(block, binding):
     """Marker, Verdict line, then the binding and at most one ACCEPT line, each once."""
     lines = block.split('\n')
@@ -169,10 +194,10 @@ def unposted_verdict(claim, task, *, config_dir=None, run=subprocess.run, claude
             type(reviewer) is not str or not _REVIEWER.fullmatch(reviewer)):
         return 'NOT_APPLICABLE', None, None
     if config_dir is None:
-        role = role_config.resolve_role('reviewer')
-        if claim.get('account') not in (None, role.get('account')):
-            return 'UNKNOWN', 'REVIEWER_ACCOUNT_CHANGED', None
-        config_dir = role.get('config_dir')
+        resolved = _claim_config_dir(claim)
+        if isinstance(resolved, tuple):
+            return 'UNKNOWN', resolved[1], None
+        config_dir = resolved
     if not config_dir:
         return 'UNKNOWN', 'REVIEWER_ACCOUNT_UNCONFIGURED', None
     state = session_state(session, config_dir, run=run, claude=claude)
@@ -224,10 +249,10 @@ def truncated_fail_repost(claim, task, comments, *, config_dir=None):
             type(reviewer) is not str or not _REVIEWER.fullmatch(reviewer)):
         return 'REPOST_NOT_CLAUDE_REVIEWER', None, None
     if config_dir is None:
-        role = role_config.resolve_role('reviewer')
-        if claim.get('account') not in (None, role.get('account')):
-            return 'REVIEWER_ACCOUNT_CHANGED', None, None
-        config_dir = role.get('config_dir')
+        resolved = _claim_config_dir(claim)
+        if isinstance(resolved, tuple):
+            return resolved[1], None, None
+        config_dir = resolved
     if not config_dir:
         return 'REVIEWER_ACCOUNT_UNCONFIGURED', None, None
     blocks = verdict_blocks(session, config_dir, reviewer)
