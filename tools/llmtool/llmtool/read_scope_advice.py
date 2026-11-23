@@ -401,7 +401,7 @@ def referencing_tests(*, root, commit, read_paths, write_paths, runner=None, tex
             fallback = _module_referencing_tests(
                 root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
                 runner=runner)
-            return fallback[:max(0, MAX_ITEMS - 1)] + [item(TEST_REFERENCES_CAPPED, None, note)]
+            return [item(TEST_REFERENCES_CAPPED, None, note)] + fallback[:max(0, MAX_ITEMS - 1)]
         except Exception:
             pass
     return _module_referencing_tests(

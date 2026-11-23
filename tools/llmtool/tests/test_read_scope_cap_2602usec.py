@@ -52,11 +52,11 @@ class ReadScopeCapTest(unittest.TestCase):
             runner=runner)
 
         self.assertLessEqual(len(precise_greps), advice.MAX_PRECISE_IDENTIFIERS)
-        self.assertEqual(items[:-1], fallback)
-        self.assertEqual(items[-1]['kind'], advice.TEST_REFERENCES_CAPPED)
-        self.assertIsNone(items[-1]['path'])
-        self.assertIn('capped', items[-1]['note'])
-        self.assertIn('identifier', items[-1]['note'])
+        self.assertEqual(items[0]['kind'], advice.TEST_REFERENCES_CAPPED)
+        self.assertIsNone(items[0]['path'])
+        self.assertIn('capped', items[0]['note'])
+        self.assertIn('identifier', items[0]['note'])
+        self.assertEqual(items[1:], fallback)
         task_store._validate_read_scope_advice([advice.entry(items, None, None)])
 
     def test_grep_bound_stops_further_greps_and_falls_back_with_note(self):
@@ -81,11 +81,11 @@ class ReadScopeCapTest(unittest.TestCase):
             runner=runner)
 
         self.assertEqual(len(precise_greps), 2)
-        self.assertEqual(items[:-1], fallback)
-        self.assertEqual(items[-1]['kind'], advice.TEST_REFERENCES_CAPPED)
-        self.assertIsNone(items[-1]['path'])
-        self.assertIn('capped', items[-1]['note'])
-        self.assertIn('git grep', items[-1]['note'])
+        self.assertEqual(items[0]['kind'], advice.TEST_REFERENCES_CAPPED)
+        self.assertIsNone(items[0]['path'])
+        self.assertIn('capped', items[0]['note'])
+        self.assertIn('git grep', items[0]['note'])
+        self.assertEqual(items[1:], fallback)
         task_store._validate_read_scope_advice([advice.entry(items, None, None)])
 
     def test_time_budget_stops_early_and_clamps_per_call_timeout(self):
@@ -123,11 +123,11 @@ class ReadScopeCapTest(unittest.TestCase):
         for timeout_arg, remaining_before in recorded_timeouts:
             self.assertGreater(timeout_arg, 0)
             self.assertLessEqual(timeout_arg, remaining_before)
-        self.assertEqual(items[:-1], fallback)
-        self.assertEqual(items[-1]['kind'], advice.TEST_REFERENCES_CAPPED)
-        self.assertIsNone(items[-1]['path'])
-        self.assertIn('capped', items[-1]['note'])
-        self.assertIn('time', items[-1]['note'])
+        self.assertEqual(items[0]['kind'], advice.TEST_REFERENCES_CAPPED)
+        self.assertIsNone(items[0]['path'])
+        self.assertIn('capped', items[0]['note'])
+        self.assertIn('time', items[0]['note'])
+        self.assertEqual(items[1:], fallback)
         task_store._validate_read_scope_advice([advice.entry(items, None, None)])
 
     def test_timeout_expired_at_deadline_falls_back_with_time_cap_note(self):
@@ -150,9 +150,9 @@ class ReadScopeCapTest(unittest.TestCase):
             root='/fake', commit='HEAD', read_paths=[], write_paths=[WIDGET],
             runner=runner)
 
-        self.assertEqual(items[:-1], fallback)
-        self.assertEqual(items[-1]['kind'], advice.TEST_REFERENCES_CAPPED)
-        self.assertIn('time', items[-1]['note'])
+        self.assertEqual(items[0]['kind'], advice.TEST_REFERENCES_CAPPED)
+        self.assertIn('time', items[0]['note'])
+        self.assertEqual(items[1:], fallback)
 
     def test_final_grep_returning_after_deadline_falls_back_with_time_cap_note(self):
         source = _module_source(1)
@@ -174,11 +174,11 @@ class ReadScopeCapTest(unittest.TestCase):
             root='/fake', commit='HEAD', read_paths=[], write_paths=[WIDGET],
             runner=runner)
 
-        self.assertEqual(items[:-1], fallback)
-        self.assertEqual(items[-1]['kind'], advice.TEST_REFERENCES_CAPPED)
-        self.assertIsNone(items[-1]['path'])
-        self.assertIn('capped', items[-1]['note'])
-        self.assertIn('time', items[-1]['note'])
+        self.assertEqual(items[0]['kind'], advice.TEST_REFERENCES_CAPPED)
+        self.assertIsNone(items[0]['path'])
+        self.assertIn('capped', items[0]['note'])
+        self.assertIn('time', items[0]['note'])
+        self.assertEqual(items[1:], fallback)
         task_store._validate_read_scope_advice([advice.entry(items, None, None)])
 
     def test_module_show_returning_after_deadline_falls_back_with_time_cap_note(self):
@@ -201,11 +201,11 @@ class ReadScopeCapTest(unittest.TestCase):
             root='/fake', commit='HEAD', read_paths=[], write_paths=[WIDGET],
             runner=runner)
 
-        self.assertEqual(items[:-1], fallback)
-        self.assertEqual(items[-1]['kind'], advice.TEST_REFERENCES_CAPPED)
-        self.assertIsNone(items[-1]['path'])
-        self.assertIn('capped', items[-1]['note'])
-        self.assertIn('time', items[-1]['note'])
+        self.assertEqual(items[0]['kind'], advice.TEST_REFERENCES_CAPPED)
+        self.assertIsNone(items[0]['path'])
+        self.assertIn('capped', items[0]['note'])
+        self.assertIn('time', items[0]['note'])
+        self.assertEqual(items[1:], fallback)
         task_store._validate_read_scope_advice([advice.entry(items, None, None)])
 
     def test_within_bounds_matches_precise_output_and_historical_no_texts(self):
@@ -245,8 +245,12 @@ class ReadScopeCapTest(unittest.TestCase):
         total = advice.MAX_PRECISE_IDENTIFIERS + 1
         source = _module_source(total)
         modules = [f'tools/llmtool/llmtool/mod_{i}.py' for i in range(8)]
+        missing_read = 'tools/llmtool/llmtool/extra_read.py'
 
         def runner(argv, **kwargs):
+            if argv[3] == 'cat-file':
+                exists = argv[5] == f'HEAD:{missing_read}'
+                return types.SimpleNamespace(returncode=0 if exists else 1, stdout='')
             if argv[3] == 'show':
                 spec = argv[4]
                 return types.SimpleNamespace(
@@ -268,28 +272,27 @@ class ReadScopeCapTest(unittest.TestCase):
 
         goal = 'Update ' + ', '.join(f'fn_{i:02d}()' for i in range(total))
         args = types.SimpleNamespace(
-            task_id='1' * 32, provider='agy', acceptance=['none'],
+            task_id='1' * 32, provider='agy',
+            acceptance=[f'Check {missing_read}'],
             repair_packet=None, high_debug_task=None,
-            read_path=[], write_path=modules,
+            read_path=[], write_path=modules + ['AGENTS.md'],
             read_scope_reason=None, read_scope_check=False, cwd='/fake')
         store = mock.Mock()
         store.get.return_value = {'pm_assignment': {'goal': goal}}
 
-        with (mock.patch.object(advice.subprocess, 'run', side_effect=runner),
-              mock.patch.object(advice, 'missing_read_paths', return_value=[]),
-              mock.patch.object(advice, 'companion_items', return_value=[]),
-              mock.patch.object(advice, 'route_path_items', return_value=[]),
-              mock.patch.object(advice, 'shell_items', return_value=[]),
-              mock.patch.object(advice, 'size_items', return_value=[])):
+        with mock.patch.object(advice.subprocess, 'run', side_effect=runner):
             result = task_submission_cli._scope_advice_items(args, store)
 
         self.assertLessEqual(len(result), advice.MAX_ITEMS)
         self.assertEqual(len(result), advice.MAX_ITEMS)
+        self.assertEqual(result[0]['kind'], advice.READ_MISSING)
+        self.assertEqual(result[0]['path'], missing_read)
+        self.assertEqual(result[1]['kind'], advice.COMPANION_WRITE)
+        self.assertEqual(result[2]['kind'], advice.TEST_REFERENCES_CAPPED)
+        self.assertIsNone(result[2]['path'])
+        self.assertEqual(result[3:], fallback[:advice.MAX_ITEMS - 3])
         capped = [item for item in result if item['kind'] == advice.TEST_REFERENCES_CAPPED]
         self.assertEqual(len(capped), 1)
-        self.assertEqual(result[:-1], fallback[:advice.MAX_ITEMS - 1])
-        self.assertEqual(result[-1]['kind'], advice.TEST_REFERENCES_CAPPED)
-        self.assertIsNone(result[-1]['path'])
         task_store._validate_read_scope_advice([advice.entry(result, None, None)])
 
 
