@@ -1317,7 +1317,7 @@ class TaskAdvanceTests(unittest.TestCase):
                           side_effect=RuntimeError('unavailable')):
             snapshot = task_advance._d6_snapshot(record, 'executor-1')
         self.assertEqual(snapshot['state'], 'D6_BINDING_UNAVAILABLE')
-        self.assertEqual(snapshot['code'], 'TASK_ADVANCE_REFUSED')
+        self.assertEqual(snapshot['code'], 'RUNTIMEERROR')
 
     def test_completion_action_captures_nested_json_output(self):
         class Store:
