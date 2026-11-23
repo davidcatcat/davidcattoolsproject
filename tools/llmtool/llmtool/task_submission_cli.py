@@ -448,13 +448,24 @@ def _pm_assignment_limit_error(response):
     return None
 
 
+def _prelaunch_error(message, code):
+    """Build an LLMToolError carrying a stable code and pre-launch marker."""
+    error = LLMToolError(message)
+    if type(code) is str and re.fullmatch(r'[A-Z0-9_]{1,64}', code):
+        error.code = code
+    error.prelaunch_refusal = True
+    return error
+
+
 def _validate_acceptance_scope(acceptance):
     if type(acceptance) is not list:
-        raise LLMToolError('developer acceptance scope is invalid')
+        raise _prelaunch_error('developer acceptance scope is invalid',
+                               'DEVELOPER_ACCEPTANCE_INVALID')
     count = len(acceptance)
     if not 1 <= count <= 16:
-        raise LLMToolError(
-            f'PM_RESPONSE_ACCEPTANCE_COUNT: {count} items (allowed 1-16)')
+        raise _prelaunch_error(
+            f'PM_RESPONSE_ACCEPTANCE_COUNT: {count} items (allowed 1-16)',
+            'PM_RESPONSE_ACCEPTANCE_COUNT')
     # #2281 limit row 8: no per-item byte cap; the response bound holds.
     return [_screen_text(item, RESPONSE_LIMIT) for item in acceptance]
 
@@ -4955,7 +4966,8 @@ def _resolve_developer_role(role_name, *, owner_override=None, repository=None,
     except LLMToolError as exc:
         if getattr(exc, 'role_config_code', None) == role_config.ROLE_MODEL_NOT_ALLOWED:
             _refuse_developer_model(role_name, getattr(exc, 'owner_override_code', None))
-        raise LLMToolError(role_name + ' role configuration is invalid') from None
+        raise _prelaunch_error(role_name + ' role configuration is invalid',
+                               'ROLE_CONFIG_INVALID') from None
 
 
 def _refuse_developer_model(role_name, detail=None):
@@ -4963,7 +4975,7 @@ def _refuse_developer_model(role_name, detail=None):
                role_config.ROLE_MODEL_NOT_ALLOWED)
     if type(detail) is str and re.fullmatch(r'[A-Z0-9_]{1,64}', detail):
         message += ' (' + detail + ')'
-    error = LLMToolError(message)
+    error = _prelaunch_error(message, role_config.ROLE_MODEL_NOT_ALLOWED)
     error.role_config_code = role_config.ROLE_MODEL_NOT_ALLOWED
     raise error from None
 
@@ -5074,7 +5086,8 @@ def _agy_developer_profile(route_config, *, owner_override=None, repository=None
     role = _resolve_developer_role('agy-developer', owner_override=owner_override,
                                    repository=repository, fetch_comment=fetch_comment)
     if role.get('account') is not None:
-        error = LLMToolError('agy-developer role accounts are not supported')
+        error = _prelaunch_error('agy-developer role accounts are not supported',
+                                 'AGY_ROLE_ACCOUNT_UNSUPPORTED')
         error.role_config_code = 'AGY_ROLE_ACCOUNT_UNSUPPORTED'
         raise error
     model = _developer_role_value(role, 'model', route_config)
@@ -5085,7 +5098,8 @@ def _agy_developer_profile(route_config, *, owner_override=None, repository=None
     try:
         model, effort = AgyRoute(route_config).validate_profile(model, effort)
     except RouteError:
-        error = LLMToolError('agy-developer role model or effort is invalid')
+        error = _prelaunch_error('agy-developer role model or effort is invalid',
+                                 'AGY_ROLE_PROFILE_INVALID')
         error.role_config_code = 'AGY_ROLE_PROFILE_INVALID'
         raise error from None
     _require_developer_model('agy-developer', 'agy', route_config, model, role)
@@ -5200,9 +5214,11 @@ def _developer_card_prefix(task, registration, provider):
         pinned = skill_ledger.pin_dispatch(task['task_id'], task['run_id'], route)
     except Exception as exc:
         code = getattr(exc, 'skill_ledger_code', 'LEDGER_UNREADABLE')
-        raise LLMToolError(label + '_SKILL_PIN_FAILED: ' + code) from None
+        raise _prelaunch_error(label + '_SKILL_PIN_FAILED: ' + code,
+                               label + '_SKILL_PIN_FAILED') from None
     if type(pinned) is not str or re.fullmatch(r'[0-9a-f]{40}', pinned) is None:
-        raise LLMToolError(label + '_SKILL_PIN_FAILED: PIN_INVALID')
+        raise _prelaunch_error(label + '_SKILL_PIN_FAILED: PIN_INVALID',
+                               label + '_SKILL_PIN_FAILED')
     # #2029: a merge during dispatch can leave the authenticated pin newer than the local fetch.
     task_completion.ensure_main_commit(registration.root, pinned)
     try:
@@ -5219,22 +5235,25 @@ def _developer_card_prefix(task, registration, provider):
                 raise
     except skill_manifest.SkillManifestError as exc:
         if exc.code == skill_manifest.SKILL_MANIFEST_PATH_MISSING:
-            raise LLMToolError(label + '_ROLE_CARD_MISSING') from None
-        raise LLMToolError(exc.code) from None
+            raise _prelaunch_error(label + '_ROLE_CARD_MISSING',
+                                   label + '_ROLE_CARD_MISSING') from None
+        raise _prelaunch_error(exc.code, exc.code) from None
     if (type(built) is not dict or built.get('commit') != pinned or
             built.get('route') != route or type(built.get('cards')) is not list):
-        raise LLMToolError(label + '_ROLE_CARD_PIN_MISMATCH')
+        raise _prelaunch_error(label + '_ROLE_CARD_PIN_MISMATCH',
+                               label + '_ROLE_CARD_PIN_MISMATCH')
     for card in built['cards']:
         try:
             # Size is judged on the whole prefix, so it has its own refusal code.
             _screen_text(card.get('text') if type(card) is dict else None,
                          skill_manifest.MAX_DEVELOPER_PREFIX_SIZE)
         except LLMToolError:
-            raise LLMToolError(label + '_SKILL_TEXT_REFUSED') from None
+            raise _prelaunch_error(label + '_SKILL_TEXT_REFUSED',
+                                   label + '_SKILL_TEXT_REFUSED') from None
     try:
         prefix = skill_manifest.role_card_prefix(built)
     except skill_manifest.SkillManifestError as exc:
-        raise LLMToolError(exc.code) from None
+        raise _prelaunch_error(exc.code, exc.code) from None
     return prefix, hashlib.sha256(prefix.encode('utf-8')).hexdigest()
 
 
@@ -5298,8 +5317,9 @@ def _delegate_timeout(args, route):
     try:
         return resolve_route_timeout(route, getattr(args, 'timeout', None))
     except RouteError as exc:
-        raise LLMToolError(
-            f'{exc.code}: --timeout refused for the {route} Developer route') from None
+        raise _prelaunch_error(
+            f'{exc.code}: --timeout refused for the {route} Developer route',
+            exc.code) from None
 
 
 def _serialize_direct_dispatch(run):
@@ -5799,14 +5819,14 @@ def _validate_repair_packet(value):
             type(value.get('findings_count')) is not int or
             type(value.get('reviewer_text_excerpt_untrusted_data')) is not str or
             len(value['reviewer_text_excerpt_untrusted_data']) > 2000):
-        raise LLMToolError('repair reference packet is invalid')
+        raise _prelaunch_error('repair reference packet is invalid', 'REPAIR_PACKET_INVALID')
     if set(value) != fields:
         if (not optional.issubset(value) or
                 type(value.get('high_debug_report_untrusted_data')) is not str or
                 len(value['high_debug_report_untrusted_data']) > 6000 or
                 type(value.get('high_debug_report_sha256')) is not str or
                 re.fullmatch(r'[0-9a-f]{64}', value['high_debug_report_sha256']) is None):
-            raise LLMToolError('repair reference packet is invalid')
+            raise _prelaunch_error('repair reference packet is invalid', 'REPAIR_PACKET_INVALID')
     return dict(value)
 
 
@@ -5857,7 +5877,8 @@ def _optional_agy_owner_ref(args):
     if owner_ref is not None and (
             type(owner_ref) is not str or
             worker_dispatch.owner_comment_ref().fullmatch(owner_ref) is None):
-        raise LLMToolError('--provider agy requires a valid --owner-ref before Task mutation')
+        raise _prelaunch_error('--provider agy requires a valid --owner-ref before Task mutation',
+                               'AGY_OWNER_REF_INVALID')
     return owner_ref
 
 
@@ -5866,9 +5887,10 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     """Run the provider-neutral AGY adapter against its registered D6 task."""
     owner_ref = _optional_agy_owner_ref(args)
     if getattr(args, 'mode', None) != 'direct':
-        raise LLMToolError('--provider agy requires --mode direct')
+        raise _prelaunch_error('--provider agy requires --mode direct', 'AGY_MODE_INVALID')
     if getattr(args, 'context_stdin', False):
-        raise LLMToolError('AGY direct reads only its registered D6 task scope')
+        raise _prelaunch_error('AGY direct reads only its registered D6 task scope',
+                               'AGY_CONTEXT_STDIN_UNSUPPORTED')
     timeout = _delegate_timeout(args, 'agy')
     task = store.get(args.task_id)
     previous_developer = task.get('developer')
@@ -5884,28 +5906,43 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             args, task, previous_developer, store, expected_agent='agy-developer')
     if (task.get('state') != 'PM_RESPONDED' or not task.get('response') or
             task.get('schema_version') != 2):
-        raise LLMToolError('task has no successful PM response')
+        raise _prelaunch_error('task has no successful PM response', 'TASK_PM_RESPONSE_MISSING')
     if not reassigning and task.get('developer') is not None:
-        raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
+        raise _prelaunch_error('developer assignment already exists; duplicate dispatch refused',
+                               'DEVELOPER_ALREADY_ASSIGNED')
     binding = task.get('task_binding')
-    task_completion.validate_task_binding(
-        stored_binding=binding, task_id=task.get('task_id'), run_id=task.get('run_id'),
-        contract_digest=binding.get('contract_digest') if type(binding) is dict else None)
+    try:
+        task_completion.validate_task_binding(
+            stored_binding=binding, task_id=task.get('task_id'), run_id=task.get('run_id'),
+            contract_digest=binding.get('contract_digest') if type(binding) is dict else None)
+    except LLMToolError as exc:
+        if getattr(exc, 'code', None) is None:
+            completion_code = getattr(exc, 'completion_code', None)
+            if type(completion_code) is str and re.fullmatch(r'[A-Z0-9_]{1,64}', completion_code):
+                exc.code = completion_code
+        exc.prelaunch_refusal = True
+        raise
     assignment = task.get('pm_assignment')
     if args.selection_source == 'PM':
         if (type(assignment) is not dict or (not reassigning and assignment.get('route') != 'agy') or
                 assignment.get('risk') != 'LOW' or args.acceptance != assignment.get('acceptance')):
-            raise LLMToolError('no matching low-risk AGY recommendation from the selected PM route')
+            raise _prelaunch_error('no matching low-risk AGY recommendation from the selected PM route',
+                                   'AGY_PM_ASSIGNMENT_INVALID')
     registration, snapshot = _delegate_d6_binding(args)
     if previous_developer is None:
         _reject_claude_reserved_d6(registration)
         if ((getattr(registration, 'session_ref', None) or '').startswith('handoff-') and
                 registration.trusted_agent_id != direct_reassignment.AGENTS['agy']):
-            raise LLMToolError('DIRECT_REASSIGN_D6_BINDING_MISMATCH')
+            raise _prelaunch_error('DIRECT_REASSIGN_D6_BINDING_MISMATCH',
+                                   'DIRECT_REASSIGN_D6_BINDING_MISMATCH')
     # A fresh Owner decision is required before creating the durable assignment.
     decision = worker_dispatch.evaluate('agy', owner_ref, task['task_id'])
     if not decision.allowed:
-        raise worker_dispatch.WorkerDispatchDenied(decision.reason_code)
+        denied = worker_dispatch.WorkerDispatchDenied(decision.reason_code)
+        if getattr(denied, 'code', None) is None:
+            denied.code = decision.reason_code
+        denied.prelaunch_refusal = True
+        raise denied
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     reassignment = _direct_reassignment_plan(
         args, store, task, registration, snapshot, 'agy', read_paths, write_paths)
@@ -5914,7 +5951,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     repair_packet = (reassignment.repair_packet if reassignment is not None
                      else getattr(args, 'repair_packet', None))
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
-        raise LLMToolError('developer acceptance scope is invalid')
+        raise _prelaunch_error('developer acceptance scope is invalid',
+                               'DEVELOPER_ACCEPTANCE_INVALID')
     acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
     egress_basis = _screen_text(args.egress_basis, 512)
     request = _screen_text(task['request'], REQUEST_LIMIT)
@@ -5925,7 +5963,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     model, effort = agy_profile
     executable = shutil.which(route_config['executable'])
     if executable is None:
-        raise LLMToolError('AGY executable is unavailable')
+        raise _prelaunch_error('AGY executable is unavailable', 'AGY_EXECUTABLE_UNAVAILABLE')
     route_config['executable'] = executable
     route = AgyRoute(route_config)
     pm_goal = (_screen_text(assignment.get('goal'), REQUEST_LIMIT)
@@ -5953,11 +5991,12 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     agy_max_prompt_bytes = resolve_route_max_prompt_bytes('agy', config=config)
     _screen_text(prompt, agy_max_prompt_bytes)
     if len(prompt.encode('utf-8')) > agy_max_prompt_bytes:
-        raise LLMToolError('request or response exceeds the supported size')
+        raise _prelaunch_error('request or response exceeds the supported size',
+                               'AGY_PROMPT_TOO_LARGE')
     card_prefix, card_prefix_sha256 = _developer_card_prefix(task, registration, 'agy')
     prompt = instructions + card_prefix + task_json
     if len(prompt.encode('utf-8')) > agy_max_prompt_bytes:
-        raise LLMToolError('AGY_SKILL_PROMPT_TOO_LARGE')
+        raise _prelaunch_error('AGY_SKILL_PROMPT_TOO_LARGE', 'AGY_SKILL_PROMPT_TOO_LARGE')
     provider_input_bytes = len(prompt.encode('utf-8'))
     test_policy = (direct_reassignment.test_policy(reassignment) if reassignment is not None
                    else _remote_receipt_test_policy(task, read_paths=read_paths))
@@ -6010,7 +6049,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                     expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
                               'completion': None}, developer=developer, completion=completion, **packet_write)))
     except TaskStoreConflict:
-        raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
+        raise _prelaunch_error('developer assignment already exists; duplicate dispatch refused',
+                               'DEVELOPER_ALREADY_ASSIGNED') from None
     owner_gate_denied = False
     result = None
     expected_developer = copy.deepcopy(store.get(task['task_id'])['developer'])
@@ -7298,7 +7338,8 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
                           'completion': None}, developer=developer, completion=completion)))
     except TaskStoreConflict:
-        raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
+        raise _prelaunch_error('developer assignment already exists; duplicate dispatch refused',
+                               'DEVELOPER_ALREADY_ASSIGNED') from None
     expected_developer = copy.deepcopy(claimed['developer'])
 
     def persist_failure(error_code, *, state='DEVELOPER_UNAVAILABLE',
@@ -7743,7 +7784,7 @@ def _delegate_d6_binding(args):
     if not explicit_root:
         requested_root = os.getcwd()
     if not isinstance(requested_root, (str, os.PathLike)):
-        raise LLMToolError('D6_SOURCE_BINDING_MISMATCH')
+        raise _prelaunch_error('D6_SOURCE_BINDING_MISMATCH', 'D6_SOURCE_BINDING_MISMATCH')
     try:
         snapshot = task_completion.collect_git_snapshot(requested_root)
         registration, snapshot = task_completion.bind_executor_task(
@@ -7751,14 +7792,14 @@ def _delegate_d6_binding(args):
             root=snapshot.root)
     except Exception:
         if explicit_root:
-            raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
+            raise _prelaunch_error('D6_SOURCE_BINDING_MISMATCH', 'D6_SOURCE_BINDING_MISMATCH') from None
         raise
     return registration, snapshot
 
 
 def _reject_claude_reserved_d6(registration):
     if getattr(registration, 'trusted_agent_id', None) == 'claude-developer':
-        raise LLMToolError('D6_CLAUDE_RESERVED')
+        raise _prelaunch_error('D6_CLAUDE_RESERVED', 'D6_CLAUDE_RESERVED')
 
 
 def run_task_codex_delegate(args, *, store, d6_binding=None):
@@ -7917,7 +7958,8 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
                           'completion': task.get('completion')},
                 developer=developer, completion=completion)))
     except TaskStoreConflict:
-        raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
+        raise _prelaunch_error('developer assignment already exists; duplicate dispatch refused',
+                               'DEVELOPER_ALREADY_ASSIGNED') from None
     except worker_dispatch.WorkerDispatchDenied as exc:
         detail = ('Codex timeout continuation denied' if recovering_timeout else
                   'Codex dispatch denied')
@@ -8587,7 +8629,8 @@ def _check_repair_packet_rca(packet, store, executor_task, repair_task_id):
             return
         raise ValueError
     except Exception:
-        raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
+        raise _prelaunch_error('DELEGATE_HIGH_DEBUG_TASK_INVALID',
+                               'DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
 
 
 def _check_delegate_repair_cap(args, store, d6_binding=None):
@@ -8607,13 +8650,15 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
     try:
         policy = repair_policy.load_policy()
     except Exception:
-        raise LLMToolError(
-            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
+        raise _prelaunch_error(
+            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}',
+            'DELEGATE_REPAIR_COUNT_UNAVAILABLE') from None
     try:
         task_ids = store.completion_d6_task_ids(executor_task)
     except Exception:
-        raise LLMToolError(
-            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
+        raise _prelaunch_error(
+            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}',
+            'DELEGATE_REPAIR_COUNT_UNAVAILABLE') from None
     counted = []
     stamps = {}
     new_ec2_ids = set()
@@ -8627,8 +8672,9 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
         try:
             record = store.get(task_id)
         except Exception:
-            raise LLMToolError(
-                f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
+            raise _prelaunch_error(
+                f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}',
+                'DELEGATE_REPAIR_COUNT_UNAVAILABLE') from None
         completion = record.get('completion')
         if (type(completion) is dict and
                 completion.get('executor_task_id') == executor_task):
@@ -8751,7 +8797,8 @@ def _check_repair_limits(args, store, d6_binding, policy, current_task_id, count
         count = sum(1 for task_id in counted
                     if task_id in new_ec2_ids or task_id in legacy_ec2_ids)
         if count >= policy['test_fail_max']:
-            raise LLMToolError('DELEGATE_REPAIR_LIMIT_REACHED')
+            raise _prelaunch_error('DELEGATE_REPAIR_LIMIT_REACHED',
+                                   'DELEGATE_REPAIR_LIMIT_REACHED')
         return
     # Review rounds: every counted run except new EC2 repair runs; a
     # legacy EC2 run still counts here. The first run is the original
@@ -8759,7 +8806,8 @@ def _check_repair_limits(args, store, d6_binding, policy, current_task_id, count
     review_runs = [task_id for task_id in counted if task_id not in new_ec2_ids]
     count = len(review_runs)
     if count >= 1 + policy['repair_max']:
-        raise LLMToolError('DELEGATE_REPAIR_LIMIT_REACHED')
+        raise _prelaunch_error('DELEGATE_REPAIR_LIMIT_REACHED',
+                               'DELEGATE_REPAIR_LIMIT_REACHED')
     if count <= REVIEW_REPAIRS_WITHOUT_DEBUG:
         packet = getattr(args, 'repair_packet', None)
         if type(packet) is dict and 'high_debug_report_sha256' in packet:
@@ -8773,8 +8821,9 @@ def _check_repair_limits(args, store, d6_binding, policy, current_task_id, count
     times = sorted(stamps[task_id] for task_id in review_runs
                    if type(stamps) is dict and task_id in stamps)
     if len(times) != count:
-        raise LLMToolError(
-            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
+        raise _prelaunch_error(
+            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}',
+            'DELEGATE_REPAIR_COUNT_UNAVAILABLE') from None
     _check_repair_rca(args, store, d6_binding, times[REVIEW_REPAIRS_WITHOUT_DEBUG], covered=True)
 
 
@@ -8997,19 +9046,19 @@ def _delegate_chain_gate(args, store, d6_binding, claim):
     try:
         policy = repair_policy.load_policy()
     except Exception:
-        raise LLMToolError(unavailable) from None
+        raise _prelaunch_error(unavailable, 'DELEGATE_REPAIR_COUNT_UNAVAILABLE') from None
     first = _delegate_chain_view(store, task_id, executor_task)
     if first is None:
-        raise LLMToolError(unavailable)
+        raise _prelaunch_error(unavailable, 'DELEGATE_REPAIR_COUNT_UNAVAILABLE')
     keys = list(first[1]['keys'])
     try:
         release = lineage_counts.acquire_chain_locks(store, keys)
     except Exception:
-        raise LLMToolError(unavailable) from None
+        raise _prelaunch_error(unavailable, 'DELEGATE_REPAIR_COUNT_UNAVAILABLE') from None
     try:
         fresh = _delegate_chain_view(store, task_id, executor_task)
         if fresh is None or list(fresh[1]['keys']) != keys:
-            raise LLMToolError(unavailable)
+            raise _prelaunch_error(unavailable, 'DELEGATE_REPAIR_COUNT_UNAVAILABLE')
         records, view = fresh
         _check_chain_repair_count(args, store, d6_binding, policy, view)
         registration = (d6_binding[0] if type(d6_binding) is tuple and len(d6_binding) == 2
@@ -9186,12 +9235,15 @@ def _delegate_with_scope_advice(args, store, call):
 def run_task_delegate(args, *, store=None):
     store = TaskStore() if store is None else store
     if getattr(args, 'provider', None) == 'company-gw':
-        raise LLMToolError('COMPANY_GW_DIRECT_RETIRED: direct company-gw delegation is retired; use gw-agent (#120)')
+        raise _prelaunch_error(
+            'COMPANY_GW_DIRECT_RETIRED: direct company-gw delegation is retired; use gw-agent (#120)',
+            'COMPANY_GW_DIRECT_RETIRED')
     retired = getattr(args, 'provider', None)
     if type(retired) is str and retired in worker_dispatch.RETIRED_WORKER_ALIASES:
-        raise LLMToolError(
+        raise _prelaunch_error(
             f'WORKER_ID_RETIRED_ALIAS: {retired} is a retired id; use '
-            f'{worker_dispatch.RETIRED_WORKER_ALIASES[retired]} (#1502 WP-E)')
+            f'{worker_dispatch.RETIRED_WORKER_ALIASES[retired]} (#1502 WP-E)',
+            'WORKER_ID_RETIRED_ALIAS')
     # #1815: refuse a bad --timeout before any Task read, fork or provider call.
     selected_route = getattr(args, 'provider', None)
     is_auto_reassign = getattr(args, '_auto_direct_reassignment', False) is True
@@ -9200,12 +9252,15 @@ def run_task_delegate(args, *, store=None):
             getattr(args, 'background', False) or
             getattr(args, 'selection_source', None) != 'PM' or
             (not is_auto_reassign and getattr(args, 'data_class', None) is not None)):
-        raise LLMToolError('DIRECT_REASSIGN_ROUTE_REFUSED')
+        raise _prelaunch_error('DIRECT_REASSIGN_ROUTE_REFUSED',
+                               'DIRECT_REASSIGN_ROUTE_REFUSED')
     if selected_route in TIMEOUT_ROUTES:
         _delegate_timeout(args, selected_route)
     elif getattr(args, 'timeout', None) is not None:
-        raise LLMToolError('TIMEOUT_ROUTE_UNSUPPORTED: --timeout applies only to the '
-                           'Claude, OpenCode, AGY and gw-agent Developer routes')
+        raise _prelaunch_error(
+            'TIMEOUT_ROUTE_UNSUPPORTED: --timeout applies only to the '
+            'Claude, OpenCode, AGY and gw-agent Developer routes',
+            'TIMEOUT_ROUTE_UNSUPPORTED')
     args = _auto_direct_replacement(args, store)
     if getattr(args, 'background', False):
         provider = getattr(args, 'provider', None)
@@ -9276,7 +9331,7 @@ def run_task_delegate(args, *, store=None):
     provider = getattr(args, 'provider', None)
     if provider == 'agy':
         if getattr(args, 'mode', 'proposal') != 'direct':
-            raise LLMToolError('--provider agy requires --mode direct')
+            raise _prelaunch_error('--provider agy requires --mode direct', 'AGY_MODE_INVALID')
         # #785 M18: no owner-ref check here. The repair cap and High Debug
         # refusals come first; run_task_agy_delegate validates a supplied ref
         # (None accepted) before any store read or Task mutation.
