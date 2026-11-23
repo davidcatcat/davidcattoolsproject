@@ -9109,17 +9109,19 @@ def _scope_advice_items(args, store):
         except Exception:
             pass
 
+    texts = [goal, getattr(args, 'acceptance', None),
+             getattr(args, 'repair_packet', None), reports]
     add(lambda: [read_scope_advice.item(read_scope_advice.READ_MISSING, path,
                                         'named in the spec, findings or RCA but not in read')
                  for path in read_scope_advice.missing_read_paths(
-                     texts=[goal, getattr(args, 'acceptance', None),
-                            getattr(args, 'repair_packet', None), reports],
+                     texts=texts,
                      read_paths=read_paths, write_paths=write_paths,
                      exists=read_scope_advice.git_exists(root))])
     add(lambda: read_scope_advice.companion_items(
         read_paths=read_paths, write_paths=write_paths))
     add(lambda: read_scope_advice.referencing_tests(
-        root=root, commit='HEAD', read_paths=read_paths, write_paths=write_paths))
+        root=root, commit='HEAD', read_paths=read_paths, write_paths=write_paths,
+        texts=texts))
     provider = getattr(args, 'provider', None)
     add(lambda: read_scope_advice.route_path_items(
         provider, list(read_paths or []) + list(write_paths or [])))
