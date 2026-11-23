@@ -154,7 +154,21 @@ class DisputeStoreSchemaTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         store = task_store.TaskStore(Path(temp.name).resolve())
-        store.create(_base_record(with_dispute=with_dispute, with_history=with_history))
+        rec = store.create(_base_record(with_dispute=False))
+        if with_dispute:
+            entry = {
+                'finding_id': 'F1', 'pr': PR, 'head_sha': HEAD, 'review_version': 1,
+                'severity': 'High', 'state': 'OPEN', 'evidence_ref': REF,
+                'opened_at': STAMP_1,
+            }
+            if with_history:
+                entry['history'] = [{
+                    'event': 'OPENED', 'at': STAMP_1, 'actor': f'pm:{PM_SESSION}',
+                    'head_sha': HEAD, 'refs': {},
+                }]
+            store.compare_and_update(
+                TASK, expected={'record_sha256': rec['record_sha256']},
+                review_disputes=[entry])
         return store, Path(temp.name).resolve() / f'{TASK}.json'
 
     def _assert_refused_unchanged(self, store, task_path, fn):
@@ -354,15 +368,20 @@ class DisputeStoreSchemaTests(unittest.TestCase):
     def test_refuse_formal_dispatched_to_completed(self):
         store, path = self._new_store()
         rec = store.get(TASK)
-        formal_dispatched = {
+        formal_claimed = {
             'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD, 'version': 2,
-            'state': 'DISPATCHED', 'reviewer_task': FORMAL_REVIEWER,
-            'native_session_id': CLAUDE_UUID, 'account_mode': 'ROLES',
+            'state': 'CLAIMED', 'reviewer_task': FORMAL_REVIEWER,
+            'native_session_id': None, 'account_mode': 'ROLES',
             'claimed_at': STAMP_2, 'updated_at': STAMP_2,
         }
         rec = store.compare_and_update(
             TASK, expected={'record_sha256': rec['record_sha256']},
-            review_dispatch_claim=rec['review_dispatch_claim'] + [formal_dispatched])
+            review_dispatch_claim=rec['review_dispatch_claim'] + [formal_claimed])
+        formal_dispatched = dict(formal_claimed, state='DISPATCHED',
+                                 native_session_id=CLAUDE_UUID, updated_at=STAMP_2)
+        rec = store.compare_and_update(
+            TASK, expected={'record_sha256': rec['record_sha256']},
+            review_dispatch_claim=[rec['review_dispatch_claim'][0], formal_dispatched])
         completed = dict(formal_dispatched, state='COMPLETED', updated_at=STAMP_3, review_result={
             'task_id': TASK, 'run_id': RUN, 'contract_digest': rec['task_binding']['contract_digest'],
             'head': HEAD, 'verdict': 'PASS', 'review_text': 'PASS',
@@ -375,8 +394,8 @@ class DisputeStoreSchemaTests(unittest.TestCase):
 
     def test_refuse_ruling_transition_mismatches(self):
         # Codex DISPATCHED -> COMPLETED refused.
-        store, path = self._new_store()
-        self._claim_arbiter(store, reviewer='codex-reviewer')
+        store, path = self._new_store(with_history=True)
+        self._claim_arbiter(store, reviewer='codex-reviewer', with_history=True)
         rec = store.get(TASK)
         dispatched_codex = dict(rec['review_dispatch_claim'][1],
                                 state='DISPATCHED', native_session_id=CODEX_THREAD,
@@ -395,8 +414,8 @@ class DisputeStoreSchemaTests(unittest.TestCase):
                 review_dispatch_claim=[rec['review_dispatch_claim'][0], completed_codex]))
 
         # Claude CLAIMED -> COMPLETED refused.
-        store2, path2 = self._new_store()
-        self._claim_arbiter(store2, reviewer='claude-reviewer')
+        store2, path2 = self._new_store(with_history=True)
+        self._claim_arbiter(store2, reviewer='claude-reviewer', with_history=True)
         rec2 = store2.get(TASK)
         completed_claude = dict(
             rec2['review_dispatch_claim'][1], state='COMPLETED',
@@ -410,9 +429,9 @@ class DisputeStoreSchemaTests(unittest.TestCase):
                 review_dispatch_claim=[rec2['review_dispatch_claim'][0], completed_claude]))
 
         # Claude DISPATCHED -> COMPLETED with CODEX_JSONL refused.
-        store3, path3 = self._new_store()
-        self._claim_arbiter(store3, reviewer='claude-reviewer')
-        rec3 = self._dispatch_claude_arbiter(store3)
+        store3, path3 = self._new_store(with_history=True)
+        self._claim_arbiter(store3, reviewer='claude-reviewer', with_history=True)
+        rec3 = self._dispatch_claude_arbiter(store3, with_history=True)
         bad_kind = dict(
             rec3['review_dispatch_claim'][1], state='COMPLETED', updated_at=STAMP_4,
             review_result=_ruling_result(rec3['task_binding']['contract_digest'],
@@ -424,9 +443,9 @@ class DisputeStoreSchemaTests(unittest.TestCase):
                 review_dispatch_claim=[rec3['review_dispatch_claim'][0], bad_kind]))
 
     def test_refuse_dispatched_to_completed_mutating_immutable_keys(self):
-        store, path = self._new_store()
-        self._claim_arbiter(store, reviewer='claude-reviewer')
-        rec = self._dispatch_claude_arbiter(store)
+        store, path = self._new_store(with_history=True)
+        self._claim_arbiter(store, reviewer='claude-reviewer', with_history=True)
+        rec = self._dispatch_claude_arbiter(store, with_history=True)
         cd = rec['task_binding']['contract_digest']
         base_completed = dict(
             rec['review_dispatch_claim'][1], state='COMPLETED', updated_at=STAMP_4,
@@ -450,11 +469,11 @@ class DisputeStoreSchemaTests(unittest.TestCase):
                         review_dispatch_claim=[rec['review_dispatch_claim'][0], b]))
 
     def test_refuse_unknown_to_dispatched_settle_on_ruling_claim(self):
-        store, path = self._new_store()
+        store, path = self._new_store(with_history=True)
         store.record_completion_event(
             TASK, event_id=EVENT_ID, run_id=RUN, session_id='review-' + EVENT_ID,
             source='REVIEWER', source_sha=HEAD, sequence=0, payload_sha256=PAYLOAD_DIGEST)
-        self._claim_arbiter(store, reviewer='claude-reviewer')
+        self._claim_arbiter(store, reviewer='claude-reviewer', with_history=True)
         rec = store.get(TASK)
         unknown_claim = dict(rec['review_dispatch_claim'][1],
                              state='UNKNOWN', native_session_id=CLAUDE_UUID,
@@ -472,8 +491,8 @@ class DisputeStoreSchemaTests(unittest.TestCase):
     # --- Ruling result refusals ---
 
     def test_refuse_invalid_ruling_results(self):
-        store, path = self._new_store()
-        self._claim_arbiter(store, reviewer='codex-reviewer')
+        store, path = self._new_store(with_history=True)
+        self._claim_arbiter(store, reviewer='codex-reviewer', with_history=True)
         rec = store.get(TASK)
         cd = rec['task_binding']['contract_digest']
         base_claim = dict(rec['review_dispatch_claim'][1], state='COMPLETED',
@@ -604,7 +623,11 @@ class DisputeStoreSchemaTests(unittest.TestCase):
         ]
         for bad_r in bad_rulings:
             with self.subTest(bad_r=bad_r):
-                entry = dict(rec['review_disputes'][0], state='RULED', ruling=bad_r)
+                entry = dict(
+                    rec['review_disputes'][0], state='RULED', ruling=bad_r,
+                    history=list(rec['review_disputes'][0]['history']) + [
+                        _history_event('RULED', at=STAMP_4),
+                    ])
                 self._assert_refused_unchanged(
                     store, path,
                     lambda e=entry: store.compare_and_update(
@@ -628,7 +651,11 @@ class DisputeStoreSchemaTests(unittest.TestCase):
             'comment_id': RULING_COMMENT_ID,
             'contract_digest': rec['task_binding']['contract_digest'], 'run_id': RUN,
         }
-        entry = dict(rec['review_disputes'][0], state='RULED', ruling=ruling)
+        entry = dict(
+            rec['review_disputes'][0], state='RULED', ruling=ruling,
+            history=list(rec['review_disputes'][0]['history']) + [
+                _history_event('RULED', at=STAMP_4),
+            ])
         self._assert_refused_unchanged(
             store, path,
             lambda: store.compare_and_update(
