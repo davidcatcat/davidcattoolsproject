@@ -323,8 +323,8 @@ class AutoReassign2446And2449Tests(unittest.TestCase):
     def test_manual_reassignment_scope_mismatch_refuses(self):
         cases = (
             {'egress_basis': 'Changed egress basis'},
-            {'read_path': ['other.py']},
-            {'write_path': ['other.py']},
+            {'read_path': ['sample.py', 'other.py']},
+            {'read_path': ['other.py'], 'write_path': ['other.py']},
         )
         for changes in cases:
             with self.subTest(changes=changes):
