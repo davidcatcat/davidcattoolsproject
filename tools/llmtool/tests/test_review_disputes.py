@@ -976,7 +976,7 @@ class DisputeWithdrawTests(_Case):
         # Repair and High Debug on the head are no longer blocked, and the
         # finding still stands: only an arbiter ruling withdraws a finding.
         self.assertFalse(review_repair.dispute_open_on(record, PR, HEAD))
-        self.assertEqual(review_repair.withdrawn_findings(record, PR, HEAD), frozenset())
+        self.assertEqual(review_repair.withdrawn_findings(record, PR, HEAD, 1), frozenset())
 
     def test_a_replay_after_the_write_returns_the_recorded_state_and_writes_nothing(self):
         self.use(_task())

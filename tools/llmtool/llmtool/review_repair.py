@@ -83,17 +83,38 @@ def dispute_open_on(task, pr, head):
                for item in disputes)
 
 
-def withdrawn_findings(task, pr, head):
-    """Finding IDs of this PR head that an arbiter ruling WITHDREW."""
+def _withdrawal_in_version(item, version):
+    """True when a RULED WITHDRAWN entry's ruling covers exactly this review version.
+
+    The entry's own review_version must equal version (a non-bool int). An
+    arbitrate ruling also carries review_version, which must match too.
+    """
+    entry_version = item.get('review_version')
+    if type(entry_version) is not int or entry_version != version:
+        return False
+    ruling = item['ruling']
+    if 'review_version' in ruling or ruling.get('path') == 'arbitrate':
+        ruling_version = ruling.get('review_version')
+        return type(ruling_version) is int and ruling_version == version
+    return True
+
+
+def withdrawn_findings(task, pr, head, version):
+    """Finding IDs an arbiter ruling WITHDREW from this PR head and review version.
+
+    A ruling withdraws its finding only from the one formal verdict it ruled
+    on. A version that is not a non-bool int withdraws nothing (fail closed).
+    """
     disputes = task.get('review_disputes', []) if type(task) is dict else None
-    if type(disputes) is not list:
+    if type(disputes) is not list or type(version) is not int:
         return frozenset()
     return frozenset(
         item['finding_id'] for item in disputes
         if type(item) is dict and type(item.get('finding_id')) is str and
         item.get('pr') == pr and item.get('head_sha') == head and
         item.get('state') == 'RULED' and type(item.get('ruling')) is dict and
-        item['ruling'].get('outcome') == 'WITHDRAWN' and item['ruling'].get('head_sha') == head)
+        item['ruling'].get('outcome') == 'WITHDRAWN' and item['ruling'].get('head_sha') == head and
+        _withdrawal_in_version(item, version))
 
 
 # Formal Reviewer keys and their model families, in the fixed choice order.
@@ -791,7 +812,8 @@ def _review_gate(task, attempts, packet, family, policy, counts=None, *, body=No
         _refuse('REPAIR_NO_BLOCKING_FINDING')
     # #1502 WP-D D13: a FAIL whose every blocking finding an arbiter withdrew
     # is not a valid FAIL. Findings without IDs all stay blocking.
-    withdrawn = withdrawn_findings(task, packet.get('pr'), packet['failed_head'])
+    withdrawn = withdrawn_findings(task, packet.get('pr'), packet['failed_head'],
+                                   packet.get('version'))
     findings = verdict_findings(text) if withdrawn else None
     if findings:
         blocking = {finding_id for finding_id, severity in findings.items()
