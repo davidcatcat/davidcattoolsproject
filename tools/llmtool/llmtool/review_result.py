@@ -206,7 +206,9 @@ def diagnosis_review_body(task, head, executor, *, before=None, pr=None, version
         return None
     latest = max(matching, key=lambda item: (item['updated_at'], item['version']))
     result = latest.get('review_result') or {}
-    if (latest.get('state') != 'COMPLETED' or result.get('verdict') != 'FAIL' or
+    # A Codex Reviewer stores its JSON verdict word: FIX is posted as "Verdict: FAIL"
+    # and classified REVIEW_FAIL (review_dispatch), so it is a formal FAIL here too.
+    if (latest.get('state') != 'COMPLETED' or result.get('verdict') not in ('FAIL', 'FIX') or
             result.get('head') != head or result.get('task_id') != task.get('task_id')):
         return None
     text = result.get('review_text')
