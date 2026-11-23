@@ -122,6 +122,30 @@ def _stamp(value):
     return value.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
+def _row_problem(row):
+    bc = _bc()
+    if type(row) is not dict:
+        return 'row is not an object'
+    if row.get('id') is not None and (type(row['id']) is not str or not 1 <= len(row['id']) <= 128):
+        return 'id is not a short string'
+    if row.get('task_id') is not None and (type(row['task_id']) is not str or
+                                           bc._TASK_ID.fullmatch(row['task_id']) is None):
+        return 'task_id is not a Task ID: unknown Task'
+    if row.get('pr') is not None and (type(row['pr']) is not int or
+                                      not 1 <= row['pr'] <= 9999999):
+        return 'pr is not a PR number'
+    for field in ('owner_ref', 'after', 'blocker'):
+        if row.get(field) is not None and (type(row[field]) is not str or len(row[field]) > 512):
+            return f'{field} is not a short string'
+    if 'next' in row:
+        val = row['next']
+        if (type(val) is not list or
+                not 1 <= len(val) <= 16 or
+                any(type(item) is not str or not 1 <= len(item) <= 64 for item in val)):
+            return 'invalid next list'
+    return None
+
+
 def parse_predicate(text):
     """Parse one checkable predicate; free text returns None."""
     bc = _bc()

@@ -310,9 +310,11 @@ def _classify_task(ctx, row, task_id, gates, rows_by_id):
     if step == 'WAITING_REPAIR':
         return bc._classify_repair(ctx, row, record, head, gates, rows_by_id)
     if step == 'RECORD_REVIEW_RESULT':
-        claim = max((item for item in bc._claims(record)
-                     if item.get('pr') == number and item.get('head_sha') == head),
-                    key=lambda item: item.get('version', 0))
+        matching = [item for item in bc._claims(record)
+                    if item.get('pr') == number and item.get('head_sha') == head]
+        formal = [item for item in matching if 'purpose' not in item]
+        claim = (max(formal, key=lambda item: item.get('version', 0))
+                 if formal or not matching else {})
         if claim.get('state') == 'COMPLETED':
             idle = (f"review claim v{claim.get('version')} COMPLETED: result awaiting "
                     f'ingestion, next step {step}')
@@ -329,30 +331,6 @@ def _classify_task(ctx, row, task_id, gates, rows_by_id):
         if pending:
             return bc.WAITING_CI, [f'PR #{number} head {head[:12]} pending: ' + ','.join(pending)]
     return bc._finish(ctx, row, record, gates, rows_by_id, [idle], needs_developer=False)
-
-
-def _row_problem(row):
-    bc = _bc()
-    if type(row) is not dict:
-        return 'row is not an object'
-    if row.get('id') is not None and (type(row['id']) is not str or not 1 <= len(row['id']) <= 128):
-        return 'id is not a short string'
-    if row.get('task_id') is not None and (type(row['task_id']) is not str or
-                                           bc._TASK_ID.fullmatch(row['task_id']) is None):
-        return 'task_id is not a Task ID: unknown Task'
-    if row.get('pr') is not None and (type(row['pr']) is not int or
-                                      not 1 <= row['pr'] <= 9999999):
-        return 'pr is not a PR number'
-    for field in ('owner_ref', 'after', 'blocker'):
-        if row.get(field) is not None and (type(row[field]) is not str or len(row[field]) > 512):
-            return f'{field} is not a short string'
-    if 'next' in row:
-        val = row['next']
-        if (type(val) is not list or
-                not 1 <= len(val) <= 16 or
-                any(type(item) is not str or not 1 <= len(item) <= 64 for item in val)):
-            return 'invalid next list'
-    return None
 
 
 def _classify_row(ctx, row, rows_by_id, duplicate_ids):
