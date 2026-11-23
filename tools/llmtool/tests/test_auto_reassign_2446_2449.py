@@ -177,13 +177,13 @@ class AutoReassign2446And2449Tests(unittest.TestCase):
         values.update(changes)
         return Namespace(**values)
 
-    def _prepare_interrupted_assignment(self, task, original, *, data_class=None):
+    def _prepare_interrupted_assignment(self, task, original):
         agents = submission_cli.direct_reassignment.AGENTS
         record = json.loads(self._registry_path().read_text(encoding='utf-8'))
         record['trusted_agent_id'] = agents[original]
         self._registry_path().write_text(json.dumps(record), encoding='utf-8')
 
-        args = self._delegate_args(task, original, data_class=data_class)
+        args = self._delegate_args(task, original)
         old = {
             'assignment_id': new_id(),
             'selection_source': 'PM',
@@ -212,8 +212,6 @@ class AutoReassign2446And2449Tests(unittest.TestCase):
         }
         if original == 'agy':
             old['owner_assignment_ref'] = None
-        if data_class is not None:
-            old['data_class'] = data_class
         completion = {
             'state': 'WAITING_EXECUTOR',
             'executor_task_id': args.executor_task,
@@ -284,8 +282,8 @@ class AutoReassign2446And2449Tests(unittest.TestCase):
                 (self.executor_root / 'sample.py').write_text('VALUE = 1\n', encoding='utf-8')
                 self._write_opencode_model('opencode/deepseek-v4.1-flash-free#high')
                 task = self._create_pm_task(original)
-                old, args = self._prepare_interrupted_assignment(
-                    task, original, data_class='synthetic')
+                old, _ = self._prepare_interrupted_assignment(task, original)
+                args = self._delegate_args(task, original, data_class='SYNTHETIC')
 
                 with patch.dict(os.environ, {'HOME': str(self.home)}), \
                         patch('llmtool.pm_caller.check_caller', return_value=None), \
@@ -307,14 +305,14 @@ class AutoReassign2446And2449Tests(unittest.TestCase):
                 saved = self.store.get(task['task_id'])['developer']
                 self.assertEqual(saved['provider_profile'], target)
                 self.assertEqual(saved['state'], 'DEVELOPER_RESPONDED')
-                self.assertEqual(saved['data_class'], 'synthetic')
+                self.assertNotIn('data_class', saved)
                 self.assertEqual(saved['direct_handoffs'][-1]['old_assignment'], old['assignment_id'])
 
     def test_manual_reassignment_with_data_class_still_refuses(self):
         task = self._create_pm_task('opencode')
-        old, _ = self._prepare_interrupted_assignment(task, 'opencode', data_class='synthetic')
+        old, _ = self._prepare_interrupted_assignment(task, 'opencode')
         manual_args = self._delegate_args(
-            task, 'agy', reassign_from=old['assignment_id'], data_class='synthetic')
+            task, 'agy', reassign_from=old['assignment_id'], data_class='SYNTHETIC')
         for runner in (run_task_delegate, run_task_delegate_checked):
             with self.subTest(runner=runner.__name__):
                 with patch.dict(os.environ, {'HOME': str(self.home)}), \
@@ -322,18 +320,18 @@ class AutoReassign2446And2449Tests(unittest.TestCase):
                     with self.assertRaisesRegex(LLMToolError, 'DIRECT_REASSIGN_ROUTE_REFUSED'):
                         runner(manual_args, store=self.store)
 
-    def test_mismatched_data_class_refuses_as_scope_mismatch(self):
+    def test_manual_reassignment_scope_mismatch_refuses(self):
         cases = (
-            ('synthetic', 'non-sensitive'),
-            ('synthetic', None),
-            (None, 'synthetic'),
+            {'egress_basis': 'Changed egress basis'},
+            {'read_path': ['other.py']},
+            {'write_path': ['other.py']},
         )
-        for recorded, rerun in cases:
-            with self.subTest(recorded=recorded, rerun=rerun):
+        for changes in cases:
+            with self.subTest(changes=changes):
                 task = self._create_pm_task('opencode')
-                old, _ = self._prepare_interrupted_assignment(
-                    task, 'opencode', data_class=recorded)
-                args = self._delegate_args(task, 'opencode', data_class=rerun)
+                old, _ = self._prepare_interrupted_assignment(task, 'opencode')
+                args = self._delegate_args(
+                    task, 'agy', reassign_from=old['assignment_id'], **changes)
                 with patch.dict(os.environ, {'HOME': str(self.home)}), \
                         patch('llmtool.pm_caller.check_caller', return_value=None), \
                         patch.object(submission_cli, '_agy_developer_profile',

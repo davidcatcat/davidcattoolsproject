@@ -5430,9 +5430,6 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         'direct_result_callback': _direct_result_callback(
             task, registration, snapshot.head, test_policy=callback_policy),
     }
-    data_class = getattr(args, 'data_class', None)
-    if data_class is not None:
-        developer['data_class'] = data_class
     completion = {
         'state': 'WAITING_EXECUTOR', 'executor_task_id': registration.task_id,
         'reviewer_task_id': None,
@@ -5978,9 +5975,6 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         'direct_result_callback': _direct_result_callback(
             task, registration, snapshot.head, test_policy=test_policy),
     }
-    data_class = getattr(args, 'data_class', None)
-    if data_class is not None:
-        developer['data_class'] = data_class
     completion = {
         'state': 'WAITING_EXECUTOR', 'executor_task_id': registration.task_id,
         'reviewer_task_id': None,
@@ -9073,6 +9067,9 @@ def _auto_direct_replacement(args, store):
     replacement.background = False
     # A timeout for the former route belongs to that route's policy limits.
     replacement.timeout = None
+    # AGY and OpenCode developer records do not store data_class; clear it on
+    # automatic reassignment so the scope check matches the stored record.
+    replacement.data_class = None
     replacement._auto_direct_reassignment = True
     return replacement
 
