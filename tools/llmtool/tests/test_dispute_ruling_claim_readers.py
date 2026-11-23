@@ -52,11 +52,13 @@ def tearDownModule():
 def _verdict_comment(contract_digest, *, verdict='FAIL', version=1, comment_id=1001,
                      actor='Claude'):
     marker = 'FIX' if verdict == 'FAIL' else verdict
+    detail = ('Finding: F1 [High] tools/a.py:1 missing guard\n'
+              if verdict == 'FAIL' else 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n')
     body = (
         f'<!-- activity: type=review_verdict actor={actor} target=PM status={marker} -->\n'
         f'Verdict: {verdict} | Version: v{version} | HEAD: {HEAD}\n'
         f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} contract={contract_digest} head={HEAD}\n'
-        'Finding: F1 [High] tools/a.py:1 missing guard\n'
+        + detail
     )
     return {'id': comment_id, 'body': body, 'created_at': STAMP_1, 'updated_at': STAMP_1}
 
@@ -365,11 +367,16 @@ class DisputeRulingClaimReadersTests(unittest.TestCase):
 
     def test_review_outcomes_returns_no_outcome_for_ruling_claim(self):
         _, contract_digest = _base_task_record()
-        formal = _formal_claim(contract_digest, version=1, verdict='PASS')
+        formal = {
+            k: v for k, v in _formal_claim(contract_digest, version=1, verdict='PASS').items()
+            if k != 'review_result'
+        }
+        formal['state'] = 'DISPATCHED'
         event_1 = _reviewer_event(version=1, outcome='REVIEW_PASS', comment_id=1001)
         base_record = {
             'task_id': TASK, 'run_id': RUN,
             'task_binding': {'contract_digest': contract_digest},
+            'developer': {'provider_profile': 'agy', 'model': 'gemini-2.5-pro'},
             'review_dispatch_claim': [formal],
             'completion_events': [event_1],
         }
