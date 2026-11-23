@@ -6709,6 +6709,56 @@ class TaskAdvanceLineageCloseTests(unittest.TestCase):
         self.assertEqual(self.merges, [only])
         self.assertEqual(self.closes, [only, only, only])
 
+    def recorded_merge(self, task_id, pr_head=HEAD):
+        """#2491: publish PR 17 at HEAD and record advance's verified merge event."""
+        from llmtool import github_events
+        self.store.record_published_pr(task_id, 17, HEAD)
+        record = self.store.get(task_id)
+        github_events._record(self.store, record, 'github-task-advance', 'a' * 32,
+                              17, None, 'merge', 'MERGED', 'e' * 40)
+
+    def advance_plain(self, task_id, pr):
+        """advance without --merge and without a D6 (retired), GitHub returning pr."""
+        def github_get(path):
+            if path == 'pulls/17':
+                return pr
+            return []
+        with patch.object(task_advance, '_d6_snapshot', return_value=None):
+            return task_advance.advance(task_id=task_id, store=self.store, pr_number=17,
+                                        github_get=github_get)
+
+    def test_member_merged_outside_advance_merge_closes_from_the_recorded_merge(self):
+        # #2491 (Task 271a1d00): the PR was merged outside `advance --merge`, advance
+        # recorded the verified merge event but no merge_attempt, and the D6 was
+        # retired; nothing could close the member, so its ROOT stayed PARKED.
+        root = self.parked_root()
+        only = self.member(root)
+        self.recorded_merge(only)
+        merged = {'number': 17, 'head': {'sha': HEAD}, 'state': 'closed', 'merged': True}
+        result = self.advance_plain(only, merged)
+        self.assertEqual((result['step'], result['codes']), ('CLOSED', []))
+        self.assertEqual(self.lineage(only)['state'], 'CLOSED')
+        self.assertEqual(self.lineage(root)['state'], 'CLOSED')
+
+    def test_recorded_merge_close_fails_closed_unless_github_agrees(self):
+        root = self.parked_root()
+        only = self.member(root)
+        self.recorded_merge(only)
+        for name, pr in (('not merged', {'number': 17, 'head': {'sha': HEAD}, 'merged': False}),
+                         ('other head', {'number': 17, 'head': {'sha': 'f' * 40}, 'merged': True})):
+            with self.subTest(name):
+                self.advance_plain(only, pr)
+                self.assertEqual(self.lineage(only)['state'], 'OPEN')
+                self.assertEqual(self.lineage(root)['state'], 'PARKED')
+
+    def test_member_without_a_recorded_merge_is_not_closed(self):
+        root = self.parked_root()
+        only = self.member(root)
+        self.store.record_published_pr(only, 17, HEAD)
+        merged = {'number': 17, 'head': {'sha': HEAD}, 'state': 'closed', 'merged': True}
+        self.advance_plain(only, merged)
+        self.assertEqual(self.lineage(only)['state'], 'OPEN')
+
     def test_rerun_after_a_close_that_failed_before_closing_replays_the_close(self):
         # #2566: the merge succeeded but the close failed before CLOSED was saved
         # (a slow split held the lineage lock). A rerun of advance --merge saw the

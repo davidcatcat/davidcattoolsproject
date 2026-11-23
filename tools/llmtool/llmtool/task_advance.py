@@ -3849,7 +3849,8 @@ def _lineage_after_merge(result, store, task_id, record, *, merged_now=False):
     if type(record) is not dict or type(record.get('lineage')) is not dict:
         return result
     attempt = record.get('merge_attempt')
-    if not merged_now and (type(attempt) is not dict or attempt.get('state') != 'MERGED'):
+    if (not merged_now and (type(attempt) is not dict or attempt.get('state') != 'MERGED') and
+            task_submission_cli.recorded_github_merge(record) is None):
         return result
     try:
         closed = task_submission_cli.lineage_close_merged(store, task_id)
@@ -3859,6 +3860,40 @@ def _lineage_after_merge(result, store, task_id, record, *, merged_now=False):
     if type(closed) is dict and closed.get('code') == 'LINEAGE_CLOSE_FAILED':
         result.setdefault('codes', []).append('LINEAGE_CLOSE_FAILED')
     return result
+
+
+def _recorded_merge_lineage_close(record, store, task_id, pr_number, github_get):
+    """#2491: close an OPEN lineage member whose merge advance already recorded.
+
+    A PR merged outside `advance --merge` gets its GITHUB merge event when
+    advance verifies it at the reviewed PASS head, but no merge_attempt; its
+    D6 may be retired afterwards. Such a member closes from the recorded merge
+    once GitHub still shows that PR merged at the published head. Anything
+    else returns None and the normal step decides (fail closed). No D6 read.
+    """
+    lineage = record.get('lineage') if type(record) is dict else None
+    if type(lineage) is not dict or lineage.get('state') != 'OPEN':
+        return None
+    recorded = task_submission_cli.recorded_github_merge(record)
+    published = record.get('published_pr')
+    if recorded is None or type(published) is not dict:
+        return None
+    number, _merge_sha = recorded
+    if pr_number is not None and pr_number != number:
+        return None
+    get = task_completion._github_get if github_get is None else github_get
+    try:
+        pr = _pr_snapshot(number, get)
+    except Exception:
+        return None
+    head = pr.get('head') if type(pr) is dict else None
+    if (type(pr) is not dict or pr.get('number', number) != number or
+            pr.get('merged') is not True or type(head) is not dict or
+            head.get('sha') != published.get('head_sha')):
+        return None
+    return _lineage_after_merge(
+        {'task_id': task_id, 'step': 'CLOSED', 'result': {'pr': number, 'recorded_merge': True},
+         'next': 'CLOSED', 'codes': [], 'acked': []}, store, task_id, record)
 
 
 def _advance_refused(task_id, code):
@@ -4041,6 +4076,9 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         # read. A CLOSED Task keeps its read-only record path; the per-action
         # guard refuses its every external action.
         return _advance_refused(task_id, lineage_refusal)
+    recovered = _recorded_merge_lineage_close(record, store, task_id, pr_number, github_get)
+    if recovered is not None:
+        return recovered
     if integration_pr is None:
         closed_head = _closed_train_member_head(record, task_id, store)
         if closed_head is not None:
@@ -4119,6 +4157,9 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         try:
             invoke(store, record, 'github-task-advance', event_id,
                    merge_number, None, 'merge', 'MERGED', merge_sha)
+            # #2491: a lineage member merged outside `advance --merge` closes on
+            # the next advance, from the merge event recorded here
+            # (_recorded_merge_lineage_close).
             closed = _lineage_after_merge(
                 {'task_id': task_id, 'step': 'CLOSED', 'result': None,
                  'next': 'CLOSED', 'codes': []}, store, task_id, record)
