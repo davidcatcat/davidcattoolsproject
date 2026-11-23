@@ -101,11 +101,6 @@ A Developer may use an in-session read-only Reviewer child only when the CLI sup
 
 Use the [normative Issue #92 policy](defect-triage.md); preserve this legacy anchor for existing links.
 
-<a id="2026-10-19-owner-direction--developer-owned-pre-review-economical-handoffs-and-s3-stop"></a>
-### Historical D7 pre-review/S3 note
-
-The former one-round S3 stop and paused-role assignments are historical. Current Developer routing is defined above and in the [D8/D8a decision](../../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md); D4 Host work remains separate background G3/M2 work.
-
 ### Review requests and Owner updates
 
 For a formal review, publish `CLAUDE-REVIEW-REQUEST: PR #N HEAD <SHA>` (Claude Reviewer) or `CODEX-REVIEW-REQUEST: PR #N HEAD <SHA>` (Codex Reviewer) with the exact source, scope, review type and questions. This is a handoff record, not evidence that an automated reviewer ran. End each Owner-facing update with exactly one practical line: `你需要做：無` or `你需要做：<一個必要的動作或白話 yes/no 問題>`. Put technical failures and AI-owned next steps in the task/PR record; do not ask the Owner to diagnose them or relay routine prompts.
