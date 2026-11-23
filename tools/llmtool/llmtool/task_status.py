@@ -52,6 +52,12 @@ def derive_state(record):
            event.get('marker_type') == 'merge' and event.get('marker_status') == 'MERGED'
            for event in events):
         return 'COMPLETED'
+    # A task advance records a successful merge in the Task record's
+    # merge_attempt before any merge completion event is imported; a persisted
+    # MERGED state is completion evidence on its own.
+    merge_attempt = record.get('merge_attempt')
+    if type(merge_attempt) is dict and merge_attempt.get('state') == 'MERGED':
+        return 'COMPLETED'
     developer = record.get('developer')
     if type(developer) is dict:
         callback = developer.get('direct_result_callback')
