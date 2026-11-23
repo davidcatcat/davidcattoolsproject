@@ -11,6 +11,8 @@ from unittest.mock import patch
 from llmtool import high_debug
 from llmtool.errors import LLMToolError
 
+from test_high_debug import _review_fail_claim
+
 REPORT = ''.join('## ' + heading + '\nDetails.\n' for heading in high_debug.REPORT_SECTIONS) + 'RCA_CONFIRMED'
 
 
@@ -45,6 +47,7 @@ class _Store:
         self.served.add(task_id)
         return {'task_id': task_id, 'run_id': 'b' * 32,
                 'review_repair_claims': [{'family': 'family', 'pr': 17}] * 2,
+                'review_dispatch_claim': [_review_fail_claim(task_id)],
                 'completion': {'executor_task_id': 'executor',
                                'evidence': {'common_dir': '/tmp/ignored'}},
                 'high_debug': list(self.entries)}

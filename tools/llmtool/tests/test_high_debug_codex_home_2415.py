@@ -17,6 +17,8 @@ from unittest.mock import patch
 
 from llmtool import high_debug
 
+from test_high_debug import _review_fail_claim
+
 
 _STUB_RULES = 'RULES stub\nRULES_END\n\n'
 _STUB_RULES_RESULT = (_STUB_RULES, hashlib.sha256(_STUB_RULES.encode('utf-8')).hexdigest())
@@ -40,6 +42,7 @@ class _Store:
                 'review_repair_claims': [
                     {'family': 'family', 'pr': 17},
                     {'family': 'family', 'pr': 17}],
+                'review_dispatch_claim': [_review_fail_claim(task_id)],
                 'completion': {'executor_task_id': 'executor',
                                'evidence': {'common_dir': '/tmp/ignored'}},
                 'high_debug': list(self.entries)}

@@ -18,6 +18,7 @@ from llmtool.task_store import (TaskStore, commit_split_root, finalize_split_chi
 
 import review_trust_fixture
 import test_lineage_counts as lineage_fixture
+from test_high_debug import _review_fail_claim
 
 HEAD = 'a' * 40
 AT = '2026-11-15T00:00:00Z'
@@ -88,6 +89,8 @@ class ReservationCase(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.base = Path(temp.name).resolve()
         self.store = TaskStore(self.base / 'tasks')
+        self._fail_claim_stores = set()
+        self._with_fail_claim(self.store)
         self.d6s = self.base / 'd6s'
         self.d6s.mkdir()
         role = {'role': 'claude-debug', 'source': 'roles', 'account': 'acct',
@@ -107,6 +110,23 @@ class ReservationCase(unittest.TestCase):
         patcher = patch.object(*args, **kwargs)
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def _with_fail_claim(self, store):
+        """#2602 (a): make a formal FAIL at HEAD visible without rewriting the record."""
+        if id(store) in self._fail_claim_stores:
+            return store
+        self._fail_claim_stores.add(id(store))
+        read = store.get
+
+        def get(task_id):
+            record = read(task_id)
+            if type(record) is dict:
+                record = dict(record)
+                record.setdefault('review_dispatch_claim', [_review_fail_claim(task_id)])
+            return record
+
+        store.get = get
+        return store
 
     def task(self, completion=False, continues=lineage_fixture._NO_LINK):
         task = lineage_fixture.StoreCase.raw(continues)
@@ -193,6 +213,7 @@ class ReservationCase(unittest.TestCase):
     def debug(self, task_id, runner, *, create=None, fallback=False, store=None, real=False,
               taken=None):
         store, created = store or self.store, []
+        store = self._with_fail_claim(store)
         registration = SimpleNamespace(result_sha=HEAD, root=str(self.base / 'executor-d6'),
                                        common_dir=str(self.base / 'repo' / '.git'))
 
