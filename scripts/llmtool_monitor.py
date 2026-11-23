@@ -2283,6 +2283,10 @@ class GitHubSource:
         self.board_pulls: list[BoardPull] | None = None  # same pulls page as branch_prs
         self.board_page_count: int | None = None
         self.board_oldest_updated: float | None = None
+        self.open_issues: list[OpenIssue] | None = None   # None: not read or read failed
+        self.issues_cut = False   # the one issues page was full
+        self.want_issues = False   # opt-in like want_main; main() turns it on
+        self.issues_read_at = None
         self.ci_runs: list | None = None    # ci_runs(); None until GitHub was read
         self.ci_heads: dict | None = None   # latest Linux/Mac run per head from same page
         # Open PRs' checks from this refresh's one GraphQL read
@@ -2580,10 +2584,27 @@ class GitHubSource:
         self.refresh_ci()
         if self.want_main:
             self.refresh_main()
+        if self.want_issues:
+            self.refresh_open_issues()
         # A failing gh (offline, rate limited, hung) is retried later each
         # time, so the Mac is not forking it every 30 seconds for nothing.
         self.wait = min(self.wait * 2, GITHUB_BACKOFF) if failed else GITHUB_REFRESH
         self.settled = time.monotonic()
+
+    def refresh_open_issues(self) -> None:
+        """One page of open Issues for the 白板, at most every 300 s like main;
+        any failure leaves them unknown."""
+        now = time.monotonic()
+        if self.issues_read_at is not None and now - self.issues_read_at < 300:
+            return
+        self.issues_read_at = now
+        try:
+            page = self._get(f"repos/{self.repo}/issues?state=open&sort=created"
+                             "&direction=desc&per_page=100")
+        except Exception:
+            page = None
+        self.open_issues = open_issues(page)
+        self.issues_cut = type(page) is list and len(page) >= 100
 
     def refresh_main(self) -> None:
         """Read a small, bounded snapshot of main and its two required CI runs."""
@@ -4740,6 +4761,26 @@ class BoardPull:
 
 
 @dataclass(frozen=True)
+class OpenIssue:
+    number: int
+    title: str
+    prs: tuple[int, ...] = ()   # open PRs whose body closes this Issue
+
+
+def open_issues(page) -> list[OpenIssue] | None:
+    """The open Issues (not PRs) on one issues page, newest number first; None
+    when the page is not a list (Owner 2026-11-24: open Issues on the 白板). Pure."""
+    if type(page) is not list:
+        return None
+    out = [OpenIssue(item["number"], _headline(item.get("title")))
+           for item in page
+           if type(item) is dict and "pull_request" not in item
+           and item.get("state") == "open"
+           and type(item.get("number")) is int and item["number"] > 0]
+    return sorted(out, key=lambda issue: issue.number, reverse=True)
+
+
+@dataclass(frozen=True)
 class WorkBoard:
     owner: list
     running: list
@@ -4756,6 +4797,8 @@ class WorkBoard:
     window_hours: int = 12
     prs: list = field(default_factory=list)
     owner_cut: bool = False
+    issues: list | None = None   # OpenIssue rows; None when unknown
+    issues_cut: bool = False
 
 
 # File format: a JSON object with schema_version 1, UTC updated_at, string
@@ -5336,9 +5379,14 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=
     prs = (pr_board_rows(pulls, github.verdicts, checks,
                          ec2, reviewing, github.pending, office, github_known=github_known,
                          office_known=office_known) if github_known else [])
+    raw_issues = getattr(github, "open_issues", None) if github_known else None
+    issues = (None if raw_issues is None else
+              [replace(issue, prs=tuple(sorted(issue_prs.get(issue.number, ()))))
+               for issue in raw_issues])
     return WorkBoard(owner, running, queue, blocked, done, github_known, board_known,
                      github_status, board.status, board.age, board.skipped, note,
-                     int(github.window // 3600) if github is not None else 12, prs, owner_cut)
+                     int(github.window // 3600) if github is not None else 12, prs, owner_cut,
+                     issues, bool(getattr(github, "issues_cut", False)) if issues is not None else False)
 
 
 def board_counts(work: WorkBoard) -> str:
@@ -5392,7 +5440,10 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
     sections = (("等你", work.owner, owner_known), ("進行中", work.running, work.github_known),
                 ("排隊", work.queue, work.board_known), ("卡住", work.blocked, work.board_known),
                 (f"今天完成（累計 {today}）", work.done, work.github_known),
-                ("PR 看板", work.prs, work.github_known))
+                ("PR 看板", work.prs, work.github_known),
+                ("Open Issue" + ("" if work.issues is None else
+                                 f"（{len(work.issues)}{'+，只讀了 100 筆' if work.issues_cut else ''}）"),
+                 work.issues or [], work.issues is not None))
     for title, items, known in sections:
         append_header(f"── {title} ──", "section")
         if not items:
@@ -5403,7 +5454,11 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
             append_header(empty, "dim")
             continue
         for item in items:
-            if isinstance(item, BoardPull):
+            if isinstance(item, OpenIssue):
+                ref = f"#{item.number}"
+                rest = item.title + ("  → " + "、".join(f"PR #{pr}" for pr in item.prs)
+                                     if item.prs else "")
+            elif isinstance(item, BoardPull):
                 ref = f"PR #{item.number}"
                 rest = f"{item.title}  → {datetime.fromtimestamp(item.merged_at).astimezone():%H:%M}"
             elif isinstance(item, PrRow):
@@ -11224,6 +11279,7 @@ def main(argv: list[str] | None = None) -> int:
                                                        direct=not (args.once or args.gh_cli))
     if github is not None:
         github.want_main = True
+        github.want_issues = True
         github.want_hosted_ci = True
     try:
         if args.once:
