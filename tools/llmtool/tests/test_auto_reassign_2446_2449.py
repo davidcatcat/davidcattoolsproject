@@ -179,8 +179,7 @@ class AutoReassign2446And2449Tests(unittest.TestCase):
 
     def _prepare_interrupted_assignment(self, task, original):
         agents = submission_cli.direct_reassignment.AGENTS
-        record = json.loads(self._registry_path().read_text(encoding='utf-8'))
-        record['trusted_agent_id'] = agents[original]
+        record = dict(self.executor_registry, trusted_agent_id=agents[original])
         self._registry_path().write_text(json.dumps(record), encoding='utf-8')
 
         args = self._delegate_args(task, original)
@@ -279,6 +278,7 @@ class AutoReassign2446And2449Tests(unittest.TestCase):
     def test_original_command_with_data_class_reassigns_both_directions(self):
         for original, target in (('opencode', 'agy'), ('agy', 'opencode')):
             with self.subTest(original=original, target=target):
+                self.store = TaskStore(self.home / '.local/state/llmtool' / ('tasks-' + new_id()))
                 (self.executor_root / 'sample.py').write_text('VALUE = 1\n', encoding='utf-8')
                 self._write_opencode_model('opencode/deepseek-v4.1-flash-free#high')
                 task = self._create_pm_task(original)
@@ -328,6 +328,7 @@ class AutoReassign2446And2449Tests(unittest.TestCase):
         )
         for changes in cases:
             with self.subTest(changes=changes):
+                self.store = TaskStore(self.home / '.local/state/llmtool' / ('tasks-' + new_id()))
                 task = self._create_pm_task('opencode')
                 old, _ = self._prepare_interrupted_assignment(task, 'opencode')
                 args = self._delegate_args(
@@ -349,6 +350,7 @@ class AutoReassign2446And2449Tests(unittest.TestCase):
                       'opencode-go/deepseek-v4.1-flash#high',
                       'opencode/paid-model'):
             with self.subTest(model=model):
+                self.store = TaskStore(self.home / '.local/state/llmtool' / ('tasks-' + new_id()))
                 (self.executor_root / 'sample.py').write_text('VALUE = 1\n', encoding='utf-8')
                 self._write_opencode_model(model)
                 task = self._create_pm_task('agy')
