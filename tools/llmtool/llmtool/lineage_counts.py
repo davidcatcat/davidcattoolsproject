@@ -276,8 +276,51 @@ def chain_review_repairs(store, task):
     return count
 
 
+def _repair_packet_task(record):
+    """(present, original Task ID) for a Task's repair_packet.
+
+    present is True when the record carries the field. The original is None
+    when the packet cannot be decoded, has the wrong shape or is not canonical:
+    that Task's original work is then unknown, never guessed.
+    """
+    if 'repair_packet' not in record:
+        return False, None
+    from .start_failure import decode_repair_packet
+    packet = decode_repair_packet(record.get('repair_packet'))
+    if packet is None:
+        return True, None
+    return True, packet['task']
+
+
 def debug_lineage_key(store, task):
-    """Return the continuation root of the original work."""
+    """Return the continuation root of the original work.
+
+    A repair-created Task resolves through its repair_packet to the original
+    Task, so it shares that Task's Debug lineage, count and lock key. The walk
+    is bounded by MAX_CHAIN and never revisits a Task, so a repair of a repair
+    resolves in order and a cycle gives None. A missing or unusable packet on
+    a repair Task gives None, as any unresolvable Task does. A Task without a
+    repair_packet keeps its existing key.
+    """
+    return _debug_lineage_key(store, task, frozenset(), 0)
+
+
+def _debug_lineage_key(store, task, seen, steps):
+    if type(task) is not dict:
+        return None
+    is_repair, original_id = _repair_packet_task(task)
+    if is_repair:
+        task_id = task.get('task_id')
+        if (store is None or not _hex32(original_id) or
+                type(task_id) is not str or task_id in seen or steps >= MAX_CHAIN):
+            return None
+        try:
+            original = store.get(original_id)
+        except Exception:
+            return None
+        if type(original) is not dict or original.get('task_id') != original_id:
+            return None
+        return _debug_lineage_key(store, original, seen | {task_id}, steps + 1)
     records = chain_records(store, task)
     if records is None:
         return None
@@ -297,6 +340,37 @@ def debug_lineage_key(store, task):
         oldest = root
     roots = chain_records(store, oldest)
     return roots[-1].get('task_id') if roots else None
+
+
+def _repair_lineage_members(records, members):
+    """The repair-created Task IDs that resolve into members, or None in doubt.
+
+    A repair Task shares the Debug lineage of the Task named by its
+    repair_packet. Repairs of repairs join through the same bounded walk: each
+    Task is added at most once and a cycle never loops. A repair_packet that
+    cannot be parsed or shaped makes the whole set unknown, because its
+    lineage cannot be decided.
+    """
+    by_original = {}
+    for task_id, record in records.items():
+        if type(task_id) is not str or type(record) is not dict:
+            return None
+        present, original_id = _repair_packet_task(record)
+        if present:
+            if original_id is None:
+                return None
+            by_original.setdefault(original_id, []).append(task_id)
+    added = set()
+    frontier = set(members)
+    while frontier:
+        following = set()
+        for original_id in frontier:
+            for repair_id in by_original.get(original_id, ()):
+                if repair_id not in added:
+                    added.add(repair_id)
+                    following.add(repair_id)
+        frontier = following
+    return added
 
 
 def debug_lineage_members(store, task):
@@ -331,6 +405,10 @@ def debug_lineage_members(store, task):
             if chain is None:
                 return None
             members.update(chain[0])
+    repairs = _repair_lineage_members(records, members)
+    if repairs is None:
+        return None
+    members.update(repairs)
     if task['task_id'] not in members:
         return None
     return {member: records[member] for member in sorted(members)}
