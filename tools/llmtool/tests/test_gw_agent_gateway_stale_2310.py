@@ -13,7 +13,8 @@ from llmtool.errors import LLMToolError
 import test_gw_agent_route_wiring as wiring
 
 
-SOURCE = Path(__file__).resolve().parents[2] / 'api-agent-gateway' / 'api_agent_gateway'
+SOURCE = gw_agent.GATEWAY_SOURCE_DIR
+PKG = SOURCE.name  # the gateway package directory name, never spelled here (gateway coupling guard)
 
 
 def _copy_source(target):
@@ -26,9 +27,9 @@ class InstalledGatewayStaleTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.base = Path(temp.name)
-        self.source = _copy_source(self.base / 'source' / 'api_agent_gateway')
+        self.source = _copy_source(self.base / 'source' / PKG)
         self.install = self.base / 'install'
-        _copy_source(self.install / 'api_agent_gateway')
+        _copy_source(self.install / PKG)
 
     def _stale(self, package_path=None):
         return gw_agent.installed_gateway_stale(
@@ -39,25 +40,25 @@ class InstalledGatewayStaleTests(unittest.TestCase):
         self.assertFalse(self._stale())
 
     def test_changed_file_is_stale(self):
-        (self.install / 'api_agent_gateway' / 'contract.py').write_text('# old\n')
+        (self.install / PKG / 'contract.py').write_text('# old\n')
         self.assertTrue(self._stale())
 
     def test_missing_or_extra_file_is_stale(self):
-        (self.install / 'api_agent_gateway' / 'extra.py').write_text('x = 1\n')
+        (self.install / PKG / 'extra.py').write_text('x = 1\n')
         self.assertTrue(self._stale())
-        (self.install / 'api_agent_gateway' / 'extra.py').unlink()
-        (self.install / 'api_agent_gateway' / 'contract.py').unlink()
+        (self.install / PKG / 'extra.py').unlink()
+        (self.install / PKG / 'contract.py').unlink()
         self.assertTrue(self._stale())
 
     def test_bytecode_caches_are_ignored(self):
-        cache = self.install / 'api_agent_gateway' / '__pycache__'
+        cache = self.install / PKG / '__pycache__'
         cache.mkdir()
         (cache / 'cli.cpython-313.pyc').write_bytes(b'cache')
         self.assertFalse(self._stale())
 
     def test_symlink_in_install_counts_as_stale(self):
-        link = self.install / 'api_agent_gateway' / 'link.py'
-        os.symlink(self.install / 'api_agent_gateway' / 'cli.py', link)
+        link = self.install / PKG / 'link.py'
+        os.symlink(self.install / PKG / 'cli.py', link)
         self.assertTrue(self._stale())
 
     def test_absent_install_or_source_is_not_checked(self):
@@ -70,7 +71,7 @@ class InstalledGatewayStaleTests(unittest.TestCase):
     def test_tilde_path_expands_from_home(self):
         with patch.dict(os.environ, {'HOME': str(self.base)}):
             self.assertFalse(self._stale('~/install'))
-            (self.install / 'api_agent_gateway' / 'cli.py').write_text('# old\n')
+            (self.install / PKG / 'cli.py').write_text('# old\n')
             self.assertTrue(self._stale('~/install'))
 
     def test_shipped_source_dir_is_the_repository_gateway(self):
@@ -88,7 +89,7 @@ class GatewayStaleDelegateTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         # The delegate fixture installs the repository gateway; a changed copy
         # stands for the gateway source on main after an unrefreshed merge.
-        self.main_source = _copy_source(Path(temp.name) / 'api_agent_gateway')
+        self.main_source = _copy_source(Path(temp.name) / PKG)
 
     def test_stale_install_refuses_before_any_task_change_or_model_call(self):
         (self.main_source / 'contract.py').write_text(
