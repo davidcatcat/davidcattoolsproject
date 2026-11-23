@@ -98,10 +98,18 @@ def _summary(record):
     latest = events[-1] if events and type(events[-1]) is dict else None
     claim = record.get('review_dispatch_claim')
     if type(claim) is list:
-        claim = claim[-1] if claim and type(claim[-1]) is dict else None
+        # A dispute ruling claim (purpose key 'dispute_ruling', #2087) is not a
+        # formal review claim; drop dict items carrying a purpose key before
+        # picking the last claim. Non-dict items stay where they are, so a
+        # malformed last item still yields UNKNOWN.
+        formal = [item for item in claim
+                  if not (type(item) is dict and 'purpose' in item)]
+        claim = formal[-1] if formal and type(formal[-1]) is dict else None
         claim_state = claim.get('state') if claim is not None else 'UNKNOWN'
     elif type(claim) is dict:
-        claim_state = claim.get('state', 'UNKNOWN')
+        # A single ruling-claim dict is not a formal claim: UNKNOWN, never
+        # NONE (NONE means no claim was recorded at all).
+        claim_state = 'UNKNOWN' if 'purpose' in claim else claim.get('state', 'UNKNOWN')
     else:
         claim = None
         claim_state = 'NONE'
