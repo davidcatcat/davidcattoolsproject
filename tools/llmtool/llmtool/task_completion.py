@@ -542,6 +542,11 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
         if len(fields) > 3 and commit in merge_parents:
             _stop('RESULT_DIFF_INVALID')
         first_parent = fields[1]
+        # #2640: llmtool's own publish hash-refresh commit (#2497) is not
+        # Developer work; it changes only guidance-drift.json to the exact
+        # bytes the refresh computes from its parent (fail closed otherwise).
+        if len(fields) == 2 and _guidance_refresh_commit(root, commit, first_parent):
+            continue
         changed = _git(root, ('diff-tree', '--no-commit-id', '--name-only', '-r', '-z',
                               '--no-renames', first_parent, commit, '--'),
                        limit=1024 * 1024)
@@ -1605,6 +1610,7 @@ from .task_completion_part3 import (  # noqa: E402
     _collect_registered_result_diff,
     _commit_present,
     _developer_tip,
+    _guidance_refresh_commit,
     _diff_paths,
     _is_ancestor,
     _merge_resolution_paths,

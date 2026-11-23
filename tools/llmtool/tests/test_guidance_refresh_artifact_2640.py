@@ -98,6 +98,46 @@ class GuidanceRefreshArtifactTests(unittest.TestCase):
         head = self.commit('refresh plus another edit')
         self.assertEqual(self.tip(head), head)
 
+    def refreshed_head(self):
+        return guidance_refresh.refresh_guidance_hashes(
+            root=self.root, head=self.developer,
+            write_paths=['AGENTS.md', guidance_refresh.CONFIG_REL_PATH],
+            task_commits=[(self.developer, [self.source])],
+            commit_message=('title (refresh guidance hash)', 'llmtool Task x'))['head']
+
+    def test_refresh_commit_is_not_developer_attributed(self):
+        head = self.refreshed_head()
+        self.assertEqual(task_completion._developer_changed_paths(
+            self.root, self.source, head, self.source), ('AGENTS.md',))
+
+    def test_docs_task_with_refresh_commit_is_docs_only(self):
+        # The #2640 Task shape: AGY edits AGENTS.md, publish refreshes the hash,
+        # no registered test in read/write. Before: TEST_SCOPE_MISSING.
+        head = self.refreshed_head()
+        tests = task_completion.run_bounded_tests(
+            root=self.root, source_sha=self.source, result_sha=head,
+            read_paths=['AGENTS.md', guidance_refresh.CONFIG_REL_PATH,
+                        'tools/llmtool/scripts/guidance_drift_check.py'],
+            write_paths=['AGENTS.md', guidance_refresh.CONFIG_REL_PATH],
+            trusted_base_sha=self.source)
+        self.assertEqual(tests, [{'status': 'NOT_APPLICABLE_DOCS_ONLY',
+                                  'changed_paths': ['AGENTS.md'],
+                                  'source_sha': head, 'docs_only': True}])
+
+    def test_hand_made_config_change_stays_attributed_and_needs_tests(self):
+        self.write_config(_config(b'something else\n', self.claude))
+        head = self.commit('hand-made hash change')
+        self.assertEqual(task_completion._developer_changed_paths(
+            self.root, self.source, head, self.source),
+            ('AGENTS.md', guidance_refresh.CONFIG_REL_PATH))
+        with self.assertRaises(Exception) as caught:
+            task_completion.run_bounded_tests(
+                root=self.root, source_sha=self.source, result_sha=head,
+                read_paths=['AGENTS.md'],
+                write_paths=['AGENTS.md', guidance_refresh.CONFIG_REL_PATH],
+                trusted_base_sha=self.source)
+        self.assertEqual(caught.exception.completion_code, 'TEST_SCOPE_MISSING')
+
     def test_no_op_refresh_is_not_a_refresh(self):
         parent = json.dumps(_config(self.agents, self.claude), indent=2).encode() + b'\n'
         blobs = {'AGENTS.md': self.agents, 'CLAUDE.md': self.claude}
