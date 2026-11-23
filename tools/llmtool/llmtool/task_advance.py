@@ -4445,21 +4445,6 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             {'task_id': task_id, 'step': 'D6_BINDING_UNAVAILABLE', 'result': None,
              'next': 'D6_BINDING_UNAVAILABLE', 'codes': [code]}, record, store, None)
     step = decide(record, d6, pr, related)
-    if step in _EC2_DERIVED_STEPS and _pr_docs_only(number, d6['result_head'], get):
-        # #2473: a docs-only PR needs no EC2 result, whatever the EC2 record
-        # says (none, FAIL, TIMEOUT, SHA_MISMATCH). The check (docs) gate below
-        # still runs before any Reviewer is dispatched. A head with a Reviewer
-        # claim decides identically with docs_only, so those steps are unchanged.
-        step = decide(record, d6, pr, related, docs_only=True)
-    # A crash after GitHub creates the PR can leave the Task without its binding.
-    # Only an exact-head open PR recovered from this D6 branch may fill it.
-    if (recovered_pr and step not in ('PUBLISH', 'DEVELOPER_ATTENTION') and
-            pr.get('state') == 'open'):
-        try:
-            store.record_published_pr(task_id, number, d6['result_head'])
-        except Exception:
-            return {'task_id': task_id, 'step': 'REFUSED', 'codes': ['PUBLISH_PR_RECORD_FAILED'],
-                    'pr': number, 'head': d6['result_head']}
     result, codes, refusal_dict = None, [], None
     redispatch_reason = None
     ci_routed = False
@@ -4480,6 +4465,21 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                 step = REMOTE_TEST_MODULES_ABSENT_AT_HEAD
                 codes = [REMOTE_TEST_MODULES_ABSENT_AT_HEAD]
                 result = stale_base
+    if step in _EC2_DERIVED_STEPS and _pr_docs_only(number, d6['result_head'], get):
+        # #2473: a docs-only PR needs no EC2 result, whatever the EC2 record
+        # says (none, FAIL, TIMEOUT, SHA_MISMATCH). The check (docs) gate below
+        # still runs before any Reviewer is dispatched. A head with a Reviewer
+        # claim decides identically with docs_only, so those steps are unchanged.
+        step = decide(record, d6, pr, related, docs_only=True)
+    # A crash after GitHub creates the PR can leave the Task without its binding.
+    # Only an exact-head open PR recovered from this D6 branch may fill it.
+    if (recovered_pr and step not in ('PUBLISH', 'DEVELOPER_ATTENTION') and
+            pr.get('state') == 'open'):
+        try:
+            store.record_published_pr(task_id, number, d6['result_head'])
+        except Exception:
+            return {'task_id': task_id, 'step': 'REFUSED', 'codes': ['PUBLISH_PR_RECORD_FAILED'],
+                    'pr': number, 'head': d6['result_head']}
     if step in ('REVIEW_REDISPATCH', 'REVIEW_UNUSABLE_STOPPED'):
         # #2486: a stored refusal may be re-run exactly once even when older
         # claims exist on the head. The receipt proves the refusal and records

@@ -156,7 +156,8 @@ class StaleBase2602Tests(unittest.TestCase):
         self.assertEqual(result['step'], 'REPAIR_REVIEW')
         self.assertNotIn(CODE, result['codes'])
         self.assertEqual(len(repairs), 1)
-        self.assertEqual(calls, [f'git/trees/{HEAD}?recursive=1'])
+        # Presence is read once; the PR read is the existing docs-only check.
+        self.assertEqual(calls, [f'git/trees/{HEAD}?recursive=1', 'pulls/17'])
 
     def test_every_requested_module_present_keeps_the_repair_routing(self):
         record = base_record(remote_test_receipts=[
@@ -180,7 +181,9 @@ class StaleBase2602Tests(unittest.TestCase):
         self.assertEqual(result['step'], 'REPAIR_REVIEW')
         self.assertNotIn(CODE, result['codes'])
         self.assertEqual(len(repairs), 1)
-        self.assertEqual(calls, [])
+        # A positive ran_total proves a test ran, so module presence is not read;
+        # only the existing docs-only PR read happens.
+        self.assertEqual(calls, ['pulls/17'])
 
     def test_unreadable_or_incomplete_presence_keeps_the_repair_routing(self):
         cases = (
