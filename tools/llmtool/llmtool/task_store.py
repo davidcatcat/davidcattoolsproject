@@ -823,6 +823,12 @@ TASK_UPDATE_LOCK_TIMEOUT_SECONDS = 10.0
 TASK_UPDATE_LOCK_POLL_SECONDS = 0.01
 # An unlocked read reopens a record replaced under it at most this many times.
 TASK_READ_ATTEMPTS = 3
+# #2602 item (r): a per-TaskStore set of (record-byte digest, repository-config
+# token) pairs already validated by this process. The byte digest is the exact
+# file content, so a changed record is validated again; the token changes when
+# a record with an owner_assignment_ref could validate differently. The set is
+# in memory only, per instance and never persisted.
+TASK_READ_MEMO_MAX = 50000
 _TASK_STORE_CONTENTION_ERRNOS = frozenset(
     value for value in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EBUSY, errno.EINTR,
                         errno.ENOLCK)
@@ -2619,7 +2625,7 @@ def _check_start_failures_write(current, changes):
         _fail('START_RETRY_INVALID')
 
 
-def _validate(record, *, strict=True):
+def _validate(record, *, strict=True, repository_pattern=None):
     keys = set(record) - {'abandonment'} if type(record) is dict else set()
     merge_attempt = record.get('merge_attempt') if type(record) is dict else None
     published_pr = record.get('published_pr') if type(record) is dict else None
@@ -3376,8 +3382,12 @@ def _validate(record, *, strict=True):
                 ref_optional = (developer['provider_profile'] in ('agy', 'claude') and
                                 ref is None)
                 try:
-                    valid_owner_ref = ref_optional or (
-                        type(ref) is str and owner_comment_ref().fullmatch(ref) is not None)
+                    valid_owner_ref = ref_optional
+                    if not valid_owner_ref:
+                        pattern = (repository_pattern if repository_pattern is not None
+                                   else owner_comment_ref())
+                        valid_owner_ref = (type(ref) is str and
+                                           pattern.fullmatch(ref) is not None)
                 except LLMToolError:
                     _fail('TASK_STORE_REPOSITORY_CONFIG_INVALID')
                 if developer['provider_profile'] not in ('claude', 'agy') or not valid_owner_ref:
@@ -4253,6 +4263,33 @@ def _read_current_worker_ids(record):
     return record
 
 
+_REPOSITORY_CONFIG_UNREADABLE = ('REPOSITORY_CONFIG_UNREADABLE',)
+
+
+def _repository_read_input(record):
+    """The repository-config input of validating one record.
+
+    Returns (token, pattern). Both are None when no owner_assignment_ref is
+    checked. An unreadable config is a distinct token and no pattern, so the
+    validator still re-reads it and refuses with its existing code. The token is
+    the pattern text, so the same config snapshot decides reuse and validation.
+    """
+    developer = record.get('developer') if type(record) is dict else None
+    if not (type(developer) is dict and 'owner_assignment_ref' in developer):
+        return None, None
+    if (developer.get('provider_profile') in ('agy', 'claude') and
+            developer.get('owner_assignment_ref') is None):
+        # _validate never reads the repository config for this optional ref.
+        return None, None
+    from .worker_dispatch import owner_comment_ref
+    try:
+        pattern = owner_comment_ref()
+    except LLMToolError:
+        return _REPOSITORY_CONFIG_UNREADABLE, None
+    text = getattr(pattern, 'pattern', None)
+    return (text if type(text) is str else repr(pattern)), pattern
+
+
 def _identity(info):
     return (info.st_dev, info.st_ino, info.st_mode, info.st_uid,
             info.st_gid, info.st_size, info.st_mtime_ns, info.st_nlink)
@@ -4263,6 +4300,8 @@ class TaskStore:
 
     def __init__(self, root=None):
         self.root = Path(default_root() if root is None else root).absolute()
+        # #2602 item (r): validation reuse is per instance, never persisted.
+        self._validated_reads = set()
 
     def _open_root(self, create):
         """#1837: open the root one O_NOFOLLOW fd per component, relative to the
@@ -4423,7 +4462,20 @@ class TaskStore:
                     _fail()
                 if not validate:
                     return value
-                return _validate(_read_current_worker_ids(value), strict=False)
+                record = _read_current_worker_ids(value)
+                token, pattern = _repository_read_input(record)
+                memo_key = (hashlib.sha256(raw).hexdigest(), token)
+                if memo_key in self._validated_reads:
+                    return record
+                validated = (_validate(record, strict=False)
+                             if pattern is None else
+                             _validate(record, strict=False,
+                                       repository_pattern=pattern))
+                if token is not _REPOSITORY_CONFIG_UNREADABLE:
+                    if len(self._validated_reads) >= TASK_READ_MEMO_MAX:
+                        self._validated_reads.clear()
+                    self._validated_reads.add(memo_key)
+                return validated
             except LLMToolError:
                 raise
             except FileNotFoundError:
