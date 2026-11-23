@@ -2818,7 +2818,9 @@ _GITHUB_TIME = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2
 
 
 def _is_ruling_claim(claim):
-    """True when a review claim's text is an arbiter ruling, not a formal verdict."""
+    """True when a review claim is an arbiter ruling (by purpose or text), not a formal verdict."""
+    if type(claim) is dict and 'purpose' in claim:
+        return True
     result = claim.get('review_result') if type(claim) is dict else None
     text = result.get('review_text') if type(result) is dict else None
     if type(text) is not str:
@@ -3068,7 +3070,8 @@ def dispute_rule(store, task_id, *, pr, finding_id, outcome, reviewer, reviewer_
     claims = _dispute_review_claims(record, pr, head)
     claim = next((item for item in claims
                   if item.get('version') == entry.get('review_version') and
-                  item.get('state') == 'COMPLETED'), None)
+                  item.get('state') == 'COMPLETED' and
+                  not _is_ruling_claim(item)), None)
     if claim is None:
         _dispute_refuse('DISPUTE_NO_FAIL_VERDICT')
     arbiter = _dispute_arbiter(record, claim)
@@ -3974,6 +3977,7 @@ def _claude_review_claim_matches(task, reviewer_task, pr, head, reviewer_native)
         return False
     matches = [claim for claim in claims if
         type(claim) is dict and
+        not _is_ruling_claim(claim) and
         claim.get('pr') == pr and claim.get('head_sha') == head and
         claim.get('reviewer_task') == reviewer_task and
         claim.get('state') == 'COMPLETED' and
