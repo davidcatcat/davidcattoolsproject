@@ -109,7 +109,7 @@ class AbandonNeverStartedTests(unittest.TestCase):
             with self.subTest(boundary=boundary):
                 task = self._make_direct_task(
                     profile='agy', state='DEVELOPER_DISPATCHING', boundary=boundary,
-                    executor_task=f'{EXECUTOR}-{boundary or "none"}')
+                    executor_task=f'{EXECUTOR}-{(boundary or "none").lower()}')
                 saved = self.store.abandon(
                     task['task_id'], pm_session_id=task['pm_session_id'],
                     reason='Never started before dispatch interruption',
