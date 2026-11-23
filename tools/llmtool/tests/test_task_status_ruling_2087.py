@@ -65,9 +65,10 @@ class TaskStatusRulingTests(unittest.TestCase):
     def test_a1_ruling_claim_behind_formal_claim_shows_formal_state(self):
         for verdict in ('RULING', 'BLOCKED'):
             with self.subTest(verdict=verdict):
-                store, _ = _NEW_STORE(self)
-                _CLAIM_ARBITER(self, store)
-                saved = _COMPLETE_RULING(self, store, verdict=verdict)
+                store, _ = _NEW_STORE(self, with_history=True)
+                _CLAIM_ARBITER(self, store, with_history=True)
+                saved = _COMPLETE_RULING(
+                    self, store, verdict=verdict, with_history=True)
                 read_back = store.get(_a1.TASK)
                 self.assertEqual(read_back, saved)
                 # The real store really holds [formal claim, ruling claim].
@@ -115,9 +116,9 @@ class TaskStatusRulingTests(unittest.TestCase):
     def test_a2_malformed_last_item_is_unknown(self):
         # Non-dict items stay where they are: the ruling claim is dropped,
         # but a malformed last item still gives UNKNOWN.
-        store, _ = _NEW_STORE(self)
-        _CLAIM_ARBITER(self, store)
-        _COMPLETE_RULING(self, store, verdict='RULING')
+        store, _ = _NEW_STORE(self, with_history=True)
+        _CLAIM_ARBITER(self, store, with_history=True)
+        _COMPLETE_RULING(self, store, verdict='RULING', with_history=True)
         rec = store.get(_a1.TASK)
         rec['review_dispatch_claim'] = rec['review_dispatch_claim'] + [
             'not-a-claim']
