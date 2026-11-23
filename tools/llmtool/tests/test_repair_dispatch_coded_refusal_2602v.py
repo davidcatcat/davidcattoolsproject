@@ -72,6 +72,7 @@ class _Registration:
     trusted_agent_id: str
     session_ref: str
     native_session_id: object = None
+    state: str = 'ACTIVE'
 
 
 def _ec2_agy_record():
@@ -248,6 +249,9 @@ class RepairDispatchCodedRefusalTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(
                 task_submission_cli.task_completion, 'collect_git_snapshot',
                 return_value=snap))
+            stack.enter_context(mock.patch.object(
+                task_submission_cli.task_completion, 'bind_executor_task',
+                return_value=(reg, snap)))
             stack.enter_context(mock.patch.object(
                 task_submission_cli.task_completion, '_worktree_diff',
                 return_value=(['tools/llmtool/llmtool/review_repair.py'],
