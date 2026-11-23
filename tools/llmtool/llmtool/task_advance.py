@@ -1402,6 +1402,140 @@ def _receipt_not_executed(receipt):
             receipt.get('failures') == [])
 
 
+# #2602 item (p): an EC2 FAIL for an exact head whose requested test modules do
+# not exist at that head is a stale base, not a defect. Advance sends the PM to
+# update the branch from main instead of spending a counted repair.
+REMOTE_TEST_MODULES_ABSENT_AT_HEAD = 'REMOTE_TEST_MODULES_ABSENT_AT_HEAD'
+_STALE_BASE_MODULE_LIMIT = 100
+_STALE_BASE_LIST_MAX = 10
+_TEST_MODULE_NAME = re.compile(
+    r'(?:tools/llmtool/tests/)?(test_[A-Za-z0-9_]{1,100})(?:\.py)?\Z')
+
+
+def _test_module_path(module):
+    """Return tools/llmtool/tests/<test>.py for a requested module, or None."""
+    if type(module) is not str:
+        return None
+    match = _TEST_MODULE_NAME.fullmatch(module)
+    if match is None:
+        return None
+    return f'tools/llmtool/tests/{match.group(1)}.py'
+
+
+def _test_module_presence(paths, head, github_get):
+    """Return {path: present} from one complete exact-head git tree read.
+
+    Absence is proved only by a complete, untruncated tree that omits the path.
+    A read error, a truncated tree, a malformed entry or an untrustworthy head
+    returns None, so the caller keeps the existing behaviour (fails closed).
+    """
+    if (not callable(github_get) or type(head) is not str or
+            _HEX40.fullmatch(head) is None):
+        return None
+    try:
+        answer = github_get(f'git/trees/{head}?recursive=1')
+    except Exception:
+        return None
+    if (type(answer) is not dict or answer.get('truncated') is not False or
+            type(answer.get('tree')) is not list):
+        return None
+    found = {}
+    for entry in answer['tree']:
+        if type(entry) is not dict or type(entry.get('path')) is not str:
+            return None
+        path = entry['path']
+        if path not in paths:
+            continue
+        # A path must be exactly one blob; a directory, duplicate or any other
+        # shape cannot prove the module is a file at this head.
+        if entry.get('type') != 'blob' or path in found:
+            return None
+        found[path] = True
+    return {path: found.get(path, False) for path in paths}
+
+
+def _receipt_present_module_failed(receipt, present_modules):
+    """True when the receipt records a failure of a requested module that exists."""
+    stems = set()
+    for module in present_modules:
+        path = _test_module_path(module)
+        if path is not None:
+            stems.add(path.rsplit('/', 1)[-1][:-3])
+    if not stems:
+        return False
+
+    def names_module(value):
+        if type(value) is not str:
+            return False
+        return any(re.search(rf'(?<![A-Za-z0-9_]){re.escape(stem)}(?![A-Za-z0-9_])',
+                             value)
+                   for stem in stems)
+
+    failures = receipt.get('failures')
+    if type(failures) is list and any(names_module(item) for item in failures):
+        return True
+    module_results = receipt.get('module_results')
+    if type(module_results) is list:
+        for item in module_results:
+            if type(item) is not dict or not names_module(item.get('module')):
+                continue
+            final = item.get('final')
+            ran = item.get('ran')
+            if (type(ran) is int and not isinstance(ran, bool) and ran > 0 and
+                    final != 'OK'):
+                return True
+            if type(final) is str and final != 'OK':
+                return True
+    return names_module(receipt.get('failure_excerpt'))
+
+
+def _stale_base_remote_fail(receipt, head, github_get):
+    """Return stale-base details when absent modules explain an exact-head FAIL.
+
+    None keeps the existing EC2 repair routing: every requested module exists,
+    a module that exists also failed, the run executed tests, or presence at
+    the head cannot be established. A positive ran_total means a test ran and
+    failed, so absence alone cannot explain the FAIL.
+    """
+    if (type(receipt) is not dict or receipt.get('result') != 'FAIL' or
+            receipt.get('source_sha') != head):
+        return None
+    modules = receipt.get('modules')
+    if (type(modules) is not list or not modules or
+            len(modules) > _STALE_BASE_MODULE_LIMIT):
+        return None
+    ran_total = receipt.get('ran_total')
+    if type(ran_total) is not int or isinstance(ran_total, bool) or ran_total != 0:
+        return None
+    path_by_module = {}
+    for module in modules:
+        path = _test_module_path(module)
+        if path is None:
+            return None
+        path_by_module[module] = path
+    presence = _test_module_presence(tuple(path_by_module.values()), head, github_get)
+    if presence is None:
+        return None
+    present = [module for module, path in path_by_module.items() if presence[path]]
+    absent = [module for module, path in path_by_module.items() if not presence[path]]
+    if not absent or _receipt_present_module_failed(receipt, present):
+        return None
+    ordered = sorted(set(absent))
+    shown = ordered[:_STALE_BASE_LIST_MAX]
+    count = len(ordered)
+    suffix = '' if count <= len(shown) else f' (+{count - len(shown)} more)'
+    next_step = 'update the PR branch from main, then rerun EC2'
+    return {
+        'message': (f'{REMOTE_TEST_MODULES_ABSENT_AT_HEAD}: {count} requested test '
+                    f'module(s) do not exist at head {head}: '
+                    f'{", ".join(shown)}{suffix}. Next step: {next_step}.'),
+        'absent_modules': shown,
+        'absent_count': count,
+        'head': head,
+        'next_step': next_step,
+    }
+
+
 def _remote_test_receipt_summary(record, head):
     receipts = record.get('remote_test_receipts', []) if type(record) is dict else []
     if type(receipts) is not list:
@@ -4467,6 +4601,26 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             {'task_id': task_id, 'step': 'D6_BINDING_UNAVAILABLE', 'result': None,
              'next': 'D6_BINDING_UNAVAILABLE', 'codes': [code]}, record, store, None)
     step = decide(record, d6, pr, related)
+    result, codes, refusal_dict = None, [], None
+    redispatch_reason = None
+    ci_routed = False
+    rerun_version = None
+    rerun_claim = None
+    rerun_contract = None
+    rerun_refusal_code = None
+    if (step in ('REPAIR_REVIEW', 'REPAIR_RETRY', 'NEEDS_ATTENTION') and
+            number is not None and
+            _head_review_claim(record, number, d6['result_head']) is None):
+        # #2602 item (p): a stale base sends the PM to update the branch, never
+        # to a repair. The helper fails closed when presence is not established.
+        remote_status, _, stale_receipt = _remote_test_status(record, d6)
+        if remote_status in ('FAIL', 'NOT_EXECUTED'):
+            stale_base = _stale_base_remote_fail(
+                stale_receipt, d6['result_head'], get)
+            if stale_base is not None:
+                step = REMOTE_TEST_MODULES_ABSENT_AT_HEAD
+                codes = [REMOTE_TEST_MODULES_ABSENT_AT_HEAD]
+                result = stale_base
     if step in _EC2_DERIVED_STEPS and _pr_docs_only(number, d6['result_head'], get):
         # #2473: a docs-only PR needs no EC2 result, whatever the EC2 record
         # says (none, FAIL, TIMEOUT, SHA_MISMATCH). The check (docs) gate below
@@ -4482,13 +4636,6 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         except Exception:
             return {'task_id': task_id, 'step': 'REFUSED', 'codes': ['PUBLISH_PR_RECORD_FAILED'],
                     'pr': number, 'head': d6['result_head']}
-    result, codes, refusal_dict = None, [], None
-    redispatch_reason = None
-    ci_routed = False
-    rerun_version = None
-    rerun_claim = None
-    rerun_contract = None
-    rerun_refusal_code = None
     if step in ('REVIEW_REDISPATCH', 'REVIEW_UNUSABLE_STOPPED'):
         # #2486: a stored refusal may be re-run exactly once even when older
         # claims exist on the head. The receipt proves the refusal and records
