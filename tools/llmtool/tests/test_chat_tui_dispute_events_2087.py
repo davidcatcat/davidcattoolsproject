@@ -55,10 +55,12 @@ class TestDisputeClaimTimeline(unittest.TestCase):
     def test_dispatched_superseded_tail(self):
         record, _ = _ruling_record("DISPATCHED", "SUPERSEDED",
                                    reviewer="claude-reviewer")
-        expected = ("DISPATCHED, reviewer task " + readers.ARBITER_REVIEWER
-                    + " (dispute SUPERSEDED; not a formal review)")
-        self.assertIn(expected, [event["text"] for event in task_events(record)
-                                 if event["kind"] == "DISPUTE"])
+        tail = ("DISPATCHED, reviewer task " + readers.ARBITER_REVIEWER
+                + " (dispute SUPERSEDED; not a formal review)")
+        dispute_texts = [event["text"] for event in task_events(record)
+                         if event["kind"] == "DISPUTE"]
+        self.assertEqual(len(dispute_texts), 2)
+        self.assertTrue(all(tail in text for text in dispute_texts))
 
     def test_ruling_outcome_never_shown(self):
         record, claim = _ruling_record("COMPLETED", "RULED")
