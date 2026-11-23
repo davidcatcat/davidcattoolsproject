@@ -373,7 +373,7 @@ def _execution_process_status(execution):
     return None
 
 
-def _d6_process_status(store, executor_task):
+def _d6_process_status(store, executor_task, *, exclude_task_id=None):
     """NONE, DEAD, ALIVE or UNKNOWN for processes recorded on this D6.
 
     A process is bound to the D6 through a Developer execution of a Task whose
@@ -386,6 +386,8 @@ def _d6_process_status(store, executor_task):
         return 'UNKNOWN'
     seen = uncertain = False
     for task_id in task_ids:
+        if exclude_task_id is not None and task_id == exclude_task_id:
+            continue
         try:
             record = store.get(task_id)
         except Exception:
@@ -428,7 +430,8 @@ def _d6_process_status(store, executor_task):
     return 'DEAD' if seen else 'NONE'
 
 
-def _check_no_launch_d6(store, root, claim, *, executor_task, registered_d6, process_status):
+def _check_no_launch_d6(store, root, claim, *, executor_task, registered_d6, process_status,
+                        exclude_task_id=None):
     """The registered D6 is clean at the claim HEAD and no live process is bound to it."""
     from . import review_repair
     loader = review_repair._registered_d6 if registered_d6 is None else registered_d6
@@ -442,13 +445,124 @@ def _check_no_launch_d6(store, root, claim, *, executor_task, registered_d6, pro
         clean = False
     if not clean:
         refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
-    reader = _d6_process_status if process_status is None else process_status
     try:
-        status = reader(store, executor_task)
+        if process_status is None:
+            status = _d6_process_status(store, executor_task, exclude_task_id=exclude_task_id)
+        else:
+            status = process_status(store, executor_task)
     except Exception:
         status = 'UNKNOWN'
     if status not in ('NONE', 'DEAD'):
         refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+
+
+_ABANDON_START_EVIDENCE_CODE = 'TASK_ABANDONMENT_START_EVIDENCE'
+_ABANDON_START_EVIDENCE_MESSAGE = (
+    f'{_ABANDON_START_EVIDENCE_CODE}: Task has Developer start evidence; '
+    'wait for the running Developer to finish, clean or reconcile the D6, '
+    'or run llmtool task advance'
+)
+
+
+def _refuse_abandon_start_evidence():
+    error = LLMToolError(_ABANDON_START_EVIDENCE_MESSAGE)
+    error.task_store_code = 'INVALID'
+    error.task_store_error_code = _ABANDON_START_EVIDENCE_CODE
+    error.review_repair_code = _ABANDON_START_EVIDENCE_CODE
+    raise error from None
+
+
+def _abandon_has_start_evidence(task):
+    if task.get('merge_attempt') is not None or task.get('published_pr') is not None:
+        return True
+    developer = task.get('developer')
+    completion = task.get('completion')
+    if developer is None and completion is None:
+        return False
+    if type(completion) is dict and (
+            completion.get('state') != 'WAITING_EXECUTOR' or
+            completion.get('evidence') is not None or
+            completion.get('reviewer_task_id') is not None or
+            completion.get('pm_dispatch') != 'NOT_STARTED'):
+        return True
+    if developer is None:
+        return False
+    if type(developer) is not dict:
+        return True
+    if developer.get('state') not in ('DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING'):
+        return True
+    if developer.get('execution') is not None:
+        return True
+    if developer.get('dispatch_boundary') in ('STARTING', 'STOPPED'):
+        return True
+    card = developer.get('card_delivery')
+    if type(card) is dict and card.get('state') == 'DELIVERED':
+        return True
+    if any(developer.get(key) is not None for key in (
+            'artifact', 'artifact_sha256', 'usage', 'reported', 'claude_result',
+            'no_changes_diagnosis', 'claude_failure_evidence', 'rejection_detail',
+            'blocked_reason', 'progress')):
+        return True
+    callback = developer.get('direct_result_callback')
+    if type(callback) is dict:
+        evidence = callback.get('evidence')
+        if (callback.get('state') != 'WAITING_EXECUTOR' or
+                callback.get('pm_dispatch') != 'NOT_STARTED' or
+                (type(evidence) is dict and
+                 evidence.get('verification_state') not in (None, 'NOT_STARTED'))):
+            return True
+    provenance = task.get('pm_provenance')
+    if type(provenance) is dict and provenance.get('provider_invoked') is not False:
+        return True
+    return False
+
+
+def verify_abandon_never_started(store, task, *, registered_d6=None, process_status=None):
+    """#2532: allow abandoning a DISPATCHING or RUNNING Task only when never started.
+
+    Tasks with no Developer assignment and no completion tracking pass without
+    a D6 check. Otherwise every never-started check from _check_no_launch_d6
+    must hold; any start evidence refuses with TASK_ABANDONMENT_START_EVIDENCE.
+    """
+    if type(task) is not dict:
+        _refuse_abandon_start_evidence()
+    developer = task.get('developer')
+    completion = task.get('completion')
+    if developer is None and completion is None and not (
+            task.get('merge_attempt') is not None or task.get('published_pr') is not None):
+        return
+    if _abandon_has_start_evidence(task):
+        _refuse_abandon_start_evidence()
+    executor_task = None
+    if type(developer) is dict:
+        executor_task = developer.get('executor_task_id')
+        if executor_task is None and type(developer.get('direct_result_callback')) is dict:
+            executor_task = developer['direct_result_callback'].get('executor_task_id')
+    if executor_task is None and type(completion) is dict:
+        executor_task = completion.get('executor_task_id')
+    if executor_task is None:
+        return
+    if type(developer) is dict:
+        head_sha = developer.get('source_sha')
+        if type(head_sha) is not str or not _HEX40.fullmatch(head_sha):
+            _refuse_abandon_start_evidence()
+        try:
+            _check_no_launch_d6(
+                store, task, {'head_sha': head_sha}, executor_task=executor_task,
+                registered_d6=registered_d6, process_status=process_status,
+                exclude_task_id=task.get('task_id'))
+        except LLMToolError:
+            _refuse_abandon_start_evidence()
+        return
+    try:
+        if process_status is None:
+            status = _d6_process_status(store, executor_task, exclude_task_id=task.get('task_id'))
+        else:
+            status = process_status(store, executor_task)
+    except Exception:
+        status = 'UNKNOWN'
+    if status not in ('NONE', 'DEAD'):
+        _refuse_abandon_start_evidence()
 
 
 def verify_ec2_recovery(store, root, repair_task_id, *, executor_task, pr_number,

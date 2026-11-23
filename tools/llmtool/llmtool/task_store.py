@@ -4866,7 +4866,8 @@ class TaskStore:
             trusted_completion_events=events is not None,
             trusted_pm_session_adoption=True)
 
-    def abandon(self, task_id, *, pm_session_id, reason):
+    def abandon(self, task_id, *, pm_session_id, reason,
+                registered_d6=None, process_status=None):
         """Record a PM-only terminal abandonment, idempotent for the same reason."""
         if (not _safe_identifier(pm_session_id, SESSION_ID) or type(reason) is not str or
                 not 1 <= len(reason) <= 500 or not reason.strip() or
@@ -4887,7 +4888,8 @@ class TaskStore:
                 return self._update(
                     task_id, expected={'record_sha256': current['record_sha256']},
                     changes={'abandonment': stamped}, trusted_abandonment=True,
-                    abandonment_pm_session_id=pm_session_id)
+                    abandonment_pm_session_id=pm_session_id,
+                    abandon_never_started=(registered_d6, process_status))
             except TaskStoreConflict:
                 continue
         _fail('TASK_STORE_BUSY')
@@ -6112,7 +6114,8 @@ class TaskStore:
     def _update_record(self, task_id, *, expected, changes, d6_claims, claim_recovery=None,
                        trusted_dispatch_audit=False,
                        trusted_completion_events=False, trusted_abandonment=False,
-                       abandonment_pm_session_id=None, trusted_pm_session_adoption=False,
+                       abandonment_pm_session_id=None, abandon_never_started=None,
+                       trusted_pm_session_adoption=False,
                        trusted_codex_launch=False, trusted_opencode_launch=False,
                        trusted_agy_launch=False, trusted_card_delivery=False,
                        trusted_split=None, split_child_max=None, high_debug_finalize=None,
@@ -6451,6 +6454,12 @@ class TaskStore:
                         type(item) is not dict or
                         item.get('pm_session_id') != abandonment_pm_session_id):
                     _fail('TASK_PM_SESSION_DENIED')
+                from . import review_repair_recovery
+                reg_d6, proc_status = (abandon_never_started
+                                       if abandon_never_started is not None
+                                       else (None, None))
+                review_repair_recovery.verify_abandon_never_started(
+                    self, current, registered_d6=reg_d6, process_status=proc_status)
             if trusted_pm_session_adoption and current.get('abandonment') is not None:
                 _fail('PM_SESSION_ADOPTION_ABANDONED')
             if 'review_dispatch_claim' in changes:
