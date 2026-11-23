@@ -542,7 +542,8 @@ def verify_abandon_never_started(store, task, *, registered_d6=None, process_sta
         executor_task = completion.get('executor_task_id')
     if executor_task is None:
         return
-    if type(developer) is dict:
+    if type(developer) is dict and (
+            developer.get('state') == 'DEVELOPER_DISPATCHING' or registered_d6 is not None):
         head_sha = developer.get('source_sha')
         if type(head_sha) is not str or not _HEX40.fullmatch(head_sha):
             _refuse_abandon_start_evidence()

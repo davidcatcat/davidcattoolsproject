@@ -14,6 +14,7 @@ from llmtool.task_store import TaskStore, new_id
 
 HEAD = 'a' * 40
 EXECUTOR = 'executor-2532-d6'
+_UNSET = object()
 
 
 def _clean_d6(head=HEAD, *, clean=True, result_sha=None):
@@ -90,14 +91,14 @@ class AbandonNeverStartedTests(unittest.TestCase):
             return self.store.get(task['task_id'])
         raise ValueError(f'unsupported test state: {state}')
 
-    def _assert_abandon_refused(self, task, *, registered_d6=None, process_status=None):
+    def _assert_abandon_refused(self, task, *, registered_d6=_UNSET, process_status=_UNSET):
         before = self.store.get(task['task_id'])
         with self.assertRaises(LLMToolError) as caught:
             self.store.abandon(
                 task['task_id'], pm_session_id=task['pm_session_id'],
                 reason='Attempt to abandon started task',
-                registered_d6=registered_d6 or _clean_d6(),
-                process_status=process_status or _process('NONE'))
+                registered_d6=_clean_d6() if registered_d6 is _UNSET else registered_d6,
+                process_status=_process('NONE') if process_status is _UNSET else process_status)
         self.assertEqual(caught.exception.task_store_error_code,
                          'TASK_ABANDONMENT_START_EVIDENCE')
         self.assertIn('llmtool task advance', str(caught.exception))
@@ -199,6 +200,34 @@ class AbandonNeverStartedTests(unittest.TestCase):
         p1, p2 = with_neighbour(active)
         with p1, p2:
             self._assert_abandon_refused(task2, registered_d6=_clean_d6(), process_status=None)
+
+    def test_pending_task_without_registered_d6_allows_abandon_and_refuses_active_neighbour(self):
+        task = self._make_direct_task(
+            profile='agy', state='DEVELOPER_PENDING', executor_task=EXECUTOR + '-unreg')
+        with mock.patch.object(review_repair, '_registered_d6',
+                               side_effect=LLMToolError('D6 not registered')):
+            saved = self.store.abandon(
+                task['task_id'], pm_session_id=task['pm_session_id'],
+                reason='Pending task without registered D6')
+        self.assertEqual(saved['abandonment']['reason'], 'Pending task without registered D6')
+        self.assertEqual(task_status.derive_state(saved), 'ABANDONED')
+
+        task2 = self._make_direct_task(
+            profile='agy', state='DEVELOPER_PENDING', executor_task=EXECUTOR + '-pending-active')
+        neighbour_id = new_id()
+        real_ids, real_get = self.store.task_ids, self.store.get
+
+        def get(tid, *args, **kwargs):
+            if tid == neighbour_id:
+                return {'task_id': neighbour_id, 'developer': {
+                    'state': 'DEVELOPER_DISPATCHING',
+                    'executor_task_id': EXECUTOR + '-pending-active',
+                    'execution': None}}
+            return real_get(tid, *args, **kwargs)
+
+        with mock.patch.object(self.store, 'task_ids', lambda: [*real_ids(), neighbour_id]), \
+                mock.patch.object(self.store, 'get', get):
+            self._assert_abandon_refused(task2, registered_d6=None, process_status=None)
 
 
 if __name__ == '__main__':
