@@ -804,12 +804,12 @@ _CI_ENV_CONCLUSIONS = ('cancelled', 'startup_failure')
 
 
 def _ci_excerpt(run):
-    """Bounded untrusted excerpt from the check run output title and summary only."""
+    """Bounded untrusted excerpt from the check run output."""
     from . import task_submission_cli
     output = run.get('output')
     parts = []
     if type(output) is dict:
-        for key in ('title', 'summary'):
+        for key in ('title', 'summary', 'text'):
             value = output.get(key)
             if type(value) is str and value:
                 parts.append(value)
@@ -1142,6 +1142,149 @@ def _ci_failure_overlap_status(run, record, number, github_get):
     return status, failing_modules
 
 
+_UNITTEST_TEST_NAME_RE = re.compile(
+    r'(?:^|\n)\s*(?:FAIL|ERROR):\s+([^\s(]+)(?:\s+\(([^()\s]+)\))?')
+_PYTEST_TEST_NAME_RE = re.compile(
+    r'(?:^|\n)\s*(?:FAILED|ERROR)\s+([^\s]+::[^\s]+?)(?:\s+-\s+|\s*$)')
+
+
+def _failing_test_names(text):
+    """Extract bounded failing test names from unittest or pytest output."""
+    if type(text) is not str or not text.strip():
+        return []
+    found = []
+    seen = set()
+
+    def add(name):
+        cleaned = re.sub(r'[\r\n\t]+', ' ', name).strip()[:256]
+        if cleaned and cleaned not in seen and len(found) < 20:
+            seen.add(cleaned)
+            found.append(cleaned)
+
+    for match in _UNITTEST_TEST_NAME_RE.finditer(text):
+        method, scope = match.group(1), match.group(2)
+        add(f'{method} ({scope})' if scope else method)
+    for match in _PYTEST_TEST_NAME_RE.finditer(text):
+        add(match.group(1))
+    return found
+
+
+def _admissible_test_module_path(path, d6_root):
+    if not review_repair._admissible_repair_read_path(path):
+        return False
+    if type(d6_root) is str and os.path.isdir(d6_root):
+        try:
+            root_real = Path(d6_root).resolve()
+            candidate = (root_real / path).resolve()
+            return candidate.is_relative_to(root_real) and candidate.is_file()
+        except (OSError, ValueError):
+            return False
+    return True
+
+
+def _resolve_admissible_test_modules(candidates, d6_root):
+    """Resolve candidate test module names/paths to admissible repo-relative paths."""
+    if type(candidates) not in (list, tuple) or not candidates:
+        return []
+    resolved = []
+    seen = set()
+    has_root = type(d6_root) is str and os.path.isdir(d6_root)
+    for item in candidates:
+        if len(resolved) >= review_repair._MAX_EXTRA_READ_PATHS:
+            break
+        if type(item) is not str or not item:
+            continue
+        if item.endswith('.py'):
+            paths = [f'tools/llmtool/{item}'] if item.startswith('tests/') else [item]
+        elif _TEST_MODULE_TOKEN_RE.fullmatch(item):
+            if not has_root:
+                continue
+            paths = [f'tools/llmtool/tests/{item}.py', f'scripts/{item}.py']
+        else:
+            continue
+        for cand in paths:
+            if cand not in seen and _admissible_test_module_path(cand, d6_root):
+                seen.add(cand)
+                resolved.append(cand)
+                break
+    return resolved
+
+
+def _ci_run_identity(run):
+    """Return (workflow_run_id, job_id) from details_url when available."""
+    details_url = run.get('details_url') if type(run) is dict else None
+    if type(details_url) is not str:
+        return None, None
+    match = _MAC_DETAILS_URL_RE.search(details_url)
+    if not match:
+        return None, None
+    try:
+        workflow_run_id = int(match.group(1))
+        job_id = int(match.group(2))
+    except (ValueError, TypeError):
+        return None, None
+    if workflow_run_id < 1 or job_id < 1:
+        return None, None
+    return workflow_run_id, job_id
+
+
+def _ci_failure_details(run, d6_root):
+    """Build failing_tests, failing_modules, workflow_run_id, job_id, details_unavailable."""
+    output = run.get('output') if type(run) is dict else None
+    parts = ([output.get(k) for k in ('title', 'summary', 'text')
+              if type(output.get(k)) is str and output.get(k)]
+             if type(output) is dict else [])
+    raw_text = '\n'.join(parts)
+    failing_tests = _failing_test_names(raw_text)
+    failing_modules = _resolve_admissible_test_modules(_failing_test_modules(run), d6_root)
+    workflow_run_id, job_id = _ci_run_identity(run)
+    excerpt = _ci_excerpt(run)
+    details_unavailable = not excerpt.strip() and not failing_tests
+    return excerpt, failing_tests, failing_modules, workflow_run_id, job_id, details_unavailable
+
+
+def _remote_test_failure_details(receipt, executor_task, d6_root):
+    """Build remote_test_details and extra_read_paths for an EC2/hosted FAIL receipt."""
+    if type(receipt) is not dict:
+        return {'check_name': 'EC2 remote-test', 'run_identity': f'executor={executor_task}',
+                'failing_tests': [], 'failing_modules': [], 'details_unavailable': True}, []
+    actions = receipt.get('actions')
+    hosted_run_id = (actions.get('run_id')
+                     if type(actions) is dict and type(actions.get('run_id')) is int and
+                     not isinstance(actions.get('run_id'), bool) and actions['run_id'] > 0
+                     else None)
+    check_name = (f'remote-test (GitHub-hosted run {hosted_run_id})'
+                  if hosted_run_id is not None else 'EC2 remote-test')
+    digest = receipt.get('receipt_digest')
+    short_digest = digest[:8] if type(digest) is str and len(digest) >= 8 else 'unknown'
+    run_parts = [f'receipt={short_digest}']
+    if hosted_run_id is not None:
+        run_parts.append(f'run={hosted_run_id}')
+    run_parts.append(f'executor={executor_task}')
+    excerpt = receipt.get('failure_excerpt')
+    excerpt_str = excerpt if type(excerpt) is str else ''
+    failing_tests = _failing_test_names(excerpt_str)
+    module_candidates = []
+    if type(receipt.get('failures')) is list:
+        module_candidates.extend(item for item in receipt['failures'] if type(item) is str)
+    if type(receipt.get('module_results')) is list:
+        for entry in receipt['module_results']:
+            if (type(entry) is dict and type(entry.get('module')) is str and
+                    entry.get('final') not in ('OK', None) and
+                    not str(entry.get('final')).startswith('OK (')):
+                module_candidates.append(entry['module'])
+    module_candidates.extend(_failing_test_modules({'output': {'summary': excerpt_str}}))
+    failing_modules = _resolve_admissible_test_modules(module_candidates, d6_root)
+    details = {
+        'check_name': check_name,
+        'run_identity': ' '.join(run_parts),
+        'failing_tests': failing_tests,
+        'failing_modules': failing_modules,
+        'details_unavailable': not excerpt_str.strip() and not failing_tests,
+    }
+    return details, failing_modules
+
+
 def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, related,
                       run, fail_code, github_get, repair_review_call):
     """#1502 WP-D D11: route one completed exact-head required check that did not pass.
@@ -1212,8 +1355,21 @@ def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, rela
     profile = (record.get('developer') or {}).get('provider_profile')
     if profile in ('codex', 'claude') and shutil.which(profile) is None:
         return 'RUNTIME_NOT_ON_PATH', ['RUNTIME_NOT_ON_PATH'], None
-    ci_failure = {'head': head, 'check_name': run['name'], 'check_run_id': run['id'],
-                  'conclusion': 'failure', 'excerpt': _ci_excerpt(run)}
+    excerpt, failing_tests, failing_modules, workflow_run_id, job_id, details_unavailable = (
+        _ci_failure_details(run, d6.get('root')))
+    ci_failure = {
+        'head': head,
+        'check_name': run['name'],
+        'check_run_id': run['id'],
+        'conclusion': 'failure',
+        'excerpt': excerpt,
+        'failing_tests': failing_tests,
+        'failing_modules': failing_modules,
+        'details_unavailable': details_unavailable,
+    }
+    if workflow_run_id is not None and job_id is not None:
+        ci_failure['workflow_run_id'] = workflow_run_id
+        ci_failure['job_id'] = job_id
     invoke = repair_review_call or review_repair.repair_review
     try:
         captured = io.StringIO()
@@ -4603,6 +4759,11 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                             auto=True)
                         if remote_status == 'FAIL':
                             repair_args['remote_test_receipt'] = failure_receipt
+                            remote_details, extra_read = _remote_test_failure_details(
+                                failure_receipt, executor_task, d6.get('root'))
+                            repair_args['remote_test_details'] = remote_details
+                            if extra_read:
+                                repair_args['extra_read_paths'] = extra_read
                         with contextlib.redirect_stdout(captured):
                             result_value = invoke(**repair_args)
                         emitted = captured.getvalue().strip()
