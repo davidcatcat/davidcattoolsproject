@@ -3251,7 +3251,7 @@ def _assignment_paths(read_paths, write_paths):
                 all(part not in ('', '.', '..') for part in path.split('/')) and
                 all(0x20 <= ord(char) < 0x7f for char in path))
     def invalid(rule):
-        raise LLMToolError(f'developer assignment scope is invalid: {rule}')
+        raise _prelaunch_error(f'developer assignment scope is invalid: {rule}', rule)
 
     if type(read_paths) is not list or type(write_paths) is not list:
         invalid('PATH_LIST_INVALID')
@@ -3820,14 +3820,14 @@ def _check_developer_screen_disposition(store, task_id, developer):
                 _DEVELOPER_SCREEN_SOURCE, [_DEVELOPER_SCREEN_UNLOCATED], 0, root=root)
         record = high_debug._read_screen_record(task_id, _DEVELOPER_SCREEN_FAMILY, root)
     except Exception:
-        raise LLMToolError(invalid) from None
+        raise _prelaunch_error(invalid, 'DELEGATE_SCREEN_RECORD_INVALID') from None
     if record.get('source') != _DEVELOPER_SCREEN_SOURCE:
-        raise LLMToolError(invalid)
+        raise _prelaunch_error(invalid, 'DELEGATE_SCREEN_RECORD_INVALID')
     if record['disposition'] is None:
-        raise LLMToolError('DELEGATE_SCREEN_DISPOSITION_REQUIRED: ' + high_debug._screen_detail(
+        raise _prelaunch_error('DELEGATE_SCREEN_DISPOSITION_REQUIRED: ' + high_debug._screen_detail(
             [tuple(hit) for hit in record['hits']],
             f'Task {task_id} family={_DEVELOPER_SCREEN_FAMILY}',
-            omitted=record['omitted']))
+            omitted=record['omitted']), 'DELEGATE_SCREEN_DISPOSITION_REQUIRED')
 
 
 def _persist_developer_output_rejection(store, task_id, developer, error_code,
@@ -8750,8 +8750,9 @@ def _repair_run_stamp(task_id, developer, d6_unchanged):
     if developer is None:
         return None
     if type(developer) is not dict:
-        raise LLMToolError(
-            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
+        raise _prelaunch_error(
+            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}',
+            'DELEGATE_REPAIR_COUNT_UNAVAILABLE') from None
     refusal_key = (
         developer.get('provider_profile'),
         developer.get('state'),
@@ -8781,8 +8782,9 @@ def _repair_run_stamp(task_id, developer, d6_unchanged):
         if stamp.strftime('%Y-%m-%dT%H:%M:%SZ') != created_at:
             raise ValueError
     except (TypeError, ValueError):
-        raise LLMToolError(
-            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
+        raise _prelaunch_error(
+            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}',
+            'DELEGATE_REPAIR_COUNT_UNAVAILABLE') from None
     return stamp
 
 
@@ -9009,7 +9011,9 @@ def _check_chain_repair_count(args, store, d6_binding, policy, view):
             continue
         record = view['members'][member_id]
         if type(record) is not dict:
-            raise LLMToolError(f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {member_id}')
+            raise _prelaunch_error(
+                f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {member_id}',
+                'DELEGATE_REPAIR_COUNT_UNAVAILABLE')
         _collect_ec2_repair_task_ids(record, new_ec2_ids, legacy_ec2_ids)
         if _recorded_start_failure(record):
             continue
@@ -9107,11 +9111,15 @@ def _auto_direct_replacement(args, store):
     target_worker = worker_dispatch.worker_key_for(selected)
     auth = worker_dispatch.evaluate(target_worker, None, args.task_id)
     if not auth.allowed:
-        raise LLMToolError('DIRECT_REASSIGN_NO_AUTHORIZED_ALTERNATE: ' + auth.reason_code)
+        raise _prelaunch_error(
+            'DIRECT_REASSIGN_NO_AUTHORIZED_ALTERNATE: ' + auth.reason_code,
+            'DIRECT_REASSIGN_NO_AUTHORIZED_ALTERNATE')
     blocked = worker_availability.quota_refusal(
         store, target_worker, owner_assignment_ref=None, policy_task_id=args.task_id)
     if blocked is not None:
-        raise LLMToolError('DIRECT_REASSIGN_ALTERNATE_UNAVAILABLE: ' + blocked)
+        raise _prelaunch_error(
+            'DIRECT_REASSIGN_ALTERNATE_UNAVAILABLE: ' + blocked,
+            'DIRECT_REASSIGN_ALTERNATE_UNAVAILABLE')
     replacement = copy.copy(args)
     replacement.provider = selected
     replacement.mode = 'direct' if selected == 'agy' else 'proposal'

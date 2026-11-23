@@ -79,6 +79,7 @@ def _ec2_agy_record():
     record['schema_version'] = 2
     record['state'] = 'PM_RESPONDED'
     record['developer']['created_at'] = '2026-10-27T00:00:00Z'
+    record['developer']['read_paths'] = ['tools/llmtool/llmtool/review_repair.py']
     record['response'] = json.dumps({
         'schema_version': 1,
         'summary': 'AGY repair fixture.',
@@ -274,6 +275,44 @@ class RepairDispatchCodedRefusalTests(unittest.TestCase):
             self.assertEqual(claims_after[0]['repair_task_id'], repair_id)
             self.assertEqual(claims_after[0]['attempt'], 1)
             self.assertEqual(claims_after[0]['state'], 'DISPATCHED')
+
+    def test_prelaunch_scope_refusal_reports_code_and_stays_claimed(self):
+        bad_record = _ec2_agy_record()
+        bad_record['developer']['read_paths'] = ['tools/llmtool/llmtool']
+        store = _RepairStore(self.temp.name, bad_record)
+        reg = self._registration()
+        snap = self._snapshot()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                task_advance, '_d6_snapshot', return_value=self._d6()))
+            stack.enter_context(mock.patch.object(
+                review_repair, '_registered_d6', return_value=(reg, snap)))
+            stack.enter_context(mock.patch.object(
+                review_repair.worker_dispatch, 'evaluate',
+                return_value=types.SimpleNamespace(
+                    allowed=True, reason_code='OWNER_POLICY_ALLOWED')))
+            stack.enter_context(mock.patch.object(
+                task_submission_cli.worker_dispatch, 'evaluate',
+                return_value=types.SimpleNamespace(
+                    allowed=True, reason_code='OWNER_POLICY_ALLOWED')))
+            stack.enter_context(mock.patch.object(
+                active_pm_inbox, 'observe_claude_session', return_value='/repo'))
+            stack.enter_context(mock.patch.object(
+                task_submission_cli, '_delegate_d6_binding',
+                return_value=(reg, snap)))
+            stack.enter_context(mock.patch.object(
+                task_submission_cli, '_scope_advice_items', return_value=[]))
+
+            result = task_advance.advance(
+                task_id=TASK, store=store, pr_number=PR,
+                github_get=self._github_get)
+
+            self.assertEqual(result['step'], 'REPAIR_REVIEW')
+            self.assertEqual(result['codes'], ['WRITE_PATH_NOT_IN_READ_PATHS'])
+            claims = store.get(TASK)['review_repair_claims']
+            self.assertEqual(len(claims), 1)
+            self.assertEqual(claims[0]['state'], 'CLAIMED')
+            self.assertIsNone(store.get(claims[0]['repair_task_id']).get('developer'))
 
     def test_uncoded_exception_after_possible_launch_still_records_unknown(self):
         reg = self._registration()
