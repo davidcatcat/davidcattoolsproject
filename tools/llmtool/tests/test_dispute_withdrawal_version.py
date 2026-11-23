@@ -26,13 +26,17 @@ ARBITRATE = {'path': 'arbitrate', 'finding_id': 'F1', 'arbiter_claim_version': 1
              'run_id': 'b' * 32}
 
 
-def _entry(finding_id='F1', *, version=1, state='RULED', outcome='WITHDRAWN', arbitrate=None,
+_LEGACY = object()  # arbitrate default: a legacy ruling with no arbitrate key set
+
+
+def _entry(finding_id='F1', *, version=1, state='RULED', outcome='WITHDRAWN', arbitrate=_LEGACY,
            pr=PR, head=HEAD, drop=()):
+    """arbitrate is the ruling's review_version; any value, None included, adds the arbitrate keys."""
     entry = {'finding_id': finding_id, 'pr': pr, 'head_sha': head, 'review_version': version,
              'severity': 'High', 'state': state}
     if outcome is not None:
         ruling = {'outcome': outcome, 'head_sha': head, 'reviewer': 'codex-reviewer'}
-        if arbitrate is not None:
+        if arbitrate is not _LEGACY:
             ruling.update(ARBITRATE, finding_id=finding_id, review_version=arbitrate)
         entry['ruling'] = ruling
     for key in drop:
