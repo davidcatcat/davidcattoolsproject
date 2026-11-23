@@ -140,7 +140,6 @@ from .board_check_part3 import (  # noqa: E402, F401
     _row_done,
     _row_gates,
     _row_label,
-    _row_problem,
     _unlisted,
     check_board,
 )
@@ -150,6 +149,7 @@ from .board_check_part4 import (  # noqa: E402, F401
     _lstart,
     _ps_snapshot,
     _reject_constant,
+    _row_problem,
     _stamp,
     _start_order,
     _utc,
