@@ -245,6 +245,8 @@ class StandaloneTests(unittest.TestCase):
                 os.path.join(llmtool, 'tests', 'test_developer_env_ai_identity.py'),
                 # This only names a path string.
                 os.path.join(llmtool, 'tests', 'test_sensitive_paths.py'),
+                # This only creates an empty package dir for GwAgentRoute setup.
+                os.path.join(llmtool, 'tests', 'test_gw_agent_session_resume_2602.py'),
             }
             self.assertLessEqual(set(hits.stdout.splitlines()), allowed)
 
