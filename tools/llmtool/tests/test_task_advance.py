@@ -1736,7 +1736,9 @@ class TaskAdvanceCiGateTests(unittest.TestCase):
         self.assertEqual(len(self.repaired), 1)
         self.assertEqual(self.repaired[0]['ci_failure'], {
             'head': HEAD, 'check_name': 'check (Linux 3.14)', 'check_run_id': 1,
-            'conclusion': 'failure', 'excerpt': CI_EXCERPT})
+            'conclusion': 'failure', 'excerpt': CI_EXCERPT,
+            'failing_tests': ['test_example'], 'failing_modules': [],
+            'details_unavailable': False})
 
     def test_read_failure_and_malformed_reply_wait_without_dispatch(self):
         for reply in (RuntimeError('unavailable'), ({'check_runs': []}, [])):
@@ -1942,7 +1944,9 @@ class TaskAdvanceCiFailRepairTests(unittest.TestCase):
         self.assertNotIn('remote_test_receipt', call_args)
         self.assertEqual(call_args['ci_failure'], {
             'head': HEAD, 'check_name': 'check (Linux 3.14)', 'check_run_id': 1,
-            'conclusion': 'failure', 'excerpt': CI_EXCERPT})
+            'conclusion': 'failure', 'excerpt': CI_EXCERPT,
+            'failing_tests': ['test_example'], 'failing_modules': [],
+            'details_unavailable': False})
         self.assertIn('check-runs/1', calls)
 
     def test_docs_only_failure_before_review_calls_repair_with_ci_failure(self):
@@ -1961,7 +1965,9 @@ class TaskAdvanceCiFailRepairTests(unittest.TestCase):
         self.assertNotIn('remote_test_receipt', call_args)
         self.assertEqual(call_args['ci_failure'], {
             'head': HEAD, 'check_name': 'check (docs)', 'check_run_id': 2,
-            'conclusion': 'failure', 'excerpt': CI_EXCERPT})
+            'conclusion': 'failure', 'excerpt': CI_EXCERPT,
+            'failing_tests': ['test_example'], 'failing_modules': [],
+            'details_unavailable': False})
         self.assertIn('check-runs/2', calls)
 
     def test_gateway_and_ai_loop_failures_before_review_call_repair(self):
@@ -1990,7 +1996,9 @@ class TaskAdvanceCiFailRepairTests(unittest.TestCase):
         self.assertEqual(len(repaired), 1)
         self.assertEqual(repaired[0]['ci_failure'], {
             'head': HEAD, 'check_name': 'check (macOS 3.13)', 'check_run_id': 5,
-            'conclusion': 'failure', 'excerpt': CI_EXCERPT})
+            'conclusion': 'failure', 'excerpt': CI_EXCERPT,
+            'failing_tests': ['test_example'], 'failing_modules': [],
+            'details_unavailable': False})
         self.assertIn('check-runs/5', calls)
 
     @staticmethod
@@ -2114,6 +2122,9 @@ class TaskAdvanceCiFailRepairTests(unittest.TestCase):
         self.assertEqual((result['step'], result['codes']), ('CI_FAILED', []))
         self.assertEqual(len(repaired), 1)
         self.assertEqual(repaired[0]['ci_failure']['excerpt'], '')
+        self.assertEqual(repaired[0]['ci_failure']['failing_tests'], [])
+        self.assertEqual(repaired[0]['ci_failure']['failing_modules'], [])
+        self.assertTrue(repaired[0]['ci_failure']['details_unavailable'])
 
 
 class TaskAdvancePublishTests(unittest.TestCase):

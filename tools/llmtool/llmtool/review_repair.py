@@ -10,7 +10,7 @@ import shutil
 import threading
 from argparse import Namespace
 
-from . import review_result, run_budget, task_completion, worker_availability, worker_dispatch
+from . import review_result, run_budget, sensitive_paths, task_completion, worker_availability, worker_dispatch
 from .errors import LLMToolError
 from .task_store import REVIEW_DISPUTE_DEFERRABLE, REVIEW_DISPUTE_SEVERITIES, _json_bytes, new_id
 
@@ -303,6 +303,47 @@ def _replay_claimed_test_repair(*, store, task_id, existing, developer, packet,
                 'next_action': f"review-dispatch --version {packet_version + 1}"}
 
 
+_MAX_EXTRA_READ_PATHS = 16
+_MAX_TOTAL_READ_PATHS = 32
+_ADMISSIBLE_TEST_READ_PATH = re.compile(
+    r'(?:tools/[A-Za-z0-9._-]+/tests|scripts)/test_[A-Za-z0-9_]{1,120}\.py\Z')
+
+
+def _admissible_repair_read_path(path):
+    """Return True only for a safe, non-sensitive repository test module path."""
+    if (type(path) is not str or not path or len(path) > 256 or
+            path.startswith('/') or '\\' in path or
+            any(part in ('', '.', '..') for part in path.split('/')) or
+            _ADMISSIBLE_TEST_READ_PATH.fullmatch(path) is None):
+        return False
+    try:
+        return sensitive_paths.is_sensitive(path) is False
+    except Exception:
+        return False
+
+
+def _merge_repair_read_paths(read_paths, extra_read_paths, write_paths):
+    """Add admissible failing test modules to read_paths within existing bounds."""
+    if type(read_paths) is not list or type(write_paths) is not list:
+        return read_paths
+    if type(extra_read_paths) not in (list, tuple) or not extra_read_paths:
+        return read_paths
+    merged = list(read_paths)
+    seen = set(merged)
+    write_set = set(write_paths)
+    cap = max(len(merged), _MAX_TOTAL_READ_PATHS)
+    added = 0
+    for path in extra_read_paths:
+        if added >= _MAX_EXTRA_READ_PATHS or len(merged) >= cap:
+            break
+        if path in seen or path in write_set or not _admissible_repair_read_path(path):
+            continue
+        seen.add(path)
+        merged.append(path)
+        added += 1
+    return merged
+
+
 def _worker_key(profile):
     return {'company-gw': 'company-gw', 'gw-agent': 'gw-agent',
             'opencode': 'opencode-developer', 'claude': 'claude-developer',
@@ -517,8 +558,9 @@ def _failed_event(task, *, executor_task, pr_number, github_get, body_holder=Non
     return packet, event
 
 
-def _remote_test_failure(task, *, executor_task, pr_number, receipt):
+def _remote_test_failure(task, *, executor_task, pr_number, receipt, details=None):
     """Build a repair packet only from a digest-valid FAIL receipt for this exact Task head."""
+    from . import task_submission_cli
     completion = task.get('completion')
     expected_executor = completion.get('executor_task_id') if type(completion) is dict else None
     if (type(receipt) is not dict or receipt.get('task_id') != task.get('task_id') or
@@ -540,16 +582,49 @@ def _remote_test_failure(task, *, executor_task, pr_number, receipt):
         valid_excerpt = False
     if claimed != digest or not valid_excerpt:
         _refuse('REMOTE_TEST_RECEIPT_INVALID')
+    if type(details) is dict:
+        screened_excerpt = (
+            task_submission_cli._screen_text(excerpt, CI_EXCERPT_MAX_BYTES + 1024)
+            if excerpt.strip() else '')
+        check_name = details.get('check_name')
+        if type(check_name) is not str or not check_name:
+            check_name = 'EC2 remote-test'
+        run_identity = details.get('run_identity')
+        if type(run_identity) is not str or not run_identity:
+            run_identity = f'receipt={claimed[:8]} executor={executor_task}'
+        raw_tests = details.get('failing_tests')
+        failing_tests = ([item for item in raw_tests[:20] if type(item) is str and item][:20]
+                         if type(raw_tests) is list else [])
+        if failing_tests:
+            screened_tests = task_submission_cli._screen_text(
+                ', '.join(failing_tests), CI_EXCERPT_MAX_BYTES + 1024)
+        else:
+            screened_tests = 'unavailable'
+        raw_modules = details.get('failing_modules')
+        failing_modules = ([item for item in raw_modules[:20] if type(item) is str and item]
+                           if type(raw_modules) is list else [])
+        modules_line = ', '.join(failing_modules) if failing_modules else 'unavailable'
+        body = screened_excerpt if screened_excerpt.strip() else 'Failure details unavailable.'
+        text = (
+            f"REMOTE_TEST_FAILURE check={check_name} {run_identity} head={receipt['source_sha']}\n"
+            f"failing_tests={screened_tests}\n"
+            f"failing_modules={modules_line}\n"
+            f"{body}"
+        )[:MAX_EXCERPT_CHARS]
+    else:
+        text = excerpt[:MAX_EXCERPT_CHARS]
     packet = {
         'task': task['task_id'], 'pr': pr_number, 'executor_task': executor_task,
         'failed_head': receipt['source_sha'], 'version': 0,
         'verdict_comment_id': 0, 'findings_count': 0,
-        'reviewer_text_excerpt_untrusted_data': excerpt[:MAX_EXCERPT_CHARS],
+        'reviewer_text_excerpt_untrusted_data': text,
     }
-    encoded = json.dumps(packet, ensure_ascii=True, sort_keys=True,
-                         separators=(',', ':')).encode('utf-8')
-    if len(encoded) > 8192:
-        _refuse('REPAIR_PACKET_INVALID')
+    while len(json.dumps(packet, ensure_ascii=True, sort_keys=True,
+                         separators=(',', ':')).encode('utf-8')) > 8192:
+        if not packet['reviewer_text_excerpt_untrusted_data']:
+            _refuse('REPAIR_PACKET_INVALID')
+        packet['reviewer_text_excerpt_untrusted_data'] = (
+            packet['reviewer_text_excerpt_untrusted_data'][:-256])
     return packet
 
 
@@ -565,6 +640,8 @@ CI_EXCERPT_MAX_BYTES = 4096
 CI_EXCERPT_MAX_LINES = 40
 CI_PACKET_HEADER = 'CI_CHECK_FAILURE'
 _CI_FAILURE_FIELDS = frozenset(('head', 'check_name', 'check_run_id', 'conclusion', 'excerpt'))
+_CI_FAILURE_OPTIONAL_FIELDS = frozenset((
+    'failing_tests', 'failing_modules', 'workflow_run_id', 'job_id', 'details_unavailable'))
 
 
 def _ci_failure(task, *, executor_task, pr_number, ci_failure):
@@ -575,15 +652,35 @@ def _ci_failure(task, *, executor_task, pr_number, ci_failure):
     the untrusted excerpt differs. Any malformed input refuses CI_FAILURE_INVALID.
     """
     from . import task_submission_cli
-    if (type(ci_failure) is not dict or set(ci_failure) != _CI_FAILURE_FIELDS or
+    if (type(ci_failure) is not dict or
+            not _CI_FAILURE_FIELDS <= set(ci_failure) or
+            not set(ci_failure) <= (_CI_FAILURE_FIELDS | _CI_FAILURE_OPTIONAL_FIELDS) or
             type(ci_failure['head']) is not str or
             re.fullmatch(r'[0-9a-f]{40}', ci_failure['head']) is None or
             type(ci_failure['check_name']) is not str or
             ci_failure['check_name'] not in CI_REPAIR_CHECKS or
-            type(ci_failure['check_run_id']) is not int or ci_failure['check_run_id'] < 1 or
+            type(ci_failure['check_run_id']) is not int or
+            isinstance(ci_failure['check_run_id'], bool) or ci_failure['check_run_id'] < 1 or
             type(ci_failure['conclusion']) is not str or
             ci_failure['conclusion'] != 'failure' or
             type(ci_failure['excerpt']) is not str):
+        _refuse('CI_FAILURE_INVALID')
+    failing_tests = ci_failure.get('failing_tests')
+    if failing_tests is not None and (
+            type(failing_tests) is not list or len(failing_tests) > 20 or
+            any(type(item) is not str or len(item) > 256 for item in failing_tests)):
+        _refuse('CI_FAILURE_INVALID')
+    failing_modules = ci_failure.get('failing_modules')
+    if failing_modules is not None and (
+            type(failing_modules) is not list or len(failing_modules) > 20 or
+            any(type(item) is not str or len(item) > 256 for item in failing_modules)):
+        _refuse('CI_FAILURE_INVALID')
+    for key in ('workflow_run_id', 'job_id'):
+        if key in ci_failure:
+            val = ci_failure[key]
+            if type(val) is not int or isinstance(val, bool) or val < 1:
+                _refuse('CI_FAILURE_INVALID')
+    if 'details_unavailable' in ci_failure and type(ci_failure['details_unavailable']) is not bool:
         _refuse('CI_FAILURE_INVALID')
     excerpt = ci_failure['excerpt']
     if excerpt.strip():
@@ -596,8 +693,28 @@ def _ci_failure(task, *, executor_task, pr_number, ci_failure):
     if not valid_excerpt:
         _refuse('CI_FAILURE_INVALID')
     head, name, run_id = ci_failure['head'], ci_failure['check_name'], ci_failure['check_run_id']
-    text = (f"{CI_PACKET_HEADER} check={name} run={run_id} conclusion=failure "
-            f"head={head}\n{excerpt}")[:MAX_EXCERPT_CHARS]
+    lines = [f"{CI_PACKET_HEADER} check={name} run={run_id} conclusion=failure head={head}"]
+    has_details = any(key in ci_failure for key in _CI_FAILURE_OPTIONAL_FIELDS)
+    if has_details:
+        if 'workflow_run_id' in ci_failure and 'job_id' in ci_failure:
+            lines.append(f"workflow_run={ci_failure['workflow_run_id']} job={ci_failure['job_id']}")
+        if failing_tests:
+            screened_tests = task_submission_cli._screen_text(
+                ', '.join(failing_tests), CI_EXCERPT_MAX_BYTES + 1024)
+            lines.append(f"failing_tests={screened_tests}")
+        else:
+            lines.append('failing_tests=unavailable')
+        if failing_modules:
+            lines.append(f"failing_modules={', '.join(failing_modules)}")
+        else:
+            lines.append('failing_modules=unavailable')
+        if excerpt.strip():
+            lines.append(excerpt)
+        else:
+            lines.append('Failure details unavailable.')
+    else:
+        lines.append(excerpt)
+    text = '\n'.join(lines)[:MAX_EXCERPT_CHARS]
     packet = {
         'task': task['task_id'], 'pr': pr_number, 'executor_task': executor_task,
         'failed_head': head, 'version': 0,
@@ -817,7 +934,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                   dispatch_adapter=None, current_head=None, auto_review=False,
                   review_dispatcher=None, delegate_callable=None,
                   repair_task_recorder=None, retry_claim_id=None,
-                  remote_test_receipt=None, ci_failure=None, auto=False):
+                  remote_test_receipt=None, ci_failure=None, auto=False,
+                  extra_read_paths=None, remote_test_details=None):
     """Claim and dispatch one repair for a failed review, remote test or CI check.
 
     remote_test_receipt (EC2) and ci_failure (#1502 WP-D D11) are exclusive; both
@@ -846,6 +964,13 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         _refuse('REPAIR_DEVELOPER_BINDING_INVALID')
     from . import direct_reassignment
     developer = direct_reassignment.authoring_route(store, task, developer, executor_task)
+    if extra_read_paths is None and type(ci_failure) is dict:
+        extra_read_paths = ci_failure.get('failing_modules')
+    if extra_read_paths is not None:
+        merged_read = _merge_repair_read_paths(
+            developer.get('read_paths'), extra_read_paths, developer.get('write_paths'))
+        if merged_read != developer.get('read_paths'):
+            developer = dict(developer, read_paths=merged_read)
     profile = developer.get('provider_profile')
     claude_cli = (profile == 'claude' and
                   developer.get('backend_session_semantics') == 'CLI_REPORTED_SESSION_ID')
@@ -871,7 +996,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                                        body_holder=body_holder)
     else:
         packet = _remote_test_failure(task, executor_task=executor_task,
-                                      pr_number=pr_number, receipt=remote_test_receipt)
+                                      pr_number=pr_number, receipt=remote_test_receipt,
+                                      details=remote_test_details)
     if _current_d6_head(task, executor_task, current_head) != packet['failed_head']:
         _refuse('REPAIR_HEAD_MOVED')
     # #1502 WP-D D13: no review repair while a dispute on this PR head is OPEN.
