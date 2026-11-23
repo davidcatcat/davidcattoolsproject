@@ -293,6 +293,7 @@ class GwAgentRoute(DeveloperRoute):
         self.allowed_data_classes = frozenset(classes)
         self._result = None
         self._tool_failure = None
+        self._resolved_session_id = None
         self.audit_copy_path = None
 
     def configure_boundary(self, boundary):
@@ -323,7 +324,8 @@ class GwAgentRoute(DeveloperRoute):
         session_id = request.get('session_id')
         session_home = request.get('session_home')
         if session_id is not None:
-            if type(session_id) is not str or _BINDING_SESSION_ID_READ.fullmatch(session_id) is None:
+            if (type(session_id) is not str or
+                    _BINDING_SESSION_ID_REQUEST.fullmatch(session_id) is None):
                 raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
             if session_home is None:
                 raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
@@ -399,6 +401,7 @@ class GwAgentRoute(DeveloperRoute):
             raise
 
     def _prepare_files(self, tmpdir, request):
+        self._resolved_session_id = None
         root = Path(request['root']).resolve(strict=True)
         private_tmp = Path(tmpdir).resolve(strict=True)
         package_path = Path(self.package_path)
@@ -419,6 +422,25 @@ class GwAgentRoute(DeveloperRoute):
                         home_resolved in root.parents or
                         root in home_resolved.parents):
                     raise ValueError('session home inside or containing root')
+                dev_form = (_BINDING_SESSION_ID_DEVELOPER.fullmatch(session_id)
+                            is not None)
+                if dev_form or session_binding_exists(home_path):
+                    # A Task recorded by the developer layer names its session in
+                    # the dev- form; binding.json holds the gateway's 32-hex id.
+                    executor_task_id = home_path.name
+                    if _TASK_ID.fullmatch(executor_task_id) is None:
+                        raise ValueError('session home name is not an executor task')
+                    binding = read_session_binding(
+                        home_path, executor_task_id=executor_task_id)
+                    task = request.get('task')
+                    root_task_id = task.get('task_id') if type(task) is dict else None
+                    if binding['root_task_id'] != root_task_id:
+                        raise ValueError('session binding names another root task')
+                    if not dev_form and binding['session_id'] != session_id:
+                        raise ValueError('session binding names another session')
+                    self._resolved_session_id = binding['session_id']
+                    session_id = self._resolved_session_id
+                    request['session_id'] = session_id
                 meta_bytes = private_read(home_path / 'meta.json', max_bytes=_SESSION_FILE_MAX_BYTES)
                 history_bytes = private_read(home_path / 'history.json', max_bytes=_SESSION_FILE_MAX_BYTES)
 
@@ -486,6 +508,11 @@ class GwAgentRoute(DeveloperRoute):
     def build_argv(self, executable, request):
         tmp = request['_route_tmpdir']
         session_id = request.get('session_id')
+        if (type(session_id) is str and
+                _BINDING_SESSION_ID_DEVELOPER.fullmatch(session_id) is not None):
+            session_id = self._resolved_session_id
+            if session_id is None:
+                raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
         cmd = ['resume', session_id] if session_id is not None else ['run']
         common_args = [
             '--authorization-file', str(Path(tmp) / 'authorization.json'),
@@ -725,6 +752,9 @@ class GwAgentRoute(DeveloperRoute):
                 result_session_id = (self._result.get('session_id')
                                      if isinstance(self._result, dict) else None)
                 requested_session_id = request.get('session_id')
+                if (isinstance(requested_session_id, str) and
+                        _BINDING_SESSION_ID_DEVELOPER.fullmatch(requested_session_id) is not None):
+                    requested_session_id = self._resolved_session_id or ''
                 if (isinstance(result_session_id, str) and
                         _BINDING_SESSION_ID_READ.fullmatch(result_session_id) is not None and
                         (requested_session_id is None or result_session_id == requested_session_id)):
@@ -757,6 +787,8 @@ class GwAgentRoute(DeveloperRoute):
 
 _BINDING_SESSION_ID_WRITE = re.compile(r'[0-9a-fA-F-]{16,64}\Z')
 _BINDING_SESSION_ID_READ = re.compile(r'[0-9a-f]{32}\Z')
+_BINDING_SESSION_ID_DEVELOPER = re.compile(r'dev-[0-9a-f]{32}\Z')
+_BINDING_SESSION_ID_REQUEST = re.compile(r'(?:[0-9a-f]{32}|dev-[0-9a-f]{32})\Z')
 _BINDING_SCOPE_DIGEST = re.compile(r'[0-9a-f]{64}\Z')
 _BINDING_FIELDS = frozenset({
     'data_class', 'executor_task_id', 'root_task_id',
