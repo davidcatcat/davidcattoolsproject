@@ -33,6 +33,7 @@ _MERGE_LINEAGE_CODES = {'TASK_LINEAGE_PENDING': 'TASK_LINEAGE_PENDING',
 
 class _PublishRefusal(Exception):
     def __init__(self, code, operation=None, *, message=None, details=None):
+        super().__init__(code)
         self.code = code
         # Set only for a refusal after this publish's own gh pr create (#1139).
         self.operation = operation
@@ -4569,8 +4570,10 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                         except (TypeError, ValueError):
                             result = result_value
                     except Exception as exc:
-                        code = getattr(exc, 'task_store_error_code', None) or _refusal(
-                            exc, 'review_repair_code')
+                        code = getattr(exc, 'task_store_error_code', None)
+                        if (type(code) is not str or
+                                re.fullmatch(r'[A-Z0-9_]{1,64}', code) is None):
+                            code = _refusal(exc, 'review_repair_code')
                         if code == 'DIRECT_DISPATCH_LEASE_BUSY':
                             step, codes = 'WAITING_REPAIR', [code]
                         elif code == 'REPAIR_LIMIT_REACHED' and remote_status == 'FAIL':
