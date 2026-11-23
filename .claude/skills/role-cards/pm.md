@@ -67,6 +67,7 @@ A format refusal is fixed here so the card matches llmtool, and recorded (#2423)
 - Same-family Debug and Reviewer: the PR records `INDEPENDENCE_NOTE: same-family debug` (D-2).
 - Record adopted advice as a PM decision, not review: source, evidence, smallest-check result, reason (D-6).
 - [Design consultation](debug.md#consultation) (O6): at most once per WP and, at first, 10 per week, listed cases only, no new dispatch key.
+- An extra requirement for a running Task goes into the acceptance through a `PM_SPEC_CORRECTION` continuation, not only as a PR comment, so that it reaches the review prompt.
 
 ## Merge, CI and monitor
 
