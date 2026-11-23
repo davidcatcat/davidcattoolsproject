@@ -1726,8 +1726,27 @@ def record_lineage(store, task_id, lineage):
 # exists per (pr, finding_id). A ruling never replaces the formal PASS.
 _REVIEW_DISPUTE_FIELDS = frozenset(('finding_id', 'pr', 'head_sha', 'review_version',
                                     'severity', 'state', 'evidence_ref', 'opened_at'))
+_REVIEW_DISPUTE_OPTIONAL_FIELDS = frozenset(('ruling', 'arbiter_claim', 'history'))
 _REVIEW_DISPUTE_RULING_FIELDS = frozenset(('outcome', 'head_sha', 'reviewer', 'reviewer_task',
                                            'reviewer_session', 'evidence_ref', 'ruled_at'))
+_REVIEW_DISPUTE_RULING_EVIDENCE_FIELDS = frozenset((
+    'path', 'finding_id', 'review_version', 'arbiter_claim_version',
+    'rules_sha256', 'review_text_sha256', 'claim_sha256', 'source_kind',
+    'output_sha256', 'comment_id', 'contract_digest', 'run_id',
+))
+_REVIEW_DISPUTE_CLAIM_DISPUTE_FIELDS = frozenset((
+    'pr', 'finding_id', 'head_sha', 'review_version', 'dispute_text_sha256',
+))
+_REVIEW_DISPUTE_HISTORY_FIELDS = frozenset(('event', 'at', 'actor', 'head_sha', 'refs'))
+_REVIEW_DISPUTE_HISTORY_EVENTS = frozenset((
+    'OPENED', 'DEFERRED', 'ARBITER_CLAIMED', 'ARBITER_DISPATCHED',
+    'ARBITER_COMPLETED', 'ARBITER_UNKNOWN', 'ARBITER_WITHHELD', 'RULED',
+))
+_REVIEW_DISPUTE_HISTORY_REF_FIELDS = frozenset((
+    'reviewer_task', 'version', 'comment_id', 'claim_sha256',
+    'review_text_sha256', 'output_sha256',
+))
+_REVIEW_DISPUTE_SOURCE_KINDS = frozenset(('CODEX_JSONL', 'CLAUDE_TRANSCRIPT'))
 REVIEW_DISPUTE_STATES = ('OPEN', 'RULED', 'DEFERRED', 'WITHDRAWN')
 # Severity words of formal verdict Finding lines (formal-verdict.md, #1502 4.12).
 REVIEW_DISPUTE_SEVERITIES = ('Blocker', 'Blocking', 'Critical', 'High', 'Medium',
@@ -1786,10 +1805,25 @@ def valid_review_dispute_session(value):
             not _emitted_sensitive(value))
 
 
+def _hex64(value):
+    return type(value) is str and re.fullmatch(r'[0-9a-f]{64}', value) is not None
+
+
+def _canonical_claim_sha256(claim):
+    payload = json.dumps(claim, ensure_ascii=False, sort_keys=True,
+                         separators=(',', ':'), allow_nan=False).encode('utf-8')
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _valid_review_dispute_ruling(item):
     ruling = item.get('ruling')
-    return (type(ruling) is dict and set(ruling) == _REVIEW_DISPUTE_RULING_FIELDS and
-            ruling['outcome'] in REVIEW_DISPUTE_OUTCOMES and
+    if type(ruling) is not dict:
+        return False
+    keys = set(ruling)
+    if keys not in (_REVIEW_DISPUTE_RULING_FIELDS,
+                    _REVIEW_DISPUTE_RULING_FIELDS | _REVIEW_DISPUTE_RULING_EVIDENCE_FIELDS):
+        return False
+    if not (ruling['outcome'] in REVIEW_DISPUTE_OUTCOMES and
             ruling['head_sha'] == item['head_sha'] and
             ruling['reviewer'] in REVIEW_DISPUTE_REVIEWERS and
             _safe_identifier(ruling['reviewer_task'], D6_TASK_ID) and
@@ -1797,18 +1831,126 @@ def _valid_review_dispute_ruling(item):
             _review_dispute_ref_match(ruling['evidence_ref']) is not None and
             ruling['evidence_ref'] != item['evidence_ref'] and
             _valid_utc_seconds(ruling['ruled_at']) and
-            ruling['ruled_at'] >= item['opened_at'])
+            ruling['ruled_at'] >= item['opened_at']):
+        return False
+    if keys == _REVIEW_DISPUTE_RULING_FIELDS:
+        return True
+    return (ruling['path'] == 'arbitrate' and
+            _safe_identifier(ruling['finding_id'], REVIEW_DISPUTE_FINDING_ID) and
+            type(ruling['review_version']) is int and 1 <= ruling['review_version'] <= 9999 and
+            type(ruling['arbiter_claim_version']) is int and
+            1 <= ruling['arbiter_claim_version'] <= 9999 and
+            _hex64(ruling['rules_sha256']) and
+            _hex64(ruling['review_text_sha256']) and
+            _hex64(ruling['claim_sha256']) and
+            ruling['source_kind'] in _REVIEW_DISPUTE_SOURCE_KINDS and
+            _hex64(ruling['output_sha256']) and
+            type(ruling['comment_id']) is int and ruling['comment_id'] >= 1 and
+            _hex64(ruling['contract_digest']) and
+            _safe_identifier(ruling['run_id'], TASK_ID))
+
+
+def _valid_review_dispute_history(history):
+    if type(history) is not list or len(history) > 64:
+        return False
+    for event in history:
+        if type(event) is not dict or set(event) != _REVIEW_DISPUTE_HISTORY_FIELDS:
+            return False
+        actor = event['actor']
+        actor_ok = (actor == 'llmtool' or
+                    (type(actor) is str and actor.startswith('pm:') and
+                     _safe_identifier(actor[3:], SESSION_ID)))
+        refs = event['refs']
+        if (event['event'] not in _REVIEW_DISPUTE_HISTORY_EVENTS or
+                not _valid_utc_seconds(event['at']) or
+                not actor_ok or
+                type(event['head_sha']) is not str or
+                re.fullmatch(r'[0-9a-f]{40}', event['head_sha']) is None or
+                type(refs) is not dict or
+                not set(refs).issubset(_REVIEW_DISPUTE_HISTORY_REF_FIELDS)):
+            return False
+        for key, value in refs.items():
+            if key == 'reviewer_task' and not _safe_identifier(value, D6_TASK_ID):
+                return False
+            if key == 'version' and (type(value) is not int or not 1 <= value <= 9999):
+                return False
+            if key == 'comment_id' and (type(value) is not int or value < 1):
+                return False
+            if (key in ('claim_sha256', 'review_text_sha256', 'output_sha256') and
+                    not _hex64(value)):
+                return False
+    return True
+
+
+def _normalized_review_claims(record):
+    claim = record.get('review_dispatch_claim')
+    if claim is None:
+        return []
+    return [claim] if type(claim) is dict else claim if type(claim) is list else []
+
+
+def _matching_arbiter_claims(claims, item):
+    ac = item.get('arbiter_claim')
+    if type(ac) is not dict:
+        return []
+    return [
+        c for c in claims
+        if type(c) is dict and
+        c.get('purpose') == 'dispute_ruling' and
+        c.get('reviewer_task') == ac.get('reviewer_task') and
+        c.get('version') == ac.get('version') and
+        type(c.get('dispute')) is dict and
+        c['dispute'].get('pr') == item.get('pr') and
+        c['dispute'].get('finding_id') == item.get('finding_id') and
+        c['dispute'].get('head_sha') == item.get('head_sha') and
+        c['dispute'].get('review_version') == item.get('review_version')
+    ]
+
+
+def _valid_arbitrate_ruling_binding(record, item):
+    ruling = item['ruling']
+    if 'arbiter_claim' not in item:
+        return False
+    matching = _matching_arbiter_claims(_normalized_review_claims(record), item)
+    if len(matching) != 1:
+        return False
+    claim = matching[0]
+    result = claim.get('review_result')
+    dispute = claim.get('dispute')
+    task_binding = record.get('task_binding')
+    if (claim.get('state') != 'COMPLETED' or
+            type(result) is not dict or result.get('verdict') != 'RULING' or
+            type(dispute) is not dict or type(task_binding) is not dict):
+        return False
+    return (dispute.get('pr') == item['pr'] and
+            dispute.get('head_sha') == item['head_sha'] == ruling['head_sha'] and
+            dispute.get('review_version') == item['review_version'] == ruling['review_version'] and
+            dispute.get('finding_id') == item['finding_id'] == ruling['finding_id'] and
+            claim.get('version') == ruling['arbiter_claim_version'] == item['arbiter_claim']['version'] and
+            claim.get('reviewer_task') == ruling['reviewer_task'] == item['arbiter_claim']['reviewer_task'] and
+            claim.get('native_session_id') == ruling['reviewer_session'] and
+            claim.get('reviewer') == ruling['reviewer'] and
+            result.get('outcome') == ruling['outcome'] and
+            result.get('source') == {'kind': ruling['source_kind'],
+                                     'output_sha256': ruling['output_sha256']} and
+            hashlib.sha256(result['review_text'].encode('utf-8')).hexdigest() ==
+            ruling['review_text_sha256'] and
+            claim.get('rules_sha256') == ruling['rules_sha256'] and
+            _canonical_claim_sha256(claim) == ruling['claim_sha256'] and
+            ruling['contract_digest'] == task_binding.get('contract_digest') and
+            ruling['run_id'] == record.get('run_id'))
 
 
 def _validate_review_disputes(record):
     items = record.get('review_disputes')
     if type(items) is not list or len(items) > MAX_REVIEW_DISPUTES:
         _fail('REVIEW_DISPUTE_INVALID')
+    claims = _normalized_review_claims(record)
     ruled, live, open_keys, repositories = set(), set(), set(), set()
     for item in items:
         if (type(item) is not dict or
-                set(item) not in (_REVIEW_DISPUTE_FIELDS,
-                                  _REVIEW_DISPUTE_FIELDS | frozenset(('ruling',))) or
+                not _REVIEW_DISPUTE_FIELDS.issubset(item) or
+                set(item) - _REVIEW_DISPUTE_FIELDS - _REVIEW_DISPUTE_OPTIONAL_FIELDS or
                 not _safe_identifier(item['finding_id'], REVIEW_DISPUTE_FINDING_ID) or
                 type(item['pr']) is not int or not 1 <= item['pr'] <= 9999999 or
                 type(item['head_sha']) is not str or
@@ -1822,9 +1964,19 @@ def _validate_review_disputes(record):
                 not _valid_utc_seconds(item['opened_at']) or
                 ('ruling' in item) != (item['state'] == 'RULED') or
                 (item['state'] == 'RULED' and not _valid_review_dispute_ruling(item)) or
+                (item['state'] == 'RULED' and 'path' in item['ruling'] and
+                 not _valid_arbitrate_ruling_binding(record, item)) or
                 (item['state'] == 'DEFERRED' and
-                 item['severity'] not in REVIEW_DISPUTE_DEFERRABLE)):
+                 item['severity'] not in REVIEW_DISPUTE_DEFERRABLE) or
+                ('history' in item and not _valid_review_dispute_history(item['history']))):
             _fail('REVIEW_DISPUTE_INVALID')
+        if 'arbiter_claim' in item:
+            ac = item['arbiter_claim']
+            if (type(ac) is not dict or set(ac) != frozenset(('reviewer_task', 'version')) or
+                    not _safe_identifier(ac['reviewer_task'], D6_TASK_ID) or
+                    type(ac['version']) is not int or not 1 <= ac['version'] <= 9999 or
+                    len(_matching_arbiter_claims(claims, item)) != 1):
+                _fail('REVIEW_DISPUTE_INVALID')
         repositories.add(_review_dispute_ref_match(item['evidence_ref']).group(1))
         if item['state'] == 'RULED':
             repositories.add(_review_dispute_ref_match(item['ruling']['evidence_ref']).group(1))
@@ -1847,16 +1999,69 @@ def _validate_review_disputes(record):
         _fail('REVIEW_DISPUTE_INVALID')
 
 
-def _check_review_disputes_transition(old, new):
-    """Append one OPEN or DEFERRED entry, or move one OPEN entry to RULED or WITHDRAWN."""
+def _arbiter_claim_transition_matches(event_name, arbiter_claim, old_claims, new_claims):
+    """Verify an ARBITER_* history event has its matching claim state change in this write."""
+    if (type(arbiter_claim) is not dict or
+            type(old_claims) is not list or type(new_claims) is not list):
+        return False
+    rt = arbiter_claim.get('reviewer_task')
+    ver = arbiter_claim.get('version')
+    if event_name == 'ARBITER_CLAIMED':
+        if len(new_claims) != len(old_claims) + 1 or new_claims[:-1] != old_claims:
+            return False
+        added = new_claims[-1]
+        return (type(added) is dict and
+                added.get('purpose') == 'dispute_ruling' and
+                added.get('state') == 'CLAIMED' and
+                added.get('reviewer_task') == rt and
+                added.get('version') == ver)
+    if len(new_claims) != len(old_claims):
+        return False
+    changed = [(b, a) for b, a in zip(old_claims, new_claims) if b != a]
+    if len(changed) != 1:
+        return False
+    before, after = changed[0]
+    if (type(before) is not dict or type(after) is not dict or
+            before.get('purpose') != 'dispute_ruling' or
+            before.get('reviewer_task') != rt or
+            before.get('version') != ver):
+        return False
+    b_state, a_state = before.get('state'), after.get('state')
+    if event_name == 'ARBITER_DISPATCHED':
+        return b_state == 'CLAIMED' and a_state == 'DISPATCHED'
+    if event_name == 'ARBITER_UNKNOWN':
+        return b_state == 'CLAIMED' and a_state == 'UNKNOWN'
+    if event_name == 'ARBITER_COMPLETED':
+        return (b_state in ('CLAIMED', 'DISPATCHED') and a_state == 'COMPLETED' and
+                type(after.get('review_result')) is dict and
+                after['review_result'].get('verdict') == 'RULING')
+    if event_name == 'ARBITER_WITHHELD':
+        return (b_state in ('CLAIMED', 'DISPATCHED') and a_state == 'COMPLETED' and
+                type(after.get('review_result')) is dict and
+                after['review_result'].get('verdict') == 'BLOCKED')
+    return False
+
+
+def _check_review_disputes_transition(old, new, *, old_claims=None, new_claims=None):
+    """Append one OPEN or DEFERRED entry, or advance one OPEN entry."""
     old = [] if old is None else old
-    if type(old) is not list or type(new) is not list:
+    old_claims = [] if old_claims is None else old_claims
+    new_claims = [] if new_claims is None else new_claims
+    if (type(old) is not list or type(new) is not list or
+            type(old_claims) is not list or type(new_claims) is not list):
         _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
     if len(new) == len(old) + 1:
         added = new[-1]
         if (new[:-1] != old or type(added) is not dict or
-                added.get('state') not in ('OPEN', 'DEFERRED') or 'ruling' in added):
+                added.get('state') not in ('OPEN', 'DEFERRED') or
+                'ruling' in added or 'arbiter_claim' in added):
             _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
+        if 'history' in added:
+            hist = added['history']
+            expected_ev = 'OPENED' if added.get('state') == 'OPEN' else 'DEFERRED'
+            if (type(hist) is not list or len(hist) != 1 or
+                    type(hist[0]) is not dict or hist[0].get('event') != expected_ev):
+                _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
         return
     changed = [index for index, (before, after) in enumerate(zip(old, new))
                if before != after]
@@ -1865,10 +2070,44 @@ def _check_review_disputes_transition(old, new):
     before, after = old[changed[0]], new[changed[0]]
     if (type(before) is not dict or type(after) is not dict or
             before.get('state') != 'OPEN' or
-            after.get('state') not in ('RULED', 'WITHDRAWN') or
-            set(after) - set(before) - {'ruling'} or set(before) - set(after) or
+            after.get('state') not in ('OPEN', 'RULED', 'WITHDRAWN') or
             any(before.get(key) != after.get(key)
                 for key in _REVIEW_DISPUTE_FIELDS - {'state'})):
+        _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
+    # arbiter_claim is set once on OPEN -> OPEN with the CLAIMED claim, then immutable.
+    if 'arbiter_claim' in before:
+        if after.get('arbiter_claim') != before['arbiter_claim']:
+            _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
+    elif 'arbiter_claim' in after:
+        if (after.get('state') != 'OPEN' or
+                not _arbiter_claim_transition_matches(
+                    'ARBITER_CLAIMED', after['arbiter_claim'], old_claims, new_claims)):
+            _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
+    # ruling is added only on OPEN -> RULED.
+    if after.get('state') == 'RULED':
+        if 'ruling' not in after or 'ruling' in before:
+            _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
+    elif 'ruling' in after or 'ruling' in before:
+        _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
+    # history is append-only (exactly +1 event when present on after).
+    if 'history' in after:
+        old_hist = before.get('history', [])
+        new_hist = after['history']
+        if (type(old_hist) is not list or type(new_hist) is not list or
+                len(new_hist) != len(old_hist) + 1 or new_hist[:-1] != old_hist or
+                type(new_hist[-1]) is not dict):
+            _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
+        ev_name = new_hist[-1].get('event')
+        if ev_name in ('OPENED', 'DEFERRED'):
+            _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
+        if ev_name == 'RULED' and after.get('state') != 'RULED':
+            _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
+        if type(ev_name) is str and ev_name.startswith('ARBITER_'):
+            if (after.get('state') != 'OPEN' or
+                    not _arbiter_claim_transition_matches(
+                        ev_name, after.get('arbiter_claim'), old_claims, new_claims)):
+                _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
+    elif 'history' in before or after.get('state') == 'OPEN':
         _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
 
 
@@ -2560,15 +2799,18 @@ def _validate(record, *, strict=True):
             _fail('REVIEW_DISPATCH_CLAIM_INVALID')
         identities = set()
         for item in claims:
+            ruling_keys_count = sum(1 for key in ('purpose', 'dispute', 'reviewer') if key in item) if type(item) is dict else 0
             if (type(item) is not dict or
                     set(item) - frozenset(('failure_reason', 'binding_mismatch_keys',
                                            'rules_sha256', 'bind_failure_reason',
-                                           'review_kind')) not in (
+                                           'review_kind', 'purpose', 'dispute',
+                                           'reviewer')) not in (
                         _REVIEW_DISPATCH_CLAIM_FIELDS,
                         _REVIEW_DISPATCH_CLAIM_FIELDS | frozenset(('review_result',)),
                         _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS,
                         _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS |
                         frozenset(('review_result',))) or
+                    ruling_keys_count not in (0, 3) or
                     ('failure_reason' in item and
                      not _known_review_failure_reason(item['failure_reason'])) or
                     # #1909 item 1 (security v91): only an UNKNOWN claim, never with failure_reason.
@@ -2618,19 +2860,69 @@ def _validate(record, *, strict=True):
                       'review_result' not in item)) or
                     (item['state'] != 'COMPLETED' and 'review_result' in item)):
                 _fail('REVIEW_DISPATCH_CLAIM_INVALID')
+            if 'purpose' in item:
+                dispute = item['dispute']
+                disputes = record.get('review_disputes')
+                if (item['purpose'] != 'dispute_ruling' or
+                        type(item['reviewer']) is not str or
+                        item['reviewer'] not in REVIEW_DISPUTE_REVIEWERS or
+                        type(dispute) is not dict or
+                        set(dispute) != _REVIEW_DISPUTE_CLAIM_DISPUTE_FIELDS or
+                        type(dispute['pr']) is not int or dispute['pr'] != item['pr'] or
+                        not _safe_identifier(dispute['finding_id'], REVIEW_DISPUTE_FINDING_ID) or
+                        type(dispute['head_sha']) is not str or
+                        dispute['head_sha'] != item['head_sha'] or
+                        type(dispute['review_version']) is not int or
+                        not 1 <= dispute['review_version'] <= 9999 or
+                        not _hex64(dispute['dispute_text_sha256']) or
+                        type(disputes) is not list or
+                        not any(type(entry) is dict and
+                                entry.get('pr') == dispute['pr'] and
+                                entry.get('finding_id') == dispute['finding_id'] and
+                                entry.get('head_sha') == dispute['head_sha'] and
+                                entry.get('review_version') == dispute['review_version']
+                                for entry in disputes)):
+                    _fail('REVIEW_DISPATCH_CLAIM_INVALID')
             if item['state'] == 'COMPLETED':
                 result = item['review_result']
                 task_binding = record.get('task_binding')
-                if (type(result) is not dict or set(result) != _REVIEW_DISPATCH_RESULT_FIELDS or
+                if (type(result) is not dict or
                         result.get('task_id') != record.get('task_id') or
                         result.get('run_id') != record.get('run_id') or
                         type(task_binding) is not dict or
                         result.get('contract_digest') != task_binding.get('contract_digest') or
                         result.get('head') != item['head_sha'] or
-                        result.get('verdict') not in ('PASS', 'FIX', 'FAIL', 'BLOCKED') or
-                        type(result.get('review_text')) is not str or
-                        len(result['review_text'].encode('utf-8', 'replace')) > 65536):
+                        type(result.get('review_text')) is not str):
                     _fail('REVIEW_DISPATCH_CLAIM_INVALID')
+                if 'purpose' in item:
+                    source = result.get('source')
+                    expected_kind = ('CODEX_JSONL' if item['reviewer'] == 'codex-reviewer'
+                                     else 'CLAUDE_TRANSCRIPT')
+                    if (type(source) is not dict or
+                            set(source) != frozenset(('kind', 'output_sha256')) or
+                            source.get('kind') != expected_kind or
+                            not _hex64(source.get('output_sha256'))):
+                        _fail('REVIEW_DISPATCH_CLAIM_INVALID')
+                    verdict = result.get('verdict')
+                    if verdict == 'RULING':
+                        if (set(result) != _REVIEW_DISPATCH_RESULT_FIELDS |
+                                frozenset(('outcome', 'source')) or
+                                result.get('outcome') not in REVIEW_DISPUTE_OUTCOMES or
+                                not result['review_text'] or
+                                len(result['review_text'].encode('utf-8', 'replace')) > 65536):
+                            _fail('REVIEW_DISPATCH_CLAIM_INVALID')
+                    elif verdict == 'BLOCKED':
+                        if (set(result) != _REVIEW_DISPATCH_RESULT_FIELDS |
+                                frozenset(('source',)) or
+                                result['review_text'] != ''):
+                            _fail('REVIEW_DISPATCH_CLAIM_INVALID')
+                    else:
+                        _fail('REVIEW_DISPATCH_CLAIM_INVALID')
+                else:
+                    if (set(result) != _REVIEW_DISPATCH_RESULT_FIELDS or
+                            result.get('verdict') not in ('PASS', 'FIX', 'FAIL', 'BLOCKED') or
+                            len(result['review_text'].encode('utf-8', 'replace')) > 65536):
+                        _fail('REVIEW_DISPATCH_CLAIM_INVALID')
             identity = (item['pr'], item['head_sha'], item['version'])
             if identity in identities:
                 _fail('REVIEW_DISPATCH_CLAIM_INVALID')
@@ -6472,8 +6764,14 @@ class TaskStore:
                                             trusted_split, split_child_max)
             if 'review_disputes' in changes:
                 # #1502 WP-D D13: append and forward transitions only, under the task lock.
-                _check_review_disputes_transition(current.get('review_disputes'),
-                                                  changes['review_disputes'])
+                old_claim = current.get('review_dispatch_claim')
+                new_claim = changes.get('review_dispatch_claim', old_claim)
+                _check_review_disputes_transition(
+                    current.get('review_disputes'), changes['review_disputes'],
+                    old_claims=([] if old_claim is None else
+                                [old_claim] if type(old_claim) is dict else old_claim),
+                    new_claims=([] if new_claim is None else
+                                [new_claim] if type(new_claim) is dict else new_claim))
             if 'read_scope_advice' in changes:
                 # #2503: advisory entries are append-only.
                 _check_read_scope_advice_transition(current.get('read_scope_advice'),
@@ -6499,16 +6797,39 @@ class TaskStore:
                 allowed_claim_transition = False
                 if type(old_claims) is list and type(new_claims) is list:
                     if len(new_claims) == len(old_claims) + 1 and new_claims[:-1] == old_claims:
-                        allowed_claim_transition = (type(new_claims[-1]) is dict and
-                                                    new_claims[-1].get('state') == 'CLAIMED' and
-                                                    new_claims[-1].get('review_kind') != 'security')
+                        added_claim = new_claims[-1]
+                        allowed_claim_transition = (
+                            type(added_claim) is dict and
+                            added_claim.get('state') == 'CLAIMED' and
+                            added_claim.get('review_kind') != 'security')
+                        if allowed_claim_transition and 'purpose' in added_claim:
+                            dispute = added_claim.get('dispute')
+                            if (type(dispute) is dict and any(
+                                    type(entry) is dict and
+                                    entry.get('pr') == dispute.get('pr') and
+                                    entry.get('finding_id') == dispute.get('finding_id') and
+                                    entry.get('head_sha') == dispute.get('head_sha') and
+                                    entry.get('review_version') == dispute.get('review_version') and
+                                    entry.get('state') == 'RULED'
+                                    for entry in current.get('review_disputes') or ())):
+                                allowed_claim_transition = False
                     elif len(new_claims) == len(old_claims):
                         changed = [index for index, (before, after) in
                                    enumerate(zip(old_claims, new_claims)) if before != after]
                         if len(changed) == 1:
                             index = changed[0]
                             before, after = old_claims[index], new_claims[index]
+                            dispute = before.get('dispute')
+                            ruled_entry = ('purpose' in before and type(dispute) is dict and any(
+                                type(entry) is dict and
+                                entry.get('pr') == dispute.get('pr') and
+                                entry.get('finding_id') == dispute.get('finding_id') and
+                                entry.get('head_sha') == dispute.get('head_sha') and
+                                entry.get('review_version') == dispute.get('review_version') and
+                                entry.get('state') == 'RULED'
+                                for entry in current.get('review_disputes') or ()))
                             allowed_claim_transition = (
+                                not ruled_entry and
                                 before.get('state') == 'CLAIMED' and
                                 after.get('state') in ('UNKNOWN', 'DISPATCHED', 'COMPLETED') and
                                 before.get('review_kind') != 'security' and
@@ -6516,13 +6837,34 @@ class TaskStore:
                                 all(before.get(key) == after.get(key) for key in (
                                     'executor_task', 'pr', 'head_sha', 'version',
                                     'account_mode', 'account', 'claimed_at',
-                                    'reviewer_task', 'rules_sha256', 'review_kind')) and
-                                (before.get('state') == 'CLAIMED' and
-                                 (after.get('state') == 'COMPLETED' or
-                                  ('review_result' not in after))) and
+                                    'reviewer_task', 'rules_sha256', 'review_kind',
+                                    'purpose', 'dispute', 'reviewer')) and
+                                (after.get('state') == 'COMPLETED' or
+                                 'review_result' not in after) and
+                                ('purpose' not in before or after.get('state') != 'COMPLETED' or
+                                 (before.get('reviewer') == 'codex-reviewer' and
+                                  type(after.get('review_result')) is dict and
+                                  type(after['review_result'].get('source')) is dict and
+                                  after['review_result']['source'].get('kind') == 'CODEX_JSONL')) and
                                 all(old == new for i, (old, new) in
                                     enumerate(zip(old_claims, new_claims)) if i != index))
-                            if (not allowed_claim_transition and
+                            if (not allowed_claim_transition and not ruled_entry and
+                                    before.get('state') == 'DISPATCHED' and
+                                    after.get('state') == 'COMPLETED' and
+                                    before.get('purpose') == 'dispute_ruling' and
+                                    before.get('reviewer') == 'claude-reviewer' and
+                                    type(before.get('native_session_id')) is str and
+                                    set(after) == set(before) | {'review_result'} and
+                                    all(before.get(key) == after.get(key) for key in before
+                                        if key not in ('state', 'updated_at')) and
+                                    type(after.get('review_result')) is dict and
+                                    type(after['review_result'].get('source')) is dict and
+                                    after['review_result']['source'].get('kind') == 'CLAUDE_TRANSCRIPT' and
+                                    all(old == new for i, (old, new) in
+                                        enumerate(zip(old_claims, new_claims)) if i != index)):
+                                allowed_claim_transition = True
+                            if (not allowed_claim_transition and not ruled_entry and
+                                    'purpose' not in before and
                                     before.get('state') == 'UNKNOWN' and
                                     after.get('state') == 'DISPATCHED'):
                                 # #1636: an UNKNOWN review claim settles only with its
