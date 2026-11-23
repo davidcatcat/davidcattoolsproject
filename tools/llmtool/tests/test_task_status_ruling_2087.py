@@ -86,7 +86,7 @@ class TaskStatusRulingTests(unittest.TestCase):
                 self.assertEqual(
                     _sans_state(summary),
                     _sans_state(_summary_of(_BASE_RECORD(with_dispute=False))))
-                self.assertEqual(tuple(sorted(summary)), SUMMARY_KEYS)
+                self.assertEqual(set(summary), set(SUMMARY_KEYS))
 
     # --- A2: single ruling-claim dict, no claim, malformed last item ---
 
@@ -96,7 +96,7 @@ class TaskStatusRulingTests(unittest.TestCase):
         summary = _summary_of(rec)
         self.assertEqual(summary['review_claim_state'], 'UNKNOWN')
         self.assertNotEqual(summary['review_claim_state'], 'NONE')
-        self.assertEqual(tuple(sorted(summary)), SUMMARY_KEYS)
+        self.assertEqual(set(summary), set(SUMMARY_KEYS))
 
     def test_a2_single_formal_claim_dict_is_unchanged(self):
         rec = _BASE_RECORD(with_dispute=False)
@@ -138,9 +138,9 @@ class TaskStatusRulingTests(unittest.TestCase):
             _sans_state(_summary_of(_BASE_RECORD(with_dispute=False))))
         self.assertEqual(summary['review_claim_state'], 'COMPLETED')
         self.assertEqual(
-            tuple(sorted(summary)),
-            ('task_id', 'pm_session_id', 'state', 'executor_d6',
-             'last_event', 'review_claim_state', 'pending_inbox_count'))
+            set(summary),
+            {'task_id', 'pm_session_id', 'state', 'executor_d6',
+             'last_event', 'review_claim_state', 'pending_inbox_count'})
 
 
 if __name__ == '__main__':
