@@ -36,6 +36,12 @@ class RefusalReason2602Tests(unittest.TestCase):
                 self.assertEqual(task_advance._refusal(error, 'completion_code'),
                                  'RUNTIMEERROR')
 
+    def test_a_known_code_attribute_is_kept_when_the_requested_one_is_absent(self):
+        error = RuntimeError('ignored')
+        error.code = 'KNOWN_REFUSAL_CODE'
+        self.assertEqual(task_advance._refusal(error, 'completion_code'),
+                         'KNOWN_REFUSAL_CODE')
+
     def test_a_long_type_name_is_bounded_and_code_shaped(self):
         error = type('X' * 80, (Exception,), {})('boom')
         code = task_advance._refusal(error, 'completion_code')

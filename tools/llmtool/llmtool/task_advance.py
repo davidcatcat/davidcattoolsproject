@@ -2631,9 +2631,9 @@ def _publish_task(record, d6, executor_task, *, git_runner=None,
 
     # #2602 D2: a Developer result with no commit over its base (for example a
     # branch equal to main) cannot become a PR. Stop here with a definite code
-    # and next step instead of failing later as PUBLISH_GITHUB_FAILED.
-    if (not changed and not committed and
-            (remote_head is None or local_head in main_bases)):
+    # and next step instead of failing later as PUBLISH_GITHUB_FAILED. Only a
+    # published main tip is the boundary; any other unpushed path is unchanged.
+    if not changed and not committed and local_head in main_bases:
         raise _no_new_commit_refusal()
 
     if any(path in guidance_refresh.GUIDANCE_FILES for path in task_paths):
@@ -3446,9 +3446,12 @@ def _blocked_fallback_reviewer(record, head):
 
 
 def _refusal(exc, attribute):
-    code = getattr(exc, attribute, None)
-    if type(code) is str and re.fullmatch(r'[A-Z0-9_]{1,64}', code):
-        return code
+    # The caller's attribute first, then the exception's own code attribute:
+    # E1 keeps a known error code whenever one is available.
+    for key in (attribute, 'code'):
+        code = getattr(exc, key, None)
+        if type(code) is str and re.fullmatch(r'[A-Z0-9_]{1,64}', code):
+            return code
     # #2602 E1/E2: keep a reason (the exception type name, never its message),
     # bounded and code-shaped, instead of a bare TASK_ADVANCE_REFUSED.
     name = getattr(type(exc), '__name__', '')
