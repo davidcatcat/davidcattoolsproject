@@ -227,18 +227,19 @@ class DisputeRulingClaimReadersTests(unittest.TestCase):
                     TASK, expected={'record_sha256': rec['record_sha256']},
                     review_dispatch_claim=current_claims + [arbiter])
         if events:
-            for ev in events:
-                store.record_completion_event(
-                    TASK,
-                    event_id=ev['event_id'],
-                    run_id=ev['run_id'],
-                    session_id=ev['session_id'],
-                    source=ev['source'],
-                    source_sha=ev['source_sha'],
-                    sequence=ev['sequence'],
-                    payload_sha256=ev['payload_sha256'],
-                    review_kind=ev.get('review_kind'),
-                )
+            with patch.object(task_store.TaskStore, '_completion_now', return_value=STAMP_2):
+                for ev in events:
+                    store.record_completion_event(
+                        TASK,
+                        event_id=ev['event_id'],
+                        run_id=ev['run_id'],
+                        session_id=ev['session_id'],
+                        source=ev['source'],
+                        source_sha=ev['source_sha'],
+                        sequence=ev['sequence'],
+                        payload_sha256=ev['payload_sha256'],
+                        review_kind=ev.get('review_kind'),
+                    )
             rec = store.get(TASK)
         return store, rec, contract_digest
 
