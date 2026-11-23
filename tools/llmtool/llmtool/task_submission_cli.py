@@ -5393,8 +5393,6 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
     _screen_text(prompt, REQUEST_LIMIT)
     model, steps = _opencode_developer_profile()
     if reassignment is not None:
-        if not opencode_direct_developer.is_free_model(model):
-            raise LLMToolError('DIRECT_REASSIGN_OPENCODE_FREE_MODEL_REQUIRED')
         if shutil.which('opencode') is None:
             raise LLMToolError('DIRECT_REASSIGN_ALTERNATE_UNAVAILABLE')
         decision = worker_dispatch.evaluate('opencode-developer', None, task['task_id'])
@@ -9069,6 +9067,10 @@ def _auto_direct_replacement(args, store):
     replacement.background = False
     # A timeout for the former route belongs to that route's policy limits.
     replacement.timeout = None
+    # AGY and OpenCode developer records do not store data_class; clear it on
+    # automatic reassignment so the scope check matches the stored record.
+    replacement.data_class = None
+    replacement._auto_direct_reassignment = True
     return replacement
 
 
@@ -9188,11 +9190,12 @@ def run_task_delegate(args, *, store=None):
             f'{worker_dispatch.RETIRED_WORKER_ALIASES[retired]} (#1502 WP-E)')
     # #1815: refuse a bad --timeout before any Task read, fork or provider call.
     selected_route = getattr(args, 'provider', None)
+    is_auto_reassign = getattr(args, '_auto_direct_reassignment', False) is True
     if getattr(args, 'reassign_from', None) is not None and (
             selected_route not in direct_reassignment.AGENTS or
             getattr(args, 'background', False) or
             getattr(args, 'selection_source', None) != 'PM' or
-            getattr(args, 'data_class', None) is not None):
+            (not is_auto_reassign and getattr(args, 'data_class', None) is not None)):
         raise LLMToolError('DIRECT_REASSIGN_ROUTE_REFUSED')
     if selected_route in TIMEOUT_ROUTES:
         _delegate_timeout(args, selected_route)
