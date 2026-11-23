@@ -99,7 +99,8 @@ class DisputeTuiStatusTests(unittest.TestCase):
         # started_at is the formal claim's claimed_at, not the arbiter's.
         self.assertEqual(items[0]['started_at'], STAMP_1)
         self.assertNotEqual(items[0]['started_at'], STAMP_2)
-        self.assertEqual(items[0]['pr'], PR)
+        # pr is derived as the display form "#42", not the raw int.
+        self.assertEqual(items[0]['pr'], f'#{PR}')
 
         # Single ruling-claim dict: the purposed claim is skipped, so the
         # item is still there (state from the completion) with no started_at,
@@ -109,7 +110,7 @@ class DisputeTuiStatusTests(unittest.TestCase):
         self.assertEqual(len(single_items), 1)
         self.assertEqual(single_items[0]['state'], 'WAITING_REVIEW')
         self.assertIsNone(single_items[0]['started_at'])
-        self.assertEqual(single_items[0]['pr'], PR)
+        self.assertEqual(single_items[0]['pr'], f'#{PR}')
 
     def test_formal_claims_unchanged(self):
         store = self._new_store()
