@@ -91,8 +91,33 @@ def _merge_resolution_paths(root, commit, first_parent, second_parent):
     return resolution_paths | set(conflict_paths)
 
 
+def _guidance_refresh_commit(root, commit, parent):
+    """True for llmtool's own publish hash-refresh commit (#2497, #2640).
+
+    It may change only guidance-drift.json, and only to the exact bytes the
+    refresh writes from the parent tree (guidance_refresh.is_refresh_content),
+    so it adds no Developer content. Any git failure or doubt is False.
+    """
+    from . import guidance_refresh as _g
+    try:
+        paths = _git(root, ('diff-tree', '--no-commit-id', '--no-renames', '-r',
+                            '--name-only', '-z', parent, commit), limit=4096)
+        if [p for p in paths.decode('utf-8').split('\x00') if p] != [_g.CONFIG_REL_PATH]:
+            return False
+        blob = lambda sha, path: _git(root, ('cat-file', 'blob', f'{sha}:{path}'),
+                                      limit=1024 * 1024)
+        return _g.is_refresh_content(
+            blob(parent, _g.CONFIG_REL_PATH), blob(commit, _g.CONFIG_REL_PATH),
+            {path: blob(parent, path) for path in _g.GUIDANCE_FILES})
+    except (LLMToolError, UnicodeError):
+        return False
+
+
 def _developer_tip(root, start_sha, head_sha, trusted_base_sha=None):
     """Return head_sha with its trailing clean trusted-main merges stripped.
+
+    llmtool's own guidance hash-refresh commit (_guidance_refresh_commit) is
+    stripped too: it carries no Developer content (#2640).
 
     A stripped merge has exactly two parents, a trusted second parent and no
     resolution or conflict path, so it adds nothing to its first parent except
@@ -105,6 +130,9 @@ def _developer_tip(root, start_sha, head_sha, trusted_base_sha=None):
     while current != start_sha:
         raw = _git(root, ('rev-list', '--parents', '-n', '1', current), limit=4096)
         parents = raw.decode('ascii').split()[1:]
+        if len(parents) == 1 and _guidance_refresh_commit(root, current, parents[0]):
+            current = parents[0]
+            continue
         if len(parents) == 2:
             _require_trusted_base(root, trusted_base_sha)
         if (len(parents) != 2 or not _m._is_ancestor(root, parents[1], trusted_base_sha) or
