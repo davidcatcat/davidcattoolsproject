@@ -3124,7 +3124,8 @@ def _review_refusal_rerun(record, claim, d6, pr, store, github_get):
         return None, REVIEW_RERUN_CONTRACT_CHANGED
     # #2486 security v91: any attempt for this PR and head may still be running,
     # not only the newest refused claim. One live attempt is doubt; doubt refuses.
-    live_attempts = [item for item in _non_ruling_claims(record)
+    # #2087: ruling claims count too (fail closed); a live arbiter process is doubt.
+    live_attempts = [item for item in _claims(record)
                      if type(item) is dict and item.get('pr') == claim.get('pr') and
                      item.get('head_sha') == head]
     if any(_reviewer_process_live(item) for item in live_attempts):

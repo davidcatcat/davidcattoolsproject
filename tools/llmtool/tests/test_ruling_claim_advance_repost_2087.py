@@ -4,13 +4,16 @@ Covers three post-merge security findings (PR #2662 L1 and L2, PR #2656 L1):
 
 * A2-L1: ``review_transcript.truncated_fail_repost`` refuses a ruling claim first.
 * A2-L2: ``task_advance`` chooses the review claim of a PR head from formal
-  claims only, so a ruling claim at a higher version changes nothing.
+  claims only, so a ruling claim at a higher version changes nothing. The #2486
+  live Reviewer process check before a re-run still counts every claim at the
+  head, ruling claims included (fail closed).
 * #2656 L1: the version-used refusal of review dispatch counts every ruling
   claim on the PR, whatever its executor_task.
 
 A ruling claim is a dict with a ``purpose`` key, whatever its value. Placeholder
 ids and digests only; no runtime, GitHub, transcript or account is started
-(every such function is injected or patched).
+(every such function is injected or patched). The repost CLI test and the
+advance-step tests write their formal and ruling claims through the real TaskStore.
 """
 
 import tempfile
@@ -61,7 +64,7 @@ def _new_store(test):
     return task_store.TaskStore(Path(temp.name).resolve() / 'store')
 
 
-def _store_with(test, claims):
+def _store_with(test, claims, *, dispute=None):
     """A real TaskStore holding the formal claims, then each ruling claim (CLAIMED first)."""
     store = _new_store(test)
     base, digest = _base_task_record()
@@ -73,7 +76,7 @@ def _store_with(test, claims):
     if rulings:
         record = store.compare_and_update(
             TASK, expected={'record_sha256': record['record_sha256']},
-            review_disputes=[_dispute_entry()])
+            review_disputes=[dispute or _dispute_entry()])
     for ruling in rulings:
         claimed = {key: value for key, value in ruling.items() if key != 'review_result'}
         claimed['state'] = 'CLAIMED'
@@ -95,6 +98,50 @@ def _formal_in_state(digest, state, version=1):
         claim = {key: value for key, value in claim.items() if key != 'review_result'}
         claim['state'] = state
     return claim
+
+
+ADVANCE_PR = 17
+ADVANCE_EXECUTOR = 'executor-1'
+
+
+def _at_advance_head(claim, **changes):
+    """Re-aim a claim at PR 17, the advance head and the advance D6 (dispute and result too)."""
+    claim = dict(claim, executor_task=ADVANCE_EXECUTOR, pr=ADVANCE_PR, head_sha=ta.HEAD)
+    if 'dispute' in claim:
+        claim['dispute'] = dict(claim['dispute'], pr=ADVANCE_PR, head_sha=ta.HEAD)
+    if 'review_result' in claim:
+        claim['review_result'] = dict(claim['review_result'], head=ta.HEAD)
+    claim.update(changes)
+    return claim
+
+
+class _AdvanceStore:
+    """The real TaskStore, plus the advance-time fields that are not under test.
+
+    Every read of review_dispatch_claim and review_disputes is served by the real
+    store: the claims were written through it and are validated by it. Only the
+    Developer, completion, event and remote-test fields that advance reads (and
+    that need a full Developer run to store) are laid over the record, as the
+    other advance tests in this suite do. Every other attribute is the store's own.
+    """
+
+    def __init__(self, real, overlay):
+        self._real = real
+        self._overlay = overlay
+
+    def get(self, task_id):
+        return dict(self._real.get(task_id), **self._overlay)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _advance_store(test, claims):
+    dispute = dict(_dispute_entry(), pr=ADVANCE_PR, head_sha=ta.HEAD)
+    store, _, _ = _store_with(test, claims, dispute=dispute)
+    overlay = {key: value for key, value in ta.base_record().items()
+               if key not in ('task_id', 'run_id', 'review_dispatch_claim')}
+    return _AdvanceStore(store, overlay)
 
 
 class RepostRefusesRulingClaimTest(unittest.TestCase):
@@ -150,9 +197,8 @@ class RepostRefusesRulingClaimTest(unittest.TestCase):
 class RepostCliPostsNothingForRulingClaimTest(unittest.TestCase):
     """A2-L1 through the PM command: nothing is posted at the PM-given version."""
 
-    def _run(self, claims, version):
-        record = {'task_id': TASK, 'run_id': 'b' * 32, 'review_dispatch_claim': claims}
-        store = SimpleNamespace(get=lambda _task_id: record)
+    def _run(self, store, version):
+        """Run the PM command on a real TaskStore; every outward call is injected."""
         posted = []
         args = SimpleNamespace(task_id=TASK, executor_task=EXECUTOR, pr=PR, version=version,
                                repost_truncated_fail=True)
@@ -170,11 +216,15 @@ class RepostCliPostsNothingForRulingClaimTest(unittest.TestCase):
 
     def test_ruling_claim_at_the_given_version_posts_nothing(self):
         _, digest = _base_task_record()
+        formal = _formal_claim(digest, version=1)
         for label, ruling in _arbiter_variants(digest, version=2):
             with self.subTest(claim=label):
-                code, posted, out = self._run([_formal_claim(digest, version=1), ruling], 2)
+                store, before, _ = _store_with(self, [formal, ruling])
+                code, posted, out = self._run(store, 2)
                 self.assertEqual((code, posted, out['state'], out['code']),
                                  (1, [], 'REFUSED', 'REPOST_NOT_CLAUDE_REVIEWER'))
+                # The command only reads: the stored Task is as it was.
+                self.assertEqual(store.get(TASK), before)
 
 
 class DecideSkipsRulingClaimsTest(unittest.TestCase):
@@ -305,7 +355,8 @@ class ClaimChoiceHelpersSkipRulingClaimsTest(unittest.TestCase):
                 {'developer': {}, 'review_dispatch_claim': [
                     formal, dict(formal, version=2)]}, ta.HEAD))
 
-    def test_rerun_live_check_ignores_ruling_claims(self):
+    def test_rerun_live_check_counts_ruling_claims(self):
+        """#2486 live check, fail closed: a ruling claim at the head is doubt like any claim."""
         _, digest = _base_task_record()
         reason = sorted(review_dispatch.REVIEW_FAILURE_REASONS)[0]
         refused = dict(_formal_in_state(digest, 'UNKNOWN'), pr=17, head_sha=ta.HEAD,
@@ -322,35 +373,50 @@ class ClaimChoiceHelpersSkipRulingClaimsTest(unittest.TestCase):
                     record, refused, d6, pr, object(), lambda _path: [])
 
         self.assertEqual(rerun([refused]), (2, None))
+        live = {'UNKNOWN', 'CLAIMED', 'DISPATCHED'}
         for label, ruling in _arbiter_variants(digest):
             with self.subTest(ruling=label):
                 claim = dict(ruling, pr=17, head_sha=ta.HEAD, version=2)
-                # A ruling claim is never a live Reviewer attempt for the refused
-                # review, so the one re-run stays allowed. The next version still
-                # counts the version the ruling claim holds, so it cannot collide.
-                self.assertEqual(rerun([refused, claim]), (3, None))
+                if label in live:
+                    # An arbiter process may still be running at this head: doubt refuses.
+                    self.assertEqual(rerun([refused, claim]),
+                                     (None, task_advance.REVIEW_RERUN_REVIEWER_LIVE))
+                    self.assertEqual(rerun([claim, refused]),
+                                     (None, task_advance.REVIEW_RERUN_REVIEWER_LIVE))
+                else:
+                    # A COMPLETED ruling claim has ended. The next version still counts
+                    # the version the ruling claim holds, so it cannot collide.
+                    self.assertEqual(rerun([refused, claim]), (3, None))
+        # Any value of purpose counts, as in every other reader.
+        other = dict(_arbiter_claim(digest, state='DISPATCHED', reviewer='claude-reviewer'),
+                     purpose='other', pr=17, head_sha=ta.HEAD, version=2)
+        self.assertEqual(rerun([refused, other]),
+                         (None, task_advance.REVIEW_RERUN_REVIEWER_LIVE))
+        # A ruling claim at another head or PR is no attempt for this PR and head.
+        for changes in ({'head_sha': 'f' * 40}, {'pr': 23}):
+            elsewhere = dict(other, **changes)
+            self.assertEqual(rerun([refused, elsewhere]), (3, None), changes)
 
 
 class AdvanceStepsChooseFormalClaimTest(unittest.TestCase):
     """A2-L2: RECORD_REVIEW_RESULT, RUN_TASK_COMPLETE and REVIEWER_ATTENTION steps."""
 
-    def _claims(self):
+    def _claims(self, state='DISPATCHED'):
+        """The formal claim and the ruling claims, shaped for PR 17 at the advance head."""
         _, digest = _base_task_record()
-        formal = {'executor_task': 'executor-1', 'pr': 17, 'head_sha': ta.HEAD, 'version': 1,
-                  'state': 'DISPATCHED', 'reviewer_task': 'reviewer-1',
-                  'native_session_id': 'session-1'}
-        rulings = [dict(claim, executor_task='executor-1', pr=17, head_sha=ta.HEAD, version=2,
-                        reviewer_task='reviewer-2')
+        formal = _at_advance_head(_formal_in_state(digest, state), reviewer_task='reviewer-1',
+                                  native_session_id='session-1')
+        rulings = [_at_advance_head(claim, reviewer_task='reviewer-2')
                    for _, claim in _arbiter_variants(digest)]
         return formal, rulings
 
     def _advance(self, claims, outcomes, **kwargs):
-        record = ta.base_record(review_dispatch_claim=claims)
-        store = type('Store', (), {'get': lambda self, _id: record})()
+        """advance() on a real TaskStore that holds the claims; GitHub, D6 and runtime are patched."""
+        store = _advance_store(self, claims)
         with patch.object(task_advance, '_d6_snapshot', return_value=ta.d6()), \
                 patch.object(task_advance, '_pr_snapshot', return_value=ta.PR), \
                 patch.object(task_advance, '_review_outcomes', return_value=outcomes):
-            return task_advance.advance(task_id=record['task_id'], store=store, pr_number=17,
+            return task_advance.advance(task_id=TASK, store=store, pr_number=17,
                                         github_get=lambda _url: [], **kwargs)
 
     def test_record_review_result_uses_formal_version(self):
@@ -402,8 +468,8 @@ class AdvanceStepsChooseFormalClaimTest(unittest.TestCase):
                     'pr': 17, 'head_sha': ta.HEAD, 'version': 1})
 
     def test_review_outcome_unknown_names_the_formal_claim(self):
-        formal, rulings = self._claims()
-        unknown = dict(formal, state='UNKNOWN')
+        formal, rulings = self._claims(state='UNKNOWN')
+        unknown = formal
         for label, claims in [('BASELINE', [unknown])] + [
                 (name, [unknown, ruling]) for name, ruling in zip(RULING_LABELS, rulings)]:
             with self.subTest(ruling=label):
