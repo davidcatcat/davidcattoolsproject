@@ -2999,6 +2999,21 @@ def _claims(record):
     return value if type(value) is list else []
 
 
+def _is_ruling_claim(claim):
+    """#2087: a ruling claim is a dict with a purpose key, whatever its value."""
+    return type(claim) is dict and 'purpose' in claim
+
+
+def _non_ruling_claims(record):
+    """#2087 A2-L2: the review claims a step may choose from, ruling claims left out.
+
+    Used wherever a PR head's review claim picks the next step or the version
+    passed on (decide, advance steps, _head_review_claim). The merge-side readers
+    keep _claims on purpose: they veto on any newer claim.
+    """
+    return [claim for claim in _claims(record) if not _is_ruling_claim(claim)]
+
+
 def _events(related):
     if type(related) is dict:
         value = related.get('events', [])
@@ -3048,7 +3063,7 @@ def _well_formed_review_refusal(refusal):
 
 def _head_review_claim(record, number, head):
     """Return the highest-version claim for one PR and head, if any."""
-    matching = [claim for claim in _claims(record) if type(claim) is dict and
+    matching = [claim for claim in _non_ruling_claims(record) if type(claim) is dict and
                 claim.get('pr') == number and claim.get('head_sha') == head]
     return max(matching, key=lambda item: item.get('version', 0), default=None)
 
@@ -3109,6 +3124,7 @@ def _review_refusal_rerun(record, claim, d6, pr, store, github_get):
         return None, REVIEW_RERUN_CONTRACT_CHANGED
     # #2486 security v91: any attempt for this PR and head may still be running,
     # not only the newest refused claim. One live attempt is doubt; doubt refuses.
+    # #2087: ruling claims count too (fail closed); a live arbiter process is doubt.
     live_attempts = [item for item in _claims(record)
                      if type(item) is dict and item.get('pr') == claim.get('pr') and
                      item.get('head_sha') == head]
@@ -3615,7 +3631,7 @@ def decide(record, d6, pr, related, docs_only=False, extra_modules=()):
     if (type(result_head) is not str or re.fullmatch(r'[0-9a-f]{40}', result_head) is None or
             d6.get('recorded_result_head') != result_head):
         return 'PUBLISH'
-    claims = _claims(record)
+    claims = _non_ruling_claims(record)
     chosen_pr = pr.get('number') if type(pr) is dict else None
     pr_head = pr.get('head') if type(pr) is dict else None
     if (type(chosen_pr) is not int or not 1 <= chosen_pr <= 9999999 or
@@ -3725,7 +3741,7 @@ def _reviewer_fallback(record, exc):
 def _blocked_fallback_reviewer(record, head):
     """#1831 P2: the other eligible Reviewer while the head has one claim, else None."""
     if sum(type(item) is dict and item.get('head_sha') == head
-           for item in _claims(record)) != 1:
+           for item in _non_ruling_claims(record)) != 1:
         return None
     family = task_completion._reviewer_author_family(record.get('developer'))
     alternate = 'claude-reviewer' if family == 'claude' else 'codex-reviewer'
@@ -3757,7 +3773,7 @@ def _pr_number(record, requested):
     number = published.get('pr') if type(published) is dict else None
     if type(number) is int and 1 <= number <= 9999999:
         return number
-    claims = _claims(record)
+    claims = _non_ruling_claims(record)
     return claims[-1].get('pr') if claims and type(claims[-1]) is dict else None
 
 
@@ -4821,7 +4837,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                 result = dict(result)
                 result.pop('review_text', None)
     elif step == 'RECORD_REVIEW_RESULT':
-        claim = next(c for c in reversed(_claims(record)) if type(c) is dict and
+        claim = next(c for c in reversed(_non_ruling_claims(record)) if type(c) is dict and
                      c.get('pr') == number and c.get('head_sha') == d6['result_head'])
         invoke = record_review_result_call or review_result.record_review_result
         try:
@@ -4932,7 +4948,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                         else:
                             codes.append(code)
     elif step == 'RUN_TASK_COMPLETE':
-        claim = next(c for c in reversed(_claims(record)) if type(c) is dict and
+        claim = next(c for c in reversed(_non_ruling_claims(record)) if type(c) is dict and
                      c.get('pr') == number and c.get('head_sha') == d6['result_head'])
         invoke = run_task_complete_call or task_submission_cli.run_task_complete
         try:
@@ -5024,7 +5040,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         # A prior result check may already have persisted the synthetic
         # REVIEW_BLOCKED event for a completed session with no posted verdict.
         # Keep that recoverable state actionable on later advance calls.
-        claim = next((c for c in reversed(_claims(record)) if type(c) is dict and
+        claim = next((c for c in reversed(_non_ruling_claims(record)) if type(c) is dict and
                       c.get('pr') == number and c.get('head_sha') == d6['result_head']), None)
         missing_verdict = (reviewer_session_done and claim is not None and any(
             type(event) is dict and event.get('source') == 'REVIEWER' and

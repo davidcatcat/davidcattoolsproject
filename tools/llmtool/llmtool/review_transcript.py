@@ -245,7 +245,13 @@ def truncated_fail_repost(claim, task, comments, *, config_dir=None):
     findings; the PR holds exactly one verdict comment for that HEAD and
     version, and it is exactly the pre-#2536 truncated header of that verdict.
     A PASS is always refused. The block is the transcript text, unedited.
+
+    #2087 A2-L1: a ruling claim (any dict with a purpose key) is never a Claude
+    formal Reviewer verdict; it is refused first, before any role, account,
+    session, transcript or comment read, with nothing to post.
     """
+    if type(claim) is dict and 'purpose' in claim:
+        return 'REPOST_NOT_CLAUDE_REVIEWER', None, None
     session, reviewer = claim.get('native_session_id'), claim.get('reviewer_task')
     if (type(session) is not str or not _UUID.fullmatch(session) or
             type(reviewer) is not str or not _REVIEWER.fullmatch(reviewer)):

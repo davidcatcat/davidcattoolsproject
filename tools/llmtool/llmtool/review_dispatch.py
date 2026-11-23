@@ -1544,13 +1544,17 @@ def _post_under_lock(*, fd, directory, name, task, task_id, claim, text, login_r
 
 def _refuse_version_used(claims, *, executor_task, pr_number, version, kind, message):
     from . import review_result
+    # #2087 #2656 L1: a ruling claim (any dict with a purpose key) holds its version
+    # for the whole PR, whatever its executor_task. Formal and security claims are
+    # counted only for this executor_task and kind, exactly as before.
     pr_versions = [
         claim['version'] for claim in claims
         if type(claim) is dict and
-        claim.get('executor_task') == executor_task and
         claim.get('pr') == pr_number and
         type(claim.get('version')) is int and
-        (review_result.review_kind(claim) == kind or 'purpose' in claim)
+        ('purpose' in claim or
+         (claim.get('executor_task') == executor_task and
+          review_result.review_kind(claim) == kind))
     ]
     next_version = (max(pr_versions) + 1) if pr_versions else (1 if kind == 'formal' else 91)
     if kind == 'formal' and next_version > 90:
