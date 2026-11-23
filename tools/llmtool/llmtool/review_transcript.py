@@ -189,6 +189,8 @@ def select_verdict(blocks, *, task, head, version):
 
 def unposted_verdict(claim, task, *, config_dir=None, run=subprocess.run, claude=None):
     """Return (state, code, block); the caller posts the block unedited."""
+    if 'purpose' in claim:
+        return 'NOT_APPLICABLE', None, None
     session, reviewer = claim.get('native_session_id'), claim.get('reviewer_task')
     if (type(session) is not str or not _UUID.fullmatch(session) or
             type(reviewer) is not str or not _REVIEWER.fullmatch(reviewer)):

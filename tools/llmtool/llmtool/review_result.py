@@ -281,6 +281,8 @@ def _settle_candidate(task, claim, comments, *, head, version):
     and version, and it must be a formal Claude PASS posted after the claim.
     Anything else leaves the claim UNKNOWN. The dispatch is never replayed.
     """
+    if 'purpose' in claim:
+        return False
     claimed_at = claim.get('claimed_at')
     # #1909 item 1 (security v92): a failed Reviewer bind never settles.
     if (claim.get('state') != 'UNKNOWN' or 'failure_reason' in claim or
@@ -447,6 +449,8 @@ def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
         _refuse('REVIEW_RESULT_TASK_INVALID')
     claim, head = _claim_for(task, executor_task=executor_task,
                              pr_number=pr_number, version=version, kind=kind)
+    if 'purpose' in claim:
+        _refuse('REVIEW_RESULT_CLAIM_INVALID')
     if (task.get('schema_version') != 2 or
             type(task.get('run_id')) is not str or _HEX32.fullmatch(task['run_id']) is None or
             type(task.get('pm_session_id')) is not str or
