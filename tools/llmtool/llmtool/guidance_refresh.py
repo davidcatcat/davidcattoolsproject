@@ -285,3 +285,30 @@ def refresh_guidance_hashes(
     if _HEX40.fullmatch(new_head) is None:
         raise GuidanceRefreshError('GUIDANCE_REFRESH_COMMAND_FAILED')
     return {'refreshed': True, 'head': new_head, 'updated': sorted(updates)}
+
+
+def is_refresh_content(parent_config_bytes, child_config_bytes, guidance_blobs):
+    """True when child_config_bytes is exactly the refresh of parent_config_bytes.
+
+    #2640: the publish step's own hash-refresh commit is not Developer work.
+    It qualifies only when the new guidance-drift.json bytes are exactly what
+    refresh_guidance_hashes writes for the parent: the parent config with each
+    guidance file's hash set to the sha256 of that file in the parent tree, at
+    least one hash changed, nothing else changed. guidance_blobs maps each
+    guidance file to its bytes in the parent tree. Any doubt is False.
+    """
+    try:
+        config = _load_config_bytes(parent_config_bytes)
+    except GuidanceRefreshError:
+        return False
+    if type(guidance_blobs) is not dict or set(guidance_blobs) != GUIDANCE_FILES:
+        return False
+    changed = False
+    for path, blob in guidance_blobs.items():
+        if type(blob) is not bytes:
+            return False
+        digest = hashlib.sha256(blob).hexdigest()
+        if config['hashes'][path] != digest:
+            config['hashes'][path] = digest
+            changed = True
+    return changed and child_config_bytes == (json.dumps(config, indent=2) + '\n').encode('utf-8')
