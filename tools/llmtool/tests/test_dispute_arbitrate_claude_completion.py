@@ -204,6 +204,7 @@ class ClaudeRulingCollectionTests(unittest.TestCase):
         self.fake_lister = fake_lister
         self.fake_poster = fake_poster
 
+        real_session_state = review_transcript.session_state
         patches = (
             patch.object(task_completion, '_github_get', side_effect=fake_github_get),
             patch.object(task_completion, '_trusted_slug', return_value=REPOSITORY),
@@ -214,7 +215,7 @@ class ClaudeRulingCollectionTests(unittest.TestCase):
             patch.object(role_config, 'resolve_role',
                          side_effect=lambda _role, **_kw: dict(self.role)),
             patch.object(dispute_arbiter.review_transcript, 'session_state',
-                         side_effect=lambda sid, cdir, **kw: review_transcript.session_state(
+                         side_effect=lambda sid, cdir, **kw: real_session_state(
                              sid, cdir, run=self.fake_run, claude='/usr/bin/claude')),
         )
         for p in patches:
