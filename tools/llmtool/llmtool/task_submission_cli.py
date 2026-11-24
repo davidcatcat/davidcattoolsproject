@@ -57,6 +57,7 @@ from .developer_routes import (AgyRoute, ClaudeRoute, GwAgentRoute, RouteError, 
                                UnsupportedBoundary, check_route_model, for_platform,
                                load_route_config, resolve_route_max_diff_bytes,
                                resolve_route_max_prompt_bytes,
+                               resolve_route_max_task_paths,
                                resolve_route_timeout, run_route)
 from .developer_routes.base import _git_status_paths
 from .developer_routes.gw_agent import (_GATEWAY_DATA_CLASS, _normalize_gw_agent_usage,
@@ -3536,7 +3537,7 @@ class _DeveloperSourceFiles(dict):
 DEVELOPER_TASK_MAX_PATHS = 1024
 
 
-def _assignment_paths(read_paths, write_paths):
+def _assignment_paths(read_paths, write_paths, *, route=None):
     def valid(path):
         return (type(path) is str and 0 < len(path) <= 512 and
                 not path.startswith('/') and '\\' not in path and
@@ -3552,6 +3553,15 @@ def _assignment_paths(read_paths, write_paths):
     if (len(read_paths) > DEVELOPER_TASK_MAX_PATHS or
             len(write_paths) > DEVELOPER_TASK_MAX_PATHS):
         invalid('PATH_LIMIT_EXCEEDED')
+    if route is not None:
+        try:
+            route_max = resolve_route_max_task_paths(route)
+        except RouteError as exc:
+            raise _prelaunch_error(
+                f'{exc.code}: max_task_paths refused for the {route} Developer route',
+                exc.code) from None
+        if len(read_paths) > route_max or len(write_paths) > route_max:
+            invalid('PATH_LIMIT_EXCEEDED')
     for path in read_paths + write_paths:
         if type(path) is str and (path.startswith('/') or '..' in path.split('/') or
                                   '\\' in path):
@@ -5685,7 +5695,7 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         if ((getattr(registration, 'session_ref', None) or '').startswith('handoff-') and
                 registration.trusted_agent_id != direct_reassignment.AGENTS['opencode']):
             raise LLMToolError('DIRECT_REASSIGN_D6_BINDING_MISMATCH')
-    read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
+    read_paths, write_paths = _assignment_paths(args.read_path, args.write_path, route='opencode')
     reassignment = _direct_reassignment_plan(
         args, store, task, registration, snapshot, 'opencode', read_paths, write_paths)
     if reassignment is not None:
@@ -6237,7 +6247,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             denied.code = decision.reason_code
         denied.prelaunch_refusal = True
         raise denied
-    read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
+    read_paths, write_paths = _assignment_paths(args.read_path, args.write_path, route='agy')
     reassignment = _direct_reassignment_plan(
         args, store, task, registration, snapshot, 'agy', read_paths, write_paths)
     if reassignment is not None:
@@ -7003,7 +7013,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
     decision = worker_dispatch.evaluate('claude-developer', owner_ref, registration.task_id)
     if not decision.allowed:
         raise worker_dispatch.WorkerDispatchDenied(decision.reason_code)
-    read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
+    read_paths, write_paths = _assignment_paths(args.read_path, args.write_path, route='claude')
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
     acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
@@ -7444,7 +7454,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         raise LLMToolError('no matching low-risk gw-agent recommendation from the selected PM route')
     registration, snapshot = _delegate_d6_binding(args)
     _reject_claude_reserved_d6(registration)
-    read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
+    read_paths, write_paths = _assignment_paths(args.read_path, args.write_path, route='gw-agent')
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
     acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]

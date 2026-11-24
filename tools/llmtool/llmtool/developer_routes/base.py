@@ -48,10 +48,11 @@ HARD_MAX_DIFF_BYTES = 5 * 1024 * 1024
 # #2281 (Owner 2026-11-21): 5 MiB is the hard ceiling for every route-level
 # byte bound in developer-routes.json. A larger value is refused at load.
 HARD_MAX_BYTE_BOUND = 5 * 1024 * 1024
-# #2157: Developer read and write path caps per route. TaskStore stores at most
-# 32 of each per Developer record, so a route may lower the cap but not raise it.
-DEFAULT_MAX_TASK_PATHS = 32
-HARD_MAX_TASK_PATHS = 32
+# #2157, #2281: Developer read and write path caps per route. TaskStore stores
+# at most 1024 of each per Developer record, so a route may lower the cap but
+# not raise it above the stored-record bound.
+DEFAULT_MAX_TASK_PATHS = 1024
+HARD_MAX_TASK_PATHS = 1024
 DEFAULT_CLAUDE_MAX_PROMPT_BYTES = HARD_MAX_BYTE_BOUND
 DEFAULT_AGY_MAX_PROMPT_BYTES = HARD_MAX_BYTE_BOUND
 DEFAULT_OPENCODE_MAX_PROMPT_BYTES = HARD_MAX_BYTE_BOUND
@@ -95,13 +96,8 @@ def max_source_total_bytes_ok(value: Any) -> bool:
 
 
 def max_task_paths_ok(value: Any) -> bool:
-    """Return True only for the int DEFAULT_MAX_TASK_PATHS, not bool, for now (#2157).
-
-    _assignment_paths does not read max_task_paths yet, so any other value would
-    look like a limit that is not enforced. The wiring PR relaxes this check to
-    1..HARD_MAX_TASK_PATHS together with that enforcement.
-    """
-    return type(value) is int and value == DEFAULT_MAX_TASK_PATHS
+    """Return True only for an int (not bool) with 1 <= value <= HARD_MAX_TASK_PATHS."""
+    return type(value) is int and 1 <= value <= HARD_MAX_TASK_PATHS
 
 
 class RouteError(LLMToolError):
@@ -494,7 +490,7 @@ def resolve_route_max_diff_bytes(route: Any, *,
 
 
 def resolve_route_max_task_paths(route: Any, *, config: Mapping[str, Any] | None = None) -> int:
-    """Return the Developer read and write path cap for route (#2157); not wired yet.
+    """Return the Developer read and write path cap for route (#2157, #2281).
 
     route is a registered route name or a DeveloperRoute; config is a
     load_route_config() result (None loads the repository file). A route
