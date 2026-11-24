@@ -29,8 +29,11 @@ def _git(*args, **kwargs):
 
 
 def _relative_path(path):
-    return (type(path) is str and bool(path) and not path.startswith('/') and
-            '\\' not in path and '\x00' not in path and
+    # Match the Task write-path validators: at most 512 characters of
+    # printable ASCII, so control and non-ASCII paths fail closed here too.
+    return (type(path) is str and bool(path) and len(path) <= 512 and
+            path.isascii() and path.isprintable() and
+            not path.startswith('/') and '\\' not in path and
             all(part not in ('', '.', '..') for part in path.split('/')))
 
 
