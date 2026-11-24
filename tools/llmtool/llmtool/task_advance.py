@@ -814,7 +814,9 @@ def _ci_excerpt(run):
             value = output.get(key)
             if type(value) is str and value:
                 parts.append(value)
-    lines = '\n'.join(parts).splitlines()[:review_repair.CI_EXCERPT_MAX_LINES]
+    max_lines = min(repair_policy.ci_excerpt_max_lines(),
+                    review_repair.CI_EXCERPT_MAX_LINES)
+    lines = '\n'.join(parts).splitlines()[:max_lines]
     raw = '\n'.join(lines).encode('utf-8', errors='replace')
     excerpt = raw[:review_repair.CI_EXCERPT_MAX_BYTES].decode('utf-8', errors='ignore')
     if not excerpt.strip():
