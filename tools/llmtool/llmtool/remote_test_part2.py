@@ -1,3 +1,8 @@
+# #2281 row 9: fixed total-deadline reserve and SSH-timeout safety margin.
+_REMOTE_WORK_RESERVE_SECONDS = 60
+_REMOTE_SSH_TIMEOUT_MARGIN_SECONDS = 60
+
+
 def _validate_remote_receipt(raw, *, sha, modules):
     if type(raw) is not bytes or not raw or len(raw) > _REMOTE_LIMIT:
         return None
@@ -175,11 +180,27 @@ def _fresh_pr_head(pr):
     return head['sha']
 
 
-def _ssh_argv(config, sha, ref, modules):
+def _remote_test_timeouts():
+    """Resolve and validate the #2281 row 9 remote test timeouts before SSH."""
+    from . import repair_policy
+    module_limit = repair_policy.remote_test_module_timeout_seconds()
+    total_limit = repair_policy.remote_test_total_timeout_seconds()
+    if (module_limit < 1 or total_limit < _REMOTE_WORK_RESERVE_SECONDS + 1 or
+            module_limit > total_limit - _REMOTE_WORK_RESERVE_SECONDS):
+        raise LLMToolError(
+            'REMOTE_TEST_TIMEOUT_INVALID: module exceeds total minus reserve')
+    if total_limit + _REMOTE_SSH_TIMEOUT_MARGIN_SECONDS >= _ssh_timeout():
+        raise LLMToolError(
+            'REMOTE_TEST_TIMEOUT_INVALID: total plus margin reaches the SSH timeout')
+    return module_limit, total_limit
+
+
+def _ssh_argv(config, sha, ref, modules, module_timeout=180, total_timeout=540):
     """The one EC2 SSH command; every dynamic value is a validated argv word."""
     return ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
             config['user'] + '@' + config['host'], 'python3', '-', sha, ref,
-            config['repo_path'], config['python'], *modules]
+            config['repo_path'], config['python'], str(module_timeout),
+            str(total_timeout), *modules]
 
 
 def _command_digest(argv):
@@ -287,7 +308,8 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         config = _config(config_path)
     except LLMToolError:
         return denied('CONFIG_INVALID')
-    argv = _ssh_argv(config, sha, ref, selected)
+    module_timeout, total_timeout = _remote_test_timeouts()
+    argv = _ssh_argv(config, sha, ref, selected, module_timeout, total_timeout)
     command_digest = _command_digest(argv)
     for known in reversed(task.get('remote_test_receipts', [])):
         if (known.get('executor_task') != executor_task or known.get('source_sha') != sha):
