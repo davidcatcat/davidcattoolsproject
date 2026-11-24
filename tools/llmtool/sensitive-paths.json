@@ -24,6 +24,7 @@
     "tools/llmtool/llmtool/task_completion_part2.py",
     "tools/llmtool/llmtool/task_completion_part3.py",
     "tools/llmtool/llmtool/task_completion_part4.py",
+    "tools/llmtool/llmtool/task_completion_part5.py",
     "tools/llmtool/llmtool/task_store.py",
     "tools/llmtool/llmtool/task_submission_cli.py",
     "tools/llmtool/llmtool/review_authority.py",

@@ -579,7 +579,8 @@ def collect_claude_result(*, task_id, expected_common_dir, expected_root,
                           expected_branch, source_sha, task_binding,
                           expected_agent, expected_session_ref,
                           expected_native_session_id, write_paths, claude_result,
-                          artifact_segments=None, trusted_base_sha=None):
+                          artifact_segments=None, trusted_base_sha=None,
+                          stacked_chain=None):
     """Verify a bound Claude result using D6 evidence, without an artifact claim.
 
     #1886: with artifact_segments, the D6 head is the Claude result plus
@@ -596,7 +597,7 @@ def collect_claude_result(*, task_id, expected_common_dir, expected_root,
         expected_agent=expected_agent, expected_session_ref=expected_session_ref,
         expected_native_session_id=expected_native_session_id,
         write_paths=write_paths, artifact_segments=artifact_segments,
-        trusted_base_sha=trusted_base_sha)
+        trusted_base_sha=trusted_base_sha, stacked_chain=stacked_chain)
     if (type(claude_result) is not dict or
             claude_result.get('executor_task_id') != registration.task_id):
         _stop('CLAUDE_RESULT_BINDING_INVALID')
@@ -633,7 +634,7 @@ def collect_claude_result(*, task_id, expected_common_dir, expected_root,
     elif claimed_head != snapshot.head:
         _stop('RESULT_HEAD_MISMATCH')
     _reject_legacy_grafts(registration.root, registration.common_dir)
-    return {
+    result = {
         'task_id': task_binding.get('task_id'), 'run_id': task_binding.get('run_id'),
         'executor_task_id': registration.task_id,
         'executor_identity': registration.trusted_agent_id,
@@ -646,6 +647,11 @@ def collect_claude_result(*, task_id, expected_common_dir, expected_root,
         'developer_changed_paths': list(developer_paths),
         'diff_sha256': hashlib.sha256(patch).hexdigest(),
     }
+    if stacked_chain is not None:
+        from . import task_completion_part5
+        result.update(task_completion_part5._stacked_chain_evidence(
+            registration.root, stacked_chain, source_sha))
+    return result
 
 
 def _worktree_snapshot(*, root, source_sha, read_paths, write_paths, expected_head=None):
