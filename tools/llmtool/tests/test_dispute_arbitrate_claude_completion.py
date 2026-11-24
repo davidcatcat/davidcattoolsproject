@@ -574,6 +574,33 @@ class ClaudeRulingCollectionTests(unittest.TestCase):
             with patch.object(dispute_arbiter, 'ruling_blocks', side_effect=AssertionError('must not open')):
                 self._assert_refused_unchanged('ARBITER_SESSION_UNKNOWN', before)
 
+    def test_blocked_session_with_turn_complete_stays_pending(self):
+        self._seed()
+        self._write_transcript(_transcript_bytes([_assistant_entry(_ruling_text())]))
+        before = self._record_bytes()
+
+        self.assertTrue(
+            review_transcript.turn_complete(CLAUDE_SESSION, str(self.claude_home), ARBITER_TASK)
+        )
+        self.agents_rows = [{'sessionId': CLAUDE_SESSION, 'state': 'blocked'}]
+        with patch.object(dispute_arbiter, 'ruling_blocks', side_effect=AssertionError('must not open')):
+            res = self._arbitrate()
+        self.assertEqual(res['code'], 'ARBITER_PENDING')
+        self.assertEqual(res['state'], 'DISPATCHED')
+        self.assertEqual(self._record_bytes(), before)
+        self.assertEqual(self.github_calls, [])
+        self.assertEqual(self.comment_lister_calls, [])
+        self.assertEqual(self.comment_poster_calls, [])
+
+    def test_dirty_same_head_arbiter_d6_refuses_collection(self):
+        self._seed()
+        self._write_transcript(_transcript_bytes([_assistant_entry(_ruling_text())]))
+        before = self._record_bytes()
+
+        self.snapshot.clean = False
+        with patch.object(dispute_arbiter, 'ruling_blocks', side_effect=AssertionError('must not open')):
+            self._assert_refused_unchanged('DISPUTE_ARBITER_UNVERIFIED', before)
+
     def test_screen_refusal_records_blocked_and_withheld(self):
         self._seed()
         ruling = _ruling_text(actor='Claude')

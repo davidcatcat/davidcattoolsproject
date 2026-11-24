@@ -406,7 +406,7 @@ def collect_claude_ruling(store, task, entry, claim, *, run=subprocess.run,
     try:
         registration = task_submission_cli._dispute_arbiter_d6_binding(
             task, reviewer='claude-reviewer', reviewer_task=reviewer_task,
-            head=head, common_dir=common_dir)
+            head=head, require_clean=True, common_dir=common_dir)
     except LLMToolError as error:
         return getattr(error, 'dispute_code', None) or 'DISPUTE_ARBITER_UNVERIFIED'
     if getattr(registration, 'native_session_id', None) != session_id:
@@ -414,10 +414,6 @@ def collect_claude_ruling(store, task, entry, claim, *, run=subprocess.run,
 
     # C4: Ended session
     state = review_transcript.session_state(session_id, config_dir, run=run, claude=claude)
-    if state == 'BLOCKED':
-        if not review_transcript.turn_complete(session_id, config_dir, reviewer_task):
-            return 'ARBITER_PENDING'
-        state = 'ENDED'
     if state == 'UNKNOWN':
         return 'ARBITER_SESSION_UNKNOWN'
     if state != 'ENDED':

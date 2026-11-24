@@ -1122,10 +1122,10 @@ Every refusal checks that the stored record is byte-equal to before, that the cl
 - **Screen.** A monkeypatched `_screen_text` refusal gives `COMPLETED` with `BLOCKED`, empty text, no `outcome` and the `source` digest. The result is `DISPUTE_RULING_WITHHELD`, and nothing is posted.
 - **Formal unchanged.** A formal Claude claim on the same fixtures still rests at `DISPATCHED` (the store refuses its `COMPLETED`), and `unposted_verdict` returns today's result for it.
 - **Collection is a claim-truth write (§2.4).** With a newer formal claim already at the head, a bound ended-session ruling still moves the claim `DISPATCHED` → `COMPLETED`. Step 12 does not exist until A3, so nothing is posted or ruled here. A3's race tests cover the step 12 refusal that follows.
-- **Supersede vs collection** (real `TaskStore`; B1 merged first):
+- **Abandon between step 2 and C8** (real `TaskStore`). The injected `run` abandons the old Task through the real store and returns `ENDED`. C8's CAS loses and writes nothing, and a replay refuses `DISPUTE_TASK_ABANDONED`.
+- **Supersede vs collection** (conditional future tests; requires B1, outside the current B1/B2-dropped delivery; real `TaskStore`, B1 merged first):
   - **Supersede wins.** The injected agents-listing `run` calls `supersede` (which goes on, because the claim is `DISPATCHED`) and then returns `ENDED`. C8's CAS loses and writes nothing. The claim is still `DISPATCHED`, and the entry is `SUPERSEDED` with `arbiter.state == 'DISPATCHED'`. A replay refuses `DISPUTE_SUPERSEDED` at step 2: `run` is not called again, and the transcript is not opened.
   - **Collection wins.** C8 writes `COMPLETED` `RULING`. A `supersede` after that refuses `DISPUTE_RULING_PENDING` (B1). With a withheld result (`BLOCKED`), the `supersede` goes on.
-  - **Abandon between step 2 and C8.** The injected `run` abandons the old Task through the real store and returns `ENDED`. C8's CAS loses and writes nothing, and a replay refuses `DISPUTE_TASK_ABANDONED`.
 
 ### PR A3: step 12, freshness and race tests (#2087)
 
