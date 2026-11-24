@@ -172,6 +172,9 @@ class _GateStore:
         record.update(copy.deepcopy(changes))
         return self._seal(record)
 
+    def task_ids(self):
+        return sorted(self.records)
+
     def get(self, task_id):
         if task_id not in self.records:
             raise LLMToolError('task not found')
