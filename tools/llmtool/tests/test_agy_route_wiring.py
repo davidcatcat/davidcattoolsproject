@@ -1377,10 +1377,19 @@ class AgyRouteWiringTests(unittest.TestCase):
 
     def test_sensitive_skill_text_refuses_before_provider_call(self):
         flagged = 'flagged skill rule\n'
+        audit = {}
+        record = Mock()
         with patch.object(task_submission_cli, '_emitted_sensitive',
                           side_effect=lambda value: flagged in value):
-            self._assert_skill_refusal(
-                'AGY_SKILL_TEXT_REFUSED', card_git=_CardGit({**_CARDS, _DEV_CARD: flagged}))
+            with self.assertRaises(LLMToolError) as caught:
+                self._run_agy_delegate(
+                    audit=audit, ledger_record=record,
+                    card_git=_CardGit({**_CARDS, _DEV_CARD: flagged}))
+        self.assertEqual(getattr(caught.exception, 'code', None), 'DELEGATE_TEXT_SENSITIVE')
+        self.assertFalse(getattr(caught.exception, 'prelaunch_refusal', False))
+        self.assertEqual(audit['store_writes'], [])
+        self.assertEqual(audit['prompts'], [])
+        record.assert_not_called()
 
     def _prefix_with_cards(self, cards):
         status, _task, _events, prompts = self._run_agy_delegate(card_git=_CardGit(cards))

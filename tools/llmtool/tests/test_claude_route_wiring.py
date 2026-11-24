@@ -660,6 +660,23 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                                                 _CardGit({**_CARDS, _CORE: text})))
                 self._assert_prewrite_refusal(configure, message='CLAUDE_SKILL_TEXT_REFUSED')
 
+    def test_sensitive_card_text_refuses_before_provider_call(self):
+        flagged = 'flagged skill rule\n'
+        cli, store, args, _reg, _evaluations, _prompts, requests, patches, runner = self._setup()
+        patches.append(patch.object(cli.skill_manifest, '_run_git',
+                                    _CardGit({**_CARDS, _DEV_CARD: flagged})))
+        patches.append(patch.object(cli, '_emitted_sensitive',
+                                    side_effect=lambda value: flagged in value))
+        with contextlib.ExitStack() as stack:
+            for item in patches:
+                stack.enter_context(item)
+            with self.assertRaises(LLMToolError) as caught:
+                cli.run_task_claude_delegate(args, store=store, route_runner=runner)
+        self.assertEqual(getattr(caught.exception, 'code', None), 'DELEGATE_TEXT_SENSITIVE')
+        self.assertFalse(getattr(caught.exception, 'prelaunch_refusal', False))
+        self.assertEqual(store.writes, 0)
+        self.assertEqual(requests, [])
+
     def test_production_sized_cards_fit_the_14_kib_prefix(self):
         # Real card files where the checkout has them; a card not yet on this
         # checkout is taken at the 6 KiB production ceiling instead.

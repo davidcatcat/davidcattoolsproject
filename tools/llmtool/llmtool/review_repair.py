@@ -20,10 +20,47 @@ MAX_REPAIR_ATTEMPTS = run_budget.MAX_REPAIR_ATTEMPTS
 MAX_EXCERPT_CHARS = 2000
 
 
-def _refuse(code):
+def _refuse(code, *, prelaunch=False):
     error = LLMToolError('Review repair refused; details omitted')
     error.review_repair_code = code
+    if prelaunch:
+        error.prelaunch_refusal = True
     raise error from None
+
+
+def _is_prelaunch_coded_refusal(exc, store, repair_task_id):
+    """Return True only when exc is a coded pre-launch refusal and no Developer was bound."""
+    if getattr(exc, 'prelaunch_refusal', False) is not True:
+        return False
+    code = getattr(exc, 'review_repair_code', None) or getattr(exc, 'code', None)
+    if type(code) is not str or re.fullmatch(r'[A-Z0-9_]{1,64}', code) is None:
+        return False
+    if code == 'DELEGATE_TEXT_SENSITIVE':
+        return False
+    try:
+        repair_task = store.get(repair_task_id)
+    except Exception:
+        return False
+    return type(repair_task) is dict and repair_task.get('developer') is None
+
+
+def _invoke_claimed_adapter(*, store, task_id, claim, repair_task, developer,
+                            packet, executor_task, profile, dispatch_adapter,
+                            delegate_callable):
+    adapter = dispatch_adapter
+    if adapter is None:
+        adapter = lambda **request: _delegate_repair(
+            **request, delegate=delegate_callable, store=store)
+    try:
+        result = adapter(task=repair_task, developer=developer, packet=packet,
+                         executor_task=executor_task, provider_profile=profile,
+                         model=developer.get('model'))
+    except Exception as exc:
+        if not _is_prelaunch_coded_refusal(exc, store, claim['repair_task_id']):
+            _update_claim_state(store, task_id, claim, 'UNKNOWN')
+        raise
+    _update_claim_state(store, task_id, claim, 'DISPATCHED')
+    return result
 
 
 def _refuse_unclaimed(code, repair_task_id):
@@ -306,18 +343,11 @@ def _replay_claimed_test_repair(*, store, task_id, existing, developer, packet,
                     'attempt': fresh.get('attempt'), 'replayed': dispatched,
                     'next_action': (f"review-dispatch --version {packet_version + 1}"
                                     if dispatched else f"task delegate {repair_task_id}")}
-        adapter = dispatch_adapter
-        if adapter is None:
-            adapter = lambda **request: _delegate_repair(
-                **request, delegate=delegate_callable, store=store)
-        try:
-            result = adapter(task=repair_task, developer=developer, packet=packet,
-                             executor_task=executor_task, provider_profile=profile,
-                             model=developer.get('model'))
-        except Exception:
-            _update_claim_state(store, task_id, fresh, 'UNKNOWN')
-            raise
-        _update_claim_state(store, task_id, fresh, 'DISPATCHED')
+        result = _invoke_claimed_adapter(
+            store=store, task_id=task_id, claim=fresh, repair_task=repair_task,
+            developer=developer, packet=packet, executor_task=executor_task,
+            profile=profile, dispatch_adapter=dispatch_adapter,
+            delegate_callable=delegate_callable)
         claim = dict(fresh, state='DISPATCHED')
         return {'result': result, 'attempt': claim['attempt'],
                 'repair_task_id': repair_task_id, 'claim': claim, 'replayed': True,
@@ -383,18 +413,22 @@ def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
     write_paths = developer.get('write_paths')
     if (type(acceptance) is not list or type(read_paths) is not list or
             type(write_paths) is not list):
-        _refuse('REPAIR_DEVELOPER_BINDING_INVALID')
+        _refuse('REPAIR_DEVELOPER_BINDING_INVALID', prelaunch=True)
     profile = developer.get('provider_profile')
     data_class = developer.get('data_class')
     if profile == 'gw-agent' and data_class not in ('SYNTHETIC', 'PUBLIC_REPO'):
-        _refuse('REPAIR_DATA_CLASS_INVALID')
+        _refuse('REPAIR_DATA_CLASS_INVALID', prelaunch=True)
     try:
         original_task = store.get(packet['task'])
     except Exception:
-        _refuse('REPAIR_HEAD_MOVED')
+        _refuse('REPAIR_HEAD_MOVED', prelaunch=True)
     if type(original_task) is not dict:
-        _refuse('REPAIR_HEAD_MOVED')
-    registration, _snapshot = _registered_d6(original_task, executor_task)
+        _refuse('REPAIR_HEAD_MOVED', prelaunch=True)
+    try:
+        registration, _snapshot = _registered_d6(original_task, executor_task)
+    except LLMToolError as exc:
+        exc.prelaunch_refusal = True
+        raise
     args = Namespace(
         task_id=task['task_id'], provider=profile,
         mode='direct' if profile in ('codex', 'agy', 'claude', 'gw-agent') else 'proposal',
@@ -1292,6 +1326,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                                        repair_task_id=repair_task_id)
         except LLMToolError as error:
             error.review_repair_unclaimed_task_id = repair_task_id
+            if not getattr(error, 'review_repair_code', None) and not getattr(error, 'code', None):
+                error.review_repair_code = 'REPAIR_TASK_RECORD_UNAVAILABLE'
             raise
         except Exception:
             _refuse_unclaimed('REPAIR_TASK_RECORD_UNAVAILABLE', repair_task_id)
@@ -1322,22 +1358,12 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         release_chain()
 
     # The provider is called only after the claim CAS succeeded.
-    adapter = dispatch_adapter
-    if adapter is None:
-        adapter = lambda **request: _delegate_repair(
-            **request, delegate=delegate_callable, store=store)
     try:
-        try:
-            # Revalidate after recording so a D6 moved during repair Task creation
-            # cannot redirect the provider; the pre-write head check above ensures
-            # unregistered or already-moved worktrees consume no repair attempt.
-            result = adapter(task=repair_task, developer=developer, packet=packet,
-                             executor_task=executor_task, provider_profile=profile,
-                             model=developer.get('model'))
-        except Exception:
-            _update_claim_state(store, task_id, claim, 'UNKNOWN')
-            raise
-        _update_claim_state(store, task_id, claim, 'DISPATCHED')
+        result = _invoke_claimed_adapter(
+            store=store, task_id=task_id, claim=claim, repair_task=repair_task,
+            developer=developer, packet=packet, executor_task=executor_task,
+            profile=profile, dispatch_adapter=dispatch_adapter,
+            delegate_callable=delegate_callable)
     finally:
         dispatch_guard.close()
     claim['state'] = 'DISPATCHED'
