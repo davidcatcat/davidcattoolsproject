@@ -7819,6 +7819,33 @@ def waiting_notify_hours(path: str | None = None) -> int:
     return value if type(value) is int and 0 <= value <= 1000 else WAITING_NOTIFY_HOURS
 
 
+def ec2_busy_window_seconds(path: str | None = None) -> int:
+    """monitor_ec2_busy_window_seconds from tools/llmtool/policy.json, else 1800.
+
+    A local, bounded read that never follows a link or blocks on a FIFO."""
+    fd = -1
+    try:
+        if path is None:
+            path = os.path.join(canonical_root(), "tools", "llmtool", "policy.json")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return STUCK_BUSY_WINDOW
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            raw = handle.read(WAITING_POLICY_READ + 1)
+        data = json.loads(raw) if len(raw) <= WAITING_POLICY_READ else None
+    except Exception:
+        return STUCK_BUSY_WINDOW
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    value = data.get("monitor_ec2_busy_window_seconds") if type(data) is dict else None
+    return value if type(value) is int and value >= 1 else STUCK_BUSY_WINDOW
+
+
 def _waited(age: float) -> str:
     age = max(0.0, age)
     if age < 3600:
@@ -7866,7 +7893,7 @@ def stuck_open_d6(details, prs) -> set[str]:
             if value[4] and prs.get(value[4], (None, ""))[1] == "OPEN"}
 
 
-def stuck_alerts(now, ci, reviews, records, open_d6) -> list[str]:
+def stuck_alerts(now, ci, reviews, records, open_d6, busy_window=None) -> list[str]:
     alerts = []
     for pr, head, since in sorted(reviews or []):
         if type(since) not in (int, float) or since <= 0:
@@ -7902,11 +7929,12 @@ def stuck_alerts(now, ci, reviews, records, open_d6) -> list[str]:
         alerts.extend(line for _, line in sorted(mac))
     busy = []
     if records is not None:
+        window = ec2_busy_window_seconds() if busy_window is None else busy_window
         for record in records:
             if not isinstance(record, StuckRecord) or record.busy_at <= 0:
                 continue
             age = now - record.busy_at
-            if 0 <= age <= STUCK_BUSY_WINDOW:
+            if 0 <= age <= window:
                 busy.append((record.busy_at, record.task,
                              f"EC2 忙碌：task {record.task}（REMOTE_BUSY，{int(age // 60)} 分鐘前）"))
         alerts.extend(item[2] for item in sorted(busy, key=lambda item: (-item[0], item[1]))[:3])
