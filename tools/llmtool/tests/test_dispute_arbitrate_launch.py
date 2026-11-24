@@ -328,14 +328,17 @@ class _ArbitrateLaunchCase(unittest.TestCase):
             'account': 'claude-acc',
         }
 
+    def _task_path(self):
+        return self.store.root / f'{TASK}.json'
+
     def _seed(self, **kwargs):
         record = _seed_task(**kwargs)
         record['completion']['evidence']['common_dir'] = str(self.common_dir)
         record['completion']['evidence']['root'] = str(self.exec_root)
-        return self.store._write(record, create=not self.store._path(TASK).exists())
+        return self.store._write(record, create=not self._task_path().exists())
 
     def _record_bytes(self):
-        return self.store._path(TASK).read_bytes()
+        return self._task_path().read_bytes()
 
 
 class ArbitrateParserTests(unittest.TestCase):
