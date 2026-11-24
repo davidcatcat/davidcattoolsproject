@@ -61,9 +61,29 @@ class MainCiJobSummaryTests(unittest.TestCase):
         self.assertEqual(result['state'], summary.UNKNOWN)
         self.assertEqual(result['reason'], summary.COUNT_MISMATCH)
 
-    def test_duplicate_job_ids_cannot_mask_a_missing_job(self):
-        # Two copies of one job do not satisfy a stated total of 2.
+    def test_duplicate_job_ids_with_matching_total_are_unknown(self):
+        # R2: a stated total of 2 with two received jobs that share one job id
+        # is still UNKNOWN: two copies are not two distinct jobs.
         pages = [[job(1, GATEWAY), job(1, GATEWAY)]]
+        result = summary.summarize(SHA, pages, 2)
+        self.assertEqual(result['state'], summary.UNKNOWN)
+        self.assertEqual(result['reason'], summary.DUPLICATE_JOB_ID)
+
+    def test_duplicate_job_ids_are_detected_when_count_mismatches(self):
+        # R2: a duplicate id is UNKNOWN whether or not the received count matches
+        # the stated total, and the duplicate reason wins over count_mismatch.
+        cases = [
+            ([job(1, GATEWAY), job(1, GATEWAY)], 3),
+            ([job(1, GATEWAY), job(1, GATEWAY), job(2, 'lint')], 2),
+        ]
+        for jobs, total in cases:
+            with self.subTest(jobs=jobs, total=total):
+                result = summary.summarize(SHA, [jobs], total)
+                self.assertEqual(result['state'], summary.UNKNOWN)
+                self.assertEqual(result['reason'], summary.DUPLICATE_JOB_ID)
+
+    def test_duplicate_job_ids_across_pages_are_unknown(self):
+        pages = [[job(1, GATEWAY)], [job(1, 'lint')]]
         result = summary.summarize(SHA, pages, 2)
         self.assertEqual(result['state'], summary.UNKNOWN)
         self.assertEqual(result['reason'], summary.DUPLICATE_JOB_ID)
@@ -116,6 +136,24 @@ class MainCiJobSummaryTests(unittest.TestCase):
         self.assertEqual(result['state'], summary.UNKNOWN)
         self.assertEqual(result['reason'], summary.COMPLETED_WITHOUT_CONCLUSION)
 
+    def test_empty_required_fields_are_malformed_not_green(self):
+        # A blank name or status is malformed data: it must never read GREEN.
+        for field, value in (('name', ''), ('name', '   '), ('status', ''),
+                             ('status', '  ')):
+            with self.subTest(field=field, value=value):
+                broken = job(1, GATEWAY)
+                broken[field] = value
+                result = summary.summarize(SHA, [[broken]], 1)
+                self.assertEqual(result['state'], summary.UNKNOWN)
+                self.assertEqual(result['reason'], summary.MALFORMED_JOB)
+
+    def test_completed_job_with_blank_conclusion_is_unknown(self):
+        for conclusion in ('', '   '):
+            with self.subTest(conclusion=conclusion):
+                result = summary.summarize(SHA, [[job(1, GATEWAY, conclusion)]], 1)
+                self.assertEqual(result['state'], summary.UNKNOWN)
+                self.assertEqual(result['reason'], summary.MALFORMED_JOB)
+
     def test_stated_total_not_int_is_unknown(self):
         result = summary.summarize(SHA, [[job(1, GATEWAY)]], '1')
         self.assertEqual(result['state'], summary.UNKNOWN)
@@ -149,9 +187,24 @@ class MainCiJobSummaryTests(unittest.TestCase):
         self.assertEqual(pages, snapshot)
         self.assertEqual(stated, 2)
 
+    def test_every_bad_conclusion_is_red(self):
+        # The failing set is exactly main_incident.BAD.
+        for conclusion in sorted(main_incident.BAD):
+            with self.subTest(conclusion=conclusion):
+                result = summary.summarize(
+                    SHA, [[job(1, GATEWAY, conclusion)]], 1)
+                self.assertEqual(result['state'], summary.RED)
+                self.assertEqual(result['failing'],
+                                 [{'id': 1, 'name': GATEWAY,
+                                   'conclusion': conclusion}])
+
     def test_failing_set_is_main_incident_bad(self):
         # The module reuses main_incident.BAD rather than copying it.
         self.assertEqual(set(summary._FAILED), set(main_incident.BAD))
+
+    def test_failing_set_is_the_same_bad_object(self):
+        # Identity, not just equality: the exported BAD object is reused.
+        self.assertIs(summary._FAILED, main_incident.BAD)
 
 
 if __name__ == '__main__':

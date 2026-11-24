@@ -49,7 +49,8 @@ JOB_NOT_COMPLETED = 'job_not_completed'
 
 _SHA = re.compile(r'^[0-9a-f]{40}$')
 _COMPLETED = 'completed'
-_FAILED = frozenset(main_incident.BAD)
+# The very object main_incident exports, so the failing set is reused not copied.
+_FAILED = main_incident.BAD
 
 
 def summarize(sha, pages, stated_total):
@@ -118,16 +119,21 @@ def _valid_job(job, sha):
         return False, MALFORMED_JOB
     if type(job.get('id')) is not int:
         return False, MALFORMED_JOB
-    if not isinstance(job.get('name'), str) or not isinstance(job.get('status'), str):
+    name, status = job.get('name'), job.get('status')
+    if not isinstance(name, str) or not name.strip():
+        return False, MALFORMED_JOB
+    if not isinstance(status, str) or not status.strip():
         return False, MALFORMED_JOB
     if job.get('head_sha') != sha:
         return False, SHA_MISMATCH
     conclusion = job.get('conclusion')
     if conclusion is None:
-        if job['status'] == _COMPLETED:
+        if status == _COMPLETED:
             return False, COMPLETED_WITHOUT_CONCLUSION
         return True, None
-    return isinstance(conclusion, str), MALFORMED_JOB
+    if not isinstance(conclusion, str) or not conclusion.strip():
+        return False, MALFORMED_JOB
+    return True, None
 
 
 def _add_failing(failing, job):
