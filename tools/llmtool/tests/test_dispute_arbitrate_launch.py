@@ -247,9 +247,31 @@ class _ArbitrateLaunchCase(unittest.TestCase):
 
         def fake_create_d6(**kwargs):
             self.created_d6.append(kwargs)
+            task_id = kwargs['task_id']
+            branch = 'llmtool/' + task_id
+            self.d6_records[task_id] = SimpleNamespace(
+                task_id=task_id,
+                trusted_agent_id=kwargs['reviewer_key'],
+                native_session_id=None,
+                result_sha=kwargs['base_sha'],
+                root=str(self.rev_root),
+                common_dir=str(self.common_dir),
+                branch=branch,
+                github_login=REVIEW_LOGIN,
+            )
+            self.snapshots[str(self.rev_root)] = SimpleNamespace(
+                head=kwargs['base_sha'],
+                root=str(self.rev_root),
+                common_dir=str(self.common_dir),
+                branch=branch,
+                clean=True,
+            )
 
         def fake_bind(**kwargs):
             self.bound_sessions.append(kwargs)
+            rec = self.d6_records.get(kwargs['task_id'])
+            if rec is not None:
+                rec.native_session_id = kwargs['session_id']
 
         self.fake_github_get = fake_github_get
         self.fake_create_d6 = fake_create_d6
@@ -664,21 +686,76 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
         self.assertEqual(caught.exception.dispute_code, 'DISPUTE_STALE')
 
     def test_d6_registration_head_mismatch_refuses_dispute_arbiter_unverified(self):
-        record = self._seed()
-        with patch.object(
-            task_completion, 'read_d6_registration',
-            return_value=SimpleNamespace(
-                task_id='arbiter-d6', trusted_agent_id='codex-reviewer',
-                native_session_id=THREAD_ID, result_sha=NEW_HEAD,
-                root=str(self.rev_root), common_dir=str(self.common_dir),
-                branch='llmtool/arbiter-d6', github_login=REVIEW_LOGIN,
-            ),
-        ):
-            with self.assertRaises(LLMToolError) as caught:
-                task_submission_cli._dispute_arbiter_registration(
-                    record, reviewer='codex-reviewer', reviewer_task='arbiter-d6',
-                    reviewer_session=THREAD_ID, head=HEAD)
-            self.assertEqual(caught.exception.dispute_code, 'DISPUTE_ARBITER_UNVERIFIED')
+        def mismatch_create_d6(**kwargs):
+            self.fake_create_d6(**kwargs)
+            self.d6_records[kwargs['task_id']].result_sha = NEW_HEAD
+
+        # Codex launch path refuses DISPUTE_ARBITER_UNVERIFIED and records UNKNOWN (not COMPLETED)
+        self._seed()
+        ruling_text = _ruling_text(actor='Codex')
+        raw_jsonl = _codex_jsonl({
+            'task_id': TASK, 'run_id': RUN, 'head': HEAD,
+            'outcome': 'UPHELD', 'ruling': ruling_text,
+        })
+        with patch.object(review_dispatch.shutil, 'which', return_value='/usr/bin/codex'), \
+             patch.object(review_dispatch.subprocess, 'run',
+                          return_value=SimpleNamespace(returncode=0, stdout=raw_jsonl, stderr=b'')), \
+             patch('llmtool.codex_direct_developer.validate_profile'):
+            out = io.StringIO()
+            rc = task_submission_cli.run_task_dispute(
+                SimpleNamespace(
+                    task_id=TASK, pm_session=PM_SESSION,
+                    dispute_action='arbitrate', pr=PR, finding=FINDING,
+                ),
+                store=self.store,
+                stdout=out,
+                current_head=lambda _r, _p: HEAD,
+                github_get=lambda _p: _dispute_comment(),
+                create_d6=mismatch_create_d6,
+                bind_session=self.fake_bind,
+            )
+        self.assertEqual(rc, 1)
+        self.assertEqual(json.loads(out.getvalue())['code'], 'DISPUTE_ARBITER_UNVERIFIED')
+        stored = self.store.get(TASK)
+        ac = [c for c in stored['review_dispatch_claim'] if c.get('purpose') == 'dispute_ruling'][0]
+        self.assertEqual(ac['state'], 'UNKNOWN')
+        self.assertNotIn('review_result', ac)
+        self.assertEqual(stored['review_disputes'][0]['state'], 'OPEN')
+        self.assertEqual(stored['review_disputes'][0]['history'][-1]['event'], 'ARBITER_UNKNOWN')
+
+        # Claude launch path refuses DISPUTE_ARBITER_UNVERIFIED and records UNKNOWN (not DISPATCHED)
+        self._seed(
+            developer={
+                'assignment_id': 'f' * 32, 'selection_source': 'PM',
+                'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'codex',
+                'provider_type': 'codex-cli', 'model': 'gpt-6.1-sol',
+                'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+                'session_id': 'dev-' + ('1' * 32), 'source_sha': HEAD,
+                'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+                'read_paths': ['tools/a.py'], 'write_paths': ['tools/a.py'],
+                'acceptance': ['A1'], 'context_sha256': '1' * 64,
+                'egress_basis': 'bounded', 'input_bytes': 10, 'max_tokens': None,
+                'artifact_format': 'unified_diff', 'artifact': _DIFF,
+                'artifact_sha256': _DIFF_SHA256, 'usage': None, 'error_code': None,
+                'created_at': STAMP_1, 'executor_task_id': EXECUTOR,
+            },
+            claims=[_formal_claim(actor='Codex', account_mode='CODEX_CLI')],
+        )
+        with self.assertRaises(LLMToolError) as caught:
+            task_submission_cli.dispute_arbitrate(
+                self.store, TASK, pr=PR, finding_id=FINDING,
+                current_head=lambda _r, _p: HEAD,
+                github_get=lambda _p: _dispute_comment(),
+                create_d6=mismatch_create_d6,
+                dispatch_session=lambda **_kw: CLAUDE_SESSION,
+                bind_session=self.fake_bind,
+            )
+        self.assertEqual(caught.exception.dispute_code, 'DISPUTE_ARBITER_UNVERIFIED')
+        stored = self.store.get(TASK)
+        ac = [c for c in stored['review_dispatch_claim'] if c.get('purpose') == 'dispute_ruling'][0]
+        self.assertEqual(ac['state'], 'UNKNOWN')
+        self.assertEqual(stored['review_disputes'][0]['state'], 'OPEN')
+        self.assertEqual(stored['review_disputes'][0]['history'][-1]['event'], 'ARBITER_UNKNOWN')
 
     def test_screen_refusal_on_codex_ruling_records_blocked_with_empty_text(self):
         self._seed()

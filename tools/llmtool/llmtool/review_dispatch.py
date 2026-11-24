@@ -2137,6 +2137,11 @@ def dispatch_arbiter(*, store, task_id, executor_task, pr_number, finding_id,
         if fresh.get('abandonment') is not None:
             dispute_refuse('DISPUTE_TASK_ABANDONED')
 
+        from .task_submission_cli import _dispute_arbiter_registration
+        _dispute_arbiter_registration(
+            fresh, reviewer=selected, reviewer_task=reviewer_task,
+            reviewer_session=session_id, head=head)
+
         fresh_claims = fresh.get('review_dispatch_claim')
         fresh_claims = ([fresh_claims] if type(fresh_claims) is dict else
                         list(fresh_claims) if type(fresh_claims) is list else [])
