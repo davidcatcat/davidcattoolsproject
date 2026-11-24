@@ -21,6 +21,7 @@ from . import github_identity, review_result, sensitive_paths, task_completion
 from . import lineage_counts, mac_full_suite, repair_policy, review_transcript
 from . import remote_test, start_failure, task_submission_cli
 from . import guidance_refresh
+from . import dispute_arbiter
 from .ai_github_exec import AiIdentityError, verified_ai_env
 from .errors import LLMToolError
 from .task_store import TaskStore, _json_bytes, external_action_refusal
@@ -1712,12 +1713,75 @@ def _security_merge_refusal(code, *, number=None, head=None, task_id=None):
     return {'step': 'MERGE_REFUSED', 'codes': [code], 'result': result}
 
 
+_RULING_COMMENT_MAX_BYTES = 65536
+
+
+def _is_ruling_comment(comment, body):
+    """True only for a strictly well-formed, unedited dispute ruling comment (#2087 A1).
+
+    The first three non-empty lines are the ruling marker, a ruling header (legacy
+    or versioned) and the Codex binding line, in that order. The binding head
+    equals the header HEAD (not necessarily the current PR head), the marker
+    status equals the header outcome, the body has exactly one Ruling line, exactly
+    one dispute_ruling marker line, no
+    review_verdict marker line, no Verdict: line and no verdict version-and-head
+    line, is at most 65536 UTF-8
+    bytes, and was never edited. Anything else is not a ruling comment and is
+    classified as a possible security verdict.
+    """
+    try:
+        if type(comment) is not dict or type(body) is not str:
+            return False
+        if len(body.encode('utf-8', 'surrogatepass')) > _RULING_COMMENT_MAX_BYTES:
+            return False
+        created_at = comment.get('created_at')
+        updated_at = comment.get('updated_at')
+        if (type(created_at) is not str or type(updated_at) is not str or
+                not created_at or updated_at != created_at):
+            return False
+        # One single line splitting (str.splitlines: newline, CR, CR LF and the other
+        # Unicode line boundaries) feeds every line-based condition below, so no
+        # separator can hide a line from one condition while another sees it.
+        lines = [line for line in body.splitlines() if line.strip()]
+        if len(lines) < 3:
+            return False
+        marker = task_submission_cli._RULING_MARKER.fullmatch(lines[0])
+        header = (task_submission_cli._RULING_HEADER.fullmatch(lines[1]) or
+                  dispute_arbiter.RULING_HEADER_VERSIONED.fullmatch(lines[1]))
+        binding = review_result._CODEX_BINDING.fullmatch(lines[2])
+        if marker is None or header is None or binding is None:
+            return False
+        if binding.group(4) != header.group(header.lastindex):
+            return False
+        if marker.group(2) != header.group(2):
+            return False
+        stripped_lines = [line.strip() for line in lines]
+        if sum(1 for line in stripped_lines if line.startswith('Ruling: ')) != 1:
+            return False
+        if sum(1 for line in stripped_lines
+               if task_submission_cli._RULING_MARKER.fullmatch(line) is not None or
+               'type=dispute_ruling' in line) != 1:
+            return False
+        for line in stripped_lines:
+            if line.startswith('Verdict:'):
+                return False
+            if (task_completion._VERDICT_MARKER.fullmatch(line) is not None or
+                    'type=review_verdict' in line):
+                return False
+            if review_result._VERDICT_VERSION_HEAD.fullmatch(line) is not None:
+                return False
+        return True
+    except Exception:
+        return False
+
+
 def _security_comment_code(comments, head):
     """Refuse when any security verdict comment (v91+) at head is not PASS, failing closed.
 
     A successfully read EMPTY list means this head has no security verdict, so
     the check passes (#2199 A2). Only a malformed read, an incomplete page or a
-    malformed comment entry refuses.
+    malformed comment entry refuses. A well-formed, unedited dispute ruling
+    comment is skipped (#2087 A1): it carries a binding line but no verdict.
     """
     if type(comments) is not list:
         return 'MERGE_SECURITY_REVIEW_UNKNOWN'
@@ -1729,6 +1793,8 @@ def _security_comment_code(comments, head):
         body = comment.get('body')
         if type(body) is not str:
             return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+        if _is_ruling_comment(comment, body):
+            continue
         raw_lines = [line.strip() for line in body.splitlines() if line.strip()]
         marker = task_completion._VERDICT_MARKER.fullmatch(raw_lines[0]) if raw_lines else None
         has_verdict_prefix = any(line.startswith('Verdict:') for line in raw_lines)
@@ -1806,6 +1872,9 @@ def _merge_security_claim(record, number, head, events, github_get=None):
         for claim in claims:
             if type(claim) is not dict:
                 return 'MERGE_SECURITY_REVIEW_UNKNOWN'
+            if 'purpose' in claim:
+                # #2087 A3: a ruling claim is not a verdict; it neither refuses nor passes.
+                continue
             if claim.get('pr') != number or claim.get('head_sha') != head:
                 continue
             kind = review_result.review_kind(claim)
