@@ -393,6 +393,7 @@ def _measure_read_bytes(
         norm = _norm_path(raw)
         if not _is_safe_rel_path(norm):
             return 0, "read_path_unmeasurable"
+        norm = Path(norm).as_posix()
         if norm not in seen:
             seen.add(norm)
             unique_reads.append(norm)
@@ -438,18 +439,19 @@ def _measure_part(value: Any, repo_dir: Path, *, allow_inline: bool) -> int:
     if isinstance(value, str):
         if not value:
             return 0
-        if os.path.isfile(value):
-            try:
-                return os.path.getsize(value)
-            except OSError:
-                return 0
-        if not os.path.isabs(value):
-            candidate = repo_dir / value
-            if candidate.is_file():
+        if os.path.isabs(value):
+            if os.path.isfile(value):
                 try:
-                    return candidate.stat().st_size
+                    return os.path.getsize(value)
                 except OSError:
                     return 0
+            return len(value.encode("utf-8")) if allow_inline else 0
+        candidate = repo_dir / value
+        if candidate.is_file():
+            try:
+                return candidate.stat().st_size
+            except OSError:
+                return 0
         return len(value.encode("utf-8")) if allow_inline else 0
     if isinstance(value, list):
         return sum(_measure_part(item, repo_dir, allow_inline=allow_inline) for item in value)
@@ -496,7 +498,8 @@ def _match_tier(spec, context_bytes=0, repo=None) -> int | None:
             break
     if tier is None:
         return None
-    base = spec.get("base") if isinstance(spec.get("base"), str) and spec.get("base").strip() else None
+    raw_base = spec.get("base")
+    base = raw_base.strip() if isinstance(raw_base, str) and raw_base.strip() else None
     if repo is not None and _has_new_write_file(writes, Path(repo), base):
         tier = max(tier, NEW_FILE_MIN_TIER)
     return min(tier, LADDER_MAX_TIER)
