@@ -1683,6 +1683,13 @@ def _merge_pass_claim(record, number, head, events):
 _VERDICT_VERSION_RE = re.compile(r'Version:\s*v([0-9]+)\b')
 _SECURITY_VERSION_MIN = 91
 
+# #2602 item n: the formal review dispatch applies the same exact-head security
+# verdict check as the merge gate before it starts a Reviewer. These steps name
+# the two refusals: a same-head non-PASS verdict, and unreadable/incomplete
+# security evidence (never treated as "no verdict").
+REVIEW_SECURITY_NOT_PASS = 'REVIEW_SECURITY_NOT_PASS'
+REVIEW_SECURITY_UNKNOWN = 'REVIEW_SECURITY_UNKNOWN'
+
 
 def _security_merge_refusal(code, *, number=None, head=None, task_id=None):
     """Build a MERGE_REFUSED dict for a security gate refusal with an explicit next step."""
@@ -4806,6 +4813,23 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                     if action == 'RUN_REMOTE_TEST' and ci_code in codes:
                         codes.remove(ci_code)
                     step = action
+    if step == 'DISPATCH_REVIEW':
+        # #2602 item n: the shared formal review dispatch step reuses the merge
+        # gate's security verdict check (Task claims, REVIEWER completion events
+        # and the PR's exact-head issue comments, with the same paging, ruling
+        # and dispute exclusions). It runs after the step is chosen and before
+        # anything is consumed or started: no re-run is recorded, no Reviewer is
+        # invoked and no fallback Reviewer replaces a refused one.
+        security_code = _merge_security_claim(
+            record, number, d6['result_head'], related['events'], github_get=get)
+        if security_code is not None:
+            step = (REVIEW_SECURITY_UNKNOWN
+                    if security_code == 'MERGE_SECURITY_REVIEW_UNKNOWN'
+                    else REVIEW_SECURITY_NOT_PASS)
+            codes = [step]
+            result = _security_merge_refusal(
+                security_code, number=number, head=d6['result_head'],
+                task_id=task_id)['result']
     if step == 'RUN_REMOTE_TEST':
         guard()  # #1781: an EC2 run is an external action
         try:
