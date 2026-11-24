@@ -47,7 +47,7 @@ MALFORMED_JOB = 'malformed_job'
 COMPLETED_WITHOUT_CONCLUSION = 'completed_without_conclusion'
 JOB_NOT_COMPLETED = 'job_not_completed'
 
-_SHA = re.compile(r'^[0-9a-f]{40}$')
+_SHA = re.compile(r'\A[0-9a-f]{40}\Z')
 _COMPLETED = 'completed'
 # The very object main_incident exports, so the failing set is reused not copied.
 _FAILED = main_incident.BAD
@@ -67,23 +67,29 @@ def summarize(sha, pages, stated_total):
               'stated_total': stated_total, 'total_jobs': 0, 'failing': []}
     if not isinstance(sha, str) or _SHA.match(sha) is None:
         return _unknown(result, SHA_INVALID)
-    if not isinstance(pages, (list, tuple)) or any(
-            not isinstance(page, (list, tuple)) for page in pages):
+    if not isinstance(pages, (list, tuple)):
         return _unknown(result, PAGES_MALFORMED)
     if type(stated_total) is not int:
         return _unknown(result, STATED_TOTAL_INVALID)
     # Scan the whole listing first: every completed failing job found must be
-    # reported even when the result ends up UNKNOWN.
+    # reported even when the result ends up UNKNOWN. A malformed page or job is
+    # skipped and remembered as the first UNKNOWN reason, so a usable failing
+    # job later in the listing is never hidden.
     failing = []
     seen_ids = set()
     duplicate_id = False
     not_completed = False
+    first_reason = None
     count = 0
     for page in pages:
+        if not isinstance(page, (list, tuple)):
+            first_reason = first_reason or PAGES_MALFORMED
+            continue
         for job in page:
             valid, reason = _valid_job(job, sha)
             if not valid:
-                return _unknown(result, reason, failing)
+                first_reason = first_reason or reason
+                continue
             count += 1
             if job['id'] in seen_ids:
                 duplicate_id = True
@@ -93,6 +99,8 @@ def summarize(sha, pages, stated_total):
             elif job['conclusion'] in _FAILED:
                 _add_failing(failing, job)
     result['total_jobs'] = count
+    if first_reason is not None:
+        return _unknown(result, first_reason, failing)
     if not count or count != stated_total or duplicate_id:
         # Empty, missing pages, extra jobs or duplicate ids cannot establish
         # a complete, well-formed listing.

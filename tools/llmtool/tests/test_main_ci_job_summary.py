@@ -117,6 +117,26 @@ class MainCiJobSummaryTests(unittest.TestCase):
                 self.assertEqual(result['state'], summary.UNKNOWN)
                 self.assertEqual(result['reason'], reason)
 
+    def test_malformed_job_does_not_hide_later_failing_job(self):
+        # F1: a malformed job makes the result UNKNOWN, but a completed failing
+        # job later in the same listing is still reported.
+        pages = [[None, job(2, GATEWAY, 'failure')]]
+        result = summary.summarize(SHA, pages, 2)
+        self.assertEqual(result['state'], summary.UNKNOWN)
+        self.assertEqual(result['reason'], summary.MALFORMED_JOB)
+        self.assertEqual(result['failing'],
+                         [{'id': 2, 'name': GATEWAY, 'conclusion': 'failure'}])
+
+    def test_malformed_page_does_not_hide_failing_job_on_another_page(self):
+        # F1: a malformed page is skipped, so a failing job on a usable page is
+        # still reported.
+        pages = [[job(1, GATEWAY, 'failure')], None]
+        result = summary.summarize(SHA, pages, 2)
+        self.assertEqual(result['state'], summary.UNKNOWN)
+        self.assertEqual(result['reason'], summary.PAGES_MALFORMED)
+        self.assertEqual(result['failing'],
+                         [{'id': 1, 'name': GATEWAY, 'conclusion': 'failure'}])
+
     def test_job_on_another_sha_is_unknown(self):
         pages = [[job(1, GATEWAY), job(2, 'lint', sha=OTHER)]]
         result = summary.summarize(SHA, pages, 2)
@@ -124,11 +144,19 @@ class MainCiJobSummaryTests(unittest.TestCase):
         self.assertEqual(result['reason'], summary.SHA_MISMATCH)
 
     def test_invalid_sha_is_unknown(self):
-        for bad in ('xyz', 'a' * 41, 'A' * 40, None, 7):
+        for bad in ('xyz', 'a' * 41, 'A' * 40, 'a' * 40 + '\n', None, 7):
             with self.subTest(sha=bad):
                 result = summary.summarize(bad, [job(1, GATEWAY)], 1)
                 self.assertEqual(result['state'], summary.UNKNOWN)
                 self.assertEqual(result['reason'], summary.SHA_INVALID)
+
+    def test_sha_with_trailing_newline_is_not_green(self):
+        # F2: Python's $ anchor matches before a final newline; the SHA must be
+        # exactly 40 hex digits, even when a successful job carries it.
+        bad = SHA + '\n'
+        result = summary.summarize(bad, [[job(1, GATEWAY, sha=bad)]], 1)
+        self.assertEqual(result['state'], summary.UNKNOWN)
+        self.assertEqual(result['reason'], summary.SHA_INVALID)
 
     def test_completed_job_without_conclusion_is_unknown(self):
         pages = [[job(1, GATEWAY), job(2, 'lint', conclusion=None)]]
