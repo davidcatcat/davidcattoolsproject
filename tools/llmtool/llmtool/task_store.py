@@ -4406,11 +4406,10 @@ class TaskStore:
             _fail()
         return task_id + '.json'
 
-    def _read_at(self, directory, task_id, *, validate=True):
+    def _read_raw_at(self, directory, task_id):
         """Read one record with every file check and a strict JSON parse.
 
-        validate=False skips only the final _validate; it is for read-only
-        scans whose matches the caller then reads again through get().
+        Returns ``(value, raw_bytes)`` without running ``_validate``.
         """
         name = self._name(task_id)
         for _ in range(TASK_READ_ATTEMPTS):
@@ -4460,22 +4459,7 @@ class TaskStore:
                                    parse_constant=lambda _: _fail())
                 if value.get('task_id') != task_id:
                     _fail()
-                if not validate:
-                    return value
-                record = _read_current_worker_ids(value)
-                token, pattern = _repository_read_input(record)
-                memo_key = (hashlib.sha256(raw).hexdigest(), token)
-                if memo_key in self._validated_reads:
-                    return record
-                validated = (_validate(record, strict=False)
-                             if pattern is None else
-                             _validate(record, strict=False,
-                                       repository_pattern=pattern))
-                if token is not _REPOSITORY_CONFIG_UNREADABLE:
-                    if len(self._validated_reads) >= TASK_READ_MEMO_MAX:
-                        self._validated_reads.clear()
-                    self._validated_reads.add(memo_key)
-                return validated
+                return value, raw
             except LLMToolError:
                 raise
             except FileNotFoundError:
@@ -4491,6 +4475,30 @@ class TaskStore:
                 if fd is not None:
                     os.close(fd)
         _fail('TASK_STORE_BUSY')
+
+    def _read_at(self, directory, task_id, *, validate=True):
+        """Read one record with every file check and a strict JSON parse.
+
+        validate=False skips only the final _validate; it is for read-only
+        scans whose matches the caller then reads again through get().
+        """
+        value, raw = self._read_raw_at(directory, task_id)
+        if not validate:
+            return value
+        record = _read_current_worker_ids(value)
+        token, pattern = _repository_read_input(record)
+        memo_key = (hashlib.sha256(raw).hexdigest(), token)
+        if memo_key in self._validated_reads:
+            return record
+        validated = (_validate(record, strict=False)
+                     if pattern is None else
+                     _validate(record, strict=False,
+                               repository_pattern=pattern))
+        if token is not _REPOSITORY_CONFIG_UNREADABLE:
+            if len(self._validated_reads) >= TASK_READ_MEMO_MAX:
+                self._validated_reads.clear()
+            self._validated_reads.add(memo_key)
+        return validated
 
     @staticmethod
     def _unique_pairs(pairs):
@@ -4910,7 +4918,7 @@ class TaskStore:
                 for other_id in task_ids:
                     if other_id == task_id:
                         continue
-                    light = self._read_at(directory, other_id, validate=False)
+                    light, _ = self._read_raw_at(directory, other_id)
                     if not (claims & self._d6_named_ids(light)):
                         continue
                     other = self.get(other_id)

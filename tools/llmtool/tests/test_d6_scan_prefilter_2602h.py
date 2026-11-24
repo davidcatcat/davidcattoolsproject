@@ -38,25 +38,19 @@ class D6ScanPrefilterTests(unittest.TestCase):
     def _d6_task(self, executor_task_id=None, *, responded=False):
         task = test_task_store.TaskStoreTests._codex_dispatch_task(self)
         if executor_task_id is not None:
-            task['completion'] = {
-                'state': 'WAITING_EXECUTOR',
-                'executor_task_id': executor_task_id,
-                'reviewer_task_id': None,
-                'evidence': None,
-                'missing_gates': [],
-                'pm_dispatch': 'NOT_STARTED',
-                'pm_response': None,
-                'pm_recommendation': None,
-                'pm_usage': None,
-                'pm_error_code': None,
-            }
+            developer = test_task_store.TaskStoreTests._developer_assignment(
+                provider='codex', max_tokens=None)
+            developer['executor_task_id'] = executor_task_id
             if responded:
-                task['developer']['state'] = 'DEVELOPER_RESPONDED'
-                task['developer']['provider_type'] = 'codex-cli'
-                task['developer']['artifact'] = '--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n'
-                task['developer']['artifact_sha256'] = hashlib.sha256(
-                    task['developer']['artifact'].encode('utf-8')
+                developer['state'] = 'DEVELOPER_RESPONDED'
+                developer['provider_type'] = 'codex-cli'
+                developer['artifact'] = '--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n'
+                developer['artifact_sha256'] = hashlib.sha256(
+                    developer['artifact'].encode('utf-8')
                 ).hexdigest()
+            task['developer'] = developer
+            task['completion'] = test_task_store.TaskStoreTests._d6_completion(
+                executor_task_id)
         return task
 
     def _write_raw_task(self, task_id, raw_bytes):
