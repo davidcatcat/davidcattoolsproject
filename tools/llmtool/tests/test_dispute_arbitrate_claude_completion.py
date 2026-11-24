@@ -558,6 +558,24 @@ class ClaudeRulingCollectionTests(unittest.TestCase):
         self._write_transcript(_transcript_bytes([_user_entry(_ruling_text())]))
         self._assert_refused_unchanged('ARBITER_TRANSCRIPT_UNAVAILABLE', before)
 
+    def test_deeply_nested_json_line_refuses_unavailable_and_unchanged(self):
+        self._seed()
+        before = self._record_bytes()
+        depth = sys.getrecursionlimit() + 500
+        nested_line = ('[' * depth + ']' * depth).encode('utf-8')
+        self.assertLess(len(nested_line), dispute_arbiter._TRANSCRIPT_MAX_BYTES)
+
+        # Deeply nested JSON line alone
+        self._write_transcript(nested_line + b'\n')
+        self._assert_refused_unchanged('ARBITER_TRANSCRIPT_UNAVAILABLE', before)
+        # Replay still refuses and leaves record unchanged
+        self._assert_refused_unchanged('ARBITER_TRANSCRIPT_UNAVAILABLE', before)
+
+        # Deeply nested JSON line alongside a valid assistant entry
+        valid_line = json.dumps(_assistant_entry(_ruling_text())).encode('utf-8')
+        self._write_transcript(valid_line + b'\n' + nested_line + b'\n')
+        self._assert_refused_unchanged('ARBITER_TRANSCRIPT_UNAVAILABLE', before)
+
     def test_session_not_ended(self):
         self._seed()
         before = self._record_bytes()

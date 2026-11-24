@@ -276,10 +276,12 @@ def ruling_blocks(session_id, config_dir, reviewer_task):
     saw_assistant = False
     assistant_texts = []
     for line in decoded.splitlines():
+        if not line:
+            continue
         try:
             entry = json.loads(line)
-        except ValueError:
-            continue
+        except (ValueError, TypeError, RecursionError):
+            return None
         if type(entry) is not dict or entry.get('type') != 'assistant':
             continue
         message = entry.get('message')
