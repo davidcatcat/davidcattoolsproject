@@ -28,7 +28,12 @@ import worker_policy_fixture  # noqa: E402
 
 TASK = 'a' * 32
 RUN = 'b' * 32
-CONTRACT = 'c' * 64
+_REQUEST = 'Fix tools/a.py'
+_REQUEST_SHA256 = hashlib.sha256(_REQUEST.encode('utf-8')).hexdigest()
+_TASK_CONTRACT = task_submission_cli._contract(TASK, _REQUEST_SHA256)
+CONTRACT = _TASK_CONTRACT.binding(RUN).contract_digest
+_DIFF = 'diff --git a/tools/a.py b/tools/a.py\n'
+_DIFF_SHA256 = hashlib.sha256(_DIFF.encode('utf-8')).hexdigest()
 HEAD = 'd' * 40
 NEW_HEAD = 'e' * 40
 EXECUTOR = 'exec-d6-1'
@@ -39,6 +44,7 @@ PR = 42
 FINDING = 'F1'
 REVIEW_VERSION = 1
 DISPUTE_COMMENT_ID = 1001
+REVIEW_LOGIN = 'review-account'
 REPOSITORY = 'davidcatcat/davidcattoolsproject'
 EVIDENCE_REF = f'https://github.com/{REPOSITORY}/pull/{PR}#issuecomment-{DISPUTE_COMMENT_ID}'
 BINDING = f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} contract={CONTRACT} head={HEAD}'
@@ -116,93 +122,79 @@ def _formal_claim(*, version=REVIEW_VERSION, state='COMPLETED', actor='Claude',
     return claim
 
 
-def _seed_task(store, *, developer=None, claims=None, disputes=None, completion_events=None):
-    record = {
-        'schema_version': 2,
-        'task_id': TASK,
-        'run_id': RUN,
-        'pm_session_id': PM_SESSION,
-        'state': 'PM_RESPONDED',
+def _seed_task(*, developer=None, claims=None, disputes=None, completion_events=None):
+    record = task_submission_cli._record(
+        TASK, RUN, PM_SESSION, 'claude', _REQUEST,
+        state='PM_RESPONDED', provider_type='claude-cli',
+        model='claude-sonnet-4-6', backend='NO_NATIVE_SESSION_ID_EXPOSED',
+        request_sha=_REQUEST_SHA256, contract=_TASK_CONTRACT)
+    record['response'] = '{"schema_version": 1, "summary": "ok"}'
+    record['developer'] = developer or {
+        'assignment_id': 'f' * 32,
+        'selection_source': 'PM',
+        'state': 'DEVELOPER_RESPONDED',
+        'provider_profile': 'agy',
+        'provider_type': 'agy-cli',
+        'model': 'gemini-2.5-pro',
+        'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+        'session_id': 'dev-' + ('1' * 32),
+        'source_sha': HEAD,
+        'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+        'read_paths': ['tools/a.py'],
+        'write_paths': ['tools/a.py'],
+        'acceptance': ['A1'],
+        'context_sha256': '1' * 64,
+        'egress_basis': 'bounded test',
+        'input_bytes': 10,
+        'max_tokens': None,
+        'artifact_format': 'unified_diff',
+        'artifact': _DIFF,
+        'artifact_sha256': _DIFF_SHA256,
+        'usage': None,
+        'error_code': None,
         'created_at': '2026-11-24T00:00:00Z',
-        'updated_at': '2026-11-24T00:00:00Z',
-        'request': 'Fix tools/a.py',
-        'pm_response': {'schema_version': 1, 'summary': 'ok'},
-        'task_binding': {
+        'owner_assignment_ref': None,
+        'executor_task_id': EXECUTOR,
+    }
+    record['completion'] = {
+        'state': 'WAITING_EXECUTOR',
+        'executor_task_id': EXECUTOR,
+        'reviewer_task_id': None,
+        'evidence': {
             'task_id': TASK,
             'run_id': RUN,
             'contract_digest': CONTRACT,
-        },
-        'developer': developer or {
-            'assignment_id': 'f' * 32,
-            'selection_source': 'PM',
-            'state': 'DEVELOPER_RESPONDED',
-            'provider_profile': 'agy',
-            'provider_type': 'agy-cli',
-            'model': 'gemini-2.5-pro',
-            'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
-            'session_id': 'dev-' + ('1' * 32),
+            'execution_mode': 'DIRECT_D6',
+            'root': '/tmp/fake-exec-root',
+            'common_dir': '/tmp/fake-repo/.git',
+            'branch': 'llmtool/' + EXECUTOR,
             'source_sha': HEAD,
-            'source_sha_binding': 'D6_REGISTRY_OBSERVED',
-            'read_paths': ['tools/a.py'],
-            'write_paths': ['tools/a.py'],
-            'acceptance': ['A1'],
-            'context_sha256': '1' * 64,
-            'egress_basis': 'bounded test',
-            'input_bytes': 10,
-            'max_tokens': None,
-            'artifact_format': 'unified_diff',
-            'artifact': None,
-            'artifact_sha256': None,
-            'usage': None,
-            'error_code': None,
-            'created_at': '2026-11-24T00:00:00Z',
-            'owner_assignment_ref': None,
-            'executor_task_id': EXECUTOR,
+            'executor_identity': 'agy',
+            'executor_session_ref': 'ref-1',
+            'executor_native_session_id': 'exec-session-1',
+            'executor_native_session': 'VERIFIED',
         },
-        'completion': {
-            'state': 'WAITING_EXECUTOR',
-            'executor_task_id': EXECUTOR,
-            'reviewer_task_id': None,
-            'evidence': {
-                'task_id': TASK,
-                'run_id': RUN,
-                'contract_digest': CONTRACT,
-                'execution_mode': 'DIRECT_D6',
-                'root': '/tmp/fake-exec-root',
-                'common_dir': '/tmp/fake-repo/.git',
-                'branch': 'llmtool/' + EXECUTOR,
-                'source_sha': HEAD,
-                'executor_identity': 'agy',
-                'executor_session_ref': 'ref-1',
-                'executor_native_session_id': 'exec-session-1',
-                'executor_native_session': 'VERIFIED',
-            },
-            'missing_gates': [],
-            'pm_dispatch': 'NOT_STARTED',
-            'pm_response': None,
-            'pm_recommendation': None,
-            'pm_usage': None,
-            'pm_error_code': None,
-        },
-        'review_dispatch_claim': [_formal_claim()] if claims is None else claims,
-        'review_disputes': [{
-            'finding_id': FINDING,
-            'pr': PR,
-            'head_sha': HEAD,
-            'review_version': REVIEW_VERSION,
-            'severity': 'High',
-            'state': 'OPEN',
-            'evidence_ref': EVIDENCE_REF,
-            'opened_at': '2026-11-24T00:10:00Z',
-        }] if disputes is None else disputes,
+        'missing_gates': [],
+        'pm_dispatch': 'NOT_STARTED',
+        'pm_response': None,
+        'pm_recommendation': None,
+        'pm_usage': None,
+        'pm_error_code': None,
     }
+    record['review_dispatch_claim'] = [_formal_claim()] if claims is None else claims
+    record['review_disputes'] = [{
+        'finding_id': FINDING,
+        'pr': PR,
+        'head_sha': HEAD,
+        'review_version': REVIEW_VERSION,
+        'severity': 'High',
+        'state': 'OPEN',
+        'evidence_ref': EVIDENCE_REF,
+        'opened_at': '2026-11-24T00:10:00Z',
+    }] if disputes is None else disputes
     if completion_events is not None:
         record['completion_events'] = completion_events
-    store_path = store._path(TASK)
-    store_path.parent.mkdir(parents=True, exist_ok=True)
-    raw = json.dumps(record, sort_keys=True, indent=2).encode('utf-8')
-    store_path.write_bytes(raw)
-    return store.get(TASK)
+    return record
 
 
 def _dispute_comment(*, body='PM dispute explanation.', created='2026-11-24T00:09:00Z',
@@ -229,7 +221,7 @@ class _ArbitrateLaunchCase(unittest.TestCase):
         self.exec_root.mkdir(parents=True)
         self.rev_root = Path(self.temp.name) / 'rev'
         self.rev_root.mkdir(parents=True)
-        worker_policy_fixture.install(self)
+        self.policy_path = worker_policy_fixture.install(self)
 
         self.pr_head = HEAD
         self.d6_records = {
@@ -241,7 +233,7 @@ class _ArbitrateLaunchCase(unittest.TestCase):
                 root=str(self.exec_root),
                 common_dir=str(self.common_dir),
                 branch='llmtool/' + EXECUTOR,
-                github_login=review_trust_fixture.AI_LOGIN,
+                github_login=REVIEW_LOGIN,
             ),
         }
         self.snapshots = {
@@ -281,7 +273,7 @@ class _ArbitrateLaunchCase(unittest.TestCase):
                 root=str(self.rev_root),
                 common_dir=str(self.common_dir),
                 branch='llmtool/' + task_id,
-                github_login=review_trust_fixture.AI_LOGIN,
+                github_login=REVIEW_LOGIN,
             )
 
         def fake_snapshot(root):
@@ -306,7 +298,7 @@ class _ArbitrateLaunchCase(unittest.TestCase):
             patch.object(review_dispatch, '_review_rules',
                          return_value=('RULES\nRULES_END\n\n', '9' * 64)),
             patch.object(review_dispatch, '_resolve_github_login',
-                         return_value=review_trust_fixture.AI_LOGIN),
+                         return_value=REVIEW_LOGIN),
             patch.object(review_dispatch, '_resolve_reviewer_role',
                          side_effect=self._resolve_role),
             patch.object(review_dispatch, '_admit_review_model',
@@ -337,12 +329,10 @@ class _ArbitrateLaunchCase(unittest.TestCase):
         }
 
     def _seed(self, **kwargs):
-        record = _seed_task(self.store, **kwargs)
+        record = _seed_task(**kwargs)
         record['completion']['evidence']['common_dir'] = str(self.common_dir)
         record['completion']['evidence']['root'] = str(self.exec_root)
-        self.store._path(TASK).write_bytes(
-            json.dumps(record, sort_keys=True, indent=2).encode('utf-8'))
-        return self.store.get(TASK)
+        return self.store._write(record, create=not self.store._path(TASK).exists())
 
     def _record_bytes(self):
         return self.store._path(TASK).read_bytes()
@@ -371,7 +361,7 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
             developer={
                 'assignment_id': 'f' * 32, 'selection_source': 'PM',
                 'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'claude',
-                'provider_type': 'claude-cli', 'model': 'claude-sonnet-4-6',
+                'provider_type': None, 'model': None,
                 'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
                 'session_id': 'dev-' + ('1' * 32), 'source_sha': HEAD,
                 'source_sha_binding': 'D6_REGISTRY_OBSERVED',
@@ -382,11 +372,15 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
                 'artifact_sha256': None, 'usage': None, 'error_code': None,
                 'created_at': '2026-11-24T00:00:00Z',
                 'owner_assignment_ref': None, 'executor_task_id': EXECUTOR,
+                'claude_result': {
+                    'executor_task_id': EXECUTOR, 'head_sha': HEAD,
+                    'recorded_at': '2026-11-24T00:00:00Z',
+                },
             },
             claims=[_formal_claim(actor='Codex', account_mode='CODEX_CLI')],
         )
         before = self._record_bytes()
-        worker_policy_fixture.set_worker(self, 'claude-reviewer', dispatch='PAUSED')
+        worker_policy_fixture.update(self.policy_path, 'claude-reviewer', 'PAUSED')
         with self.assertRaises(LLMToolError) as caught:
             task_submission_cli.dispute_arbitrate(
                 self.store, TASK, pr=PR, finding_id=FINDING,
@@ -417,16 +411,14 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
         with patch.object(review_dispatch.shutil, 'which', return_value='/usr/bin/codex'), \
              patch.object(review_dispatch.subprocess, 'run',
                           return_value=SimpleNamespace(returncode=0, stdout=raw_jsonl, stderr=b'')), \
-             patch.object(review_dispatch, 'validate_profile', create=True):
-            # validate_profile is imported from codex_direct_developer inside dispatch_arbiter
-            with patch('llmtool.codex_direct_developer.validate_profile'):
-                res = task_submission_cli.dispute_arbitrate(
-                    self.store, TASK, pr=PR, finding_id=FINDING,
-                    current_head=lambda _r, _p: HEAD,
-                    github_get=comment_get,
-                    create_d6=self.fake_create_d6,
-                    bind_session=self.fake_bind,
-                )
+             patch('llmtool.codex_direct_developer.validate_profile'):
+            res = task_submission_cli.dispute_arbitrate(
+                self.store, TASK, pr=PR, finding_id=FINDING,
+                current_head=lambda _r, _p: HEAD,
+                github_get=comment_get,
+                create_d6=self.fake_create_d6,
+                bind_session=self.fake_bind,
+            )
 
         self.assertEqual(res['state'], 'COMPLETED')
         self.assertEqual(res['verdict'], 'RULING')
@@ -570,8 +562,8 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
                 'read_paths': ['tools/a.py'], 'write_paths': ['tools/a.py'],
                 'acceptance': ['A1'], 'context_sha256': '1' * 64,
                 'egress_basis': 'bounded', 'input_bytes': 10, 'max_tokens': None,
-                'artifact_format': 'unified_diff', 'artifact': None,
-                'artifact_sha256': None, 'usage': None, 'error_code': None,
+                'artifact_format': 'unified_diff', 'artifact': _DIFF,
+                'artifact_sha256': _DIFF_SHA256, 'usage': None, 'error_code': None,
                 'created_at': '2026-11-24T00:00:00Z', 'executor_task_id': EXECUTOR,
             },
             claims=[_formal_claim(actor='Codex', account_mode='CODEX_CLI')],
@@ -653,7 +645,9 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
                 self._seed(claims=claims)
                 if add_event:
                     self.store.record_completion_event(
-                        TASK, source='REVIEWER', source_sha=HEAD, summary='PASS')
+                        TASK, event_id='9' * 32, run_id=RUN,
+                        session_id='review-session-2', source='REVIEWER',
+                        source_sha=HEAD, sequence=1, payload_sha256='8' * 64)
                 before = self._record_bytes()
                 with self.assertRaises(LLMToolError) as caught:
                     task_submission_cli.dispute_arbitrate(
@@ -668,7 +662,10 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
 
     def test_event_attribution_allows_unversioned_own_event_and_refuses_legacy_newer(self):
         self._seed()
-        self.store.record_completion_event(TASK, source='REVIEWER', source_sha=HEAD, summary='FAIL')
+        self.store.record_completion_event(
+            TASK, event_id='9' * 32, run_id=RUN,
+            session_id='review-session-1', source='REVIEWER',
+            source_sha=HEAD, sequence=1, payload_sha256='8' * 64)
         record = self.store.get(TASK)
         # Disputed verdict's own REVIEWER event (no version key) does not refuse
         claim = task_submission_cli._check_newer_formal_outcome(
@@ -704,7 +701,7 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
                 task_id='arbiter-d6', trusted_agent_id='codex-reviewer',
                 native_session_id=THREAD_ID, result_sha=NEW_HEAD,
                 root=str(self.rev_root), common_dir=str(self.common_dir),
-                branch='llmtool/arbiter-d6', github_login=review_trust_fixture.AI_LOGIN,
+                branch='llmtool/arbiter-d6', github_login=REVIEW_LOGIN,
             ),
         ):
             with self.assertRaises(LLMToolError) as caught:
