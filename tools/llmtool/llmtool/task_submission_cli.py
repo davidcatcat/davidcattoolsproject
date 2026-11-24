@@ -10110,7 +10110,9 @@ def _start_retry_claim(args, store, task, failed, developer, completion, registr
         verdict = start_failure.classify(current, probe)
         if not verdict.start_failure:
             raise _not_start_failure(verdict)
-        if _start_retry_count(current) >= worker_dispatch.MAX_START_RETRIES_PER_TASK:
+        limit = min(repair_policy.start_retries_max(),
+                    worker_dispatch.MAX_START_RETRIES_PER_TASK)
+        if _start_retry_count(current) >= limit:
             raise LLMToolError('START_RETRY_LIMIT_REACHED: a third start failure goes to the PM')
         if _start_retry_repair_packet(store, current) != validated_packet:
             raise LLMToolError('START_RETRY_REPAIR_PACKET_MISMATCH')
@@ -10161,7 +10163,9 @@ def run_task_retry_start(args, *, store=None, route_runner=None, d6_unchanged=No
     if getattr(args, 'executor_task', None) != executor_task:
         raise LLMToolError('START_RETRY_D6_CHANGED: --executor-task is not the D6 of the '
                            'failed start; no Task or D6 write was made')
-    if _start_retry_count(task) >= worker_dispatch.MAX_START_RETRIES_PER_TASK:
+    limit = min(repair_policy.start_retries_max(),
+                worker_dispatch.MAX_START_RETRIES_PER_TASK)
+    if _start_retry_count(task) >= limit:
         raise LLMToolError('START_RETRY_LIMIT_REACHED: a third start failure goes to the PM')
     owner_ref = failed.get('owner_assignment_ref')
     decision = worker_dispatch.evaluate('claude-developer', owner_ref, executor_task)
