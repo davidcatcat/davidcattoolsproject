@@ -355,6 +355,22 @@ class RulingCommentNotSkippedTests(_GateAsserts, unittest.TestCase):
         self.assertFalse(task_advance._is_ruling_comment(ruling, ruling['body']))
         self.assertRefused(_run_merge_once([ruling]), UNKNOWN)
 
+    def test_second_dispute_ruling_marker_line_keeps_main_result(self):
+        marker = ('<!-- activity: type=dispute_ruling actor=Codex target=PM '
+                  'status=UPHELD -->')
+        loose = '<!-- activity: type=dispute_ruling actor=Claude target=PM status=WITHDRAWN -->'
+        for label, extra in (('own_line', marker), ('own_line_other', loose),
+                             ('behind_cr', f'Reasons follow.\r{marker}'),
+                             ('behind_cr_other', f'Reasons follow.\r{loose}')):
+            with self.subTest(second=label):
+                ruling = _ruling_comment(extra_lines=(extra,))
+                self.assertFalse(task_advance._is_ruling_comment(ruling, ruling['body']))
+                self.assertRefused(_run_merge_once([ruling]), UNKNOWN)
+
+    def test_single_dispute_ruling_marker_line_still_skipped(self):
+        ruling = _ruling_comment()
+        self.assertTrue(task_advance._is_ruling_comment(ruling, ruling['body']))
+
     def test_binding_head_differs_from_header_head_not_skipped(self):
         for header in ('versioned', 'legacy'):
             with self.subTest(header=header):

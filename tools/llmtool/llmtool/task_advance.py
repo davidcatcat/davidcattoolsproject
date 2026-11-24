@@ -1722,7 +1722,8 @@ def _is_ruling_comment(comment, body):
     The first three non-empty lines are the ruling marker, a ruling header (legacy
     or versioned) and the Codex binding line, in that order. The binding head
     equals the header HEAD (not necessarily the current PR head), the marker
-    status equals the header outcome, the body has exactly one Ruling line, no
+    status equals the header outcome, the body has exactly one Ruling line, exactly
+    one dispute_ruling marker line, no
     review_verdict marker line, no Verdict: line and no verdict version-and-head
     line, is at most 65536 UTF-8
     bytes, and was never edited. Anything else is not a ruling comment and is
@@ -1756,6 +1757,10 @@ def _is_ruling_comment(comment, body):
             return False
         stripped_lines = [line.strip() for line in lines]
         if sum(1 for line in stripped_lines if line.startswith('Ruling: ')) != 1:
+            return False
+        if sum(1 for line in stripped_lines
+               if task_submission_cli._RULING_MARKER.fullmatch(line) is not None or
+               'type=dispute_ruling' in line) != 1:
             return False
         for line in stripped_lines:
             if line.startswith('Verdict:'):
