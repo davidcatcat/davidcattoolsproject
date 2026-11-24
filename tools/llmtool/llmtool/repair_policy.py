@@ -68,6 +68,16 @@ OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
 #   row 19: ai_debug_excerpt_max_chars (#2281 row 19, second part, basis #2188
 #           and #1502 D11: the AI Debug excerpt size limit in characters;
 #           caller default llmtool.start_failure.HIGH_DEBUG_EXCERPT_MAX_CHARS)
+#   row 9:  remote_test_module_timeout_seconds (the per-module EC2 remote test
+#           timeout in seconds; caller default REMOTE_TEST_MODULE_TIMEOUT_SECONDS)
+#           and remote_test_total_timeout_seconds (the whole remote test run in
+#           seconds; caller default REMOTE_TEST_TOTAL_TIMEOUT_SECONDS)
+#   row 19: reviewer_excerpt_max_chars (the reviewer excerpt size limit in
+#           characters; caller default REVIEWER_EXCERPT_MAX_CHARS) and
+#           ci_excerpt_max_lines (the CI excerpt size limit in lines; caller
+#           default CI_EXCERPT_MAX_LINES)
+#   row 20: monitor_ec2_busy_window_seconds (the EC2 busy window in seconds,
+#           not a stuck threshold; caller default MONITOR_EC2_BUSY_WINDOW_SECONDS)
 #   #2537:  gw_agent_max_turns (the per-Task gw-agent turn cap; caller default
 #           GW_AGENT_MAX_TURNS below)
 #   #2622 (Owner decision relayed in the issue): route_failure_pause_after (the
@@ -85,6 +95,18 @@ OPTIONAL_POSITIVE_POLICY_KEYS = ('spec_preflight_large_file_lines', 'merge_train
                                  'ai_debug_excerpt_max_chars', 'gw_agent_max_turns',
                                  'route_failure_pause_after',
                                  'local_test_timeout_seconds')
+# #2281 rows 9, 19 and 20: five further optional positive keys. They live in a
+# companion tuple, validated through ALL_OPTIONAL_POSITIVE_POLICY_KEYS, so the
+# public pre-#2281 list above stays byte-for-byte stable for its consumers.
+# Each key is an optional positive integer with no upper validation bound, the
+# same rule as the list above.
+OPTIONAL_POSITIVE_POLICY_KEYS_2281 = (
+    'remote_test_module_timeout_seconds', 'remote_test_total_timeout_seconds',
+    'reviewer_excerpt_max_chars', 'ci_excerpt_max_lines',
+    'monitor_ec2_busy_window_seconds')
+# The full optional positive set the policy loader validates.
+ALL_OPTIONAL_POSITIVE_POLICY_KEYS = (*OPTIONAL_POSITIVE_POLICY_KEYS,
+                                     *OPTIONAL_POSITIVE_POLICY_KEYS_2281)
 # #2281 row 18 (basis #819): Developer assignment wait. The key above is
 # optional; a policy that omits it keeps the caller default, the hard-coded
 # wait at its point of use (llmtool.developer_assignment_inbox).
@@ -147,6 +169,21 @@ ROUTE_FAILURE_PAUSE_AFTER = 3
 # it keeps the caller default, the hard-coded limit at its point of use
 # (llmtool.task_completion, _TEST_TIMEOUT).
 LOCAL_TEST_TIMEOUT_SECONDS = 600
+# #2281 row 9: the per-module EC2 remote test timeout, in seconds. The key above
+# is optional; a policy that omits it keeps this value.
+REMOTE_TEST_MODULE_TIMEOUT_SECONDS = 180
+# #2281 row 9: the whole EC2 remote test run timeout, in seconds. The key above
+# is optional; a policy that omits it keeps this value.
+REMOTE_TEST_TOTAL_TIMEOUT_SECONDS = 540
+# #2281 row 19: the reviewer excerpt size limit, in characters. The key above
+# is optional; a policy that omits it keeps this value.
+REVIEWER_EXCERPT_MAX_CHARS = 2000
+# #2281 row 19: the CI excerpt size limit, in lines. The key above is optional;
+# a policy that omits it keeps this value.
+CI_EXCERPT_MAX_LINES = 40
+# #2281 row 20: the EC2 busy window, in seconds (not a stuck threshold). The key
+# above is optional; a policy that omits it keeps this value.
+MONITOR_EC2_BUSY_WINDOW_SECONDS = 1800
 # #2281 L0a (design rule 3): the bound is a real technical limit, not an
 # arbitrary cap. policy.json is untrusted input, so load_policy reads at most
 # _MAX_BYTES + 1 bytes in one bounded buffer instead of the whole file. The
@@ -183,12 +220,12 @@ def load_policy(path=None):
     except (OSError, ValueError, UnicodeError):
         _refuse('POLICY_INVALID')
     allowed = {'schema_version', *POLICY_KEYS, *OPTIONAL_POLICY_LIMITS,
-               *OPTIONAL_POSITIVE_POLICY_KEYS}
+               *ALL_OPTIONAL_POSITIVE_POLICY_KEYS}
     if (type(data) is not dict or not {'schema_version', *POLICY_KEYS} <= set(data) <= allowed or
             any(key in data and (type(data[key]) is not int or not low <= data[key] <= high)
                 for key, (low, high) in OPTIONAL_POLICY_LIMITS.items()) or
             any(key in data and (type(data[key]) is not int or data[key] < 1)
-                for key in OPTIONAL_POSITIVE_POLICY_KEYS) or
+                for key in ALL_OPTIONAL_POSITIVE_POLICY_KEYS) or
             type(data['schema_version']) is not int or data['schema_version'] != 1 or
             any(type(data[key]) is not int or not 0 <= data[key] <= 1000
                 for key in POLICY_KEYS)):
@@ -348,6 +385,59 @@ def local_test_timeout_seconds(path=None, default=LOCAL_TEST_TIMEOUT_SECONDS):
     """
     policy = load_policy(path)
     return policy.get('local_test_timeout_seconds', default)
+
+
+def remote_test_module_timeout_seconds(path=None,
+                                       default=REMOTE_TEST_MODULE_TIMEOUT_SECONDS):
+    """#2281 row 9: the per-module EC2 remote test timeout, in seconds.
+
+    The key is optional; a policy that omits it keeps the caller default, the
+    hard-coded per-module remote test timeout.
+    """
+    policy = load_policy(path)
+    return policy.get('remote_test_module_timeout_seconds', default)
+
+
+def remote_test_total_timeout_seconds(path=None,
+                                      default=REMOTE_TEST_TOTAL_TIMEOUT_SECONDS):
+    """#2281 row 9: the whole EC2 remote test run timeout, in seconds.
+
+    The key is optional; a policy that omits it keeps the caller default, the
+    hard-coded whole-run remote test timeout.
+    """
+    policy = load_policy(path)
+    return policy.get('remote_test_total_timeout_seconds', default)
+
+
+def reviewer_excerpt_max_chars(path=None, default=REVIEWER_EXCERPT_MAX_CHARS):
+    """#2281 row 19: the reviewer excerpt size limit, in characters.
+
+    The key is optional; a policy that omits it keeps the caller default, the
+    hard-coded reviewer excerpt limit.
+    """
+    policy = load_policy(path)
+    return policy.get('reviewer_excerpt_max_chars', default)
+
+
+def ci_excerpt_max_lines(path=None, default=CI_EXCERPT_MAX_LINES):
+    """#2281 row 19: the CI excerpt size limit, in lines.
+
+    The key is optional; a policy that omits it keeps the caller default, the
+    hard-coded CI excerpt limit.
+    """
+    policy = load_policy(path)
+    return policy.get('ci_excerpt_max_lines', default)
+
+
+def monitor_ec2_busy_window_seconds(path=None,
+                                    default=MONITOR_EC2_BUSY_WINDOW_SECONDS):
+    """#2281 row 20: the EC2 busy window, in seconds (not a stuck threshold).
+
+    The key is optional; a policy that omits it keeps the caller default, the
+    hard-coded EC2 busy window.
+    """
+    policy = load_policy(path)
+    return policy.get('monitor_ec2_busy_window_seconds', default)
 
 
 KINDS = ('root', 'child', 'replan')
