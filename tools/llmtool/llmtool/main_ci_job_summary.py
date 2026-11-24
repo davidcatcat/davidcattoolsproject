@@ -84,15 +84,15 @@ def summarize(sha, pages, stated_total):
             if not valid:
                 return _unknown(result, reason, failing)
             count += 1
-            seen = seen_ids.add(job['id'])
-            if seen:
+            if job['id'] in seen_ids:
                 duplicate_id = True
+            seen_ids.add(job['id'])
             if job['status'] != _COMPLETED:
                 not_completed = True
             elif job['conclusion'] in _FAILED:
                 _add_failing(failing, job)
     result['total_jobs'] = count
-    if not count or count != stated_total:
+    if not count or count != stated_total or duplicate_id:
         # Empty, missing pages, extra jobs or duplicate ids cannot establish
         # a complete, well-formed listing.
         return _unknown(result, DUPLICATE_JOB_ID if duplicate_id else COUNT_MISMATCH,
