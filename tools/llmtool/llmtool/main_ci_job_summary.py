@@ -40,8 +40,9 @@ UNKNOWN = 'unknown'
 SHA_INVALID = 'sha_invalid'
 PAGES_MALFORMED = 'pages_malformed'
 STATED_TOTAL_INVALID = 'stated_total_invalid'
-INCOMPLETE_DATA = 'incomplete_data'
 SHA_MISMATCH = 'sha_mismatch'
+COUNT_MISMATCH = 'count_mismatch'
+DUPLICATE_JOB_ID = 'duplicate_job_id'
 MALFORMED_JOB = 'malformed_job'
 COMPLETED_WITHOUT_CONCLUSION = 'completed_without_conclusion'
 JOB_NOT_COMPLETED = 'job_not_completed'
@@ -70,18 +71,34 @@ def summarize(sha, pages, stated_total):
         return _unknown(result, PAGES_MALFORMED)
     if type(stated_total) is not int:
         return _unknown(result, STATED_TOTAL_INVALID)
-    jobs, reason = _collect_jobs(pages, sha)
-    if reason is not None:
-        return _unknown(result, reason)
-    result['total_jobs'] = len(jobs)
-    if not jobs or len(jobs) < stated_total:
-        return _unknown(result, INCOMPLETE_DATA)
+    # Scan the whole listing first: every completed failing job found must be
+    # reported even when the result ends up UNKNOWN.
     failing = []
-    for job in jobs:
-        if job['status'] != _COMPLETED:
-            return _unknown(result, JOB_NOT_COMPLETED, failing)
-        if job['conclusion'] in _FAILED:
-            _add_failing(failing, job)
+    seen_ids = set()
+    duplicate_id = False
+    not_completed = False
+    count = 0
+    for page in pages:
+        for job in page:
+            valid, reason = _valid_job(job, sha)
+            if not valid:
+                return _unknown(result, reason, failing)
+            count += 1
+            seen = seen_ids.add(job['id'])
+            if seen:
+                duplicate_id = True
+            if job['status'] != _COMPLETED:
+                not_completed = True
+            elif job['conclusion'] in _FAILED:
+                _add_failing(failing, job)
+    result['total_jobs'] = count
+    if not count or count != stated_total:
+        # Empty, missing pages, extra jobs or duplicate ids cannot establish
+        # a complete, well-formed listing.
+        return _unknown(result, DUPLICATE_JOB_ID if duplicate_id else COUNT_MISMATCH,
+                        failing)
+    if not_completed:
+        return _unknown(result, JOB_NOT_COMPLETED, failing)
     if failing:
         return _with_failing(result, RED, None, failing)
     return _with_failing(result, GREEN, None, failing)
@@ -94,18 +111,6 @@ def _unknown(result, reason, failing=None):
 def _with_failing(result, state, reason, failing):
     result.update({'state': state, 'reason': reason, 'failing': failing})
     return result
-
-
-def _collect_jobs(pages, sha):
-    """Return (jobs in input order, reason). reason is None when all are well formed."""
-    jobs = []
-    for page in pages:
-        for job in page:
-            valid, reason = _valid_job(job, sha)
-            if not valid:
-                return jobs, reason
-            jobs.append(job)
-    return jobs, None
 
 
 def _valid_job(job, sha):

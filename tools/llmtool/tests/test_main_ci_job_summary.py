@@ -48,12 +48,25 @@ class MainCiJobSummaryTests(unittest.TestCase):
         pages = [[job(1, GATEWAY), job(2, 'lint')]]
         result = summary.summarize(SHA, pages, 3)
         self.assertEqual(result['state'], summary.UNKNOWN)
-        self.assertEqual(result['reason'], summary.INCOMPLETE_DATA)
+        self.assertEqual(result['reason'], summary.COUNT_MISMATCH)
 
     def test_empty_job_list_is_unknown(self):
         result = summary.summarize(SHA, [], 0)
         self.assertEqual(result['state'], summary.UNKNOWN)
-        self.assertEqual(result['reason'], summary.INCOMPLETE_DATA)
+        self.assertEqual(result['reason'], summary.COUNT_MISMATCH)
+
+    def test_more_jobs_than_total_is_unknown(self):
+        pages = [[job(1, GATEWAY), job(2, 'lint')]]
+        result = summary.summarize(SHA, pages, 1)
+        self.assertEqual(result['state'], summary.UNKNOWN)
+        self.assertEqual(result['reason'], summary.COUNT_MISMATCH)
+
+    def test_duplicate_job_ids_cannot_mask_a_missing_job(self):
+        # Two copies of one job do not satisfy a stated total of 2.
+        pages = [[job(1, GATEWAY), job(1, GATEWAY)]]
+        result = summary.summarize(SHA, pages, 2)
+        self.assertEqual(result['state'], summary.UNKNOWN)
+        self.assertEqual(result['reason'], summary.DUPLICATE_JOB_ID)
 
     def test_malformed_page_and_malformed_job_are_unknown(self):
         def broken(field, value):
@@ -109,11 +122,22 @@ class MainCiJobSummaryTests(unittest.TestCase):
         self.assertEqual(result['reason'], summary.STATED_TOTAL_INVALID)
 
     def test_failing_jobs_still_reported_on_unknown(self):
+        # A failing job followed by an in-progress job is still listed.
         pages = [[job(1, GATEWAY, 'failure'), job(2, 'lint', status='queued',
                     conclusion=None)]]
         result = summary.summarize(SHA, pages, 2)
         self.assertEqual(result['state'], summary.UNKNOWN)
         self.assertEqual(result['reason'], summary.JOB_NOT_COMPLETED)
+        self.assertEqual(result['failing'],
+                         [{'id': 1, 'name': GATEWAY, 'conclusion': 'failure'}])
+
+    def test_incomplete_listing_still_lists_failing_jobs(self):
+        # A failing job in a listing that is shorter than the stated total is
+        # still reported with an UNKNOWN result.
+        pages = [[job(1, GATEWAY, 'failure'), job(2, 'lint')]]
+        result = summary.summarize(SHA, pages, 3)
+        self.assertEqual(result['state'], summary.UNKNOWN)
+        self.assertEqual(result['reason'], summary.COUNT_MISMATCH)
         self.assertEqual(result['failing'],
                          [{'id': 1, 'name': GATEWAY, 'conclusion': 'failure'}])
 
