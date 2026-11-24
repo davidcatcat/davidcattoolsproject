@@ -390,7 +390,7 @@ supplied:
 ## Slice 3 — Evidence on `authoring_route` in `tools/llmtool/llmtool/direct_reassignment.py`
 
 Facts in this section were read at main commit
-`863f78d5d553e7efe2e4bdb11f24b4211f342b1e` from
+`700d9ac5eecd71a4aae76a4ac5e400dceb04003e` from
 `tools/llmtool/llmtool/direct_reassignment.py` and
 `tools/llmtool/tests/test_direct_reassignment.py` (the read set for this
 section), together with this document. No code or test is changed; this file is
@@ -542,12 +542,15 @@ Other admission and repair-result helpers it depends on
   (incompatible states, an unknown profile, an empty dict, and `None` return
   `False`).
 - `effective_writer_admission`:
-  - `test_effective_writer_admission_returns_verified_writer` covers a claim
-    whose `repair_task_id` is absent from the store being skipped (`KeyError`
-    caught), a claim on another `executor_task` being skipped, the
+  - `test_effective_writer_admission_returns_verified_writer` covers the
     verified-writer projection of the four evidence keys from the verified
     repair's `completion['evidence']`, and the initial dict's other keys being
-    preserved.
+    preserved. Its fixture also lists a claim with an absent `repair_task_id`
+    and a claim on another `executor_task`, but the valid claim is the last
+    list entry and `effective_writer_admission` walks claims in reverse, so the
+    valid claim is reached and verified first and the function returns before
+    either earlier entry is inspected. Those two skip branches are therefore
+    not exercised by this test.
   - `test_effective_writer_admission_refuses_unverified_repair` covers a
     dispatch-mismatched repair (`developer['source_sha']` different from the
     claim's `head_sha`) being refused with
@@ -577,7 +580,8 @@ Other admission and repair-result helpers it depends on
   `authoring_route`.
 - `effective_writer_admission`: the non-list-claims and non-dict-claim-entry
   early return of `initial`; the `claim['state'] != 'DISPATCHED'` skip; the
-  `LLMToolError`-from-`store.get` catch branch (only `KeyError` is exercised);
+  skip of a claim on another `executor_task`; the `KeyError`-from-`store.get`
+  and `LLMToolError`-from-`store.get` catch branches (neither is exercised);
   the skip when the repair developer has no `direct_handoffs` or is not
   `DEVELOPER_RESPONDED`; and the final return of `initial` unchanged when no
   claim verifies.
