@@ -2098,7 +2098,8 @@ def dispatch_arbiter(*, store, task_id, executor_task, pr_number, finding_id,
 
         from .task_submission_cli import _dispute_arbiter_d6_binding
         reg = _dispute_arbiter_d6_binding(
-            task, reviewer=selected, reviewer_task=reviewer_task, head=head)
+            task, reviewer=selected, reviewer_task=reviewer_task, head=head,
+            require_clean=True)
 
         env = os.environ.copy()
         if config_dir:

@@ -2796,7 +2796,7 @@ def _dispute_head(record, pr, current_head):
     return head
 
 
-def _dispute_arbiter_d6_binding(record, *, reviewer, reviewer_task, head):
+def _dispute_arbiter_d6_binding(record, *, reviewer, reviewer_task, head, require_clean=False):
     """Verify the arbiter's registered D6 worktree and HEAD before launch or completion."""
     completion = record.get('completion')
     evidence = completion.get('evidence') if type(completion) is dict else None
@@ -2818,7 +2818,8 @@ def _dispute_arbiter_d6_binding(record, *, reviewer, reviewer_task, head):
             getattr(snapshot, 'head', None) != head or
             getattr(snapshot, 'root', None) != getattr(registration, 'root', None) or
             getattr(snapshot, 'common_dir', None) != getattr(registration, 'common_dir', None) or
-            getattr(snapshot, 'branch', None) != getattr(registration, 'branch', None)):
+            getattr(snapshot, 'branch', None) != getattr(registration, 'branch', None) or
+            (require_clean and getattr(snapshot, 'clean', None) is not True)):
         _dispute_refuse('DISPUTE_ARBITER_UNVERIFIED')
     return registration
 

@@ -792,6 +792,13 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
 
         self._assert_unverified_without_launch(moved_snapshot_create_d6)
 
+    def test_d6_dirty_snapshot_refuses_without_launch(self):
+        def dirty_snapshot_create_d6(**kwargs):
+            self.fake_create_d6(**kwargs)
+            self.snapshots[str(self.rev_root)].clean = False
+
+        self._assert_unverified_without_launch(dirty_snapshot_create_d6)
+
     def test_pr_head_moves_during_run_refuses_dispute_stale(self):
         # Codex path: PR head moves during subprocess.run -> DISPUTE_STALE, UNKNOWN (not COMPLETED)
         self._seed()
