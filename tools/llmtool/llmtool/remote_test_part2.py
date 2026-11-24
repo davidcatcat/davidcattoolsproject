@@ -195,7 +195,7 @@ def _remote_test_timeouts():
     return module_limit, total_limit
 
 
-def _ssh_argv(config, sha, ref, modules, module_timeout=180, total_timeout=540):
+def _ssh_argv(config, sha, ref, modules, module_timeout, total_timeout):
     """The one EC2 SSH command; every dynamic value is a validated argv word."""
     return ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
             config['user'] + '@' + config['host'], 'python3', '-', sha, ref,

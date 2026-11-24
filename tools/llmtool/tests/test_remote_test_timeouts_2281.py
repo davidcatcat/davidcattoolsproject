@@ -40,7 +40,7 @@ class RemoteTestTimeoutTests(unittest.TestCase):
     @staticmethod
     def _remote_parse_source():
         script = remote_test._REMOTE_SCRIPT
-        start = script.index('sha,ref')
+        start = script.index('if len(sys.argv)')
         end = script.index('started=')
         return 'import re,sys\n' + script[start:end]
 
@@ -101,6 +101,12 @@ class RemoteTestTimeoutTests(unittest.TestCase):
                 self.assertEqual(40, result.returncode,
                                  result.stderr.decode('utf8', 'replace'))
 
+    def test_remote_script_refuses_a_missing_timeout_word_before_unpacking(self):
+        result = self._run_remote_parse(
+            _SHA, 'refs/heads/main', '/srv/repo', '/usr/bin/python3', '180')
+        self.assertEqual(40, result.returncode,
+                         result.stderr.decode('utf8', 'replace'))
+
     def test_local_refuses_module_above_total_minus_reserve(self):
         with self._policy_file(remote_test_module_timeout_seconds=481,
                                remote_test_total_timeout_seconds=540), \
@@ -138,6 +144,59 @@ class RemoteTestTimeoutTests(unittest.TestCase):
                 mock.patch.object(remote_test, '_ssh_timeout',
                                   return_value=541 + margin):
             self.assertEqual((180, 540), remote_test._remote_test_timeouts())
+
+    @contextlib.contextmanager
+    def _incident_admission(self):
+        from llmtool import main_incident_store as incident_store
+        record = {'outcome': incident_store.OPEN, 'record_sha256': 'f' * 64}
+        with mock.patch.object(incident_store, 'get', return_value=record), \
+                mock.patch.object(incident_store, 'admitted_shas',
+                                  return_value={_SHA}), \
+                mock.patch.object(incident_store, 'failing_modules',
+                                  return_value={'test_example'}), \
+                mock.patch.object(incident_store, 'append_remote_test',
+                                  return_value={'record_sha256': 'e' * 64}), \
+                mock.patch.object(remote_test, '_config', return_value=_CONFIG):
+            yield
+
+    def test_incident_route_uses_the_configured_timeouts(self):
+        sent = []
+
+        def transport(argv, script, timeout):
+            sent.append((argv, script, timeout))
+            raise OSError('offline')
+
+        with self._policy_file(remote_test_module_timeout_seconds=300,
+                               remote_test_total_timeout_seconds=900), \
+                mock.patch.object(remote_test, '_ssh_timeout',
+                                  return_value=1800), \
+                self._incident_admission():
+            result = remote_test.run_incident_remote_test(
+                'mi-' + 'a' * 40, sha=_SHA, modules=('test_example',),
+                transport=transport)
+        self.assertEqual((result['result'], result['code']),
+                         ('UNAVAILABLE', 'SSH_UNAVAILABLE'))
+        [argv, script, timeout] = sent[0]
+        self.assertEqual(argv, remote_test._ssh_argv(
+            _CONFIG, _SHA, _SHA, ('test_example',), 300, 900))
+        self.assertEqual(['300', '900', 'test_example'], argv[-3:])
+        self.assertEqual(timeout, 1800)
+        self.assertIs(script, remote_test._REMOTE_SCRIPT)
+
+    def test_incident_route_refuses_invalid_timeouts_before_ssh(self):
+        def transport(*args):
+            self.fail('transport called')
+
+        with self._policy_file(remote_test_module_timeout_seconds=481,
+                               remote_test_total_timeout_seconds=540), \
+                mock.patch.object(remote_test, '_ssh_timeout',
+                                  return_value=1800), \
+                self._incident_admission():
+            result = remote_test.run_incident_remote_test(
+                'mi-' + 'a' * 40, sha=_SHA, modules=('test_example',),
+                transport=transport)
+        self.assertEqual(result['result'], 'ADMISSION_DENIED')
+        self.assertEqual(result['code'], remote_test.INCIDENT_CONFIG_INVALID)
 
     def test_command_digest_covers_the_timeout_words(self):
         base = remote_test._ssh_argv(

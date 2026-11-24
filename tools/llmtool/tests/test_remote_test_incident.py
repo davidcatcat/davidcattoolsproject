@@ -148,7 +148,8 @@ class IncidentRemoteTestTests(unittest.TestCase):
         argv, script, timeout = self.calls[0]
         config = remote_test._config(self.config)
         # Same session as the Task path; the SHA itself is the fetched ref.
-        self.assertEqual(argv, remote_test._ssh_argv(config, HEAD, HEAD, ('test_alpha',)))
+        self.assertEqual(argv, remote_test._ssh_argv(
+            config, HEAD, HEAD, ('test_alpha',), *remote_test._remote_test_timeouts()))
         self.assertEqual(argv[:5], ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10'])
         self.assertIs(script, remote_test._REMOTE_SCRIPT)
         self.assertEqual(timeout, remote_test._SSH_TIMEOUT)

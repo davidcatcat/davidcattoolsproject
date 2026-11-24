@@ -54,7 +54,11 @@ def run_incident_remote_test(incident_id, *, sha, modules=(), root=None,
         config = _config(config_path)
     except LLMToolError:
         return _incident_denied(INCIDENT_CONFIG_INVALID, incident_id)
-    argv = _ssh_argv(config, sha, sha, selected)
+    try:
+        module_timeout, total_timeout = _remote_test_timeouts()
+    except LLMToolError:
+        return _incident_denied(INCIDENT_CONFIG_INVALID, incident_id)
+    argv = _ssh_argv(config, sha, sha, selected, module_timeout, total_timeout)
     command_digest = _command_digest(argv)
 
     def finish(result, code, receipt=None):
