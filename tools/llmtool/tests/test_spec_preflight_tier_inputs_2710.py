@@ -109,7 +109,7 @@ class SpecPreflightTierInputs2710Tests(unittest.TestCase):
         _git(repo, "config", "user.name", "Test User")
         (repo / "existing.py").write_bytes(b"x" * 100)
         _git(repo, "add", "existing.py")
-        _git(repo, "commit", "-m", "initial")
+        _git(repo, "-c", "commit.gpgsign=false", "commit", "-m", "initial")
         base_sha = _git(repo, "rev-parse", "HEAD")
 
         # Even if new_file.py exists in the working tree, it does not exist at base_sha.
@@ -137,7 +137,7 @@ class SpecPreflightTierInputs2710Tests(unittest.TestCase):
         _git(repo, "config", "user.name", "Test User")
         (repo / "mod.py").write_bytes(b"x" * 2000)
         _git(repo, "add", "mod.py")
-        _git(repo, "commit", "-m", "initial")
+        _git(repo, "-c", "commit.gpgsign=false", "commit", "-m", "initial")
         base_sha = _git(repo, "rev-parse", "HEAD")
 
         # Working tree shrinks mod.py to 10 bytes, but base_sha still has 2000 bytes (T2).

@@ -346,6 +346,8 @@ def _is_safe_rel_path(norm: str) -> bool:
 
 
 def _git_verify_base(repo_dir: Path, base: str) -> bool:
+    if not base or base.startswith("-"):
+        return False
     result = subprocess.run(
         ["git", "-C", str(repo_dir), "rev-parse", "--verify", "--quiet", f"{base}^{{tree}}"],
         capture_output=True,
@@ -477,11 +479,14 @@ def _has_new_write_file(writes: list[Any], repo: Path, base: str | None) -> bool
     if base is not None:
         if not _git_verify_base(repo, base):
             return True
-        safe_writes = [w for w in str_writes if _is_safe_rel_path(w)]
+        safe_writes = [Path(w).as_posix() for w in str_writes if _is_safe_rel_path(w)]
         sizes = _git_blob_sizes(repo, base, safe_writes)
         if sizes is None:
             return True
-        return any(not _is_safe_rel_path(w) or sizes.get(w, -1) < 0 for w in str_writes)
+        return any(
+            not _is_safe_rel_path(w) or sizes.get(Path(w).as_posix(), -1) < 0
+            for w in str_writes
+        )
     return any(not (repo / w).is_file() for w in str_writes)
 
 
