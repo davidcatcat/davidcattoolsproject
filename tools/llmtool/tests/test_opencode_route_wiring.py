@@ -19,7 +19,7 @@ import unittest
 from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from llmtool import developer_stderr
 from llmtool import skill_ledger
@@ -437,6 +437,22 @@ class OpenCodeRouteWiringTests(unittest.TestCase):
         for code, git_kwargs, cards in cases:
             with self.subTest(code=code):
                 self._assert_prewrite_refusal(code, cards=cards, git_kwargs=git_kwargs)
+
+    def test_sensitive_card_text_refuses_before_any_write(self):
+        flagged = 'flagged skill rule\n'
+        provider = Mock()
+        with patch.object(submission_cli, '_emitted_sensitive',
+                          side_effect=lambda value: flagged in value):
+            with self.assertRaises(LLMToolError) as caught:
+                self._run(
+                    cards={**_CARDS, _DEV_CARD: flagged},
+                    extra={'provider': patch.object(
+                        submission_cli.opencode_direct_developer, 'run', provider)})
+        self.assertEqual(getattr(caught.exception, 'code', None), 'DELEGATE_TEXT_SENSITIVE')
+        self.assertFalse(getattr(caught.exception, 'prelaunch_refusal', False))
+        self.assertEqual(self.live.store.writes, [])
+        self.assertIsNone(self.live.store.task['developer'])
+        provider.assert_not_called()
 
     def test_cards_are_built_only_after_the_existing_refusal_checks(self):
         refusal = LLMToolError('ROLE_MODEL_NOT_ALLOWED')

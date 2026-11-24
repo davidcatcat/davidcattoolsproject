@@ -444,6 +444,97 @@ class RepairDispatchCodedRefusalTests(unittest.TestCase):
             self.assertEqual(claims_after[0]['state'], 'UNKNOWN')
             self.assertEqual(claims_after[0]['attempt'], 1)
 
+    def test_sensitive_role_card_text_refusal_reports_code_and_is_not_replayed(self):
+        reg = self._registration()
+        snap = self._snapshot()
+        route_cfg = {
+            'routes': {
+                'agy': {
+                    'executable': 'agy', 'denied_dirs': [],
+                    'default_model': 'gemini-test', 'default_effort': 'medium',
+                    'max_prompt_bytes': 1024 * 1024, 'max_diff_bytes': 1024 * 1024,
+                    'default_timeout': 600, 'max_timeout': 1200,
+                },
+            },
+        }
+        flagged = 'synthetic-sensitive-card-line'
+        cards = {
+            'schema_version': 1, 'commit': 'e' * 40, 'role': 'developer',
+            'route': 'agy', 'prefix_size': len(flagged), 'cards_sha256': '0' * 64,
+            'cards': [{'path': '.claude/skills/role-cards/common-core.md',
+                       'sha256': hashlib.sha256(flagged.encode('utf-8')).hexdigest(),
+                       'size': len(flagged), 'text': flagged}],
+        }
+        seen = []
+
+        def fake_sensitive(value):
+            seen.append(value)
+            return value == flagged
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                task_advance, '_d6_snapshot', return_value=self._d6()))
+            stack.enter_context(mock.patch.object(
+                review_repair, '_registered_d6', return_value=(reg, snap)))
+            stack.enter_context(mock.patch.object(
+                review_repair.worker_dispatch, 'evaluate',
+                return_value=types.SimpleNamespace(
+                    allowed=True, reason_code='OWNER_POLICY_ALLOWED')))
+            stack.enter_context(mock.patch.object(
+                task_submission_cli.worker_dispatch, 'evaluate',
+                return_value=types.SimpleNamespace(
+                    allowed=True, reason_code='OWNER_POLICY_ALLOWED')))
+            stack.enter_context(mock.patch.object(
+                active_pm_inbox, 'observe_claude_session', return_value='/repo'))
+            stack.enter_context(mock.patch.object(
+                task_submission_cli, '_delegate_d6_binding',
+                return_value=(reg, snap)))
+            stack.enter_context(mock.patch.object(
+                task_submission_cli, 'load_route_config', return_value=route_cfg))
+            stack.enter_context(mock.patch.object(
+                task_submission_cli, '_agy_developer_profile',
+                return_value=('gemini-test', 'medium')))
+            stack.enter_context(mock.patch.object(
+                task_submission_cli.shutil, 'which', return_value='/usr/bin/agy'))
+            stack.enter_context(mock.patch.object(
+                skill_ledger, 'pin_dispatch', return_value='e' * 40))
+            stack.enter_context(mock.patch.object(
+                task_submission_cli.task_completion, 'ensure_main_commit',
+                return_value=False))
+            stack.enter_context(mock.patch.object(
+                source_freshness, '_fetch_origin_main', return_value=None))
+            stack.enter_context(mock.patch.object(
+                skill_manifest, 'build_role_cards', return_value=cards))
+            stack.enter_context(mock.patch.object(
+                task_submission_cli, '_scope_advice_items', return_value=[]))
+            stack.enter_context(mock.patch.object(
+                task_submission_cli, '_emitted_sensitive', side_effect=fake_sensitive))
+
+            first = task_advance.advance(
+                task_id=TASK, store=self.store, pr_number=PR,
+                github_get=self._github_get)
+
+            self.assertEqual(first['step'], 'REPAIR_REVIEW')
+            self.assertEqual(first['codes'], ['DELEGATE_TEXT_SENSITIVE'])
+            claims = self.store.get(TASK)['review_repair_claims']
+            self.assertEqual(len(claims), 1)
+            self.assertEqual(claims[0]['state'], 'UNKNOWN')
+            self.assertEqual(claims[0]['attempt'], 1)
+            repair_id = claims[0]['repair_task_id']
+            self.assertIsNone(self.store.get(repair_id).get('developer'))
+
+            calls_before = len(seen)
+            second = task_advance.advance(
+                task_id=TASK, store=self.store, pr_number=PR,
+                github_get=self._github_get)
+            self.assertNotIn(flagged, seen[calls_before:])
+            self.assertFalse(second['result']['replayed'])
+            self.assertIsNone(self.store.get(repair_id).get('developer'))
+            claims_after = self.store.get(TASK)['review_repair_claims']
+            self.assertEqual(len(claims_after), 1)
+            self.assertEqual(claims_after[0]['state'], 'UNKNOWN')
+            self.assertEqual(claims_after[0]['attempt'], 1)
+
     def test_uncoded_exception_after_possible_launch_still_records_unknown(self):
         reg = self._registration()
         snap = self._snapshot()

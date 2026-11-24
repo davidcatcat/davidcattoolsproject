@@ -5260,7 +5260,9 @@ def _developer_card_prefix(task, registration, provider):
             # Size is judged on the whole prefix, so it has its own refusal code.
             _screen_text(card.get('text') if type(card) is dict else None,
                          skill_manifest.MAX_DEVELOPER_PREFIX_SIZE)
-        except LLMToolError:
+        except LLMToolError as exc:
+            if getattr(exc, 'code', None) == 'DELEGATE_TEXT_SENSITIVE':
+                raise
             raise _prelaunch_error(label + '_SKILL_TEXT_REFUSED',
                                    label + '_SKILL_TEXT_REFUSED') from None
     try:
