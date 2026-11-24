@@ -2096,6 +2096,10 @@ def dispatch_arbiter(*, store, task_id, executor_task, pr_number, finding_id,
         if not gate.allowed:
             _refuse(gate.reason_code)
 
+        from .task_submission_cli import _dispute_arbiter_d6_binding
+        reg = _dispute_arbiter_d6_binding(
+            task, reviewer=selected, reviewer_task=reviewer_task, head=head)
+
         env = os.environ.copy()
         if config_dir:
             env['CLAUDE_CONFIG_DIR'] = config_dir
@@ -2105,9 +2109,6 @@ def dispatch_arbiter(*, store, task_id, executor_task, pr_number, finding_id,
         env = github_identity.ai_github_env(env, home)
 
         if selected == 'codex-reviewer':
-            reviewer_reg = task_completion.read_d6_registration(
-                reviewer_task, executor.common_dir,
-                allowed_states=task_completion._D6_EVIDENCE_STATES)
             run_codex = codex_runner or _dispatch_codex
 
             def ruling_parser(raw, *, task_id, run_id, contract_digest, head, version=1):
@@ -2117,7 +2118,7 @@ def dispatch_arbiter(*, store, task_id, executor_task, pr_number, finding_id,
                     finding_id=finding_id, pr=pr_number, review_version=review_version)
 
             codex_result = run_codex(
-                reviewer_root=reviewer_reg.root, prompt=prompt, task=task,
+                reviewer_root=reg.root, prompt=prompt, task=task,
                 head=head, version=version, model=codex_model, effort=codex_effort,
                 config_dir=config_dir, parser=ruling_parser)
             if type(codex_result) is not dict:
@@ -2141,6 +2142,17 @@ def dispatch_arbiter(*, store, task_id, executor_task, pr_number, finding_id,
         _dispute_arbiter_registration(
             fresh, reviewer=selected, reviewer_task=reviewer_task,
             reviewer_session=session_id, head=head)
+
+        try:
+            _, _, current_head, _, _ = _preflight(
+                store, task_id, executor_task, pr_number, review_version,
+                reviewer=selected, kind='formal')
+        except LLMToolError as exc:
+            if getattr(exc, 'review_dispatch_code', None) == 'REVIEW_PROMPT_PR_HEAD_MISMATCH':
+                dispute_refuse('DISPUTE_STALE')
+            raise
+        if current_head != head:
+            dispute_refuse('DISPUTE_STALE')
 
         fresh_claims = fresh.get('review_dispatch_claim')
         fresh_claims = ([fresh_claims] if type(fresh_claims) is dict else

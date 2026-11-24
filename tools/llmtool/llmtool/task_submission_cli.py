@@ -2796,14 +2796,8 @@ def _dispute_head(record, pr, current_head):
     return head
 
 
-def _dispute_arbiter_registration(record, *, reviewer, reviewer_task, reviewer_session, head):
-    """Authenticate the arbiter run against its registered D6 Reviewer record (v91 F1).
-
-    The Reviewer Task must be a registered D6 Reviewer record of the chosen
-    Reviewer, distinct from the Executor, with its worktree at the disputed
-    HEAD. The session must be that record's own native session and not the
-    Developer's run session. A fabricated Task or a foreign session refuses.
-    """
+def _dispute_arbiter_d6_binding(record, *, reviewer, reviewer_task, head):
+    """Verify the arbiter's registered D6 worktree and HEAD before launch or completion."""
     completion = record.get('completion')
     evidence = completion.get('evidence') if type(completion) is dict else None
     common_dir = evidence.get('common_dir') if type(evidence) is dict else None
@@ -2826,6 +2820,20 @@ def _dispute_arbiter_registration(record, *, reviewer, reviewer_task, reviewer_s
             getattr(snapshot, 'common_dir', None) != getattr(registration, 'common_dir', None) or
             getattr(snapshot, 'branch', None) != getattr(registration, 'branch', None)):
         _dispute_refuse('DISPUTE_ARBITER_UNVERIFIED')
+    return registration
+
+
+def _dispute_arbiter_registration(record, *, reviewer, reviewer_task, reviewer_session, head):
+    """Authenticate the arbiter run against its registered D6 Reviewer record (v91 F1).
+
+    The Reviewer Task must be a registered D6 Reviewer record of the chosen
+    Reviewer, distinct from the Executor, with its worktree at the disputed
+    HEAD. The session must be that record's own native session and not the
+    Developer's run session. A fabricated Task or a foreign session refuses.
+    """
+    registration = _dispute_arbiter_d6_binding(
+        record, reviewer=reviewer, reviewer_task=reviewer_task, head=head)
+    completion = record.get('completion')
     native = getattr(registration, 'native_session_id', None)
     if type(native) is not str or native != reviewer_session:
         _dispute_refuse('DISPUTE_ARBITER_SESSION_MISMATCH')

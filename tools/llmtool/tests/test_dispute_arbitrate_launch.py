@@ -685,46 +685,8 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
             )
         self.assertEqual(caught.exception.dispute_code, 'DISPUTE_STALE')
 
-    def test_d6_registration_head_mismatch_refuses_dispute_arbiter_unverified(self):
-        def mismatch_create_d6(**kwargs):
-            self.fake_create_d6(**kwargs)
-            self.d6_records[kwargs['task_id']].result_sha = NEW_HEAD
-
-        # Codex launch path refuses DISPUTE_ARBITER_UNVERIFIED and records UNKNOWN (not COMPLETED)
-        self._seed()
-        ruling_text = _ruling_text(actor='Codex')
-        raw_jsonl = _codex_jsonl({
-            'task_id': TASK, 'run_id': RUN, 'head': HEAD,
-            'outcome': 'UPHELD', 'ruling': ruling_text,
-        })
-        with patch.object(review_dispatch.shutil, 'which', return_value='/usr/bin/codex'), \
-             patch.object(review_dispatch.subprocess, 'run',
-                          return_value=SimpleNamespace(returncode=0, stdout=raw_jsonl, stderr=b'')), \
-             patch('llmtool.codex_direct_developer.validate_profile'):
-            out = io.StringIO()
-            rc = task_submission_cli.run_task_dispute(
-                SimpleNamespace(
-                    task_id=TASK, pm_session=PM_SESSION,
-                    dispute_action='arbitrate', pr=PR, finding=FINDING,
-                ),
-                store=self.store,
-                stdout=out,
-                current_head=lambda _r, _p: HEAD,
-                github_get=lambda _p: _dispute_comment(),
-                create_d6=mismatch_create_d6,
-                bind_session=self.fake_bind,
-            )
-        self.assertEqual(rc, 1)
-        self.assertEqual(json.loads(out.getvalue())['code'], 'DISPUTE_ARBITER_UNVERIFIED')
-        stored = self.store.get(TASK)
-        ac = [c for c in stored['review_dispatch_claim'] if c.get('purpose') == 'dispute_ruling'][0]
-        self.assertEqual(ac['state'], 'UNKNOWN')
-        self.assertNotIn('review_result', ac)
-        self.assertEqual(stored['review_disputes'][0]['state'], 'OPEN')
-        self.assertEqual(stored['review_disputes'][0]['history'][-1]['event'], 'ARBITER_UNKNOWN')
-
-        # Claude launch path refuses DISPUTE_ARBITER_UNVERIFIED and records UNKNOWN (not DISPATCHED)
-        self._seed(
+    def _seed_claude_arbiter(self):
+        return self._seed(
             developer={
                 'assignment_id': 'f' * 32, 'selection_source': 'PM',
                 'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'codex',
@@ -741,21 +703,159 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
             },
             claims=[_formal_claim(actor='Codex', account_mode='CODEX_CLI')],
         )
+
+    def _assert_unverified_without_launch(self, create_d6):
+        # Codex launch path refuses DISPUTE_ARBITER_UNVERIFIED without launching or binding
+        self._seed()
+        ruling_text = _ruling_text(actor='Codex')
+        raw_jsonl = _codex_jsonl({
+            'task_id': TASK, 'run_id': RUN, 'head': HEAD,
+            'outcome': 'UPHELD', 'ruling': ruling_text,
+        })
+        with patch.object(review_dispatch.shutil, 'which', return_value='/usr/bin/codex'), \
+             patch.object(review_dispatch.subprocess, 'run',
+                          return_value=SimpleNamespace(returncode=0, stdout=raw_jsonl, stderr=b'')) as mock_run, \
+             patch('llmtool.codex_direct_developer.validate_profile'):
+            out = io.StringIO()
+            rc = task_submission_cli.run_task_dispute(
+                SimpleNamespace(
+                    task_id=TASK, pm_session=PM_SESSION,
+                    dispute_action='arbitrate', pr=PR, finding=FINDING,
+                ),
+                store=self.store,
+                stdout=out,
+                current_head=lambda _r, _p: HEAD,
+                github_get=lambda _p: _dispute_comment(),
+                create_d6=create_d6,
+                bind_session=self.fake_bind,
+            )
+        mock_run.assert_not_called()
+        self.assertEqual(self.bound_sessions, [])
+        self.assertEqual(rc, 1)
+        self.assertEqual(json.loads(out.getvalue())['code'], 'DISPUTE_ARBITER_UNVERIFIED')
+        stored = self.store.get(TASK)
+        ac = [c for c in stored['review_dispatch_claim'] if c.get('purpose') == 'dispute_ruling'][0]
+        self.assertEqual(ac['state'], 'UNKNOWN')
+        self.assertIsNone(ac['native_session_id'])
+        self.assertNotIn('review_result', ac)
+        self.assertEqual(stored['review_disputes'][0]['state'], 'OPEN')
+        self.assertEqual(stored['review_disputes'][0]['history'][-1]['event'], 'ARBITER_UNKNOWN')
+
+        # Claude launch path refuses DISPUTE_ARBITER_UNVERIFIED without launching or binding
+        self._seed_claude_arbiter()
+        self.bound_sessions.clear()
+        claude_calls = []
+
+        def record_claude(**kw):
+            claude_calls.append(kw)
+            return CLAUDE_SESSION
+
         with self.assertRaises(LLMToolError) as caught:
             task_submission_cli.dispute_arbitrate(
                 self.store, TASK, pr=PR, finding_id=FINDING,
                 current_head=lambda _r, _p: HEAD,
                 github_get=lambda _p: _dispute_comment(),
-                create_d6=mismatch_create_d6,
-                dispatch_session=lambda **_kw: CLAUDE_SESSION,
+                create_d6=create_d6,
+                dispatch_session=record_claude,
                 bind_session=self.fake_bind,
             )
+        self.assertEqual(claude_calls, [])
+        self.assertEqual(self.bound_sessions, [])
         self.assertEqual(caught.exception.dispute_code, 'DISPUTE_ARBITER_UNVERIFIED')
         stored = self.store.get(TASK)
         ac = [c for c in stored['review_dispatch_claim'] if c.get('purpose') == 'dispute_ruling'][0]
         self.assertEqual(ac['state'], 'UNKNOWN')
+        self.assertIsNone(ac['native_session_id'])
+        self.assertNotIn('review_result', ac)
         self.assertEqual(stored['review_disputes'][0]['state'], 'OPEN')
         self.assertEqual(stored['review_disputes'][0]['history'][-1]['event'], 'ARBITER_UNKNOWN')
+
+    def test_d6_registration_head_mismatch_refuses_dispute_arbiter_unverified(self):
+        def mismatch_create_d6(**kwargs):
+            self.fake_create_d6(**kwargs)
+            self.d6_records[kwargs['task_id']].result_sha = NEW_HEAD
+
+        self._assert_unverified_without_launch(mismatch_create_d6)
+
+    def test_d6_registration_trusted_agent_id_mismatch_refuses_without_launch(self):
+        def wrong_agent_create_d6(**kwargs):
+            self.fake_create_d6(**kwargs)
+            other = 'claude-reviewer' if kwargs['reviewer_key'] == 'codex-reviewer' else 'codex-reviewer'
+            self.d6_records[kwargs['task_id']].trusted_agent_id = other
+
+        self._assert_unverified_without_launch(wrong_agent_create_d6)
+
+    def test_d6_snapshot_head_moved_refuses_without_launch(self):
+        def moved_snapshot_create_d6(**kwargs):
+            self.fake_create_d6(**kwargs)
+            self.snapshots[str(self.rev_root)].head = NEW_HEAD
+
+        self._assert_unverified_without_launch(moved_snapshot_create_d6)
+
+    def test_pr_head_moves_during_run_refuses_dispute_stale(self):
+        # Codex path: PR head moves during subprocess.run -> DISPUTE_STALE, UNKNOWN (not COMPLETED)
+        self._seed()
+        ruling_text = _ruling_text(actor='Codex')
+        raw_jsonl = _codex_jsonl({
+            'task_id': TASK, 'run_id': RUN, 'head': HEAD,
+            'outcome': 'UPHELD', 'ruling': ruling_text,
+        })
+
+        def move_head_codex(*_args, **_kwargs):
+            self.pr_head = NEW_HEAD
+            return SimpleNamespace(returncode=0, stdout=raw_jsonl, stderr=b'')
+
+        with patch.object(review_dispatch.shutil, 'which', return_value='/usr/bin/codex'), \
+             patch.object(review_dispatch.subprocess, 'run', side_effect=move_head_codex), \
+             patch('llmtool.codex_direct_developer.validate_profile'):
+            with self.assertRaises(LLMToolError) as caught:
+                task_submission_cli.dispute_arbitrate(
+                    self.store, TASK, pr=PR, finding_id=FINDING,
+                    current_head=lambda _r, _p: self.pr_head,
+                    github_get=lambda _p: _dispute_comment(),
+                    create_d6=self.fake_create_d6,
+                    bind_session=self.fake_bind,
+                )
+        self.assertEqual(caught.exception.dispute_code, 'DISPUTE_STALE')
+        stored = self.store.get(TASK)
+        ac = [c for c in stored['review_dispatch_claim'] if c.get('purpose') == 'dispute_ruling'][0]
+        self.assertNotIn(ac['state'], ('COMPLETED', 'DISPATCHED'))
+        self.assertEqual(ac['state'], 'UNKNOWN')
+        self.assertNotIn('review_result', ac)
+        self.assertEqual(stored['review_disputes'][0]['state'], 'OPEN')
+        self.assertNotIn(
+            stored['review_disputes'][0]['history'][-1]['event'],
+            ('ARBITER_COMPLETED', 'ARBITER_DISPATCHED'),
+        )
+
+        # Claude path: PR head moves during dispatch_session -> DISPUTE_STALE, UNKNOWN (not DISPATCHED)
+        self.pr_head = HEAD
+        self._seed_claude_arbiter()
+
+        def move_head_claude(**_kw):
+            self.pr_head = NEW_HEAD
+            return CLAUDE_SESSION
+
+        with self.assertRaises(LLMToolError) as caught:
+            task_submission_cli.dispute_arbitrate(
+                self.store, TASK, pr=PR, finding_id=FINDING,
+                current_head=lambda _r, _p: self.pr_head,
+                github_get=lambda _p: _dispute_comment(),
+                create_d6=self.fake_create_d6,
+                dispatch_session=move_head_claude,
+                bind_session=self.fake_bind,
+            )
+        self.assertEqual(caught.exception.dispute_code, 'DISPUTE_STALE')
+        stored = self.store.get(TASK)
+        ac = [c for c in stored['review_dispatch_claim'] if c.get('purpose') == 'dispute_ruling'][0]
+        self.assertNotIn(ac['state'], ('COMPLETED', 'DISPATCHED'))
+        self.assertEqual(ac['state'], 'UNKNOWN')
+        self.assertNotIn('review_result', ac)
+        self.assertEqual(stored['review_disputes'][0]['state'], 'OPEN')
+        self.assertNotIn(
+            stored['review_disputes'][0]['history'][-1]['event'],
+            ('ARBITER_COMPLETED', 'ARBITER_DISPATCHED'),
+        )
 
     def test_screen_refusal_on_codex_ruling_records_blocked_with_empty_text(self):
         self._seed()
