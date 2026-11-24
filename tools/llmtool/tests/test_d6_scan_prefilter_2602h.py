@@ -129,6 +129,24 @@ class D6ScanPrefilterTests(unittest.TestCase):
         for uid in unrelated_ids:
             self.assertNotIn(uid, get_calls)
 
+    def test_unicode_escaped_d6_holder_is_still_refused(self):
+        d6_id = 'd6-scan-unicode'
+        holder = self.store.create(self._d6_task(d6_id))
+        holder_path = self.root / f"{holder['task_id']}.json"
+        raw = holder_path.read_bytes()
+        literal = f'"{d6_id}"'.encode('utf-8')
+        escaped = ('"' + ''.join(f'\\u{ord(ch):04x}' for ch in d6_id) + '"').encode('utf-8')
+        self.assertIn(literal, raw)
+        escaped_raw = raw.replace(literal, escaped)
+        self.assertNotIn(d6_id.encode('utf-8'), escaped_raw)
+        self._write_raw_task(holder['task_id'], escaped_raw)
+
+        claimant = self._d6_task(d6_id)
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.create(claimant)
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_D6_ALREADY_BOUND')
+        self.assertNotIn(claimant['task_id'], self.store.task_ids())
+
 
 if __name__ == '__main__':
     unittest.main()
