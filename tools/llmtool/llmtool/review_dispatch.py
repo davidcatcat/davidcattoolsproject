@@ -327,9 +327,9 @@ def _preflight(store, task_id, executor_task, pr_number, version, *, task=None,
 
 
 def _create_d6(*, task_id, base_sha, repo_root, executor_task, github_login,
-               reviewer_key='claude-reviewer'):
+               reviewer_key='claude-reviewer', lease_ref=None):
     lifecycle = Path(__file__).resolve().parents[1] / 'scripts' / 'd6_worktree_lifecycle.py'
-    lease = f'read-only formal review of executor task {executor_task} at {base_sha}'
+    lease = lease_ref or f'read-only formal review of executor task {executor_task} at {base_sha}'
     args = [sys.executable, '-B', str(lifecycle), '--task-id', task_id,
             '--agent-id', reviewer_key, '--session-ref', 'pending-' + task_id,
             '--lease-ref', lease, '--branch', 'llmtool/reviewer-' + task_id,
@@ -840,7 +840,7 @@ def _record_codex_quota(raw_stdout):
 
 def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
                     model=None, effort=_CODEX_REVIEW_EFFORT,
-                    config_dir=None):
+                    config_dir=None, parser=_parse_codex_review):
     model = _review_model('codex-reviewer', model)
     try:
         timeout = developer_routes.role_timeout('codex-reviewer')
@@ -874,7 +874,7 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
     if type(binding) is not dict:
         _refuse('REVIEW_PROMPT_BINDING_MISSING')
     _record_codex_quota(result.stdout)
-    return _parse_codex_review(
+    return parser(
         result.stdout, task_id=task.get('task_id'), run_id=task.get('run_id'),
         contract_digest=binding.get('contract_digest'),
         head=head, version=version)
@@ -1887,3 +1887,428 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
     if not keep_text:
         output.pop('review_text', None)
     return output
+
+
+def _arbiter_output_contract(*, actor, finding_id, pr_number, review_version, head,
+                             binding_line, task_id, run_id):
+    header = (
+        f'<!-- activity: type=dispute_ruling actor={actor} target=PM status=<UPHELD|WITHDRAWN> -->\n'
+        f'Ruling: {finding_id} <UPHELD|WITHDRAWN> | PR: #{pr_number} | '
+        f'Version: {review_version} | HEAD: {head}\n'
+        f'{binding_line}'
+    )
+    if actor == 'Codex':
+        return (
+            'Return one raw JSON object with exact keys '
+            '{"task_id", "run_id", "head", "outcome", "ruling"} where '
+            f'task_id="{task_id}", run_id="{run_id}", head="{head}", '
+            'outcome is "UPHELD" or "WITHDRAWN", and ruling is a UTF-8 string '
+            '(at most 65536 bytes, no review_verdict marker or Verdict: line) '
+            'whose first three non-empty lines are:\n' + header
+        )
+    return (
+        'Output one ruling text (at most 65536 UTF-8 bytes, no review_verdict '
+        'marker or Verdict: line) whose first three non-empty lines are:\n' + header
+    )
+
+
+def dispatch_arbiter(*, store, task_id, executor_task, pr_number, finding_id,
+                     review_version, disputed_head, reviewer_key,
+                     finding_section, dispute_text, dispute_text_sha256,
+                     create_d6=None, dispatch_session=None, bind_session=None,
+                     codex_runner=None):
+    """Claim once, create a read-only arbiter D6, bind and launch the arbiter."""
+    from . import dispute_arbiter
+    from .review_repair import dispute_refuse
+
+    task = store.get(task_id)
+    if type(task) is not dict or task.get('task_id') != task_id:
+        dispute_refuse('DISPUTE_TASK_INVALID')
+    if task.get('abandonment') is not None:
+        dispute_refuse('DISPUTE_TASK_ABANDONED')
+
+    try:
+        _, executor, head, _base, selected = _preflight(
+            store, task_id, executor_task, pr_number, review_version,
+            task=task, reviewer=reviewer_key, kind='formal')
+    except LLMToolError as exc:
+        code = getattr(exc, 'review_dispatch_code', None)
+        if code == 'REVIEW_PROMPT_PR_HEAD_MISMATCH':
+            dispute_refuse('DISPUTE_STALE')
+        if code in ('REVIEWER_NOT_ALLOWED', 'REVIEWER_SAME_FAMILY',
+                    'REVIEWER_FAMILY_UNSUPPORTED', 'REVIEWER_INVALID'):
+            dispute_refuse('DISPUTE_ARBITER_UNAVAILABLE')
+        raise
+    if head != disputed_head:
+        dispute_refuse('DISPUTE_STALE')
+    gate = _policy(task, selected)
+    if not gate.allowed:
+        dispute_refuse('DISPUTE_ARBITER_UNAVAILABLE')
+
+    reviewer_role = _resolve_reviewer_role(selected)
+    config_dir = reviewer_role['config_dir'] if reviewer_role is not None else None
+    if (selected == 'claude-reviewer' and
+            reviewer_role.get('provider') not in (None, 'claude')):
+        _refuse('REVIEWER_PROVIDER_MISMATCH')
+    if (selected == 'claude-reviewer' and
+            (reviewer_role['source'] == 'builtin' or config_dir is None)):
+        _refuse('REVIEWER_ACCOUNT_UNCONFIGURED')
+    claude_model = None
+    if selected == 'codex-reviewer':
+        if reviewer_role.get('provider') not in (None, 'codex'):
+            _refuse('REVIEWER_CONFIG_INVALID')
+        codex_model = reviewer_role.get('model') or _review_default_model('codex-reviewer')
+        codex_effort = reviewer_role.get('effort') or _CODEX_REVIEW_EFFORT
+        codex_model = _admit_review_model('codex-reviewer', codex_model)
+        from .codex_direct_developer import validate_profile
+        try:
+            validate_profile(codex_model, codex_effort)
+        except LLMToolError:
+            _refuse('REVIEWER_CONFIG_INVALID')
+        account_mode = ('ROLES' if reviewer_role['source'] == 'roles' else 'CODEX_CLI')
+    else:
+        codex_model, codex_effort = None, None
+        claude_model = _review_model('claude-reviewer', reviewer_role.get('model'))
+        account_mode = {
+            'roles': 'ROLES', 'env': 'EXPLICIT', 'cli': 'EXPLICIT',
+            'pm_runtime': 'LEGACY', 'builtin': 'BUILTIN_DEFAULT',
+        }.get(reviewer_role['source'], 'BUILTIN_DEFAULT')
+
+    repo_root = str(Path(executor.common_dir).parent)
+    rules_prefix, rules_sha256 = _review_rules(repo_root)
+
+    stored_claims = task.get('review_dispatch_claim')
+    claims = ([stored_claims] if type(stored_claims) is dict else
+              list(stored_claims) if type(stored_claims) is list else [])
+    recorded_versions = [
+        c['version'] for c in claims
+        if type(c) is dict and c.get('pr') == pr_number and
+        type(c.get('version')) is int and not isinstance(c.get('version'), bool)
+    ]
+    version = max([review_version, *recorded_versions]) + 1
+    reviewer_task = 'reviewer-' + os.urandom(10).hex()
+    now = _now()
+    claim = {
+        'executor_task': executor_task,
+        'pr': pr_number,
+        'head_sha': head,
+        'version': version,
+        'state': 'CLAIMED',
+        'reviewer_task': reviewer_task,
+        'native_session_id': None,
+        'account_mode': account_mode,
+        'claimed_at': now,
+        'updated_at': now,
+        'rules_sha256': rules_sha256,
+        'purpose': 'dispute_ruling',
+        'dispute': {
+            'pr': pr_number,
+            'finding_id': finding_id,
+            'head_sha': head,
+            'review_version': review_version,
+            'dispute_text_sha256': dispute_text_sha256,
+        },
+        'reviewer': selected,
+    }
+    if reviewer_role.get('account') is not None:
+        claim['account'] = reviewer_role['account']
+
+    disputes = list(task.get('review_disputes') or [])
+    entry_index = next((
+        i for i, item in enumerate(disputes)
+        if type(item) is dict and item.get('pr') == pr_number and
+        item.get('finding_id') == finding_id and item.get('head_sha') == head and
+        item.get('state') == 'OPEN' and 'arbiter_claim' not in item
+    ), None)
+    if entry_index is None:
+        _refuse('REVIEW_DISPATCH_CLAIM_UNAVAILABLE')
+    pm_session_id = task.get('pm_session_id')
+    if type(pm_session_id) is not str or not pm_session_id:
+        dispute_refuse('DISPUTE_TASK_INVALID')
+    next_entry = dict(disputes[entry_index])
+    next_entry['arbiter_claim'] = {'reviewer_task': reviewer_task, 'version': version}
+    next_entry['history'] = list(next_entry.get('history', [])) + [{
+        'event': 'ARBITER_CLAIMED',
+        'at': now,
+        'actor': f'pm:{pm_session_id}',
+        'head_sha': head,
+        'refs': {'reviewer_task': reviewer_task, 'version': version},
+    }]
+    disputes[entry_index] = next_entry
+    try:
+        store.compare_and_update(
+            task_id, expected={'record_sha256': task['record_sha256']},
+            review_dispatch_claim=claims + [claim],
+            review_disputes=disputes)
+    except Exception:
+        _refuse('REVIEW_DISPATCH_CLAIM_UNAVAILABLE')
+
+    create = create_d6 or _create_d6
+    send = dispatch_session or functools.partial(_dispatch, model=claude_model)
+    bind = bind_session or _bind_d6
+    session_id = None
+    try:
+        gate = _policy(task, selected)
+        if not gate.allowed:
+            _refuse(gate.reason_code)
+        github_login = _resolve_github_login()
+        d6_kwargs = {
+            'task_id': reviewer_task, 'base_sha': head, 'repo_root': repo_root,
+            'executor_task': executor_task, 'github_login': github_login,
+            'reviewer_key': selected,
+        }
+        if create_d6 is None:
+            d6_kwargs['lease_ref'] = (
+                f'read-only dispute arbitration of task {task_id} '
+                f'PR #{pr_number} finding {finding_id} at {head}'
+            )
+        create(**d6_kwargs)
+
+        binding = task.get('task_binding')
+        binding_line = task_completion._review_binding_line(
+            task_id, task.get('run_id'), binding['contract_digest'], head).strip()
+        if hashlib.sha256(dispute_text.encode('utf-8')).hexdigest() != claim['dispute']['dispute_text_sha256']:
+            dispute_refuse('DISPUTE_TEXT_INVALID')
+        actor = 'Codex' if selected == 'codex-reviewer' else 'Claude'
+        output_contract = _arbiter_output_contract(
+            actor=actor, finding_id=finding_id, pr_number=pr_number,
+            review_version=review_version, head=head, binding_line=binding_line,
+            task_id=task_id, run_id=task.get('run_id'))
+        prompt = dispute_arbiter.render_ruling_prompt(
+            rules_prefix=rules_prefix,
+            binding_line=binding_line,
+            finding_section=finding_section,
+            dispute_text=dispute_text,
+            output_contract=output_contract,
+        )
+
+        try:
+            _, _, current_head, _, _ = _preflight(
+                store, task_id, executor_task, pr_number, review_version,
+                reviewer=selected, kind='formal')
+        except LLMToolError as exc:
+            if getattr(exc, 'review_dispatch_code', None) == 'REVIEW_PROMPT_PR_HEAD_MISMATCH':
+                dispute_refuse('DISPUTE_STALE')
+            raise
+        if current_head != head:
+            dispute_refuse('DISPUTE_STALE')
+        gate = _policy(task, selected)
+        if not gate.allowed:
+            _refuse(gate.reason_code)
+
+        from .task_submission_cli import _dispute_arbiter_d6_binding
+        reg = _dispute_arbiter_d6_binding(
+            task, reviewer=selected, reviewer_task=reviewer_task, head=head,
+            require_clean=True)
+
+        env = os.environ.copy()
+        if config_dir:
+            env['CLAUDE_CONFIG_DIR'] = config_dir
+        else:
+            env.pop('CLAUDE_CONFIG_DIR', None)
+        home = env.get('HOME') or os.path.expanduser('~')
+        env = github_identity.ai_github_env(env, home)
+
+        if selected == 'codex-reviewer':
+            run_codex = codex_runner or _dispatch_codex
+
+            def ruling_parser(raw, *, task_id, run_id, contract_digest, head, version=1):
+                return dispute_arbiter.parse_codex_ruling(
+                    raw, task_id=task_id, run_id=run_id,
+                    contract_digest=contract_digest, head=head,
+                    finding_id=finding_id, pr=pr_number, review_version=review_version)
+
+            codex_result = run_codex(
+                reviewer_root=reg.root, prompt=prompt, task=task,
+                head=head, version=version, model=codex_model, effort=codex_effort,
+                config_dir=config_dir, parser=ruling_parser)
+            if type(codex_result) is not dict:
+                _refuse('REVIEW_NOT_POSTED')
+            session_id = codex_result.get('thread_id')
+            if type(session_id) is not str or not session_id:
+                _refuse('REVIEW_NOT_POSTED')
+            bind(task_id=reviewer_task, session_id=session_id, repo_root=repo_root)
+        else:
+            session_id = send(task_id=reviewer_task, prompt=prompt,
+                              repo_root=repo_root, env=env)
+            bind(task_id=reviewer_task, session_id=session_id, repo_root=repo_root)
+
+        fresh = store.get(task_id)
+        if type(fresh) is not dict or fresh.get('task_id') != task_id:
+            dispute_refuse('DISPUTE_TASK_INVALID')
+        if fresh.get('abandonment') is not None:
+            dispute_refuse('DISPUTE_TASK_ABANDONED')
+
+        from .task_submission_cli import _dispute_arbiter_registration
+        _dispute_arbiter_registration(
+            fresh, reviewer=selected, reviewer_task=reviewer_task,
+            reviewer_session=session_id, head=head)
+
+        try:
+            _, _, current_head, _, _ = _preflight(
+                store, task_id, executor_task, pr_number, review_version,
+                reviewer=selected, kind='formal')
+        except LLMToolError as exc:
+            if getattr(exc, 'review_dispatch_code', None) == 'REVIEW_PROMPT_PR_HEAD_MISMATCH':
+                dispute_refuse('DISPUTE_STALE')
+            raise
+        if current_head != head:
+            dispute_refuse('DISPUTE_STALE')
+
+        fresh_claims = fresh.get('review_dispatch_claim')
+        fresh_claims = ([fresh_claims] if type(fresh_claims) is dict else
+                        list(fresh_claims) if type(fresh_claims) is list else [])
+        claim_idx = next((
+            i for i, item in enumerate(fresh_claims)
+            if type(item) is dict and item.get('purpose') == 'dispute_ruling' and
+            item.get('reviewer_task') == reviewer_task and item.get('version') == version
+        ), None)
+        fresh_disputes = list(fresh.get('review_disputes') or [])
+        fresh_entry_idx = next((
+            i for i, item in enumerate(fresh_disputes)
+            if type(item) is dict and item.get('pr') == pr_number and
+            item.get('finding_id') == finding_id and item.get('head_sha') == head and
+            item.get('state') == 'OPEN'
+        ), None)
+        if claim_idx is None or fresh_entry_idx is None:
+            dispute_refuse('DISPUTE_RULING_CLAIM_INVALID')
+
+        done_at = _now()
+        if selected == 'codex-reviewer':
+            fresh_binding = fresh.get('task_binding')
+            output_sha256 = codex_result['output_sha256']
+            withheld = False
+            try:
+                from .task_submission_cli import _screen_text
+                review_text = _screen_text(codex_result['review_text'], 65536)
+                outcome = codex_result['outcome']
+                verdict = 'RULING'
+            except LLMToolError:
+                review_text = ''
+                outcome = None
+                verdict = 'BLOCKED'
+                withheld = True
+            review_result = {
+                'task_id': task_id,
+                'run_id': fresh.get('run_id'),
+                'contract_digest': fresh_binding.get('contract_digest'),
+                'head': head,
+                'verdict': verdict,
+                'review_text': review_text,
+                'source': {'kind': 'CODEX_JSONL', 'output_sha256': output_sha256},
+            }
+            if not withheld:
+                review_result['outcome'] = outcome
+            next_claim = dict(
+                fresh_claims[claim_idx], state='COMPLETED',
+                native_session_id=session_id, updated_at=done_at,
+                review_result=review_result)
+            hist_event = 'ARBITER_WITHHELD' if withheld else 'ARBITER_COMPLETED'
+            refs = {'reviewer_task': reviewer_task, 'version': version,
+                    'output_sha256': output_sha256}
+            if not withheld:
+                refs['review_text_sha256'] = hashlib.sha256(
+                    review_text.encode('utf-8')).hexdigest()
+        else:
+            withheld = False
+            outcome = None
+            next_claim = dict(
+                fresh_claims[claim_idx], state='DISPATCHED',
+                native_session_id=session_id, updated_at=done_at)
+            hist_event = 'ARBITER_DISPATCHED'
+            refs = {'reviewer_task': reviewer_task, 'version': version}
+
+        fresh_claims[claim_idx] = next_claim
+        updated_entry = dict(fresh_disputes[fresh_entry_idx])
+        updated_entry['history'] = list(updated_entry.get('history', [])) + [{
+            'event': hist_event,
+            'at': done_at,
+            'actor': 'llmtool',
+            'head_sha': head,
+            'refs': refs,
+        }]
+        fresh_disputes[fresh_entry_idx] = updated_entry
+        store.compare_and_update(
+            task_id, expected={'record_sha256': fresh['record_sha256']},
+            review_dispatch_claim=fresh_claims,
+            review_disputes=fresh_disputes)
+
+        if withheld:
+            dispute_refuse('DISPUTE_RULING_WITHHELD')
+        if selected != 'codex-reviewer':
+            return {
+                'task_id': task_id, 'state': 'DISPATCHED', 'code': 'ARBITER_PENDING',
+                'pr': pr_number, 'finding_id': finding_id, 'head_sha': head,
+                'reviewer': selected, 'reviewer_task': reviewer_task,
+                'reviewer_session': session_id, 'version': version,
+            }
+        return {
+            'task_id': task_id, 'state': 'COMPLETED', 'verdict': 'RULING',
+            'outcome': outcome, 'pr': pr_number, 'finding_id': finding_id,
+            'head_sha': head, 'reviewer': selected, 'reviewer_task': reviewer_task,
+            'reviewer_session': session_id, 'version': version,
+        }
+    except Exception as exc:
+        if getattr(exc, 'dispute_code', None) in (
+                'DISPUTE_TASK_ABANDONED', 'DISPUTE_RULING_WITHHELD'):
+            raise
+        try:
+            fresh = store.get(task_id)
+        except Exception:
+            fresh = None
+        if type(fresh) is dict and fresh.get('abandonment') is not None:
+            dispute_refuse('DISPUTE_TASK_ABANDONED')
+        if type(fresh) is dict:
+            fresh_claims = fresh.get('review_dispatch_claim')
+            fresh_claims = ([fresh_claims] if type(fresh_claims) is dict else
+                            list(fresh_claims) if type(fresh_claims) is list else [])
+            claim_idx = next((
+                i for i, item in enumerate(fresh_claims)
+                if type(item) is dict and item.get('purpose') == 'dispute_ruling' and
+                item.get('reviewer_task') == reviewer_task and item.get('version') == version and
+                item.get('state') == 'CLAIMED'
+            ), None)
+            fresh_disputes = list(fresh.get('review_disputes') or [])
+            fresh_entry_idx = next((
+                i for i, item in enumerate(fresh_disputes)
+                if type(item) is dict and item.get('pr') == pr_number and
+                item.get('finding_id') == finding_id and item.get('head_sha') == head and
+                item.get('state') == 'OPEN'
+            ), None)
+            if claim_idx is not None and fresh_entry_idx is not None:
+                unknown = dict(fresh_claims[claim_idx], state='UNKNOWN', updated_at=_now())
+                if session_id is not None:
+                    unknown['native_session_id'] = session_id
+                reason = getattr(exc, 'review_failure_reason', None)
+                if reason in REVIEW_FAILURE_REASONS:
+                    unknown['failure_reason'] = reason
+                if (type(exc) is RuntimeError and len(exc.args) == 1 and
+                        exc.args[0] in REVIEWER_BIND_FAILURE_REASONS):
+                    unknown['bind_failure_reason'] = exc.args[0]
+                mismatch = getattr(exc, 'review_binding_mismatch_keys', None)
+                if reason == 'VERDICT_BINDING_MISMATCH' and type(mismatch) is tuple:
+                    keys = [key for key in ('task_id', 'run_id', 'head') if key in mismatch]
+                    if keys:
+                        unknown['binding_mismatch_keys'] = keys
+                fresh_claims[claim_idx] = unknown
+                updated_entry = dict(fresh_disputes[fresh_entry_idx])
+                updated_entry['history'] = list(updated_entry.get('history', [])) + [{
+                    'event': 'ARBITER_UNKNOWN',
+                    'at': _now(),
+                    'actor': 'llmtool',
+                    'head_sha': head,
+                    'refs': {'reviewer_task': reviewer_task, 'version': version},
+                }]
+                fresh_disputes[fresh_entry_idx] = updated_entry
+                try:
+                    store.compare_and_update(
+                        task_id, expected={'record_sha256': fresh['record_sha256']},
+                        review_dispatch_claim=fresh_claims,
+                        review_disputes=fresh_disputes)
+                except Exception:
+                    pass
+        if getattr(exc, 'dispute_code', None) or getattr(exc, 'review_dispatch_code', None):
+            raise
+        outcome_error = LLMToolError('Reviewer dispatch refused; details omitted')
+        outcome_error.review_dispatch_code = 'REVIEW_DISPATCH_OUTCOME_UNKNOWN'
+        raise outcome_error from None
