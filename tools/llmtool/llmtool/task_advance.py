@@ -1738,7 +1738,10 @@ def _is_ruling_comment(comment, body):
         if (type(created_at) is not str or type(updated_at) is not str or
                 not created_at or updated_at != created_at):
             return False
-        lines = [line.rstrip('\r') for line in body.split('\n') if line.strip()]
+        # One single line splitting (str.splitlines: newline, CR, CR LF and the other
+        # Unicode line boundaries) feeds every line-based condition below, so no
+        # separator can hide a line from one condition while another sees it.
+        lines = [line for line in body.splitlines() if line.strip()]
         if len(lines) < 3:
             return False
         marker = task_submission_cli._RULING_MARKER.fullmatch(lines[0])
@@ -1751,9 +1754,10 @@ def _is_ruling_comment(comment, body):
             return False
         if marker.group(2) != header.group(2):
             return False
-        if len(task_submission_cli._RULING_ANY_LINE.findall(body)) != 1:
+        stripped_lines = [line.strip() for line in lines]
+        if sum(1 for line in stripped_lines if line.startswith('Ruling: ')) != 1:
             return False
-        for line in (item.strip() for item in body.splitlines() if item.strip()):
+        for line in stripped_lines:
             if line.startswith('Verdict:'):
                 return False
             if (task_completion._VERDICT_MARKER.fullmatch(line) is not None or
