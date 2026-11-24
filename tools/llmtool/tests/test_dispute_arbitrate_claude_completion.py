@@ -562,7 +562,8 @@ class ClaudeRulingCollectionTests(unittest.TestCase):
         self._seed()
         before = self._record_bytes()
         depth = max(sys.getrecursionlimit() + 500, 10000)
-        nested_line = ('[' * depth + ']' * depth).encode('utf-8')
+        nested_str = '[' * depth + ']' * depth
+        nested_line = nested_str.encode('utf-8')
         self.assertLess(len(nested_line), dispute_arbiter._TRANSCRIPT_MAX_BYTES)
 
         # Deeply nested JSON line alone
@@ -574,10 +575,11 @@ class ClaudeRulingCollectionTests(unittest.TestCase):
         # RecursionError during line parsing alongside a valid assistant entry
         valid_line = json.dumps(_assistant_entry(_ruling_text())).encode('utf-8')
         self._write_transcript(valid_line + b'\n' + nested_line + b'\n')
+        self._assert_refused_unchanged('ARBITER_TRANSCRIPT_UNAVAILABLE', before)
         real_loads = json.loads
 
         def loads_raising_on_nested(s, *args, **kwargs):
-            if s.startswith('['):
+            if s == nested_str:
                 raise RecursionError('maximum recursion depth exceeded')
             return real_loads(s, *args, **kwargs)
 
