@@ -453,7 +453,8 @@ class RemoteTestTests(unittest.TestCase):
 
     def test_remote_script_has_deadline_kill_and_bounded_owned_cleanup(self):
         script = remote_test._REMOTE_SCRIPT
-        self.assertIn('deadline=begin+540', script)
+        self.assertIn('work_deadline=begin+int(tl)-60; deadline=begin+int(tl)',
+                      script)
         self.assertIn('"--kill-after=2s"', script)
         self.assertIn('info.st_uid!=nobody_uid', script)
         self.assertIn('now-info.st_mtime>86400', script)

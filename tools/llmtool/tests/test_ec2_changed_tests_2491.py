@@ -150,7 +150,7 @@ class ChangedTestModuleSetTests(unittest.TestCase):
                     'host': 'ec2.example.org', 'user': 'runner',
                     'repo_path': '/home/runner/project',
                     'python': '/usr/bin/python3'}), \
-                patch.object(remote_test, '_ssh_timeout', return_value=60):
+                patch.object(remote_test, '_ssh_timeout', return_value=1800):
             result = remote_test.run_remote_test(
                 TASK_ID, executor_task='d6-task', sha=HEAD,
                 ref=f'refs/pull/{PR}/head', modules=(), pr=PR,
