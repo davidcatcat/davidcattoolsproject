@@ -118,7 +118,7 @@ class IncidentRemoteTestTests(unittest.TestCase):
                 during()
             if error is not None:
                 raise error
-            out = self.receipt(sha=argv[8], modules=argv[12:]) if stdout is None else stdout
+            out = self.receipt(sha=argv[8], modules=argv[14:]) if stdout is None else stdout
             return SimpleNamespace(stdout=out, stderr=b'', returncode=returncode)
         return run
 
@@ -180,7 +180,7 @@ class IncidentRemoteTestTests(unittest.TestCase):
         result = self.run_it(modules=())
 
         self.assertEqual(result['modules'], ['test_alpha', 'test_beta'])
-        self.assertEqual(self.calls[0][0][12:], ['test_alpha', 'test_beta'])
+        self.assertEqual(self.calls[0][0][14:], ['test_alpha', 'test_beta'])
 
     def test_fail_receipt_is_recorded_with_its_receipt(self):
         result = self.run_it(transport=self.transport(self.receipt(result='FAIL')))
@@ -390,7 +390,7 @@ class IncidentRemoteTestTests(unittest.TestCase):
 
         at_cap = self.run_it(incident=incident, modules=many[:-1])
         self.assertEqual(at_cap['result'], 'PASS')
-        self.assertEqual(len(self.calls[0][0][12:]), incident_store.MAX_REMOTE_MODULES)
+        self.assertEqual(len(self.calls[0][0][14:]), incident_store.MAX_REMOTE_MODULES)
 
     def test_invalid_config_is_refused(self):
         self.config.chmod(0o644)
