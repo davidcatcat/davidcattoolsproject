@@ -2738,6 +2738,7 @@ class TaskStoreTests(unittest.TestCase):
             store.create(task)
 
         original_get = store.get
+        original_read_raw = store._read_raw_at
         original_lock = store._lock_sidecar
         original_unlock = store._unlock_sidecar
         lock_owner = [None]
@@ -2757,14 +2758,20 @@ class TaskStoreTests(unittest.TestCase):
             return original_unlock(lock_fd)
 
         unlocked_finished_reads = []
+        validated_finished_gets = []
 
-        def slow_finished_get(task_id):
+        def slow_finished_raw_read(directory, task_id):
             if task_id in finished_ids:
                 if lock_owner[0] == threading.get_ident():
                     locked_finished_reads.append(task_id)
                 else:
                     unlocked_finished_reads.append(task_id)
                 time.sleep(0.005)
+            return original_read_raw(directory, task_id)
+
+        def tracked_finished_get(task_id):
+            if task_id in finished_ids:
+                validated_finished_gets.append(task_id)
             return original_get(task_id)
 
         def bind(index, task):
@@ -2788,11 +2795,12 @@ class TaskStoreTests(unittest.TestCase):
                 outcomes.append(exc.task_store_error_code)
 
         # #1631: a 100 ms lock wait raced the locked commit on slow runners.
-        # Keep the product lock timeout; the read lists below prove that the
-        # scans read the finished Tasks and never under the binding lock.
+        # #2602h: the unlocked scan uses the lighter _read_raw_at prefilter and
+        # never calls full validation (get) for unrelated finished Tasks.
         with patch.object(store, '_lock_sidecar', side_effect=tracked_lock), \
                 patch.object(store, '_unlock_sidecar', side_effect=tracked_unlock), \
-                patch.object(store, 'get', side_effect=slow_finished_get):
+                patch.object(store, '_read_raw_at', side_effect=slow_finished_raw_read), \
+                patch.object(store, 'get', side_effect=tracked_finished_get):
             threads = [threading.Thread(target=bind, args=(i, task))
                        for i, task in enumerate(candidates)]
             for thread in threads:
@@ -2802,6 +2810,7 @@ class TaskStoreTests(unittest.TestCase):
         self.assertTrue(all(not thread.is_alive() for thread in threads))
         self.assertEqual(locked_finished_reads, [])
         self.assertTrue(finished_ids <= set(unlocked_finished_reads))
+        self.assertEqual(validated_finished_gets, [])
         self.assertEqual(outcomes, ['BOUND', 'BOUND'])
 
         claude_task = self._codex_dispatch_task()

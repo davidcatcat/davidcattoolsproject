@@ -4406,11 +4406,10 @@ class TaskStore:
             _fail()
         return task_id + '.json'
 
-    def _read_at(self, directory, task_id, *, validate=True):
+    def _read_raw_at(self, directory, task_id):
         """Read one record with every file check and a strict JSON parse.
 
-        validate=False skips only the final _validate; it is for read-only
-        scans whose matches the caller then reads again through get().
+        Returns ``(value, raw_bytes)`` without running ``_validate``.
         """
         name = self._name(task_id)
         for _ in range(TASK_READ_ATTEMPTS):
@@ -4460,22 +4459,7 @@ class TaskStore:
                                    parse_constant=lambda _: _fail())
                 if value.get('task_id') != task_id:
                     _fail()
-                if not validate:
-                    return value
-                record = _read_current_worker_ids(value)
-                token, pattern = _repository_read_input(record)
-                memo_key = (hashlib.sha256(raw).hexdigest(), token)
-                if memo_key in self._validated_reads:
-                    return record
-                validated = (_validate(record, strict=False)
-                             if pattern is None else
-                             _validate(record, strict=False,
-                                       repository_pattern=pattern))
-                if token is not _REPOSITORY_CONFIG_UNREADABLE:
-                    if len(self._validated_reads) >= TASK_READ_MEMO_MAX:
-                        self._validated_reads.clear()
-                    self._validated_reads.add(memo_key)
-                return validated
+                return value, raw
             except LLMToolError:
                 raise
             except FileNotFoundError:
@@ -4491,6 +4475,30 @@ class TaskStore:
                 if fd is not None:
                     os.close(fd)
         _fail('TASK_STORE_BUSY')
+
+    def _read_at(self, directory, task_id, *, validate=True):
+        """Read one record with every file check and a strict JSON parse.
+
+        validate=False skips only the final _validate; it is for read-only
+        scans whose matches the caller then reads again through get().
+        """
+        value, raw = self._read_raw_at(directory, task_id)
+        if not validate:
+            return value
+        record = _read_current_worker_ids(value)
+        token, pattern = _repository_read_input(record)
+        memo_key = (hashlib.sha256(raw).hexdigest(), token)
+        if memo_key in self._validated_reads:
+            return record
+        validated = (_validate(record, strict=False)
+                     if pattern is None else
+                     _validate(record, strict=False,
+                               repository_pattern=pattern))
+        if token is not _REPOSITORY_CONFIG_UNREADABLE:
+            if len(self._validated_reads) >= TASK_READ_MEMO_MAX:
+                self._validated_reads.clear()
+            self._validated_reads.add(memo_key)
+        return validated
 
     @staticmethod
     def _unique_pairs(pairs):
@@ -4872,16 +4880,52 @@ class TaskStore:
         finally:
             self._unlock_sidecar(lock_fd)
 
+    @staticmethod
+    def _d6_named_ids(record):
+        """Return every D6 identifier named in a record's D6-holding fields."""
+        developer = record.get('developer')
+        callback = (developer.get('direct_result_callback')
+                    if type(developer) is dict else None)
+        ids = set()
+        for item in (developer, record.get('completion'), callback):
+            if type(item) is dict:
+                value = item.get('executor_task_id')
+                if type(value) is str:
+                    ids.add(value)
+        return ids
+
     def _d6_scan_holders(self, task_id, claims, holds):
-        """Return the other Tasks holding a claimed D6. Runs without the lock."""
+        """Return the other Tasks holding a claimed D6. Runs without the lock.
+
+        Each other record first gets the file checks and strict JSON parse of
+        _read_at(validate=False) without full validation. A record that cannot
+        be opened, read or parsed, or whose task_id does not match its file
+        name, still fails closed with TASK_D6_BINDING_SCAN_FAILED. A parsed
+        record that would fail full validation no longer blocks a D6 claim
+        unless it is a candidate holder (names one of ``claims``); only
+        candidates are read through full validation (get()) and evaluated with
+        ``holds``.
+        """
         holders = set()
         try:
-            for other_id in self.task_ids():
-                if other_id == task_id:
-                    continue
-                other = self.get(other_id)
-                if any(holds(other, claim) for claim in claims):
-                    holders.add(other_id)
+            task_ids = self.task_ids()
+            if not task_ids:
+                return holders
+            directory = self._dirfd(create=False)
+            if directory is None:
+                _fail('TASK_D6_BINDING_SCAN_FAILED')
+            try:
+                for other_id in task_ids:
+                    if other_id == task_id:
+                        continue
+                    light, _ = self._read_raw_at(directory, other_id)
+                    if not (claims & self._d6_named_ids(light)):
+                        continue
+                    other = self.get(other_id)
+                    if any(holds(other, claim) for claim in claims):
+                        holders.add(other_id)
+            finally:
+                os.close(directory)
         except Exception:
             _fail('TASK_D6_BINDING_SCAN_FAILED')
         return holders
