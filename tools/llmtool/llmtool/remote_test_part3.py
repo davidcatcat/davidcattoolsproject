@@ -55,7 +55,8 @@ def run_incident_remote_test(incident_id, *, sha, modules=(), root=None,
     except LLMToolError:
         return _incident_denied(INCIDENT_CONFIG_INVALID, incident_id)
     try:
-        module_timeout, total_timeout = _remote_test_timeouts()
+        timeout = _ssh_timeout()
+        module_timeout, total_timeout = _remote_test_timeouts(timeout)
     except LLMToolError:
         return _incident_denied(INCIDENT_CONFIG_INVALID, incident_id)
     argv = _ssh_argv(config, sha, sha, selected, module_timeout, total_timeout)
@@ -69,7 +70,6 @@ def run_incident_remote_test(incident_id, *, sha, modules=(), root=None,
 
     if transport is None:
         transport = _ssh_transport
-    timeout = _ssh_timeout()
     try:
         result = transport(argv, _REMOTE_SCRIPT, timeout)
     except subprocess.TimeoutExpired:

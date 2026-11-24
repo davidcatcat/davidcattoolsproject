@@ -198,6 +198,59 @@ class RemoteTestTimeoutTests(unittest.TestCase):
         self.assertEqual(result['result'], 'ADMISSION_DENIED')
         self.assertEqual(result['code'], remote_test.INCIDENT_CONFIG_INVALID)
 
+    def test_incident_route_reads_the_ssh_timeout_once(self):
+        sent = []
+        values = iter((1800, 600))
+
+        def transport(argv, script, timeout):
+            sent.append(timeout)
+            raise OSError('offline')
+
+        with self._policy_file(), \
+                mock.patch.object(remote_test, '_ssh_timeout',
+                                  side_effect=lambda: next(values)), \
+                self._incident_admission():
+            result = remote_test.run_incident_remote_test(
+                'mi-' + 'a' * 40, sha=_SHA, modules=('test_example',),
+                transport=transport)
+        self.assertEqual((result['result'], result['code']),
+                         ('UNAVAILABLE', 'SSH_UNAVAILABLE'))
+        self.assertEqual(sent, [1800])
+
+    def test_task_route_reads_the_ssh_timeout_once(self):
+        task = {
+            'task_id': '1' * 32, 'run_id': '2' * 32,
+            'pm_session_id': 'pm-' + '3' * 32,
+            'developer': {'read_paths': ['tools/llmtool/tests/test_example.py'],
+                          'write_paths': []},
+            'completion': {'evidence': {'common_dir': '/repo/.git',
+                                        'result': {'result_head': _SHA}}},
+            'remote_test_receipts': [],
+        }
+        store = mock.Mock()
+        store.get.return_value = task
+        sent = []
+        values = iter((1800, 600))
+
+        def transport(argv, script, timeout):
+            sent.append(timeout)
+            raise OSError('offline')
+
+        with self._policy_file(), \
+                mock.patch.object(remote_test, '_ssh_timeout',
+                                  side_effect=lambda: next(values)), \
+                mock.patch.object(remote_test, 'read_d6_registration',
+                                  return_value=mock.Mock(result_sha=_SHA)), \
+                mock.patch.object(remote_test, '_config', return_value=_CONFIG), \
+                mock.patch.object(remote_test, '_record_outcome',
+                                  return_value={'result': 'UNAVAILABLE'}):
+            result = remote_test.run_remote_test(
+                task['task_id'], executor_task='d6-task', sha=_SHA,
+                ref='refs/pull/1/head', modules=('test_example',), store=store,
+                transport=transport)
+        self.assertEqual(result['result'], 'UNAVAILABLE')
+        self.assertEqual(sent, [1800])
+
     def test_command_digest_covers_the_timeout_words(self):
         base = remote_test._ssh_argv(
             _CONFIG, _SHA, 'refs/heads/main', ('test_example',), 180, 540)

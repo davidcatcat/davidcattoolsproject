@@ -180,16 +180,18 @@ def _fresh_pr_head(pr):
     return head['sha']
 
 
-def _remote_test_timeouts():
+def _remote_test_timeouts(ssh_timeout=None):
     """Resolve and validate the #2281 row 9 remote test timeouts before SSH."""
     from . import repair_policy
+    if ssh_timeout is None:
+        ssh_timeout = _ssh_timeout()
     module_limit = repair_policy.remote_test_module_timeout_seconds()
     total_limit = repair_policy.remote_test_total_timeout_seconds()
     if (module_limit < 1 or total_limit < _REMOTE_WORK_RESERVE_SECONDS + 1 or
             module_limit > total_limit - _REMOTE_WORK_RESERVE_SECONDS):
         raise LLMToolError(
             'REMOTE_TEST_TIMEOUT_INVALID: module exceeds total minus reserve')
-    if total_limit + _REMOTE_SSH_TIMEOUT_MARGIN_SECONDS >= _ssh_timeout():
+    if total_limit + _REMOTE_SSH_TIMEOUT_MARGIN_SECONDS >= ssh_timeout:
         raise LLMToolError(
             'REMOTE_TEST_TIMEOUT_INVALID: total plus margin reaches the SSH timeout')
     return module_limit, total_limit
@@ -308,7 +310,8 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         config = _config(config_path)
     except LLMToolError:
         return denied('CONFIG_INVALID')
-    module_timeout, total_timeout = _remote_test_timeouts()
+    timeout = _ssh_timeout()
+    module_timeout, total_timeout = _remote_test_timeouts(timeout)
     argv = _ssh_argv(config, sha, ref, selected, module_timeout, total_timeout)
     command_digest = _command_digest(argv)
     for known in reversed(task.get('remote_test_receipts', [])):
@@ -322,7 +325,6 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         break
     if transport is None:
         transport = _ssh_transport
-    timeout = _ssh_timeout()
     try:
         result = transport(argv, _REMOTE_SCRIPT, timeout)
     except subprocess.TimeoutExpired:
