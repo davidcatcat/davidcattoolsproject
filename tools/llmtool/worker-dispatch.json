@@ -44,17 +44,11 @@
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6760670167"
     },
     "claude-reviewer": {
-      "dispatch": "OWNER_ASSIGNMENT_ONLY",
+      "dispatch": "PAUSED",
       "decided_by": "Owner",
       "decided_at": "2026-11-24",
-      "reason": "One-time Owner grant for the PR #2699 F3 arbitration (returns to PAUSED afterwards); all other claude-reviewer dispatch stays paused",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-7141865604",
-      "owner_assignments": [
-        {
-          "task_id": "5cf4cde1dcd249578092e8f0f1244244",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6685246395"
-        }
-      ]
+      "reason": "One-time Owner grant for PR #2699 F3 arbitration ended; every claude-reviewer dispatch is paused again",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-7141865604"
     },
     "codex-reviewer": {
       "dispatch": "ALLOWED",
