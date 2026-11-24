@@ -177,6 +177,101 @@ class FallbackBudgetTest(unittest.TestCase):
                          [(advice.TEST_REFERENCES_WRITE, TEST_A),
                           (advice.TEST_REFERENCES_WRITE, TEST_B)])
 
+    def test_no_defined_name_with_many_write_paths_bounds_fallback_greps(self):
+        source = _module_source(2)
+        write_paths = [f'tools/llmtool/llmtool/mod_{i:03d}.py' for i in range(250)]
+        grep_calls = []
+        now = [0.0]
+
+        def runner(argv, **kwargs):
+            if argv[3] == 'show':
+                return types.SimpleNamespace(
+                    returncode=0, stdout=source if argv[4].endswith('mod_000.py') else '')
+            grep_calls.append((argv, kwargs['timeout']))
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout=f'HEAD:tools/llmtool/tests/test_ref_{len(grep_calls):03d}.py\n')
+
+        with mock.patch.object(advice.time, 'monotonic', side_effect=lambda: now[0]):
+            items = advice.referencing_tests(
+                root='/fake', commit='HEAD', read_paths=[], write_paths=write_paths,
+                runner=runner, texts=['Update the documentation only.'])
+
+        self.assertEqual(len(grep_calls), advice.MAX_PRECISE_GREPS)
+        self.assertLessEqual(len(items), advice.MAX_ITEMS)
+        capped = [item for item in items if item['kind'] == advice.TEST_REFERENCES_CAPPED]
+        self.assertEqual(len(capped), 1)
+        self.assertEqual(items[0], capped[0])
+        self.assertIsNone(items[0]['path'])
+        self.assertIn('capped', items[0]['note'])
+        self.assertIn('partial', items[0]['note'])
+        self.assertEqual(len(items[1:]), advice.MAX_PRECISE_GREPS)
+        self.assertTrue(all(item['kind'] == advice.TEST_REFERENCES_WRITE for item in items[1:]))
+        task_store._validate_read_scope_advice([advice.entry(items, None, None)])
+
+    def test_precise_runner_exception_bounds_fallback_greps(self):
+        source = _module_source(4)
+        write_paths = [f'tools/llmtool/llmtool/mod_{i:03d}.py' for i in range(250)]
+        precise_greps = []
+        fallback_greps = []
+        now = [0.0]
+
+        def runner(argv, **kwargs):
+            if argv[3] == 'show':
+                return types.SimpleNamespace(
+                    returncode=0, stdout=source if argv[4].endswith('mod_000.py') else '')
+            if _is_module_grep(argv):
+                fallback_greps.append(argv)
+                return types.SimpleNamespace(
+                    returncode=0,
+                    stdout=f'HEAD:tools/llmtool/tests/test_fb_{len(fallback_greps):03d}.py\n')
+            precise_greps.append(argv)
+            if len(precise_greps) == 3:
+                raise RuntimeError('git grep failed')
+            return types.SimpleNamespace(returncode=0, stdout=f'HEAD:{TEST_B}\n')
+
+        texts = ['Update fn_00(), fn_01(), fn_02(), fn_03()']
+        with mock.patch.object(advice.time, 'monotonic', side_effect=lambda: now[0]):
+            items = advice.referencing_tests(
+                root='/fake', commit='HEAD', read_paths=[], write_paths=write_paths,
+                runner=runner, texts=texts)
+
+        self.assertEqual(len(precise_greps), 3)
+        self.assertEqual(len(precise_greps) + len(fallback_greps), advice.MAX_PRECISE_GREPS)
+        capped = [item for item in items if item['kind'] == advice.TEST_REFERENCES_CAPPED]
+        self.assertEqual(len(capped), 1)
+        self.assertEqual(items[0], capped[0])
+        self.assertIn('capped', items[0]['note'])
+        self.assertIn('partial', items[0]['note'])
+        self.assertEqual(len(items[1:]), advice.MAX_PRECISE_GREPS - 3)
+        task_store._validate_read_scope_advice([advice.entry(items, None, None)])
+
+    def test_no_texts_with_many_write_paths_bounds_fallback_greps(self):
+        write_paths = [f'tools/llmtool/llmtool/mod_{i:03d}.py' for i in range(250)]
+        grep_calls = []
+        now = [0.0]
+
+        def runner(argv, **kwargs):
+            grep_calls.append((argv, kwargs['timeout']))
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout=f'HEAD:tools/llmtool/tests/test_ref_{len(grep_calls):03d}.py\n')
+
+        with mock.patch.object(advice.time, 'monotonic', side_effect=lambda: now[0]):
+            items = advice.referencing_tests(
+                root='/fake', commit='HEAD', read_paths=[], write_paths=write_paths,
+                runner=runner)
+
+        self.assertEqual(len(grep_calls), advice.MAX_PRECISE_GREPS)
+        self.assertLessEqual(len(items), advice.MAX_ITEMS)
+        capped = [item for item in items if item['kind'] == advice.TEST_REFERENCES_CAPPED]
+        self.assertEqual(len(capped), 1)
+        self.assertEqual(items[0], capped[0])
+        self.assertIn('capped', items[0]['note'])
+        self.assertIn('partial', items[0]['note'])
+        self.assertEqual(len(items[1:]), advice.MAX_PRECISE_GREPS)
+        task_store._validate_read_scope_advice([advice.entry(items, None, None)])
+
 
 if __name__ == '__main__':
     unittest.main()

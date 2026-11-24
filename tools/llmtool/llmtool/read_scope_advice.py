@@ -223,12 +223,22 @@ def _module_referencing_tests_bounded(*, root, commit, read_paths, write_paths, 
     return items, partial
 
 
-def _module_referencing_tests(*, root, commit, read_paths, write_paths, runner=None):
-    """Historical module-level referencing-test list without aggregate cap."""
-    items, _ = _module_referencing_tests_bounded(
+def _capped_fallback_result(*, root, commit, read_paths, write_paths, runner=None,
+                            max_greps, deadline, reason=None):
+    fallback, partial = _module_referencing_tests_bounded(
         root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
-        runner=runner)
-    return items
+        runner=runner, max_greps=max_greps, deadline=deadline)
+    if reason is None and not partial:
+        return fallback
+    if reason is not None:
+        suffix = ('partial module-level list (budget exhausted)'
+                  if partial else 'using module-level list')
+        note = ('precise test search was capped (%s); %s'
+                % (reason, suffix))[:MAX_NOTE_CHARS]
+    else:
+        note = ('module-level test search was capped (budget exhausted); '
+                'partial module-level list')[:MAX_NOTE_CHARS]
+    return [item(TEST_REFERENCES_CAPPED, None, note)] + fallback[:max(0, MAX_ITEMS - 1)]
 
 
 # --- #2602u: list only the tests that exercise the names a spec changes ------
@@ -341,7 +351,8 @@ def _candidate_names(text, definitions):
     return found
 
 
-def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, runner=None):
+def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, runner=None,
+                               budget=None):
     """Tests that directly exercise names the spec texts change; None when no name is found.
 
     Any error propagates to referencing_tests(), which keeps the module-level list.
@@ -350,7 +361,9 @@ def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, 
     given = [text for text in _texts(texts) if text.strip()]
     if not given:
         return None
-    deadline = time.monotonic() + PRECISE_SEARCH_MAX_SECONDS
+    if budget is None:
+        budget = {'deadline': time.monotonic() + PRECISE_SEARCH_MAX_SECONDS, 'greps': 0}
+    deadline = budget['deadline']
     definitions, callable_names = _defined_names(
         _module_sources(run, root, commit, write_paths, deadline=deadline))
     names = []
@@ -386,6 +399,7 @@ def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, 
         argv = ['git', '-C', str(root), 'grep', '-l', '-E', '-e', pattern,
                 commit, '--', *_TEST_DIRS]
         greps += 1
+        budget['greps'] = greps
         try:
             result = run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                          timeout=min(PRECISE_CALL_TIMEOUT_SECONDS, remaining), check=False)
@@ -420,33 +434,34 @@ def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, 
 def referencing_tests(*, root, commit, read_paths, write_paths, runner=None, texts=None):
     """Test files to show the PM for the files being written.
 
-    Without texts (the historical input) this returns exactly the module-level
-    reference list. With texts (the goal and acceptance), it returns only tests
-    that directly exercise names the texts change, and falls back to the
-    module-level list when no changed name can be identified or the new logic
-    errors. The advice stays fail-open either way.
+    Without texts (the historical input) this returns the module-level reference
+    list under the aggregate budget. With texts (the goal and acceptance), it
+    returns only tests that directly exercise names the texts change, and falls
+    back to the module-level list under the same aggregate budget when the
+    precise search is capped, finds no changed name, or errors. The advice stays
+    fail-open either way.
     """
+    deadline = time.monotonic() + PRECISE_SEARCH_MAX_SECONDS
+    budget = {'deadline': deadline, 'greps': 0}
     if texts is not None:
         try:
             precise = _precise_referencing_tests(
                 root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
-                texts=texts, runner=runner)
+                texts=texts, runner=runner, budget=budget)
             if precise is not None:
                 return precise
         except _PreciseSearchCapped as exc:
             remaining_greps = max(0, MAX_PRECISE_GREPS - exc.greps)
-            fallback, partial = _module_referencing_tests_bounded(
+            return _capped_fallback_result(
                 root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
-                runner=runner, max_greps=remaining_greps, deadline=exc.deadline)
-            suffix = ('partial module-level list (budget exhausted)'
-                      if partial else 'using module-level list')
-            note = ('precise test search was capped (%s); %s'
-                    % (exc.reason, suffix))[:MAX_NOTE_CHARS]
-            return [item(TEST_REFERENCES_CAPPED, None, note)] + fallback[:max(0, MAX_ITEMS - 1)]
+                runner=runner, max_greps=remaining_greps, deadline=exc.deadline,
+                reason=exc.reason)
         except Exception:
             pass
-    return _module_referencing_tests(
-        root=root, commit=commit, read_paths=read_paths, write_paths=write_paths, runner=runner)
+    remaining_greps = max(0, MAX_PRECISE_GREPS - budget['greps'])
+    return _capped_fallback_result(
+        root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
+        runner=runner, max_greps=remaining_greps, deadline=budget['deadline'])
 
 
 # --- #2503 PR-6: route capability and size advice ----------------------------
