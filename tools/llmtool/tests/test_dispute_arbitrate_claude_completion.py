@@ -561,9 +561,11 @@ class ClaudeRulingCollectionTests(unittest.TestCase):
     def test_deeply_nested_json_line_refuses_unavailable_and_unchanged(self):
         self._seed()
         before = self._record_bytes()
-        depth = sys.getrecursionlimit() + 500
+        depth = max(sys.getrecursionlimit() + 500, 10000)
         nested_line = ('[' * depth + ']' * depth).encode('utf-8')
         self.assertLess(len(nested_line), dispute_arbiter._TRANSCRIPT_MAX_BYTES)
+        with self.assertRaises(RecursionError):
+            json.loads(nested_line)
 
         # Deeply nested JSON line alone
         self._write_transcript(nested_line + b'\n')
