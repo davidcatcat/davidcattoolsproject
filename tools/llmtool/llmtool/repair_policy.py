@@ -34,6 +34,10 @@ OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
 # default; a present key of the wrong type, zero or negative refuses
 # POLICY_INVALID. Callers are wired in later pieces.
 #   row 2:  spec_preflight_large_file_lines (gw-agent edit large-file threshold)
+#   row 10: local_test_timeout_seconds (#2281 row 10, basis #1703: the
+#           per-module timeout of the task complete local test run, in seconds;
+#           caller default llmtool.task_completion._TEST_TIMEOUT, and the
+#           whole-run bound stays three times this value)
 #   row 15: merge_train_members_max, merge_train_files_per_pr_max
 #   row 16: revert_scope_prs_max
 #   row 17: d6_writer_lease_hours (#2281 L7: D6 writer lease length in hours,
@@ -79,7 +83,8 @@ OPTIONAL_POSITIVE_POLICY_KEYS = ('spec_preflight_large_file_lines', 'merge_train
                                  'review_source_limit_bytes', 'start_failures_max',
                                  'start_retries_max', 'committed_result_carries_max',
                                  'ai_debug_excerpt_max_chars', 'gw_agent_max_turns',
-                                 'route_failure_pause_after')
+                                 'route_failure_pause_after',
+                                 'local_test_timeout_seconds')
 # #2281 row 18 (basis #819): Developer assignment wait. The key above is
 # optional; a policy that omits it keeps the caller default, the hard-coded
 # wait at its point of use (llmtool.developer_assignment_inbox).
@@ -137,6 +142,11 @@ GW_AGENT_MAX_TURNS = 64
 # this many consecutive route failures. The key above is optional; a policy
 # that omits it keeps this value, and tools/llmtool/policy.json records 3.
 ROUTE_FAILURE_PAUSE_AFTER = 3
+# #2281 row 10 (basis #1703): the per-module timeout of the task complete
+# local test run, in seconds. The key above is optional; a policy that omits
+# it keeps the caller default, the hard-coded limit at its point of use
+# (llmtool.task_completion, _TEST_TIMEOUT).
+LOCAL_TEST_TIMEOUT_SECONDS = 600
 # #2281 L0a (design rule 3): the bound is a real technical limit, not an
 # arbitrary cap. policy.json is untrusted input, so load_policy reads at most
 # _MAX_BYTES + 1 bytes in one bounded buffer instead of the whole file. The
@@ -326,6 +336,18 @@ def route_failure_pause_after(path=None):
     """
     policy = load_policy(path)
     return policy.get('route_failure_pause_after', ROUTE_FAILURE_PAUSE_AFTER)
+
+
+def local_test_timeout_seconds(path=None, default=LOCAL_TEST_TIMEOUT_SECONDS):
+    """#2281 row 10 (basis #1703): the per-module local test timeout, in seconds.
+
+    The key is optional; a policy that omits it keeps the caller default, the
+    hard-coded limit at its point of use (llmtool.task_completion,
+    _TEST_TIMEOUT). The task complete run keeps its whole-run bound at three
+    times this value.
+    """
+    policy = load_policy(path)
+    return policy.get('local_test_timeout_seconds', default)
 
 
 KINDS = ('root', 'child', 'replan')
