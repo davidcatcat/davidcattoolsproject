@@ -8,7 +8,10 @@ required or not, and reports RED, GREEN or UNKNOWN for the whole SHA.
 
 The failing conclusions are exactly ``main_incident.BAD`` (``failure``,
 ``cancelled``, ``timed_out``, ``startup_failure``); the set is reused, not
-copied.
+copied. The known non-failing conclusions are exactly ``success``, ``skipped``
+and ``neutral``; a completed job with any other conclusion (including
+``action_required`` or ``stale``) is unrecognized, so the result is UNKNOWN
+rather than GREEN.
 
 Pure and read-only: nothing here calls GitHub, the network or Git, reads a
 file, or mutates the input. Inputs:
@@ -21,9 +24,11 @@ file, or mutates the input. Inputs:
 
 The result is a new dict: ``state`` is RED when the listing is complete and
 well formed and at least one job is failing, GREEN when it is complete and
-well formed and none is failing, UNKNOWN otherwise, and ``reason`` names the
-first UNKNOWN reason. A result never claims GREEN on incomplete, still running
-or malformed data; failing jobs found are still reported on an UNKNOWN result.
+well formed, none is failing and every completed job has a known non-failing
+conclusion, UNKNOWN otherwise, and ``reason`` names the first UNKNOWN reason.
+A result never claims GREEN on incomplete, still running, unrecognized
+conclusion or malformed data; failing jobs found are still reported on an
+UNKNOWN result.
 """
 
 from __future__ import annotations
@@ -45,12 +50,16 @@ COUNT_MISMATCH = 'count_mismatch'
 DUPLICATE_JOB_ID = 'duplicate_job_id'
 MALFORMED_JOB = 'malformed_job'
 COMPLETED_WITHOUT_CONCLUSION = 'completed_without_conclusion'
+UNKNOWN_CONCLUSION = 'unknown_conclusion'
 JOB_NOT_COMPLETED = 'job_not_completed'
 
 _SHA = re.compile(r'\A[0-9a-f]{40}\Z')
 _COMPLETED = 'completed'
 # The very object main_incident exports, so the failing set is reused not copied.
 _FAILED = main_incident.BAD
+# A completed conclusion must be one of these to be trusted as non-failing;
+# anything outside both sets (action_required, stale, a typo) is unrecognized.
+_NOT_FAILING = frozenset({'success', 'skipped', 'neutral'})
 
 
 def summarize(sha, pages, stated_total):
@@ -61,7 +70,9 @@ def summarize(sha, pages, stated_total):
     ``name``, ``conclusion`` and ``id``, in the input order of the pages.
     ``state`` is
     ``red``, ``green`` or ``unknown``; ``reason`` names the first UNKNOWN
-    reason, and is None on RED and GREEN.
+    reason, and is None on RED and GREEN. GREEN also requires every completed
+    job to have a known non-failing conclusion; an unrecognized one gives
+    UNKNOWN with reason ``UNKNOWN_CONCLUSION``.
     """
     result = {'sha': sha, 'state': UNKNOWN, 'reason': None,
               'stated_total': stated_total, 'total_jobs': 0, 'failing': []}
@@ -99,6 +110,8 @@ def summarize(sha, pages, stated_total):
                 not_completed = True
             elif job['conclusion'] in _FAILED:
                 _add_failing(failing, job)
+            elif job['conclusion'] not in _NOT_FAILING:
+                first_reason = first_reason or UNKNOWN_CONCLUSION
     result['total_jobs'] = count
     if total_invalid:
         return _unknown(result, STATED_TOTAL_INVALID, failing)

@@ -182,6 +182,37 @@ class MainCiJobSummaryTests(unittest.TestCase):
                 self.assertEqual(result['state'], summary.UNKNOWN)
                 self.assertEqual(result['reason'], summary.MALFORMED_JOB)
 
+    def test_completed_job_with_unrecognized_conclusion_is_unknown(self):
+        # F1: a well-formed but unrecognized conclusion is malformed data, not a
+        # pass; one such job must never let the listing read GREEN.
+        for conclusion in ('bogus', 'action_required', 'stale'):
+            with self.subTest(conclusion=conclusion):
+                result = summary.summarize(SHA, [[job(1, GATEWAY, conclusion)]], 1)
+                self.assertEqual(result['state'], summary.UNKNOWN)
+                self.assertEqual(result['reason'], summary.UNKNOWN_CONCLUSION)
+                self.assertEqual(result['failing'], [])
+
+    def test_unrecognized_conclusion_does_not_hide_failing_job(self):
+        # F1: an unrecognized conclusion makes the result UNKNOWN, but a usable
+        # completed failing job in the same listing is still reported.
+        pages = [[job(1, GATEWAY, 'failure'), job(2, 'lint', 'bogus')]]
+        result = summary.summarize(SHA, pages, 2)
+        self.assertEqual(result['state'], summary.UNKNOWN)
+        self.assertEqual(result['reason'], summary.UNKNOWN_CONCLUSION)
+        self.assertEqual(result['failing'],
+                         [{'id': 1, 'name': GATEWAY, 'conclusion': 'failure'}])
+
+    def test_every_known_non_failing_conclusion_is_green(self):
+        # The allow-list is exactly success, skipped and neutral; anything else
+        # outside main_incident.BAD is unrecognized, never a clean pass.
+        self.assertEqual(
+            summary._NOT_FAILING, frozenset({'success', 'skipped', 'neutral'}))
+        for conclusion in sorted(summary._NOT_FAILING):
+            with self.subTest(conclusion=conclusion):
+                result = summary.summarize(SHA, [[job(1, GATEWAY, conclusion)]], 1)
+                self.assertEqual(result['state'], summary.GREEN)
+                self.assertIsNone(result['reason'])
+
     def test_stated_total_not_int_is_unknown(self):
         result = summary.summarize(SHA, [[job(1, GATEWAY)]], '1')
         self.assertEqual(result['state'], summary.UNKNOWN)
@@ -216,6 +247,8 @@ class MainCiJobSummaryTests(unittest.TestCase):
             (summary.COMPLETED_WITHOUT_CONCLUSION,
              [[job(1, GATEWAY, 'failure'),
                job(2, 'lint', conclusion=None)]], 2),
+            (summary.UNKNOWN_CONCLUSION,
+             [[job(1, GATEWAY, 'failure'), job(2, 'lint', 'bogus')]], 2),
             (summary.COUNT_MISMATCH,
              [[job(1, GATEWAY, 'failure'), job(2, 'lint')]], 3),
             (summary.DUPLICATE_JOB_ID,
