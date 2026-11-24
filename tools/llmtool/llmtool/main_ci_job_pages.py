@@ -97,11 +97,12 @@ def collect_pages(sha, run_id, run_attempt, pages):
                 return _unknown(result, reason)
             page_ids.append(job['id'])
             page_jobs.append(dict(job))
+        # Every page, empty ones included, takes part in duplicate detection: a
+        # repeated empty page is just as ambiguous as a repeated non-empty one.
         signature = tuple(page_ids)
-        if signature:
-            if signature in seen_pages:
-                duplicate_page = True
-            seen_pages.add(signature)
+        if signature in seen_pages:
+            duplicate_page = True
+        seen_pages.add(signature)
         for job_id in page_ids:
             if job_id in seen_ids:
                 duplicate_job = True

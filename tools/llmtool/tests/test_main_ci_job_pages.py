@@ -72,6 +72,11 @@ class MainCiJobPagesTests(unittest.TestCase):
         fetched = [page([job(1), job(2)], 2), page([job(1), job(2)], 2)]
         self.assertUnknown(collect(fetched), pages_mod.DUPLICATE_PAGE)
 
+    def test_duplicate_empty_pages_are_unknown(self):
+        # One valid job plus two identical empty pages is ambiguous, not GREEN.
+        fetched = [page([job(1)], 1), page([], 1), page([], 1)]
+        self.assertUnknown(collect(fetched), pages_mod.DUPLICATE_PAGE)
+
     def test_duplicate_job_id_is_unknown(self):
         fetched = [page([job(1), job(2)], TOTAL), page([job(2), job(3)], TOTAL)]
         self.assertUnknown(collect(fetched), pages_mod.DUPLICATE_JOB_ID)
