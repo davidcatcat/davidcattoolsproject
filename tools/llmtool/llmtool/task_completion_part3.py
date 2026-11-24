@@ -282,7 +282,8 @@ def _collect_registered_result_diff(*, task_id, expected_common_dir, expected_ro
                                      expected_branch, source_sha, task_binding,
                                      expected_agent, expected_session_ref,
                                      expected_native_session_id, write_paths,
-                                     artifact_segments=None, trusted_base_sha=None):
+                                     artifact_segments=None, trusted_base_sha=None,
+                                     stacked_chain=None):
     """Share D6, ENV2, HEAD, ancestry, scope and diff-hash checks across routes."""
     registration = read_d6_registration(task_id, expected_common_dir,
                                         allowed_states=_m._D6_EVIDENCE_STATES)
@@ -315,6 +316,13 @@ def _collect_registered_result_diff(*, task_id, expected_common_dir, expected_ro
         limit=4096, allow_exit_1=True, return_exit_code=True)
     if ancestor_status != 0:
         _stop('SOURCE_NOT_ANCESTOR')
+    normalized_chain = None
+    if stacked_chain is not None:
+        # #2084: no repair artifact segment check gets a chain union.
+        from . import task_completion_part5
+        normalized_chain = task_completion_part5._apply_stacked_chain(
+            registration.root, stacked_chain, artifact_segments, source_sha,
+            snapshot.head, write_paths, trusted_base_sha)
     # The 128-path limit counts Developer paths only: a merged main can bring in
     # any number of its own files.
     paths = _diff_paths(registration.root, source_sha, snapshot.head)
@@ -324,7 +332,7 @@ def _collect_registered_result_diff(*, task_id, expected_common_dir, expected_ro
         registration.root, source_sha, snapshot.head, trusted_base_sha)
     if not developer_paths or len(developer_paths) > 128:
         _stop('RESULT_DIFF_INVALID')
-    if not set(developer_paths).issubset(set(write_paths)):
+    if normalized_chain is None and not set(developer_paths).issubset(set(write_paths)):
         _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID' if artifact_segments is not None
               else 'RESULT_SCOPE_MISMATCH')
     patch = _git(registration.root, ('diff', '--binary', '--no-ext-diff', '--no-textconv',
@@ -413,7 +421,8 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
                            expected_branch, source_sha, task_binding,
                            expected_agent, expected_session_ref,
                            expected_native_session_id, write_paths, artifact, artifact_sha256,
-                           artifact_segments=None, trusted_base_sha=None):
+                           artifact_segments=None, trusted_base_sha=None,
+                           stacked_chain=None):
     """Compare the current registered Executor HEAD and actual source-to-result diff."""
     registration, snapshot, paths, developer_paths, patch = _collect_registered_result_diff(
         task_id=task_id, expected_common_dir=expected_common_dir,
@@ -422,15 +431,18 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
         expected_agent=expected_agent, expected_session_ref=expected_session_ref,
         expected_native_session_id=expected_native_session_id,
         write_paths=write_paths, artifact_segments=artifact_segments,
-        trusted_base_sha=trusted_base_sha)
+        trusted_base_sha=trusted_base_sha, stacked_chain=stacked_chain)
     # An artifact describes the Developer's work, so it is compared with the
     # Developer tip. Paths, digest and scope above still cover the full head.
     if artifact_segments is None:
         tip = _developer_tip(registration.root, source_sha, snapshot.head, trusted_base_sha)
+        scope_paths = (_developer_changed_paths(
+            registration.root, source_sha, tip, trusted_base_sha)
+            if stacked_chain is not None else developer_paths)
         verify_artifact_applied(registration.root, artifact, artifact_sha256,
                                 source_sha, tip,
                                 _diff_paths(registration.root, source_sha, tip),
-                                write_paths, scope_paths=developer_paths)
+                                write_paths, scope_paths=scope_paths)
     else:
         # The original proposal's own segment carries its artifact; a later
         # repair segment may be a record-only one bound to its result HEAD.
@@ -444,7 +456,7 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
         _verify_artifact_segments(registration.root, artifact_segments, source_sha,
                                   write_paths, trusted_base_sha)
     _reject_legacy_grafts(registration.root, registration.common_dir)
-    return {
+    result = {
         'task_id': task_binding.get('task_id'), 'run_id': task_binding.get('run_id'),
         'executor_task_id': registration.task_id,
         'executor_identity': registration.trusted_agent_id,
@@ -458,6 +470,11 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
         'developer_changed_paths': list(developer_paths),
         'diff_sha256': hashlib.sha256(patch).hexdigest(),
     }
+    if stacked_chain is not None:
+        from . import task_completion_part5
+        result.update(task_completion_part5._stacked_chain_evidence(
+            registration.root, stacked_chain, source_sha))
+    return result
 
 
 def _native_session_identity(value):

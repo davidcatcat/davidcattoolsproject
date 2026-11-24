@@ -15,6 +15,7 @@ SPLIT_MODULES = (
     'task_completion_part2.py',
     'task_completion_part3.py',
     'task_completion_part4.py',
+    'task_completion_part5.py',
 )
 TASK_COMPLETION_LIMIT = 81920
 PART_LIMIT = 24576
