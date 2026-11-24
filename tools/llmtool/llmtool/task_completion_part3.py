@@ -436,13 +436,17 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
     # Developer tip. Paths, digest and scope above still cover the full head.
     if artifact_segments is None:
         tip = _developer_tip(registration.root, source_sha, snapshot.head, trusted_base_sha)
-        scope_paths = (_developer_changed_paths(
-            registration.root, source_sha, tip, trusted_base_sha)
-            if stacked_chain is not None else developer_paths)
+        if stacked_chain is None:
+            scope_write_paths, scope_paths = write_paths, developer_paths
+        else:
+            from . import task_completion_part5
+            scope_write_paths, scope_paths = task_completion_part5._stacked_artifact_scope(
+                registration.root, stacked_chain, source_sha, write_paths, tip,
+                trusted_base_sha)
         verify_artifact_applied(registration.root, artifact, artifact_sha256,
                                 source_sha, tip,
                                 _diff_paths(registration.root, source_sha, tip),
-                                write_paths, scope_paths=scope_paths)
+                                scope_write_paths, scope_paths=scope_paths)
     else:
         # The original proposal's own segment carries its artifact; a later
         # repair segment may be a record-only one bound to its result HEAD.

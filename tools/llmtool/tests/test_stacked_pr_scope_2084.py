@@ -189,6 +189,36 @@ class StackedPrScopeTests(unittest.TestCase):
             trusted_base_sha=main_sha, stacked_chain=chain,
             artifact_segments=[])), 'DEVELOPER_ARTIFACT_CHAIN_INVALID')
 
+    def test_stacked_update_branch_resolution_accepted_with_chain(self):
+        self.git('checkout', '-q', '-b', 'task1')
+        task1 = self.commit_file(
+            'a.txt', 'header\ntask1\nkeep1\nkeep2\nkeep3\nfooter\n', 'task1')
+        self.git('checkout', '-q', '-b', 'task2')
+        self.commit_file('b.txt', 'b1\n', 'task2')
+        self.git('checkout', '-q', 'main')
+        main_sha = self.commit_file(
+            'a.txt', 'header\nmain\nkeep1\nkeep2\nkeep3\nfooter\n', 'main moves')
+        self.git('checkout', '-q', 'task2')
+        self.git_run('merge', '--no-edit', 'main', check=False)
+        self.write('a.txt', 'header\nresolved\nkeep1\nkeep2\nkeep3\nfooter\n')
+        self.git('add', 'a.txt')
+        self.git('commit', '-q', '--no-edit')
+        head = self.git('rev-parse', 'HEAD')
+        branch = self.branch()
+        self.register_d6(source=task1, head=head, branch=branch)
+        chain = [{'source_sha': self.base, 'result_sha': task1,
+                  'write_paths': ['a.txt']}]
+
+        accepted = self.collect(
+            source=task1, head=head, branch=branch, write_paths=['b.txt'],
+            trusted_base_sha=main_sha, stacked_chain=chain)
+
+        self.assertEqual(accepted['stacked_chain_used'], True)
+        self.assertEqual(accepted['developer_changed_paths'], ['a.txt', 'b.txt'])
+        self.assertEqual(self.code(lambda: self.collect(
+            source=task1, head=head, branch=branch, write_paths=['b.txt'],
+            trusted_base_sha=main_sha)), 'RESULT_SCOPE_MISMATCH')
+
     def test_single_task_without_chain_result_is_unchanged(self):
         self.git('checkout', '-q', '-b', 'dev')
         head = self.commit_file(
@@ -233,6 +263,7 @@ class StackedPrScopeTests(unittest.TestCase):
             'absolute path': [{**valid, 'write_paths': ['/a.txt']}],
             'parent path': [{**valid, 'write_paths': ['a/../b']}],
             'backslash path': [{**valid, 'write_paths': ['a\\b']}],
+            'nul path': [{**valid, 'write_paths': ['a\x00b']}],
             'too many paths': [{**valid, 'write_paths': too_many}],
             'broken link': [valid, {'source_sha': task2, 'result_sha': task1,
                                     'write_paths': ['b.txt']}],

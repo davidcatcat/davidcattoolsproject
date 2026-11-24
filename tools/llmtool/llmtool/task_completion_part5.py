@@ -30,7 +30,7 @@ def _git(*args, **kwargs):
 
 def _relative_path(path):
     return (type(path) is str and bool(path) and not path.startswith('/') and
-            '\\' not in path and
+            '\\' not in path and '\x00' not in path and
             all(part not in ('', '.', '..') for part in path.split('/')))
 
 
@@ -179,6 +179,23 @@ def _apply_stacked_chain(root, stacked_chain, artifact_segments, bound_source_sh
     _stacked_scope_check(root, normalized, bound_source_sha, bound_result_sha,
                          bound_write_paths, trusted_base_sha)
     return normalized
+
+
+def _stacked_artifact_scope(root, stacked_chain, bound_source_sha,
+                            bound_write_paths, tip, trusted_base_sha):
+    """Return (allowed write paths, Developer scope) for a stacked artifact.
+
+    The full range already passed ``_stacked_scope_check``, so only a trusted
+    main merge in the bound Task's range can attribute a path from an earlier
+    Task. The artifact check therefore compares its scope with the same union
+    the merge check allows, never with a single Task's write paths.
+    """
+    normalized = _normalize_stacked_chain(root, stacked_chain, bound_source_sha)
+    allowed = set(bound_write_paths)
+    for entry in normalized:
+        allowed.update(entry['write_paths'])
+    return sorted(allowed), _m._developer_changed_paths(
+        root, bound_source_sha, tip, trusted_base_sha)
 
 
 def _stacked_chain_evidence(root, stacked_chain, bound_source_sha):
