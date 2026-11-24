@@ -4872,16 +4872,52 @@ class TaskStore:
         finally:
             self._unlock_sidecar(lock_fd)
 
+    @staticmethod
+    def _d6_named_ids(record):
+        """Return every D6 identifier named in a record's D6-holding fields."""
+        developer = record.get('developer')
+        callback = (developer.get('direct_result_callback')
+                    if type(developer) is dict else None)
+        ids = set()
+        for item in (developer, record.get('completion'), callback):
+            if type(item) is dict:
+                value = item.get('executor_task_id')
+                if type(value) is str:
+                    ids.add(value)
+        return ids
+
     def _d6_scan_holders(self, task_id, claims, holds):
-        """Return the other Tasks holding a claimed D6. Runs without the lock."""
+        """Return the other Tasks holding a claimed D6. Runs without the lock.
+
+        Each other record first gets the file checks and strict JSON parse of
+        _read_at(validate=False) without full validation. A record that cannot
+        be opened, read or parsed, or whose task_id does not match its file
+        name, still fails closed with TASK_D6_BINDING_SCAN_FAILED. A parsed
+        record that would fail full validation no longer blocks a D6 claim
+        unless it is a candidate holder (names one of ``claims``); only
+        candidates are read through full validation (get()) and evaluated with
+        ``holds``.
+        """
         holders = set()
         try:
-            for other_id in self.task_ids():
-                if other_id == task_id:
-                    continue
-                other = self.get(other_id)
-                if any(holds(other, claim) for claim in claims):
-                    holders.add(other_id)
+            task_ids = self.task_ids()
+            if not task_ids:
+                return holders
+            directory = self._dirfd(create=False)
+            if directory is None:
+                return holders
+            try:
+                for other_id in task_ids:
+                    if other_id == task_id:
+                        continue
+                    light = self._read_at(directory, other_id, validate=False)
+                    if not (claims & self._d6_named_ids(light)):
+                        continue
+                    other = self.get(other_id)
+                    if any(holds(other, claim) for claim in claims):
+                        holders.add(other_id)
+            finally:
+                os.close(directory)
         except Exception:
             _fail('TASK_D6_BINDING_SCAN_FAILED')
         return holders
