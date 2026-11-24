@@ -1724,8 +1724,8 @@ def _is_ruling_comment(comment, body):
     equals the header HEAD (not necessarily the current PR head), the marker
     status equals the header outcome, the body has exactly one Ruling line, exactly
     one dispute_ruling marker line, no
-    review_verdict marker line, no Verdict: line and no verdict version-and-head
-    line, is at most 65536 UTF-8
+    review_verdict marker line, no Verdict: line, no verdict version-and-head
+    line, and no security-review version marker (v91+), is at most 65536 UTF-8
     bytes, and was never edited. Anything else is not a ruling comment and is
     classified as a possible security verdict.
     """
@@ -1770,6 +1770,8 @@ def _is_ruling_comment(comment, body):
                 return False
             if review_result._VERDICT_VERSION_HEAD.fullmatch(line) is not None:
                 return False
+        if any(int(v) >= _SECURITY_VERSION_MIN for v in _VERDICT_VERSION_RE.findall(body)):
+            return False
         return True
     except Exception:
         return False
