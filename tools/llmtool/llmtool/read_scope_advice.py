@@ -159,29 +159,47 @@ def reference_patterns(path):
     return patterns
 
 
-def _module_referencing_tests(*, root, commit, read_paths, write_paths, runner=None):
+def _module_referencing_tests_bounded(*, root, commit, read_paths, write_paths, runner=None,
+                                      max_greps=None, deadline=None):
     """Test files at commit that reference a written file but are in neither read nor write.
 
-    Bounded: one git grep per written non-test .py/.json file over
+    Bounded: at most one git grep per written non-test .py/.json file over
     tools/llmtool/tests and scripts/test_*.py, at most MAX_TESTS_PER_PATH
-    results each. Any error gives no result for that file.
+    results each. When max_greps or deadline is set, stops once the aggregate
+    budget is spent and reports whether the fallback was partial.
     """
     run = runner or subprocess.run
     known = set(read_paths or []) | set(write_paths or [])
     found = {}
     more = []
+    greps = 0
+    partial = False
     for path in sorted(set(write_paths or [])):
         name = path.rsplit('/', 1)[-1]
         if not name.endswith(('.py', '.json')) or name.startswith('test_') or '/tests/' in path:
             continue
+        if max_greps is not None and greps >= max_greps:
+            partial = True
+            break
+        call_timeout = PRECISE_CALL_TIMEOUT_SECONDS
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                partial = True
+                break
+            call_timeout = min(PRECISE_CALL_TIMEOUT_SECONDS, remaining)
         argv = ['git', '-C', str(root), 'grep', '-l', '-E']
         for pattern in reference_patterns(path):
             argv += ['-e', pattern]
         argv += [commit, '--', *_TEST_DIRS]
+        greps += 1
         try:
             result = run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                         timeout=20, check=False)
+                         timeout=call_timeout, check=False)
         except Exception:
+            if deadline is not None and time.monotonic() >= deadline:
+                partial = True
+                break
             continue
         if getattr(result, 'returncode', 2) not in (0, 1):
             continue
@@ -199,9 +217,28 @@ def _module_referencing_tests(*, root, commit, read_paths, write_paths, runner=N
             more.append(item(TEST_REFERENCES_MORE, path,
                              '%d more test files reference it; shown: the first %d'
                              % (len(ranked) - MAX_TESTS_PER_PATH, MAX_TESTS_PER_PATH)))
-    return [item(TEST_REFERENCES_WRITE, test,
-                 ('references ' + source + '; it may pin the old behaviour')[:MAX_NOTE_CHARS])
-            for test, source in sorted(found.items())] + more
+    items = [item(TEST_REFERENCES_WRITE, test,
+                  ('references ' + source + '; it may pin the old behaviour')[:MAX_NOTE_CHARS])
+             for test, source in sorted(found.items())] + more
+    return items, partial
+
+
+def _capped_fallback_result(*, root, commit, read_paths, write_paths, runner=None,
+                            max_greps, deadline, reason=None):
+    fallback, partial = _module_referencing_tests_bounded(
+        root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
+        runner=runner, max_greps=max_greps, deadline=deadline)
+    if reason is None and not partial:
+        return fallback
+    if reason is not None:
+        suffix = ('partial module-level list (budget exhausted)'
+                  if partial else 'using module-level list')
+        note = ('precise test search was capped (%s); %s'
+                % (reason, suffix))[:MAX_NOTE_CHARS]
+    else:
+        note = ('module-level test search was capped (budget exhausted); '
+                'partial module-level list')[:MAX_NOTE_CHARS]
+    return [item(TEST_REFERENCES_CAPPED, None, note)] + fallback[:max(0, MAX_ITEMS - 1)]
 
 
 # --- #2602u: list only the tests that exercise the names a spec changes ------
@@ -213,14 +250,18 @@ PRECISE_CALL_TIMEOUT_SECONDS = 20  # Per-call timeout cap for precise search git
 
 
 class _PreciseSearchCapped(Exception):
-    def __init__(self, reason):
+    def __init__(self, reason, *, deadline=None, greps=0):
         super().__init__(reason)
         self.reason = reason
+        self.deadline = deadline
+        self.greps = greps
 
 
-def _check_deadline(deadline):
+def _check_deadline(deadline, *, greps=0):
     if deadline is not None and time.monotonic() >= deadline:
-        raise _PreciseSearchCapped('time limit %.1fs reached' % PRECISE_SEARCH_MAX_SECONDS)
+        raise _PreciseSearchCapped(
+            'time limit %.1fs reached' % PRECISE_SEARCH_MAX_SECONDS,
+            deadline=deadline, greps=greps)
 
 _CHANGE_VERB = re.compile(
     r'\b(?:add|adjust|change|edit|extend|fix|introduce|modify|move|refactor|'
@@ -252,7 +293,9 @@ def _module_sources(run, root, commit, write_paths, *, deadline=None):
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise _PreciseSearchCapped('time limit %.1fs reached' % PRECISE_SEARCH_MAX_SECONDS)
+                raise _PreciseSearchCapped(
+                    'time limit %.1fs reached' % PRECISE_SEARCH_MAX_SECONDS,
+                    deadline=deadline)
             call_timeout = min(PRECISE_CALL_TIMEOUT_SECONDS, remaining)
         try:
             result = run(['git', '-C', str(root), 'show', '%s:%s' % (commit, path)],
@@ -308,7 +351,8 @@ def _candidate_names(text, definitions):
     return found
 
 
-def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, runner=None):
+def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, runner=None,
+                               budget=None):
     """Tests that directly exercise names the spec texts change; None when no name is found.
 
     Any error propagates to referencing_tests(), which keeps the module-level list.
@@ -317,7 +361,9 @@ def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, 
     given = [text for text in _texts(texts) if text.strip()]
     if not given:
         return None
-    deadline = time.monotonic() + PRECISE_SEARCH_MAX_SECONDS
+    if budget is None:
+        budget = {'deadline': time.monotonic() + PRECISE_SEARCH_MAX_SECONDS, 'greps': 0}
+    deadline = budget['deadline']
     definitions, callable_names = _defined_names(
         _module_sources(run, root, commit, write_paths, deadline=deadline))
     names = []
@@ -329,17 +375,22 @@ def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, 
         return None
     if len(names) > MAX_PRECISE_IDENTIFIERS:
         raise _PreciseSearchCapped(
-            'identifier limit %d reached (%d matched)' % (MAX_PRECISE_IDENTIFIERS, len(names)))
+            'identifier limit %d reached (%d matched)' % (MAX_PRECISE_IDENTIFIERS, len(names)),
+            deadline=deadline)
     write = {path.strip('/') for path in write_paths or [] if type(path) is str}
     found = {}
     more = []
     greps = 0
     for name in names:
         if greps >= MAX_PRECISE_GREPS:
-            raise _PreciseSearchCapped('git grep limit %d reached' % MAX_PRECISE_GREPS)
+            raise _PreciseSearchCapped(
+                'git grep limit %d reached' % MAX_PRECISE_GREPS,
+                deadline=deadline, greps=greps)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise _PreciseSearchCapped('time limit %.1fs reached' % PRECISE_SEARCH_MAX_SECONDS)
+            raise _PreciseSearchCapped(
+                'time limit %.1fs reached' % PRECISE_SEARCH_MAX_SECONDS,
+                deadline=deadline, greps=greps)
         if name in callable_names:
             # A function or class is exercised by a call, not by an import alone.
             pattern = '(^|[^A-Za-z0-9_])' + _ere(name) + '[[:space:]]*\\('
@@ -348,13 +399,14 @@ def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, 
         argv = ['git', '-C', str(root), 'grep', '-l', '-E', '-e', pattern,
                 commit, '--', *_TEST_DIRS]
         greps += 1
+        budget['greps'] = greps
         try:
             result = run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                          timeout=min(PRECISE_CALL_TIMEOUT_SECONDS, remaining), check=False)
         except subprocess.TimeoutExpired:
-            _check_deadline(deadline)
+            _check_deadline(deadline, greps=greps)
             raise
-        _check_deadline(deadline)
+        _check_deadline(deadline, greps=greps)
         if getattr(result, 'returncode', 2) not in (0, 1):
             raise RuntimeError('git grep failed for ' + name)
         tests = []
@@ -382,30 +434,34 @@ def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, 
 def referencing_tests(*, root, commit, read_paths, write_paths, runner=None, texts=None):
     """Test files to show the PM for the files being written.
 
-    Without texts (the historical input) this returns exactly the module-level
-    reference list. With texts (the goal and acceptance), it returns only tests
-    that directly exercise names the texts change, and falls back to the
-    module-level list when no changed name can be identified or the new logic
-    errors. The advice stays fail-open either way.
+    Without texts (the historical input) this returns the module-level reference
+    list under the aggregate budget. With texts (the goal and acceptance), it
+    returns only tests that directly exercise names the texts change, and falls
+    back to the module-level list under the same aggregate budget when the
+    precise search is capped, finds no changed name, or errors. The advice stays
+    fail-open either way.
     """
+    deadline = time.monotonic() + PRECISE_SEARCH_MAX_SECONDS
+    budget = {'deadline': deadline, 'greps': 0}
     if texts is not None:
         try:
             precise = _precise_referencing_tests(
                 root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
-                texts=texts, runner=runner)
+                texts=texts, runner=runner, budget=budget)
             if precise is not None:
                 return precise
         except _PreciseSearchCapped as exc:
-            note = ('precise test search was capped (%s); using module-level list'
-                    % exc.reason)[:MAX_NOTE_CHARS]
-            fallback = _module_referencing_tests(
+            remaining_greps = max(0, MAX_PRECISE_GREPS - exc.greps)
+            return _capped_fallback_result(
                 root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
-                runner=runner)
-            return [item(TEST_REFERENCES_CAPPED, None, note)] + fallback[:max(0, MAX_ITEMS - 1)]
+                runner=runner, max_greps=remaining_greps, deadline=exc.deadline,
+                reason=exc.reason)
         except Exception:
             pass
-    return _module_referencing_tests(
-        root=root, commit=commit, read_paths=read_paths, write_paths=write_paths, runner=runner)
+    remaining_greps = max(0, MAX_PRECISE_GREPS - budget['greps'])
+    return _capped_fallback_result(
+        root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
+        runner=runner, max_greps=remaining_greps, deadline=budget['deadline'])
 
 
 # --- #2503 PR-6: route capability and size advice ----------------------------

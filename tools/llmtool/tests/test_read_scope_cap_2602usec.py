@@ -85,7 +85,7 @@ class ReadScopeCapTest(unittest.TestCase):
         self.assertIsNone(items[0]['path'])
         self.assertIn('capped', items[0]['note'])
         self.assertIn('git grep', items[0]['note'])
-        self.assertEqual(items[1:], fallback)
+        self.assertEqual(items[1:], [])
         task_store._validate_read_scope_advice([advice.entry(items, None, None)])
 
     def test_time_budget_stops_early_and_clamps_per_call_timeout(self):
@@ -127,7 +127,7 @@ class ReadScopeCapTest(unittest.TestCase):
         self.assertIsNone(items[0]['path'])
         self.assertIn('capped', items[0]['note'])
         self.assertIn('time', items[0]['note'])
-        self.assertEqual(items[1:], fallback)
+        self.assertEqual(items[1:], [])
         task_store._validate_read_scope_advice([advice.entry(items, None, None)])
 
     def test_timeout_expired_at_deadline_falls_back_with_time_cap_note(self):
@@ -152,7 +152,7 @@ class ReadScopeCapTest(unittest.TestCase):
 
         self.assertEqual(items[0]['kind'], advice.TEST_REFERENCES_CAPPED)
         self.assertIn('time', items[0]['note'])
-        self.assertEqual(items[1:], fallback)
+        self.assertEqual(items[1:], [])
 
     def test_final_grep_returning_after_deadline_falls_back_with_time_cap_note(self):
         source = _module_source(1)
@@ -178,7 +178,7 @@ class ReadScopeCapTest(unittest.TestCase):
         self.assertIsNone(items[0]['path'])
         self.assertIn('capped', items[0]['note'])
         self.assertIn('time', items[0]['note'])
-        self.assertEqual(items[1:], fallback)
+        self.assertEqual(items[1:], [])
         task_store._validate_read_scope_advice([advice.entry(items, None, None)])
 
     def test_module_show_returning_after_deadline_falls_back_with_time_cap_note(self):
@@ -205,7 +205,7 @@ class ReadScopeCapTest(unittest.TestCase):
         self.assertIsNone(items[0]['path'])
         self.assertIn('capped', items[0]['note'])
         self.assertIn('time', items[0]['note'])
-        self.assertEqual(items[1:], fallback)
+        self.assertEqual(items[1:], [])
         task_store._validate_read_scope_advice([advice.entry(items, None, None)])
 
     def test_within_bounds_matches_precise_output_and_historical_no_texts(self):
