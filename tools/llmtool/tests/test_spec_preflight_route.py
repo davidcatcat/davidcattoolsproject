@@ -54,10 +54,18 @@ class RouteTierTests(unittest.TestCase):
     def _run_main(self, spec, log_lines):
         # A short clean gw-agent spec: 3 reads, 1 write, no context file.
         with tempfile.TemporaryDirectory() as directory:
+            repo_dir = Path(directory) / "repo"
+            repo_dir.mkdir()
+            for rel_path in (*spec.get("read", []), *spec.get("write", [])):
+                target = repo_dir / rel_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("ok\n", encoding="utf-8")
             spec_path, log_path = self._write_files(directory, spec, log_lines)
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                status = spec_preflight.main([str(spec_path), "--ladder", str(log_path)])
+                status = spec_preflight.main(
+                    [str(spec_path), "--repo", str(repo_dir), "--ladder", str(log_path)]
+                )
             return status, output.getvalue()
 
     def test_main_gw_agent_log_of_three_solved_rows_is_current_2(self):
