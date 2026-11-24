@@ -14,12 +14,13 @@ from .diagnostics import (safe_diagnostic_text, _contains_credential_value,
                           contains_unsafe_controls)
 from .errors import coded_error, LLMToolError
 from .task_lifecycle import utc_time
-from .repair_policy import review_source_limit_bytes
+from .repair_policy import review_source_limit_bytes, review_packet_limit_bytes
 
-PACKET_LIMIT = 256 * 1024
-# #2281 row 12 (basis #131, #165): read the optional policy key once at import.
-# The review path itself must not open files; an absent key keeps the 128 KiB
-# default, and an invalid policy refuses POLICY_INVALID instead of falling back.
+# #2281 row 12 (basis #131, #165): read the optional policy keys once at import.
+# The review path itself must not open files; an absent key keeps its caller
+# default (256 KiB packet, 128 KiB source), and an invalid policy refuses
+# POLICY_INVALID instead of falling back.
+PACKET_LIMIT = review_packet_limit_bytes()
 SOURCE_LIMIT = review_source_limit_bytes()
 EVIDENCE_LIMIT = 32 * 1024
 VERDICT_LIMIT = 64 * 1024
