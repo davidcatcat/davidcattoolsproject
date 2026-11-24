@@ -56,19 +56,33 @@ class MainCiJobSummaryTests(unittest.TestCase):
         self.assertEqual(result['reason'], summary.INCOMPLETE_DATA)
 
     def test_malformed_page_and_malformed_job_are_unknown(self):
+        def broken(field, value):
+            j = job(1, GATEWAY)
+            j[field] = value
+            return j
+
+        def missing(field):
+            j = job(1, GATEWAY)
+            del j[field]
+            return j
+
         bad_pages = [
-            ('not a list', 1),
-            ([None], 1),
-            ([job(1, GATEWAY, conclusion=7)], 1),
-            ([job(1, GATEWAY, name=7)], 1),
-            ([job(1, GATEWAY, status=7)], 1),
-            ([job(1, GATEWAY, sha=123)], 1),
+            (('not a list', 1), summary.PAGES_MALFORMED),
+            (([7], 1), summary.PAGES_MALFORMED),
+            (([[None]], 1), summary.MALFORMED_JOB),
+            (([[missing('id')]], 1), summary.MALFORMED_JOB),
+            (([[broken('id', 'one')]], 1), summary.MALFORMED_JOB),
+            (([[missing('name')]], 1), summary.MALFORMED_JOB),
+            (([[broken('name', 7)]], 1), summary.MALFORMED_JOB),
+            (([[broken('status', 7)]], 1), summary.MALFORMED_JOB),
+            (([[broken('conclusion', 7)]], 1), summary.MALFORMED_JOB),
+            (([[broken('head_sha', 123)]], 1), summary.SHA_MISMATCH),
         ]
-        for pages, total in bad_pages:
-            with self.subTest(pages=pages):
-                result = summary.summarize(SHA, pages, total)
+        for args, reason in bad_pages:
+            with self.subTest(args=args):
+                result = summary.summarize(SHA, *args)
                 self.assertEqual(result['state'], summary.UNKNOWN)
-                self.assertIsNotNone(result['reason'])
+                self.assertEqual(result['reason'], reason)
 
     def test_job_on_another_sha_is_unknown(self):
         pages = [[job(1, GATEWAY), job(2, 'lint', sha=OTHER)]]
@@ -90,7 +104,7 @@ class MainCiJobSummaryTests(unittest.TestCase):
         self.assertEqual(result['reason'], summary.COMPLETED_WITHOUT_CONCLUSION)
 
     def test_stated_total_not_int_is_unknown(self):
-        result = summary.summarize(SHA, [job(1, GATEWAY)], '1')
+        result = summary.summarize(SHA, [[job(1, GATEWAY)]], '1')
         self.assertEqual(result['state'], summary.UNKNOWN)
         self.assertEqual(result['reason'], summary.STATED_TOTAL_INVALID)
 
