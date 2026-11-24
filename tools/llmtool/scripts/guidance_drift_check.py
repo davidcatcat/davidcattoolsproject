@@ -329,9 +329,9 @@ RULE_SCHEMAS: dict[str, Any] = {
         "waiting_notify_after_hours": Int(1),
     }, {
         "timeout_continuation_max": Int(0, 3),
-        # #2281 L0b: same rule as repair_policy.OPTIONAL_POSITIVE_POLICY_KEYS
-        # (>= 1, no upper bound); limit table rows 2, 10, 12, 13, 14, 15, 16,
-        # 17, 18 and 19, plus the #2537 turn cap. Every key that
+        # #2281 L0b: same rule as repair_policy's optional positive keys
+        # (>= 1, no upper bound); limit table rows 2, 9, 10, 12, 13, 14, 15,
+        # 16, 17, 18, 19 and 20, plus the #2537 turn cap. Every key that
         # repair_policy.py accepts must appear here.
         "spec_preflight_large_file_lines": Int(1),
         "merge_train_members_max": Int(1),
@@ -349,6 +349,14 @@ RULE_SCHEMAS: dict[str, Any] = {
         "ai_debug_excerpt_max_chars": Int(1),
         "gw_agent_max_turns": Int(1),
         "local_test_timeout_seconds": Int(1),
+        # #2281 rows 9, 19 and 20: remote test timeouts, reviewer/CI excerpt
+        # bounds and the EC2 busy window; the same optional positive-integer
+        # rule as the keys above.
+        "remote_test_module_timeout_seconds": Int(1),
+        "remote_test_total_timeout_seconds": Int(1),
+        "reviewer_excerpt_max_chars": Int(1),
+        "ci_excerpt_max_lines": Int(1),
+        "monitor_ec2_busy_window_seconds": Int(1),
         # #2622 (Owner decision relayed in the issue): consecutive route
         # failures after which a Developer route pauses; same optional
         # positive-integer rule as the keys above.

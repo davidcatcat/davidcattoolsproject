@@ -1,6 +1,6 @@
 """#2281: the guidance drift check accepts every optional policy limit key.
 
-A1: each of the eleven optional limit keys that repair_policy.py accepts, set
+A1: each of the sixteen optional limit keys that repair_policy.py accepts, set
     to its loader default, gives no drift finding.
 A2: zero, a negative value, a bool or a string for each of those keys gives the
     existing integer-range finding.
@@ -34,7 +34,7 @@ BASE = {"schema_version": 1, "repair_max": 5, "parent_debug_max": 1,
         "test_fail_max": 5, "review_fail_max": 6,
         "waiting_notify_after_hours": 24}
 
-# The eleven optional keys this Task adds to the drift schema, with the loader
+# The sixteen optional keys this Task adds to the drift schema, with the loader
 # default each one keeps when absent (repair_policy constants).
 OPTIONAL_DEFAULTS = {
     "review_packet_limit_bytes": rp.REVIEW_PACKET_LIMIT_BYTES,
@@ -48,6 +48,12 @@ OPTIONAL_DEFAULTS = {
     "ai_debug_excerpt_max_chars": rp.AI_DEBUG_EXCERPT_MAX_CHARS,
     "gw_agent_max_turns": rp.GW_AGENT_MAX_TURNS,
     "local_test_timeout_seconds": rp.LOCAL_TEST_TIMEOUT_SECONDS,
+    # #2281 rows 9, 19 and 20.
+    "remote_test_module_timeout_seconds": rp.REMOTE_TEST_MODULE_TIMEOUT_SECONDS,
+    "remote_test_total_timeout_seconds": rp.REMOTE_TEST_TOTAL_TIMEOUT_SECONDS,
+    "reviewer_excerpt_max_chars": rp.REVIEWER_EXCERPT_MAX_CHARS,
+    "ci_excerpt_max_lines": rp.CI_EXCERPT_MAX_LINES,
+    "monitor_ec2_busy_window_seconds": rp.MONITOR_EC2_BUSY_WINDOW_SECONDS,
 }
 
 
