@@ -330,13 +330,25 @@ RULE_SCHEMAS: dict[str, Any] = {
     }, {
         "timeout_continuation_max": Int(0, 3),
         # #2281 L0b: same rule as repair_policy.OPTIONAL_POSITIVE_POLICY_KEYS
-        # (>= 1, no upper bound); limit table rows 2, 15 and 16, and row 17
-        # (#2281 L7, the D6 writer lease length in hours).
+        # (>= 1, no upper bound); limit table rows 2, 10, 12, 13, 14, 15, 16,
+        # 17, 18 and 19, plus the #2537 turn cap. Every key that
+        # repair_policy.py accepts must appear here.
         "spec_preflight_large_file_lines": Int(1),
         "merge_train_members_max": Int(1),
         "merge_train_files_per_pr_max": Int(1),
         "revert_scope_prs_max": Int(1),
         "d6_writer_lease_hours": Int(1),
+        "review_packet_limit_bytes": Int(1),
+        "review_source_limit_bytes": Int(1),
+        "claude_review_envelope_limit_bytes": Int(1),
+        "start_failures_max": Int(1),
+        "start_retries_max": Int(1),
+        "committed_result_carries_max": Int(1),
+        "developer_assignment_wait_seconds": Int(1),
+        "developer_assignment_expiry_seconds": Int(1),
+        "ai_debug_excerpt_max_chars": Int(1),
+        "gw_agent_max_turns": Int(1),
+        "local_test_timeout_seconds": Int(1),
         # #2622 (Owner decision relayed in the issue): consecutive route
         # failures after which a Developer route pauses; same optional
         # positive-integer rule as the keys above.
