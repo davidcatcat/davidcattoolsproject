@@ -69,8 +69,9 @@ def summarize(sha, pages, stated_total):
         return _unknown(result, SHA_INVALID)
     if not isinstance(pages, (list, tuple)):
         return _unknown(result, PAGES_MALFORMED)
-    if type(stated_total) is not int:
-        return _unknown(result, STATED_TOTAL_INVALID)
+    # Only an unusable SHA or a non-iterable page listing can return before the
+    # scan: without them there is no usable job to check or visit.
+    total_invalid = type(stated_total) is not int
     # Scan the whole listing first: every completed failing job found must be
     # reported even when the result ends up UNKNOWN. A malformed page or job is
     # skipped and remembered as the first UNKNOWN reason, so a usable failing
@@ -99,6 +100,8 @@ def summarize(sha, pages, stated_total):
             elif job['conclusion'] in _FAILED:
                 _add_failing(failing, job)
     result['total_jobs'] = count
+    if total_invalid:
+        return _unknown(result, STATED_TOTAL_INVALID, failing)
     if first_reason is not None:
         return _unknown(result, first_reason, failing)
     if not count or count != stated_total or duplicate_id:

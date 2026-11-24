@@ -187,6 +187,52 @@ class MainCiJobSummaryTests(unittest.TestCase):
         self.assertEqual(result['state'], summary.UNKNOWN)
         self.assertEqual(result['reason'], summary.STATED_TOTAL_INVALID)
 
+    def test_invalid_stated_total_still_reports_failing_job(self):
+        # F1: an invalid stated_total must not return before the scan; a usable
+        # completed failing job is still reported, with a real total_jobs.
+        for stated in ('1', None, 1.0, True):
+            with self.subTest(stated=stated):
+                pages = [[job(1, GATEWAY, 'failure')]]
+                result = summary.summarize(SHA, pages, stated)
+                self.assertEqual(result['state'], summary.UNKNOWN)
+                self.assertEqual(result['reason'], summary.STATED_TOTAL_INVALID)
+                self.assertEqual(
+                    result['failing'],
+                    [{'id': 1, 'name': GATEWAY, 'conclusion': 'failure'}])
+                self.assertEqual(result['total_jobs'], 1)
+
+    def test_usable_failing_job_is_reported_on_every_unknown_reason(self):
+        # Invariant: once the job listing is iterable, no UNKNOWN reason may
+        # drop a usable completed failing job.
+        cases = [
+            (summary.STATED_TOTAL_INVALID,
+             [[job(1, GATEWAY, 'failure')]], '1'),
+            (summary.PAGES_MALFORMED,
+             [[job(1, GATEWAY, 'failure')], None], 2),
+            (summary.MALFORMED_JOB,
+             [[None, job(1, GATEWAY, 'failure')]], 2),
+            (summary.SHA_MISMATCH,
+             [[job(1, GATEWAY, 'failure'), job(2, 'lint', sha=OTHER)]], 2),
+            (summary.COMPLETED_WITHOUT_CONCLUSION,
+             [[job(1, GATEWAY, 'failure'),
+               job(2, 'lint', conclusion=None)]], 2),
+            (summary.COUNT_MISMATCH,
+             [[job(1, GATEWAY, 'failure'), job(2, 'lint')]], 3),
+            (summary.DUPLICATE_JOB_ID,
+             [[job(1, GATEWAY, 'failure'), job(1, 'lint')]], 2),
+            (summary.JOB_NOT_COMPLETED,
+             [[job(1, GATEWAY, 'failure'),
+               job(2, 'lint', status='queued', conclusion=None)]], 2),
+        ]
+        for reason, pages, stated in cases:
+            with self.subTest(reason=reason):
+                result = summary.summarize(SHA, pages, stated)
+                self.assertEqual(result['state'], summary.UNKNOWN)
+                self.assertEqual(result['reason'], reason)
+                self.assertEqual(
+                    result['failing'],
+                    [{'id': 1, 'name': GATEWAY, 'conclusion': 'failure'}])
+
     def test_failing_jobs_still_reported_on_unknown(self):
         # A failing job followed by an in-progress job is still listed.
         pages = [[job(1, GATEWAY, 'failure'), job(2, 'lint', status='queued',
