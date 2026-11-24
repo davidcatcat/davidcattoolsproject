@@ -106,6 +106,9 @@ def green_linux_ci(path, pr=PR):
             'head_sha': head, 'status': 'completed', 'conclusion': 'success'}]}
     if path.startswith('pulls/') and path.endswith('/files?per_page=100'):
         return [{'filename': 'src/module.py'}]
+    if path.startswith('issues/') and path.endswith('/comments?per_page=100'):
+        # #2602 item n: the review dispatch security gate reads PR issue comments.
+        return []
     if path.startswith('pulls/'):
         return pr
     return []
