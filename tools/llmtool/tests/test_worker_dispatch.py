@@ -309,16 +309,17 @@ class WorkerDispatchTests(unittest.TestCase):
             worker_dispatch.evaluate('agy', None, task_id).reason_code,
             'OWNER_ASSIGNMENT_REQUIRED')
 
-    def test_real_claude_developer_policy_allows_pm_selected_work(self):
+    def test_real_claude_developer_policy_is_owner_paused(self):
         with patch.object(worker_dispatch, '_POLICY_PATH',
                           Path(worker_dispatch._DEFAULT_POLICY_PATH)):
             decision = worker_dispatch.evaluate('claude-developer')
-        self.assertTrue(decision.allowed)
-        self.assertEqual(decision.reason_code, 'OWNER_POLICY_ALLOWED')
+        # #289 c7121158963 (Owner 2026-11-24): claude-developer paused.
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason_code, 'OWNER_PAUSED')
         real_policy = worker_dispatch._parse_policy(
             Path(worker_dispatch._DEFAULT_POLICY_PATH).read_bytes())
         worker = real_policy['workers']['claude-developer']
-        self.assertEqual(worker['dispatch'], 'ALLOWED')
+        self.assertEqual(worker['dispatch'], 'PAUSED')
         self.assertNotIn('owner_assignments', worker)
 
     # #289 (Owner decision 2026-11-14): the real policy resumes PM-selected AGY
@@ -394,7 +395,9 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertNotIn('owner_assignments', agy)
         self.assertEqual(
             {key: row['dispatch'] for key, row in policy['workers'].items()},
-            {'codex-developer': 'PAUSED', 'claude-developer': 'ALLOWED',
+            {'codex-developer': 'PAUSED',
+             # #289 c7121158963 (Owner 2026-11-24): claude-developer paused.
+             'claude-developer': 'PAUSED',
              'opencode-developer': 'ALLOWED', 'agy': 'ALLOWED',
              'company-gw': 'PAUSED', 'gw-agent': 'ALLOWED',
              # #289 c7106823913: the Owner paused the Claude formal Reviewer.

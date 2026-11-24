@@ -88,8 +88,9 @@ class CompanyGwRetiredTests(unittest.TestCase):
         self.assertEqual(decision.reason_code, 'OWNER_PAUSED')
         self.assertTrue(gw_agent_decision.allowed)
         self.assertEqual(gw_agent_decision.reason_code, 'OWNER_POLICY_ALLOWED')
-        self.assertTrue(claude_decision.allowed)
-        self.assertEqual(claude_decision.reason_code, 'OWNER_POLICY_ALLOWED')
+        # #289 c7121158963 (Owner 2026-11-24): claude-developer paused.
+        self.assertFalse(claude_decision.allowed)
+        self.assertEqual(claude_decision.reason_code, 'OWNER_PAUSED')
 
 
 if __name__ == '__main__':
