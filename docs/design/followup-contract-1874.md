@@ -384,3 +384,181 @@ supplied:
   and how cross-D6 / multi-Task contract integration (`task_binding.contract_digest`,
   `LLMTOOL-REVIEW-BINDING`, or unioning contracts across sibling Tasks) is
   intended to work in the P1 fix.
+
+---
+
+## Slice 3 — Evidence on `authoring_route` in `tools/llmtool/llmtool/direct_reassignment.py`
+
+Facts in this section were read from `tools/llmtool/llmtool/direct_reassignment.py`
+and `tools/llmtool/tests/test_direct_reassignment.py` at the head at which slice 2
+was read, `2a55a82f99e04033421fc56e0d60b7083b63fee7`; the read set records no SHA
+for the current main head, so none is stated. No code or test is changed; this
+file is the only write. References name the file and the function only.
+
+### D1 — Exit paths of `authoring_route`
+
+`authoring_route` (`tools/llmtool/llmtool/direct_reassignment.py`) takes
+`store`, `root`, `developer`, and `executor_task`. It never mutates its input:
+it either returns the `developer` argument unchanged (the same object) or
+returns a new dict built from it. The read set shows exactly six exit paths:
+
+| # | Exit path | Starts from (input record) | Returns | Fields changed vs. the input record | Refusal condition |
+|---|-----------|----------------------------|---------|-------------------------------------|-------------------|
+| 1 | `root` carries no `review_repair_claims` (empty or missing list) | the passed-in `developer` argument | that record unchanged | none | none |
+| 2 | the root's completion evidence (`root['completion']['evidence']`) has no `common_dir` key | the passed-in `developer` argument | that record unchanged | none | none |
+| 3 | `effective_writer_admission` projects an `executor_identity` equal to the initial evidence's `executor_identity`, and its projected `executor_session_ref` does not start with `'handoff-'` | the passed-in `developer` argument | that record unchanged | none | none |
+| 4 | the projected `executor_identity` equals none of the `AGENTS` values (`opencode-developer`, `agy-developer`) | the passed-in `developer` argument (record not returned) | nothing raised; no record | none | refuses `DIRECT_REASSIGN_D6_BINDING_MISMATCH` (an `LLMToolError` via `_refuse`) |
+| 5 | the `AGENTS` profile resolved from the projected identity equals the input record's `provider_profile` | the passed-in `developer` argument | that record unchanged | none | none |
+| 6 | the resolved profile differs from the input record's `provider_profile` | the passed-in `developer` record | a new record (a copy of that dict) | `provider_profile` becomes the resolved profile; `owner_assignment_ref` becomes `None`; all other keys are carried over unchanged | none |
+
+Notes on the paths above:
+
+- The `store` argument is passed through to
+  `effective_writer_admission` and is otherwise unused by `authoring_route`.
+- When the `developer` argument is not a dict (for example `None`), exits 1 and
+  2 still return it unchanged, and exits 3–5 behave the same way (they return
+  the argument as-is), so the same input-record/unchanged-or-new table applies
+  to every exit path.
+- The copy in exit 6 is built as `dict(developer, provider_profile=profile,
+  owner_assignment_ref=None)`: every key other than the two named above keeps
+  the input record's value.
+
+### D2 — What `authoring_route` does and does not replace; helpers it depends on
+
+- **Goal:** not replaced. `authoring_route` reads no `goal` and writes none;
+  the `developer` record it passes through or copies carries no `goal` on any
+  exit path.
+- **Acceptance:** not replaced. `authoring_route` never reads or writes an
+  `acceptance` field of the `developer` record; on exit 6 the copy preserves
+  whatever `acceptance` value (or absence) the input record had.
+- **Read paths:** not replaced. `authoring_route` never reads or writes
+  `read_paths`; on exit 6 the copy preserves them unchanged.
+- **Write paths:** not replaced. `authoring_route` never reads or writes
+  `write_paths`; on exit 6 the copy preserves them unchanged.
+
+In short: across all exit paths the only fields that can change are
+`provider_profile` and `owner_assignment_ref` (set to `None`), and only on
+exit 6. It never mutates the input `developer` dict, and it never returns or
+modifies the `root` task.
+
+Other admission and repair-result helpers it depends on
+(`tools/llmtool/llmtool/direct_reassignment.py`):
+
+- **`effective_writer_admission` (admission helper):** projects verified
+  handoff identity onto the original artifact chain. It walks the root's
+  `review_repair_claims` in reverse order; it only continues when the entry is
+  a dict, `claim['executor_task'] == executor_task`, and
+  `claim['state'] == 'DISPATCHED'`. For such a claim it loads
+  `store.get(claim['repair_task_id'])` (a `KeyError` or `LLMToolError` is
+  caught and the claim skipped), requires the repair's `developer` to have
+  `direct_handoffs` and `state == 'DEVELOPER_RESPONDED'`, then calls
+  `verified_repair_result(root, claim, repair)`, which may refuse with
+  `DIRECT_REASSIGN_RESULT_UNVERIFIED`. On a verified repair it returns
+  `dict(initial, **{name: evidence[name] for name in ('executor_identity',
+  'executor_session_ref', 'executor_native_session_id',
+  'executor_native_session')})`, where `evidence` is
+  `repair['completion']['evidence']`; if no claim verifies it returns
+  `initial` (the passed-in evidence dict) unchanged. **UNKNOWN:** whether
+  other `store.get` error types can escape the caught
+  `(LLMToolError, KeyError)` pair; **UNKNOWN:** what happens when a verified
+  repair's `completion` or `evidence` is missing, or is missing one of the four
+  evidence keys (the read set proves no guard: the code would raise an
+  uncaught `KeyError`/`TypeError`); **UNKNOWN:** any caller-side contract on
+  the `initial` dict beyond it being the root's completion evidence.
+- **`verified_repair_result` (repair-result helper):** verifies the current
+  writer, the prior claim, and the result before a claim may be settled. It
+  reads the repair task's `developer`, `execution`, and `completion`, calls
+  `task_completion.read_d6_registration` (with
+  `task_completion._D6_EVIDENCE_STATES`), computes the audit binding via
+  `worker_dispatch._assignment_audit_binding` and the worker key via
+  `worker_dispatch.worker_key_for`, and restricts `dispatch_audit` entries to
+  those whose `worker_key` matches, whose `decision` is `'ALLOWED'`, and whose
+  binding matches via `worker_dispatch._matches_assignment_binding`. It
+  requires **all** of: the root task's completion evidence binding
+  (`executor_task_id`, `root`, `common_dir`, `branch`) equals the D6
+  registration; the last entry of the repair developer's `direct_handoffs` has
+  `new_assignment == developer['assignment_id']`; the filtered audit actions
+  include both `'REASSIGN'` and `'DISPATCH'`; the developer state is
+  `DEVELOPER_RESPONDED` with `dispatch_boundary` `STARTING`; the registration's
+  `trusted_agent_id` equals `AGENTS[developer['provider_profile']]`; the
+  registration `root`/`branch` equal the evidence's; the claim's `head_sha`
+  equals `developer['source_sha']` and the claim's `executor_task` equals the
+  registration `task_id`; the execution status is `DONE`/`SUCCEEDED` with
+  `process_exit_code == 0` and `cleanup_status == 'CONFIRMED'`; the execution
+  `native_session_id` is present, registered, and equal to the evidence's
+  `executor_native_session_id`. On any failure it refuses
+  `DIRECT_REASSIGN_RESULT_UNVERIFIED` (via `_refuse`); on success it returns
+  `None`. It has no passing return value other than `None`.
+- Other helpers in the same file (`test_policy`, `replacement_candidate`,
+  `_checked_scope`, `_repair_packet`, `inspect`, `_install_successor`, `claim`,
+  `reconcile_claim`) are not invoked by `authoring_route` on any of its exit
+  paths.
+
+### D3 — Coverage by `tools/llmtool/tests/test_direct_reassignment.py` of the D2 behaviours
+
+**Covered by existing tests** (test names in
+`tools/llmtool/tests/test_direct_reassignment.py`, all in
+`DirectReassignmentTests`):
+
+- `replacement_candidate` (a helper in the same file; not called by
+  `authoring_route`): `test_replacement_candidate_accepts_eligible_developers`
+  (the three eligible profile/state/`dispatch_boundary` combinations return
+  `True`) and `test_replacement_candidate_refuses_ineligible_developers`
+  (incompatible states, an unknown profile, an empty dict, and `None` return
+  `False`).
+- `effective_writer_admission`:
+  - `test_effective_writer_admission_returns_verified_writer` covers a claim
+    whose `repair_task_id` is absent from the store being skipped (`KeyError`
+    caught), a claim on another `executor_task` being skipped, the
+    verified-writer projection of the four evidence keys from the verified
+    repair's `completion['evidence']`, and the initial dict's other keys being
+    preserved.
+  - `test_effective_writer_admission_refuses_unverified_repair` covers a
+    dispatch-mismatched repair (`developer['source_sha']` different from the
+    claim's `head_sha`) being refused with
+    `DIRECT_REASSIGN_RESULT_UNVERIFIED` from inside
+    `effective_writer_admission`.
+- `verified_repair_result`:
+  - `test_verified_repair_result_accepts_verified_result` covers the verified
+    repair (root claim + matching evidence, execution, and REASSIGN/DISPATCH
+    audit entries) returning `None`.
+  - `test_verified_repair_result_refuses_unverified_result` covers the
+    `head_sha`-mismatch refusal and the execution-status refusal (setting
+    `status` to `FAILED`), both raising `LLMToolError` with
+    `DIRECT_REASSIGN_RESULT_UNVERIFIED`.
+
+**Not covered by existing tests:**
+
+- `authoring_route` itself: the test file imports only `effective_writer_admission`,
+  `replacement_candidate`, and `verified_repair_result` from
+  `llmtool.direct_reassignment`; no test in the read set invokes it. Therefore
+  none of the six D1 exit paths (including both the unchanged-`developer`
+  returns and the new-record exit 6 with the changed `provider_profile` and
+  `owner_assignment_ref`) and its `DIRECT_REASSIGN_D6_BINDING_MISMATCH`
+  refusal are covered.
+- `effective_writer_admission`: the non-list-claims and non-dict-claim-entry
+  early return of `initial`; the `claim['state'] != 'DISPATCHED'` skip; the
+  `LLMToolError`-from-`store.get` catch branch (only `KeyError` is exercised);
+  the skip when the repair developer has no `direct_handoffs` or is not
+  `DEVELOPER_RESPONDED`; and the final return of `initial` unchanged when no
+  claim verifies.
+- `verified_repair_result`: the test file exercises only one positive case and
+  two of the many refusal conditions (the claim `head_sha` mismatch and the
+  execution status). The remaining clause of the refusal condition — root
+  evidence binding, `direct_handoffs` tail, REASSIGN/DISPATCH audit actions,
+  developer state and `dispatch_boundary`, `trusted_agent_id`, registration
+  `root`/`branch`, execution exit code and `cleanup_status`, the
+  `native_session_id` chain, and the evidence
+  `executor_native_session_id` — is not individually covered. (The
+  `worker_key_for`, `_assignment_audit_binding`,
+  `_matches_assignment_binding`, and `read_d6_registration` behaviour the
+  tests rely on is mocked/patched in the test setup, so the audit-matching
+  logic of `worker_dispatch` is not exercised for real by these tests.)
+- The UNKNOWN items marked in D2 (the uncaught
+  `KeyError`/`TypeError` edge on a verified repair's `completion`/`evidence`,
+  and any `store.get` error types beyond `LLMToolError`/`KeyError`) are, by
+  definition, not proven by the read set and are not covered.
+- `_repair_packet`, `inspect`, `claim`, `_install_successor`,
+  `reconcile_claim`, and `test_policy` have no tests in the read set (the
+  first five are not `authoring_route` dependencies; `test_policy` is
+  unrelated to its exit paths).
