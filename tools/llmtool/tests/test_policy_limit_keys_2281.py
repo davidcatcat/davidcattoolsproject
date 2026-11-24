@@ -1,4 +1,4 @@
-"""#2281 L0b: policy.json keys for limit-table rows 2, 12, 13, 14, 15, 16 and 18.
+"""#2281 L0b: policy.json keys for limit-table rows 2, 10, 12, 13, 14, 15, 16 and 18.
 
 A1: the repository policy.json has one key per limit at the value recorded in
     the #2281 limit table, and load_policy accepts them. Row 18 is omitted
@@ -77,6 +77,10 @@ TURN_CAP_KEY = 'gw_agent_max_turns'
 # #2622 (Owner decision relayed in the issue): consecutive route failures after
 # which a Developer route pauses; set in the repository policy.json.
 ROUTE_FAILURE_KEY = 'route_failure_pause_after'
+# #2281 row 10 (basis #1703): the per-module timeout of the task complete
+# local test run; omitted from the repository policy.json (default
+# repair_policy.LOCAL_TEST_TIMEOUT_SECONDS and task_completion._TEST_TIMEOUT).
+ROW10_KEY = 'local_test_timeout_seconds'
 
 
 class PolicyLimitKeysTests(unittest.TestCase):
@@ -98,7 +102,7 @@ class PolicyLimitKeysTests(unittest.TestCase):
                          {*LIMITS, *LATER_LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY,
                           PACKET_ROW12_KEY, SOURCE_ROW12_KEY, ROW12_KEY,
                           ROW13_KEY, ROW13_RETRY_KEY, ROW14_KEY, ROW19_KEY,
-                          TURN_CAP_KEY, ROUTE_FAILURE_KEY})
+                          TURN_CAP_KEY, ROUTE_FAILURE_KEY, ROW10_KEY})
         # Optional: none of them is required by the loader.
         self.assertFalse(set(LIMITS) & set(rp.POLICY_KEYS))
         self.assertFalse(set(LIMITS) & set(rp.OPTIONAL_POLICY_LIMITS))

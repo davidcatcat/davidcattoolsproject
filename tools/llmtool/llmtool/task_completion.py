@@ -37,6 +37,7 @@ import time
 from datetime import datetime, timezone
 
 from . import github_identity
+from . import repair_policy
 from . import source_freshness
 from . import trust
 from . import worker_dispatch
@@ -55,6 +56,8 @@ _TASK_PATH_LIMIT = 1024
 _TIMEOUT = 10
 # seconds per registered test module. #1703: test_task_completion alone needs about
 # 310 s on the Mac (300 s caused TEST_RUNNER_TIMEOUT); the gw-agent wiring module ~240 s.
+# #2281 row 10: the optional policy.json key local_test_timeout_seconds overrides
+# this per-module default; the whole-run bound stays three times the chosen value.
 _TEST_TIMEOUT = 600
 # #2543: wall-clock bound for one whole local run (all modules in sequence).
 # Without it a Task with many eligible modules ran for hours on the Owner Mac
@@ -844,9 +847,25 @@ def _docs_only_ci(paths):
 
 
 
+def _local_test_timeouts():
+    """#2281 row 10: per-module and whole-run local test bounds, in seconds.
+
+    An absent policy key keeps the module defaults, so code and tests that
+    patch _TEST_TIMEOUT and _TEST_TOTAL_TIMEOUT keep their existing meaning. A
+    present key sets the per-module bound, and the whole-run bound stays three
+    times it.
+    """
+    sentinel = object()
+    per_module = repair_policy.local_test_timeout_seconds(default=sentinel)
+    if per_module is sentinel:
+        return _TEST_TIMEOUT, _TEST_TOTAL_TIMEOUT
+    return per_module, 3 * per_module
+
+
 def _run_registered_tests(root, source_sha, eligible, *, home, pycache=None):
+    per_module_timeout, total_timeout = _local_test_timeouts()
     evidence = []
-    run_deadline = time.monotonic() + _TEST_TOTAL_TIMEOUT
+    run_deadline = time.monotonic() + total_timeout
     for path, kind in eligible:
         if time.monotonic() >= run_deadline:
             _stop('TEST_RUNNER_TIMEOUT')
@@ -872,7 +891,7 @@ def _run_registered_tests(root, source_sha, eligible, *, home, pycache=None):
         except OSError:
             _stop('TEST_RUNNER_UNAVAILABLE')
         output = bytearray()
-        deadline = min(time.monotonic() + _TEST_TIMEOUT, run_deadline)
+        deadline = min(time.monotonic() + per_module_timeout, run_deadline)
         selector = selectors.DefaultSelector()
         started = time.monotonic()
         try:
