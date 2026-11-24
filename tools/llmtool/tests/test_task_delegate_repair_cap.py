@@ -2092,5 +2092,120 @@ class ChainGateConcurrencyTests(unittest.TestCase):
         _assert_released(self, store)
 
 
+
+class FormalPassAtHeadTests(unittest.TestCase):
+    """#2688: a repair after a formal PASS at the D6 head needs no root cause.
+
+    #1502 D1 requires AI Debug only after the third effective review repair
+    receives a formal FAIL. A repair that follows a bound formal PASS at the
+    current head (for example after a Codex security FAIL) has no formal FAIL
+    to diagnose. Any other claim shape keeps the root-cause requirement.
+    """
+
+    _HOLDER = '3' * 32
+
+    def setUp(self):
+        _patch_trust_and_binding(self)
+
+    def _claim(self, *, version=1, state='COMPLETED', verdict='PASS', head=_HEAD,
+               result_head=None, result_task=None, **extra):
+        claim = {
+            'pr': 2688, 'version': version, 'head_sha': head,
+            'executor_task': _EXECUTOR_TASK, 'state': state,
+            'review_kind': 'formal', 'updated_at': '2026-11-04T00:00:03Z',
+            'review_result': {
+                'verdict': verdict,
+                'head': head if result_head is None else result_head,
+                'task_id': self._HOLDER if result_task is None else result_task,
+                'review_text': 'Verdict: ' + verdict,
+            },
+        }
+        claim.update(extra)
+        return claim
+
+    def _store(self, claims, *, count=_FIRST_RCA_REPAIR):
+        store = _Store(count=count)
+        holder = store.records['%032x' % (count - 1)]
+        store.records.pop('%032x' % (count - 1))
+        holder['task_id'] = self._HOLDER
+        holder['review_dispatch_claim'] = claims
+        store.records[self._HOLDER] = holder
+        return store
+
+    def _admits(self, store, args=None):
+        self.assertIsNone(task_submission_cli._check_delegate_repair_cap(
+            _no_high_debug() if args is None else args, store))
+        self.assertEqual(store.writes, [])
+
+    def _requires_debug(self, store):
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_REQUIRED$'):
+            task_submission_cli._check_delegate_repair_cap(_no_high_debug(), store)
+        self.assertEqual(store.writes, [])
+
+    def test_repairs_four_and_five_after_a_formal_pass_need_no_root_cause(self):
+        for count in (_FIRST_RCA_REPAIR, _FIRST_RCA_REPAIR + 1):
+            with self.subTest(prior_runs=count):
+                self._admits(self._store([self._claim()], count=count))
+
+    def test_a_later_pass_after_an_earlier_fail_at_the_head_admits(self):
+        self._admits(self._store([self._claim(version=1, verdict='FAIL'),
+                                  self._claim(version=2)]))
+
+    def test_the_review_limit_still_refuses(self):
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_REPAIR_LIMIT_REACHED$'):
+            task_submission_cli._check_delegate_repair_cap(
+                _no_high_debug(), self._store([self._claim()], count=_REVIEW_LIMIT))
+
+    def test_a_formal_fail_or_fix_at_the_head_still_requires_debug(self):
+        for verdict in ('FAIL', 'FIX', 'BLOCKED'):
+            with self.subTest(verdict=verdict):
+                self._requires_debug(self._store([self._claim(verdict=verdict)]))
+        self._requires_debug(self._store([self._claim(version=1),
+                                          self._claim(version=2, verdict='FAIL')]))
+
+    def test_a_newer_unfinished_claim_still_requires_debug(self):
+        for state in ('DISPATCHED', 'UNKNOWN', 'CLAIMED'):
+            with self.subTest(state=state):
+                self._requires_debug(self._store([
+                    self._claim(version=1), self._claim(version=2, state=state)]))
+
+    def test_a_pass_on_another_head_or_unbound_result_still_requires_debug(self):
+        for claim in (self._claim(head='b' * 40),
+                      self._claim(result_head='b' * 40),
+                      self._claim(result_task='4' * 32)):
+            with self.subTest(claim=claim):
+                self._requires_debug(self._store([claim]))
+
+    def test_doubtful_claim_shapes_still_require_debug(self):
+        for claims in (
+                [self._claim(), self._claim(purpose='dispute_ruling')],
+                [self._claim(), self._claim(version=2, review_kind='security')],
+                [self._claim(review_kind='security')],
+                [self._claim(version=True)],
+                [self._claim(), self._claim(executor_task='other-d6')],
+                [self._claim(version=1), self._claim(version=1)],
+                [self._claim(), 'not a claim'],
+                'not a list'):
+            with self.subTest(claims=claims):
+                self._requires_debug(self._store(claims))
+
+    def test_no_claim_at_the_head_still_requires_debug(self):
+        self._requires_debug(self._store([]))
+
+    def test_a_repair_packet_keeps_the_root_cause_rule(self):
+        store = self._store([self._claim()])
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_REQUIRED$'):
+            task_submission_cli._check_delegate_repair_cap(
+                _no_high_debug(repair_packet={'task': self._HOLDER}), store)
+        self.assertEqual(store.writes, [])
+
+    def test_an_unreadable_head_still_requires_debug(self):
+        for binding in ((None, SimpleNamespace(head=None)),
+                        (None, SimpleNamespace(head='not-a-sha'))):
+            with self.subTest(binding=binding), patch.object(
+                    task_submission_cli, '_delegate_d6_binding', return_value=binding):
+                self._requires_debug(self._store([self._claim()]))
+
+
 if __name__ == '__main__':
     unittest.main()

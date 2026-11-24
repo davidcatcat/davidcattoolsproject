@@ -8678,8 +8678,10 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
     policy.json (#1502 WP-D D7): at most 1 + repair_max review runs and
     test_fail_max EC2 repair runs per D6. At or over a limit the delegate
     always refuses. Review repairs four and five need a confirmed applicable
-    root cause through the High Debug arguments or repair packet. A recorded
-    start failure is not a run. This check never changes a Task.
+    root cause through the High Debug arguments or repair packet, except a
+    repair without a packet whose D6 head holds a bound formal PASS (#2688,
+    _formal_pass_at_repair_head). A recorded start failure is not a run. This
+    check never changes a Task.
     """
     executor_task = getattr(args, 'executor_task', None)
     current_task_id = getattr(args, 'task_id', None)
@@ -8824,6 +8826,67 @@ def _repair_run_stamp(task_id, developer, d6_unchanged):
     return stamp
 
 
+def _formal_pass_at_repair_head(args, store, d6_binding, current_task_id):
+    """#2688: True only when the D6 head under repair holds a clean, bound formal PASS.
+
+    #1502 D1: AI Debug first becomes required after the third effective review
+    repair receives a formal FAIL. A PM repair that follows a formal PASS at the
+    current D6 head (a Codex security FAIL at that head, for example) has no
+    formal FAIL to diagnose, and High Debug refuses to run for one
+    (HIGH_DEBUG_FAIL_REQUIRED). Such a repair still counts toward repair_max.
+
+    True needs, over every Task on this D6: each review claim at the head is a
+    formal, non-ruling claim of this executor with an integer version, and the
+    one claim of the highest version is COMPLETED with a PASS bound to the head
+    and its own Task. Any other shape, or any read failure, returns False, which
+    keeps the root-cause requirement unchanged.
+    """
+    from . import review_result
+    try:
+        executor_task = getattr(args, 'executor_task', None)
+        if d6_binding is None:
+            d6_binding = _delegate_d6_binding(args)
+        head = getattr(d6_binding[1], 'head', None)
+        if (type(executor_task) is not str or type(head) is not str or
+                re.fullmatch(r'[0-9a-f]{40}', head) is None):
+            return False
+        at_head = []
+        for task_id in store.completion_d6_task_ids(executor_task):
+            if task_id == current_task_id:
+                continue
+            record = store.get(task_id)
+            claims = record.get('review_dispatch_claim', [])
+            claims = [claims] if type(claims) is dict else claims
+            if type(claims) is not list:
+                return False
+            for claim in claims:
+                if type(claim) is not dict:
+                    return False
+                if claim.get('head_sha') != head:
+                    continue
+                version = claim.get('version')
+                if (_is_ruling_claim(claim) or
+                        review_result.review_kind(claim) != 'formal' or
+                        claim.get('executor_task') != executor_task or
+                        type(version) is not int or isinstance(version, bool)):
+                    return False
+                at_head.append((version, record, claim))
+        if not at_head:
+            return False
+        top = max(item[0] for item in at_head)
+        latest = [item for item in at_head if item[0] == top]
+        if len(latest) != 1:
+            return False
+        _version, record, claim = latest[0]
+        result = claim.get('review_result')
+        return (claim.get('state') == 'COMPLETED' and type(result) is dict and
+                result.get('verdict') == 'PASS' and result.get('head') == head and
+                type(record.get('task_id')) is str and
+                result.get('task_id') == record.get('task_id'))
+    except Exception:
+        return False
+
+
 def _check_repair_limits(args, store, d6_binding, policy, current_task_id, counted,
                          new_ec2_ids, legacy_ec2_ids, newest_assignment, stamps=None):
     """Apply the review and EC2 limits to counted runs, then the root cause."""
@@ -8851,6 +8914,9 @@ def _check_repair_limits(args, store, d6_binding, policy, current_task_id, count
         if type(packet) is dict and 'high_debug_report_sha256' in packet:
             _check_repair_packet_rca(packet, store, getattr(args, 'executor_task', None),
                                      current_task_id)
+        return
+    if (getattr(args, 'repair_packet', None) is None and
+            _formal_pass_at_repair_head(args, store, d6_binding, current_task_id)):
         return
     if count == REVIEW_REPAIRS_WITHOUT_DEBUG + 1:
         _check_repair_rca(args, store, d6_binding, newest_assignment)
