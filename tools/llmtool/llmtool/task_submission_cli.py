@@ -3168,8 +3168,23 @@ def dispute_withdraw(store, task_id, *, pr, finding_id, head):
         if 'WITHDRAWN' in states:
             return dict(result, replay=True)
         _dispute_refuse('DISPUTE_NOT_OPEN')
+    entry = disputes[open_entries[0]]
+    next_entry = dict(entry, state='WITHDRAWN')
+    if 'history' in entry:
+        if type(entry['history']) is not list:
+            _dispute_refuse('DISPUTE_RECORD_INVALID')
+        pm_session_id = record.get('pm_session_id')
+        if type(pm_session_id) is not str or not pm_session_id:
+            _dispute_refuse('DISPUTE_TASK_INVALID')
+        next_entry['history'] = list(entry['history']) + [{
+            'event': 'WITHDRAWN',
+            'at': _timestamp(),
+            'actor': f'pm:{pm_session_id}',
+            'head_sha': head,
+            'refs': {},
+        }]
     updated = list(disputes)
-    updated[open_entries[0]] = dict(disputes[open_entries[0]], state='WITHDRAWN')
+    updated[open_entries[0]] = next_entry
     try:
         store.compare_and_update(task_id, expected={'record_sha256': record.get('record_sha256')},
                                  review_disputes=updated)

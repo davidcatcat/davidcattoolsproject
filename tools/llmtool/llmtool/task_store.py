@@ -1745,7 +1745,7 @@ _REVIEW_DISPUTE_CLAIM_DISPUTE_FIELDS = frozenset((
 ))
 _REVIEW_DISPUTE_HISTORY_FIELDS = frozenset(('event', 'at', 'actor', 'head_sha', 'refs'))
 _REVIEW_DISPUTE_HISTORY_EVENTS = frozenset((
-    'OPENED', 'DEFERRED', 'ARBITER_CLAIMED', 'ARBITER_DISPATCHED',
+    'OPENED', 'DEFERRED', 'WITHDRAWN', 'ARBITER_CLAIMED', 'ARBITER_DISPATCHED',
     'ARBITER_COMPLETED', 'ARBITER_UNKNOWN', 'ARBITER_WITHHELD', 'RULED',
 ))
 _REVIEW_DISPUTE_HISTORY_REF_FIELDS = frozenset((
@@ -2107,6 +2107,8 @@ def _check_review_disputes_transition(old, new, *, old_claims=None, new_claims=N
         if ev_name in ('OPENED', 'DEFERRED'):
             _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
         if ev_name == 'RULED' and after.get('state') != 'RULED':
+            _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
+        if (ev_name == 'WITHDRAWN') != (after.get('state') == 'WITHDRAWN'):
             _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
         if type(ev_name) is str and ev_name.startswith('ARBITER_'):
             if (after.get('state') != 'OPEN' or
