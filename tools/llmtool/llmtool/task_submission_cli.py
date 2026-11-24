@@ -1162,6 +1162,11 @@ def add_task_submission_parsers(actions):
     arbitrate.add_argument('task_id', help='existing durable Task ID')
     arbitrate.add_argument('--pr', required=True, type=int, help='GitHub pull request number')
     arbitrate.add_argument('--finding', required=True, help='finding ID of the verdict, e.g. F1')
+    arbitrate.add_argument('--recover-claim', metavar='REVIEWER_TASK',
+                           help='recover a proved pre-launch refusal without launching')
+    arbitrate.add_argument('--recovery-evidence-ref', help='PM investigation comment URL')
+    arbitrate.add_argument('--legacy-source-sha',
+                           help='investigated runtime SHA for a receipt-less legacy refusal')
     arbitrate.add_argument('--pm-session',
                            help=('caller PM session (native UUID or pm- ID); must own '
                                  'the Task; default: CLAUDE_CODE_SESSION_ID or '
@@ -3388,6 +3393,7 @@ def _replay_arbiter_claim(store, task_id, record, disputes, index, entry, *, pr,
 
 
 def dispute_arbitrate(store, task_id, *, pr, finding_id, current_head=None,
+                      recover_claim=None, recovery_evidence_ref=None, legacy_source_sha=None,
                       github_get=None, create_d6=None, dispatch_session=None,
                       bind_session=None, codex_runner=None):
     """Launch or advance the llmtool-chosen arbiter for one OPEN dispute (steps 1-11a/11b)."""
@@ -3412,6 +3418,13 @@ def dispute_arbitrate(store, task_id, *, pr, finding_id, current_head=None,
         _dispute_refuse('DISPUTE_RECORD_INVALID')
     index, entry = current[0]
 
+    if recover_claim is not None:
+        from .arbiter_recovery import recover
+        return recover(store, record, disputes, index, reviewer_task=recover_claim,
+                       evidence_ref=recovery_evidence_ref, source_sha=legacy_source_sha,
+                       repository=_dispute_repository(), now=_timestamp())
+    if recovery_evidence_ref is not None or legacy_source_sha is not None:
+        _dispute_refuse('DISPUTE_ARGUMENT_INVALID')
     if 'arbiter_claim' in entry:
         return _replay_arbiter_claim(
             store, task_id, record, disputes, index, entry,
@@ -3476,6 +3489,9 @@ def run_task_dispute(args, *, store=None, stdout=None, current_head=None,
         if action == 'arbitrate':
             result = dispute_arbitrate(
                 store, args.task_id, pr=args.pr, finding_id=args.finding,
+                recover_claim=getattr(args, 'recover_claim', None),
+                recovery_evidence_ref=getattr(args, 'recovery_evidence_ref', None),
+                legacy_source_sha=getattr(args, 'legacy_source_sha', None),
                 current_head=current_head, github_get=github_get,
                 create_d6=create_d6, dispatch_session=dispatch_session,
                 bind_session=bind_session, codex_runner=codex_runner)

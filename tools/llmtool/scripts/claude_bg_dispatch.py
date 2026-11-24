@@ -411,7 +411,8 @@ def refuse_cross_account_launch(worker_dir, *, account_env=None):
 
 
 def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_interval,
-             new_session=False, owner_assignment_ref=None, worker_dir=None, model=None):
+             new_session=False, owner_assignment_ref=None, worker_dir=None, model=None,
+             authorization_task_id=None):
     is_claude_developer_role = (type(role) is str and
                                 CLAUDE_DEVELOPER_ROLE_RE.fullmatch(role) is not None)
     if not is_claude_developer_role and not ROLE_RE.fullmatch(role or ""):
@@ -422,7 +423,34 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
         raise DispatchError(getattr(exc, "role_config_code", "ROLE_CONFIG_INVALID")) from None
     refuse_cross_account_launch(worker_dir, account_env=account_env)
     worker_key = _worker_key(role)
-    decision = worker_dispatch.evaluate(worker_key, owner_assignment_ref, task_id)
+    authorization_id = task_id
+    if authorization_task_id is not None:
+        if role != "claude-reviewer":
+            raise DispatchError("REVIEW_AUTHORIZATION_INVALID")
+        registration = _registration(task_id, repo_root)
+        try:
+            task = TaskStore().get(authorization_task_id)
+        except LLMToolError:
+            raise DispatchError("REVIEW_AUTHORIZATION_INVALID") from None
+        claims = task.get("review_dispatch_claim", []) if type(task) is dict else []
+        claims = [claims] if type(claims) is dict else claims
+        matches = [c for c in claims if type(c) is dict and
+                   c.get("reviewer_task") == task_id and c.get("state") == "CLAIMED"]
+        if (type(task) is not dict or task.get('task_id') != authorization_task_id or
+                task.get('abandonment') is not None or len(matches) != 1 or
+                registration.trusted_agent_id != role or
+                registration.native_session_id is not None or
+                registration.result_sha != matches[0].get("head_sha") or
+                (task.get("developer") or {}).get("owner_assignment_ref") != owner_assignment_ref):
+            raise DispatchError("REVIEW_AUTHORIZATION_INVALID")
+        completion = task.get("completion") or {}
+        evidence = completion.get("evidence") or {}
+        if (completion.get("executor_task_id") == task_id or
+                completion.get("executor_task_id") != matches[0].get("executor_task") or
+                evidence.get("common_dir") != registration.common_dir):
+            raise DispatchError("REVIEW_AUTHORIZATION_INVALID")
+        authorization_id = authorization_task_id
+    decision = worker_dispatch.evaluate(worker_key, owner_assignment_ref, authorization_id)
     if not decision.allowed:
         raise DispatchError(decision.reason_code)
     if not prompt or len(prompt.encode("utf-8")) > PROMPT_LIMIT or prompt.startswith("-"):
@@ -727,6 +755,7 @@ def _main(argv=None):
     target.add_argument("--new", action="store_true", help="start a new session")
     start.add_argument("--name", required=True, help="role name passed as -n")
     start.add_argument("--task-id", required=True, help="registered D6 task id")
+    start.add_argument("--authorization-task-id", help="original Task owning the Reviewer claim")
     start.add_argument("--owner-assignment-ref", help="exact Owner assignment reference")
     start.add_argument("--model", help="explicit model; must pass the role's allowed-model check")
     prompt = start.add_mutually_exclusive_group(required=True)
@@ -763,6 +792,7 @@ def _main(argv=None):
             result = dispatch(
                 claude=args.claude, target=args.session, role=args.name,
                 task_id=args.task_id, prompt=text, repo_root=args.repo_root,
+                authorization_task_id=args.authorization_task_id,
                 timeout=_bounded(args.timeout, 1, 600, "--timeout"), poll_interval=poll,
                 new_session=args.new, owner_assignment_ref=args.owner_assignment_ref,
                 worker_dir=args.worker_config_dir, model=args.model)

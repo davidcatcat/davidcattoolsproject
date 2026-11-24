@@ -246,6 +246,41 @@ class ClaudeBgDispatchTests(unittest.TestCase):
                              timeout=timeout) if owner_ref is None else self.run_tool(
                                  *args, timeout=timeout)
 
+    def test_reviewer_authorization_uses_original_task_only_for_its_bound_claim(self):
+        reg = SimpleNamespace(trusted_agent_id='claude-reviewer',
+                              native_session_id=None, result_sha='a' * 40,
+                              common_dir='/synthetic/repo/.git')
+        task = {'task_id': 'original-task',
+                'developer': {'owner_assignment_ref': 'owner-ref'},
+                'completion': {'executor_task_id': 'executor',
+                               'evidence': {'common_dir': reg.common_dir}},
+                'review_dispatch_claim': [{
+                    'reviewer_task': 'reviewer-one', 'state': 'CLAIMED',
+                    'head_sha': 'a' * 40, 'executor_task': 'executor'}]}
+        with patch.object(dispatch_tool, '_account_environment', return_value=({}, {})), \
+             patch.object(dispatch_tool, 'refuse_cross_account_launch'), \
+             patch.object(dispatch_tool, '_registration', return_value=reg), \
+             patch.object(dispatch_tool, 'TaskStore') as store, \
+             patch.object(dispatch_tool.worker_dispatch, 'evaluate',
+                          side_effect=RuntimeError('gate reached')) as gate:
+            store.return_value.get.return_value = task
+            with self.assertRaisesRegex(RuntimeError, 'gate reached'):
+                dispatch_tool.dispatch(
+                    claude='unused', target=None, role='claude-reviewer',
+                    task_id='reviewer-one', prompt='bounded', repo_root=self.root,
+                    timeout=1, poll_interval=.01, authorization_task_id='original-task',
+                    owner_assignment_ref='owner-ref')
+            gate.assert_called_once_with('claude-reviewer', 'owner-ref', 'original-task')
+            gate.reset_mock()
+            with self.assertRaises(dispatch_tool.DispatchError) as caught:
+                dispatch_tool.dispatch(
+                    claude='unused', target=None, role='claude-reviewer',
+                    task_id='reviewer-other', prompt='bounded', repo_root=self.root,
+                    timeout=1, poll_interval=.01, authorization_task_id='original-task',
+                    owner_assignment_ref='owner-ref')
+            self.assertEqual(caught.exception.code, 'REVIEW_AUTHORIZATION_INVALID')
+            gate.assert_not_called()
+
     def test_dispatch_gate_allows_pauses_assignment_and_unknown_roles_before_launch(self):
         valid_ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-1'
         cases = [

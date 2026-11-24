@@ -880,13 +880,18 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
         head=head, version=version)
 
 
-def _dispatch(*, task_id, prompt, repo_root, env, model):
+def _dispatch(*, task_id, prompt, repo_root, env, model,
+              authorization_task_id=None, owner_assignment_ref=None):
     # #1502 WP-E R1: the admitted model is passed explicitly; the bridge checks it again.
     model = _admit_review_model('claude-reviewer', model)
     script = Path(__file__).resolve().parents[1] / 'scripts' / 'claude_bg_dispatch.py'
     args = [sys.executable, '-B', str(script), 'dispatch', '--new', '--name',
             'claude-reviewer', '--model', model, '--task-id', task_id, '--prompt', prompt,
             '--repo-root', str(repo_root)]
+    if authorization_task_id is not None:
+        args += ["--authorization-task-id", authorization_task_id]
+    if owner_assignment_ref is not None:
+        args += ["--owner-assignment-ref", owner_assignment_ref]
     result = subprocess.run(args, cwd=str(repo_root), env=env,
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, check=False, timeout=660)
@@ -894,6 +899,11 @@ def _dispatch(*, task_id, prompt, repo_root, env, model):
         receipt = json.loads(result.stdout.decode('utf-8'))
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise RuntimeError('REVIEWER_DISPATCH_UNKNOWN') from None
+    if (type(receipt) is dict and receipt.get('result') == 'REJECTED' and
+            receipt.get('reason') in ('OWNER_ASSIGNMENT_REQUIRED', 'OWNER_PAUSED')):
+        error = RuntimeError('REVIEWER_DISPATCH_REJECTED')
+        error.launch_refusal = {'result': 'REJECTED', 'reason': receipt['reason']}
+        raise error
     if result.returncode or type(receipt) is not dict or receipt.get('result') != 'DELIVERED':
         raise RuntimeError('REVIEWER_DISPATCH_UNKNOWN')
     session_id = receipt.get('actual_session_id')
@@ -1704,7 +1714,9 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
 
     create = create_d6 or _create_d6
     # The built-in Claude bridge always receives the admitted model explicitly.
-    send = dispatch_session or functools.partial(_dispatch, model=claude_model)
+    send = dispatch_session or functools.partial(
+        _dispatch, model=claude_model, authorization_task_id=task_id,
+        owner_assignment_ref=(task.get("developer") or {}).get("owner_assignment_ref"))
     bind = bind_session or _bind_d6
     session_id = None
     try:
@@ -2044,7 +2056,9 @@ def dispatch_arbiter(*, store, task_id, executor_task, pr_number, finding_id,
         _refuse('REVIEW_DISPATCH_CLAIM_UNAVAILABLE')
 
     create = create_d6 or _create_d6
-    send = dispatch_session or functools.partial(_dispatch, model=claude_model)
+    send = dispatch_session or functools.partial(
+        _dispatch, model=claude_model, authorization_task_id=task_id,
+        owner_assignment_ref=(task.get("developer") or {}).get("owner_assignment_ref"))
     bind = bind_session or _bind_d6
     session_id = None
     try:
@@ -2279,6 +2293,8 @@ def dispatch_arbiter(*, store, task_id, executor_task, pr_number, finding_id,
                 unknown = dict(fresh_claims[claim_idx], state='UNKNOWN', updated_at=_now())
                 if session_id is not None:
                     unknown['native_session_id'] = session_id
+                if getattr(exc, 'launch_refusal', None) is not None:
+                    unknown['launch_refusal'] = exc.launch_refusal
                 reason = getattr(exc, 'review_failure_reason', None)
                 if reason in REVIEW_FAILURE_REASONS:
                     unknown['failure_reason'] = reason

@@ -343,7 +343,7 @@ class _ArbitrateLaunchCase(unittest.TestCase):
                 TASK, expected={'record_sha256': rec['record_sha256']},
                 review_disputes=initial_disputes)
         for arbiter in ruling_claims:
-            claimed = {k: v for k, v in arbiter.items() if k != 'review_result'}
+            claimed = {k: v for k, v in arbiter.items() if k not in ('review_result', 'launch_refusal')}
             claimed['state'] = 'CLAIMED'
             claimed['native_session_id'] = None
             current_claims = list(rec.get('review_dispatch_claim') or [])
@@ -599,6 +599,89 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
             bind_session=self.fake_bind,
         )
         self.assertEqual(replay['code'], 'ARBITER_PENDING')
+
+    def _seed_refused_arbiter(self, *, receipt=True):
+        claim = tdrcr._arbiter_claim(CONTRACT, state='UNKNOWN')
+        claim['native_session_id'] = None
+        if receipt:
+            claim['launch_refusal'] = {'result': 'REJECTED',
+                                       'reason': 'OWNER_ASSIGNMENT_REQUIRED'}
+        self._seed(claims=[_formal_claim(), claim], disputes=[dict(
+            tdrcr._dispute_entry(), evidence_ref=EVIDENCE_REF,
+            arbiter_claim={'reviewer_task': claim['reviewer_task'], 'version': claim['version']},
+            history=[{'event': 'ARBITER_CLAIMED', 'at': tdrcr.STAMP_2,
+                      'actor': f'pm:{PM_SESSION}', 'head_sha': HEAD,
+                      'refs': {'reviewer_task': claim['reviewer_task'], 'version': claim['version']}}])])
+        return claim
+
+    def test_recovery_preserves_unknown_claim_and_records_evidence(self):
+        claim = self._seed_refused_arbiter()
+        before = self.store.get(TASK)
+        reg = SimpleNamespace(native_session_id=None,
+                              session_ref='pending-' + claim['reviewer_task'],
+                              common_dir=str(self.common_dir))
+        edited = [dict(before['review_disputes'][0])]
+        del edited[0]['arbiter_claim']
+        with self.assertRaises(LLMToolError):
+            self.store.compare_and_update(
+                TASK, expected={'record_sha256': before['record_sha256']},
+                review_disputes=edited)
+        with patch.object(task_submission_cli, '_dispute_arbiter_d6_binding', return_value=reg):
+            result = task_submission_cli.dispute_arbitrate(
+                self.store, TASK, pr=PR, finding_id=FINDING,
+                current_head=lambda *_: HEAD, recover_claim=claim['reviewer_task'],
+                recovery_evidence_ref=EVIDENCE_REF)
+        self.assertEqual(result['code'], 'ARBITER_RECOVERED')
+        after = self.store.get(TASK)
+        self.assertEqual(after['review_dispatch_claim'], before['review_dispatch_claim'])
+        self.assertNotIn('arbiter_claim', after['review_disputes'][0])
+        event = after['review_disputes'][0]['history'][-1]
+        self.assertEqual(event['event'], 'ARBITER_RECOVERED')
+        self.assertEqual(event['refs']['claim_sha256'],
+                         task_store._canonical_claim_sha256(claim))
+
+    def test_recovery_refuses_unknown_without_positive_evidence(self):
+        claim = self._seed_refused_arbiter(receipt=False)
+        before = self.store.get(TASK)
+        reg = SimpleNamespace(native_session_id=None,
+                              session_ref='pending-' + claim['reviewer_task'],
+                              common_dir=str(self.common_dir))
+        with patch.object(task_submission_cli, '_dispute_arbiter_d6_binding', return_value=reg):
+            with self.assertRaises(LLMToolError) as caught:
+                task_submission_cli.dispute_arbitrate(
+                    self.store, TASK, pr=PR, finding_id=FINDING,
+                    current_head=lambda *_: HEAD, recover_claim=claim['reviewer_task'],
+                    recovery_evidence_ref=EVIDENCE_REF)
+        self.assertEqual(caught.exception.dispute_code, 'ARBITER_RECOVERY_EVIDENCE_REQUIRED')
+        self.assertEqual(self.store.get(TASK), before)
+
+    def test_uninvestigated_legacy_unknown_cannot_borrow_a_vulnerable_source(self):
+        from llmtool.arbiter_recovery import no_start_proof
+        claim = tdrcr._arbiter_claim(CONTRACT, state='UNKNOWN')
+        claim['reviewer'] = 'claude-reviewer'
+        claim['native_session_id'] = None
+        with patch('llmtool.arbiter_recovery.subprocess.run') as run:
+            with self.assertRaises(LLMToolError):
+                no_start_proof(claim,
+                               source_sha='2a55a82f99e04033421fc56e0d60b7083b63fee7',
+                               repo_root=str(self.repo_root))
+        run.assert_not_called()
+
+    def test_bridge_refusal_is_preserved_and_task_authorization_is_forwarded(self):
+        from types import SimpleNamespace
+        receipt = {'schema_version': 1, 'result': 'REJECTED',
+                   'reason': 'OWNER_ASSIGNMENT_REQUIRED', 'detail': ''}
+        with patch.object(review_dispatch.subprocess, 'run', return_value=SimpleNamespace(
+                returncode=2, stdout=json.dumps(receipt).encode(), stderr=b'')) as run:
+            with self.assertRaises(RuntimeError) as caught:
+                review_dispatch._dispatch(
+                    task_id='reviewer-test', prompt='bounded', repo_root=str(self.repo_root),
+                    env={}, model=review_dispatch._review_default_model('claude-reviewer'),
+                    authorization_task_id=TASK, owner_assignment_ref=EVIDENCE_REF)
+        self.assertEqual(caught.exception.launch_refusal['reason'], 'OWNER_ASSIGNMENT_REQUIRED')
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[argv.index('--authorization-task-id') + 1], TASK)
+        self.assertEqual(argv[argv.index('--owner-assignment-ref') + 1], EVIDENCE_REF)
 
     def test_replay_claimed_becomes_unknown(self):
         claim = tdrcr._arbiter_claim(CONTRACT, state='CLAIMED')

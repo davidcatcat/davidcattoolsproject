@@ -1746,11 +1746,11 @@ _REVIEW_DISPUTE_CLAIM_DISPUTE_FIELDS = frozenset((
 _REVIEW_DISPUTE_HISTORY_FIELDS = frozenset(('event', 'at', 'actor', 'head_sha', 'refs'))
 _REVIEW_DISPUTE_HISTORY_EVENTS = frozenset((
     'OPENED', 'DEFERRED', 'WITHDRAWN', 'ARBITER_CLAIMED', 'ARBITER_DISPATCHED',
-    'ARBITER_COMPLETED', 'ARBITER_UNKNOWN', 'ARBITER_WITHHELD', 'RULED',
+    'ARBITER_COMPLETED', 'ARBITER_UNKNOWN', 'ARBITER_WITHHELD', 'ARBITER_RECOVERED', 'RULED',
 ))
 _REVIEW_DISPUTE_HISTORY_REF_FIELDS = frozenset((
     'reviewer_task', 'version', 'comment_id', 'claim_sha256',
-    'review_text_sha256', 'output_sha256',
+    'review_text_sha256', 'output_sha256', 'source_sha',
 ))
 _REVIEW_DISPUTE_SOURCE_KINDS = frozenset(('CODEX_JSONL', 'CLAUDE_TRANSCRIPT'))
 REVIEW_DISPUTE_STATES = ('OPEN', 'RULED', 'DEFERRED', 'WITHDRAWN')
@@ -1876,6 +1876,8 @@ def _valid_review_dispute_history(history):
                 not set(refs).issubset(_REVIEW_DISPUTE_HISTORY_REF_FIELDS)):
             return False
         for key, value in refs.items():
+            if key == 'source_sha' and (type(value) is not str or re.fullmatch(r'[0-9a-f]{40}', value) is None):
+                return False
             if key == 'reviewer_task' and not _safe_identifier(value, D6_TASK_ID):
                 return False
             if key == 'version' and (type(value) is not int or not 1 <= value <= 9999):
@@ -2048,7 +2050,8 @@ def _arbiter_claim_transition_matches(event_name, arbiter_claim, old_claims, new
     return False
 
 
-def _check_review_disputes_transition(old, new, *, old_claims=None, new_claims=None):
+def _check_review_disputes_transition(old, new, *, old_claims=None, new_claims=None,
+                                     trusted_arbiter_recovery=False):
     """Append one OPEN or DEFERRED entry, or advance one OPEN entry."""
     old = [] if old is None else old
     old_claims = [] if old_claims is None else old_claims
@@ -2080,9 +2083,22 @@ def _check_review_disputes_transition(old, new, *, old_claims=None, new_claims=N
             any(before.get(key) != after.get(key)
                 for key in _REVIEW_DISPUTE_FIELDS - {'state'})):
         _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
-    # arbiter_claim is set once on OPEN -> OPEN with the CLAIMED claim, then immutable.
+    recovery = (after.get('history') or [{}])[-1].get('event') == 'ARBITER_RECOVERED'
+    if recovery:
+        matching = _matching_arbiter_claims(old_claims, before)
+        event = after['history'][-1]
+        if (not trusted_arbiter_recovery or
+                len(matching) != 1 or matching[0].get('state') != 'UNKNOWN' or
+                matching[0].get('native_session_id') is not None or
+                old_claims != new_claims or 'arbiter_claim' in after or
+                after.get('state') != 'OPEN' or
+                event.get('refs', {}).get('claim_sha256') != _canonical_claim_sha256(matching[0]) or
+                type(event.get('refs', {}).get('comment_id')) is not int or
+                not _hex64(event.get('refs', {}).get('output_sha256'))):
+            _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
+    # A proved no-start recovery preserves the original claim and removes only its pointer.
     if 'arbiter_claim' in before:
-        if after.get('arbiter_claim') != before['arbiter_claim']:
+        if not recovery and after.get('arbiter_claim') != before['arbiter_claim']:
             _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
     elif 'arbiter_claim' in after:
         if (after.get('state') != 'OPEN' or
@@ -2110,7 +2126,7 @@ def _check_review_disputes_transition(old, new, *, old_claims=None, new_claims=N
             _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
         if (ev_name == 'WITHDRAWN') != (after.get('state') == 'WITHDRAWN'):
             _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
-        if type(ev_name) is str and ev_name.startswith('ARBITER_'):
+        if type(ev_name) is str and ev_name.startswith('ARBITER_') and not recovery:
             if (after.get('state') != 'OPEN' or
                     not _arbiter_claim_transition_matches(
                         ev_name, after.get('arbiter_claim'), old_claims, new_claims)):
@@ -2812,13 +2828,22 @@ def _validate(record, *, strict=True, repository_pattern=None):
                     set(item) - frozenset(('failure_reason', 'binding_mismatch_keys',
                                            'rules_sha256', 'bind_failure_reason',
                                            'review_kind', 'purpose', 'dispute',
-                                           'reviewer')) not in (
+                                           'reviewer', 'launch_refusal')) not in (
                         _REVIEW_DISPATCH_CLAIM_FIELDS,
                         _REVIEW_DISPATCH_CLAIM_FIELDS | frozenset(('review_result',)),
                         _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS,
                         _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS |
                         frozenset(('review_result',))) or
                     ruling_keys_count not in (0, 3) or
+                    ('launch_refusal' in item and
+                     (item.get('purpose') != 'dispute_ruling' or
+                      item.get('state') != 'UNKNOWN' or
+                      item.get('native_session_id') is not None or
+                      type(item['launch_refusal']) is not dict or
+                      set(item['launch_refusal']) != {'result', 'reason'} or
+                      item['launch_refusal'].get('result') != 'REJECTED' or
+                      item['launch_refusal'].get('reason') not in
+                      ('OWNER_ASSIGNMENT_REQUIRED', 'OWNER_PAUSED'))) or
                     ('failure_reason' in item and
                      not _known_review_failure_reason(item['failure_reason'])) or
                     # #1909 item 1 (security v91): only an UNKNOWN claim, never with failure_reason.
@@ -6546,7 +6571,7 @@ class TaskStore:
                        trusted_file_ops_evidence=False, trusted_file_ops_reservation=False,
                        d6_unchanged=None, direct_dispatch_boundary=None,
                        direct_reassign_verify=None, direct_claim_recovery=None,
-                       ec2_claim_recovery=None):
+                       ec2_claim_recovery=None, trusted_arbiter_recovery=False):
         # Refused here, not by the writable-field check: the dispatch gate
         # before that check can write its audit to the record.
         if _D6_CLAIM_ARGUMENTS & set(changes):
@@ -6866,6 +6891,7 @@ class TaskStore:
                 new_claim = changes.get('review_dispatch_claim', old_claim)
                 _check_review_disputes_transition(
                     current.get('review_disputes'), changes['review_disputes'],
+                    trusted_arbiter_recovery=trusted_arbiter_recovery,
                     old_claims=([] if old_claim is None else
                                 [old_claim] if type(old_claim) is dict else old_claim),
                     new_claims=([] if new_claim is None else
