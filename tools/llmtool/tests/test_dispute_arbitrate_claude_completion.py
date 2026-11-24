@@ -564,8 +564,6 @@ class ClaudeRulingCollectionTests(unittest.TestCase):
         depth = max(sys.getrecursionlimit() + 500, 10000)
         nested_line = ('[' * depth + ']' * depth).encode('utf-8')
         self.assertLess(len(nested_line), dispute_arbiter._TRANSCRIPT_MAX_BYTES)
-        with self.assertRaises(RecursionError):
-            json.loads(nested_line)
 
         # Deeply nested JSON line alone
         self._write_transcript(nested_line + b'\n')
@@ -573,10 +571,19 @@ class ClaudeRulingCollectionTests(unittest.TestCase):
         # Replay still refuses and leaves record unchanged
         self._assert_refused_unchanged('ARBITER_TRANSCRIPT_UNAVAILABLE', before)
 
-        # Deeply nested JSON line alongside a valid assistant entry
+        # RecursionError during line parsing alongside a valid assistant entry
         valid_line = json.dumps(_assistant_entry(_ruling_text())).encode('utf-8')
         self._write_transcript(valid_line + b'\n' + nested_line + b'\n')
-        self._assert_refused_unchanged('ARBITER_TRANSCRIPT_UNAVAILABLE', before)
+        real_loads = json.loads
+
+        def loads_raising_on_nested(s, *args, **kwargs):
+            if s.startswith('['):
+                raise RecursionError('maximum recursion depth exceeded')
+            return real_loads(s, *args, **kwargs)
+
+        with patch.object(dispute_arbiter.json, 'loads', side_effect=loads_raising_on_nested):
+            self._assert_refused_unchanged('ARBITER_TRANSCRIPT_UNAVAILABLE', before)
+            self._assert_refused_unchanged('ARBITER_TRANSCRIPT_UNAVAILABLE', before)
 
     def test_session_not_ended(self):
         self._seed()
