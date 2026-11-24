@@ -268,13 +268,21 @@ ROLE_MODELS = NeedsModel(Obj(
         "timeout": Int(1, ROUTE_TIMEOUT_CAP_SECONDS),
     },
 ))
-WORKER_DISPATCH_ENTRY = Obj({
-    "dispatch": OneOf(*sorted(DISPATCH_VALUES)),
-    "decided_by": Str(),
-    "decided_at": Str(r"\d{4}-\d{2}-\d{2}"),
-    "reason": Str(),
-    "evidence": Str(r"https://\S+"),
-})
+WORKER_DISPATCH_ENTRY = Obj(
+    {
+        "dispatch": OneOf(*sorted(DISPATCH_VALUES)),
+        "decided_by": Str(),
+        "decided_at": Str(r"\d{4}-\d{2}-\d{2}"),
+        "reason": Str(),
+        "evidence": Str(r"https://\S+"),
+    },
+    {
+        "owner_assignments": ListOf(Obj({
+            "task_id": Str(r"[0-9a-f]{32}"),
+            "owner_assignment_ref": Str(r"https://\S+"),
+        })),
+    },
+)
 EXECUTION_HOST = Obj(
     {
         "id": Str(r"[a-z0-9][a-z0-9-]*"),
