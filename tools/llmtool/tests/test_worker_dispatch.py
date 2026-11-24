@@ -400,8 +400,8 @@ class WorkerDispatchTests(unittest.TestCase):
              'claude-developer': 'PAUSED',
              'opencode-developer': 'ALLOWED', 'agy': 'ALLOWED',
              'company-gw': 'PAUSED', 'gw-agent': 'ALLOWED',
-             # #289 c7106823913: the Owner paused the Claude formal Reviewer.
-             'claude-reviewer': 'PAUSED', 'codex-reviewer': 'ALLOWED',
+             # #289 c7141865604 (Owner 2026-11-24): one-time grant for PR #2699 F3 arbitration.
+             'claude-reviewer': 'OWNER_ASSIGNMENT_ONLY', 'codex-reviewer': 'ALLOWED',
              'codex-debug': 'ALLOWED', 'claude-debug': 'ALLOWED'})
         with self._real_policy():
             decisions = {key: worker_dispatch.evaluate(key) for key in policy['workers']}
@@ -412,34 +412,47 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(decisions['agy'].reason_code, 'OWNER_POLICY_ALLOWED')
         self.assertTrue(decisions['agy'].allowed)
         self.assertFalse(decisions['claude-reviewer'].allowed)
-        self.assertEqual(decisions['claude-reviewer'].reason_code, 'OWNER_PAUSED')
+        self.assertEqual(decisions['claude-reviewer'].reason_code, 'OWNER_ASSIGNMENT_REQUIRED')
 
-    # #289 (Owner decision relayed on c7106823913): the real policy pauses the
-    # Claude formal Reviewer, so every formal review goes to codex-reviewer.
-    # These tests read the live worker-dispatch.json through the real reader,
-    # parser and gate.
-    _CLAUDE_REVIEWER_PAUSE_REF = ('https://github.com/davidcatcat/davidcattoolsproject/'
-                                  'issues/289#issuecomment-7106823913')
+    # #289 (Owner decision relayed on c7141865604): the real policy grants
+    # claude-reviewer for one Task only (PR #2699 F3 arbitration) and keeps all
+    # other claude-reviewer dispatch paused.
+    _CLAUDE_REVIEWER_GRANT_REF = ('https://github.com/davidcatcat/davidcattoolsproject/'
+                                  'issues/289#issuecomment-7141865604')
+    _CLAUDE_REVIEWER_TASK_ID = '5cf4cde1dcd249578092e8f0f1244244'
+    _CLAUDE_REVIEWER_TASK_REF = ('https://github.com/davidcatcat/davidcattoolsproject/'
+                                 'issues/289#issuecomment-6685246395')
 
-    def test_real_policy_claude_reviewer_row_is_owner_paused(self):
+    def test_real_policy_claude_reviewer_row_is_one_time_owner_grant(self):
         raw = Path(worker_dispatch._DEFAULT_POLICY_PATH).read_bytes()
         policy = worker_dispatch._parse_policy(raw)
         row = policy['workers']['claude-reviewer']
         self.assertEqual(set(row), {'dispatch', 'decided_by', 'decided_at', 'reason',
-                                    'evidence'})
-        self.assertEqual(row['dispatch'], 'PAUSED')
+                                    'evidence', 'owner_assignments'})
+        self.assertEqual(row['dispatch'], 'OWNER_ASSIGNMENT_ONLY')
         self.assertEqual(row['decided_by'], 'Owner')
-        self.assertEqual(row['decided_at'], '2026-11-23')
-        self.assertEqual(row['evidence'], self._CLAUDE_REVIEWER_PAUSE_REF)
+        self.assertEqual(row['decided_at'], '2026-11-24')
+        self.assertEqual(row['evidence'], self._CLAUDE_REVIEWER_GRANT_REF)
         self.assertEqual(
             row['reason'],
-            'Owner paused claude-reviewer, so every formal review goes to codex-reviewer')
+            'One-time Owner grant for the PR #2699 F3 arbitration '
+            '(returns to PAUSED afterwards); all other claude-reviewer dispatch stays paused')
         self.assertLessEqual(len(row['reason']), 512)
+        self.assertEqual(
+            row['owner_assignments'],
+            [{'task_id': self._CLAUDE_REVIEWER_TASK_ID,
+              'owner_assignment_ref': self._CLAUDE_REVIEWER_TASK_REF}])
         with self._real_policy():
-            paused = worker_dispatch.evaluate('claude-reviewer')
+            without_task = worker_dispatch.evaluate('claude-reviewer')
+            granted = worker_dispatch.evaluate(
+                'claude-reviewer',
+                self._CLAUDE_REVIEWER_TASK_REF,
+                self._CLAUDE_REVIEWER_TASK_ID)
             codex = worker_dispatch.evaluate('codex-reviewer')
-        self.assertFalse(paused.allowed)
-        self.assertEqual(paused.reason_code, 'OWNER_PAUSED')
+        self.assertFalse(without_task.allowed)
+        self.assertEqual(without_task.reason_code, 'OWNER_ASSIGNMENT_REQUIRED')
+        self.assertTrue(granted.allowed)
+        self.assertEqual(granted.reason_code, 'OWNER_ASSIGNMENT_MATCHED')
         self.assertTrue(codex.allowed)
         self.assertEqual(codex.reason_code, 'OWNER_POLICY_ALLOWED')
 
