@@ -66,7 +66,7 @@ class PolicyNewKeysTests(unittest.TestCase):
 
     # A1
     def test_keys_are_optional_positive_keys(self):
-        self.assertTrue(set(NEW_KEYS) <= set(rp.ALL_OPTIONAL_POSITIVE_POLICY_KEYS))
+        self.assertTrue(set(NEW_KEYS) <= set(rp.OPTIONAL_POSITIVE_POLICY_KEYS))
         for key in NEW_KEYS:
             with self.subTest(key=key):
                 self.assertNotIn(key, rp.POLICY_KEYS)

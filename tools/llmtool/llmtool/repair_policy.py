@@ -94,19 +94,15 @@ OPTIONAL_POSITIVE_POLICY_KEYS = ('spec_preflight_large_file_lines', 'merge_train
                                  'start_retries_max', 'committed_result_carries_max',
                                  'ai_debug_excerpt_max_chars', 'gw_agent_max_turns',
                                  'route_failure_pause_after',
-                                 'local_test_timeout_seconds')
-# #2281 rows 9, 19 and 20: five further optional positive keys. They live in a
-# companion tuple, validated through ALL_OPTIONAL_POSITIVE_POLICY_KEYS, so the
-# public pre-#2281 list above stays byte-for-byte stable for its consumers.
-# Each key is an optional positive integer with no upper validation bound, the
-# same rule as the list above.
-OPTIONAL_POSITIVE_POLICY_KEYS_2281 = (
-    'remote_test_module_timeout_seconds', 'remote_test_total_timeout_seconds',
-    'reviewer_excerpt_max_chars', 'ci_excerpt_max_lines',
-    'monitor_ec2_busy_window_seconds')
-# The full optional positive set the policy loader validates.
-ALL_OPTIONAL_POSITIVE_POLICY_KEYS = (*OPTIONAL_POSITIVE_POLICY_KEYS,
-                                     *OPTIONAL_POSITIVE_POLICY_KEYS_2281)
+                                 'local_test_timeout_seconds',
+                                 # #2281 rows 9, 19 and 20: remote test timeouts,
+                                 # reviewer/CI excerpt bounds and the EC2 busy
+                                 # window; the same optional positive-integer
+                                 # rule as every key above.
+                                 'remote_test_module_timeout_seconds',
+                                 'remote_test_total_timeout_seconds',
+                                 'reviewer_excerpt_max_chars', 'ci_excerpt_max_lines',
+                                 'monitor_ec2_busy_window_seconds')
 # #2281 row 18 (basis #819): Developer assignment wait. The key above is
 # optional; a policy that omits it keeps the caller default, the hard-coded
 # wait at its point of use (llmtool.developer_assignment_inbox).
@@ -220,12 +216,12 @@ def load_policy(path=None):
     except (OSError, ValueError, UnicodeError):
         _refuse('POLICY_INVALID')
     allowed = {'schema_version', *POLICY_KEYS, *OPTIONAL_POLICY_LIMITS,
-               *ALL_OPTIONAL_POSITIVE_POLICY_KEYS}
+               *OPTIONAL_POSITIVE_POLICY_KEYS}
     if (type(data) is not dict or not {'schema_version', *POLICY_KEYS} <= set(data) <= allowed or
             any(key in data and (type(data[key]) is not int or not low <= data[key] <= high)
                 for key, (low, high) in OPTIONAL_POLICY_LIMITS.items()) or
             any(key in data and (type(data[key]) is not int or data[key] < 1)
-                for key in ALL_OPTIONAL_POSITIVE_POLICY_KEYS) or
+                for key in OPTIONAL_POSITIVE_POLICY_KEYS) or
             type(data['schema_version']) is not int or data['schema_version'] != 1 or
             any(type(data[key]) is not int or not 0 <= data[key] <= 1000
                 for key in POLICY_KEYS)):

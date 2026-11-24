@@ -102,7 +102,12 @@ class PolicyLimitKeysTests(unittest.TestCase):
                          {*LIMITS, *LATER_LIMITS, ROW18_KEY, EXPIRY_ROW18_KEY,
                           PACKET_ROW12_KEY, SOURCE_ROW12_KEY, ROW12_KEY,
                           ROW13_KEY, ROW13_RETRY_KEY, ROW14_KEY, ROW19_KEY,
-                          TURN_CAP_KEY, ROUTE_FAILURE_KEY, ROW10_KEY})
+                          TURN_CAP_KEY, ROUTE_FAILURE_KEY, ROW10_KEY,
+                          # #2281 rows 9, 19 and 20.
+                          'remote_test_module_timeout_seconds',
+                          'remote_test_total_timeout_seconds',
+                          'reviewer_excerpt_max_chars', 'ci_excerpt_max_lines',
+                          'monitor_ec2_busy_window_seconds'})
         # Optional: none of them is required by the loader.
         self.assertFalse(set(LIMITS) & set(rp.POLICY_KEYS))
         self.assertFalse(set(LIMITS) & set(rp.OPTIONAL_POLICY_LIMITS))
