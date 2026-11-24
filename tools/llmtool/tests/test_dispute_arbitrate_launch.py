@@ -23,24 +23,23 @@ from llmtool import (  # noqa: E402
 from llmtool.errors import LLMToolError  # noqa: E402
 
 import review_trust_fixture  # noqa: E402
+import test_dispute_ruling_claim_readers as tdrcr  # noqa: E402
 import worker_policy_fixture  # noqa: E402
 
 
-TASK = 'a' * 32
-RUN = 'b' * 32
-_REQUEST = 'Fix tools/a.py'
-_REQUEST_SHA256 = hashlib.sha256(_REQUEST.encode('utf-8')).hexdigest()
-_TASK_CONTRACT = task_submission_cli._contract(TASK, _REQUEST_SHA256)
-CONTRACT = _TASK_CONTRACT.binding(RUN).contract_digest
+TASK = tdrcr.TASK
+RUN = tdrcr.RUN
 _DIFF = 'diff --git a/tools/a.py b/tools/a.py\n'
 _DIFF_SHA256 = hashlib.sha256(_DIFF.encode('utf-8')).hexdigest()
-HEAD = 'd' * 40
-NEW_HEAD = 'e' * 40
-EXECUTOR = 'exec-d6-1'
-PM_SESSION = 'pm-session-1'
+HEAD = tdrcr.HEAD
+NEW_HEAD = 'd' * 40
+EXECUTOR = tdrcr.EXECUTOR
+PM_SESSION = tdrcr.PM_SESSION
+STAMP_1 = tdrcr.STAMP_1
+_, CONTRACT = tdrcr._base_task_record()
 THREAD_ID = '0123456789abcdef0123456789abcdef'
 CLAUDE_SESSION = '11111111-1111-4111-8111-111111111111'
-PR = 42
+PR = tdrcr.PR
 FINDING = 'F1'
 REVIEW_VERSION = 1
 DISPUTE_COMMENT_ID = 1001
@@ -48,11 +47,7 @@ REVIEW_LOGIN = 'review-account'
 REPOSITORY = 'davidcatcat/davidcattoolsproject'
 EVIDENCE_REF = f'https://github.com/{REPOSITORY}/pull/{PR}#issuecomment-{DISPUTE_COMMENT_ID}'
 BINDING = f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} contract={CONTRACT} head={HEAD}'
-FINDINGS = (
-    'Finding: F1 [High] tools/a.py:10 missing guard\n'
-    '  detail line for F1\n'
-    'Finding: F2 [Low] tools/b.py:20 naming\n'
-)
+FINDINGS = 'Finding: F1 [High] tools/a.py:1 missing guard\n'
 
 
 def setUpModule():
@@ -94,42 +89,23 @@ def _codex_jsonl(payload, *, thread_id=THREAD_ID, extra_threads=0):
     return ('\n'.join(json.dumps(e) for e in events) + '\n').encode('utf-8')
 
 
-def _formal_claim(*, version=REVIEW_VERSION, state='COMPLETED', actor='Claude',
-                  verdict='FAIL', head=HEAD, account_mode='ROLES',
-                  reviewer_task='reviewer-11111111111111111111',
-                  session='review-session-1'):
-    claim = {
-        'executor_task': EXECUTOR,
-        'pr': PR,
-        'head_sha': head,
-        'version': version,
-        'state': state,
-        'reviewer_task': reviewer_task,
-        'native_session_id': None if state == 'CLAIMED' else session,
-        'account_mode': account_mode,
-        'claimed_at': '2026-11-24T00:00:00Z',
-        'updated_at': '2026-11-24T00:05:00Z',
-    }
-    if state == 'COMPLETED':
-        claim['review_result'] = {
-            'task_id': TASK,
-            'run_id': RUN,
-            'contract_digest': CONTRACT,
-            'head': head,
-            'verdict': verdict,
-            'review_text': _verdict_text(actor=actor, status=verdict, head=head, version=version),
-        }
+def _formal_claim(contract_digest=CONTRACT, *, version=REVIEW_VERSION, state='COMPLETED',
+                  actor='Claude', verdict='FAIL', account_mode='ROLES',
+                  reviewer_task=tdrcr.FORMAL_REVIEWER):
+    claim = tdrcr._formal_claim(
+        contract_digest, version=version, verdict=verdict,
+        reviewer_task=reviewer_task, actor=actor)
+    claim['account_mode'] = account_mode
+    if state != 'COMPLETED':
+        claim['state'] = state
+        claim.pop('review_result', None)
+        if state == 'CLAIMED':
+            claim['native_session_id'] = None
     return claim
 
 
-def _seed_task(*, developer=None, claims=None, disputes=None, completion_events=None):
-    record = task_submission_cli._record(
-        TASK, RUN, PM_SESSION, 'claude', _REQUEST,
-        state='PM_RESPONDED', provider_type='claude-cli',
-        model='claude-sonnet-4-6', backend='NO_NATIVE_SESSION_ID_EXPOSED',
-        request_sha=_REQUEST_SHA256, contract=_TASK_CONTRACT)
-    record['response'] = '{"schema_version": 1, "summary": "ok"}'
-    record['developer'] = developer or {
+def _default_developer():
+    return {
         'assignment_id': 'f' * 32,
         'selection_source': 'PM',
         'state': 'DEVELOPER_RESPONDED',
@@ -152,11 +128,14 @@ def _seed_task(*, developer=None, claims=None, disputes=None, completion_events=
         'artifact_sha256': _DIFF_SHA256,
         'usage': None,
         'error_code': None,
-        'created_at': '2026-11-24T00:00:00Z',
+        'created_at': STAMP_1,
         'owner_assignment_ref': None,
         'executor_task_id': EXECUTOR,
     }
-    record['completion'] = {
+
+
+def _default_completion(*, root, common_dir):
+    return {
         'state': 'WAITING_EXECUTOR',
         'executor_task_id': EXECUTOR,
         'reviewer_task_id': None,
@@ -165,8 +144,8 @@ def _seed_task(*, developer=None, claims=None, disputes=None, completion_events=
             'run_id': RUN,
             'contract_digest': CONTRACT,
             'execution_mode': 'DIRECT_D6',
-            'root': '/tmp/fake-exec-root',
-            'common_dir': '/tmp/fake-repo/.git',
+            'root': str(root),
+            'common_dir': str(common_dir),
             'branch': 'llmtool/' + EXECUTOR,
             'source_sha': HEAD,
             'executor_identity': 'agy',
@@ -181,23 +160,9 @@ def _seed_task(*, developer=None, claims=None, disputes=None, completion_events=
         'pm_usage': None,
         'pm_error_code': None,
     }
-    record['review_dispatch_claim'] = [_formal_claim()] if claims is None else claims
-    record['review_disputes'] = [{
-        'finding_id': FINDING,
-        'pr': PR,
-        'head_sha': HEAD,
-        'review_version': REVIEW_VERSION,
-        'severity': 'High',
-        'state': 'OPEN',
-        'evidence_ref': EVIDENCE_REF,
-        'opened_at': '2026-11-24T00:10:00Z',
-    }] if disputes is None else disputes
-    if completion_events is not None:
-        record['completion_events'] = completion_events
-    return record
 
 
-def _dispute_comment(*, body='PM dispute explanation.', created='2026-11-24T00:09:00Z',
+def _dispute_comment(*, body='PM dispute explanation.', created='2026-11-22T23:59:00Z',
                      updated=None, pr=PR, comment_id=DISPUTE_COMMENT_ID):
     return {
         'id': comment_id,
@@ -212,14 +177,15 @@ class _ArbitrateLaunchCase(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.store_dir = Path(self.temp.name) / 'tasks'
+        base_dir = Path(self.temp.name).resolve()
+        self.store_dir = base_dir / 'tasks'
         self.store = task_store.TaskStore(self.store_dir)
-        self.repo_root = Path(self.temp.name) / 'repo'
+        self.repo_root = base_dir / 'repo'
         self.common_dir = self.repo_root / '.git'
         self.common_dir.mkdir(parents=True)
-        self.exec_root = Path(self.temp.name) / 'exec'
+        self.exec_root = base_dir / 'exec'
         self.exec_root.mkdir(parents=True)
-        self.rev_root = Path(self.temp.name) / 'rev'
+        self.rev_root = base_dir / 'rev'
         self.rev_root.mkdir(parents=True)
         self.policy_path = worker_policy_fixture.install(self)
 
@@ -331,11 +297,45 @@ class _ArbitrateLaunchCase(unittest.TestCase):
     def _task_path(self):
         return self.store.root / f'{TASK}.json'
 
-    def _seed(self, **kwargs):
-        record = _seed_task(**kwargs)
-        record['completion']['evidence']['common_dir'] = str(self.common_dir)
-        record['completion']['evidence']['root'] = str(self.exec_root)
-        return self.store._write(record, create=not self._task_path().exists())
+    def _seed(self, *, developer=None, claims=None, disputes=None):
+        temp_store = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_store.cleanup)
+        self.store = task_store.TaskStore(Path(temp_store.name).resolve() / 'tasks')
+        base, contract_digest = tdrcr._base_task_record()
+        base['developer'] = _default_developer() if developer is None else developer
+        base['completion'] = _default_completion(root=self.exec_root, common_dir=self.common_dir)
+        raw_claims = [_formal_claim(contract_digest)] if claims is None else list(claims)
+        formal_claims = [c for c in raw_claims if 'purpose' not in c]
+        ruling_claims = [c for c in raw_claims if 'purpose' in c]
+        if formal_claims:
+            base['review_dispatch_claim'] = formal_claims
+        rec = self.store.create(base)
+        default_dispute = dict(tdrcr._dispute_entry(), evidence_ref=EVIDENCE_REF)
+        dispute_list = [default_dispute] if disputes is None else disputes
+        if dispute_list:
+            initial_disputes = [
+                {k: v for k, v in d.items() if k not in ('arbiter_claim', 'history')}
+                for d in dispute_list
+            ]
+            rec = self.store.compare_and_update(
+                TASK, expected={'record_sha256': rec['record_sha256']},
+                review_disputes=initial_disputes)
+        for arbiter in ruling_claims:
+            claimed = {k: v for k, v in arbiter.items() if k != 'review_result'}
+            claimed['state'] = 'CLAIMED'
+            claimed['native_session_id'] = None
+            current_claims = list(rec.get('review_dispatch_claim') or [])
+            updates = {'review_dispatch_claim': current_claims + [claimed]}
+            if dispute_list and any('arbiter_claim' in d for d in dispute_list):
+                updates['review_disputes'] = dispute_list
+            rec = self.store.compare_and_update(
+                TASK, expected={'record_sha256': rec['record_sha256']},
+                **updates)
+            if arbiter['state'] != 'CLAIMED':
+                rec = self.store.compare_and_update(
+                    TASK, expected={'record_sha256': rec['record_sha256']},
+                    review_dispatch_claim=current_claims + [arbiter])
+        return rec
 
     def _record_bytes(self):
         return self._task_path().read_bytes()
@@ -373,11 +373,11 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
                 'egress_basis': 'bounded', 'input_bytes': 10, 'max_tokens': None,
                 'artifact_format': 'unified_diff', 'artifact': None,
                 'artifact_sha256': None, 'usage': None, 'error_code': None,
-                'created_at': '2026-11-24T00:00:00Z',
+                'created_at': STAMP_1,
                 'owner_assignment_ref': None, 'executor_task_id': EXECUTOR,
                 'claude_result': {
                     'executor_task_id': EXECUTOR, 'head_sha': HEAD,
-                    'recorded_at': '2026-11-24T00:00:00Z',
+                    'recorded_at': STAMP_1,
                 },
             },
             claims=[_formal_claim(actor='Codex', account_mode='CODEX_CLI')],
@@ -567,7 +567,7 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
                 'egress_basis': 'bounded', 'input_bytes': 10, 'max_tokens': None,
                 'artifact_format': 'unified_diff', 'artifact': _DIFF,
                 'artifact_sha256': _DIFF_SHA256, 'usage': None, 'error_code': None,
-                'created_at': '2026-11-24T00:00:00Z', 'executor_task_id': EXECUTOR,
+                'created_at': STAMP_1, 'executor_task_id': EXECUTOR,
             },
             claims=[_formal_claim(actor='Codex', account_mode='CODEX_CLI')],
         )
@@ -599,30 +599,17 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
         self.assertEqual(replay['code'], 'ARBITER_PENDING')
 
     def test_replay_claimed_becomes_unknown(self):
-        claim = {
-            'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD, 'version': 2,
-            'state': 'CLAIMED', 'reviewer_task': 'reviewer-22222222222222222222',
-            'native_session_id': None, 'account_mode': 'ROLES',
-            'claimed_at': '2026-11-24T00:15:00Z', 'updated_at': '2026-11-24T00:15:00Z',
-            'purpose': 'dispute_ruling',
-            'dispute': {
-                'pr': PR, 'finding_id': FINDING, 'head_sha': HEAD,
-                'review_version': REVIEW_VERSION, 'dispute_text_sha256': '8' * 64,
-            },
-            'reviewer': 'codex-reviewer',
-        }
+        claim = tdrcr._arbiter_claim(CONTRACT, state='CLAIMED')
         self._seed(
             claims=[_formal_claim(), claim],
-            disputes=[{
-                'finding_id': FINDING, 'pr': PR, 'head_sha': HEAD,
-                'review_version': REVIEW_VERSION, 'severity': 'High',
-                'state': 'OPEN', 'evidence_ref': EVIDENCE_REF,
-                'opened_at': '2026-11-24T00:10:00Z',
-                'arbiter_claim': {'reviewer_task': claim['reviewer_task'], 'version': 2},
-                'history': [{'event': 'ARBITER_CLAIMED', 'at': '2026-11-24T00:15:00Z',
-                             'actor': f'pm:{PM_SESSION}', 'head_sha': HEAD,
-                             'refs': {'reviewer_task': claim['reviewer_task'], 'version': 2}}],
-            }],
+            disputes=[dict(
+                tdrcr._dispute_entry(),
+                evidence_ref=EVIDENCE_REF,
+                arbiter_claim={'reviewer_task': claim['reviewer_task'], 'version': claim['version']},
+                history=[{'event': 'ARBITER_CLAIMED', 'at': tdrcr.STAMP_2,
+                          'actor': f'pm:{PM_SESSION}', 'head_sha': HEAD,
+                          'refs': {'reviewer_task': claim['reviewer_task'], 'version': claim['version']}}],
+            )],
         )
         with self.assertRaises(LLMToolError) as caught:
             task_submission_cli.dispute_arbitrate(
@@ -752,8 +739,8 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
         self._seed()
         before = self._record_bytes()
         for bad_comment in (
-            _dispute_comment(updated='2026-11-24T00:09:30Z'),
-            _dispute_comment(created='2026-11-24T00:11:00Z'),
+            _dispute_comment(updated='2026-11-22T23:59:30Z'),
+            _dispute_comment(created='2026-11-23T00:01:00Z'),
         ):
             with self.assertRaises(LLMToolError) as caught:
                 task_submission_cli.dispute_arbitrate(
