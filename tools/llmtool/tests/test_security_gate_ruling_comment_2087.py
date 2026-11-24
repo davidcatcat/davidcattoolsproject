@@ -516,5 +516,43 @@ class RulingClaimSkippedTests(_GateAsserts, unittest.TestCase):
             NOT_PASS)
 
 
+class RulingSecurityVersionMarkerTests(_GateAsserts, unittest.TestCase):
+    """PR #2676 F1: a ruling-shaped comment with a security version marker is not skipped."""
+
+    def test_ruling_with_security_version_marker_refuses_alone_and_with_pass(self):
+        sec_pass = _verdict_comment(2, 'PASS', HEAD, version=91)
+        for label, extra in (
+            ('v91', 'Version: v91'),
+            ('v92', 'Version: v92'),
+            ('indented_v91', '  Version: v91'),
+            ('behind_cr_v91', 'Reasons follow.\rVersion: v91'),
+        ):
+            with self.subTest(variant=label):
+                ruling = _ruling_comment(extra_lines=(extra,))
+                self.assertFalse(task_advance._is_ruling_comment(ruling, ruling['body']))
+                self.assertEqual(task_advance._security_comment_code([ruling], HEAD), UNKNOWN)
+                self.assertRefused(_run_merge_once([ruling]), UNKNOWN)
+                self.assertEqual(
+                    task_advance._security_comment_code([ruling, sec_pass], HEAD), UNKNOWN)
+                self.assertRefused(_run_merge_once([ruling, sec_pass]), UNKNOWN)
+
+    def test_same_ruling_without_version_marker_is_still_skipped(self):
+        sec_pass = _verdict_comment(2, 'PASS', HEAD, version=91)
+        ruling = _ruling_comment()
+        self.assertTrue(task_advance._is_ruling_comment(ruling, ruling['body']))
+        self.assertIsNone(task_advance._security_comment_code([ruling], HEAD))
+        self.assertMerged(_run_merge_once([ruling]))
+        self.assertMerged(_run_merge_once([ruling, sec_pass]))
+
+    def test_ruling_with_version_below_security_min_keeps_existing_behaviour(self):
+        below_min = task_advance._SECURITY_VERSION_MIN - 1
+        for version in (2, below_min):
+            with self.subTest(version=version):
+                ruling = _ruling_comment(extra_lines=(f'Version: v{version}',))
+                self.assertTrue(task_advance._is_ruling_comment(ruling, ruling['body']))
+                self.assertIsNone(task_advance._security_comment_code([ruling], HEAD))
+                self.assertMerged(_run_merge_once([ruling]))
+
+
 if __name__ == '__main__':
     unittest.main()
