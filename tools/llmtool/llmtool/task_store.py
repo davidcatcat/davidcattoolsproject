@@ -4913,7 +4913,7 @@ class TaskStore:
                 return holders
             directory = self._dirfd(create=False)
             if directory is None:
-                return holders
+                _fail('TASK_D6_BINDING_SCAN_FAILED')
             try:
                 for other_id in task_ids:
                     if other_id == task_id:

@@ -141,6 +141,28 @@ class D6ScanPrefilterTests(unittest.TestCase):
         self.assertEqual(caught.exception.task_store_error_code, 'TASK_D6_ALREADY_BOUND')
         self.assertNotIn(claimant['task_id'], self.store.task_ids())
 
+    def test_scan_fails_closed_when_directory_disappears_after_listing(self):
+        holder = self._d6_task('d6-scan-disappearing-dir')
+        self.store.create(holder)
+        claimant = self._d6_task('d6-scan-disappearing-dir')
+        real_dirfd = self.store._dirfd
+        no_create_calls = 0
+
+        def disappearing_dirfd(create=True):
+            nonlocal no_create_calls
+            if not create:
+                no_create_calls += 1
+                if no_create_calls == 2:
+                    return None
+            return real_dirfd(create=create)
+
+        with patch.object(self.store, '_dirfd', side_effect=disappearing_dirfd):
+            with self.assertRaises(LLMToolError) as caught:
+                self.store.create(claimant)
+        self.assertEqual(no_create_calls, 2)
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_D6_BINDING_SCAN_FAILED')
+        self.assertNotIn(claimant['task_id'], self.store.task_ids())
+
 
 if __name__ == '__main__':
     unittest.main()
