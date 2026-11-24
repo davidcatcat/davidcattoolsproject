@@ -1,5 +1,6 @@
 """#2087 (Advisor slice A2-iii-2): unit tests for task dispute arbitrate launch and Codex completion."""
 
+import argparse
 import hashlib
 import io
 import json
@@ -14,7 +15,6 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from llmtool import (  # noqa: E402
-    cli,
     review_dispatch,
     task_completion,
     task_store,
@@ -343,15 +343,16 @@ class _ArbitrateLaunchCase(unittest.TestCase):
 
 class ArbitrateParserTests(unittest.TestCase):
     def test_parser_rejects_reviewer_session_outcome_or_evidence_options(self):
-        parser = cli.build_parser()
-        args = parser.parse_args(['task', 'dispute', 'arbitrate', TASK, '--pr', '42', '--finding', 'F1'])
+        parser = argparse.ArgumentParser()
+        task_submission_cli.add_task_submission_parsers(parser.add_subparsers(dest='action'))
+        args = parser.parse_args(['dispute', 'arbitrate', TASK, '--pr', '42', '--finding', 'F1'])
         self.assertEqual(args.dispute_action, 'arbitrate')
         for bad_opt in ('--reviewer', '--reviewer-task', '--reviewer-session',
                         '--outcome', '--evidence-ref'):
             with patch('sys.stderr', new_callable=io.StringIO):
                 with self.assertRaises(SystemExit) as caught:
                     parser.parse_args([
-                        'task', 'dispute', 'arbitrate', TASK,
+                        'dispute', 'arbitrate', TASK,
                         '--pr', '42', '--finding', 'F1', bad_opt, 'val',
                     ])
                 self.assertEqual(caught.exception.code, 2)
@@ -359,29 +360,8 @@ class ArbitrateParserTests(unittest.TestCase):
 
 class ArbitrateLaunchTests(_ArbitrateLaunchCase):
     def test_disallowed_policy_refuses_dispute_arbiter_unavailable_before_any_write(self):
-        # Claude Developer + Codex Reviewer -> chooses claude-reviewer; pause claude-reviewer.
-        self._seed(
-            developer={
-                'assignment_id': 'f' * 32, 'selection_source': 'PM',
-                'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'claude',
-                'provider_type': None, 'model': None,
-                'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
-                'session_id': 'dev-' + ('1' * 32), 'source_sha': HEAD,
-                'source_sha_binding': 'D6_REGISTRY_OBSERVED',
-                'read_paths': ['tools/a.py'], 'write_paths': ['tools/a.py'],
-                'acceptance': ['A1'], 'context_sha256': '1' * 64,
-                'egress_basis': 'bounded', 'input_bytes': 10, 'max_tokens': None,
-                'artifact_format': 'unified_diff', 'artifact': None,
-                'artifact_sha256': None, 'usage': None, 'error_code': None,
-                'created_at': STAMP_1,
-                'owner_assignment_ref': None, 'executor_task_id': EXECUTOR,
-                'claude_result': {
-                    'executor_task_id': EXECUTOR, 'head_sha': HEAD,
-                    'recorded_at': STAMP_1,
-                },
-            },
-            claims=[_formal_claim(actor='Codex', account_mode='CODEX_CLI')],
-        )
+        # AGY (Gemini) Developer + Codex Reviewer -> chooses claude-reviewer; pause claude-reviewer.
+        self._seed(claims=[_formal_claim(actor='Codex', account_mode='CODEX_CLI')])
         before = self._record_bytes()
         worker_policy_fixture.update(self.policy_path, 'claude-reviewer', 'PAUSED')
         with self.assertRaises(LLMToolError) as caught:
@@ -800,7 +780,12 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
 
     def test_formal_codex_unchanged(self):
         self._seed(claims=[])
-        formal_text = _verdict_text(actor='Codex', status='PASS', head=HEAD, version=1)
+        formal_text = (
+            '<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->\n'
+            f'Verdict: PASS | Version: v1 | HEAD: {HEAD}\n'
+            f'{task_completion._FORMAL_ACCEPT}\n'
+            f'{BINDING}\n'
+        )
         raw_jsonl = _codex_jsonl({
             'task_id': TASK, 'run_id': RUN, 'head': HEAD,
             'verdict': 'PASS', 'review': formal_text,
