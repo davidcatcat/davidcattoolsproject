@@ -2696,6 +2696,11 @@ def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
             store=store, task_id=args.task_id, executor_task=args.executor_task,
             pr_number=args.pr, repair_task_id=recover))
     from .review_repair import repair_review
+    high_debug_kwargs = {
+        key: getattr(args, key)
+        for key in ('high_debug_task', 'high_debug_ref', 'high_debug_family')
+        if getattr(args, key, None) is not None
+    }
     result = repair_review(
         store=store, task_id=args.task_id,
         executor_task=args.executor_task, pr_number=args.pr,
@@ -2706,9 +2711,7 @@ def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
         review_dispatcher=review_dispatcher,
         delegate_callable=delegate_callable,
         repair_task_recorder=repair_task_recorder,
-        high_debug_task=getattr(args, 'high_debug_task', None),
-        high_debug_ref=getattr(args, 'high_debug_ref', None),
-        high_debug_family=getattr(args, 'high_debug_family', None))
+        **high_debug_kwargs)
     return _print(result)
 
 

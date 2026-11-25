@@ -1,11 +1,8 @@
 import hashlib
-import json
 import tempfile
 import unittest
-from argparse import Namespace
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
