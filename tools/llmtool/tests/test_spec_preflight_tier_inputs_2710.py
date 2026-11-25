@@ -127,7 +127,24 @@ class SpecPreflightTierInputs2710Tests(unittest.TestCase):
         spec = dict(
             self.base_spec,
             base=base_sha,
-            read=["existing.py"],
+            read=["existing.py", "new_file.py"],
+            write=["new_file.py"],
+        )
+        status, output = self._run_main(spec, tier=3, extra_args=("--repo", str(repo)))
+        self.assertEqual(status, 2)
+        self.assertEqual(output, "SPEC_LADDER_TIER_EXCEEDED:required=4,current=3\n")
+
+        status_ok, output_ok = self._run_main(spec, tier=4, extra_args=("--repo", str(repo)))
+        self.assertEqual(status_ok, 0)
+        self.assertEqual(output_ok, "SPEC_PREFLIGHT_OK:tier=4,current=4\n")
+
+    def test_new_write_file_in_read_without_base_requires_tier_4(self):
+        repo = self.dir / "repo_new_no_base"
+        repo.mkdir()
+        (repo / "existing.py").write_bytes(b"x" * 100)
+        spec = dict(
+            self.base_spec,
+            read=["existing.py", "new_file.py"],
             write=["new_file.py"],
         )
         status, output = self._run_main(spec, tier=3, extra_args=("--repo", str(repo)))
@@ -178,18 +195,32 @@ class SpecPreflightTierInputs2710Tests(unittest.TestCase):
     def test_unmeasurable_read_file_fails_preflight(self):
         repo = self.dir / "repo"
         repo.mkdir()
+        (repo / "existing.py").write_bytes(b"x")
         (repo / "subdir").mkdir()
         (self.dir / "escape.py").write_bytes(b"e")
-        for bad_read in (["missing.py"], ["subdir"], ["../escape.py"]):
+        for bad_read in (["subdir"], ["../escape.py"]):
             with self.subTest(read=bad_read):
                 spec = dict(
                     self.base_spec,
                     read=bad_read,
-                    write=["missing.py"],
+                    write=["existing.py"],
                 )
                 status, output = self._run_main(spec, tier=6, extra_args=("--repo", str(repo)))
                 self.assertEqual(status, 1)
                 self.assertEqual(output, "SPEC_PREFLIGHT_FAIL:read_path_unmeasurable\n")
+
+        missing_spec = dict(
+            self.base_spec,
+            read=["missing.py"],
+            write=["existing.py"],
+        )
+        self.assertEqual(
+            spec_preflight._measure_read_bytes(missing_spec, repo, None),
+            (0, "read_path_unmeasurable"),
+        )
+        status, output = self._run_main(missing_spec, tier=6, extra_args=("--repo", str(repo)))
+        self.assertEqual(status, 1)
+        self.assertEqual(output, "SPEC_PREFLIGHT_FAIL:read_path_missing\n")
 
     def test_non_gw_agent_spec_keeps_existing_ladder_behaviour(self):
         for provider in (None, "codex"):
@@ -263,8 +294,10 @@ class SpecPreflightTierInputs2710Tests(unittest.TestCase):
 
         repo = self.dir / "repo_no_ladder"
         repo.mkdir()
+        (repo / "small.py").write_bytes(b"s")
+        (repo / "subdir").mkdir()
         (repo / "huge.py").write_bytes(b"h" * 25000)
-        spec_missing_read = dict(self.base_spec, read=["absent.py"], write=["absent.py"])
+        spec_missing_read = dict(self.base_spec, read=["subdir"], write=["small.py"])
         spec_path.write_text(json.dumps(spec_missing_read), encoding="utf-8")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

@@ -378,6 +378,8 @@ def _git_blob_sizes(repo_dir: Path, base: str, paths: list[str]) -> dict[str, in
         parts = line.rsplit(" ", 2)
         if len(parts) == 3 and parts[1] == "blob" and parts[2].isdigit():
             sizes[path] = int(parts[2])
+        elif line.endswith(" missing"):
+            sizes[path] = -2
         else:
             sizes[path] = -1
     return sizes
@@ -407,6 +409,13 @@ def _measure_read_bytes(
     if not unique_reads:
         return 0, None
 
+    write_set: set[str] = set()
+    for raw in _spec_paths(spec, "write", "write_paths"):
+        if isinstance(raw, str):
+            norm = _norm_path(raw)
+            if _is_safe_rel_path(norm):
+                write_set.add(Path(norm).as_posix())
+
     if base is not None:
         sizes = _git_blob_sizes(repo_dir, base, unique_reads)
         if sizes is None:
@@ -414,6 +423,8 @@ def _measure_read_bytes(
         total = 0
         for norm in unique_reads:
             size = sizes.get(norm, -1)
+            if size == -2 and norm in write_set:
+                continue
             if size < 0:
                 return 0, "read_path_unmeasurable"
             total += size
@@ -431,6 +442,8 @@ def _measure_read_bytes(
         except (OSError, ValueError):
             return 0, "read_path_unmeasurable"
         if not target.is_file():
+            if norm in write_set and not target.exists() and not target.is_symlink():
+                continue
             return 0, "read_path_unmeasurable"
         try:
             total += target.stat().st_size
