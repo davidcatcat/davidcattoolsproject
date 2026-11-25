@@ -1,4 +1,4 @@
-"""``llmtool ci main-incident scan|show|confirm`` (#1706 R3, design sections 5 and 9).
+"""``llmtool ci main-incident scan|show|confirm|jobs`` (#1706 R3, #2602 slice 3).
 
 ``scan`` reads main commits and CI runs through an injectable ``github_get``
 (GET reads only; nothing is written to GitHub), runs the R1/R2 detection,
@@ -42,6 +42,7 @@ import re
 import sys
 from urllib.parse import quote
 
+from . import main_ci_job_fetch
 from . import main_incident as mi
 from . import main_incident_graph as graph
 from . import main_incident_store as store
@@ -96,6 +97,8 @@ def add_main_incident_parser(actions):
     confirm.add_argument('--scope', required=True, help='comma-separated PR numbers')
     confirm.add_argument('--reason', required=True)
     confirm.add_argument('--pm-session', default=None, help='caller PM session (else from the runtime)')
+    sub.add_parser(
+        'jobs', help='Report failed jobs for the latest main Linux and FULL Mac runs')
     return incident
 
 
@@ -419,6 +422,18 @@ def _show(args, root):
     return store.get(args.incident, root), 0
 
 
+def _jobs(github_get):
+    """Print the bounded read-only main CI job report; never touches the store."""
+    if github_get is None:
+        from .task_completion import _github_get as github_get
+    payload = main_ci_job_fetch.inspect_jobs(github_get)
+    print(json.dumps(payload, sort_keys=True))
+    if payload['state'] == main_ci_job_fetch.UNKNOWN:
+        print(f'llmtool: {payload["reason"]}', file=sys.stderr)
+        return 2
+    return 1 if payload['state'] == main_ci_job_fetch.RED else 0
+
+
 def _scope(text):
     """Sorted unique PR numbers from ``1,#2, 3``; None when malformed or empty."""
     if not isinstance(text, str):
@@ -476,8 +491,10 @@ def _confirm(args, root, environ, state_root, now):
 
 def run_main_incident(args, *, github_get=None, root=None, environ=None, state_root=None,
                       now=None, read_texts=None):
-    """Print one JSON document; exit 0 done, 1 refused, 2 GitHub read unavailable."""
+    """Print one JSON document; exit 0 done, 1 refused or RED, 2 read unavailable."""
     action = args.incident_action
+    if action == 'jobs':
+        return _jobs(github_get)
     try:
         if action == 'show':
             payload, status = _show(args, root)
@@ -496,7 +513,7 @@ def run_main_incident(args, *, github_get=None, root=None, environ=None, state_r
         if code is None:
             raise
         payload, status = {'code': code}, 1
-    if status == 1:
+    if status == 1 and action != 'jobs':
         payload = dict(payload, refused=True, incident_id=getattr(args, 'incident', None))
     print(json.dumps(payload, sort_keys=True, indent=2 if action == 'show' else None))
     if status:
