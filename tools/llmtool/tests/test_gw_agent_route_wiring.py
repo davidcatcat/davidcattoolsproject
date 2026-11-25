@@ -2128,6 +2128,49 @@ class GwAgentRealStoreTests(unittest.TestCase):
                          (0, 'PM_EVIDENCE_READY', []))
         self.assertEqual(callback['evidence']['verification_state'], 'READY')
 
+    def test_active_pm_packet_over_provider_cap_reaches_the_active_pm(self):
+        # #2718: the packet carries the whole PM response. A live-runtime PM
+        # makes no provider call, so the 64 KiB provider request cap must not
+        # refuse a verified result whose packet is larger.
+        target = 'gw-agent-large-response.md'
+        original = self._active_pm_task
+
+        def large_response_task(name):
+            task_id = original(name)
+            response = json.loads(self.store.get(task_id)['response'])
+            response['summary'] = 'bounded ' + 'x' * (70 * 1024)
+            self.store.update(task_id, response=json.dumps(response))
+            return task_id
+
+        with patch.object(self, '_active_pm_task', large_response_task):
+            code, task = self._delegate(target)
+        callback = task['developer']['direct_result_callback']
+        self.assertEqual((code, callback['state'], callback['missing_gates']),
+                         (0, 'PM_EVIDENCE_READY', []))
+        packet = task_submission_cli._direct_result_packet(
+            task, task['developer'], 'executor-d6', callback['evidence'])
+        size = len(json.dumps(packet, ensure_ascii=True, sort_keys=True,
+                              separators=(',', ':')).encode('utf-8'))
+        self.assertGreater(size, task_submission_cli.PROVIDER_PM_PACKET_MAX_BYTES)
+
+    def test_active_pm_packet_over_active_cap_is_still_refused(self):
+        target = 'gw-agent-huge-response.md'
+        original = self._active_pm_task
+
+        def huge_response_task(name):
+            task_id = original(name)
+            response = json.loads(self.store.get(task_id)['response'])
+            response['summary'] = 'bounded ' + 'x' * (
+                task_submission_cli.ACTIVE_PM_PACKET_MAX_BYTES + 1)
+            self.store.update(task_id, response=json.dumps(response))
+            return task_id
+
+        with patch.object(self, '_active_pm_task', huge_response_task), \
+                self.assertRaisesRegex(LLMToolError, 'exceeds the supported size'):
+            self._delegate(target)
+        callback = self.store.get(self.task_id)['developer']['direct_result_callback']
+        self.assertNotEqual(callback['state'], 'PM_EVIDENCE_READY')
+
     def test_public_repo_data_class_succeeds_on_real_store(self):
         target = 'gw-agent-public-repo.md'
         code, task = self._delegate(

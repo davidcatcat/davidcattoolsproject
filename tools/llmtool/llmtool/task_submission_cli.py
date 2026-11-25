@@ -627,6 +627,10 @@ def _record(task_id, run_id, session_id, profile, prompt, *, state='PM_PENDING',
     return record
 
 
+PROVIDER_PM_PACKET_MAX_BYTES = 64 * 1024
+ACTIVE_PM_PACKET_MAX_BYTES = 1024 * 1024
+
+
 def _active_pm_runtime(task):
     """True when the Task's PM is the live runtime recorded by record-pm.
 
@@ -12586,7 +12590,11 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
     result = evidence['result']
     packet = _direct_result_packet(task, developer, executor_task_id, evidence)
     content = json.dumps(packet, ensure_ascii=True, sort_keys=True, separators=(',', ':'))
-    _screen_text(content, 64 * 1024)
+    # #2718: 64 KiB bounds a provider PM request. A live-runtime PM gets no
+    # request; it reads the persisted evidence, so only the larger store-side
+    # bound applies. The content screen is the same on both paths.
+    _screen_text(content, ACTIVE_PM_PACKET_MAX_BYTES if _active_pm_runtime(task)
+                 else PROVIDER_PM_PACKET_MAX_BYTES)
     if _active_pm_runtime(task):
         # No provider profile exists for a live-runtime PM (#352 G6): keep the
         # verified result durable for `task show` and never resolve a profile.
