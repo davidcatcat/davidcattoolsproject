@@ -11495,6 +11495,74 @@ def _completion_with_trusted_main_pin(task, pin):
     return {**completion, 'evidence': {**evidence, 'trusted_main_pin': pin}}
 
 
+_STACKED_COMPLETION_STATES = frozenset(('PM_RETURNED', 'PM_EVIDENCE_READY'))
+_HEX40_RE = re.compile(r'[0-9a-f]{40}')
+
+
+def _stacked_chain(task, store):
+    """Build the verified root-first stacked-Task chain for ``task``, or None.
+
+    Walks ``continues`` backwards from ``task``. Any cycle, depth above
+    ``_CONTINUATION_LINEAGE_MAX``, missing/non-matching predecessor or
+    exception returns None (fail closed to the strict single-Task check).
+    """
+    try:
+        if type(task) is not dict:
+            return None
+        current_id = task.get('task_id')
+        developer = task.get('developer')
+        if type(current_id) is not str or not current_id or type(developer) is not dict:
+            return None
+        expected_head = developer.get('source_sha')
+        if type(expected_head) is not str or _HEX40_RE.fullmatch(expected_head) is None:
+            return None
+        seen = {current_id}
+        chain = []
+        current = task
+        depth = 0
+        while True:
+            pred_id = current.get('continues')
+            if pred_id is None:
+                break
+            if type(pred_id) is not str or not pred_id or pred_id in seen:
+                return None
+            depth += 1
+            if depth > _CONTINUATION_LINEAGE_MAX:
+                return None
+            seen.add(pred_id)
+            pred = store.get(pred_id)
+            if type(pred) is not dict or pred.get('task_id') != pred_id:
+                break
+            completion = pred.get('completion')
+            evidence = completion.get('evidence') if type(completion) is dict else None
+            result_head = evidence.get('result_head') if type(evidence) is dict else None
+            pred_dev = pred.get('developer')
+            pred_source = pred_dev.get('source_sha') if type(pred_dev) is dict else None
+            pred_writes = pred_dev.get('write_paths') if type(pred_dev) is dict else None
+            if (type(completion) is not dict or
+                    completion.get('state') not in _STACKED_COMPLETION_STATES or
+                    type(result_head) is not str or
+                    _HEX40_RE.fullmatch(result_head) is None or
+                    result_head != expected_head or
+                    type(pred_source) is not str or
+                    _HEX40_RE.fullmatch(pred_source) is None or
+                    type(pred_writes) is not list or not pred_writes):
+                break
+            chain.append({
+                'source_sha': pred_source,
+                'result_sha': result_head,
+                'write_paths': list(pred_writes),
+            })
+            current = pred
+            expected_head = pred_source
+        if not chain:
+            return None
+        chain.reverse()
+        return chain
+    except Exception:
+        return None
+
+
 def run_task_complete(args, *, store=None, reviewer_adapter=None):
     """Verify an Executor result and make one non-replayable original-profile PM call.
 
@@ -11614,6 +11682,9 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
             common_dir=initial.get('common_dir'), root=initial.get('root'),
             branch=initial.get('branch'), source_sha=developer['source_sha'],
             trusted_base_sha=main_pin['sha'])
+        stacked_chain = _stacked_chain(task, store) if artifact_segments is None else None
+        chain_kwarg = ({'stacked_chain': stacked_chain}
+                       if type(stacked_chain) is list and artifact_segments is None else {})
         if claude_route:
             git_evidence = task_completion.collect_claude_result(
                 task_id=args.executor_task, expected_common_dir=initial.get('common_dir'),
@@ -11626,7 +11697,8 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
                 trusted_base_sha=main_pin['sha'],
                 # #1886: PM continuation repairs on this D6 extend the Claude result.
                 **({'artifact_segments': artifact_segments}
-                   if artifact_segments is not None else {}))
+                   if artifact_segments is not None else {}),
+                **chain_kwarg)
         else:
             git_evidence = task_completion.collect_executor_result(
                 task_id=args.executor_task, expected_common_dir=initial.get('common_dir'),
@@ -11639,7 +11711,8 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
                 artifact_sha256=developer['artifact_sha256'],
                 trusted_base_sha=main_pin['sha'],
                 **({'artifact_segments': artifact_segments}
-                   if artifact_segments is not None else {}))
+                   if artifact_segments is not None else {}),
+                **chain_kwarg)
         main_pin = dict(main_pin)
         result_heads = list(main_pin['verified_result_heads'])
         if git_evidence['result_head'] not in result_heads:
