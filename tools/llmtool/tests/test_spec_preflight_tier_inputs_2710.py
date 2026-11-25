@@ -296,6 +296,23 @@ class SpecPreflightTierInputs2710Tests(unittest.TestCase):
                 self.assertEqual(status, 1)
                 self.assertEqual(output, "SPEC_PREFLIGHT_FAIL:packet_file_unmeasurable\n")
 
+    def test_malformed_read_or_read_paths_is_refused(self):
+        repo = self.dir / "repo_malformed_read"
+        repo.mkdir()
+        (repo / "a.py").write_bytes(b"a" * 25000)
+        cases = (
+            {"read": "a.py"},
+            {"read_paths": "a.py"},
+            {"read": 123},
+            {"read": "a.py", "read_paths": ["a.py"]},
+        )
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                spec = dict(self.base_spec, write=["a.py"], **overrides)
+                status, output = self._run_main(spec, tier=6, extra_args=("--repo", str(repo)))
+                self.assertEqual(status, 1)
+                self.assertEqual(output, "SPEC_PREFLIGHT_FAIL:read_path_unmeasurable\n")
+
 
 if __name__ == "__main__":
     unittest.main()

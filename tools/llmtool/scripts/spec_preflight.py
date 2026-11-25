@@ -386,6 +386,10 @@ def _git_blob_sizes(repo_dir: Path, base: str, paths: list[str]) -> dict[str, in
 def _measure_read_bytes(
     spec: dict[str, Any], repo_dir: Path, base: str | None
 ) -> tuple[int, str | None]:
+    for key in ("read", "read_paths"):
+        raw = spec.get(key)
+        if raw is not None and not isinstance(raw, list):
+            return 0, "read_path_unmeasurable"
     reads = _spec_paths(spec, "read", "read_paths")
     unique_reads: list[str] = []
     seen: set[str] = set()
