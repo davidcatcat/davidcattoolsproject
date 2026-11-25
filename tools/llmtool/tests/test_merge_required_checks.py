@@ -103,7 +103,7 @@ class MergeRequiredCheckSkippedTests(unittest.TestCase):
                                  'MERGE_CHECKS_NOT_GREEN')
         self.assertEqual(merge_checks(CODE_FILES, [run(LINUX, 'cancelled'),
                                                    run(LINUX, 'skipped'), run(MACOS)]),
-                         'MERGE_CHECKS_NOT_GREEN')
+                         'MERGE_REQUIRED_CHECK_SKIPPED')
 
     def test_older_failed_run_is_excused_only_by_a_newer_success(self):
         self.assertIsNone(merge_checks(CODE_FILES, [run(MACOS, 'failure'), run(LINUX), run(MACOS)]))

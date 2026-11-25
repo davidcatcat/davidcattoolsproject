@@ -612,15 +612,24 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
     if not check_runs:
         return 'MERGE_CHECKS_MISSING'
     superseded = {}
+    cancelled_superseded = {}
     for item in check_runs:
         if (type(item) is dict and type(item.get('id')) is int and type(item.get('name')) is str and
-                item.get('head_sha') == head and item.get('status') == 'completed' and
-                item.get('conclusion') == 'success'):
-            superseded[item['name']] = max(item['id'], superseded.get(item['name'], 0))
-    # An older run is excused only by a newer SUCCESS of the same check name (#1433).
+                item.get('head_sha') == head and item.get('status') == 'completed'):
+            if item.get('conclusion') == 'success':
+                superseded[item['name']] = max(item['id'], superseded.get(item['name'], 0))
+            if item.get('conclusion') in ('success', 'skipped'):
+                cancelled_superseded[item['name']] = max(
+                    item['id'], cancelled_superseded.get(item['name'], 0))
+    # #2734: a cancelled run is also excused by a newer SUCCESS or SKIPPED run of the
+    # same exact-head check name. Every other run is excused only by a newer SUCCESS
+    # of the same check name (#1433).
     if any(type(item) is not dict or type(item.get('name')) is not str or
            item.get('head_sha') != head or
-           (not (type(item.get('id')) is int and item['id'] < superseded.get(item['name'], 0)) and
+           (not (type(item.get('id')) is int and
+                 (item['id'] < superseded.get(item.get('name'), 0) or
+                  (item.get('conclusion') == 'cancelled' and
+                   item['id'] < cancelled_superseded.get(item.get('name'), 0)))) and
             (item.get('status') != 'completed' or
              item.get('conclusion') not in ('success', 'skipped'))) for item in check_runs):
         return 'MERGE_CHECKS_NOT_GREEN'
