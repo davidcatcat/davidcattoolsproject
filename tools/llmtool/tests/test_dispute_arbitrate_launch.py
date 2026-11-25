@@ -590,14 +590,17 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
         ac = [c for c in stored['review_dispatch_claim'] if c.get('purpose') == 'dispute_ruling'][0]
         self.assertEqual(ac['state'], 'DISPATCHED')
         # Replay reports ARBITER_PENDING without launching again
-        replay = task_submission_cli.dispute_arbitrate(
-            self.store, TASK, pr=PR, finding_id=FINDING,
-            current_head=lambda _r, _p: HEAD,
-            github_get=lambda _p: _dispute_comment(),
-            create_d6=self.fake_create_d6,
-            dispatch_session=lambda **_kw: self.fail('must not relaunch'),
-            bind_session=self.fake_bind,
-        )
+        with patch('llmtool.role_config.resolve_role',
+                   return_value=self._resolve_role('claude-reviewer')), \
+             patch('llmtool.review_transcript.session_state', return_value='RUNNING'):
+            replay = task_submission_cli.dispute_arbitrate(
+                self.store, TASK, pr=PR, finding_id=FINDING,
+                current_head=lambda _r, _p: HEAD,
+                github_get=lambda _p: _dispute_comment(),
+                create_d6=self.fake_create_d6,
+                dispatch_session=lambda **_kw: self.fail('must not relaunch'),
+                bind_session=self.fake_bind,
+            )
         self.assertEqual(replay['code'], 'ARBITER_PENDING')
 
     def _seed_refused_arbiter(self, *, receipt=True):

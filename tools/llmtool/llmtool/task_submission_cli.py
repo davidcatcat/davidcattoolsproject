@@ -2802,11 +2802,13 @@ def _dispute_head(record, pr, current_head):
     return head
 
 
-def _dispute_arbiter_d6_binding(record, *, reviewer, reviewer_task, head, require_clean=False):
+def _dispute_arbiter_d6_binding(record, *, reviewer, reviewer_task, head,
+                                require_clean=False, common_dir=None):
     """Verify the arbiter's registered D6 worktree and HEAD before launch or completion."""
     completion = record.get('completion')
     evidence = completion.get('evidence') if type(completion) is dict else None
-    common_dir = evidence.get('common_dir') if type(evidence) is dict else None
+    if common_dir is None:
+        common_dir = evidence.get('common_dir') if type(evidence) is dict else None
     executor_task = completion.get('executor_task_id') if type(completion) is dict else None
     if type(common_dir) is not str or not common_dir or reviewer_task == executor_task:
         _dispute_refuse('DISPUTE_ARBITER_UNVERIFIED')
@@ -3370,12 +3372,28 @@ def _replay_arbiter_claim(store, task_id, record, disputes, index, entry, *, pr,
     if state == 'UNKNOWN':
         _dispute_refuse('ARBITER_OUTCOME_UNKNOWN')
     if state == 'DISPATCHED':
-        return {
-            'task_id': task_id, 'state': 'DISPATCHED', 'code': 'ARBITER_PENDING',
-            'pr': pr, 'finding_id': finding_id, 'head_sha': head,
-            'reviewer': claim.get('reviewer'), 'reviewer_task': ac['reviewer_task'],
-            'reviewer_session': claim.get('native_session_id'), 'version': ac['version'],
-        }
+        from . import dispute_arbiter
+        collected = dispute_arbiter.collect_claude_ruling(store, record, entry, claim)
+        if type(collected) is str:
+            if collected == 'ARBITER_PENDING':
+                return {
+                    'task_id': task_id, 'state': 'DISPATCHED', 'code': 'ARBITER_PENDING',
+                    'pr': pr, 'finding_id': finding_id, 'head_sha': head,
+                    'reviewer': claim.get('reviewer'), 'reviewer_task': ac['reviewer_task'],
+                    'reviewer_session': claim.get('native_session_id'), 'version': ac['version'],
+                }
+            _dispute_refuse(collected)
+        res = collected.get('review_result') if type(collected) is dict else None
+        if type(res) is dict and res.get('verdict') == 'RULING':
+            return {
+                'task_id': task_id, 'state': 'COMPLETED', 'verdict': 'RULING',
+                'outcome': res.get('outcome'), 'pr': pr, 'finding_id': finding_id,
+                'head_sha': head, 'reviewer': collected.get('reviewer'),
+                'reviewer_task': ac['reviewer_task'],
+                'reviewer_session': collected.get('native_session_id'),
+                'version': ac['version'],
+            }
+        _dispute_refuse('DISPUTE_RULING_CLAIM_INVALID')
     if state == 'COMPLETED':
         res = claim.get('review_result')
         if type(res) is dict and res.get('verdict') == 'BLOCKED':
