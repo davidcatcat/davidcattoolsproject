@@ -41,14 +41,6 @@ class RecoveryEvidenceTests(unittest.TestCase):
             check(root, repair, CLAIM)
         self.assertEqual(caught.exception.review_repair_code, 'REPAIR_RECOVERY_EVIDENCE_INVALID')
 
-    def changed(self, path, value, profile='gw-agent'):
-        root, repair = records(profile)
-        target = repair
-        for key in path[:-1]:
-            target = target[key]
-        target[path[-1]] = value
-        return root, repair
-
     def test_valid_records_pass_e3(self):
         for profile in ('gw-agent', 'opencode', 'claude', 'agy'):
             root, repair = records(profile)
@@ -103,22 +95,53 @@ class RecoveryEvidenceTests(unittest.TestCase):
                  (('completion',), None)]
         for path, value in cases:
             with self.subTest(path=path):
-                self.refused(rec.check_execution, *self.changed(path, value))
+                self.refused(rec.check_execution, *self.changed(path, value, 'claude'))
+
+    def changed(self, path, value, profile='gw-agent'):
+        root, repair = records(profile)
+        if profile == 'claude':
+            repair['developer']['executor_task_id'] = 'exec-1'
+        target = repair
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
+        return root, repair
+
+    def test_e4_retaining_routes_accept_a_held_d6_session(self):
+        # #2718: per #1328/#1535 a later OpenCode or gw-agent run in a D6 keeps
+        # the D6's first session in its evidence; check_d6 binds it.
+        for profile in ('gw-agent', 'opencode'):
+            with self.subTest(profile=profile):
+                root, repair = self.changed(
+                    ('completion', 'evidence', 'executor_native_session_id'), 's-held', profile)
+                self.assertIsNone(rec.check_execution(root, repair, CLAIM))
+                for held in ('', None):
+                    self.refused(rec.check_execution, *self.changed(
+                        ('completion', 'evidence', 'executor_native_session_id'), held, profile))
+
+    def test_e4_other_routes_still_need_the_run_session(self):
+        for profile in ('claude', 'agy'):
+            with self.subTest(profile=profile):
+                self.refused(rec.check_execution, *self.changed(
+                    ('completion', 'evidence', 'executor_native_session_id'), 's-held', profile))
 
 
 class RecoveryD6Tests(unittest.TestCase):
     refused = RecoveryEvidenceTests.refused
 
-    def e5(self, result=HEAD, d6_root='/d6', branch='fix/x', ancestor=True, error=None):
+    def e5(self, result=HEAD, d6_root='/d6', branch='fix/x', ancestor=True, error=None,
+           held='s-1', registered_session='s-1'):
         root, repair = records()
-        repair['completion']['evidence'].update(root='/d6', branch='fix/x')
+        repair['completion']['evidence'].update(root='/d6', branch='fix/x',
+                                                executor_native_session_id=held)
         calls = []
 
         def registered_d6(task, executor_task):
             calls.append((task['task_id'], executor_task))
             if error is not None:
                 raise error
-            return SimpleNamespace(root=d6_root, branch=branch, result_sha=result), None
+            return SimpleNamespace(root=d6_root, branch=branch, result_sha=result,
+                                   native_session_id=registered_session), None
 
         def is_ancestor(git_root, older, newer):
             calls.append((git_root, older, newer))
@@ -148,6 +171,16 @@ class RecoveryD6Tests(unittest.TestCase):
         check, root, repair, _ = self.e5()
         del repair['completion']['evidence']['root']
         self.refused(check, root, repair)
+
+    def test_held_session_must_be_the_d6_registered_session(self):
+        # #2718: a held session that differs from the run's own passes only
+        # when the D6 registration holds exactly that session.
+        check, root, repair, _ = self.e5(held='s-held', registered_session='s-held')
+        self.assertIsNone(check(root, repair, CLAIM))
+        for registered in ('s-1', 's-other', None):
+            with self.subTest(registered=registered):
+                check, root, repair, _ = self.e5(held='s-held', registered_session=registered)
+                self.refused(check, root, repair)
 
 
 if __name__ == '__main__':

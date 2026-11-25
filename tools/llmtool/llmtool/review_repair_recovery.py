@@ -237,6 +237,7 @@ def check_ec2_continuation(store, root, repair, claim):
 # Delegates that also record an adapter authorization (worker_dispatch.authorize_dispatch).
 _ADAPTER_PROFILES = ('gw-agent', 'opencode')
 _TERMINAL = ('DEVELOPER_RESPONDED', 'DEVELOPER_OUTPUT_REJECTED')
+_SESSION_RETAINING_PROFILES = ('gw-agent', 'opencode')
 
 
 def _dicts(*values):
@@ -277,6 +278,13 @@ def check_execution(root, repair, claim):
     _dicts(developer.get('execution'), completion.get('evidence'))
     execution, evidence = developer['execution'], completion['evidence']
     session = execution.get('native_session_id')
+    held = evidence.get('executor_native_session_id')
+    # #1328/#1535: an OpenCode or gw-agent D6 keeps the first session it took,
+    # so a later run's evidence names that held session, not the run's own.
+    # check_d6 then requires the D6 registration to hold exactly that session.
+    session_ok = (held == session or
+                  (developer.get('provider_profile') in _SESSION_RETAINING_PROFILES and
+                   type(held) is str and bool(held)))
     if (developer.get('selection_source') != 'PM' or developer.get('state') not in _TERMINAL or
             developer.get('executor_task_id', claim['executor_task']) != claim['executor_task'] or
             developer.get('source_sha') != claim['head_sha'] or
@@ -284,7 +292,7 @@ def check_execution(root, repair, claim):
             type(execution.get('process_exit_code')) is not int or
             type(session) is not str or not session or
             evidence.get('executor_native_session') != 'VERIFIED' or
-            evidence.get('executor_native_session_id') != session or
+            not session_ok or
             completion.get('executor_task_id') != claim['executor_task'] or
             evidence.get('task_id') != repair.get('task_id') or
             evidence.get('run_id') != repair.get('run_id') or
@@ -302,7 +310,11 @@ def check_d6(root, repair, claim, *, registered_d6, is_ancestor):
     try:
         registration, _snapshot = registered_d6(root, claim['executor_task'])
         evidence, result = repair['completion']['evidence'], registration.result_sha
-        valid = (registration.root == evidence['root'] and
+        execution = repair['developer']['execution']
+        held = evidence.get('executor_native_session_id')
+        valid = ((held == execution.get('native_session_id') or
+                  registration.native_session_id == held) and
+                 registration.root == evidence['root'] and
                  registration.branch == evidence['branch'] and
                  type(result) is str and _HEX40.fullmatch(result) is not None and
                  (result == claim['head_sha'] or
