@@ -32,6 +32,11 @@ def _ci_draft():
             "not_run_checks": list(task_completion._NOT_RUN_CHECKS)}
 
 
+def _approval_refs():
+    return {"reviewer_host_policy_issue": 120, "worker_dispatch_issue": 410,
+            "worker_dispatch_evidence_pr": 411, "retain_release_issues": [289, 352]}
+
+
 class TrustCliTest(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp()).resolve()
@@ -84,7 +89,8 @@ class TrustCliTest(unittest.TestCase):
 
     def _write_draft(self):
         draft = self.home / "draft.json"
-        draft.write_text(json.dumps({"ci_trust": _ci_draft()}), encoding="utf-8")
+        draft.write_text(json.dumps({"repository": {"approval_refs": _approval_refs()},
+                                     "ci_trust": _ci_draft()}), encoding="utf-8")
         return draft
 
     def _replace(self, draft, digest):
@@ -195,7 +201,8 @@ class TrustCliTest(unittest.TestCase):
                                "https://github.com/davidcatcat/davidcattoolsproject.git"]},
         }
         draft = self.home / "draft.json"
-        draft.write_text(json.dumps({"ci_trust": _ci_draft()}), encoding="utf-8")
+        draft.write_text(json.dumps({"repository": {"approval_refs": _approval_refs()},
+                                     "ci_trust": _ci_draft()}), encoding="utf-8")
         loaded = mock.Mock(sha256="a" * 64)
         target = self.home / ".config" / "llmtool" / "trust.json"
         with mock.patch.object(trust_cli, "_owner_home", return_value=self.home), \
@@ -222,6 +229,37 @@ class TrustCliTest(unittest.TestCase):
                 trust_cli._init(argparse.Namespace(input=None, import_config=False))
             self.assertEqual(caught.exception.code, "TRUST_INIT_INPUT_INVALID")
 
+    def test_init_refuses_draft_without_approval_refs_before_any_write(self):
+        draft = self.home / "draft.json"
+        draft.write_text(json.dumps({"ci_trust": _ci_draft()}), encoding="utf-8")
+        target = self.home / ".config" / "llmtool" / "trust.json"
+        with mock.patch.object(trust_cli, "_owner_home", return_value=self.home), \
+             mock.patch.object(trust_cli, "_checkout_values", return_value={
+                 "canonical_root": "/repo", "workspace_root": "/workspace",
+                 "tasks_root": "/workspace/tasks", "repository": {"slug": "owner/repo",
+                 "allowed_origins": ["https://github.com/owner/repo.git"]}}):
+            with self.assertRaises(trust_cli.TrustError) as caught:
+                trust_cli._init(argparse.Namespace(input=str(draft), import_config=False))
+        self.assertEqual(caught.exception.code, "TRUST_INIT_INPUT_INVALID")
+        self.assertFalse(target.exists())
+        self.assertFalse((self.home / ".config").exists())
+
+    def test_init_refuses_draft_without_ci_trust_before_any_write(self):
+        draft = self.home / "draft.json"
+        draft.write_text(json.dumps({"repository": {"approval_refs": _approval_refs()}}),
+                         encoding="utf-8")
+        target = self.home / ".config" / "llmtool" / "trust.json"
+        with mock.patch.object(trust_cli, "_owner_home", return_value=self.home), \
+             mock.patch.object(trust_cli, "_checkout_values", return_value={
+                 "canonical_root": "/repo", "workspace_root": "/workspace",
+                 "tasks_root": "/workspace/tasks", "repository": {"slug": "owner/repo",
+                 "allowed_origins": ["https://github.com/owner/repo.git"]}}):
+            with self.assertRaises(trust_cli.TrustError) as caught:
+                trust_cli._init(argparse.Namespace(input=str(draft), import_config=False))
+        self.assertEqual(caught.exception.code, "TRUST_INIT_INPUT_INVALID")
+        self.assertFalse(target.exists())
+        self.assertFalse((self.home / ".config").exists())
+
     def test_import_config_overrides_dispatch_references(self):
         checkout = self.home / "checkout"
         checkout.mkdir(mode=0o700)
@@ -235,7 +273,8 @@ class TrustCliTest(unittest.TestCase):
                                "https://github.com/davidcatcat/davidcattoolsproject.git"]},
         }
         draft = self.home / "draft.json"
-        draft.write_text(json.dumps({"ci_trust": _ci_draft()}), encoding="utf-8")
+        draft.write_text(json.dumps({"repository": {"approval_refs": _approval_refs()},
+                                     "ci_trust": _ci_draft()}), encoding="utf-8")
         output = __import__("io").StringIO()
         with mock.patch.object(trust_cli, "_owner_home", return_value=self.home), \
              mock.patch.object(trust_cli, "_checkout_values", return_value=values), \
@@ -268,7 +307,8 @@ class TrustCliTest(unittest.TestCase):
                                "https://github.com/davidcatcat/davidcattoolsproject.git"]},
         }
         draft = self.home / "draft.json"
-        draft.write_text(json.dumps({"ci_trust": _ci_draft()}), encoding="utf-8")
+        draft.write_text(json.dumps({"repository": {"approval_refs": _approval_refs()},
+                                     "ci_trust": _ci_draft()}), encoding="utf-8")
         old = mock.Mock(sha256=old_sha256, canonical_root=str(checkout))
         args = argparse.Namespace(input=str(draft), import_config=False,
                                   replace=True, confirm_rotation="b" * 64)
