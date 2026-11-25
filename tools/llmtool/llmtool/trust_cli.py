@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -15,45 +14,6 @@ import subprocess
 import sys
 
 from .trust import TrustError, load_trust, verify_repository
-
-
-def _legacy_sources():
-    """Resolve expected values from the pre-trust implementation constants."""
-    from . import config, review_bundle, review_origins, task_completion
-
-    lifecycle_path = Path(__file__).resolve().parents[1] / "scripts" / "d6_worktree_lifecycle.py"
-    spec = importlib.util.spec_from_file_location("_llmtool_d6_legacy", lifecycle_path)
-    if spec is None or spec.loader is None:
-        raise TrustError("TRUST_LEGACY_UNAVAILABLE")
-    try:
-        lifecycle = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(lifecycle)
-        repo = config.legacy_repository_config(home=str(_owner_home()))
-        retain_match = re.search(r"\(\?:([0-9|]+)\)", lifecycle.OWNER_APPROVAL_RE.pattern)
-        retain_issues = tuple(int(value) for value in retain_match.group(1).split("|")) if retain_match else ()
-        if len(retain_issues) != 2:
-            raise ValueError
-    except Exception:
-        raise TrustError("TRUST_LEGACY_UNAVAILABLE")
-    return {
-        "canonical_root": str(review_bundle.LEGACY_PROTECTED[0]),
-        "workspace_root": str(review_bundle.LEGACY_PROTECTED[1]),
-        "tasks_root": str(lifecycle.TASKS_ROOT),
-        "slug": repo["slug"],
-        "allowed_origins": tuple(sorted(review_origins.REVIEW_ORIGINS)),
-        "worker_dispatch_issue": repo["dispatch_issue"],
-        "worker_dispatch_evidence_pr": repo["dispatch_evidence_pr"],
-        "retain_release_issues": retain_issues,
-        "workflows": (
-            (task_completion._CI_WORKFLOW_PATH, task_completion._CI_WORKFLOW_NAME,
-             tuple(sorted(task_completion._CI_RUNNER_NAMES)), (), task_completion._MAC_CHECK, None),
-            (task_completion._LINUX_CI_WORKFLOW_PATH, task_completion._LINUX_CI_WORKFLOW_NAME,
-             tuple(sorted(task_completion._LINUX_CI_RUNNER_NAMES)), (), task_completion._LINUX_CHECK,
-             task_completion._DOCS_CHECK),
-        ),
-        "not_run_checks": tuple(task_completion._NOT_RUN_CHECKS),
-        "reviewer_host_policy_issue": 120,
-    }
 
 
 def add_trust_parser(sub):
@@ -340,17 +300,14 @@ def _init(args):
     if not args.input:
         raise TrustError("TRUST_INIT_INPUT_INVALID")
     draft = _read_draft(args.input)
-
-    legacy = _legacy_sources()
-    workflows = [{"path": item[0], "name": item[1], "runner_names": list(item[2]),
-                  "runner_labels": None, "code_check": item[4], "docs_check": item[5]}
-                 for item in legacy["workflows"]]
-    approval_refs = {
-        "reviewer_host_policy_issue": legacy["reviewer_host_policy_issue"],
-        "worker_dispatch_issue": legacy["worker_dispatch_issue"],
-        "worker_dispatch_evidence_pr": legacy["worker_dispatch_evidence_pr"],
-        "retain_release_issues": list(legacy["retain_release_issues"]),
-    }
+    supplied_repository = draft.get("repository")
+    if type(supplied_repository) is not dict or "approval_refs" not in supplied_repository:
+        raise TrustError("TRUST_INIT_INPUT_INVALID")
+    if "ci_trust" not in draft:
+        raise TrustError("TRUST_INIT_INPUT_INVALID")
+    approval_refs = supplied_repository["approval_refs"]
+    if type(approval_refs) is not dict:
+        raise TrustError("TRUST_INIT_INPUT_INVALID")
 
     document = {
         "schema_version": 1,
@@ -358,25 +315,16 @@ def _init(args):
         "workspace_root": inferred["workspace_root"],
         "tasks_root": inferred["tasks_root"],
         "repository": {**inferred["repository"], "approval_refs": approval_refs},
-        "ci_trust": {"mode": "self-hosted", "github_actions_app_id": 15368,
-                     "workflows": workflows, "not_run_checks": list(legacy["not_run_checks"])},
+        "ci_trust": draft["ci_trust"],
         "tools": {"git": None, "gh_path": None, "lsof": None},
     }
     # A draft may supply unresolved fields, but cannot override checkout-derived identity.
     for key in ("canonical_root", "workspace_root", "tasks_root"):
         if key in draft and draft[key] != inferred[key]:
             raise TrustError("TRUST_INIT_INPUT_INVALID")
-    if "repository" in draft:
-        supplied = draft["repository"]
-        if type(supplied) is not dict:
+    for key, value in inferred["repository"].items():
+        if key in supplied_repository and supplied_repository[key] != value:
             raise TrustError("TRUST_INIT_INPUT_INVALID")
-        for key, value in inferred["repository"].items():
-            if key in supplied and supplied[key] != value:
-                raise TrustError("TRUST_INIT_INPUT_INVALID")
-        if "approval_refs" in supplied:
-            document["repository"]["approval_refs"] = supplied["approval_refs"]
-    if "ci_trust" in draft:
-        document["ci_trust"] = draft["ci_trust"]
     if "tools" in draft:
         document["tools"] = draft["tools"]
     if args.import_config:
