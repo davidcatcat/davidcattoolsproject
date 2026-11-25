@@ -300,8 +300,15 @@ class TaskAdvanceNotDeliveredRedispatchTests(unittest.TestCase):
 
         def _get_with_completion(tid):
             rec = orig_get(tid)
-            if tid == task_id and type(rec) is dict and not rec.get('completion'):
-                rec = dict(rec, completion={'executor_task_id': 'executor-d6'})
+            if tid == task_id and type(rec) is dict:
+                updates = {}
+                if not rec.get('completion'):
+                    updates['completion'] = {'executor_task_id': 'executor-d6'}
+                dev = rec.get('developer')
+                if type(dev) is not dict or dev.get('state') != 'DEVELOPER_RESPONDED':
+                    updates['developer'] = dict(dev or {}, state='DEVELOPER_RESPONDED')
+                if updates:
+                    rec = dict(rec, **updates)
             return rec
 
         d6 = self._d6_snapshot()
