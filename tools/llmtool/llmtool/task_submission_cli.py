@@ -2012,12 +2012,12 @@ def _review_ci_lines(head):
 
 
 def _review_original_task(store, task, task_id, executor_task):
-    """Return (task_id, record) of the original Task on this D6, or None.
+    """Return [(task_id, record), ...] of earlier non-abandoned Tasks on this D6.
 
-    The original is the earliest non-abandoned other Task whose completion
-    names the same executor D6, created before the reviewed Task; ties go to
-    the lower task_id. This is the D6 rule of _check_delegate_repair_cap.
-    A store without task_ids has no original. A failing read raises.
+    Every other non-abandoned Task whose completion names the same executor D6
+    and whose created_at is earlier than the reviewed Task's is included,
+    ordered by (created_at, task_id). A store without task_ids has none. A
+    failing read raises.
 
     A store with completion_d6_task_ids narrows the scan to the Tasks whose
     stored completion names this D6, without validating unrelated records;
@@ -2026,7 +2026,7 @@ def _review_original_task(store, task, task_id, executor_task):
     """
     list_ids = getattr(store, 'task_ids', None)
     if list_ids is None:
-        return None
+        return []
     on_d6 = getattr(store, 'completion_d6_task_ids', None)
     other_ids = list_ids() if on_d6 is None else on_d6(executor_task)
     reviewed_at = task.get('created_at')
@@ -2043,10 +2043,8 @@ def _review_original_task(store, task, task_id, executor_task):
                 type(reviewed_at) is str and type(created_at) is str and
                 created_at < reviewed_at):
             candidates.append((created_at, other_id, record))
-    if not candidates:
-        return None
-    _, original_id, record = min(candidates, key=lambda item: (item[0], item[1]))
-    return original_id, record
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return [(original_id, record) for _, original_id, record in candidates]
 
 
 def run_task_review_prompt(args, *, store=None):
@@ -2081,29 +2079,44 @@ def run_task_review_prompt(args, *, store=None):
     task = store.get(args.task_id)
     pm_assignment = checked_contract(task.get('pm_assignment'))
     try:
-        original = _review_original_task(store, task, args.task_id, args.executor_task)
+        siblings = _review_original_task(store, task, args.task_id, args.executor_task)
     except Exception:
         refuse('REVIEW_PROMPT_CONTRACT_MISSING')
+    if len(siblings) > 8:
+        refuse('REVIEW_PROMPT_CONTRACT_SET_TOO_LARGE')
     original_lines = []
-    if original is not None:
-        original_id, original_record = original
-        if type(original_id) is not str:
-            refuse('REVIEW_PROMPT_CONTRACT_MISSING')
-        original_assignment = checked_contract(original_record.get('pm_assignment'))
+    if siblings:
+        earlier_items = set()
+        for original_id, original_record in siblings:
+            if type(original_id) is not str:
+                refuse('REVIEW_PROMPT_CONTRACT_MISSING')
+            original_assignment = checked_contract(original_record.get('pm_assignment'))
+            earlier_items.update(original_assignment['acceptance'])
+            original_lines.extend((
+                '<<< BEGIN ORIGINAL TASK CONTRACT DATA >>>',
+                'Original Task id: ' + json.dumps(original_id, ensure_ascii=True),
+                'Original Task goal: ' + json.dumps(original_assignment['goal'], ensure_ascii=True),
+                *(f'{index}. {json.dumps(item, ensure_ascii=True)}'
+                  for index, item in enumerate(original_assignment['acceptance'], 1)),
+                '<<< END ORIGINAL TASK CONTRACT DATA >>>',
+            ))
         delta = [str(index) for index, item in enumerate(pm_assignment['acceptance'], 1)
-                 if item not in original_assignment['acceptance']]
-        original_lines = [
-            '<<< BEGIN ORIGINAL TASK CONTRACT DATA >>>',
-            'Original Task id: ' + json.dumps(original_id, ensure_ascii=True),
-            'Original Task goal: ' + json.dumps(original_assignment['goal'], ensure_ascii=True),
-            *(f'{index}. {json.dumps(item, ensure_ascii=True)}'
-              for index, item in enumerate(original_assignment['acceptance'], 1)),
-            '<<< END ORIGINAL TASK CONTRACT DATA >>>',
-            'Repair delta: current acceptance items not in the original contract: '
-            + (', '.join(delta) if delta else 'none') + '.',
-            'Judge the PR against both contracts; where a current item replaces an original '
-            'one, the current item governs; an original item not replaced still applies.',
-        ]
+                 if item not in earlier_items]
+        if len(siblings) == 1:
+            original_lines.extend((
+                'Repair delta: current acceptance items not in the original contract: '
+                + (', '.join(delta) if delta else 'none') + '.',
+                'Judge the PR against both contracts; where a current item replaces an original '
+                'one, the current item governs; an original item not replaced still applies.',
+            ))
+        else:
+            original_lines.extend((
+                'Repair delta: current acceptance items not in any earlier contract: '
+                + (', '.join(delta) if delta else 'none') + '.',
+                'Judge the PR against all contracts in order; where a later contract item '
+                'replaces an earlier one, the later item governs; an item not replaced still '
+                'applies, and the current Task contract governs last.',
+            ))
     completion = task.get('completion')
     evidence = completion.get('evidence') if type(completion) is dict else None
     binding = task.get('task_binding')
