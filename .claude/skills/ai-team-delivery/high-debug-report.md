@@ -6,7 +6,7 @@ This report is mandatory for a PM-assigned High Debug Task. Follow the [PM Conti
 
 ## Trigger, identity and authority
 
-The trigger is an ordinary repair failure in the same confirmed root-cause/finding family before the 2nd repair, following the [repair cap](pm-continuation-reference.md#repair-cap). High-risk or deep technical uncertainty may trigger earlier when the PM records its evidence. The diagnostic Worker is **`codex-debug` / Codex CLI / `gpt-6.1-sol`**, run with `llmtool task high-debug`, with high reasoning when supported. It falls back to `claude-debug` only when Codex reports quota exhausted or login failed (WP-B). Use it only when existing dispatch, model availability, evidence/egress, D6 and task-budget gates permit, in a verified read-only context. Do not purchase or silently substitute a provider or model. A Debug report authorizes no mutation and does not replace independent review.
+AI Debug first becomes required after the third effective review repair receives a formal FAIL and runs with `llmtool task high-debug`; the Debug Worker selection is defined by the [AI Debug rule in AGENTS.md](../../../AGENTS.md#current-authority-restructured-per-owner-decision-010-step-2). Use it only when existing dispatch, model availability, evidence/egress, D6 and task-budget gates permit, in a verified read-only context. Do not purchase or silently substitute a provider or model. A Debug report authorizes no mutation and does not replace independent review.
 
 ## Mandatory report
 
