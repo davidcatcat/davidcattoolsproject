@@ -25,6 +25,12 @@ newest (highest id) run for the main SHA, whatever its state, so an older
 success cannot hide a newer failure or a pending rerun (the one exception is
 the completed skip-only Mac dispatch described below).
 
+For the FULL Mac check only, a listing with no matching SHA reports
+``full_mac_not_run`` when the newest listed run was created before the main
+commit's committer date, so absence is provable from the two existing reads.
+A missing or unparseable date, or a listed run created at or after that date,
+still reports ``run_list_bound``: a matching run may be newer than the page.
+
 Each run's pages are passed through ``main_ci_job_pages.collect_pages`` (SHA,
 run id and run attempt all bound) and then ``main_ci_job_summary.summarize``.
 Totals and pages stay per run; they are never pooled across runs before
@@ -49,6 +55,8 @@ malformed, mismatched or failed read keeps it UNKNOWN.
 """
 
 from __future__ import annotations
+
+from datetime import datetime, timezone
 
 from . import mac_full_due
 from . import main_ci_job_pages as pages_mod
@@ -100,6 +108,7 @@ PAGES_FAILED = 'pages_failed'
 PAGES_MALFORMED = 'pages_malformed'
 PAGES_BOUND = 'pages_bound'
 FULL_EVIDENCE_MISSING = 'full_evidence_missing'
+FULL_MAC_NOT_RUN = 'full_mac_not_run'
 RUN_SCAN_BOUND = 'run_scan_bound'
 
 # One entry per relevant check: kind, workflow path and the run event that
@@ -126,14 +135,51 @@ def _read(github_get, path):
     return data
 
 
-def main_sha(github_get):
-    """Return the current main commit SHA; raise StateError on any bad read."""
+def _main_commit(github_get):
+    """Return (current main SHA, its committer date or None)."""
     data = _read(github_get, MAIN)
     commit = data.get('commit') if isinstance(data, dict) else None
     sha = commit.get('sha') if isinstance(commit, dict) else None
     if not isinstance(sha, str) or mac_full_due.SHA.match(sha) is None:
         raise mac_full_due.StateError(MAIN)
-    return sha
+    inner = commit.get('commit') if isinstance(commit, dict) else None
+    committer = inner.get('committer') if isinstance(inner, dict) else None
+    date = committer.get('date') if isinstance(committer, dict) else None
+    return sha, date if isinstance(date, str) else None
+
+
+def main_sha(github_get):
+    """Return the current main commit SHA; raise StateError on any bad read."""
+    return _main_commit(github_get)[0]
+
+
+def _parse_time(value):
+    """Return an aware UTC datetime for one GitHub timestamp, or None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _full_mac_absent(runs, main_date):
+    """True only when the listing proves the main SHA has no FULL Mac run.
+
+    The listing is newest first, so a newest run created before the main
+    commit rules every later run out. A missing or unparseable date cannot
+    prove absence, and an empty listing has no newest run to compare.
+    """
+    if not runs:
+        return False
+    created = _parse_time(runs[0].get('created_at'))
+    committed = _parse_time(main_date)
+    if created is None or committed is None:
+        return False
+    return created < committed
 
 
 def _listed_runs(github_get, workflow, event):
@@ -315,7 +361,7 @@ def _run_report(github_get, sha, kind, workflow, event, run):
     return result, False
 
 
-def _run_result(github_get, sha, kind, workflow, event):
+def _run_result(github_get, sha, kind, workflow, event, main_date):
     """Return one run's bounded report; never GREEN on missing data."""
     result = {'kind': kind, 'workflow': workflow, 'run_id': None,
               'run_attempt': None, 'state': UNKNOWN, 'reason': None, 'failing': []}
@@ -325,7 +371,12 @@ def _run_result(github_get, sha, kind, workflow, event):
         return result
     matching, reason = _matching_runs(runs, sha)
     if matching is None:
-        if reason == RUN_MISSING and len(runs) >= RUNS_PER_PAGE:
+        if reason == RUN_MISSING and kind == FULL_MAC:
+            # Only a provable absence gets its own reason; otherwise the
+            # page may still hide a newer matching run.
+            reason = (FULL_MAC_NOT_RUN if _full_mac_absent(runs, main_date)
+                      else RUN_LIST_BOUND)
+        elif reason == RUN_MISSING and len(runs) >= RUNS_PER_PAGE:
             reason = RUN_LIST_BOUND
         result['reason'] = reason
         return result
@@ -361,12 +412,12 @@ def inspect_jobs(github_get):
     result = {'sha': None, 'state': UNKNOWN, 'reason': None,
               'runs': [], 'failing': []}
     try:
-        sha = main_sha(github_get)
+        sha, main_date = _main_commit(github_get)
     except mac_full_due.StateError:
         result['reason'] = MAIN_READ_FAILED
         return result
     result['sha'] = sha
-    runs = [_run_result(github_get, sha, kind, workflow, event)
+    runs = [_run_result(github_get, sha, kind, workflow, event, main_date)
             for kind, workflow, event in _KINDS]
     result['runs'] = runs
     result['failing'] = [

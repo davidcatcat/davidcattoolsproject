@@ -18,8 +18,9 @@ MAC_JOB = 'check (macOS 3.13)'
 MAC_SHARDS = ('shards (1/3)', 'shards (2/3)', 'shards (3/3)')
 
 
-def run(run_id, sha=SHA, attempt=1):
+def run(run_id, sha=SHA, attempt=1, created_at='2026-11-20T00:00:00Z'):
     return {'id': run_id, 'head_sha': sha, 'run_attempt': attempt,
+            'created_at': created_at,
             'status': 'completed', 'conclusion': 'success'}
 
 
@@ -40,8 +41,9 @@ def job(job_id, name, run_id, attempt, sha=SHA, conclusion='success',
 class FakeGitHub:
     """A read-only fake: every call is one GET path; unknown paths fail."""
 
-    def __init__(self, sha=SHA):
+    def __init__(self, sha=SHA, main_date=None):
         self.sha = sha
+        self.main_date = main_date
         self.runs = {}
         self.pages = {}
         self.fail = set()
@@ -61,7 +63,10 @@ class FakeGitHub:
         if path in self.too_large:
             raise reader_too_large()
         if path == fetch.MAIN:
-            return {'commit': {'sha': self.sha}}
+            commit = {'sha': self.sha}
+            if self.main_date is not None:
+                commit['commit'] = {'committer': {'date': self.main_date}}
+            return {'commit': commit}
         for (workflow, event), runs in self.runs.items():
             if path == fetch.RUNS.format(workflow=workflow, event=event,
                                          per_page=fetch.RUNS_PER_PAGE):
@@ -243,6 +248,70 @@ class MainCiJobFetchTests(unittest.TestCase):
         self.assertEqual(result['reason'], fetch.RUN_MISSING)
         self.assertIsNone(result['runs'][0]['run_id'])
         self.assertEqual(result['runs'][1]['state'], fetch.GREEN)
+
+    def test_full_mac_absence_proved_by_an_older_newest_run(self):
+        github = green_github()
+        github.main_date = '2026-11-21T00:00:00Z'
+        github.workflow(fetch.MAC_WORKFLOW, 'workflow_dispatch', [
+            run(MAC_RUN - 1, sha=OLDER, created_at='2026-11-20T00:00:00Z')])
+        result = fetch.inspect_jobs(github)
+        self.assertEqual(result['state'], fetch.UNKNOWN)
+        self.assertEqual(result['reason'], fetch.FULL_MAC_NOT_RUN)
+        self.assertEqual(result['runs'][1]['reason'], fetch.FULL_MAC_NOT_RUN)
+        self.assertEqual(result['failing'], [])
+        # The Linux path is unchanged, and its success cannot make it GREEN.
+        self.assertEqual(result['runs'][0]['state'], fetch.GREEN)
+        # The main commit date came from the existing branches/main read.
+        self.assertEqual(github.calls.count(fetch.MAIN), 1)
+
+    def test_full_mac_runs_newer_than_main_commit_stay_run_list_bound(self):
+        github = green_github()
+        github.main_date = '2026-11-21T00:00:00Z'
+        github.workflow(fetch.MAC_WORKFLOW, 'workflow_dispatch', [
+            run(MAC_RUN, sha=OLDER, created_at='2026-11-22T00:00:00Z')])
+        result = fetch.inspect_jobs(github)
+        self.assertEqual(result['state'], fetch.UNKNOWN)
+        self.assertEqual(result['reason'], fetch.RUN_LIST_BOUND)
+
+    def test_full_mac_absence_with_missing_or_bad_dates_stays_bound(self):
+        cases = (
+            (None, '2026-11-20T00:00:00Z'),          # main date missing
+            ('not-a-date', '2026-11-20T00:00:00Z'),  # main date unparseable
+            ('2026-11-21T00:00:00Z', None),          # run date missing
+            ('2026-11-21T00:00:00Z', 'not-a-date'),  # run date unparseable
+            ('2026-11-21T00:00:00Z', '2026-11-21T00:00:00Z'),  # not earlier
+        )
+        for main_date, created_at in cases:
+            with self.subTest(main_date=main_date, created_at=created_at):
+                github = green_github()
+                github.main_date = main_date
+                listing = run(MAC_RUN, sha=OLDER)
+                if created_at is None:
+                    del listing['created_at']
+                else:
+                    listing['created_at'] = created_at
+                github.workflow(fetch.MAC_WORKFLOW, 'workflow_dispatch',
+                                [listing])
+                result = fetch.inspect_jobs(github)
+                self.assertEqual(result['state'], fetch.UNKNOWN)
+                self.assertEqual(result['reason'], fetch.RUN_LIST_BOUND)
+
+    def test_full_mac_empty_listing_stays_run_list_bound(self):
+        github = green_github()
+        github.main_date = '2026-11-21T00:00:00Z'
+        github.workflow(fetch.MAC_WORKFLOW, 'workflow_dispatch', [])
+        result = fetch.inspect_jobs(github)
+        self.assertEqual(result['state'], fetch.UNKNOWN)
+        self.assertEqual(result['reason'], fetch.RUN_LIST_BOUND)
+
+    def test_linux_missing_run_stays_run_missing_when_dates_could_prove_it(self):
+        github = green_github()
+        github.main_date = '2026-11-21T00:00:00Z'
+        github.workflow(fetch.LINUX_WORKFLOW, 'push', [
+            run(LINUX_RUN, sha=OLDER, created_at='2026-11-20T00:00:00Z')])
+        result = fetch.inspect_jobs(github)
+        self.assertEqual(result['state'], fetch.UNKNOWN)
+        self.assertEqual(result['reason'], fetch.RUN_MISSING)
 
     def test_failed_read_is_unknown_and_other_failure_still_reported(self):
         github = green_github()
