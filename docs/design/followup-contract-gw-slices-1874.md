@@ -1,6 +1,6 @@
 # #1874 follow-up — Executable split plan and `gw-agent` slice assessment
 
-Facts in this plan were read at base SHA `8b2b68f3f3945851e7bdac2dbbfde05df180c7f2` from [followup-contract-1874.md](followup-contract-1874.md), [followup-advance-caller-1874.md](followup-advance-caller-1874.md), `tools/llmtool/llmtool/direct_reassignment.py`, `tools/llmtool/llmtool/review_repair.py`, `tools/llmtool/llmtool/task_submission_cli.py`, and `tools/llmtool/scripts/spec_preflight.py`. **Docs only:** this document is the only file created or modified; no code or test is changed. Gates: `check (docs)` CI and formal review by `codex-reviewer`.
+Facts in this plan were read at examined worktree head `20ccd4bf5c45c31a4de79c1582f19c884cfcae70` from [followup-contract-1874.md](followup-contract-1874.md), [followup-advance-caller-1874.md](followup-advance-caller-1874.md), `tools/llmtool/llmtool/direct_reassignment.py`, `tools/llmtool/llmtool/review_repair.py`, `tools/llmtool/llmtool/task_submission_cli.py`, and `tools/llmtool/scripts/spec_preflight.py`. **Docs only:** this document is the only file created or modified; no code or test is changed. Gates: `check (docs)` CI and formal review by `codex-reviewer`.
 
 ## 1. Baseline, tier limits, and resolved dependencies
 
@@ -28,29 +28,32 @@ Facts in this plan were read at base SHA `8b2b68f3f3945851e7bdac2dbbfde05df180c7
 
 ## 2. Context/repair reserve method and `gw-agent` candidacy
 
-- **Context and repair reserve method (`tools/llmtool/scripts/spec_preflight.py` and `tools/llmtool/llmtool/review_repair.py`):**
-  - In `main` (`tools/llmtool/scripts/spec_preflight.py`), `context_bytes` is measured from `context_file` (`os.path.getsize(context_file)`), which holds the rendered prompt, task contract, and full contents of every unique file in `read`.
-  - **Numeric reserve at T5 (`16,384` `context_bytes` max):**
-    1. **Prompt and contract reserve:** `2,048` bytes for `goal`, up to `15` `acceptance` items (`REPAIR_ROOM_MAX_ACCEPTANCE = 15`), `TEXT_DEVELOPER_CONTEXT_SEPARATOR` (`tools/llmtool/llmtool/task_submission_cli.py`), and framing instructions. This leaves at most **`14,336` bytes** for unique read files on an initial dispatch.
-    2. **Repair reserve:** `_record_repair_task` (`tools/llmtool/llmtool/review_repair.py`) appends `1` `bounded_acceptance` item (`~200–300` bytes, reserving 1 of the 16 acceptance slots), and `_failed_event`, `_remote_test_failure`, and `_ci_failure` (`tools/llmtool/llmtool/review_repair.py`) build a `repair_packet` capped at **`8,192` bytes** (`MAX_EXCERPT_CHARS = 2000`). Reserving `8,192 + 300 = 8,492` bytes for a worst-case repair dispatch leaves at most **`5,844` bytes** (`16,384 - 2,048 - 8,492`) for unique read files when full repair headroom is included.
-- **`gw-agent` candidates: `none`.**
-  - **Why no slice is a `gw-agent` candidate:**
-    1. Any remaining `#1874` review-side, caller-investigation, or contract slice must read `tools/llmtool/llmtool/task_submission_cli.py` in full (`12,276` lines observed via `read_file`; its first `800` lines alone exceed T5's `16,384`-byte `context_bytes` cap and T6's `24,576`-byte cap).
-    2. Writing `tools/llmtool/llmtool/task_submission_cli.py` (`12,276` lines `>= DEFAULT_LARGE_FILE_LINES = 2000`) is refused for `gw-agent` by `main` (`tools/llmtool/scripts/spec_preflight.py`) with `SPEC_PREFLIGHT_INVALID:EDIT_LINE_HINT_MISSING:-1`.
-    3. Contract and authority decisions (`task_binding.contract_digest`, `LLMTOOL-REVIEW-BINDING`, multi-Task contract unioning) require `AGY/OpenCode` and Owner/Coordinator/PM sign-off rather than `gw-agent`.
-    4. No required read file is dropped or fragmented to fake a smaller read, and no helper is invented solely to create `gw-agent` work.
+- **Context measurement and reserve estimates (`tools/llmtool/scripts/spec_preflight.py` and `tools/llmtool/llmtool/review_repair.py`):**
+  - In `main` (`tools/llmtool/scripts/spec_preflight.py`), `context_bytes` is measured only via `os.path.getsize(context_file)` when `spec.get("context_file")` names an existing file (otherwise `0`), and passed to `spec_tier`. `spec_preflight.py` does **not** construct or verify a file containing the rendered prompt, task contract, and read files.
+  - **Unmeasured reserve estimates at T5 (`16,384` `context_bytes` max) — estimates only, not eligibility bounds:**
+    1. **Prompt and contract reserve (unsourced estimate):** `2,048` bytes is an illustrative estimate for `goal`, up to `15` `acceptance` items (`REPAIR_ROOM_MAX_ACCEPTANCE = 15`), and framing instructions. Subtracting this estimate from `16,384` leaves `14,336` bytes as a rough read-byte estimate, not a measured bound.
+    2. **Repair reserve (estimate from packet refusal threshold):** `_record_repair_task` (`tools/llmtool/llmtool/review_repair.py`) appends `1` `bounded_acceptance` item (reserving 1 of the 16 acceptance slots; `~200–300` bytes estimated), and `_failed_event` (`tools/llmtool/llmtool/review_repair.py`) truncates the reviewer excerpt to `MAX_EXCERPT_CHARS = 2000` and **refuses** (`REPAIR_PACKET_INVALID`) if the JSON-encoded `repair_packet` exceeds `8,192` bytes. `8,192` is a packet encoding refusal threshold, not a measured number of bytes added to the worker `context_file`. Using `8,192 + 300 = 8,492` bytes as a rough repair-headroom estimate would leave `5,844` bytes (`16,384 - 2,048 - 8,492`), which is an **estimate only and cannot establish T5 eligibility**.
+  - **Requirement before assigning any tier:** Any tier assignment must construct and measure the actual complete `context_file` (and account for any repair-dispatch context) against `LADDER_SIZES` rather than relying on these estimates.
+
+- **`gw-agent` candidacy: `UNKNOWN` (pending the read and measurement pass in §3).**
+  - **What is established:**
+    1. `tools/llmtool/llmtool/task_submission_cli.py` has `12,276` lines (observed via `read_file`), which is `>= DEFAULT_LARGE_FILE_LINES = 2000`. Any slice that **writes** `tools/llmtool/llmtool/task_submission_cli.py` is refused for `gw-agent` by `main` (`tools/llmtool/scripts/spec_preflight.py`) with `SPEC_PREFLIGHT_INVALID:EDIT_LINE_HINT_MISSING:-1`.
+    2. Contract and authority decisions (`task_binding.contract_digest`, `LLMTOOL-REVIEW-BINDING`, multi-Task contract unioning) and slices requiring large modules are `AGY/OpenCode` work (with Owner/Coordinator/PM sign-off where required), not `gw-agent` work.
+    3. Per P2, no required read file is dropped or fragmented to fake a smaller read, and no helper is invented solely to create `gw-agent` work.
+  - **Why overall candidacy is `UNKNOWN`:**
+    - Because `task_advance.py`, `review_dispatch.py`, any external caller modules, and `tools/llmtool/tests/test_*.py` are outside `read_paths` in this run, complete per-slice `read` and `write` lists cannot be enumerated, and actual complete `context_file` byte sizes cannot be measured here. Without complete scopes and measured `context_bytes`, it is unknown whether any independent slice fits `T<=5` (`LADDER_SIZES[5] = (4, 16384, 16)`).
 
 ## 3. Executable split plan: `none`
 
 **Executable slices:** `none`.
 
-Per P1 and P4, no executable slice is proposed here because complete `read`/`write` lists and exact base-SHA byte counts cannot be established from the authorized `read_paths` and tools in this run. Rather than presenting incomplete or unmeasured candidates as an executable split plan, the smallest blockers are recorded below:
+Per P1 and P4, no executable slice is proposed here because complete `read`/`write` lists and exact measured `context_file` byte counts cannot be established from the authorized `read_paths` and tools in this run. Rather than presenting incomplete or unmeasured candidates as an executable split plan, the smallest blockers are recorded below:
 
-1. **Base-SHA byte measurement unavailable in this run:** Shell execution (`run_command`) is blocked in this sandbox (`agentapi` operation not permitted), so exact per-file byte counts at base SHA `8b2b68f3f3945851e7bdac2dbbfde05df180c7f2` (`wc -c` / `git ls-tree`) cannot be measured here and are not guessed.
+1. **Context and base-SHA byte measurement unavailable in this run:** Shell execution is not used in this run, and `spec_preflight.py` does not itself build a `context_file`, so exact per-file byte counts at the target base SHA (`wc -c` / `git ls-tree`) and actual complete `context_file` sizes cannot be measured here and are not guessed.
 2. **Required code and test files lie outside `read_paths`:** `tools/llmtool/llmtool/task_advance.py`, `tools/llmtool/llmtool/review_dispatch.py`, any external CLI/orchestration caller modules under `tools/llmtool/` and `scripts/`, and `tools/llmtool/tests/test_*.py` are outside `read_paths`. Without reading those modules, complete `read` and `write` lists (including the `test_*.py` modules required by `check_read_scope` in `tools/llmtool/scripts/spec_preflight.py`) cannot be enumerated or measured.
 3. **Pending PR #2708 (`#1874` A evidence section):** PR #2708 is not merged yet. Any design or implementation slice that depends on its conclusions is **pending PR #2708 acceptance** and cannot use its in-progress files as a stable base.
 
 ### Smallest unblock path
 
-- Dispatch an `AGY/OpenCode` read/measurement pass with shell access (`git ls-tree` / `wc -c` at the target base SHA) and `read_paths` covering `tools/llmtool/llmtool/task_advance.py`, `tools/llmtool/llmtool/review_dispatch.py`, CLI/orchestration caller modules under `tools/llmtool/` and `scripts/`, and `tools/llmtool/tests/test_*.py` to enumerate complete `read`/`write` scopes and measure exact unique read bytes.
+- Dispatch an `AGY/OpenCode` read/measurement pass with shell access (`git ls-tree` / `wc -c` at the target base SHA) and `read_paths` covering `tools/llmtool/llmtool/task_advance.py`, `tools/llmtool/llmtool/review_dispatch.py`, CLI/orchestration caller modules under `tools/llmtool/` and `scripts/`, and `tools/llmtool/tests/test_*.py` to enumerate complete `read`/`write` scopes, build and measure the actual complete `context_file` sizes, and then assign `T` tiers and `gw-agent` vs `AGY/OpenCode` candidacy.
 - Keep any slice that depends on `#1874` A evidence **pending PR #2708 acceptance** until PR #2708 is merged.
