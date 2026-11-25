@@ -421,6 +421,38 @@ class _Case(unittest.TestCase):
     def disputes(self):
         return self.store.get(TASK).get('review_disputes', [])
 
+    def use_arbitrate_ruled(self, claims, finding_id='F1', *, outcome='WITHDRAWN', head=HEAD):
+        """Use a Task whose dispute is RULED by arbitrate, bound to its ruling claim.
+
+        A3 (test_dispute_arbitrate_rule) covers how arbitrate step 12 makes
+        this write; here only the persisted RULED state is needed. The real
+        task_store validator checks the binding.
+        """
+        text = _ruling_body(finding_id, outcome, head=head, version=1)
+        ac = _arbiter_claim(finding_id, outcome, head=head, version=2, text=text,
+                            verdict='RULING',
+                            source={'kind': 'CODEX_JSONL', 'output_sha256': 'c' * 64})
+        ac['review_result']['outcome'] = outcome
+        ac.update(purpose='dispute_ruling', reviewer='codex-reviewer', rules_sha256='9' * 64,
+                  dispute={'pr': PR, 'finding_id': finding_id, 'head_sha': head,
+                           'review_version': 1, 'dispute_text_sha256': '0' * 64})
+        entry = _entry(finding_id, head=head)
+        entry['arbiter_claim'] = {'reviewer_task': ac['reviewer_task'], 'version': 2}
+        now = _now()
+        entry.update(state='RULED', ruling={
+            'outcome': outcome, 'head_sha': head, 'reviewer': 'codex-reviewer',
+            'reviewer_task': ac['reviewer_task'], 'reviewer_session': ac['native_session_id'],
+            'evidence_ref': RULING_REF, 'ruled_at': now, 'path': 'arbitrate',
+            'finding_id': finding_id, 'review_version': 1, 'arbiter_claim_version': 2,
+            'rules_sha256': '9' * 64,
+            'review_text_sha256': hashlib.sha256(text.encode('utf-8')).hexdigest(),
+            'claim_sha256': task_store._canonical_claim_sha256(ac),
+            'source_kind': 'CODEX_JSONL', 'output_sha256': 'c' * 64,
+            'comment_id': RULING_ID, 'contract_digest': trr.CONTRACT, 'run_id': trr.RUN})
+        record = _task(claims=list(claims) + [ac], disputes=[entry])
+        task_store._validate_review_disputes(record)
+        return self.use(record)
+
 
 class DisputeOpenTests(_Case):
     def test_open_records_one_open_entry_bound_to_the_recorded_fail(self):
@@ -512,11 +544,10 @@ class DisputeOpenTests(_Case):
         self.assertEqual([item['finding_id'] for item in self.disputes()], ['F1', 'F3'])
 
     def test_a_ruled_finding_is_never_disputed_or_ruled_again(self):
-        self.use(_task(claims=[_review_claim(),
-                               _review_claim(head=NEW_HEAD, version=2,
-                                             session='review-session-2')]))
-        self.open()
-        self.arbitrate(outcome='UPHELD')
+        self.use_arbitrate_ruled([_review_claim(),
+                                  _review_claim(head=NEW_HEAD, version=2,
+                                                session='review-session-2')],
+                                 outcome='UPHELD')
         self.refused('DISPUTE_ALREADY_RULED', self.open)
         self.refused('DISPUTE_RULE_MANUAL_RETIRED', task_submission_cli.dispute_rule,
                      self.store, TASK, pr=PR, finding_id='F1', outcome='WITHDRAWN',
@@ -1616,9 +1647,13 @@ class DisputeRuleRetirementTests(_Case):
             'request_sha256': hashlib.sha256(b'test retired manual rule').hexdigest(),
             'response': None, 'usage': None, 'error_code': None,
             'developer': None, 'pm_assignment': None, 'completion': None,
-            'review_disputes': [_entry()],
         }
-        created = store.create(record)
+        # A store creates a Task without disputes (#1502 D13); the OPEN
+        # dispute is appended as the one allowed transition.
+        first = store.create(record)
+        created = store.compare_and_update(
+            TASK, expected={'record_sha256': first['record_sha256']},
+            review_disputes=[_entry()])
         path = store_dir / f'{TASK}.json'
         return store, path.read_bytes(), created
 
