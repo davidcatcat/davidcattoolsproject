@@ -205,7 +205,12 @@ class MainCiJobFetchTests(unittest.TestCase):
         result = fetch.inspect_jobs(github)
         self.assertEqual(result['state'], fetch.UNKNOWN)
         self.assertEqual(result['reason'], pages.RUN_ATTEMPT_MISMATCH)
-        self.assertEqual(result['failing'][0]['id'], 1)
+        # The failing job keeps its own attempt, not the selected run's.
+        self.assertEqual(result['failing'], [{
+            'kind': fetch.LINUX, 'workflow': fetch.LINUX_WORKFLOW,
+            'run_id': LINUX_RUN, 'run_attempt': LINUX_ATTEMPT + 1,
+            'id': 1, 'name': GATEWAY, 'conclusion': 'failure'}])
+        self.assertEqual(result['runs'][0]['run_attempt'], LINUX_ATTEMPT)
 
     def test_run_id_mismatch_is_unknown(self):
         github = green_github()
@@ -214,6 +219,27 @@ class MainCiJobFetchTests(unittest.TestCase):
         result = fetch.inspect_jobs(github)
         self.assertEqual(result['state'], fetch.UNKNOWN)
         self.assertEqual(result['reason'], pages.RUN_ID_MISMATCH)
+        # The failing job keeps its own run id, not the selected run's.
+        self.assertEqual(result['failing'], [{
+            'kind': fetch.LINUX, 'workflow': fetch.LINUX_WORKFLOW,
+            'run_id': LINUX_RUN + 1, 'run_attempt': LINUX_ATTEMPT,
+            'id': 1, 'name': GATEWAY, 'conclusion': 'failure'}])
+        self.assertEqual(result['runs'][0]['run_id'], LINUX_RUN)
+
+    def test_malformed_total_page_still_reports_its_failing_job(self):
+        github = green_github()
+        # A usable job list on a page whose total_count is missing: the listing
+        # is UNKNOWN, but the known failure must not disappear.
+        github.pages[(LINUX_RUN, 1)] = {
+            'jobs': [job(1, GATEWAY, LINUX_RUN, LINUX_ATTEMPT,
+                         conclusion='failure')]}
+        result = fetch.inspect_jobs(github)
+        self.assertEqual(result['state'], fetch.UNKNOWN)
+        self.assertEqual(result['reason'], fetch.PAGES_MALFORMED)
+        self.assertEqual(result['failing'], [{
+            'kind': fetch.LINUX, 'workflow': fetch.LINUX_WORKFLOW,
+            'run_id': LINUX_RUN, 'run_attempt': LINUX_ATTEMPT,
+            'id': 1, 'name': GATEWAY, 'conclusion': 'failure'}])
 
     def test_sha_mismatch_is_unknown(self):
         github = green_github()

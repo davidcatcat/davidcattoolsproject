@@ -166,6 +166,10 @@ def _job_pages(github_get, run_id):
         total = data.get('total_count') if isinstance(data, dict) else None
         jobs = data.get('jobs') if isinstance(data, dict) else None
         if type(total) is not int or total < 0 or not isinstance(jobs, list):
+            # Keep a usable job list so a known failure on a page with a bad
+            # total_count is still reported; the listing stays UNKNOWN.
+            if isinstance(data, dict) and isinstance(jobs, list):
+                pages.append(data)
             return pages, PAGES_MALFORMED
         if stated_total is None:
             stated_total = total
@@ -194,6 +198,36 @@ def _job_lists(pages):
     return lists
 
 
+def _job_identity(pages):
+    """Map each job id to the run identity its own job data carries."""
+    identity = {}
+    for jobs in _job_lists(pages):
+        for job in jobs:
+            if not isinstance(job, dict) or type(job.get('id')) is not int:
+                continue
+            run_id, run_attempt = job.get('run_id'), job.get('run_attempt')
+            identity.setdefault(job['id'], (
+                run_id if type(run_id) is int else None,
+                run_attempt if type(run_attempt) is int else None))
+    return identity
+
+
+def _failing_with_identity(failing, pages, run_id, run_attempt):
+    """Label each failing job with its own identity, never another run's.
+
+    A job taken from mismatched pages keeps the run id and attempt its job
+    data carries; only a job whose own identity is missing falls back to the
+    selected run.
+    """
+    identity = _job_identity(pages)
+    labelled = []
+    for item in failing:
+        actual_run, actual_attempt = identity.get(
+            item.get('id'), (run_id, run_attempt))
+        labelled.append(dict(item, run_id=actual_run, run_attempt=actual_attempt))
+    return labelled
+
+
 def _run_result(github_get, sha, kind, workflow, event):
     """Return one run's bounded report; never GREEN on missing data."""
     result = {'kind': kind, 'workflow': workflow, 'run_id': None,
@@ -214,20 +248,24 @@ def _run_result(github_get, sha, kind, workflow, event):
     pages, reason = _job_pages(github_get, run_id)
     if reason is not None:
         result['reason'] = reason
-        result['failing'] = summary_mod.summarize(
-            sha, _job_lists(pages), None)['failing']
+        result['failing'] = _failing_with_identity(
+            summary_mod.summarize(sha, _job_lists(pages), None)['failing'],
+            pages, run_id, run_attempt)
         return result
     collected = pages_mod.collect_pages(sha, run_id, run_attempt, pages)
     if collected['state'] != pages_mod.OK:
         result['reason'] = collected['reason']
         # The validator rejects the listing as a whole, but any well-formed
         # failing job in the fetched pages is still reported.
-        result['failing'] = summary_mod.summarize(
-            sha, _job_lists(pages), collected['stated_total'])['failing']
+        result['failing'] = _failing_with_identity(
+            summary_mod.summarize(
+                sha, _job_lists(pages), collected['stated_total'])['failing'],
+            pages, run_id, run_attempt)
         return result
     summary = summary_mod.summarize(
         sha, collected['pages'], collected['stated_total'])
-    result['failing'] = summary['failing']
+    result['failing'] = _failing_with_identity(
+        summary['failing'], pages, run_id, run_attempt)
     if guard in (RUN_PENDING, RUN_CONCLUSION_UNKNOWN, RUN_INVALID):
         # The run itself is not a completed success, so no job listing can
         # make the report GREEN; known failing jobs are still reported.
@@ -256,8 +294,7 @@ def inspect_jobs(github_get):
             for kind, workflow, event in _KINDS]
     result['runs'] = runs
     result['failing'] = [
-        dict(job, kind=run['kind'], workflow=run['workflow'],
-             run_id=run['run_id'], run_attempt=run['run_attempt'])
+        dict(job, kind=run['kind'], workflow=run['workflow'])
         for run in runs for job in run['failing']]
     unknown = [run for run in runs if run['state'] == UNKNOWN]
     if unknown:
