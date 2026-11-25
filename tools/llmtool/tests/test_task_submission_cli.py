@@ -3321,10 +3321,15 @@ class TaskSubmissionCLITests(unittest.TestCase):
         result = DirectResult(0, 'ses_Abc123', 'bounded result', None, 'UNKNOWN',
                               'f' * 64, 45, 'CONFIRMED', 'opencode v2.0.32',
                               20, 1, 'e' * 64)
+        def execute(**_kwargs):
+            # The strict output rejection runs only for a non-empty in-scope diff.
+            (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+            return result
+
         output = io.StringIO()
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.opencode_direct_developer.run',
-                      return_value=result), \
+                      side_effect=execute), \
                 patch('llmtool.task_submission_cli._developer_output_rejection',
                       side_effect=KeyboardInterrupt()), redirect_stdout(output), \
                 self.assertRaises(KeyboardInterrupt):
