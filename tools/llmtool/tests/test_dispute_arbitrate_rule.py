@@ -131,9 +131,8 @@ def _developer(profile='agy', model='gemini-2.5-pro', native_session='exec-sessi
         'usage': None,
         'error_code': None,
         'created_at': STAMP_1,
-        'owner_assignment_ref': None,
+        **({'owner_assignment_ref': None} if profile in ('agy', 'claude') else {}),
         'executor_task_id': EXECUTOR,
-        'execution': {'native_session_id': native_session},
     }
 
 
@@ -354,8 +353,10 @@ class DisputeArbitrateRuleTests(unittest.TestCase):
         ruling_text = _ruling_text(actor='Codex', outcome=outcome)
         ac = tdrcr._arbiter_claim(
             cd, state='COMPLETED', version=ARBITER_VERSION,
-            reviewer='codex-reviewer', reviewer_task=reviewer_task,
-            session=session, outcome=outcome, text=ruling_text)
+            reviewer='codex-reviewer', outcome=outcome)
+        ac['reviewer_task'] = reviewer_task
+        ac['native_session_id'] = session
+        ac['review_result']['review_text'] = ruling_text
         ac['account_mode'] = account_mode
         if account_mode == 'CODEX_CLI':
             ac.pop('account', None)
@@ -837,7 +838,7 @@ class DisputeArbitrateRuleTests(unittest.TestCase):
 
         # First-review session refuses DISPUTE_ARBITER_NOT_FRESH
         self.posted.clear()
-        self._seed_completed_codex(session=tdrcr.FORMAL_SESSION)
+        self._seed_completed_codex(session=f'formal-session-{REVIEW_VERSION}')
         with self.assertRaises(LLMToolError) as caught_first:
             task_submission_cli.dispute_arbitrate(
                 self.store, TASK, pr=PR, finding_id=FINDING,

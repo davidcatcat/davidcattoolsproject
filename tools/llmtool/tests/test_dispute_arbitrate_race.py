@@ -197,6 +197,7 @@ class DisputeArbitrateRaceTests(unittest.TestCase):
             'artifact_format': 'unified_diff', 'artifact': 'diff --git a/tools/a.py b/tools/a.py\n',
             'artifact_sha256': '1' * 64, 'usage': None, 'error_code': None,
             'created_at': STAMP_1, 'executor_task_id': EXECUTOR,
+            **({'owner_assignment_ref': None} if dev_profile == 'agy' else {}),
         }
         base['completion'] = _completion(root=self.exec_root, common_dir=self.common_dir)
         base['review_dispatch_claim'] = [tdrcr._formal_claim(cd, version=REVIEW_VERSION, verdict='FAIL', actor=first_actor)]
@@ -211,8 +212,16 @@ class DisputeArbitrateRaceTests(unittest.TestCase):
         session = CODEX_THREAD if arbiter == 'codex-reviewer' else CLAUDE_SESSION
         ruling_text = _ruling_text(actor=actor, outcome=outcome)
         ac = tdrcr._arbiter_claim(
-            cd, state=state, version=ARBITER_VERSION, reviewer=arbiter,
-            reviewer_task=ARBITER_TASK, session=session, outcome=outcome, text=ruling_text)
+            cd, state=state, version=ARBITER_VERSION, reviewer=arbiter, outcome=outcome)
+        ac['reviewer_task'] = ARBITER_TASK
+        if state != 'CLAIMED':
+            ac['native_session_id'] = session
+        if state == 'COMPLETED':
+            ac['review_result']['review_text'] = ruling_text
+            ac['review_result']['source'] = {
+                'kind': 'CODEX_JSONL' if arbiter == 'codex-reviewer' else 'CLAUDE_TRANSCRIPT',
+                'output_sha256': tdrcr.OUTPUT_DIGEST,
+            }
         ac['account_mode'] = 'ROLES'
         ac['account'] = 'codex-acc' if arbiter == 'codex-reviewer' else 'claude-acc'
 

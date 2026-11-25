@@ -357,7 +357,6 @@ class ClaudeRulingCollectionTests(unittest.TestCase):
             'usage': None,
             'error_code': None,
             'created_at': STAMP_1,
-            'owner_assignment_ref': None,
             'executor_task_id': EXECUTOR,
         })
         ruling = _ruling_text(actor='Claude', marker_status='WITHDRAWN', header_outcome='WITHDRAWN')
