@@ -4,12 +4,6 @@ import re
 from . import trust
 from .task_review import reject
 
-# Legacy values, kept only for ``llmtool trust verify-legacy`` until #369 PR-10.
-REVIEW_ORIGINS = frozenset((
-    'git@github.com:davidcatcat/davidcattoolsproject.git',
-    'https://github.com/davidcatcat/davidcattoolsproject.git',
-))
-
 
 def review_trust():
     """Return the frozen TrustConfig; fail closed with the sanitized TRUST_* code."""

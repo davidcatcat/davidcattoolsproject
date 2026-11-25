@@ -22,10 +22,6 @@ from .task_review_collector import (_LocalGit, collect_bundle_manifest,
 
 FILE_LIMIT = 1024 * 1024
 TOTAL_LIMIT = 4 * FILE_LIMIT
-# Legacy values, kept only for ``llmtool trust verify-legacy`` until #369 PR-10.
-LEGACY_PROTECTED = tuple(Path(p) for p in (
-    '/Users/davidsun/git/davidcataiporject/davidcattoolsproject',
-    '/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject'))
 SECRET_PARTS = frozenset(('.git','.aws','.ssh','.codex','.claude','credentials',
     'auth','auth.json','credentials.json','.env','.netrc','.npmrc','.kube',
     'secrets','tokens','id_rsa','id_ed25519','login.keychain-db'))
