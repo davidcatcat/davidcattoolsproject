@@ -496,6 +496,24 @@ class DisputeArbitrateRaceTests(unittest.TestCase):
         self.assertEqual(after['review_disputes'][0], entry_before)
         self.assertEqual(review_repair.withdrawn_findings(after, PR, HEAD, REVIEW_VERSION + 2), frozenset())
 
+    def _write_unrelated_event(self, seq):
+        before = self.store.get(TASK)
+        res = self.store.record_completion_event(
+            TASK,
+            event_id=f'{seq:032x}',
+            run_id=RUN,
+            session_id='unrelated-session-1',
+            source='DIRECT_D6_DEVELOPER',
+            source_sha=HEAD,
+            sequence=seq,
+            payload_sha256=f'{seq:064x}',
+        )
+        self.assertTrue(res['created'])
+        after = self.store.get(TASK)
+        self.assertNotEqual(after['record_sha256'], before['record_sha256'])
+        self.assertEqual(after['review_disputes'], before['review_disputes'])
+        self.assertEqual(after['review_dispatch_claim'], before['review_dispatch_claim'])
+
     def test_cas_loser_reevaluates_and_concurrent_calls_and_three_conflicts(self):
         # 1. Unrelated write between F3 read and CAS -> second round wins
         self._seed_arbiter(arbiter='codex-reviewer', state='COMPLETED')
@@ -504,10 +522,7 @@ class DisputeArbitrateRaceTests(unittest.TestCase):
         def head_bumps_unrelated(_r, _p):
             head_calls[0] += 1
             if head_calls[0] == 4:
-                r = self.store.get(TASK)
-                self.store.compare_and_update(
-                    TASK, expected={'record_sha256': r['record_sha256']},
-                    error_code='UNRELATED_WRITE')
+                self._write_unrelated_event(1)
             return HEAD
 
         res = task_submission_cli.dispute_arbitrate(
@@ -587,10 +602,7 @@ class DisputeArbitrateRaceTests(unittest.TestCase):
         def head_bumps_three_times(_r, _p):
             head_calls2[0] += 1
             if head_calls2[0] in (4, 5, 6):
-                r = self.store.get(TASK)
-                self.store.compare_and_update(
-                    TASK, expected={'record_sha256': r['record_sha256']},
-                    error_code=f'CONFLICT_{head_calls2[0]}')
+                self._write_unrelated_event(head_calls2[0])
             return HEAD
 
         with self.assertRaises(LLMToolError) as caught:

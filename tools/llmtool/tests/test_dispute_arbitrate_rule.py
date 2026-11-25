@@ -657,13 +657,19 @@ class DisputeArbitrateRuleTests(unittest.TestCase):
         self._seed_completed_codex()
         rec = self.store.get(TASK)
         # Direct TaskStore conflict raises TaskStoreConflict specifically
-        self.store.compare_and_update(
-            TASK, expected={'record_sha256': rec['record_sha256']},
-            error_code='OTHER_UPDATE')
+        ev_res = self.store.record_completion_event(
+            TASK, event_id='a' * 32, run_id=RUN,
+            session_id='unrelated-session-1', source='DIRECT_D6_DEVELOPER',
+            source_sha=HEAD, sequence=1, payload_sha256='b' * 64)
+        self.assertTrue(ev_res['created'])
+        updated = self.store.get(TASK)
+        self.assertNotEqual(updated['record_sha256'], rec['record_sha256'])
+        self.assertEqual(updated['review_disputes'], rec['review_disputes'])
+        self.assertEqual(updated['review_dispatch_claim'], rec['review_dispatch_claim'])
         with self.assertRaises(task_store.TaskStoreConflict):
             self.store.compare_and_update(
                 TASK, expected={'record_sha256': rec['record_sha256']},
-                error_code='SECOND')
+                review_disputes=rec['review_disputes'])
 
         # Non-CAS LLMToolError from store is not retried and reports DISPUTE_RULE_WRITE_UNKNOWN
         calls = []
