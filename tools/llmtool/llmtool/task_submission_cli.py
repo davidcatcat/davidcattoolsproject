@@ -9676,15 +9676,19 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
                  ref) is not None)
     if not valid:
         if ref is not None or high_debug_task is not None:
-            raise LLMToolError(
+            raise _prelaunch_error(
                 'DELEGATE_HIGH_DEBUG_REF_INVALID: an Issue comment link on this repository '
-                'whose path ends in /issues/N#issuecomment-M or /issues/N/comments/M')
-        raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_REQUIRED')
+                'whose path ends in /issues/N#issuecomment-M or /issues/N/comments/M',
+                'DELEGATE_HIGH_DEBUG_REF_INVALID')
+        raise _prelaunch_error('DELEGATE_HIGH_DEBUG_TASK_REQUIRED',
+                               'DELEGATE_HIGH_DEBUG_TASK_REQUIRED')
     if high_debug_task is None:
-        raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_REQUIRED')
+        raise _prelaunch_error('DELEGATE_HIGH_DEBUG_TASK_REQUIRED',
+                               'DELEGATE_HIGH_DEBUG_TASK_REQUIRED')
     if (type(high_debug_task) is not str or
             re.fullmatch(r'[0-9a-f]{32}', high_debug_task) is None):
-        raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID')
+        raise _prelaunch_error('DELEGATE_HIGH_DEBUG_TASK_INVALID',
+                               'DELEGATE_HIGH_DEBUG_TASK_INVALID')
     try:
         diagnosis_task = store.get(high_debug_task)
         entries = diagnosis_task.get('high_debug')
@@ -9766,26 +9770,32 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
             diagnosis_task, high_debug_task, entry, matched_executor,
             diagnosis_issue=diagnosis_issue)
     except Exception:
-        raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
+        raise _prelaunch_error('DELEGATE_HIGH_DEBUG_TASK_INVALID',
+                               'DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
     if d6_binding is None:
         try:
             d6_binding = _delegate_d6_binding(args)
         except Exception:
-            raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
+            raise _prelaunch_error('D6_SOURCE_BINDING_MISMATCH',
+                                   'D6_SOURCE_BINDING_MISMATCH') from None
     _registration, snapshot = d6_binding
     current_head = getattr(snapshot, 'head', None)
     if no_pr:
         if not members or high_debug_task not in members:
-            raise LLMToolError('DELEGATE_HIGH_DEBUG_LINEAGE_MISMATCH')
+            raise _prelaunch_error('DELEGATE_HIGH_DEBUG_LINEAGE_MISMATCH',
+                                   'DELEGATE_HIGH_DEBUG_LINEAGE_MISMATCH')
         if not any(event.get('source') == 'GITHUB' and
                    event.get('issue_number') == diagnosis_issue
                    for task in members.values() for event in task.get('completion_events', [])):
-            raise LLMToolError('DELEGATE_HIGH_DEBUG_ISSUE_UNVERIFIED')
+            raise _prelaunch_error('DELEGATE_HIGH_DEBUG_ISSUE_UNVERIFIED',
+                                   'DELEGATE_HIGH_DEBUG_ISSUE_UNVERIFIED')
         if matched_executor != executor_task or examined_sha != current_head:
-            raise LLMToolError('DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED')
+            raise _prelaunch_error('DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED',
+                                   'DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED')
     if matched_executor == executor_task and examined_sha == current_head:
         if newest_assignment is None or recorded_stamp <= newest_assignment:
-            raise LLMToolError('DELEGATE_HIGH_DEBUG_TIME_MISMATCH')
+            raise _prelaunch_error('DELEGATE_HIGH_DEBUG_TIME_MISMATCH',
+                                   'DELEGATE_HIGH_DEBUG_TIME_MISMATCH')
         return
     if covered or matched_executor != executor_task:
         from . import review_result
@@ -9794,20 +9804,24 @@ def _check_repair_rca(args, store, d6_binding, newest_assignment, *, covered=Fal
             diagnosis_task, examined_sha, matched_executor, before=recorded_at,
             pr=int(source_pr.group(1))) if source_pr is not None else None)
         if task_id is None or source is None:
-            raise LLMToolError('DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED')
+            raise _prelaunch_error('DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED',
+                                   'DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED')
         if not members or high_debug_task not in members:
-            raise LLMToolError('DELEGATE_HIGH_DEBUG_LINEAGE_MISMATCH')
+            raise _prelaunch_error('DELEGATE_HIGH_DEBUG_LINEAGE_MISMATCH',
+                                   'DELEGATE_HIGH_DEBUG_LINEAGE_MISMATCH')
         targets = [review_result.diagnosis_findings(item, current_head, executor_task)
                    for item in members.values()]
         if [target for target in targets if target is not None] == [source]:
             return
-        raise LLMToolError('DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED')
+        raise _prelaunch_error('DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED',
+                               'DELEGATE_HIGH_DEBUG_CAUSE_UNVERIFIED')
     if examined_sha != current_head:
         head_prefix = current_head[:12] if type(current_head) is str else ''
         examined_prefix = examined_sha[:12] if type(examined_sha) is str else ''
-        raise LLMToolError(
+        raise _prelaunch_error(
             f'DELEGATE_HIGH_DEBUG_HEAD_MOVED: a new High Debug must be taken on '
-            f'the current D6 head {head_prefix}; examined SHA {examined_prefix}')
+            f'the current D6 head {head_prefix}; examined SHA {examined_prefix}',
+            'DELEGATE_HIGH_DEBUG_HEAD_MOVED')
 
 
 def _delegate_chain_view(store, task_id, executor_task):
