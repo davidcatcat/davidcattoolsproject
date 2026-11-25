@@ -475,7 +475,10 @@ class CodexDelegateTests(unittest.TestCase):
         screen_text = task_submission_cli._screen_text
 
         def capture_screen(value, limit):
-            if limit == 64 * 1024:
+            # #2718: an active-runtime PM is screened at its own cap; the
+            # packet must still fit the provider cap (asserted below).
+            if limit in (task_submission_cli.PROVIDER_PM_PACKET_MAX_BYTES,
+                         task_submission_cli.ACTIVE_PM_PACKET_MAX_BYTES):
                 try:
                     packet = json.loads(value)
                 except (TypeError, json.JSONDecodeError):
@@ -511,7 +514,7 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertEqual(packets[0]['developer_reported']['label'],
                          'Developer-reported, unverified')
         self.assertLessEqual(len(json.dumps(packets[0], ensure_ascii=True).encode()),
-                             64 * 1024)
+                             task_submission_cli.PROVIDER_PM_PACKET_MAX_BYTES)
         self.assertLessEqual(len(json.dumps(developer['reported'], ensure_ascii=True,
                                             sort_keys=True,
                                             separators=(',', ':')).encode()), 8 * 1024)
