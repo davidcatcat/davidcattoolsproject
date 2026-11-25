@@ -60,6 +60,13 @@ def codex_attempt_reported(kwargs, code):
 
 
 class FallbackTests(unittest.TestCase):
+    def setUp(self):
+        # These tests cover the Codex-first route; the Owner pause of
+        # codex-debug (#289 c7153323324) is covered by PausedCodexDebugTests.
+        paused = patch.object(high_debug, '_codex_debug_owner_paused', return_value=False)
+        paused.start()
+        self.addCleanup(paused.stop)
+
     def _run(self, outcomes, route='codex', attempt_ran=True):
         calls = []
         def fake(*, route, **kwargs):
@@ -385,6 +392,13 @@ class FallbackTests(unittest.TestCase):
 
 
 class CliWiringTests(unittest.TestCase):
+    def setUp(self):
+        # These tests cover the Codex-first route; the Owner pause of
+        # codex-debug (#289 c7153323324) is covered by PausedCodexDebugTests.
+        paused = patch.object(high_debug, '_codex_debug_owner_paused', return_value=False)
+        paused.start()
+        self.addCleanup(paused.stop)
+
     def test_task_high_debug_goes_through_the_fallback(self):
         args = SimpleNamespace(task_id='a' * 32, executor_task='executor', pr=17, family='family',
                                failed_corrections=2, early=None, evidence_file=None, route='codex')
@@ -409,3 +423,57 @@ class CliWiringTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PausedCodexDebugTests(unittest.TestCase):
+    """Owner 2026-11-25 (#289 c7153323324): codex-debug PAUSED runs claude-debug."""
+
+    def _policy(self, allowed, reason):
+        return patch.object(high_debug.worker_dispatch, 'evaluate',
+                            return_value=SimpleNamespace(allowed=allowed, reason_code=reason))
+
+    def _run(self):
+        calls = []
+        def fake(*, route, claude_fallback=None, **kwargs):
+            calls.append((route, 'codex_attempt' in kwargs))
+            if route == 'claude':
+                # The real run_high_debug consumes the one-use grant first.
+                self.assertTrue(high_debug._consume_claude_grant(claude_fallback, 'a' * 32))
+            return 'ran-' + route
+        with patch.object(high_debug, 'run_high_debug', side_effect=fake):
+            return high_debug.run_high_debug_with_fallback(task_id='a' * 32), calls
+
+    def test_owner_paused_codex_debug_runs_claude_without_a_codex_attempt(self):
+        with self._policy(False, 'OWNER_PAUSED'):
+            result, calls = self._run()
+        self.assertEqual((result, calls), ('ran-claude', [('claude', False)]))
+        self.assertEqual(high_debug._CLAUDE_GRANTS, set())
+
+    def test_allowed_codex_debug_keeps_codex_first(self):
+        with self._policy(True, 'OWNER_POLICY_ALLOWED'):
+            result, calls = self._run()
+        self.assertEqual((result, calls), ('ran-codex', [('codex', True)]))
+
+    def test_other_refusals_or_unreadable_policy_keep_codex_first(self):
+        for decision in (self._policy(False, 'OWNER_ASSIGNMENT_REQUIRED'),
+                         patch.object(high_debug.worker_dispatch, 'evaluate',
+                                      side_effect=LLMToolError('unreadable'))):
+            with self.subTest(decision=decision), decision:
+                result, calls = self._run()
+                self.assertEqual((result, calls), ('ran-codex', [('codex', True)]))
+
+    def test_explicit_claude_route_is_still_refused(self):
+        with self._policy(False, 'OWNER_PAUSED'), \
+                self.assertRaises(LLMToolError) as caught:
+            high_debug.run_high_debug_with_fallback(route='claude', task_id='a' * 32)
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_CLAUDE_ROUTE_REFUSED')
+
+    def test_paused_grant_is_one_use_and_task_bound(self):
+        grant = high_debug._issue_claude_grant('a' * 32, high_debug.CODEX_DEBUG_PAUSED)
+        self.assertFalse(high_debug._consume_claude_grant(grant, 'b' * 32))
+        grant = high_debug._issue_claude_grant('a' * 32, high_debug.CODEX_DEBUG_PAUSED)
+        self.assertTrue(high_debug._consume_claude_grant(grant, 'a' * 32))
+        self.assertFalse(high_debug._consume_claude_grant(grant, 'a' * 32))
+
+    def test_real_policy_pauses_codex_debug(self):
+        self.assertTrue(high_debug._codex_debug_owner_paused('a' * 32))

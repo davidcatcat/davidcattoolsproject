@@ -1052,6 +1052,11 @@ _CODEX_SETTINGS = (
 # #1502 WP-B: only these two Codex failures may switch AI Debug to the Claude
 # route. Anything else (timeout, screen refusal, unknown result) stops as before.
 DEBUG_FALLBACK_CODES = frozenset(('HIGH_DEBUG_QUOTA_EXHAUSTED', 'HIGH_DEBUG_AUTH_FAILED'))
+# Owner 2026-11-25 (#289 c7153323324): while worker-dispatch.json pauses
+# codex-debug, AI Debug runs on claude-debug without a Codex attempt. Only
+# run_high_debug_with_fallback issues this grant, from its own policy reread.
+CODEX_DEBUG_PAUSED = 'HIGH_DEBUG_CODEX_PAUSED'
+_CLAUDE_GRANT_CODES = DEBUG_FALLBACK_CODES | {CODEX_DEBUG_PAUSED}
 _CODEX_QUOTA = re.compile(r'usage limit|hit your limit|quota|rate.?limit|\b429\b', re.I)
 _CODEX_LOGIN = re.compile(
     r'not logged in|log ?in again|unauthori[sz]ed|\b401\b|authentication (?:failed|required)', re.I)
@@ -1712,7 +1717,7 @@ _CLAUDE_GRANTS_LOCK = threading.Lock()
 
 def _issue_claude_grant(task_id, codex_code):
     """Record this run's Codex fallback condition; None when there is none."""
-    if type(task_id) is not str or codex_code not in DEBUG_FALLBACK_CODES:
+    if type(task_id) is not str or codex_code not in _CLAUDE_GRANT_CODES:
         return None
     grant = _ClaudeFallbackGrant(task_id, codex_code)
     with _CLAUDE_GRANTS_LOCK:
@@ -1734,7 +1739,7 @@ def _consume_claude_grant(grant, task_id):
             return False
         _CLAUDE_GRANTS.discard(grant)
     return (type(task_id) is str and grant.task_id == task_id and
-            grant.codex_code in DEBUG_FALLBACK_CODES)
+            grant.codex_code in _CLAUDE_GRANT_CODES)
 
 
 class _CodexAttempt:
@@ -2127,6 +2132,15 @@ _CLAUDE_DEBUG_UNAVAILABLE = DEBUG_FALLBACK_CODES | {
     'HIGH_DEBUG_DISPATCH_REFUSED', 'HIGH_DEBUG_ACCOUNT_UNCONFIGURED'}
 
 
+def _codex_debug_owner_paused(task_id):
+    """True only when a fresh read of worker-dispatch.json pauses codex-debug."""
+    try:
+        decision = worker_dispatch.evaluate('codex-debug', None, task_id)
+    except Exception:
+        return False   # the Codex route then refuses through its own gate
+    return decision.allowed is False and decision.reason_code == 'OWNER_PAUSED'
+
+
 def run_high_debug_with_fallback(*, route='codex', **kwargs):
     """Run AI Debug; switch from Codex to Claude only on DEBUG_FALLBACK_CODES.
 
@@ -2152,6 +2166,16 @@ def run_high_debug_with_fallback(*, route='codex', **kwargs):
         # Only this function issues a grant or an attempt record; a caller
         # never supplies one.
         _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
+    if _codex_debug_owner_paused(kwargs.get('task_id')):
+        # The Owner paused codex-debug: no Codex attempt; claude-debug's own
+        # dispatch gate still applies inside run_high_debug.
+        grant = _issue_claude_grant(kwargs.get('task_id'), CODEX_DEBUG_PAUSED)
+        if grant is None:
+            _refuse(CLAUDE_ROUTE_REFUSED, _CODEX_ATTEMPT_UNCONFIRMED_DETAIL)
+        try:
+            return run_high_debug(route='claude', claude_fallback=grant, **kwargs)
+        finally:
+            _revoke_claude_grant(grant)
     attempt = _CodexAttempt(kwargs.get('task_id')) if route == 'codex' else None
     extra = {'codex_attempt': attempt} if attempt is not None else {}
     try:
