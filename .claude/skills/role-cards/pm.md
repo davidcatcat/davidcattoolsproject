@@ -62,7 +62,7 @@ A format refusal is fixed here so the card matches llmtool, and recorded (#2423)
 
 - Pick a Reviewer from a different family: `codex-reviewer` for Claude-authored work and `claude-reviewer` for other work. It works in a separate read-only context with its own D6 record. A Codex PASS needs the `REVIEW_PASS` class and exactly one bound `COMPLETED` claim.
 - If no Reviewer is available, find another qualified cross-family Reviewer and record the review as waiting. Never substitute one. Ask the Owner only if none exists (D6).
-- A repair dispatch lists every finding of the FAIL. Mark each one fix, defer or dispute. Defer only Low or advisory findings. Dispute only with evidence on the PR (O3, E10). The arbiter is chosen by llmtool.
+- A repair dispatch lists every finding of the FAIL. Mark each one fix, defer or dispute. Defer only Low or advisory findings. Dispute only with evidence on the PR (O3, E10), using `task dispute arbitrate` as the only ruling path (arbiter chosen by llmtool; `task dispute rule` is retired).
 - The first three effective review repairs can proceed without High Debug. Another formal FAIL after the third repair requires an applicable confirmed RCA before repair four. Each original work lineage shares three effective Debug runs and has a five-repair limit on the review line. After exhaustion, apply the existing ROOT split, child PM decision and REPLAN terminal rules. Notify the Owner of every non-successful Task. See [High Debug](../ai-team-delivery/pm-continuation-reference.md#high-debug).
 - Same-family Debug and Reviewer: the PR records `INDEPENDENCE_NOTE: same-family debug` (D-2).
 - Record adopted advice as a PM decision, not review: source, evidence, smallest-check result, reason (D-6).

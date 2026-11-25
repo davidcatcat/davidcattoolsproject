@@ -38,6 +38,7 @@ Legal recovery commands (the manual flow only when `task advance` cannot run):
 - **BLOCKED:** confirm the cause with evidence, classify it, then retry (transient only), reassign or isolate ([BLOCKED](../../.claude/skills/ai-team-delivery/pm-continuation.md#blocked-diagnose-then-retry-reassign-or-isolate)).
 - **`MAIN_PIN_COMMIT_MISSING`:** the main commit the step pins is missing from the local checkout, so fetch main first and then rerun the step ([PR #2567](https://github.com/davidcatcat/davidcattoolsproject/pull/2567)).
 - **Dispute withdraw:** `task dispute withdraw` withdraws only the PM's own dispute, while the finding stays on the record and then goes through normal repair ([dispute background #2087](https://github.com/davidcatcat/davidcattoolsproject/issues/2087), [PR #2579](https://github.com/davidcatcat/davidcattoolsproject/pull/2579)).
+- **Dispute ruling:** open a dispute with `task dispute open` (evidence on the PR) and rule it only through `task dispute arbitrate` (llmtool chooses the arbiter and records the ruling; `task dispute rule` is retired and refuses `DISPUTE_RULE_MANUAL_RETIRED`, with no PM-written ruling, PM-chosen reviewer or PM-chosen outcome) ([#2087](https://github.com/davidcatcat/davidcattoolsproject/issues/2087), [dispute arbiter design](../../docs/design/dispute-arbiter-trusted-path-2087.md)).
 
 Refusals not to retry unchanged:
 
