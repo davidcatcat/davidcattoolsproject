@@ -1225,11 +1225,27 @@ def _verdict_post_name(task_id, claim):
 
 def _receipt_identity(task_id, claim, text):
     # Only a digest of the text is stored; never the review text itself.
-    return {'schema_version': 1, 'task_id': task_id, 'pr': claim.get('pr'),
-            'head': claim.get('head_sha'), 'version': claim.get('version'),
-            'reviewer_task': claim.get('reviewer_task'),
-            'text_sha256': hashlib.sha256(
-                text.encode('utf-8', 'surrogatepass')).hexdigest()}
+    identity = {'schema_version': 1, 'task_id': task_id, 'pr': claim.get('pr'),
+                'head': claim.get('head_sha'), 'version': claim.get('version'),
+                'reviewer_task': claim.get('reviewer_task'),
+                'text_sha256': hashlib.sha256(
+                    text.encode('utf-8', 'surrogatepass')).hexdigest()}
+    if claim.get('purpose') == 'dispute_ruling':
+        dispute = claim.get('dispute')
+        if (type(dispute) is not dict or
+                type(dispute.get('pr')) is not int or isinstance(dispute.get('pr'), bool) or
+                type(dispute.get('head_sha')) is not str or
+                type(dispute.get('review_version')) is not int or
+                isinstance(dispute.get('review_version'), bool) or
+                type(dispute.get('finding_id')) is not str):
+            raise _PostError('VERDICT_POST_RECEIPT_UNAVAILABLE')
+        identity['dispute'] = {
+            'pr': dispute['pr'],
+            'head_sha': dispute['head_sha'],
+            'review_version': dispute['review_version'],
+            'finding_id': dispute['finding_id'],
+        }
+    return identity
 
 
 def _lock_current(fd, path):
@@ -1389,6 +1405,81 @@ def _find_posted_verdict(comments, login, text, binding_line):
     return match, conflict, duplicate
 
 
+_RULING_MARKER_LINE = re.compile(r'^<!--\s*activity:\s*type=dispute_ruling\b')
+_VERDICT_MARKER_LINE = re.compile(r'^<!--\s*activity:\s*type=review_verdict\b')
+
+
+def _find_posted_ruling(comments, login, text, binding_line, *,
+                        finding_id, pr, head, review_version):
+    """Return (exact comment, conflict, duplicate) within the ruling identity.
+
+    Comments outside the ruling identity (disputed FAIL, other verdicts,
+    rulings on other findings or other review versions) are ignored.
+    """
+    from .dispute_arbiter import RULING_HEADER_VERSIONED
+    from .task_submission_cli import _RULING_HEADER
+
+    match, conflict, duplicate = None, False, False
+    for comment in comments:
+        if type(comment) is not dict:
+            continue
+        user, body = comment.get('user'), comment.get('body')
+        if type(user) is not dict or user.get('login') != login or type(body) is not str:
+            continue
+        lines = body.splitlines()
+        if binding_line not in lines:
+            continue
+        has_ruling_marker = any(_RULING_MARKER_LINE.match(line) is not None for line in lines)
+        ruling_lines = [line for line in lines if line.startswith('Ruling: ')]
+        if not has_ruling_marker and not ruling_lines:
+            continue
+        if not has_ruling_marker:
+            first_non_empty = next((line for line in lines if line.strip()), '')
+            if _VERDICT_MARKER_LINE.match(first_non_empty) is not None:
+                continue
+        if len(ruling_lines) != 1:
+            conflict = True
+            continue
+        ruling_line = ruling_lines[0]
+        v_match = RULING_HEADER_VERSIONED.fullmatch(ruling_line)
+        if v_match is not None:
+            c_finding, _c_outcome, c_pr, c_ver, c_head = v_match.groups()
+            if (c_finding, c_pr, c_ver, c_head) != (
+                    finding_id, str(pr), str(review_version), head):
+                continue
+        else:
+            l_match = _RULING_HEADER.fullmatch(ruling_line)
+            if l_match is None:
+                conflict = True
+                continue
+            c_finding, _c_outcome, c_pr, c_head = l_match.groups()
+            if (c_finding, c_pr, c_head) != (finding_id, str(pr), head):
+                continue
+        if body == text:
+            if match is None:
+                match = comment
+            else:
+                duplicate = True
+        else:
+            conflict = True
+    return match, conflict, duplicate
+
+
+def _match_posted(comments, login, text, binding_line, claim):
+    if type(claim) is dict and claim.get('purpose') == 'dispute_ruling':
+        dispute = claim.get('dispute')
+        if type(dispute) is not dict:
+            return None, True, False
+        return _find_posted_ruling(
+            comments, login, text, binding_line,
+            finding_id=dispute.get('finding_id'),
+            pr=dispute.get('pr'),
+            head=dispute.get('head_sha'),
+            review_version=dispute.get('review_version'),
+        )
+    return _find_posted_verdict(comments, login, text, binding_line)
+
+
 def _comment_id(comment):
     value = comment.get('id') if type(comment) is dict else None
     return value if type(value) is int and not isinstance(value, bool) else None
@@ -1466,7 +1557,7 @@ def _post_under_lock(*, fd, directory, name, task, task_id, claim, text, login_r
         except Exception:
             comments = None
         match, _conflict, duplicate = (
-            _find_posted_verdict(comments, login, text, binding_line)
+            _match_posted(comments, login, text, binding_line, claim)
             if type(comments) is list else (None, False, False))
         if duplicate:
             # Record the conflict durably on the receipt, keeping its POSTED
@@ -1508,7 +1599,7 @@ def _post_under_lock(*, fd, directory, name, task, task_id, claim, text, login_r
         comments = None
     if type(comments) is not list:
         raise failed('VERDICT_POST_LIST_FAILED')
-    match, conflict, duplicate = _find_posted_verdict(comments, login, text, binding_line)
+    match, conflict, duplicate = _match_posted(comments, login, text, binding_line, claim)
     if duplicate:
         raise failed('VERDICT_POST_DUPLICATE')
     if match is not None:
@@ -1520,7 +1611,17 @@ def _post_under_lock(*, fd, directory, name, task, task_id, claim, text, login_r
         return output
     if conflict:
         raise failed('VERDICT_POST_CONFLICT')
-    if not allowed():
+    try:
+        is_allowed = allowed()
+    except LLMToolError as exc:
+        if getattr(exc, 'dispute_code', None) is not None:
+            try:
+                record('FAILED', code='VERDICT_POST_NOT_ALLOWED')
+            except _PostError:
+                pass
+            raise
+        raise
+    if not is_allowed:
         raise failed('VERDICT_POST_NOT_ALLOWED')
     # Fence right before posting: only this attempt, still holding the named
     # lock, may post. A newer attempt's receipt is never overwritten here.

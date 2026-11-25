@@ -408,10 +408,35 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
         })
         expected_sha = hashlib.sha256(raw_jsonl).hexdigest()
         gh_reads = []
+        posted = []
+        posted_comment_id = 2002
 
         def comment_get(path):
             gh_reads.append(path)
-            return _dispute_comment(body='Dispute body for F1')
+            if path == f'issues/comments/{DISPUTE_COMMENT_ID}':
+                return _dispute_comment(body='Dispute body for F1')
+            if path == f'issues/comments/{posted_comment_id}':
+                return {
+                    'id': posted_comment_id,
+                    'body': posted[0]['body'],
+                    'issue_url': f'https://api.github.com/repos/{REPOSITORY}/issues/{PR}',
+                    'created_at': '2026-11-23T00:05:00Z',
+                    'updated_at': '2026-11-23T00:05:00Z',
+                }
+            raise AssertionError(f'unexpected github_get: {path}')
+
+        def fake_lister(_pr):
+            return [dict(c) for c in posted]
+
+        def fake_poster(_root, pr_num, body):
+            comment = {
+                'id': posted_comment_id,
+                'user': {'login': REVIEW_LOGIN},
+                'body': body,
+                'pr': pr_num,
+            }
+            posted.append(comment)
+            return comment
 
         with patch.object(review_dispatch.shutil, 'which', return_value='/usr/bin/codex'), \
              patch.object(review_dispatch.subprocess, 'run',
@@ -423,14 +448,22 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
                 github_get=comment_get,
                 create_d6=self.fake_create_d6,
                 bind_session=self.fake_bind,
+                comment_lister=fake_lister,
+                comment_poster=fake_poster,
+                login_resolver=lambda: REVIEW_LOGIN,
             )
 
-        self.assertEqual(res['state'], 'COMPLETED')
-        self.assertEqual(res['verdict'], 'RULING')
+        self.assertEqual(res['state'], 'RULED')
+        self.assertTrue(res['formal_pass_required'])
         self.assertEqual(res['outcome'], 'WITHDRAWN')
         self.assertEqual(res['reviewer'], 'codex-reviewer')
         self.assertEqual(res['reviewer_session'], THREAD_ID)
-        self.assertEqual(gh_reads, [f'issues/comments/{DISPUTE_COMMENT_ID}'])
+        self.assertEqual(len(posted), 1)
+        self.assertEqual(posted[0]['body'], ruling_text)
+        self.assertEqual(gh_reads, [
+            f'issues/comments/{DISPUTE_COMMENT_ID}',
+            f'issues/comments/{posted_comment_id}',
+        ])
         self.assertEqual(len(self.created_d6), 1)
         self.assertEqual(self.created_d6[0]['base_sha'], HEAD)
         self.assertEqual(self.created_d6[0]['reviewer_key'], 'codex-reviewer')
@@ -457,23 +490,28 @@ class ArbitrateLaunchTests(_ArbitrateLaunchCase):
             'kind': 'CODEX_JSONL', 'output_sha256': expected_sha,
         })
         entry = stored['review_disputes'][0]
-        self.assertEqual(entry['state'], 'OPEN')
+        self.assertEqual(entry['state'], 'RULED')
         self.assertEqual(entry['arbiter_claim'], {'reviewer_task': ac['reviewer_task'], 'version': ac['version']})
-        self.assertEqual([e['event'] for e in entry['history']], ['ARBITER_CLAIMED', 'ARBITER_COMPLETED'])
+        self.assertEqual([e['event'] for e in entry['history']], ['ARBITER_CLAIMED', 'ARBITER_COMPLETED', 'RULED'])
         self.assertEqual(entry['history'][0]['actor'], f'pm:{PM_SESSION}')
         self.assertEqual(entry['history'][1]['actor'], 'llmtool')
+        self.assertEqual(entry['history'][2]['actor'], 'llmtool')
 
-        # Replay on COMPLETED RULING returns recorded result with no second launch
+        # Replay on RULED returns recorded result with no second launch and no second post
         replay = task_submission_cli.dispute_arbitrate(
             self.store, TASK, pr=PR, finding_id=FINDING,
             current_head=lambda _r, _p: HEAD,
             github_get=comment_get,
             create_d6=self.fake_create_d6,
             bind_session=self.fake_bind,
+            comment_lister=fake_lister,
+            comment_poster=fake_poster,
+            login_resolver=lambda: REVIEW_LOGIN,
         )
-        self.assertEqual(replay['state'], 'COMPLETED')
+        self.assertEqual(replay['state'], 'RULED')
         self.assertEqual(replay['outcome'], 'WITHDRAWN')
         self.assertEqual(len(self.created_d6), 1)
+        self.assertEqual(len(posted), 1)
 
     def test_refused_codex_output_cases_record_unknown_and_leave_dispute_open(self):
         ruling_ok = _ruling_text(actor='Codex')

@@ -338,15 +338,48 @@ class ClaudeRulingCollectionTests(unittest.TestCase):
         expected_sha = hashlib.sha256(raw).hexdigest()
         self._write_transcript(raw)
 
-        res = self._arbitrate()
-        self.assertEqual(res['state'], 'COMPLETED')
-        self.assertEqual(res['verdict'], 'RULING')
+        posted = []
+        posted_comment_id = 2002
+
+        def fake_lister(_pr):
+            return [dict(c) for c in posted]
+
+        def fake_poster(_root, pr_num, body):
+            comment = {
+                'id': posted_comment_id,
+                'user': {'login': REVIEW_LOGIN},
+                'body': body,
+                'pr': pr_num,
+            }
+            posted.append(comment)
+            return comment
+
+        def fake_get(path):
+            if path == f'issues/comments/{posted_comment_id}':
+                return {
+                    'id': posted_comment_id,
+                    'body': posted[0]['body'],
+                    'issue_url': f'https://api.github.com/repos/{REPOSITORY}/issues/{PR}',
+                    'created_at': '2026-11-23T00:05:00Z',
+                    'updated_at': '2026-11-23T00:05:00Z',
+                }
+            raise AssertionError(f'unexpected github_get: {path}')
+
+        res = task_submission_cli.dispute_arbitrate(
+            self.store, TASK, pr=PR, finding_id=FINDING,
+            current_head=lambda _r, _p: HEAD,
+            github_get=fake_get,
+            comment_lister=fake_lister,
+            comment_poster=fake_poster,
+            login_resolver=lambda: REVIEW_LOGIN,
+        )
+        self.assertEqual(res['state'], 'RULED')
+        self.assertTrue(res['formal_pass_required'])
         self.assertEqual(res['outcome'], 'WITHDRAWN')
         self.assertEqual(res['reviewer'], 'claude-reviewer')
         self.assertEqual(res['reviewer_session'], CLAUDE_SESSION)
-        self.assertEqual(self.github_calls, [])
-        self.assertEqual(self.comment_lister_calls, [])
-        self.assertEqual(self.comment_poster_calls, [])
+        self.assertEqual(len(posted), 1)
+        self.assertEqual(posted[0]['body'], ruling)
 
         stored = self.store.get(TASK)
         ac = [c for c in stored['review_dispatch_claim'] if c.get('purpose') == 'dispute_ruling'][0]
@@ -360,17 +393,26 @@ class ClaudeRulingCollectionTests(unittest.TestCase):
         })
         history = stored['review_disputes'][0]['history']
         self.assertEqual([h['event'] for h in history],
-                         ['ARBITER_CLAIMED', 'ARBITER_DISPATCHED', 'ARBITER_COMPLETED'])
+                         ['ARBITER_CLAIMED', 'ARBITER_DISPATCHED', 'ARBITER_COMPLETED', 'RULED'])
+        self.assertEqual(history[-2]['actor'], 'llmtool')
+        self.assertEqual(history[-2]['refs']['output_sha256'], expected_sha)
         self.assertEqual(history[-1]['actor'], 'llmtool')
-        self.assertEqual(history[-1]['refs']['output_sha256'], expected_sha)
 
         after_first = self._record_bytes()
         self.run_calls.clear()
-        replay = self._arbitrate()
-        self.assertEqual(replay['state'], 'COMPLETED')
+        replay = task_submission_cli.dispute_arbitrate(
+            self.store, TASK, pr=PR, finding_id=FINDING,
+            current_head=lambda _r, _p: HEAD,
+            github_get=fake_get,
+            comment_lister=fake_lister,
+            comment_poster=fake_poster,
+            login_resolver=lambda: REVIEW_LOGIN,
+        )
+        self.assertEqual(replay['state'], 'RULED')
         self.assertEqual(replay['outcome'], 'WITHDRAWN')
         self.assertEqual(self._record_bytes(), after_first)
         self.assertEqual(self.run_calls, [])
+        self.assertEqual(len(posted), 1)
 
     def test_forged_github_only_ruling_cannot_complete(self):
         ruling = _ruling_text(actor='Claude')
@@ -701,9 +743,9 @@ class ClaudeRulingCollectionTests(unittest.TestCase):
         self._seed(claims=[formal_1, formal_3])
         self._write_transcript(_transcript_bytes([_assistant_entry(_ruling_text())]))
 
-        res = self._arbitrate()
-        self.assertEqual(res['state'], 'COMPLETED')
-        self.assertEqual(res['verdict'], 'RULING')
+        with self.assertRaises(LLMToolError) as caught:
+            self._arbitrate()
+        self.assertEqual(caught.exception.dispute_code, 'DISPUTE_VERDICT_NEWER')
         stored = self.store.get(TASK)
         ac = [c for c in stored['review_dispatch_claim'] if c.get('purpose') == 'dispute_ruling'][0]
         self.assertEqual(ac['state'], 'COMPLETED')
