@@ -30,16 +30,29 @@ _FINGERPRINT = 'cpython3.13-testbase-local-0123456789ab'
 
 
 class _DictStore:
-    """Minimal in-memory store for _stacked_chain unit tests."""
+    """Minimal in-memory store for _stacked_chain and recording-stub tests."""
 
     def __init__(self, records=None, *, fail_on=()):
         self.records = dict(records or {})
         self.fail_on = set(fail_on)
 
+    def create(self, record):
+        self.records[record['task_id']] = dict(record)
+        return dict(record)
+
     def get(self, task_id):
         if task_id in self.fail_on:
             raise RuntimeError('store read failed')
         return self.records[task_id]
+
+    def compare_and_update(self, task_id, *, expected, **changes):
+        record = dict(self.records[task_id])
+        for key, value in expected.items():
+            if record.get(key) != value:
+                raise RuntimeError('store precondition mismatch')
+        record.update(changes)
+        self.records[task_id] = record
+        return dict(record)
 
 
 def _hex(char):
@@ -327,16 +340,25 @@ class StackedChainCliTests(unittest.TestCase):
     def create_task(self, task_id, *, d6_id, source, branch, write_paths,
                     artifact=None, artifact_sha256=None, continues=None,
                     completion_state='WAITING_EXECUTOR', result_head=None,
-                    claude_route=False):
+                    claude_route=False, store=None):
         run_id = _id(100 + int(task_id, 16))
-        contract = task_submission_cli._contract(task_id, '0' * 64, continues=continues)
+        request = 'goal'
+        request_sha = hashlib.sha256(request.encode('utf-8')).hexdigest()
+        contract = task_submission_cli._contract(task_id, request_sha, continues=continues)
         record = task_submission_cli._record(
-            task_id, run_id, 'pm-' + _id(999), 'active-pm-runtime', 'goal',
+            task_id, run_id, 'pm-' + _id(999), 'active-pm-runtime', request,
             state='PM_RESPONDED', provider_type='active-pm-runtime', model=None,
-            backend='ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL', request_sha='0' * 64,
+            backend='ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL', request_sha=request_sha,
             contract=contract)
+        route = 'claude' if claude_route else 'gw-agent'
+        assignment = {
+            'route': route, 'risk': 'LOW', 'goal': 'goal',
+            'acceptance': ['ok'],
+        }
         record['response'] = json.dumps({
-            'schema_version': 1, 'summary': 'ok', 'developer_assignment': None})
+            'schema_version': 1, 'summary': 'ok',
+            'developer_assignment': assignment})
+        record['pm_assignment'] = {'schema_version': 1, **assignment}
         record['pm_route_binding'] = {
             'type': 'active-pm-runtime', 'model': None, 'base_url': None}
         record['pm_provenance'] = {
@@ -346,11 +368,15 @@ class StackedChainCliTests(unittest.TestCase):
         }
         if continues is not None:
             record['continues'] = continues
+        if not claude_route and artifact is None:
+            artifact = 'diff'
+            artifact_sha256 = hashlib.sha256(artifact.encode('utf-8')).hexdigest()
+        sorted_writes = sorted(set(write_paths))
         developer = {
             'assignment_id': _id(200 + int(task_id, 16)),
             'selection_source': 'PM',
             'state': 'DEVELOPER_RESPONDED',
-            'provider_profile': 'claude' if claude_route else 'gw-agent',
+            'provider_profile': route,
             'provider_type': 'claude-cli' if claude_route else 'gw-agent-cli',
             'model': 'test-model',
             'backend_session_semantics': (
@@ -359,8 +385,8 @@ class StackedChainCliTests(unittest.TestCase):
             'session_id': 'dev-' + _id(300 + int(task_id, 16)),
             'source_sha': source,
             'source_sha_binding': 'D6_REGISTRY_OBSERVED',
-            'read_paths': list(write_paths),
-            'write_paths': list(write_paths),
+            'read_paths': list(sorted_writes),
+            'write_paths': list(sorted_writes),
             'acceptance': ['ok'],
             'context_sha256': 'c' * 64,
             'egress_basis': 'test',
@@ -395,7 +421,32 @@ class StackedChainCliTests(unittest.TestCase):
             'executor_native_session': 'UNKNOWN',
         }
         if result_head is not None:
-            evidence['result'] = {'result_head': result_head}
+            if completion_state in ('PM_EVIDENCE_READY', 'PM_RETURNED'):
+                evidence['result'] = {
+                    'task_id': task_id,
+                    'run_id': run_id,
+                    'result_head': result_head,
+                }
+                evidence['tests'] = [{
+                    'path': 'tools/llmtool/tests/test_stacked_chain_cli_2084.py',
+                    'exit_code': 0,
+                    'source_sha': result_head,
+                    'output_sha256': '0' * 64,
+                }]
+                evidence['review_pr_ci'] = {
+                    'stage': 'EXECUTOR_RESULT',
+                    'formal_review_state': 'NOT_STARTED',
+                    'ci_state': 'NOT_STARTED',
+                }
+            else:
+                evidence['result'] = {'result_head': result_head}
+        pm_dispatch = 'RETURNED' if completion_state == 'PM_RETURNED' else 'NOT_STARTED'
+        pm_response = (
+            json.dumps({'schema_version': 1, 'decision': 'SEND_TO_REVIEW', 'summary': 'ok'})
+            if completion_state == 'PM_RETURNED' else None)
+        pm_recommendation = (
+            {'decision': 'SEND_TO_REVIEW', 'summary': 'ok'}
+            if completion_state == 'PM_RETURNED' else None)
         record['developer'] = developer
         record['completion'] = {
             'state': completion_state,
@@ -403,32 +454,43 @@ class StackedChainCliTests(unittest.TestCase):
             'reviewer_task_id': None,
             'evidence': evidence,
             'missing_gates': [],
-            'pm_dispatch': 'NOT_STARTED',
-            'pm_response': None,
-            'pm_recommendation': None,
+            'pm_dispatch': pm_dispatch,
+            'pm_response': pm_response,
+            'pm_recommendation': pm_recommendation,
             'pm_usage': None,
             'pm_error_code': None,
         }
-        self.store.create(record)
-        return self.store.get(task_id)
+        target_store = self.store if store is None else store
+        target_store.create(record)
+        return target_store.get(task_id)
 
-    def _run_complete(self, task_id, d6_id, *, main_sha):
+    def _run_complete(self, task_id, d6_id, *, main_sha, store=None):
         args = Namespace(task_id=task_id, executor_task=d6_id,
                          reviewer_task=None, pr=None)
+        target_store = self.store if store is None else store
         fake_tests = lambda **kw: [{
             'path': 'tools/llmtool/tests/test_stacked_chain_cli_2084.py',
             'exit_code': 0, 'source_sha': kw['result_sha'],
             'output_sha256': '0' * 64,
         }]
-        with mock.patch.object(task_completion, 'read_authenticated_main_sha',
-                               return_value=main_sha), \
-                mock.patch.object(task_completion, '_trusted_slug',
-                                  return_value='owner/repo'), \
-                mock.patch.object(task_completion, 'run_bounded_tests',
-                                  side_effect=fake_tests), \
-                mock.patch.object(skill_gate, 'check_completion'), \
-                contextlib.redirect_stdout(io.StringIO()):
-            return task_submission_cli.run_task_complete(args, store=self.store)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                task_completion, 'read_authenticated_main_sha',
+                return_value=main_sha))
+            stack.enter_context(mock.patch.object(
+                task_completion, '_trusted_slug',
+                return_value='owner/repo'))
+            stack.enter_context(mock.patch.object(
+                task_completion, 'run_bounded_tests',
+                side_effect=fake_tests))
+            stack.enter_context(mock.patch.object(
+                skill_gate, 'check_completion'))
+            if store is not None:
+                stack.enter_context(mock.patch.object(
+                    task_submission_cli, '_record_ready_event'))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            return task_submission_cli.run_task_complete(
+                args, store=target_store)
 
     def _two_step_with_update_branch(self):
         self.git('checkout', '-q', '-b', 'task1')
@@ -564,28 +626,30 @@ class StackedChainCliTests(unittest.TestCase):
 
     def test_recording_stub_omits_stacked_chain_when_not_stacked(self):
         s0, s1, s2 = _hex('0'), _hex('1'), _hex('2')
+        fake_store = _DictStore()
         self.create_task(
             _id(1), d6_id='d6-1', source=s0, branch='task1',
             write_paths=['a.txt'], completion_state='PM_EVIDENCE_READY',
-            result_head=s1)
+            result_head=s1, store=fake_store)
         # 1. no-continues
         self.create_task(
             _id(2), d6_id='d6-2', source=s1, branch='task2',
-            write_paths=['b.txt'], artifact='diff', artifact_sha256='0' * 64)
+            write_paths=['b.txt'], artifact='diff', artifact_sha256='0' * 64,
+            store=fake_store)
         # 2. cross-D6-not-stacked (continues points to incomplete task)
         self.create_task(
             _id(3), d6_id='d6-3', source=s0, branch='task3',
             write_paths=['c.txt'], completion_state='WAITING_EXECUTOR',
-            result_head=s1)
+            result_head=s1, store=fake_store)
         self.create_task(
             _id(4), d6_id='d6-4', source=s1, branch='task4',
             write_paths=['b.txt'], artifact='diff', artifact_sha256='0' * 64,
-            continues=_id(3))
+            continues=_id(3), store=fake_store)
         # 3. same-D6-segments (artifact_segments is not None)
         self.create_task(
             _id(5), d6_id='d6-5', source=s1, branch='task5',
             write_paths=['b.txt'], artifact='diff', artifact_sha256='0' * 64,
-            continues=_id(1))
+            continues=_id(1), store=fake_store)
 
         recorded_kwargs = []
 
@@ -604,7 +668,9 @@ class StackedChainCliTests(unittest.TestCase):
                 mock.patch.object(task_submission_cli, '_completion_repair_artifact_segments',
                                   side_effect=[None, None, [('a', 'd', s1, s2)]]):
             for task_id, d6_id in ((_id(2), 'd6-2'), (_id(4), 'd6-4'), (_id(5), 'd6-5')):
-                self.assertEqual(self._run_complete(task_id, d6_id, main_sha=s0), 0)
+                self.assertEqual(
+                    self._run_complete(task_id, d6_id, main_sha=s0, store=fake_store),
+                    0)
 
         self.assertEqual(len(recorded_kwargs), 3)
         for call_kwargs in recorded_kwargs:
@@ -620,7 +686,7 @@ class StackedChainCliTests(unittest.TestCase):
             repair_kwargs.append(dict(kwargs))
             return {'result_head': s2}
 
-        task5 = self.store.get(_id(5))
+        task5 = fake_store.get(_id(5))
         task5['review_repair_claims'] = [{'repair_task_id': _id(6)}]
         with mock.patch.object(task_completion, 'read_authenticated_main_sha',
                                return_value=s0), \
@@ -631,7 +697,7 @@ class StackedChainCliTests(unittest.TestCase):
                 mock.patch.object(task_completion, 'collect_executor_result',
                                   side_effect=fake_repair_collector):
             admitted = task_submission_cli._repair_head_admitted(
-                task5, self.store, task5['completion']['evidence'],
+                task5, fake_store, task5['completion']['evidence'],
                 executor_task='d6-5', head=s2)
         self.assertTrue(admitted)
         self.assertEqual(len(repair_kwargs), 1)
@@ -642,14 +708,14 @@ class StackedChainCliTests(unittest.TestCase):
         self.create_task(
             _id(6), d6_id='d6-6', source=s1, branch='task6',
             write_paths=['b.txt'], continues=_id(1), result_head=s2,
-            claude_route=True)
+            claude_route=True, store=fake_store)
         claude_repair_kwargs = []
 
         def fake_claude_repair_collector(**kwargs):
             claude_repair_kwargs.append(dict(kwargs))
             return {'result_head': s2}
 
-        task6 = self.store.get(_id(6))
+        task6 = fake_store.get(_id(6))
         task6['review_repair_claims'] = [{'repair_task_id': _id(7)}]
         with mock.patch.object(task_completion, 'read_authenticated_main_sha',
                                return_value=s0), \
@@ -660,7 +726,7 @@ class StackedChainCliTests(unittest.TestCase):
                 mock.patch.object(task_completion, 'collect_claude_result',
                                   side_effect=fake_claude_repair_collector):
             claude_admitted = task_submission_cli._repair_head_admitted(
-                task6, self.store, task6['completion']['evidence'],
+                task6, fake_store, task6['completion']['evidence'],
                 executor_task='d6-6', head=s2)
         self.assertTrue(claude_admitted)
         self.assertEqual(len(claude_repair_kwargs), 1)
@@ -669,17 +735,19 @@ class StackedChainCliTests(unittest.TestCase):
 
     def test_claude_route_passes_stacked_chain_only_when_stacked(self):
         s0, s1, s2 = _hex('0'), _hex('1'), _hex('2')
+        fake_store = _DictStore()
         self.create_task(
             _id(1), d6_id='d6-1', source=s0, branch='task1',
             write_paths=['a.txt'], completion_state='PM_RETURNED',
-            result_head=s1)
+            result_head=s1, store=fake_store)
         self.create_task(
             _id(2), d6_id='d6-2', source=s1, branch='task2',
             write_paths=['b.txt'], continues=_id(1), result_head=s2,
-            claude_route=True)
+            claude_route=True, store=fake_store)
         self.create_task(
             _id(3), d6_id='d6-3', source=s1, branch='task3',
-            write_paths=['b.txt'], result_head=s2, claude_route=True)
+            write_paths=['b.txt'], result_head=s2, claude_route=True,
+            store=fake_store)
 
         recorded = []
 
@@ -697,8 +765,12 @@ class StackedChainCliTests(unittest.TestCase):
                                side_effect=fake_claude_collector), \
                 mock.patch.object(task_submission_cli, '_completion_repair_artifact_segments',
                                   return_value=None):
-            self.assertEqual(self._run_complete(_id(2), 'd6-2', main_sha=s0), 0)
-            self.assertEqual(self._run_complete(_id(3), 'd6-3', main_sha=s0), 0)
+            self.assertEqual(
+                self._run_complete(_id(2), 'd6-2', main_sha=s0, store=fake_store),
+                0)
+            self.assertEqual(
+                self._run_complete(_id(3), 'd6-3', main_sha=s0, store=fake_store),
+                0)
 
         self.assertEqual(len(recorded), 2)
         self.assertEqual(
