@@ -6424,6 +6424,12 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         if (not changed_paths and type(reply_summary) is str and
                 reply_summary.strip()):
             rejection = None
+            # A responded OpenCode record reports CLI usage exactly when it
+            # holds usage (TaskStore). This path can reach the responded state
+            # from a result whose usage source and usage disagree, so normalize
+            # it the way the AGY and gw-agent delegates do.
+            execution['usage_source'] = (
+                'CLI_REPORTED' if result.usage is not None else 'UNKNOWN')
         else:
             rejection = _developer_output_rejection(
                 artifact, write_paths, normalize=False, allow_new_files=True,
