@@ -7,8 +7,9 @@ import tempfile
 import unittest
 from unittest import mock
 
-from llmtool import review_result, review_transcript, task_store
+from llmtool import review_result, review_transcript, task_store, worker_dispatch
 from llmtool.errors import LLMToolError
+import worker_policy_fixture
 
 
 TASK, RUN, HEAD = '1' * 32, '2' * 32, 'a' * 40
@@ -162,10 +163,26 @@ class TranscriptUsageTests(unittest.TestCase):
                          (None, 'USAGE_ABSENT'))
 
 
+def _install_worker_policy(testcase):
+    worker_policy_fixture.install(testcase)
+    repository = mock.patch.object(
+        worker_dispatch,
+        'repository_config',
+        return_value={
+            'slug': 'davidcatcat/davidcattoolsproject',
+            'dispatch_issue': 289,
+            'dispatch_evidence_pr': 283,
+        },
+    )
+    repository.start()
+    testcase.addCleanup(repository.stop)
+
+
 class TaskStoreReviewUsageTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        _install_worker_policy(self)
 
     def test_older_claim_without_usage_keys_and_round_trip_of_both_keys(self):
         store = _make_store(self.temp.name)
@@ -219,6 +236,7 @@ class RecordReviewResultUsageTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        _install_worker_policy(self)
         self.home = os.path.join(self.temp.name, 'claude-home')
         os.makedirs(self.home)
         self.store_dir = os.path.join(self.temp.name, 'store')
