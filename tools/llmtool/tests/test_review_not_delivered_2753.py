@@ -296,14 +296,14 @@ class TaskAdvanceNotDeliveredRedispatchTests(unittest.TestCase):
                     prompt_renderer=lambda *_: 'prompt',
                 )
 
-        record = store.get(task_id)
-        completion = dict(record.get('completion') or {}, executor_task_id='executor-d6')
-        store.compare_and_update(
-            task_id,
-            expected={'record_sha256': record['record_sha256']},
-            published_pr={'pr': 42, 'head_sha': trd.HEAD},
-            completion=completion,
-        )
+        orig_get = store.get
+
+        def _get_with_completion(tid):
+            rec = orig_get(tid)
+            if tid == task_id and type(rec) is dict and not rec.get('completion'):
+                rec = dict(rec, completion={'executor_task_id': 'executor-d6'})
+            return rec
+
         d6 = self._d6_snapshot()
         pr = self._pr_snapshot()
         redispatch_calls = []
@@ -312,7 +312,8 @@ class TaskAdvanceNotDeliveredRedispatchTests(unittest.TestCase):
             redispatch_calls.append(kwargs)
             return {'state': 'DISPATCHED', 'version': kwargs['version'], 'pr': 42}
 
-        with patch.object(task_advance, '_d6_snapshot', return_value=d6), \
+        with patch.object(store, 'get', side_effect=_get_with_completion), \
+             patch.object(task_advance, '_d6_snapshot', return_value=d6), \
              patch.object(task_advance, '_pr_snapshot', return_value=pr), \
              patch.object(task_advance, '_pr_docs_only', return_value=False), \
              patch.object(task_advance, '_remote_test_status', return_value=('PASS', None, None)), \
@@ -334,7 +335,7 @@ class TaskAdvanceNotDeliveredRedispatchTests(unittest.TestCase):
         self.assertEqual(redispatch_calls[0]['version'], 2)
         self.assertTrue(redispatch_calls[0]['refusal_rerun'])
 
-        fresh = store.get(task_id)
+        fresh = orig_get(task_id)
         second_claim = dict(
             fresh['review_dispatch_claim'][0],
             version=2,
@@ -345,7 +346,8 @@ class TaskAdvanceNotDeliveredRedispatchTests(unittest.TestCase):
             expected={'record_sha256': fresh['record_sha256']},
             review_dispatch_claim=fresh['review_dispatch_claim'] + [second_claim],
         )
-        with patch.object(task_advance, '_d6_snapshot', return_value=d6), \
+        with patch.object(store, 'get', side_effect=_get_with_completion), \
+             patch.object(task_advance, '_d6_snapshot', return_value=d6), \
              patch.object(task_advance, '_pr_snapshot', return_value=pr), \
              patch.object(task_advance, '_pr_docs_only', return_value=False), \
              patch.object(task_advance, '_remote_test_status', return_value=('PASS', None, None)):
