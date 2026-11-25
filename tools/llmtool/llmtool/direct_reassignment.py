@@ -11,6 +11,8 @@ from . import review_repair, start_failure, task_completion
 from .errors import LLMToolError
 
 AGENTS = {'opencode': 'opencode-developer', 'agy': 'agy-developer'}
+ROOT_INVALID = 'DIRECT_REASSIGN_ROOT_INVALID'
+REPAIR_EVIDENCE_INVALID = 'DIRECT_REASSIGN_RESULT_EVIDENCE_INVALID'
 
 
 def _refuse(code):
@@ -355,8 +357,13 @@ def effective_writer_admission(store, root, initial, executor_task):
         if (not developer.get('direct_handoffs') or
                 developer.get('state') != 'DEVELOPER_RESPONDED'):
             continue
+        completion = repair.get('completion')
+        evidence = completion.get('evidence') if type(completion) is dict else None
+        if type(evidence) is not dict or any(name not in evidence for name in (
+                'executor_identity', 'executor_session_ref',
+                'executor_native_session_id', 'executor_native_session')):
+            _refuse(REPAIR_EVIDENCE_INVALID)
         verified_repair_result(root, claim, repair)
-        evidence = repair['completion']['evidence']
         return dict(initial, **{name: evidence[name] for name in (
             'executor_identity', 'executor_session_ref', 'executor_native_session_id',
             'executor_native_session')})
@@ -365,8 +372,14 @@ def effective_writer_admission(store, root, initial, executor_task):
 
 def authoring_route(store, root, developer, executor_task):
     """Keep later repairs on the writer admitted by an earlier handoff."""
+    if type(root) is not dict:
+        _refuse(ROOT_INVALID)
     completion = root.get('completion') or {}
+    if type(completion) is not dict:
+        _refuse(ROOT_INVALID)
     initial = completion.get('evidence') or {}
+    if type(initial) is not dict:
+        _refuse(ROOT_INVALID)
     if not root.get('review_repair_claims') or not initial.get('common_dir'):
         return developer
     current = effective_writer_admission(store, root, initial, executor_task)

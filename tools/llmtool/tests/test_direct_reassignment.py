@@ -1,4 +1,5 @@
 """Direct tests for llmtool.direct_reassignment helpers (issue #2492)."""
+import copy
 import sys
 import tempfile
 import unittest
@@ -10,7 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import llmtool.direct_reassignment as dr
 from llmtool import worker_dispatch
-from llmtool.direct_reassignment import (effective_writer_admission,
+from llmtool.direct_reassignment import (authoring_route,
+                                         effective_writer_admission,
                                          replacement_candidate,
                                          verified_repair_result)
 from llmtool.errors import LLMToolError
@@ -22,6 +24,8 @@ TASK_ID = 'd6task-2492'
 SESSION = 'sess-2492'
 AGENT = 'opencode-developer'
 CODE = 'DIRECT_REASSIGN_RESULT_UNVERIFIED'
+ROOT_INVALID = 'DIRECT_REASSIGN_ROOT_INVALID'
+EVIDENCE_INVALID = 'DIRECT_REASSIGN_RESULT_EVIDENCE_INVALID'
 EVIDENCE_KEYS = ('executor_identity', 'executor_session_ref',
                  'executor_native_session_id', 'executor_native_session')
 
@@ -36,6 +40,19 @@ class FakeStore:
         if task_id not in self.tasks:
             raise KeyError(task_id)
         return self.tasks[task_id]
+
+
+class FailingStore(FakeStore):
+    """Store whose get raises a fixed LLMToolError for one task id."""
+
+    def __init__(self, tasks, failed_task_id):
+        super().__init__(tasks)
+        self.failed_task_id = failed_task_id
+
+    def get(self, task_id):
+        if task_id == self.failed_task_id:
+            raise LLMToolError('STORE_UNAVAILABLE')
+        return super().get(task_id)
 
 
 def _error_codes(exc):
@@ -145,12 +162,15 @@ class DirectReassignmentTests(unittest.TestCase):
     def test_verified_repair_result_refuses_unverified_result(self):
         broken = self._repair_task()
         broken['developer']['execution']['status'] = 'FAILED'
+        root = self._root()
         for claim, task in (
                 (dict(self._claim(), head_sha='f' * 40), self._repair_task()),
                 (self._claim(), broken)):
+            before = copy.deepcopy((root, claim, task))
             with self.assertRaises(LLMToolError) as ctx:
-                verified_repair_result(self._root(), claim, task)
+                verified_repair_result(root, claim, task)
             self.assertIn(CODE, _error_codes(ctx.exception))
+            self.assertEqual((root, claim, task), before)
 
     def test_effective_writer_admission_returns_verified_writer(self):
         root = self._root()
@@ -170,11 +190,189 @@ class DirectReassignmentTests(unittest.TestCase):
     def test_effective_writer_admission_refuses_unverified_repair(self):
         task = self._repair_task()
         task['developer']['source_sha'] = 'f' * 40
-        store = FakeStore({'root-2492': self._root(), 'repair-2492': task})
+        root = self._root()
+        store = FakeStore({'root-2492': root, 'repair-2492': task})
+        initial = dict(self.evidence)
+        before = copy.deepcopy((store.tasks, initial))
         with self.assertRaises(LLMToolError) as ctx:
-            effective_writer_admission(store, store.tasks['root-2492'],
-                                       dict(self.evidence), TASK_ID)
+            effective_writer_admission(store, root, initial, TASK_ID)
         self.assertIn(CODE, _error_codes(ctx.exception))
+        self.assertEqual((store.tasks, initial), before)
+
+    def test_authoring_route_a1_returns_developer_without_claims(self):
+        developer = {'provider_profile': 'agy',
+                     'owner_assignment_ref': 'ref-2492'}
+        for claims in (None, []):
+            root = {'task_id': 'root-2492',
+                    'completion': {'evidence': dict(self.evidence)}}
+            if claims is not None:
+                root['review_repair_claims'] = claims
+            self.assertIs(authoring_route(FakeStore({}), root, developer,
+                                          TASK_ID), developer)
+
+    def test_authoring_route_a2_returns_developer_without_common_dir(self):
+        developer = {'provider_profile': 'agy',
+                     'owner_assignment_ref': 'ref-2492'}
+        for evidence in ({}, {'common_dir': ''}):
+            root = {'task_id': 'root-2492',
+                    'review_repair_claims': [self._claim()],
+                    'completion': {'evidence': evidence}}
+            self.assertIs(authoring_route(FakeStore({}), root, developer,
+                                          TASK_ID), developer)
+        root = {'task_id': 'root-2492',
+                'review_repair_claims': [self._claim()]}
+        self.assertIs(authoring_route(FakeStore({}), root, developer, TASK_ID),
+                      developer)
+
+    def test_authoring_route_b_returns_developer_when_projection_matches(self):
+        developer = {'provider_profile': 'agy',
+                     'owner_assignment_ref': 'ref-2492'}
+        evidence = dict(self.evidence, executor_session_ref='sess-2492')
+        root = {'task_id': 'root-2492',
+                'review_repair_claims': [dict(self._claim(), state='CLAIMED')],
+                'completion': {'evidence': evidence}}
+        self.assertIs(authoring_route(FakeStore({}), root, developer, TASK_ID),
+                      developer)
+
+    def test_authoring_route_c_returns_developer_when_profile_matches(self):
+        root = self._root()
+        store = FakeStore({'root-2492': root,
+                           'repair-2492': self._repair_task()})
+        developer = {'provider_profile': 'opencode',
+                     'owner_assignment_ref': 'ref-2492'}
+        self.assertIs(authoring_route(store, root, developer, TASK_ID),
+                      developer)
+
+    def test_authoring_route_d_returns_new_record_for_changed_profile(self):
+        root = self._root()
+        store = FakeStore({'root-2492': root,
+                           'repair-2492': self._repair_task()})
+        developer = {'provider_profile': 'agy',
+                     'owner_assignment_ref': 'ref-2492',
+                     'goal': 'goal-2492',
+                     'acceptance': ['acceptance-2492'],
+                     'read_paths': ['read-2492'],
+                     'write_paths': ['write-2492']}
+        result = authoring_route(store, root, developer, TASK_ID)
+        self.assertIsNot(result, developer)
+        self.assertEqual(result, dict(developer, provider_profile='opencode',
+                                      owner_assignment_ref=None))
+        self.assertEqual(developer['provider_profile'], 'agy')
+        self.assertEqual(developer['owner_assignment_ref'], 'ref-2492')
+
+    def test_authoring_route_e_refuses_unknown_projected_identity(self):
+        task = self._repair_task()
+        task['completion']['evidence']['executor_identity'] = 'unknown-agent'
+        root = self._root()
+        store = FakeStore({'root-2492': root, 'repair-2492': task})
+        developer = {'provider_profile': 'opencode'}
+        before = copy.deepcopy((store.tasks, developer))
+        with self.assertRaises(LLMToolError) as ctx:
+            authoring_route(store, root, developer, TASK_ID)
+        self.assertIn('DIRECT_REASSIGN_D6_BINDING_MISMATCH',
+                      _error_codes(ctx.exception))
+        self.assertEqual((store.tasks, developer), before)
+
+    def test_authoring_route_f_refuses_unverified_repair(self):
+        task = self._repair_task()
+        task['developer']['source_sha'] = 'f' * 40
+        root = self._root()
+        store = FakeStore({'root-2492': root, 'repair-2492': task})
+        developer = {'provider_profile': 'opencode'}
+        before = copy.deepcopy((store.tasks, developer))
+        with self.assertRaises(LLMToolError) as ctx:
+            authoring_route(store, root, developer, TASK_ID)
+        self.assertIn(CODE, _error_codes(ctx.exception))
+        self.assertEqual((store.tasks, developer), before)
+
+    def test_effective_writer_admission_skips_bad_claims(self):
+        initial = dict(self.evidence)
+        claims_values = ('claims-2492', {'repair_task_id': 'repair-2492'},
+                         [self._claim(), 'claim-2492'])
+        for claims in claims_values:
+            root = {'review_repair_claims': claims,
+                    'completion': {'evidence': dict(initial)}}
+            self.assertIs(effective_writer_admission(
+                FakeStore({}), root, initial, TASK_ID), initial)
+
+    def test_effective_writer_admission_skips_other_state_and_executor(self):
+        initial = dict(self.evidence)
+        claims = (dict(self._claim(), state='CLAIMED'),
+                  dict(self._claim(), executor_task='other-task'))
+        for claim in claims:
+            root = {'review_repair_claims': [claim],
+                    'completion': {'evidence': dict(initial)}}
+            self.assertIs(effective_writer_admission(
+                FakeStore({}), root, initial, TASK_ID), initial)
+
+    def test_effective_writer_admission_skips_missing_repair(self):
+        root = self._root()
+        initial = dict(self.evidence)
+        self.assertIs(effective_writer_admission(
+            FakeStore({'root-2492': root}), root, initial, TASK_ID), initial)
+
+    def test_effective_writer_admission_skips_store_error(self):
+        root = self._root()
+        store = FailingStore({'root-2492': root}, 'repair-2492')
+        initial = dict(self.evidence)
+        self.assertIs(effective_writer_admission(store, root, initial, TASK_ID),
+                      initial)
+
+    def test_effective_writer_admission_skips_unresponded_repair(self):
+        initial = dict(self.evidence)
+        developers = ({'direct_handoffs': [],
+                       'state': 'DEVELOPER_RESPONDED'},
+                      {'direct_handoffs': [{'new_assignment': ASSIGNMENT}],
+                       'state': 'DEVELOPER_PENDING'})
+        for developer in developers:
+            task = self._repair_task()
+            task['developer'].update(developer)
+            root = self._root()
+            store = FakeStore({'root-2492': root, 'repair-2492': task})
+            self.assertIs(effective_writer_admission(
+                store, root, initial, TASK_ID), initial)
+
+    def test_effective_writer_admission_returns_initial_unverified(self):
+        initial = dict(self.evidence)
+        root = {'review_repair_claims': [],
+                'completion': {'evidence': dict(initial)}}
+        self.assertIs(effective_writer_admission(
+            FakeStore({}), root, initial, TASK_ID), initial)
+
+    def test_authoring_route_refuses_malformed_root(self):
+        developer = {'provider_profile': 'opencode'}
+        roots = (None, [], 'root-2492', 2492,
+                 {'review_repair_claims': [self._claim()],
+                  'completion': 'bad'},
+                 {'review_repair_claims': [self._claim()],
+                  'completion': {'evidence': 'bad'}})
+        for root in roots:
+            before = copy.deepcopy((root, developer))
+            with self.assertRaises(LLMToolError) as ctx:
+                authoring_route(FakeStore({}), root, developer, TASK_ID)
+            self.assertIn(ROOT_INVALID, _error_codes(ctx.exception))
+            self.assertEqual((root, developer), before)
+
+    def test_effective_writer_admission_refuses_missing_repair_evidence(self):
+        removals = ('completion', 'evidence', 'executor_identity',
+                    'executor_session_ref', 'executor_native_session_id',
+                    'executor_native_session')
+        for removal in removals:
+            task = self._repair_task()
+            if removal == 'completion':
+                del task['completion']
+            elif removal == 'evidence':
+                del task['completion']['evidence']
+            else:
+                del task['completion']['evidence'][removal]
+            root = self._root()
+            store = FakeStore({'root-2492': root, 'repair-2492': task})
+            initial = dict(self.evidence)
+            before = copy.deepcopy((store.tasks, initial))
+            with self.assertRaises(LLMToolError) as ctx:
+                effective_writer_admission(store, root, initial, TASK_ID)
+            self.assertIn(EVIDENCE_INVALID, _error_codes(ctx.exception))
+            self.assertEqual((store.tasks, initial), before)
 
 
 if __name__ == '__main__':
