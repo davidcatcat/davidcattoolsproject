@@ -101,10 +101,16 @@ def _prior_run_record(task_id, *, created_at):
     }
 
 
+def _root_record():
+    root = _record()
+    root['developer']['created_at'] = '2026-10-27T00:00:00Z'
+    return root
+
+
 class RepairReplayRca2722Tests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.store = _D6TempTaskStore(self.temp.name, _record())
+        self.store = _D6TempTaskStore(self.temp.name, _root_record())
         self.runtime_path_patch = patch.object(
             review_repair.shutil, 'which', return_value='/usr/bin/codex')
         self.runtime_path_patch.start()
@@ -148,8 +154,7 @@ class RepairReplayRca2722Tests(unittest.TestCase):
             },
             'developer': None,
         }
-        root = _record()
-        root['developer']['created_at'] = '2026-10-27T00:00:00Z'
+        root = _root_record()
         root['review_dispatch_claim'][0]['version'] = 4
         root['review_repair_claims'] = [{
             'executor_task': EXECUTOR,
@@ -177,8 +182,7 @@ class RepairReplayRca2722Tests(unittest.TestCase):
             _prior_run_record(f'{n:032x}', created_at=f'2026-10-27T0{n}:00:00Z')
             for n in range(1, 4)
         ]
-        root = _record()
-        root['developer']['created_at'] = '2026-10-27T00:00:00Z'
+        root = _root_record()
         root['review_repair_claims'] = [
             {
                 'executor_task': EXECUTOR,
@@ -196,6 +200,7 @@ class RepairReplayRca2722Tests(unittest.TestCase):
             for n in range(1, 4)
         ]
         root['review_dispatch_claim'][0]['version'] = 4
+        root['review_dispatch_claim'][0]['review_result']['review_text'] = _comment(version=4)['body']
         if with_debug:
             entry, event = _high_debug_entry(family=family, status='RCA_CONFIRMED')
             root['high_debug'] = [entry]
@@ -354,7 +359,7 @@ class RepairReplayRca2722Tests(unittest.TestCase):
         self.assertIsNone(dispatched[0].high_debug_ref)
         self.assertIsNone(dispatched[0].high_debug_family)
 
-        self.store = _D6TempTaskStore(self.temp.name, _record())
+        self.store = _D6TempTaskStore(self.temp.name, _root_record())
         ec2_result, ec2_dispatched = self._run_through_delegate(
             remote_test_receipt=_receipt(),
         )
