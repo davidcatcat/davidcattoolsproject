@@ -6411,14 +6411,23 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         if len(artifact_raw) > 5 * 1024 * 1024:
             raise LLMToolError('OpenCode diff exceeds the supported size')
         artifact = artifact_raw.decode('utf-8', 'strict')
-        rejection = _developer_output_rejection(
-            artifact, write_paths, normalize=False, allow_new_files=True,
-            sources=_revision_sources(registration.root, snapshot.head))
         execution = _direct_execution(result, evidence=True)
         # #2503: keep OpenCode's own text for the PM. It is the whole run's text
         # stream, so the end (the final answer) is kept when it must be cut.
         _attach_developer_reply(developer, getattr(result, 'text', None), keep_end=True)
         _attach_stderr_excerpt(developer, getattr(result, 'stderr_excerpt', None))
+        # #2736: mirror the AGY delegate. An unchanged worktree with a
+        # non-empty reply is a responded run with no artifact; an empty reply
+        # keeps the strict empty-envelope rejection, as does any non-empty diff.
+        reported = developer.get('reported')
+        reply_summary = reported.get('summary') if type(reported) is dict else None
+        if (not changed_paths and type(reply_summary) is str and
+                reply_summary.strip()):
+            rejection = None
+        else:
+            rejection = _developer_output_rejection(
+                artifact, write_paths, normalize=False, allow_new_files=True,
+                sources=_revision_sources(registration.root, snapshot.head))
         if rejection is not None:
             saved = _persist_developer_output_rejection(
                 store, task['task_id'], developer, rejection, result.usage, artifact,
