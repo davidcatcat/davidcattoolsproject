@@ -10,8 +10,11 @@ incident store.
 Read plan:
 
 * ``branches/main``: the current main SHA.
-* ``actions/workflows/<workflow>/runs?branch=main&event=<event>&per_page=100``:
-  the newest runs of the Linux push workflow and the FULL Mac workflow.
+* ``actions/workflows/<workflow>/runs?branch=main&event=<event>&per_page=20``:
+  the newest runs of the Linux push workflow and the FULL Mac workflow. The
+  page stays well inside the 1 MiB GitHub reader cap (about 280 KiB at the
+  observed ~14 KiB per run); a listing the reader refuses as too large is
+  UNKNOWN with ``run_list_too_large``.
 * ``actions/runs/<id>/jobs?per_page=100&page=<n>``: the jobs of the selected
   run, at most ``MAX_JOB_PAGES`` pages.
 
@@ -66,10 +69,17 @@ RUNS = ('actions/workflows/{workflow}/runs?branch=main&event={event}'
         '&per_page={per_page}')
 JOBS = 'actions/runs/{run_id}/jobs?per_page={per_page}&page={page}'
 
-RUNS_PER_PAGE = 100
+# #2602: a 100-per-page run listing is about 1,393,333 bytes, which exceeds the
+# 1 MiB GitHub reader cap in task_completion._github_get. At the observed
+# ~14 KiB per run, 20 per page is about 280 KiB, well inside the cap.
+RUNS_PER_PAGE = 20
 JOBS_PER_PAGE = 100
 MAX_JOB_PAGES = 10
 MAX_RUNS_TO_SCAN = 10
+
+# task_completion._github_get refuses a response over its 1 MiB cap with this
+# completion code, so a run listing can name that refusal separately.
+READER_TOO_LARGE = 'GITHUB_EVIDENCE_TOO_LARGE'
 
 # The FULL shard jobs prove the Mac dispatch actually executed the FULL suite;
 # ``check`` runs in a skip-only dispatch too, so it is not evidence.
@@ -78,6 +88,7 @@ FULL_SHARDS = mac_full_due.JOBS[:3]
 # Short reason codes naming why a run or the whole report is UNKNOWN.
 MAIN_READ_FAILED = 'main_read_failed'
 RUN_LIST_FAILED = 'run_list_failed'
+RUN_LIST_TOO_LARGE = 'run_list_too_large'
 RUN_LIST_MALFORMED = 'run_list_malformed'
 RUN_LIST_BOUND = 'run_list_bound'
 RUN_MISSING = 'run_missing'
@@ -99,10 +110,16 @@ _KINDS = (
 )
 
 
+class _ListingTooLarge(mac_full_due.StateError):
+    """A reader refusal for a response larger than its byte cap."""
+
+
 def _read(github_get, path):
     try:
         data = github_get(path)
-    except Exception:
+    except Exception as exc:
+        if getattr(exc, 'completion_code', None) == READER_TOO_LARGE:
+            raise _ListingTooLarge(path) from None
         raise mac_full_due.StateError(path) from None
     if not isinstance(data, (dict, list)):
         raise mac_full_due.StateError(path)
@@ -124,6 +141,8 @@ def _listed_runs(github_get, workflow, event):
     path = RUNS.format(workflow=workflow, event=event, per_page=RUNS_PER_PAGE)
     try:
         data = _read(github_get, path)
+    except _ListingTooLarge:
+        return None, RUN_LIST_TOO_LARGE
     except mac_full_due.StateError:
         return None, RUN_LIST_FAILED
     runs = data.get('workflow_runs') if isinstance(data, dict) else None

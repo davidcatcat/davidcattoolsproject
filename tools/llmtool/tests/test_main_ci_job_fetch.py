@@ -4,6 +4,7 @@ import unittest
 from llmtool import main_ci_job_fetch as fetch
 from llmtool import main_ci_job_pages as pages
 from llmtool import main_ci_job_summary as summary
+from llmtool.errors import LLMToolError
 
 SHA = 'a' * 40
 OLDER = 'b' * 40
@@ -22,6 +23,13 @@ def run(run_id, sha=SHA, attempt=1):
             'status': 'completed', 'conclusion': 'success'}
 
 
+def reader_too_large():
+    """The same refusal task_completion._github_get raises above its 1 MiB cap."""
+    error = LLMToolError('GitHub evidence is unavailable; details omitted')
+    error.completion_code = fetch.READER_TOO_LARGE
+    return error
+
+
 def job(job_id, name, run_id, attempt, sha=SHA, conclusion='success',
         status='completed'):
     return {'id': job_id, 'name': name, 'run_id': run_id,
@@ -37,6 +45,7 @@ class FakeGitHub:
         self.runs = {}
         self.pages = {}
         self.fail = set()
+        self.too_large = set()
         self.calls = []
 
     def workflow(self, workflow, event, runs):
@@ -49,6 +58,8 @@ class FakeGitHub:
         self.calls.append(path)
         if path in self.fail:
             raise OSError('api down')
+        if path in self.too_large:
+            raise reader_too_large()
         if path == fetch.MAIN:
             return {'commit': {'sha': self.sha}}
         for (workflow, event), runs in self.runs.items():
@@ -267,6 +278,36 @@ class MainCiJobFetchTests(unittest.TestCase):
         self.assertEqual(result['state'], fetch.UNKNOWN)
         self.assertEqual(result['reason'], fetch.RUN_LIST_BOUND)
         self.assertIsNone(result['runs'][0]['run_id'])
+
+    def test_run_list_page_size_stays_inside_the_reader_cap(self):
+        # #2602: 100 runs per page was 1,393,333 bytes. At the observed
+        # ~14 KiB per run, 20 per page is about 280 KiB, well under the
+        # 1 MiB GitHub reader cap in task_completion._github_get.
+        reader_cap = 1024 * 1024
+        conservative_bytes_per_run = 16 * 1024
+        self.assertLessEqual(fetch.RUNS_PER_PAGE, 20)
+        self.assertLess(fetch.RUNS_PER_PAGE * conservative_bytes_per_run,
+                        reader_cap)
+
+    def test_too_large_run_listing_is_unknown_with_its_own_reason(self):
+        github = green_github()
+        github.too_large.add(fetch.RUNS.format(
+            workflow=fetch.LINUX_WORKFLOW, event='push',
+            per_page=fetch.RUNS_PER_PAGE))
+        result = fetch.inspect_jobs(github)
+        self.assertEqual(result['state'], fetch.UNKNOWN)
+        self.assertEqual(result['reason'], fetch.RUN_LIST_TOO_LARGE)
+        self.assertEqual(result['runs'][0]['reason'], fetch.RUN_LIST_TOO_LARGE)
+        self.assertEqual(result['runs'][1]['state'], fetch.GREEN)
+
+    def test_too_large_job_page_keeps_pages_failed(self):
+        # #2602: only the run listing gets its own reason; job pages keep the
+        # existing generic failed-read behaviour.
+        github = green_github()
+        github.too_large.add(github.jobs_path(MAC_RUN, 1))
+        result = fetch.inspect_jobs(github)
+        self.assertEqual(result['state'], fetch.UNKNOWN)
+        self.assertEqual(result['reason'], fetch.PAGES_FAILED)
 
     def test_run_attempt_mismatch_is_unknown_but_reports_failure(self):
         github = green_github()
