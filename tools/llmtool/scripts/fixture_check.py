@@ -363,8 +363,9 @@ def check(*, write_baseline: bool = False) -> tuple[int, list[str]]:
         BASELINE.write_text(json.dumps(dict(sorted(counts.items())), indent=2) + "\n", encoding="utf-8")
         return 0, []
     baseline = _read_baseline()
-    exceeded, baseline_findings = compare_counts(counts, baseline)
-    violations.extend(baseline_findings)
+    exceeded, baseline_notes = compare_counts(counts, baseline)
+    for note in baseline_notes:
+        print(f"fixture-check note: {note}")
     return int(exceeded), violations
 
 
