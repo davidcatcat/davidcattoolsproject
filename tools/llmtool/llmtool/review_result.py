@@ -427,9 +427,37 @@ def _inline_copies(pr_number, head, body, *, inline_io, github_get):
         return {'posted': 0, 'skipped': 0, 'failed': 1}
 
 
+def _record_claude_claim_usage(store, task_id, *, executor_task, pr_number, version, kind,
+                               config_dir=None):
+    """Attach transcript token usage or usage_unknown once to a DISPATCHED Claude claim."""
+    from . import review_transcript
+    from .task_store import TaskStoreConflict
+    for _ in range(3):
+        task = store.get(task_id)
+        claim, _ = _claim_for(task, executor_task=executor_task,
+                              pr_number=pr_number, version=version, kind=kind)
+        if ('purpose' in claim or claim.get('state') != 'DISPATCHED' or
+                'usage' in claim or 'usage_unknown' in claim or
+                claim.get('account_mode') == 'CODEX_CLI' or
+                claim.get('reviewer') == 'codex-reviewer'):
+            return
+        patch = review_transcript.claim_usage(claim, config_dir=config_dir)
+        if patch is None:
+            return
+        stored = task.get('review_dispatch_claim')
+        claims = [stored] if type(stored) is dict else stored
+        updated = [dict(claim, **patch) if item is claim else item for item in claims]
+        try:
+            store.compare_and_update(task_id, expected={'review_dispatch_claim': stored},
+                                     review_dispatch_claim=updated)
+            return
+        except TaskStoreConflict:
+            continue
+
+
 def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
                          reviewer_session_done=False, github_get=None, inline_io=None,
-                         common_dir=None, kind='formal'):
+                         common_dir=None, kind='formal', config_dir=None):
     """Classify the latest claim-bound verdict and persist one idempotent event.
 
     #1909 item 2: an UNKNOWN claim that would settle needs its Reviewer D6
@@ -444,7 +472,8 @@ def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
         _refuse('REVIEW_KIND_UNSUPPORTED')
     if (type(version) is not int or not 1 <= version <= 9999 or
             type(pr_number) is not int or not 1 <= pr_number <= 9999999 or
-            type(reviewer_session_done) is not bool):
+            type(reviewer_session_done) is not bool or
+            (config_dir is not None and type(config_dir) is not str)):
         _refuse('REVIEW_RESULT_ARGUMENT_INVALID')
     task = store.get(task_id)
     if type(task) is not dict or task.get('task_id') != task_id:
@@ -510,6 +539,9 @@ def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
         review_kind=kind)
     if settle:
         _settle_unknown_claim(store, task, claim, comments, head=head, version=version)
+    _record_claude_claim_usage(
+        store, task_id, executor_task=executor_task, pr_number=pr_number,
+        version=version, kind=kind, config_dir=config_dir)
     output = {'state': outcome, 'event_id': event_id,
               'created': result['created'], 'comment_id': comment_id,
               'head': head, 'version': version}

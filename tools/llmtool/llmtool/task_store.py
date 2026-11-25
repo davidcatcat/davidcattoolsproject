@@ -158,6 +158,7 @@ _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS = (
     _REVIEW_DISPATCH_CLAIM_FIELDS | frozenset(('account',)))
 _REVIEW_DISPATCH_RESULT_FIELDS = frozenset((
     'task_id', 'run_id', 'contract_digest', 'head', 'verdict', 'review_text'))
+_REVIEW_USAGE_UNKNOWN_REASONS = frozenset(('TRANSCRIPT_UNAVAILABLE', 'USAGE_ABSENT'))
 _REVIEW_REPAIR_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'attempt', 'state',
     'comment_id', 'packet_sha256', 'claimed_at'))
@@ -2830,7 +2831,8 @@ def _validate(record, *, strict=True, repository_pattern=None):
                     set(item) - frozenset(('failure_reason', 'binding_mismatch_keys',
                                            'rules_sha256', 'bind_failure_reason',
                                            'review_kind', 'purpose', 'dispute',
-                                           'reviewer', 'launch_refusal')) not in (
+                                           'reviewer', 'launch_refusal',
+                                           'usage', 'usage_unknown')) not in (
                         _REVIEW_DISPATCH_CLAIM_FIELDS,
                         _REVIEW_DISPATCH_CLAIM_FIELDS | frozenset(('review_result',)),
                         _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS,
@@ -2895,6 +2897,18 @@ def _validate(record, *, strict=True, repository_pattern=None):
                       'review_result' not in item)) or
                     (item['state'] != 'COMPLETED' and 'review_result' in item)):
                 _fail('REVIEW_DISPATCH_CLAIM_INVALID')
+            if 'usage' in item and 'usage_unknown' in item:
+                _fail('REVIEW_DISPATCH_CLAIM_INVALID')
+            if 'usage' in item:
+                try:
+                    _validate_usage(item['usage'])
+                except Exception:
+                    _fail('REVIEW_DISPATCH_CLAIM_INVALID')
+            if 'usage_unknown' in item:
+                unknown = item['usage_unknown']
+                if (type(unknown) is not dict or set(unknown) != {'reason'} or
+                        unknown['reason'] not in _REVIEW_USAGE_UNKNOWN_REASONS):
+                    _fail('REVIEW_DISPATCH_CLAIM_INVALID')
             if 'purpose' in item:
                 dispute = item['dispute']
                 disputes = record.get('review_disputes')
@@ -7010,6 +7024,21 @@ class TaskStore:
                                         event.get('source') == 'REVIEWER' and
                                         event.get('source_sha') == before.get('head_sha')
                                         for event in current.get('completion_events') or ()) and
+                                    all(old == new for i, (old, new) in
+                                        enumerate(zip(old_claims, new_claims)) if i != index))
+                            if (not allowed_claim_transition and not ruled_entry and
+                                    'purpose' not in before and
+                                    before.get('state') == 'DISPATCHED' and
+                                    after.get('state') == 'DISPATCHED' and
+                                    'usage' not in before and
+                                    'usage_unknown' not in before and
+                                    ('usage' in after) != ('usage_unknown' in after)):
+                                added_key = 'usage' if 'usage' in after else 'usage_unknown'
+                                allowed_claim_transition = (
+                                    before.get('review_kind') != 'security' and
+                                    after.get('review_kind') != 'security' and
+                                    set(after) == set(before) | {added_key} and
+                                    all(before.get(key) == after.get(key) for key in before) and
                                     all(old == new for i, (old, new) in
                                         enumerate(zip(old_claims, new_claims)) if i != index))
                 if not allowed_claim_transition:
