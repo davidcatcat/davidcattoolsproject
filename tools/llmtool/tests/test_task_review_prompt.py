@@ -586,6 +586,10 @@ class TaskReviewPromptTests(unittest.TestCase):
     REPAIR_RULE = ('Judge the PR against both contracts; where a current item replaces an '
                    'original one, the current item governs; an original item not replaced '
                    'still applies.')
+    MULTI_REPAIR_RULE = (
+        'Judge the PR against all contracts in order; where a later contract item '
+        'replaces an earlier one, the later item governs; an item not replaced still '
+        'applies, and the current Task contract governs last.')
 
     def original_block(self, delta, *, original_id=ORIGINAL_ID, acceptance=None):
         acceptance = (acceptance if acceptance is not None else
@@ -601,6 +605,25 @@ class TaskReviewPromptTests(unittest.TestCase):
             self.REPAIR_RULE,
         ]
 
+    def sibling_blocks(self, delta, original_ids, *, acceptance=None):
+        acceptance = (acceptance if acceptance is not None else
+                      ['Prompt includes the PM goal.', 'Original item two.'])
+        lines = []
+        for original_id in original_ids:
+            lines.extend([
+                '<<< BEGIN ORIGINAL TASK CONTRACT DATA >>>',
+                'Original Task id: ' + json.dumps(original_id),
+                'Original Task goal: ' + json.dumps('Original goal for ' + original_id[:4] + '.'),
+                *(f'{index}. {json.dumps(item)}' for index, item in enumerate(acceptance, 1)),
+                '<<< END ORIGINAL TASK CONTRACT DATA >>>',
+            ])
+        lines.extend([
+            'Repair delta: current acceptance items not in any earlier contract: '
+            + delta + '.',
+            self.MULTI_REPAIR_RULE,
+        ])
+        return lines
+
     def prompts(self, others, **kwargs):
         """Return (Claude, Codex) prompts for a repair store and for a plain store."""
         _, claude = self.invoke(store=RepairStore(others, **kwargs))
@@ -609,13 +632,13 @@ class TaskReviewPromptTests(unittest.TestCase):
         codex_plain = self.codex_prompt()
         return ((claude, claude_plain), (codex, codex_plain))
 
-    def assert_block_after_contract(self, output, plain, block):
+    def assert_block_after_contract(self, output, plain, block, *, count=1):
         lines = output.splitlines()
         end = lines.index('<<< END PM TASK CONTRACT DATA >>>')
         self.assertEqual(lines[end + 1:end + 1 + len(block)], block)
         # Without the block, the prompt is exactly today's prompt.
         self.assertEqual(lines[:end + 1] + lines[end + 1 + len(block):], plain.splitlines())
-        self.assertEqual(output.count('<<< BEGIN ORIGINAL TASK CONTRACT DATA >>>'), 1)
+        self.assertEqual(output.count('<<< BEGIN ORIGINAL TASK CONTRACT DATA >>>'), count)
 
     def test_repair_review_carries_the_earliest_original_on_the_same_d6(self):
         others = {
@@ -631,10 +654,11 @@ class TaskReviewPromptTests(unittest.TestCase):
             '4' * 32: other_task('4' * 32, created_at='2026-10-01T10:00:00Z',
                                  executor='other-d6'),
         }
+        expected = self.sibling_blocks('2', (ORIGINAL_ID, '5' * 32))
         for reviewer, (output, plain) in zip(('Claude', 'Codex'), self.prompts(others)):
             with self.subTest(reviewer=reviewer):
-                self.assert_block_after_contract(output, plain, self.original_block('2'))
-                for other in ('2' * 32, '3' * 32, '4' * 32, '5' * 32):
+                self.assert_block_after_contract(output, plain, expected, count=2)
+                for other in ('2' * 32, '3' * 32, '4' * 32):
                     self.assertNotIn(other, output)
 
     def test_repair_delta_names_every_changed_item_or_none(self):
@@ -760,7 +784,9 @@ class RealStoreReviewPromptTests(unittest.TestCase):
     refused = TaskReviewPromptTests.refused
     assert_block_after_contract = TaskReviewPromptTests.assert_block_after_contract
     original_block = TaskReviewPromptTests.original_block
+    sibling_blocks = TaskReviewPromptTests.sibling_blocks
     REPAIR_RULE = TaskReviewPromptTests.REPAIR_RULE
+    MULTI_REPAIR_RULE = TaskReviewPromptTests.MULTI_REPAIR_RULE
 
     def setUp(self):
         self.fresh_store()
@@ -804,7 +830,9 @@ class RealStoreReviewPromptTests(unittest.TestCase):
         self.assertEqual(sorted(self.validated),
                          sorted([TASK_ID, *same_d6_tasks()]))
         self.assertFalse(set(self.validated) & set(unrelated_tasks()))
-        self.assert_block_after_contract(output, self.codex_prompt(), self.original_block('2'))
+        self.assert_block_after_contract(
+            output, self.codex_prompt(),
+            self.sibling_blocks('2', (ORIGINAL_ID, '5' * 32)), count=2)
 
     def test_render_picks_the_same_original_as_the_full_scan(self):
         later_only = {'2' * 32: other_task('2' * 32, created_at='2026-11-08T10:00:00Z'),
@@ -827,7 +855,10 @@ class RealStoreReviewPromptTests(unittest.TestCase):
                     self.assertNotIn('ORIGINAL TASK CONTRACT', output)
                 else:
                     self.assertIn('Original Task id: ' + json.dumps(ORIGINAL_ID), output)
-                    self.assertNotIn('5' * 32, output)
+                    self.assertIn('Original Task id: ' + json.dumps('5' * 32), output)
+                    self.assertLess(
+                        output.index('Original Task id: ' + json.dumps(ORIGINAL_ID)),
+                        output.index('Original Task id: ' + json.dumps('5' * 32)))
 
     def test_unreadable_or_malformed_record_refuses_the_render(self):
         bad_id = '9' * 32
