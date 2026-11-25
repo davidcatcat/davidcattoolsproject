@@ -22,6 +22,7 @@ MAC_ATTEMPT = 1
 GATEWAY = 'gateway tests (Linux 3.14)'
 LINUX_JOB = 'check (Linux 3.14)'
 MAC_JOB = 'check (macOS 3.13)'
+MAC_SHARDS = ('shards (1/3)', 'shards (2/3)', 'shards (3/3)')
 
 
 def job(job_id, name, run_id, attempt, conclusion='success'):
@@ -67,10 +68,23 @@ class FakeGitHub:
         raise KeyError(path)
 
 
+def mac_full_jobs():
+    jobs = [job(2 + index, name, MAC_RUN, MAC_ATTEMPT)
+            for index, name in enumerate(MAC_SHARDS)]
+    return jobs + [job(5, MAC_JOB, MAC_RUN, MAC_ATTEMPT)]
+
+
+def mac_skip_jobs(run_id=MAC_RUN, attempt=MAC_ATTEMPT):
+    return [job(20, 'select', run_id, attempt)] + [
+        job(21 + index, name, run_id, attempt, conclusion='skipped')
+        for index, name in enumerate(MAC_SHARDS)] + [
+        job(24, MAC_JOB, run_id, attempt)]
+
+
 def green_github():
     github = FakeGitHub()
     github.page(LINUX_RUN, 1, [job(1, LINUX_JOB, LINUX_RUN, LINUX_ATTEMPT)])
-    github.page(MAC_RUN, 1, [job(2, MAC_JOB, MAC_RUN, MAC_ATTEMPT)])
+    github.page(MAC_RUN, len(mac_full_jobs()), mac_full_jobs())
     return github
 
 
@@ -105,6 +119,15 @@ class MainCiJobFetchCliTests(unittest.TestCase):
              for run in payload['runs']],
             [(fetch.LINUX, fetch.LINUX_WORKFLOW, LINUX_RUN, LINUX_ATTEMPT),
              (fetch.FULL_MAC, fetch.MAC_WORKFLOW, MAC_RUN, MAC_ATTEMPT)])
+
+    def test_skip_only_mac_dispatch_is_unknown_not_green(self):
+        github = green_github()
+        github.page(MAC_RUN, 5, mac_skip_jobs())
+        status, payload, err = self.run_cli(github)
+        self.assertEqual((status, payload['state'], payload['reason']),
+                         (2, fetch.UNKNOWN, fetch.FULL_EVIDENCE_MISSING))
+        self.assertEqual(err, f'llmtool: {fetch.FULL_EVIDENCE_MISSING}\n')
+        self.assertEqual(payload['runs'][1]['run_id'], MAC_RUN)
 
     def test_red_report_lists_non_required_job_with_run_identity(self):
         github = green_github()

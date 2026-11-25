@@ -14,6 +14,7 @@ MAC_ATTEMPT = 1
 GATEWAY = 'gateway tests (Linux 3.14)'
 LINUX_JOB = 'check (Linux 3.14)'
 MAC_JOB = 'check (macOS 3.13)'
+MAC_SHARDS = ('shards (1/3)', 'shards (2/3)', 'shards (3/3)')
 
 
 def run(run_id, sha=SHA, attempt=1):
@@ -65,14 +66,29 @@ class FakeGitHub:
                                  page=page)
 
 
+def mac_full_jobs(run_id=MAC_RUN, attempt=MAC_ATTEMPT):
+    """The FULL Mac shard jobs plus the check job, all successful."""
+    jobs = [job(2 + index, name, run_id, attempt)
+            for index, name in enumerate(MAC_SHARDS)]
+    return jobs + [job(5, MAC_JOB, run_id, attempt)]
+
+
+def mac_skip_jobs(run_id, attempt, first_id):
+    """A dispatch whose full-due gate skipped the shards, as GitHub lists it."""
+    return [job(first_id, 'select', run_id, attempt)] + [
+        job(first_id + 1 + index, name, run_id, attempt, conclusion='skipped')
+        for index, name in enumerate(MAC_SHARDS)] + [
+        job(first_id + 4, MAC_JOB, run_id, attempt)]
+
+
 def green_github():
-    """Both relevant runs complete with one successful job each."""
+    """Both relevant runs complete; the Mac run executed the FULL shards."""
     github = FakeGitHub()
     github.workflow(fetch.LINUX_WORKFLOW, 'push', [run(LINUX_RUN, attempt=LINUX_ATTEMPT)])
     github.workflow(fetch.MAC_WORKFLOW, 'workflow_dispatch',
                     [run(MAC_RUN, attempt=MAC_ATTEMPT)])
     github.page(LINUX_RUN, 1, 1, [job(1, LINUX_JOB, LINUX_RUN, LINUX_ATTEMPT)])
-    github.page(MAC_RUN, 1, 1, [job(2, MAC_JOB, MAC_RUN, MAC_ATTEMPT)])
+    github.page(MAC_RUN, 1, len(mac_full_jobs()), mac_full_jobs())
     return github
 
 
@@ -86,9 +102,7 @@ class MainCiJobFetchTests(unittest.TestCase):
             job(1, 'build', LINUX_RUN, LINUX_ATTEMPT),
             job(2, GATEWAY, LINUX_RUN, LINUX_ATTEMPT, conclusion='failure')])
         github.page(LINUX_RUN, 2, 3, [job(3, 'lint', LINUX_RUN, LINUX_ATTEMPT)])
-        github.page(MAC_RUN, 1, 2, [
-            job(4, 'shards (1/3)', MAC_RUN, MAC_ATTEMPT),
-            job(5, MAC_JOB, MAC_RUN, MAC_ATTEMPT)])
+        github.page(MAC_RUN, 1, len(mac_full_jobs()), mac_full_jobs())
         result = fetch.inspect_jobs(github)
         self.assertEqual(result['sha'], SHA)
         self.assertEqual(result['state'], fetch.RED)
@@ -112,6 +126,62 @@ class MainCiJobFetchTests(unittest.TestCase):
         self.assertEqual(result['failing'], [])
         self.assertEqual([run['state'] for run in result['runs']],
                          [fetch.GREEN, fetch.GREEN])
+
+    def test_mac_skip_run_selects_the_older_full_run(self):
+        github = green_github()
+        newer = MAC_RUN + 1
+        github.workflow(fetch.MAC_WORKFLOW, 'workflow_dispatch', [
+            run(newer, attempt=1), run(MAC_RUN, attempt=MAC_ATTEMPT)])
+        github.page(newer, 1, 5, mac_skip_jobs(newer, 1, 20))
+        result = fetch.inspect_jobs(github)
+        self.assertEqual((result['state'], result['reason']), (fetch.GREEN, None))
+        self.assertEqual((result['runs'][1]['run_id'],
+                          result['runs'][1]['run_attempt']),
+                         (MAC_RUN, MAC_ATTEMPT))
+
+    def test_mac_skip_run_does_not_hide_an_older_full_failure(self):
+        github = green_github()
+        github.page(MAC_RUN, 1, 4, [
+            job(2, MAC_SHARDS[0], MAC_RUN, MAC_ATTEMPT, conclusion='failure'),
+            job(3, MAC_SHARDS[1], MAC_RUN, MAC_ATTEMPT),
+            job(4, MAC_SHARDS[2], MAC_RUN, MAC_ATTEMPT),
+            job(5, MAC_JOB, MAC_RUN, MAC_ATTEMPT)])
+        newer = MAC_RUN + 1
+        github.workflow(fetch.MAC_WORKFLOW, 'workflow_dispatch', [
+            run(newer, attempt=1), run(MAC_RUN, attempt=MAC_ATTEMPT)])
+        github.page(newer, 1, 5, mac_skip_jobs(newer, 1, 20))
+        result = fetch.inspect_jobs(github)
+        self.assertEqual(result['state'], fetch.RED)
+        self.assertEqual(result['runs'][1]['run_id'], MAC_RUN)
+        self.assertEqual(result['failing'], [{
+            'kind': fetch.FULL_MAC, 'workflow': fetch.MAC_WORKFLOW,
+            'run_id': MAC_RUN, 'run_attempt': MAC_ATTEMPT,
+            'id': 2, 'name': MAC_SHARDS[0], 'conclusion': 'failure'}])
+
+    def test_mac_skip_run_without_an_older_full_run_is_unknown(self):
+        github = green_github()
+        github.page(MAC_RUN, 1, 5, mac_skip_jobs(MAC_RUN, MAC_ATTEMPT, 20))
+        result = fetch.inspect_jobs(github)
+        self.assertEqual(result['state'], fetch.UNKNOWN)
+        self.assertEqual(result['reason'], fetch.FULL_EVIDENCE_MISSING)
+        self.assertEqual(result['runs'][1]['run_id'], MAC_RUN)
+        self.assertEqual(result['failing'], [])
+
+    def test_mac_skip_runs_past_the_scan_bound_are_unknown(self):
+        github = green_github()
+        newer_runs = []
+        for offset in range(fetch.MAX_RUNS_TO_SCAN + 1):
+            newer = MAC_RUN + 1 + offset
+            newer_runs.append(run(newer, attempt=1))
+            github.page(newer, 1, 5,
+                        mac_skip_jobs(newer, 1, 1000 + offset * 10))
+        github.workflow(fetch.MAC_WORKFLOW, 'workflow_dispatch',
+                        newer_runs + [run(MAC_RUN, attempt=MAC_ATTEMPT)])
+        result = fetch.inspect_jobs(github)
+        self.assertEqual(result['state'], fetch.UNKNOWN)
+        self.assertEqual(result['reason'], fetch.RUN_SCAN_BOUND)
+        self.assertEqual(result['runs'][1]['run_id'],
+                         MAC_RUN + 1 + fetch.MAX_RUNS_TO_SCAN)
 
     def test_newer_pending_run_is_not_hidden_by_an_older_success(self):
         github = green_github()

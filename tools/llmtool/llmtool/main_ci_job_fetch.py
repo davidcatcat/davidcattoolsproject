@@ -19,13 +19,22 @@ Every bound is explicit. A full run listing with no matching SHA, a job count
 that cannot be read within ``MAX_JOB_PAGES``, or any failed read leaves that
 run UNKNOWN; it is never treated as a clean result. The selected run is the
 newest (highest id) run for the main SHA, whatever its state, so an older
-success cannot hide a newer failure or a pending rerun.
+success cannot hide a newer failure or a pending rerun (the one exception is
+the completed skip-only Mac dispatch described below).
 
 Each run's pages are passed through ``main_ci_job_pages.collect_pages`` (SHA,
 run id and run attempt all bound) and then ``main_ci_job_summary.summarize``.
 Totals and pages stay per run; they are never pooled across runs before
 validation. Even when the listing is UNKNOWN, the summary's known failing jobs
 are still reported with their run identity.
+
+A Mac ``workflow_dispatch`` run counts as the FULL run only when its listing
+shows the FULL shard jobs actually ran. The full-due gate can dispatch a run
+that skips the shards (``select`` and ``check`` succeed, ``shards`` are
+``skipped``); such a run did not execute the FULL suite, so a completed
+skip-only run is never GREEN and the newest older run that did run the shards
+is selected instead. The scan of older matching runs is bounded by
+``MAX_RUNS_TO_SCAN``; exhausting it, or the run listing, is UNKNOWN.
 
 The result is a new dict: ``sha``, ``state`` (``red``, ``green`` or
 ``unknown``), ``reason`` (the first UNKNOWN reason, else None), ``runs`` (one
@@ -60,6 +69,11 @@ JOBS = 'actions/runs/{run_id}/jobs?per_page={per_page}&page={page}'
 RUNS_PER_PAGE = 100
 JOBS_PER_PAGE = 100
 MAX_JOB_PAGES = 10
+MAX_RUNS_TO_SCAN = 10
+
+# The FULL shard jobs prove the Mac dispatch actually executed the FULL suite;
+# ``check`` runs in a skip-only dispatch too, so it is not evidence.
+FULL_SHARDS = mac_full_due.JOBS[:3]
 
 # Short reason codes naming why a run or the whole report is UNKNOWN.
 MAIN_READ_FAILED = 'main_read_failed'
@@ -74,6 +88,8 @@ RUN_CONCLUSION_UNKNOWN = 'run_conclusion_unknown'
 PAGES_FAILED = 'pages_failed'
 PAGES_MALFORMED = 'pages_malformed'
 PAGES_BOUND = 'pages_bound'
+FULL_EVIDENCE_MISSING = 'full_evidence_missing'
+RUN_SCAN_BOUND = 'run_scan_bound'
 
 # One entry per relevant check: kind, workflow path and the run event that
 # selects exactly the Linux push run and the FULL Mac (workflow_dispatch) run.
@@ -116,11 +132,11 @@ def _listed_runs(github_get, workflow, event):
     return runs, None
 
 
-def _select_run(runs, sha):
-    """Return (newest run for sha, None), or (None, reason).
+def _matching_runs(runs, sha):
+    """Return (matching runs newest first, None), or (None, reason).
 
-    The newest matching run is chosen before its status is read, so a newer
-    pending or failing run always wins over an older success.
+    The order is chosen before any status is read, so a newer pending or
+    failing run is always considered before an older success.
     """
     matching = [run for run in runs if run.get('head_sha') == sha]
     if not matching:
@@ -130,11 +146,17 @@ def _select_run(runs, sha):
     ids = [run['id'] for run in matching]
     if len(set(ids)) != len(ids):
         return None, RUN_INVALID
-    run = max(matching, key=lambda item: item['id'])
-    attempt = run.get('run_attempt')
-    if type(attempt) is not int or attempt <= 0:
-        return None, RUN_INVALID
-    return run, None
+    return sorted(matching, key=lambda item: item['id'], reverse=True), None
+
+
+def _full_evidence(pages):
+    """True when the FULL shard jobs are present and none of them was skipped."""
+    conclusions = {}
+    for jobs in pages:
+        for job in jobs:
+            if isinstance(job, dict):
+                conclusions.setdefault(job.get('name'), job.get('conclusion'))
+    return all(conclusions.get(name) not in (None, 'skipped') for name in FULL_SHARDS)
 
 
 def _run_guard(run):
@@ -228,22 +250,12 @@ def _failing_with_identity(failing, pages, run_id, run_attempt):
     return labelled
 
 
-def _run_result(github_get, sha, kind, workflow, event):
-    """Return one run's bounded report; never GREEN on missing data."""
-    result = {'kind': kind, 'workflow': workflow, 'run_id': None,
-              'run_attempt': None, 'state': UNKNOWN, 'reason': None, 'failing': []}
-    runs, reason = _listed_runs(github_get, workflow, event)
-    if runs is None:
-        result['reason'] = reason
-        return result
-    run, reason = _select_run(runs, sha)
-    if run is None:
-        if reason == RUN_MISSING and len(runs) >= RUNS_PER_PAGE:
-            reason = RUN_LIST_BOUND
-        result['reason'] = reason
-        return result
+def _run_report(github_get, sha, kind, workflow, event, run):
+    """Return (one run's report, True when it is a completed skip-only Mac run)."""
+    result = {'kind': kind, 'workflow': workflow, 'run_id': run['id'],
+              'run_attempt': run['run_attempt'], 'state': UNKNOWN,
+              'reason': None, 'failing': []}
     run_id, run_attempt = run['id'], run['run_attempt']
-    result['run_id'], result['run_attempt'] = run_id, run_attempt
     guard = _run_guard(run)
     pages, reason = _job_pages(github_get, run_id)
     if reason is not None:
@@ -251,7 +263,7 @@ def _run_result(github_get, sha, kind, workflow, event):
         result['failing'] = _failing_with_identity(
             summary_mod.summarize(sha, _job_lists(pages), None)['failing'],
             pages, run_id, run_attempt)
-        return result
+        return result, False
     collected = pages_mod.collect_pages(sha, run_id, run_attempt, pages)
     if collected['state'] != pages_mod.OK:
         result['reason'] = collected['reason']
@@ -261,7 +273,7 @@ def _run_result(github_get, sha, kind, workflow, event):
             summary_mod.summarize(
                 sha, _job_lists(pages), collected['stated_total'])['failing'],
             pages, run_id, run_attempt)
-        return result
+        return result, False
     summary = summary_mod.summarize(
         sha, collected['pages'], collected['stated_total'])
     result['failing'] = _failing_with_identity(
@@ -277,7 +289,52 @@ def _run_result(github_get, sha, kind, workflow, event):
     else:
         result['state'] = summary['state']
         result['reason'] = summary['reason']
-    return result
+        if (kind == FULL_MAC and result['state'] == GREEN
+                and not _full_evidence(collected['pages'])):
+            # A success that skipped the FULL shards did not run the suite.
+            return result, True
+    return result, False
+
+
+def _run_result(github_get, sha, kind, workflow, event):
+    """Return one run's bounded report; never GREEN on missing data."""
+    result = {'kind': kind, 'workflow': workflow, 'run_id': None,
+              'run_attempt': None, 'state': UNKNOWN, 'reason': None, 'failing': []}
+    runs, reason = _listed_runs(github_get, workflow, event)
+    if runs is None:
+        result['reason'] = reason
+        return result
+    matching, reason = _matching_runs(runs, sha)
+    if matching is None:
+        if reason == RUN_MISSING and len(runs) >= RUNS_PER_PAGE:
+            reason = RUN_LIST_BOUND
+        result['reason'] = reason
+        return result
+    first_skip = None
+    for run in matching[:MAX_RUNS_TO_SCAN]:
+        attempt = run.get('run_attempt')
+        if type(attempt) is not int or attempt <= 0:
+            result['run_id'] = run['id']
+            result['reason'] = RUN_INVALID
+            return result
+        candidate, skip = _run_report(github_get, sha, kind, workflow, event, run)
+        if not skip:
+            return candidate
+        if first_skip is None:
+            first_skip = candidate
+    if first_skip is None:  # only when MAX_RUNS_TO_SCAN is zero
+        result['reason'] = RUN_INVALID
+        return result
+    # Every examined run was a completed skip-only Mac dispatch. Never GREEN:
+    # name the bound if an older FULL run may still be outside it.
+    first_skip['state'] = UNKNOWN
+    if len(matching) > MAX_RUNS_TO_SCAN:
+        first_skip['reason'] = RUN_SCAN_BOUND
+    elif len(runs) >= RUNS_PER_PAGE:
+        first_skip['reason'] = RUN_LIST_BOUND
+    else:
+        first_skip['reason'] = FULL_EVIDENCE_MISSING
+    return first_skip
 
 
 def inspect_jobs(github_get):
