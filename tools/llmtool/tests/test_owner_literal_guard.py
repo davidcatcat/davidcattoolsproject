@@ -49,8 +49,6 @@ LABELS = frozenset((LEGACY_VERIFY, RETAIN_RELEASE_REFS, GW_AGENT_POLICY_REFS,
 # Exact (repository-relative path, stripped line text) -> label.
 # LEGACY_VERIFY: legacy constants kept for ``llmtool trust verify-legacy``,
 # removed by #369 PR-10b.
-_REVIEW_BUNDLE = 'tools/llmtool/llmtool/review_bundle.py'
-_REVIEW_ORIGINS = 'tools/llmtool/llmtool/review_origins.py'
 _TASK_COMPLETION = 'tools/llmtool/llmtool/task_completion.py'
 _TRIAGE_WORKER = 'tools/llmtool/llmtool/test_triage_worker.py'
 _WORKER_DISPATCH = 'tools/llmtool/llmtool/worker_dispatch.py'
@@ -58,18 +56,6 @@ _GITHUB_IDENTITY = 'tools/llmtool/llmtool/github_identity.py'
 _D6_LIFECYCLE = 'tools/llmtool/scripts/d6_worktree_lifecycle.py'
 
 ALLOWLIST = {
-    (_REVIEW_BUNDLE,
-     "'/Users/davidsun/git/davidcataiporject/davidcattoolsproject',"):
-        LEGACY_VERIFY,
-    (_REVIEW_BUNDLE,
-     "'/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject'))"):
-        LEGACY_VERIFY,
-    (_REVIEW_ORIGINS,
-     "'git@github.com:davidcatcat/davidcattoolsproject.git',"):
-        LEGACY_VERIFY,
-    (_REVIEW_ORIGINS,
-     "'https://github.com/davidcatcat/davidcattoolsproject.git',"):
-        LEGACY_VERIFY,
     (_TASK_COMPLETION,
      "_CI_RUNNER_NAMES = frozenset(('davidproject-self-action', "
      "'davidproject-self-action-2'))"):

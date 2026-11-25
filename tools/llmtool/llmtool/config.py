@@ -193,20 +193,6 @@ class RepositoryConfigError(LLMToolError):
         super().__init__(code)
 
 
-def legacy_repository_config(home=None):
-    """Return pre-trust defaults for trust init (via _legacy_sources) and verify-legacy."""
-    defaults = {
-        "slug": "davidcatcat/davidcattoolsproject",
-        "dispatch_issue": 289,
-        "dispatch_evidence_pr": 283,
-    }
-    path = user_config_path(home)
-    user = _read_yaml(path, "user config") if os.path.lexists(path) else {}
-    if "repository" not in user:
-        return dict(defaults)
-    return _validate_repository(user["repository"], defaults)
-
-
 def repository_config(home=None):
     """Return repository identity from owner trust, never from config.yaml."""
     from .trust import TrustError, load_trust
