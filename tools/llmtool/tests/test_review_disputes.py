@@ -19,8 +19,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from llmtool import (cli, high_debug, review_repair, task_completion, task_store,
-                     task_submission_cli)
+from llmtool import (cli, high_debug, review_dispatch, review_repair, task_completion,
+                     task_store, task_submission_cli)
 from llmtool.errors import LLMToolError
 
 import review_trust_fixture
@@ -56,10 +56,13 @@ _ACCOUNT_MODES = {'Codex': 'CODEX_CLI', 'Claude': 'EXPLICIT_CLAUDE_CONFIG_DIR'}
 
 
 def _ruling_body(finding_id='F1', outcome='WITHDRAWN', *, head=HEAD, actor='Codex', pr=PR,
-                 binding=True, extra=''):
+                 binding=True, extra='', version=None):
     """The arbiter's ruling text: its review claim's review_text and its comment body."""
+    header = (f'Ruling: {finding_id} {outcome} | PR: #{pr} | Version: {version} | HEAD: {head}'
+              if version is not None
+              else f'Ruling: {finding_id} {outcome} | PR: #{pr} | HEAD: {head}')
     lines = [f'<!-- activity: type=dispute_ruling actor={actor} target=PM status={outcome} -->',
-             f'Ruling: {finding_id} {outcome} | PR: #{pr} | HEAD: {head}']
+             header]
     if binding:
         lines.append(task_completion._review_binding_line(TASK, trr.RUN, trr.CONTRACT, head))
     lines.append('The disputed finding was re-read against the posted evidence.')
@@ -69,12 +72,12 @@ def _ruling_body(finding_id='F1', outcome='WITHDRAWN', *, head=HEAD, actor='Code
 def _ruling_comment(finding_id='F1', outcome='WITHDRAWN', *, head=HEAD, actor='Codex',
                     pr=PR, issue=PR, comment_id=RULING_ID, login=REVIEW_LOGIN,
                     created=None, edited=False, binding=True, extra='', body=None,
-                    repository=REPOSITORY):
+                    repository=REPOSITORY, version=None):
     """The arbiter's ruling comment as GitHub returns it (security v91 F1)."""
     created = _now() if created is None else created
     if body is None:
         body = _ruling_body(finding_id, outcome, head=head, actor=actor, pr=pr,
-                            binding=binding, extra=extra)
+                            binding=binding, extra=extra, version=version)
     return {'id': comment_id, 'body': body,
             'issue_url': f'https://api.github.com/repos/{repository}/issues/{issue}',
             'user': {'login': login}, 'created_at': created,
@@ -84,12 +87,13 @@ def _ruling_comment(finding_id='F1', outcome='WITHDRAWN', *, head=HEAD, actor='C
 def _arbiter_claim(finding_id='F1', outcome='WITHDRAWN', *, head=HEAD, actor='Codex',
                    reviewer_task='arbiter-d6', session='arbiter-session-1', version=2,
                    account_mode=None, executor=EXECUTOR, state='COMPLETED', pr=PR,
-                   text=None, **result):
+                   text=None, ruling_version=None, **result):
     """The arbiter run's COMPLETED review-dispatch claim (High Debug #1775).
 
     Its review_text is, by default, exactly the ruling comment body.
     """
-    review_text = _ruling_body(finding_id, outcome, head=head, actor=actor) if text is None else text
+    review_text = (_ruling_body(finding_id, outcome, head=head, actor=actor, version=ruling_version)
+                   if text is None else text)
     review_result = {'task_id': TASK, 'run_id': trr.RUN, 'contract_digest': trr.CONTRACT,
                      'head': head, 'verdict': 'BLOCKED', 'review_text': review_text}
     review_result.update(result)
@@ -139,6 +143,26 @@ def _task(*, developer=None, claims=None, disputes=None, published_head=None):
     record = trr._record()
     if developer is not None:
         record['developer'] = dict(record['developer'], **developer)
+    record['completion'] = {
+        'state': 'WAITING_EXECUTOR',
+        'executor_task_id': EXECUTOR,
+        'reviewer_task_id': None,
+        'evidence': {
+            'task_id': TASK,
+            'run_id': trr.RUN,
+            'contract_digest': trr.CONTRACT,
+            'execution_mode': 'DIRECT_D6',
+            'root': '/registered/' + EXECUTOR,
+            'common_dir': COMMON_DIR,
+            'branch': 'llmtool/' + EXECUTOR,
+            'source_sha': HEAD,
+            'executor_identity': 'agy',
+            'executor_session_ref': 'ref-1',
+            'executor_native_session_id': 'exec-session-1',
+            'executor_native_session': 'VERIFIED',
+        },
+        'missing_gates': [],
+    }
     record['review_dispatch_claim'] = [_review_claim()] if claims is None else claims
     if disputes is not None:
         record['review_disputes'] = disputes
@@ -191,8 +215,16 @@ class _Case(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         worker_policy_fixture.install(self)
         self.github = {f'pulls/{PR}': {'number': PR, 'state': 'open', 'head': {'sha': HEAD}},
+                       f'issues/comments/{1001}': {
+                           'id': 1001, 'body': 'Dispute reasoning for F1.',
+                           'issue_url': f'https://api.github.com/repos/{REPOSITORY}/issues/{PR}',
+                           'created_at': '2026-11-13T00:00:00Z',
+                           'updated_at': '2026-11-13T00:00:00Z',
+                       },
                        f'issues/comments/{RULING_ID}': lambda: _ruling_comment()}
-        self.d6 = {'arbiter-d6': _registration()}
+        self.d6 = {EXECUTOR: _registration(task=EXECUTOR, agent='agy', session='exec-session-1'),
+                   'arbiter-d6': _registration()}
+        self.posted = []
         self.worktree_heads = {}
         self.trusted = REPOSITORY
         for name, fake in (('_github_get', self._github_get),
@@ -224,7 +256,7 @@ class _Case(unittest.TestCase):
         registration = next(item for item in self.d6.values() if item.root == root)
         return SimpleNamespace(head=self.worktree_heads.get(root, registration.result_sha),
                                root=registration.root, common_dir=registration.common_dir,
-                               branch=registration.branch)
+                               branch=registration.branch, clean=True)
 
     def live(self, **pull):
         self.github[f'pulls/{PR}'] = dict({'number': PR, 'state': 'open',
@@ -253,6 +285,8 @@ class _Case(unittest.TestCase):
         if call == self.rule:
             # Record the arbiter's claim first: the snapshot covers only the ruling call.
             call, args, kwargs = self.prepare_rule(*args, **kwargs), (), {}
+        elif call == self.verify:
+            call, args, kwargs = self.prepare_verify(*args, **kwargs), (), {}
         before = self.store.get(TASK)
         with self.assertRaises(LLMToolError) as caught:
             call(*args, **kwargs)
@@ -292,6 +326,94 @@ class _Case(unittest.TestCase):
 
     def rule(self, *args, **kwargs):
         return self.prepare_rule(*args, **kwargs)()
+
+    def prepare_verify(self, finding_id='F1', *, outcome='WITHDRAWN', reviewer='codex-reviewer',
+                       session='arbiter-session-1', head=HEAD, evidence_ref=RULING_REF,
+                       reviewer_task='arbiter-d6', comment=None, arbiter_claims=None,
+                       review_version=1):
+        """Record the arbiter run's claim and comment; return the shared verification call."""
+        actor = _ACTORS.get(reviewer, 'Codex')
+        self.arm(arbiter_claims, finding_id=finding_id, outcome=outcome, head=head,
+                 actor=actor, reviewer_task=reviewer_task, session=session,
+                 ruling_version=review_version)
+        self.github[f'issues/comments/{RULING_ID}'] = (
+            comment if comment is not None
+            else lambda: _ruling_comment(finding_id, outcome, head=head, actor=actor,
+                                         version=review_version))
+        record = self.store.get(TASK)
+        disputes = record.get('review_disputes', [])
+        entry = next((item for item in disputes
+                      if item.get('pr') == PR and item.get('finding_id') == finding_id and
+                      item.get('head_sha') == head and item.get('state') == 'OPEN'),
+                     _entry(finding_id, head=head))
+        repository = task_submission_cli._dispute_repository()
+        return lambda: task_submission_cli._dispute_rule_verified(
+            record, entry, pr=PR, head=head, finding_id=finding_id, outcome=outcome,
+            reviewer=reviewer, reviewer_task=reviewer_task, reviewer_session=session,
+            evidence_ref=evidence_ref, repository=repository, github_get=None,
+            review_version=entry.get('review_version'))
+
+    def verify(self, *args, **kwargs):
+        return self.prepare_verify(*args, **kwargs)()
+
+    def arbitrate(self, finding_id='F1', *, outcome='WITHDRAWN', head=HEAD, live=False):
+        self.posted = []
+        ruling_text = _ruling_body(finding_id, outcome, head=head, actor='Codex', version=1)
+        thread_id = '0123456789abcdef0123456789abcdef'
+        events = [
+            {'type': 'thread.started', 'thread_id': thread_id},
+            {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': json.dumps({
+                'task_id': TASK, 'run_id': trr.RUN, 'head': head,
+                'outcome': outcome, 'ruling': ruling_text,
+            })}},
+        ]
+        raw_jsonl = ('\n'.join(json.dumps(e) for e in events) + '\n').encode('utf-8')
+        role = {'source': 'roles', 'provider': 'codex', 'model': 'gpt-6.1-sol',
+                'effort': 'high', 'config_dir': str(Path(self.temp.name) / 'codex-home'),
+                'account': 'codex-acc'}
+
+        def fake_create_d6(**kwargs):
+            tid = kwargs['task_id']
+            self.d6[tid] = _registration(
+                task=tid, agent=kwargs['reviewer_key'], session=None, head=kwargs['base_sha'])
+
+        def fake_bind(**kwargs):
+            rec = self.d6.get(kwargs['task_id'])
+            if rec is not None:
+                rec.native_session_id = kwargs['session_id']
+
+        def fake_poster(_root, pr_num, body):
+            comment = {
+                'id': RULING_ID, 'user': {'login': REVIEW_LOGIN}, 'body': body,
+                'pr': pr_num,
+                'issue_url': f'https://api.github.com/repos/{REPOSITORY}/issues/{pr_num}',
+                'created_at': _now(), 'updated_at': _now(),
+            }
+            self.posted.append(comment)
+            self.github[f'issues/comments/{RULING_ID}'] = dict(comment)
+            return comment
+
+        with patch.object(task_submission_cli, 'result_head_admitted', return_value=True), \
+             patch.object(review_dispatch, '_review_rules',
+                          return_value=('RULES\nRULES_END\n\n', '9' * 64)), \
+             patch.object(review_dispatch, '_resolve_github_login', return_value=REVIEW_LOGIN), \
+             patch.object(review_dispatch, '_resolve_reviewer_role', return_value=role), \
+             patch.object(review_dispatch, '_admit_review_model', side_effect=lambda _k, m: m), \
+             patch.object(review_dispatch, '_review_default_model', return_value='gpt-6.1-sol'), \
+             patch.object(review_dispatch.shutil, 'which', return_value='/usr/bin/codex'), \
+             patch.object(review_dispatch.subprocess, 'run',
+                          return_value=SimpleNamespace(returncode=0, stdout=raw_jsonl, stderr=b'')), \
+             patch('llmtool.codex_direct_developer.validate_profile'):
+            return task_submission_cli.dispute_arbitrate(
+                self.store, TASK, pr=PR, finding_id=finding_id,
+                current_head=None if live else _head(head),
+                github_get=self._github_get,
+                create_d6=fake_create_d6,
+                bind_session=fake_bind,
+                comment_lister=lambda _pr: [dict(c) for c in self.posted],
+                comment_poster=fake_poster,
+                login_resolver=lambda: REVIEW_LOGIN,
+            )
 
     def disputes(self):
         return self.store.get(TASK).get('review_disputes', [])
@@ -375,7 +497,7 @@ class DisputeOpenTests(_Case):
         flagged = 'arbiter-session-flagged'
         with patch.object(task_store, '_emitted_sensitive',
                           side_effect=lambda value: value == flagged or real_screen(value)):
-            self.refused('DISPUTE_ARGUMENT_INVALID', self.rule, session=flagged)
+            self.refused('DISPUTE_ARGUMENT_INVALID', self.verify, session=flagged)
 
     def test_a_second_open_dispute_of_one_finding_is_refused(self):
         self.use(_task())
@@ -451,45 +573,47 @@ class DisputeRuleTests(_Case):
     def test_the_ruling_binds_head_run_and_evidence_and_never_replaces_the_pass(self):
         self.use(_task())
         self.open()
-        ruling_call = self.prepare_rule()   # records the arbiter run's claim
         before = self.store.get(TASK)
-        result = ruling_call()
+        result = self.arbitrate()
         after = self.store.get(TASK)
         [entry] = after['review_disputes']
         self.assertEqual(entry['state'], 'RULED')
         ruling = entry['ruling']
-        self.assertEqual({key: ruling[key] for key in ruling if key != 'ruled_at'},
-                         {'outcome': 'WITHDRAWN', 'head_sha': HEAD,
-                          'reviewer': 'codex-reviewer', 'reviewer_task': 'arbiter-d6',
-                          'reviewer_session': 'arbiter-session-1', 'evidence_ref': RULING_REF})
+        self.assertEqual(ruling['path'], 'arbitrate')
+        self.assertEqual((ruling['outcome'], ruling['head_sha'], ruling['reviewer'],
+                          ruling['finding_id'], ruling['review_version'], ruling['evidence_ref']),
+                         ('WITHDRAWN', HEAD, 'codex-reviewer', 'F1', 1, RULING_REF))
         self.assertGreaterEqual(ruling['ruled_at'], entry['opened_at'])
         # The disputed entry keeps its fields; nothing else in the Task moves.
-        self.assertEqual({key: entry[key] for key in entry if key not in ('state', 'ruling')},
+        self.assertEqual({key: entry[key] for key in entry
+                          if key not in ('state', 'ruling', 'arbiter_claim', 'history')},
                          {key: value for key, value in before['review_disputes'][0].items()
                           if key != 'state'})
         self.assertEqual({key: value for key, value in after.items()
-                          if key not in ('review_disputes', 'record_sha256')},
+                          if key not in ('review_disputes', 'review_dispatch_claim', 'record_sha256')},
                          {key: value for key, value in before.items()
-                          if key not in ('review_disputes', 'record_sha256')})
+                          if key not in ('review_disputes', 'review_dispatch_claim', 'record_sha256')})
         self.assertIs(result['formal_pass_required'], True)
         self.assertEqual(result['outcome'], 'WITHDRAWN')
 
     def test_upheld_is_recorded_the_same_way(self):
         self.use(_task())
         self.open('F3')
-        self.assertEqual(self.rule('F3', outcome='UPHELD')['outcome'], 'UPHELD')
+        res = self.arbitrate('F3', outcome='UPHELD')
+        self.assertEqual(res['outcome'], 'UPHELD')
         self.assertEqual(self.disputes()[0]['ruling']['outcome'], 'UPHELD')
+        self.assertEqual(self.disputes()[0]['ruling']['path'], 'arbitrate')
 
     def test_rule_refuses_without_an_open_dispute_of_the_current_head(self):
         self.use(_task())
-        self.refused('DISPUTE_NOT_OPEN', self.rule)
+        self.refused('DISPUTE_NOT_OPEN', self.arbitrate)
         self.defer('F2')
-        self.refused('DISPUTE_NOT_OPEN', self.rule, 'F2')
+        self.refused('DISPUTE_NOT_OPEN', self.arbitrate, 'F2')
 
     def test_a_head_change_makes_an_open_dispute_stale(self):
         self.use(_task())
         self.open()
-        self.refused('DISPUTE_STALE', self.rule, head=NEW_HEAD)
+        self.refused('DISPUTE_STALE', self.arbitrate, head=NEW_HEAD)
         self.assertEqual(self.disputes()[0]['state'], 'OPEN')
 
     def test_rule_refuses_bad_arguments(self):
@@ -497,25 +621,20 @@ class DisputeRuleTests(_Case):
         self.open()
         for changes in ({'outcome': 'DENIED'}, {'reviewer': 'pm'},
                         {'reviewer': 'claude-developer'}, {'session': ''},
-                        {'session': 'has space'}):
+                        {'session': 'has space'}, {'reviewer_task': 'Not A D6'}):
             with self.subTest(changes=changes):
-                self.refused('DISPUTE_ARGUMENT_INVALID', self.rule, **changes)
-        with self.assertRaises(LLMToolError) as caught:
-            task_submission_cli.dispute_rule(
-                self.store, TASK, pr=PR, finding_id='F1', outcome='WITHDRAWN',
-                reviewer='codex-reviewer', reviewer_task='Not A D6', reviewer_session='s-1',
-                evidence_ref=RULING_REF, current_head=_head(HEAD))
-        self.assertEqual(caught.exception.dispute_code, 'DISPUTE_ARGUMENT_INVALID')
+                self.refused('DISPUTE_ARGUMENT_INVALID', self.verify, **changes)
         # The ruling's evidence is its own comment, not the dispute's.
-        self.refused('DISPUTE_EVIDENCE_REF_INVALID', self.rule, evidence_ref=REF)
+        self.refused('DISPUTE_EVIDENCE_REF_INVALID', self.verify, evidence_ref=REF)
 
     def test_only_the_arbiter_llmtool_chose_may_rule(self):
         # AGY (Gemini) Task, first reviewed by Claude: the arbiter is Codex.
         self.use(_task())
         self.open()
-        self.refused('DISPUTE_ARBITER_MISMATCH', self.rule, reviewer='claude-reviewer',
+        self.refused('DISPUTE_ARBITER_MISMATCH', self.verify, reviewer='claude-reviewer',
                      session='arbiter-session-1')
-        self.rule()
+        claim = self.verify()
+        self.assertEqual(claim['reviewer_task'], 'arbiter-d6')
 
     def test_a_same_reviewer_arbiter_must_rule_in_a_fresh_session(self):
         # Claude-authored Task, first reviewed by Codex: only Codex is cross-family.
@@ -527,19 +646,19 @@ class DisputeRuleTests(_Case):
         opened = self.open()
         self.assertEqual(opened['arbiter'], {'reviewer': 'codex-reviewer', 'family': 'codex',
                                              'fresh_session': True})
-        self.refused('DISPUTE_ARBITER_MISMATCH', self.rule, reviewer='claude-reviewer')
-        self.refused('DISPUTE_ARBITER_NOT_FRESH', self.rule, session='first-review-session')
+        self.refused('DISPUTE_ARBITER_MISMATCH', self.verify, reviewer='claude-reviewer')
+        self.refused('DISPUTE_ARBITER_NOT_FRESH', self.verify, session='first-review-session')
         # No recorded review run of this PR is fresh either.
-        self.refused('DISPUTE_ARBITER_NOT_FRESH', self.rule, session='older-review-session')
-        self.rule(session='arbiter-session-1')
-        self.assertEqual(self.disputes()[0]['ruling']['reviewer_session'], 'arbiter-session-1')
+        self.refused('DISPUTE_ARBITER_NOT_FRESH', self.verify, session='older-review-session')
+        claim = self.verify(session='arbiter-session-1')
+        self.assertEqual(claim['native_session_id'], 'arbiter-session-1')
 
     def test_without_an_arbiter_the_dispute_stays_open_and_cannot_be_ruled(self):
         self.use(_task(developer={'provider_profile': 'unknown-route', 'model': None}))
         result = self.open()
         self.assertEqual(result['arbiter'], {'code': 'DISPUTE_ARBITER_UNAVAILABLE'})
         self.assertEqual(self.disputes()[0]['state'], 'OPEN')
-        self.refused('DISPUTE_ARBITER_UNAVAILABLE', self.rule)
+        self.refused('DISPUTE_ARBITER_UNAVAILABLE', self.arbitrate)
 
     def test_open_and_rule_never_run_or_launch_a_review(self):
         self.use(_task())
@@ -560,12 +679,12 @@ class ArbiterAuthenticationTests(_Case):
         self.open()
 
     def test_a_registered_arbiter_and_its_own_ruling_comment_are_accepted(self):
-        self.rule()
+        claim = self.verify()
         task_completion.read_d6_registration.assert_called_with(
             'arbiter-d6', COMMON_DIR, allowed_states=task_completion._D6_EVIDENCE_STATES)
         task_completion.collect_git_snapshot.assert_called_with('/registered/arbiter-d6')
         task_completion._github_get.assert_any_call(f'issues/comments/{RULING_ID}')
-        self.assertEqual(self.disputes()[0]['state'], 'RULED')
+        self.assertEqual(claim['reviewer_task'], 'arbiter-d6')
 
     def test_a_fabricated_reviewer_task_is_refused(self):
         self.d6.update({
@@ -585,80 +704,86 @@ class ArbiterAuthenticationTests(_Case):
                               'renamed-d6',     # the registry answered for another Task
                               'moved-d6'):      # its worktree left the disputed HEAD
             with self.subTest(reviewer_task=reviewer_task):
-                self.refused('DISPUTE_ARBITER_UNVERIFIED', self.rule,
+                self.refused('DISPUTE_ARBITER_UNVERIFIED', self.verify,
                              reviewer_task=reviewer_task)
         # The first review run's own D6 is never the arbiter.
         self.d6['reviewer-d6'] = _registration(task='reviewer-d6')
-        self.refused('DISPUTE_ARBITER_NOT_FRESH', self.rule, reviewer_task='reviewer-d6')
+        self.refused('DISPUTE_ARBITER_NOT_FRESH', self.verify, reviewer_task='reviewer-d6')
 
     def test_a_task_without_a_d6_common_dir_cannot_verify_the_arbiter(self):
         record = _task()
         record['completion'] = {'executor_task_id': EXECUTOR, 'evidence': {}}
         self.use(record)
         self.open()
-        self.refused('DISPUTE_ARBITER_UNVERIFIED', self.rule)
+        self.refused('DISPUTE_ARBITER_UNVERIFIED', self.verify)
 
     def test_a_foreign_session_is_refused(self):
         self.d6['other-d6'] = _registration(task='other-d6', session='other-session')
         # Another registered Reviewer's session, and a session no record holds.
         for session in ('other-session', 'arbiter-session-9'):
             with self.subTest(session=session):
-                self.refused('DISPUTE_ARBITER_SESSION_MISMATCH', self.rule, session=session)
+                self.refused('DISPUTE_ARBITER_SESSION_MISMATCH', self.verify, session=session)
         self.d6['arbiter-d6'] = _registration(session=None)
-        self.refused('DISPUTE_ARBITER_SESSION_MISMATCH', self.rule)
+        self.refused('DISPUTE_ARBITER_SESSION_MISMATCH', self.verify)
 
     def test_the_developer_run_session_is_never_the_arbiter_session(self):
         self.use(_task(developer={'execution': {'native_session_id': 'arbiter-session-1'}}))
         self.open()
-        self.refused('DISPUTE_ARBITER_NOT_INDEPENDENT', self.rule)
+        self.refused('DISPUTE_ARBITER_NOT_INDEPENDENT', self.verify)
 
     def test_an_unrelated_comment_url_is_refused(self):
         base = f'https://github.com/{REPOSITORY}/'
         for ref in (base + f'pull/{PR + 1}#issuecomment-{RULING_ID}',   # another PR
                     ISSUE_REF):                                         # an Issue thread
             with self.subTest(ref=ref):
-                self.refused('DISPUTE_EVIDENCE_REF_INVALID', self.rule, evidence_ref=ref)
+                self.refused('DISPUTE_EVIDENCE_REF_INVALID', self.verify, evidence_ref=ref)
         # A comment URL of this PR that GitHub does not return.
-        self.refused('DISPUTE_RULING_EVIDENCE_INVALID', self.rule,
+        self.refused('DISPUTE_RULING_EVIDENCE_INVALID', self.verify,
                      evidence_ref=base + f'pull/{PR}#issuecomment-1009')
 
     def test_a_comment_that_is_not_this_arbiters_ruling_is_refused(self):
-        first_review = dict(_ruling_comment(), body=_verdict())
-        second_line = f'Ruling: F1 UPHELD | PR: #{PR} | HEAD: {HEAD}\n'
+        first_review = dict(_ruling_comment(version=1), body=_verdict())
+        second_line = f'Ruling: F1 UPHELD | PR: #{PR} | Version: 1 | HEAD: {HEAD}\n'
         cases = {
-            'on another PR thread': _ruling_comment(issue=PR + 1),
-            'another comment id': _ruling_comment(comment_id=RULING_ID + 1),
-            'the other family': _ruling_comment(actor='Claude'),
-            'another HEAD': _ruling_comment(head=NEW_HEAD),
-            'another PR in the ruling line': _ruling_comment(pr=PR + 1),
-            'the other outcome': _ruling_comment(outcome='UPHELD'),
-            'another finding': _ruling_comment('F3'),
-            'no Task binding line': _ruling_comment(binding=False),
-            'edited after posting': _ruling_comment(edited=True),
-            'older than the dispute': _ruling_comment(created='2000-01-01T00:00:00Z'),
-            'two ruling lines': _ruling_comment(extra=second_line),
+            'on another PR thread': _ruling_comment(issue=PR + 1, version=1),
+            'another comment id': _ruling_comment(comment_id=RULING_ID + 1, version=1),
+            'the other family': _ruling_comment(actor='Claude', version=1),
+            'another HEAD': _ruling_comment(head=NEW_HEAD, version=1),
+            'another PR in the ruling line': _ruling_comment(pr=PR + 1, version=1),
+            'the other outcome': _ruling_comment(outcome='UPHELD', version=1),
+            'another finding': _ruling_comment('F3', version=1),
+            'no Task binding line': _ruling_comment(binding=False, version=1),
+            'edited after posting': _ruling_comment(edited=True, version=1),
+            'older than the dispute': _ruling_comment(created='2000-01-01T00:00:00Z', version=1),
+            'two ruling lines': _ruling_comment(extra=second_line, version=1),
+            'legacy header without version': _ruling_comment(version=None),
             # The same lines, but not the arbiter claim's review_text byte for byte.
-            'CRLF line ends': _ruling_comment(body=_ruling_body().replace('\n', '\r\n')),
-            'a trailing space': _ruling_comment(body=_ruling_body() + ' '),
-            'an added closing note': _ruling_comment(extra='Edited by the PM.\n'),
+            'CRLF line ends': _ruling_comment(body=_ruling_body(version=1).replace('\n', '\r\n')),
+            'a trailing space': _ruling_comment(body=_ruling_body(version=1) + ' '),
+            'an added closing note': _ruling_comment(extra='Edited by the PM.\n', version=1),
             'the first review verdict': first_review,
-            'no body': dict(_ruling_comment(), body=None),
+            'no body': dict(_ruling_comment(version=1), body=None),
             'not a comment': ['not', 'a', 'comment'],
         }
         for name, comment in cases.items():
             with self.subTest(case=name):
-                self.refused('DISPUTE_RULING_EVIDENCE_INVALID', self.rule, comment=comment)
-        self.rule()
+                self.refused('DISPUTE_RULING_EVIDENCE_INVALID', self.verify, comment=comment)
+        legacy_body = _ruling_body(version=None)
+        self.refused('DISPUTE_RULING_EVIDENCE_INVALID', self.verify,
+                     arbiter_claims=[_arbiter_claim(text=legacy_body)],
+                     comment=_ruling_comment(body=legacy_body))
+        self.verify()
 
     def test_the_comment_login_is_never_identity(self):
         # High Debug #1775 (CWE-290): all agents post as one login (#926), so the
         # author's login neither authenticates nor refuses a ruling. The arbiter
         # run's claim binds the comment through its exact review_text.
-        self.refused('DISPUTE_RULING_EVIDENCE_INVALID', self.rule,
-                     comment=_ruling_comment(login=REVIEW_LOGIN, extra='Edited by the PM.\n'))
+        self.refused('DISPUTE_RULING_EVIDENCE_INVALID', self.verify,
+                     comment=_ruling_comment(login=REVIEW_LOGIN, extra='Edited by the PM.\n',
+                                             version=1))
         self.assertEqual(self.disputes()[0]['state'], 'OPEN')
-        self.rule(comment=_ruling_comment(login='another-account'))
-        self.assertEqual(self.disputes()[0]['state'], 'RULED')
+        claim = self.verify(comment=_ruling_comment(login='another-account', version=1))
+        self.assertEqual(claim['review_result']['review_text'], _ruling_body(version=1))
 
 
 class RulingClaimProvenanceTests(_Case):
@@ -670,16 +795,13 @@ class RulingClaimProvenanceTests(_Case):
         self.open()
 
     def test_exactly_one_matching_claim_and_its_exact_text_are_accepted(self):
-        result = self.rule()
-        self.assertEqual(result['state'], 'RULED')
-        [claim] = [item for item in self.store.get(TASK)['review_dispatch_claim']
-                   if item['reviewer_task'] == 'arbiter-d6']
+        claim = self.verify()
         comment = task_completion._github_get(f'issues/comments/{RULING_ID}')
         self.assertEqual(comment['body'].encode('utf-8'),
                          claim['review_result']['review_text'].encode('utf-8'))
 
     def test_a_ruling_without_an_arbiter_claim_is_refused(self):
-        self.refused('DISPUTE_RULING_CLAIM_MISSING', self.rule, arbiter_claims=[])
+        self.refused('DISPUTE_RULING_CLAIM_MISSING', self.verify, arbiter_claims=[])
         self.assertEqual(self.disputes()[0]['state'], 'OPEN')
 
     def test_more_than_one_candidate_claim_is_refused(self):
@@ -693,7 +815,7 @@ class RulingClaimProvenanceTests(_Case):
         }
         for name, claims in cases.items():
             with self.subTest(case=name):
-                self.refused('DISPUTE_RULING_CLAIM_AMBIGUOUS', self.rule, arbiter_claims=claims)
+                self.refused('DISPUTE_RULING_CLAIM_AMBIGUOUS', self.verify, arbiter_claims=claims)
         self.assertEqual(self.disputes()[0]['state'], 'OPEN')
 
     def test_a_claim_of_the_wrong_family_d6_session_or_task_is_refused(self):
@@ -713,7 +835,7 @@ class RulingClaimProvenanceTests(_Case):
         }
         for name, claim in cases.items():
             with self.subTest(case=name):
-                self.refused('DISPUTE_RULING_CLAIM_INVALID', self.rule, arbiter_claims=[claim])
+                self.refused('DISPUTE_RULING_CLAIM_INVALID', self.verify, arbiter_claims=[claim])
         self.assertEqual(self.disputes()[0]['state'], 'OPEN')
 
     def test_a_claim_of_a_stale_head_is_refused(self):
@@ -723,17 +845,19 @@ class RulingClaimProvenanceTests(_Case):
                       result_moved):                              # its result names another HEAD
             with self.subTest(claim_head=claim['head_sha'],
                               result_head=claim['review_result']['head']):
-                self.refused('DISPUTE_RULING_CLAIM_STALE', self.rule, arbiter_claims=[claim])
+                self.refused('DISPUTE_RULING_CLAIM_STALE', self.verify, arbiter_claims=[claim])
         self.assertEqual(self.disputes()[0]['state'], 'OPEN')
 
     def test_a_claim_older_than_the_disputed_review_is_refused(self):
         self.use(_task(claims=[_review_claim(version=3)]))
         self.open()
         self.assertEqual(self.disputes()[0]['review_version'], 3)
-        self.refused('DISPUTE_RULING_CLAIM_INVALID', self.rule,
-                     arbiter_claims=[_arbiter_claim(version=2)])
-        self.rule(arbiter_claims=[_arbiter_claim(version=4)])
-        self.assertEqual(self.disputes()[0]['state'], 'RULED')
+        self.refused('DISPUTE_RULING_CLAIM_INVALID', self.verify,
+                     arbiter_claims=[_arbiter_claim(version=2, ruling_version=3)],
+                     review_version=3)
+        claim = self.verify(arbiter_claims=[_arbiter_claim(version=4, ruling_version=3)],
+                            review_version=3)
+        self.assertEqual(claim['version'], 4)
 
     def test_a_claim_of_another_session_or_d6_is_never_the_arbiter_run(self):
         # The run that produced the text is not this arbiter's run: a recorded
@@ -741,7 +865,7 @@ class RulingClaimProvenanceTests(_Case):
         for claim in (_arbiter_claim(session='arbiter-session-2'),
                       _arbiter_claim(reviewer_task='claude-d6')):
             with self.subTest(claim=(claim['reviewer_task'], claim['native_session_id'])):
-                self.refused('DISPUTE_ARBITER_NOT_FRESH', self.rule, arbiter_claims=[claim])
+                self.refused('DISPUTE_ARBITER_NOT_FRESH', self.verify, arbiter_claims=[claim])
         self.assertEqual(self.disputes()[0]['state'], 'OPEN')
 
     def test_the_validator_alone_binds_d6_session_family_and_head(self):
@@ -789,7 +913,7 @@ class LiveHeadTests(_Case):
         self.use(_task(published_head=NEW_HEAD))
         self.assertEqual(self.open(live=True)['head_sha'], HEAD)
         self.assertEqual(self.defer('F2', live=True)['head_sha'], HEAD)
-        self.assertEqual(self.rule(live=True)['head_sha'], HEAD)
+        self.assertEqual(self.arbitrate(live=True)['head_sha'], HEAD)
 
     def test_a_recorded_published_head_never_stands_in_for_the_live_one(self):
         self.use(_task(published_head=HEAD))
@@ -801,7 +925,7 @@ class LiveHeadTests(_Case):
         self.use(_task())
         self.open(live=True)
         self.live(head={'sha': NEW_HEAD})
-        self.refused('DISPUTE_STALE', self.rule, live=True)
+        self.refused('DISPUTE_STALE', self.arbitrate, live=True)
         self.assertEqual(self.disputes()[0]['state'], 'OPEN')
 
     def test_an_unreadable_or_malformed_pr_read_refuses(self):
@@ -826,7 +950,7 @@ class LiveHeadTests(_Case):
                     self.github[f'pulls/{PR}'] = answer
                 self.refused(code, self.open, 'F3', live=True)
                 self.refused(code, self.defer, 'F2', live=True)
-                self.refused(code, self.rule, live=True)
+                self.refused(code, self.arbitrate, live=True)
 
     def test_an_injected_reader_that_fails_refuses_head_unknown(self):
         self.use(_task())
@@ -1139,13 +1263,13 @@ class TrustedRepositoryTests(_Case):
         self.refused('DISPUTE_EVIDENCE_REF_INVALID', self.open)          # REF names REPOSITORY
         self.open(evidence_ref=self.OTHER_REF)
         self.assertEqual(self.disputes()[0]['evidence_ref'], self.OTHER_REF)
-        self.refused('DISPUTE_EVIDENCE_REF_INVALID', self.rule)          # RULING_REF likewise
+        self.refused('DISPUTE_EVIDENCE_REF_INVALID', self.verify)        # RULING_REF likewise
         # The live comment's thread must be of the trusted repository too.
-        self.refused('DISPUTE_RULING_EVIDENCE_INVALID', self.rule,
+        self.refused('DISPUTE_RULING_EVIDENCE_INVALID', self.verify,
                      evidence_ref=self.OTHER_RULING_REF)
-        self.rule(evidence_ref=self.OTHER_RULING_REF,
-                  comment=lambda: _ruling_comment(repository=OTHER_REPOSITORY))
-        self.assertEqual(self.disputes()[0]['ruling']['evidence_ref'], self.OTHER_RULING_REF)
+        claim = self.verify(evidence_ref=self.OTHER_RULING_REF,
+                            comment=lambda: _ruling_comment(repository=OTHER_REPOSITORY, version=1))
+        self.assertEqual(claim['reviewer_task'], 'arbiter-d6')
 
     def test_an_unreadable_or_malformed_trusted_slug_refuses(self):
         self.use(_task())
@@ -1160,7 +1284,7 @@ class TrustedRepositoryTests(_Case):
         for trusted in (LLMToolError('trust source unreadable'), None, 'a/b/c'):
             with self.subTest(rule_trusted=trusted):
                 self.trusted = trusted
-                self.refused('DISPUTE_REPOSITORY_UNKNOWN', self.rule)
+                self.refused('DISPUTE_REPOSITORY_UNKNOWN', self.arbitrate)
         self.assertEqual(self.disputes()[0]['state'], 'OPEN')
 
 
