@@ -69,6 +69,11 @@ def _review_fail_claim(task_id='a' * 32, *, head='a' * 40, executor='executor', 
 
 class HighDebugTests(unittest.TestCase):
     def setUp(self):
+        # Codex-first route; the Owner pause of codex-debug is covered in
+        # test_high_debug_fallback.PausedCodexDebugTests.
+        _codex_paused = patch.object(high_debug, '_codex_debug_owner_paused', return_value=False)
+        _codex_paused.start()
+        self.addCleanup(_codex_paused.stop)
         self.unposted_root = tempfile.TemporaryDirectory()
         self.addCleanup(self.unposted_root.cleanup)
         self._verified_ai_env_patch = patch.object(
@@ -2437,6 +2442,11 @@ class HighDebugWrongTaskOrFamilyTests(unittest.TestCase):
     """#914: run_high_debug refuses a wrong Task, executor D6 or family before any run."""
 
     def setUp(self):
+        # Codex-first route; the Owner pause of codex-debug is covered in
+        # test_high_debug_fallback.PausedCodexDebugTests.
+        _codex_paused = patch.object(high_debug, '_codex_debug_owner_paused', return_value=False)
+        _codex_paused.start()
+        self.addCleanup(_codex_paused.stop)
         root = tempfile.TemporaryDirectory()
         self.addCleanup(root.cleanup)
         store_root_patch = patch.object(high_debug.task_store, 'default_root',

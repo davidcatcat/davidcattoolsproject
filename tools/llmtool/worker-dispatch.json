@@ -44,25 +44,25 @@
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6760670167"
     },
     "claude-reviewer": {
-      "dispatch": "PAUSED",
+      "dispatch": "ALLOWED",
       "decided_by": "Owner",
-      "decided_at": "2026-11-24",
-      "reason": "One-time Owner grant for PR #2699 F3 arbitration ended; every claude-reviewer dispatch is paused again",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-7141865604"
+      "decided_at": "2026-11-25",
+      "reason": "Owner decision 2026-11-25 (#289 comment 7153323324): claude-reviewer is ALLOWED for PM-selected cross-family review dispatch (no owner_assignments required); codex-reviewer and codex-debug are PAUSED.",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-7153323324"
     },
     "codex-reviewer": {
-      "dispatch": "ALLOWED",
+      "dispatch": "PAUSED",
       "decided_by": "Owner",
-      "decided_at": "2026-10-25",
-      "reason": "formal Reviewer for Claude Developer and Claude PM changes (cross-family pairing, AGENTS.md Formal Reviewer); separate read-only context",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6397242605"
+      "decided_at": "2026-11-25",
+      "reason": "Owner decision 2026-11-25 (#289 comment 7153323324): codex-reviewer is PAUSED; claude-reviewer is ALLOWED.",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-7153323324"
     },
     "codex-debug": {
-      "dispatch": "ALLOWED",
+      "dispatch": "PAUSED",
       "decided_by": "Owner",
-      "decided_at": "2026-11-11",
-      "reason": "AI Debug route (O1, O2, #1502 WP-B): read-only Codex diagnosis; it switches to claude-debug only when Codex reports quota exhausted or login failed",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6792528804"
+      "decided_at": "2026-11-25",
+      "reason": "Owner decision 2026-11-25 (#289 comment 7153323324): codex-debug is PAUSED; claude-debug remains available for AI Debug.",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-7153323324"
     },
     "claude-debug": {
       "dispatch": "ALLOWED",

@@ -66,6 +66,11 @@ class _Store:
 
 class RunHighDebugTests(unittest.TestCase):
     def setUp(self):
+        # Codex-first route; the Owner pause of codex-debug is covered in
+        # test_high_debug_fallback.PausedCodexDebugTests.
+        _codex_paused = patch.object(high_debug, '_codex_debug_owner_paused', return_value=False)
+        _codex_paused.start()
+        self.addCleanup(_codex_paused.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name) / 'repo'
