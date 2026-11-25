@@ -48,9 +48,12 @@ def _formal_verdict_text(status='FAIL', version=1, findings=FORMAL_FINDINGS):
             f'Verdict: {status} | Version: v{version} | HEAD: {HEAD}\n{findings}\n')
 
 
-def _ruling_text(contract_digest, outcome='UPHELD', actor='Codex'):
+def _ruling_text(contract_digest, outcome='UPHELD', actor='Codex', *, review_version=None):
+    header = (f'Ruling: F1 {outcome} | PR: #{PR} | Version: {review_version} | HEAD: {HEAD}'
+              if review_version is not None
+              else f'Ruling: F1 {outcome} | PR: #{PR} | HEAD: {HEAD}')
     return (f'<!-- activity: type=dispute_ruling actor={actor} target=PM status={outcome} -->\n'
-            f'Ruling: F1 {outcome} | PR: #{PR} | HEAD: {HEAD}\n'
+            f'{header}\n'
             f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} contract={contract_digest} head={HEAD}\n'
             'Arbitration reasoning.')
 
@@ -238,16 +241,18 @@ class RulingClaimCliReadersTests(unittest.TestCase):
             task_submission_cli._dispute_fail_verdict(rec, PR, HEAD)
         self.assertEqual(caught.exception.dispute_code, 'DISPUTE_NO_FAIL_VERDICT')
 
-    # --- A2: dispute_rule disputed-claim lookup ---
+    # --- A2: _dispute_rule_verified disputed-claim lookup ---
 
-    def test_dispute_rule_baseline_and_excludes_ruling_claim_by_purpose(self):
+    def test_dispute_rule_verified_baseline_and_excludes_ruling_claim_by_purpose(self):
         _, digest = _base_record()
         rec, _ = self._create_record(
             claims=[_formal_claim(digest, version=1)],
             disputes=[self._open_dispute(review_version=1)],
         )
-        ruling = _ruling_claim(digest, version=2, state='COMPLETED', outcome='UPHELD')
-        self._append_completed_claim(rec, ruling)
+        ruling = _ruling_claim(
+            digest, version=2, state='COMPLETED', outcome='UPHELD',
+            text=_ruling_text(digest, outcome='UPHELD', review_version=1))
+        updated = self._append_completed_claim(rec, ruling)
 
         ruling_body = ruling['review_result']['review_text']
         comment = {
@@ -266,32 +271,34 @@ class RulingClaimCliReadersTests(unittest.TestCase):
              patch.object(review_repair, 'developer_family', return_value='gemini'), \
              patch.object(task_submission_cli, '_dispute_arbiter_registration', return_value=reg), \
              patch.object(task_submission_cli, '_dispute_ruling_claim', return_value=ruling):
-            result = task_submission_cli.dispute_rule(
-                self.store, TASK, pr=PR, finding_id='F1', outcome='UPHELD',
+            result = task_submission_cli._dispute_rule_verified(
+                updated, updated['review_disputes'][0],
+                pr=PR, head=HEAD, finding_id='F1', outcome='UPHELD',
                 reviewer='codex-reviewer', reviewer_task=ARBITER_REVIEWER,
                 reviewer_session=ARBITER_SESSION, evidence_ref=RULING_REF,
-                current_head=lambda _r, _p: HEAD,
-                github_get=lambda _path: comment,
+                repository=REPOSITORY, github_get=lambda _path: comment,
+                review_version=1,
             )
-        self.assertEqual(result['state'], 'RULED')
-        self.assertEqual(result['outcome'], 'UPHELD')
+        self.assertEqual(result, ruling)
 
-    def test_dispute_rule_refuses_when_disputed_version_is_only_a_ruling_claim(self):
+    def test_dispute_rule_verified_refuses_when_disputed_version_is_only_a_ruling_claim(self):
         _, digest = _base_record()
         # Only a ruling claim exists at review_version=1 (no formal claim at v1).
         ruling_at_v1 = _ruling_claim(
             digest, version=1, state='COMPLETED', text='non-ruling text')
-        self._create_record(
+        rec, _ = self._create_record(
             claims=[ruling_at_v1],
             disputes=[self._open_dispute(review_version=1)],
         )
         with patch.object(task_completion, '_trusted_slug', return_value=REPOSITORY):
             with self.assertRaises(LLMToolError) as caught:
-                task_submission_cli.dispute_rule(
-                    self.store, TASK, pr=PR, finding_id='F1', outcome='UPHELD',
+                task_submission_cli._dispute_rule_verified(
+                    rec, rec['review_disputes'][0],
+                    pr=PR, head=HEAD, finding_id='F1', outcome='UPHELD',
                     reviewer='codex-reviewer', reviewer_task=ARBITER_REVIEWER,
                     reviewer_session=ARBITER_SESSION, evidence_ref=RULING_REF,
-                    current_head=lambda _r, _p: HEAD,
+                    repository=REPOSITORY, github_get=lambda _path: {},
+                    review_version=1,
                 )
         self.assertEqual(caught.exception.dispute_code, 'DISPUTE_NO_FAIL_VERDICT')
 

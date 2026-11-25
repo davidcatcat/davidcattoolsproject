@@ -516,14 +516,19 @@ class DisputeOpenTests(_Case):
                                _review_claim(head=NEW_HEAD, version=2,
                                              session='review-session-2')]))
         self.open()
-        self.rule(outcome='UPHELD')
+        self.arbitrate(outcome='UPHELD')
         self.refused('DISPUTE_ALREADY_RULED', self.open)
-        self.refused('DISPUTE_ALREADY_RULED', self.rule, outcome='WITHDRAWN',
-                     session='arbiter-session-2')
+        self.refused('DISPUTE_RULE_MANUAL_RETIRED', task_submission_cli.dispute_rule,
+                     self.store, TASK, pr=PR, finding_id='F1', outcome='WITHDRAWN',
+                     reviewer='codex-reviewer', reviewer_task='arbiter-d6',
+                     reviewer_session='arbiter-session-2', evidence_ref=RULING_REF)
         # Not even after a new HEAD whose FAIL names the same finding again.
         self.refused('DISPUTE_ALREADY_RULED', self.open, head=NEW_HEAD)
-        self.refused('DISPUTE_ALREADY_RULED', self.rule, head=NEW_HEAD,
-                     session='arbiter-session-2')
+        self.refused('DISPUTE_RULE_MANUAL_RETIRED', task_submission_cli.dispute_rule,
+                     self.store, TASK, pr=PR, finding_id='F1', outcome='WITHDRAWN',
+                     reviewer='codex-reviewer', reviewer_task='arbiter-d6',
+                     reviewer_session='arbiter-session-2', evidence_ref=RULING_REF,
+                     current_head=_head(NEW_HEAD))
         self.assertEqual([item['state'] for item in self.disputes()], ['RULED'])
 
     def test_an_abandoned_or_unknown_task_is_refused(self):
@@ -658,7 +663,10 @@ class DisputeRuleTests(_Case):
         launch = Mock(side_effect=AssertionError('no process may start'))
         with patch.object(subprocess, 'run', launch), patch.object(subprocess, 'Popen', launch):
             self.assertIs(self.open()['review_launched'], False)
-            self.rule()
+            self.refused('DISPUTE_RULE_MANUAL_RETIRED', task_submission_cli.dispute_rule,
+                         self.store, TASK, pr=PR, finding_id='F1', outcome='WITHDRAWN',
+                         reviewer='codex-reviewer', reviewer_task='arbiter-d6',
+                         reviewer_session='arbiter-session-1', evidence_ref=RULING_REF)
             self.defer('F2')
         launch.assert_not_called()
 
@@ -978,24 +986,34 @@ class DisputeCliTests(_Case):
         self.assertEqual((code, out), (1, {'task_id': TASK, 'code': 'DEFER_BLOCKING_REFUSED'}))
         code, out = self._run(['dispute', 'defer', TASK, '--finding', 'F4'] + common + [REF])
         self.assertEqual((code, out['state']), (0, 'DEFERRED'))
-        self.arm()   # the arbiter run's one COMPLETED claim (High Debug #1775)
+        before = self.store.get(TASK)
         code, out = self._run(['dispute', 'rule', TASK, '--finding', 'F1'] + common +
                               [RULING_REF, '--outcome', 'WITHDRAWN',
                                '--reviewer', 'codex-reviewer', '--reviewer-task', 'arbiter-d6',
                                '--reviewer-session', 'arbiter-session-1'])
-        self.assertEqual((code, out['state'], out['formal_pass_required']), (0, 'RULED', True))
-        code, out = self._run(['dispute', 'open', TASK, '--finding', 'F1'] + common + [REF])
-        self.assertEqual((code, out['code']), (1, 'DISPUTE_ALREADY_RULED'))
+        self.assertEqual((code, out), (1, {'code': 'DISPUTE_RULE_MANUAL_RETIRED'}))
+        self.assertEqual(self.store.get(TASK), before)
 
     def test_the_parser_limits_outcome_and_reviewer_choices(self):
+        self.use(_task())
+        parser = argparse.ArgumentParser()
+        actions = parser.add_subparsers(dest='action')
+        task_submission_cli.add_task_submission_parsers(actions)
+        dispute_parser = actions.choices['dispute']
+        dispute_sub = dispute_parser._subparsers._group_actions[0]
+        rule_parser = dispute_sub.choices['rule']
+        for opt in ('--outcome', '--reviewer', '--reviewer-task', '--reviewer-session'):
+            self.assertNotIn(opt, rule_parser._option_string_actions)
         base = ['dispute', 'rule', TASK, '--pr', str(PR), '--finding', 'F1',
                 '--evidence-ref', RULING_REF, '--reviewer-task', 'arbiter-d6',
                 '--reviewer-session', 'arbiter-session-1']
         for extra in (['--outcome', 'DENIED', '--reviewer', 'codex-reviewer'],
                       ['--outcome', 'UPHELD', '--reviewer', 'pm']):
-            with self.subTest(extra=extra), patch('sys.stderr', io.StringIO()):
-                with self.assertRaises(SystemExit):
-                    self._parse(base + extra)
+            with self.subTest(extra=extra):
+                before = self.store.get(TASK)
+                code, out = self._run(base + extra)
+                self.assertEqual((code, out), (1, {'code': 'DISPUTE_RULE_MANUAL_RETIRED'}))
+                self.assertEqual(self.store.get(TASK), before)
 
     def test_a_caller_that_does_not_own_the_task_is_refused_first(self):
         from llmtool import pm_caller
@@ -1057,20 +1075,21 @@ class DisputeCliRouteTests(_Case):
         code, out = self._main(['task', 'dispute', 'defer', TASK, '--finding', 'F4'] +
                                common + [REF])
         self.assertEqual((code, out['state']), (0, 'DEFERRED'))
-        self.arm()   # the arbiter run's one COMPLETED claim (High Debug #1775)
+        before = self.store.get(TASK)
         code, out = self._main(['task', 'dispute', 'rule', TASK, '--finding', 'F1'] + common +
                                [RULING_REF, '--outcome', 'WITHDRAWN',
                                 '--reviewer', 'codex-reviewer', '--reviewer-task', 'arbiter-d6',
                                 '--reviewer-session', 'arbiter-session-1'])
-        self.assertEqual((code, out['state'], out['formal_pass_required']), (0, 'RULED', True))
-        # A refusal through cli.main prints only its code and exits 1.
+        self.assertEqual((code, out), (1, {'code': 'DISPUTE_RULE_MANUAL_RETIRED'}))
+        self.assertEqual(self.store.get(TASK), before)
         code, out = self._main(['task', 'dispute', 'rule', TASK, '--finding', 'F1'] + common +
                                [RULING_REF, '--outcome', 'UPHELD',
                                 '--reviewer', 'codex-reviewer', '--reviewer-task', 'arbiter-d6',
                                 '--reviewer-session', 'arbiter-session-1'])
-        self.assertEqual((code, out), (1, {'task_id': TASK, 'code': 'DISPUTE_ALREADY_RULED'}))
+        self.assertEqual((code, out), (1, {'code': 'DISPUTE_RULE_MANUAL_RETIRED'}))
+        self.assertEqual(self.store.get(TASK), before)
         self.assertEqual([(item['finding_id'], item['state']) for item in self.disputes()],
-                         [('F1', 'RULED'), ('F4', 'DEFERRED')])
+                         [('F1', 'OPEN'), ('F4', 'DEFERRED')])
 
 
 class DisputeWithdrawTests(_Case):
@@ -1566,6 +1585,143 @@ class HighDebugGateTests(unittest.TestCase):
             with self.subTest(disputes=disputes):
                 with self.assertRaises(_Reached):
                     self.debug(disputes)
+
+
+class DisputeRuleRetirementTests(_Case):
+    """#2087 (PR A3b): manual `task dispute rule` is retired; versioned header required."""
+
+    def _real_store_with_open_dispute(self):
+        store_dir = Path(self.temp.name).resolve() / 'real-store'
+        store = task_store.TaskStore(store_dir)
+        contract = {
+            'schema_version': 1, 'contract_version': 1, 'task_id': TASK,
+            'goal': 'test retired manual rule',
+            'authorized_scope': ['pm-planning'],
+            'criteria': [{'criterion_id': 'pm_response', 'description': 'Record result.',
+                          'kind': 'ARTIFACT'}],
+            'forbidden_scope': [], 'previous_digest': None,
+        }
+        parsed = task_store.parse_task_contract(json.dumps(contract))
+        digest = parsed.binding(trr.RUN).contract_digest
+        record = {
+            'schema_version': 2, 'task_id': TASK, 'run_id': trr.RUN,
+            'pm_session_id': 'pm-test-session', 'pm_provider_profile': 'test',
+            'pm_provider_type': 'test', 'pm_model': None,
+            'pm_route_binding': {'type': 'test', 'model': None, 'base_url': None},
+            'backend_session_semantics': 'NOT_STARTED', 'native_session_id': None,
+            'state': 'PM_PENDING', 'created_at': '2026-11-13T00:00:00Z',
+            'updated_at': '2026-11-13T00:00:00Z',
+            'task_contract': contract, 'task_binding': vars(parsed.binding(trr.RUN)),
+            'request': 'test retired manual rule',
+            'request_sha256': hashlib.sha256(b'test retired manual rule').hexdigest(),
+            'response': None, 'usage': None, 'error_code': None,
+            'developer': None, 'pm_assignment': None, 'completion': None,
+            'review_disputes': [_entry()],
+        }
+        created = store.create(record)
+        path = store_dir / f'{TASK}.json'
+        return store, path.read_bytes(), created
+
+    def _parse(self, argv):
+        parser = argparse.ArgumentParser()
+        task_submission_cli.add_task_submission_parsers(parser.add_subparsers(dest='action'))
+        return parser.parse_args(argv)
+
+    def test_retired_rule_refuses_across_all_entry_points_before_caller_or_store(self):
+        from llmtool import pm_caller
+        empty_store = task_store.TaskStore(Path(self.temp.name).resolve() / 'empty-store')
+        open_store, before_bytes, _ = self._real_store_with_open_dispute()
+        open_path = Path(self.temp.name).resolve() / 'real-store' / f'{TASK}.json'
+
+        arg_cases = (
+            ('no arguments', []),
+            ('old options', [TASK, '--pr', str(PR), '--finding', 'F1',
+                             '--evidence-ref', RULING_REF, '--outcome', 'WITHDRAWN',
+                             '--reviewer', 'codex-reviewer', '--reviewer-task', 'arbiter-d6',
+                             '--reviewer-session', 'arbiter-session-1']),
+            ('unknown options', ['--unknown-option', 'placeholder-value']),
+            ('open dispute', [TASK, '--pr', str(PR), '--finding', 'F1',
+                              '--evidence-ref', RULING_REF]),
+        )
+        for store_kind, store in (('no task record', empty_store), ('open dispute', open_store)):
+            for case_name, tail in arg_cases:
+                with self.subTest(store=store_kind, case=case_name):
+                    with patch.object(pm_caller, 'check_caller',
+                                      side_effect=AssertionError('caller check reached')) as caller, \
+                         patch.object(store, 'get',
+                                      side_effect=AssertionError('store.get reached')) as getter, \
+                         patch.object(store, 'compare_and_update',
+                                      side_effect=AssertionError('store write reached')) as writer:
+                        # 1. cli.main
+                        out_main = io.StringIO()
+                        with patch.object(task_submission_cli, 'TaskStore', return_value=store), \
+                             patch('sys.stdout', out_main):
+                            code_main = cli.main(['task', 'dispute', 'rule'] + tail)
+                        self.assertEqual(code_main, 1)
+                        self.assertEqual(json.loads(out_main.getvalue()),
+                                         {'code': 'DISPUTE_RULE_MANUAL_RETIRED'})
+
+                        # 2. CLI adapter (run_task_dispute)
+                        out_adapter = io.StringIO()
+                        args = self._parse(['dispute', 'rule'] + tail)
+                        code_adapter = task_submission_cli.run_task_dispute(
+                            args, store=store, stdout=out_adapter, current_head=_head(HEAD))
+                        self.assertEqual(code_adapter, 1)
+                        self.assertEqual(json.loads(out_adapter.getvalue()),
+                                         {'code': 'DISPUTE_RULE_MANUAL_RETIRED'})
+
+                        # 3. Direct module entry point (dispute_rule)
+                        with self.assertRaises(LLMToolError) as caught:
+                            task_submission_cli.dispute_rule(
+                                store, TASK, pr=PR, finding_id='F1', outcome='WITHDRAWN',
+                                reviewer='codex-reviewer', reviewer_task='arbiter-d6',
+                                reviewer_session='arbiter-session-1', evidence_ref=RULING_REF,
+                                current_head=_head(HEAD))
+                        self.assertEqual(caught.exception.dispute_code,
+                                         'DISPUTE_RULE_MANUAL_RETIRED')
+                        with self.assertRaises(LLMToolError) as caught_no_args:
+                            task_submission_cli.dispute_rule(store, TASK)
+                        self.assertEqual(caught_no_args.exception.dispute_code,
+                                         'DISPUTE_RULE_MANUAL_RETIRED')
+
+                        caller.assert_not_called()
+                        getter.assert_not_called()
+                        writer.assert_not_called()
+            if store_kind == 'open dispute':
+                self.assertEqual(open_path.read_bytes(), before_bytes)
+
+    def test_ruling_comment_requires_versioned_header_and_int_review_version(self):
+        self.use(_task())
+        self.open()
+        record = self.store.get(TASK)
+        entry = record['review_disputes'][0]
+        # Legacy header without Version: is refused even when review_version is supplied.
+        legacy_text = _ruling_body('F1', 'WITHDRAWN', head=HEAD, actor='Codex', version=None)
+        legacy_comment = _ruling_comment(body=legacy_text)
+        for review_version in (1, None):
+            with self.subTest(case='legacy_header', review_version=review_version):
+                with self.assertRaises(LLMToolError) as caught:
+                    task_submission_cli._dispute_ruling_comment(
+                        record, entry, pr=PR, head=HEAD, finding_id='F1', outcome='WITHDRAWN',
+                        reviewer='codex-reviewer', review_text=legacy_text,
+                        evidence_ref=RULING_REF, repository=REPOSITORY,
+                        github_get=lambda _path: legacy_comment,
+                        review_version=review_version)
+                self.assertEqual(caught.exception.dispute_code, 'DISPUTE_RULING_EVIDENCE_INVALID')
+
+        # Missing, None, bool or non-int review_version is refused even for a versioned comment.
+        versioned_text = _ruling_body('F1', 'WITHDRAWN', head=HEAD, actor='Codex', version=1)
+        versioned_comment = _ruling_comment(body=versioned_text)
+        for bad_version in (None, '1', True, 0):
+            with self.subTest(case='bad_version', review_version=bad_version):
+                with self.assertRaises(LLMToolError) as caught:
+                    task_submission_cli._dispute_ruling_comment(
+                        record, entry, pr=PR, head=HEAD, finding_id='F1', outcome='WITHDRAWN',
+                        reviewer='codex-reviewer', review_text=versioned_text,
+                        evidence_ref=RULING_REF, repository=REPOSITORY,
+                        github_get=lambda _path: versioned_comment,
+                        review_version=bad_version)
+                self.assertEqual(caught.exception.dispute_code, 'DISPUTE_RULING_EVIDENCE_INVALID')
 
 
 if __name__ == '__main__':

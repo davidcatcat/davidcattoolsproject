@@ -1121,14 +1121,14 @@ def add_task_submission_parsers(actions):
                             help=('Debug route (default codex). claude is refused: Claude Debug '
                                   'runs only as the automatic fallback after Codex Debug '
                                   'reports quota exhausted or login failure'))
+    import argparse
     dispute = actions.add_parser(
         'dispute', help=('Record a PM dispute, deferral, withdrawal or arbiter ruling '
                          'of one formal review finding; never runs a review'))
     dispute_actions = dispute.add_subparsers(dest='dispute_action', metavar='ACTION')
     dispute_actions.required = True
     for name, text in (('open', 'Dispute one finding of the recorded FAIL verdict'),
-                       ('defer', 'Defer one Low or Advisory finding'),
-                       ('rule', "Record the llmtool-chosen arbiter's ruling")):
+                       ('defer', 'Defer one Low or Advisory finding')):
         command = dispute_actions.add_parser(name, help=text)
         command.add_argument('task_id', help='existing durable Task ID')
         command.add_argument('--pr', required=True, type=int, help='GitHub pull request number')
@@ -1139,15 +1139,13 @@ def add_task_submission_parsers(actions):
                              help=('caller PM session (native UUID or pm- ID); must own '
                                    'the Task; default: CLAUDE_CODE_SESSION_ID or '
                                    'CODEX_THREAD_ID'))
-        if name == 'rule':
-            command.add_argument('--outcome', required=True, choices=('UPHELD', 'WITHDRAWN'))
-            command.add_argument('--reviewer', required=True,
-                                 choices=('claude-reviewer', 'codex-reviewer'),
-                                 help='must be the arbiter llmtool chose')
-            command.add_argument('--reviewer-task', required=True,
-                                 help='registered D6 Reviewer task id of the arbiter run')
-            command.add_argument('--reviewer-session', required=True,
-                                 help='native session id of the arbiter run')
+    retired_rule = dispute_actions.add_parser(
+        'rule',
+        help='Retired; use task dispute arbitrate',
+        prefix_chars='\x00',
+        add_help=False,
+    )
+    retired_rule.add_argument('_retired_args', nargs=argparse.REMAINDER)
     # #2088: the disputing PM gives up its own OPEN dispute. No ruling, no
     # evidence URL: the finding stands and goes back to normal review repair.
     withdraw = dispute_actions.add_parser(
@@ -3001,14 +2999,12 @@ def _dispute_ruling_comment(record, entry, *, pr, head, finding_id, outcome, rev
     created, updated = comment.get('created_at'), comment.get('updated_at')
     lines = ([line.rstrip('\r') for line in body.split('\n') if line.strip()]
              if type(body) is str else [])
+    from .dispute_arbiter import RULING_HEADER_VERSIONED
+    if type(review_version) is not int or review_version < 1:
+        _dispute_refuse('DISPUTE_RULING_EVIDENCE_INVALID')
     marker = _RULING_MARKER.fullmatch(lines[0]) if lines else None
-    if review_version is not None:
-        from .dispute_arbiter import RULING_HEADER_VERSIONED
-        header = RULING_HEADER_VERSIONED.fullmatch(lines[1]) if len(lines) > 1 else None
-        expected_header = (finding_id, outcome, str(pr), str(review_version), head)
-    else:
-        header = _RULING_HEADER.fullmatch(lines[1]) if len(lines) > 1 else None
-        expected_header = (finding_id, outcome, str(pr), head)
+    header = RULING_HEADER_VERSIONED.fullmatch(lines[1]) if len(lines) > 1 else None
+    expected_header = (finding_id, outcome, str(pr), str(review_version), head)
     actor = {'claude-reviewer': 'Claude', 'codex-reviewer': 'Codex'}.get(reviewer)
     if (type(comment.get('id')) is not int or comment['id'] != comment_id or
             comment.get('issue_url') !=
@@ -3164,53 +3160,11 @@ def _dispute_rule_verified(record, entry, *, pr, head, finding_id, outcome, revi
     return ruling_claim
 
 
-def dispute_rule(store, task_id, *, pr, finding_id, outcome, reviewer, reviewer_task,
-                 reviewer_session, evidence_ref, current_head=None, github_get=None):
-    """Record the arbiter's one ruling on an OPEN dispute of the current PR head.
-
-    The arbiter must be the Reviewer llmtool chose and its run must not be a
-    recorded review run of this PR. The Reviewer Task, its session and the
-    evidence comment are authenticated against the registered D6 Reviewer
-    record and a live comment read (security v91 F1). Exactly one COMPLETED
-    review-dispatch claim must bind the arbiter's run to this Task, PR and
-    HEAD, and the comment body must equal its review_text byte for byte
-    (High Debug #1775). Every refusal happens before the one store update.
-    The ruling binds the exact HEAD, run and evidence; it never replaces the
-    formal PASS.
-    """
-    from .task_store import (D6_TASK_ID, REVIEW_DISPUTE_OUTCOMES, REVIEW_DISPUTE_REVIEWERS,
-                             valid_review_dispute_session)
-    repository = _dispute_arguments(pr, finding_id, evidence_ref)
-    if (outcome not in REVIEW_DISPUTE_OUTCOMES or reviewer not in REVIEW_DISPUTE_REVIEWERS or
-            type(reviewer_task) is not str or D6_TASK_ID.fullmatch(reviewer_task) is None or
-            not valid_review_dispute_session(reviewer_session)):
-        _dispute_refuse('DISPUTE_ARGUMENT_INVALID')
-    record, disputes = _dispute_task(store, task_id)
-    same = [(index, item) for index, item in enumerate(disputes)
-            if item.get('pr') == pr and item.get('finding_id') == finding_id]
-    if any(item.get('state') == 'RULED' for _, item in same):
-        _dispute_refuse('DISPUTE_ALREADY_RULED')
-    head = _dispute_head(record, pr, current_head)
-    opened = [(index, item) for index, item in same if item.get('state') == 'OPEN']
-    current = [(index, item) for index, item in opened if item.get('head_sha') == head]
-    if not current:
-        # An OPEN dispute of an earlier HEAD is stale: the HEAD it disputed is gone.
-        _dispute_refuse('DISPUTE_STALE' if opened else 'DISPUTE_NOT_OPEN')
-    index, entry = current[0]
-    _dispute_rule_verified(
-        record, entry, pr=pr, head=head, finding_id=finding_id, outcome=outcome,
-        reviewer=reviewer, reviewer_task=reviewer_task, reviewer_session=reviewer_session,
-        evidence_ref=evidence_ref, repository=repository, github_get=github_get)
-    ruling = {'outcome': outcome, 'head_sha': head, 'reviewer': reviewer,
-              'reviewer_task': reviewer_task, 'reviewer_session': reviewer_session,
-              'evidence_ref': evidence_ref, 'ruled_at': _timestamp()}
-    updated = list(disputes)
-    updated[index] = dict(entry, state='RULED', ruling=ruling)
-    store.compare_and_update(task_id, expected={'record_sha256': record.get('record_sha256')},
-                             review_disputes=updated)
-    return {'task_id': task_id, 'state': 'RULED', 'pr': pr, 'finding_id': finding_id,
-            'head_sha': head, 'outcome': outcome, 'reviewer': reviewer,
-            'formal_pass_required': True}
+def dispute_rule(store, task_id, *, pr=None, finding_id=None, outcome=None, reviewer=None,
+                 reviewer_task=None, reviewer_session=None, evidence_ref=None,
+                 current_head=None, github_get=None):
+    """Retired manual ruling entry point; refuses DISPUTE_RULE_MANUAL_RETIRED unconditionally."""
+    _dispute_refuse('DISPUTE_RULE_MANUAL_RETIRED')
 
 
 def dispute_withdraw(store, task_id, *, pr, finding_id, head):
@@ -3932,6 +3886,10 @@ def run_task_dispute(args, *, store=None, stdout=None, current_head=None,
     The caller's PM session must own the Task. A refusal prints only its code
     and exits 1.
     """
+    action = getattr(args, 'dispute_action', None)
+    if action == 'rule':
+        _print({'code': 'DISPUTE_RULE_MANUAL_RETIRED'}, stdout=stdout)
+        return 1
     from . import pm_caller
     store = TaskStore() if store is None else store
     try:
@@ -3939,7 +3897,6 @@ def run_task_dispute(args, *, store=None, stdout=None, current_head=None,
     except pm_caller.PMCallerRefused as exc:
         _print(pm_caller.refusal(args.task_id, exc.code), stdout=stdout)
         return 1
-    action = getattr(args, 'dispute_action', None)
     try:
         if action not in _DISPUTE_ACTIONS:
             _dispute_refuse('DISPUTE_ARGUMENT_INVALID')
@@ -3965,12 +3922,8 @@ def run_task_dispute(args, *, store=None, stdout=None, current_head=None,
                   'evidence_ref': args.evidence_ref, 'current_head': current_head}
         if action == 'open':
             result = dispute_open(store, args.task_id, **common)
-        elif action == 'defer':
-            result = dispute_defer(store, args.task_id, **common)
         else:
-            result = dispute_rule(store, args.task_id, outcome=args.outcome,
-                                  reviewer=args.reviewer, reviewer_task=args.reviewer_task,
-                                  reviewer_session=args.reviewer_session, **common)
+            result = dispute_defer(store, args.task_id, **common)
     except LLMToolError as exc:
         code = (getattr(exc, 'dispute_code', None) or
                 getattr(exc, 'task_store_error_code', None) or
