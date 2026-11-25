@@ -49,23 +49,12 @@ LABELS = frozenset((LEGACY_VERIFY, RETAIN_RELEASE_REFS, GW_AGENT_POLICY_REFS,
 # Exact (repository-relative path, stripped line text) -> label.
 # LEGACY_VERIFY: legacy constants kept for ``llmtool trust verify-legacy``,
 # removed by #369 PR-10b.
-_TASK_COMPLETION = 'tools/llmtool/llmtool/task_completion.py'
 _TRIAGE_WORKER = 'tools/llmtool/llmtool/test_triage_worker.py'
 _WORKER_DISPATCH = 'tools/llmtool/llmtool/worker_dispatch.py'
 _GITHUB_IDENTITY = 'tools/llmtool/llmtool/github_identity.py'
 _D6_LIFECYCLE = 'tools/llmtool/scripts/d6_worktree_lifecycle.py'
 
 ALLOWLIST = {
-    (_TASK_COMPLETION,
-     "_CI_RUNNER_NAMES = frozenset(('davidproject-self-action', "
-     "'davidproject-self-action-2'))"):
-        LEGACY_VERIFY,
-    (_TASK_COMPLETION,
-     "'ec2-self-runner', 'ec2-self-runner-2', 'ec2-self-runner-3',"):
-        LEGACY_VERIFY,
-    (_TASK_COMPLETION,
-     "'ec2-self-runner-4'))"):
-        LEGACY_VERIFY,
     (_D6_LIFECYCLE,
      '"/Users/davidsun/.local/share/llmtool-dev-workspaces/"'):
         LEGACY_VERIFY,

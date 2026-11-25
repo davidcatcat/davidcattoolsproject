@@ -178,7 +178,9 @@ class OwnerValuesGoldenTests(unittest.TestCase):
                 return task_completion._collect_one_ci_workflow(
                     pr_number=10, result_sha=SHA, workflow_path=LINUX,
                     workflow_name='llmtool Linux CI', check_name='check (docs)',
-                    runner_names=task_completion._LINUX_CI_RUNNER_NAMES)
+                    runner_names=frozenset((
+                        'ec2-self-runner', 'ec2-self-runner-2', 'ec2-self-runner-3',
+                        'ec2-self-runner-4')))
 
         failed = _linux_docs()
         failed[1]['workflow_runs'][0]['conclusion'] = 'failure'
@@ -221,19 +223,21 @@ class OwnerValuesGoldenTests(unittest.TestCase):
                          ('Linux Python 3.9', 'Windows CI',
                           'check (macOS 3.13)', 'check (Linux 3.14)'))
 
-    def test_fixture_ci_trust_equals_legacy_constants(self):
+    def test_fixture_ci_trust_equals_expected_values(self):
         ci = review_trust_fixture.make_trust().ci_trust
         mac, linux = ci['workflows']
         self.assertEqual((mac['path'], mac['name'], set(mac['runner_names']), mac['code_check']),
-                         (task_completion._CI_WORKFLOW_PATH, task_completion._CI_WORKFLOW_NAME,
-                          task_completion._CI_RUNNER_NAMES, task_completion._MAC_CHECK))
+                         ('.github/workflows/llmtool-mac-ci.yml', 'llmtool Mac CI',
+                          {'davidproject-self-action', 'davidproject-self-action-2'},
+                          task_completion._MAC_CHECK))
         self.assertEqual((linux['path'], linux['name'], set(linux['runner_names']),
                           linux['code_check'], linux['docs_check']),
-                         (task_completion._LINUX_CI_WORKFLOW_PATH,
-                          task_completion._LINUX_CI_WORKFLOW_NAME,
-                          task_completion._LINUX_CI_RUNNER_NAMES,
-                          task_completion._LINUX_CHECK, task_completion._DOCS_CHECK))
-        self.assertEqual(tuple(ci['not_run_checks']), task_completion._NOT_RUN_CHECKS)
+                         ('.github/workflows/llmtool-linux-ci.yml',
+                          'llmtool Linux CI',
+                          {'ec2-self-runner', 'ec2-self-runner-2', 'ec2-self-runner-3',
+                           'ec2-self-runner-4'},
+                          'check (Linux 3.14)', 'check (docs)'))
+        self.assertEqual(tuple(ci['not_run_checks']), ('Linux Python 3.9', 'Windows CI'))
         self.assertEqual(ci['github_actions_app_id'], task_completion._GITHUB_ACTIONS_APP_ID)
 
 

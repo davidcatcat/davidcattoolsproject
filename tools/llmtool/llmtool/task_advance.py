@@ -806,7 +806,6 @@ def _review_ci_gate(number, head, github_get, latest_out=None, read_out=None):
 
 
 # #1502 WP-D D11: required exact-head CI checks a CI repair may answer.
-_LINUX_CHECK = 'check (Linux 3.14)'
 _MAC_CHECK = 'check (macOS 3.13)'
 # These conclusions say the CI environment stopped the check: wait uncounted,
 # never re-run or re-request CI (main PM open-item 1).

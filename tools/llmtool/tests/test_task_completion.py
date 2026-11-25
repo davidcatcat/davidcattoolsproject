@@ -3828,7 +3828,8 @@ class TaskCompletionTests(unittest.TestCase):
                 task_completion._collect_one_ci_workflow(
                     pr_number=10, result_sha='a' * 40, workflow_path=workflow_path,
                     workflow_name='llmtool Mac CI', check_name='check (macOS 3.13)',
-                    runner_names=task_completion._CI_RUNNER_NAMES,
+                    runner_names=frozenset((
+                        'davidproject-self-action', 'davidproject-self-action-2')),
                     pr_merged=True, pr_head_ref='feature/merged')
         self.assertEqual(raised.exception.completion_code, 'CI_WORKFLOW_RUN_MISMATCH')
 
@@ -3848,7 +3849,8 @@ class TaskCompletionTests(unittest.TestCase):
                 task_completion._collect_one_ci_workflow(
                     pr_number=10, result_sha='a' * 40, workflow_path=workflow_path,
                     workflow_name='llmtool Mac CI', check_name='check (macOS 3.13)',
-                    runner_names=task_completion._CI_RUNNER_NAMES,
+                    runner_names=frozenset((
+                        'davidproject-self-action', 'davidproject-self-action-2')),
                     pr_merged=False, pr_head_ref='feature/open')
         self.assertEqual(raised.exception.completion_code, 'CI_WORKFLOW_RUN_MISMATCH')
 
