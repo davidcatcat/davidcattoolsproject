@@ -435,41 +435,83 @@ def _measure_read_bytes(
     return total, None
 
 
-def _measure_part(value: Any, repo_dir: Path, *, allow_inline: bool) -> int:
+def _measure_file_part(value: Any, repo_dir: Path) -> tuple[int, str | None]:
+    if value is None:
+        return 0, None
+    if isinstance(value, str):
+        if not value or not value.strip():
+            return 0, "packet_file_unmeasurable"
+        if os.path.isabs(value):
+            try:
+                if os.path.isfile(value):
+                    return os.path.getsize(value), None
+            except OSError:
+                return 0, "packet_file_unmeasurable"
+            return 0, "packet_file_unmeasurable"
+        norm = _norm_path(value)
+        if not _is_safe_rel_path(norm):
+            return 0, "packet_file_unmeasurable"
+        candidate = repo_dir / norm
+        try:
+            repo_resolved = repo_dir.resolve()
+            candidate.resolve().relative_to(repo_resolved)
+            if candidate.is_file():
+                return candidate.stat().st_size, None
+        except (OSError, ValueError):
+            return 0, "packet_file_unmeasurable"
+        return 0, "packet_file_unmeasurable"
+    if isinstance(value, list):
+        total = 0
+        for item in value:
+            if item is None:
+                return 0, "packet_file_unmeasurable"
+            size, err = _measure_file_part(item, repo_dir)
+            if err is not None:
+                return 0, err
+            total += size
+        return total, None
+    return 0, "packet_file_unmeasurable"
+
+
+def _measure_part(value: Any, repo_dir: Path) -> int:
     if value is None:
         return 0
     if isinstance(value, str):
         if not value:
             return 0
         if os.path.isabs(value):
-            if os.path.isfile(value):
-                try:
-                    return os.path.getsize(value)
-                except OSError:
-                    return 0
-            return len(value.encode("utf-8")) if allow_inline else 0
-        candidate = repo_dir / value
-        if candidate.is_file():
             try:
-                return candidate.stat().st_size
+                if os.path.isfile(value):
+                    return os.path.getsize(value)
             except OSError:
-                return 0
-        return len(value.encode("utf-8")) if allow_inline else 0
+                return len(value.encode("utf-8"))
+            return len(value.encode("utf-8"))
+        candidate = repo_dir / value
+        try:
+            if candidate.is_file():
+                return candidate.stat().st_size
+        except OSError:
+            return len(value.encode("utf-8"))
+        return len(value.encode("utf-8"))
     if isinstance(value, list):
-        return sum(_measure_part(item, repo_dir, allow_inline=allow_inline) for item in value)
+        return sum(_measure_part(item, repo_dir) for item in value)
     if isinstance(value, dict):
         return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
     return 0
 
 
-def _measure_packet_parts(spec: dict[str, Any], repo_dir: Path) -> int:
+def _measure_packet_parts(spec: dict[str, Any], repo_dir: Path) -> tuple[int, str | None]:
     total = 0
     for key in PACKET_EVIDENCE_KEYS:
         if key in spec:
-            total += _measure_part(
-                spec[key], repo_dir, allow_inline=(key != "context_file")
-            )
-    return total
+            if key.endswith(("_file", "_files")):
+                size, err = _measure_file_part(spec[key], repo_dir)
+                if err is not None:
+                    return 0, err
+                total += size
+            else:
+                total += _measure_part(spec[key], repo_dir)
+    return total, None
 
 
 def _has_new_write_file(writes: list[Any], repo: Path, base: str | None) -> bool:
@@ -491,9 +533,15 @@ def _has_new_write_file(writes: list[Any], repo: Path, base: str | None) -> bool
 
 
 def _match_tier(spec, context_bytes=0, repo=None) -> int | None:
-    writes = _spec_paths(spec, "write", "write_paths")
-    reads = _spec_paths(spec, "read", "read_paths")
     agent = spec.get("provider") == "gw-agent"
+    if agent:
+        writes = _spec_paths(spec, "write", "write_paths")
+        reads = _spec_paths(spec, "read", "read_paths")
+    else:
+        raw_writes = spec.get("write")
+        writes = raw_writes if isinstance(raw_writes, list) else []
+        raw_reads = spec.get("read")
+        reads = raw_reads if isinstance(raw_reads, list) else []
     turns = len(reads) + 2 * len(writes) + 1
     tier = None
     for candidate in sorted(LADDER_SIZES):
@@ -503,8 +551,10 @@ def _match_tier(spec, context_bytes=0, repo=None) -> int | None:
             break
     if tier is None:
         return None
-    raw_base = spec.get("base")
-    base = raw_base.strip() if isinstance(raw_base, str) and raw_base.strip() else None
+    base = None
+    if agent:
+        raw_base = spec.get("base")
+        base = raw_base.strip() if isinstance(raw_base, str) and raw_base.strip() else None
     if repo is not None and _has_new_write_file(writes, Path(repo), base):
         tier = max(tier, NEW_FILE_MIN_TIER)
     return min(tier, LADDER_MAX_TIER)
@@ -603,6 +653,39 @@ def main(argv: list[str] | None = None) -> int:
             print("SPEC_PREFLIGHT_FAIL:" + ",".join(scope_failures))
             return 1
 
+    is_gw_agent = spec.get("provider") == "gw-agent"
+    required: int | None = None
+    if is_gw_agent:
+        if not repo_given or not repo_dir.is_dir():
+            print("SPEC_PREFLIGHT_FAIL:trusted_root_missing")
+            return 1
+
+        base: str | None = None
+        if "base" in spec and spec["base"] is not None:
+            if not isinstance(spec["base"], str) or not spec["base"].strip():
+                print("SPEC_PREFLIGHT_FAIL:invalid_base")
+                return 1
+            base = spec["base"].strip()
+            if not _git_verify_base(repo_dir, base):
+                print("SPEC_PREFLIGHT_FAIL:invalid_base")
+                return 1
+
+        read_bytes, read_error = _measure_read_bytes(spec, repo_dir, base)
+        if read_error is not None:
+            print(f"SPEC_PREFLIGHT_FAIL:{read_error}")
+            return 1
+
+        packet_bytes, packet_error = _measure_packet_parts(spec, repo_dir)
+        if packet_error is not None:
+            print(f"SPEC_PREFLIGHT_FAIL:{packet_error}")
+            return 1
+
+        context_bytes = read_bytes + packet_bytes
+        required = _match_tier(spec, context_bytes, repo=repo_dir)
+        if required is None and ladder_log is None:
+            print(f"SPEC_LADDER_TIER_EXCEEDED:required=beyond_t6,max={LADDER_MAX_TIER}")
+            return 2
+
     if ladder_log is None:
         print("SPEC_PREFLIGHT_OK")
         return 0
@@ -625,7 +708,6 @@ def main(argv: list[str] | None = None) -> int:
         if isinstance(value, dict):
             entries.append(value)
 
-    is_gw_agent = spec.get("provider") == "gw-agent"
     route = "gw-agent" if is_gw_agent else None
     current = ladder_tier(entries, route=route)[0]
     if not is_gw_agent:
@@ -645,27 +727,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"SPEC_PREFLIGHT_OK:tier={required},current={current}")
         return 0
 
-    if not repo_given or not repo_dir.is_dir():
-        print("SPEC_PREFLIGHT_FAIL:trusted_root_missing")
-        return 1
-
-    base: str | None = None
-    if "base" in spec and spec["base"] is not None:
-        if not isinstance(spec["base"], str) or not spec["base"].strip():
-            print("SPEC_PREFLIGHT_FAIL:invalid_base")
-            return 1
-        base = spec["base"].strip()
-        if not _git_verify_base(repo_dir, base):
-            print("SPEC_PREFLIGHT_FAIL:invalid_base")
-            return 1
-
-    read_bytes, read_error = _measure_read_bytes(spec, repo_dir, base)
-    if read_error is not None:
-        print(f"SPEC_PREFLIGHT_FAIL:{read_error}")
-        return 1
-
-    context_bytes = read_bytes + _measure_packet_parts(spec, repo_dir)
-    required = _match_tier(spec, context_bytes, repo=repo_dir)
     if required is None:
         print(f"SPEC_LADDER_TIER_EXCEEDED:required=beyond_t6,max={LADDER_MAX_TIER},current={current}")
         return 2

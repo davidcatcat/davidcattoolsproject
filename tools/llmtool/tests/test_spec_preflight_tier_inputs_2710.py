@@ -243,6 +243,59 @@ class SpecPreflightTierInputs2710Tests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertEqual(output, "SPEC_PREFLIGHT_FAIL:read_path_unmeasurable\n")
 
+    def test_non_gw_agent_with_write_paths_keeps_tier_1(self):
+        spec = {k: v for k, v in self.base_spec.items() if k != "provider"}
+        spec["write_paths"] = ["a.py", "b.py"]
+        spec["read_paths"] = ["a.py", "b.py"]
+        status, output = self._run_main(spec, tier=1, route=None)
+        self.assertEqual(status, 0)
+        self.assertEqual(output, "SPEC_PREFLIGHT_OK:tier=1,current=1\n")
+
+    def test_gw_agent_without_ladder_still_refuses_unmeasurable_or_oversized(self):
+        spec_no_repo = dict(self.base_spec, read=["missing.py"], write=["a.py"])
+        spec_path = self.dir / "spec_no_repo.json"
+        spec_path.write_text(json.dumps(spec_no_repo), encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            status = spec_preflight.main([str(spec_path)])
+        self.assertEqual(status, 1)
+        self.assertEqual(out.getvalue(), "SPEC_PREFLIGHT_FAIL:trusted_root_missing\n")
+
+        repo = self.dir / "repo_no_ladder"
+        repo.mkdir()
+        (repo / "huge.py").write_bytes(b"h" * 25000)
+        spec_missing_read = dict(self.base_spec, read=["absent.py"], write=["absent.py"])
+        spec_path.write_text(json.dumps(spec_missing_read), encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            status = spec_preflight.main([str(spec_path), "--repo", str(repo)])
+        self.assertEqual(status, 1)
+        self.assertEqual(out.getvalue(), "SPEC_PREFLIGHT_FAIL:read_path_unmeasurable\n")
+
+        spec_beyond_t6 = dict(self.base_spec, read=["huge.py"], write=["huge.py"])
+        spec_path.write_text(json.dumps(spec_beyond_t6), encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            status = spec_preflight.main([str(spec_path), "--repo", str(repo)])
+        self.assertEqual(status, 2)
+        self.assertIn("SPEC_LADDER_TIER_EXCEEDED:required=beyond_t6", out.getvalue())
+
+    def test_gw_agent_absent_packet_file_is_refused(self):
+        repo = self.dir / "repo_pkt"
+        repo.mkdir()
+        (repo / "a.py").write_bytes(b"a" * 100)
+        for field, value in (
+            ("context_file", "missing_context.txt"),
+            ("packet_file", "missing_packet.txt"),
+            ("evidence_files", ["missing_evidence.txt"]),
+        ):
+            with self.subTest(field=field):
+                spec = dict(self.base_spec, read=["a.py"], write=["a.py"])
+                spec[field] = value
+                status, output = self._run_main(spec, tier=6, extra_args=("--repo", str(repo)))
+                self.assertEqual(status, 1)
+                self.assertEqual(output, "SPEC_PREFLIGHT_FAIL:packet_file_unmeasurable\n")
+
 
 if __name__ == "__main__":
     unittest.main()
