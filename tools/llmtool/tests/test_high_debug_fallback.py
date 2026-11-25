@@ -476,4 +476,13 @@ class PausedCodexDebugTests(unittest.TestCase):
         self.assertFalse(high_debug._consume_claude_grant(grant, 'a' * 32))
 
     def test_real_policy_pauses_codex_debug(self):
-        self.assertTrue(high_debug._codex_debug_owner_paused('a' * 32))
+        # The repository policy file through the real reader; only the trusted
+        # repository config is pinned, as in the other real-policy tests.
+        from pathlib import Path
+        dispatch = high_debug.worker_dispatch
+        with patch.object(dispatch, '_POLICY_PATH', Path(dispatch._DEFAULT_POLICY_PATH)), \
+                patch.object(dispatch, 'repository_config',
+                             return_value={'slug': 'davidcatcat/davidcattoolsproject',
+                                           'dispatch_issue': 289, 'dispatch_evidence_pr': 283}):
+            self.assertTrue(high_debug._codex_debug_owner_paused('a' * 32))
+            self.assertTrue(dispatch.evaluate('claude-debug', None, 'a' * 32).allowed)
