@@ -13,23 +13,24 @@ import unittest
 from unittest import mock
 
 from llmtool import trust_cli
-from llmtool import task_completion
 
 
 def _ci_draft():
     return {"mode": "self-hosted", "github_actions_app_id": 15368,
             "workflows": [
-                {"path": task_completion._CI_WORKFLOW_PATH,
-                 "name": task_completion._CI_WORKFLOW_NAME,
-                 "runner_names": sorted(task_completion._CI_RUNNER_NAMES),
-                 "runner_labels": None, "code_check": task_completion._MAC_CHECK,
+                {"path": ".github/workflows/llmtool-mac-ci.yml",
+                 "name": "llmtool Mac CI",
+                 "runner_names": ["davidproject-self-action",
+                                  "davidproject-self-action-2"],
+                 "runner_labels": None, "code_check": "check (macOS 3.13)",
                  "docs_check": None},
-                {"path": task_completion._LINUX_CI_WORKFLOW_PATH,
-                 "name": task_completion._LINUX_CI_WORKFLOW_NAME,
-                 "runner_names": sorted(task_completion._LINUX_CI_RUNNER_NAMES),
-                 "runner_labels": None, "code_check": task_completion._LINUX_CHECK,
-                 "docs_check": task_completion._DOCS_CHECK}],
-            "not_run_checks": list(task_completion._NOT_RUN_CHECKS)}
+                {"path": ".github/workflows/llmtool-linux-ci.yml",
+                 "name": "llmtool Linux CI",
+                 "runner_names": ["ec2-self-runner", "ec2-self-runner-2",
+                                  "ec2-self-runner-3", "ec2-self-runner-4"],
+                 "runner_labels": None, "code_check": "check (Linux 3.14)",
+                 "docs_check": "check (docs)"}],
+            "not_run_checks": ["Linux Python 3.9", "Windows CI"]}
 
 
 def _approval_refs():

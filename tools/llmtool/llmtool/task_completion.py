@@ -65,24 +65,11 @@ _TEST_TIMEOUT = 600
 # slowest measured module is ~310 s (#1703 above), so about five slow modules fit.
 _TEST_TOTAL_TIMEOUT = 3 * _TEST_TIMEOUT
 _TEST_OUTPUT_LIMIT = 256 * 1024
-# Legacy CI values, kept only for ``llmtool trust verify-legacy`` until #369
-# PR-10. The completion gate reads ``ci_trust`` from trust.json at use time
-# (see ``_ci_trust``); none of these is consulted by the runtime CI checks,
-# except that ``_GITHUB_ACTIONS_APP_ID`` stays the fixed pin the trust value
-# ``github_actions_app_id`` must equal (the trust schema pins it too).
+# The completion gate reads ``ci_trust`` from trust.json at use time (see
+# ``_ci_trust``). The Mac check name is the code check the Linux-only path
+# excludes, and ``_GITHUB_ACTIONS_APP_ID`` stays the fixed pin the trust
+# value ``github_actions_app_id`` must equal (the trust schema pins it too).
 _MAC_CHECK = 'check (macOS 3.13)'
-_LINUX_CHECK = 'check (Linux 3.14)'
-_DOCS_CHECK = 'check (docs)'
-_REQUIRED_CHECKS = frozenset((_MAC_CHECK, _LINUX_CHECK))
-_NOT_RUN_CHECKS = ('Linux Python 3.9', 'Windows CI')
-_CI_RUNNER_NAMES = frozenset(('davidproject-self-action', 'davidproject-self-action-2'))
-_CI_WORKFLOW_PATH = '.github/workflows/llmtool-mac-ci.yml'
-_CI_WORKFLOW_NAME = 'llmtool Mac CI'
-_LINUX_CI_WORKFLOW_PATH = '.github/workflows/llmtool-linux-ci.yml'
-_LINUX_CI_WORKFLOW_NAME = 'llmtool Linux CI'
-_LINUX_CI_RUNNER_NAMES = frozenset((
-    'ec2-self-runner', 'ec2-self-runner-2', 'ec2-self-runner-3',
-    'ec2-self-runner-4'))
 _GITHUB_ACTIONS_APP_ID = 15368
 _D6_EVIDENCE_STATES = frozenset(('ACTIVE', 'REVIEW_PENDING', 'REPAIR'))
 # A GitHub-hosted job reports this runner group; self-hosted groups never do.
