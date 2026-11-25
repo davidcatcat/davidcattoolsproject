@@ -576,34 +576,44 @@ class DisputeRuleTests(_Case):
     def test_the_ruling_binds_head_run_and_evidence_and_never_replaces_the_pass(self):
         self.use(_task())
         self.open()
-        ruling_call = self.prepare_rule()   # records the arbiter run's claim
         before = self.store.get(TASK)
-        result = ruling_call()
+        result = self.arbitrate()
         after = self.store.get(TASK)
         [entry] = after['review_disputes']
         self.assertEqual(entry['state'], 'RULED')
         ruling = entry['ruling']
-        self.assertEqual({key: ruling[key] for key in ruling if key != 'ruled_at'},
+        self.assertEqual(ruling['path'], 'arbitrate')
+        self.assertEqual({key: ruling[key] for key in ('outcome', 'head_sha', 'reviewer',
+                                                       'reviewer_task', 'reviewer_session',
+                                                       'evidence_ref')},
                          {'outcome': 'WITHDRAWN', 'head_sha': HEAD,
-                          'reviewer': 'codex-reviewer', 'reviewer_task': 'arbiter-d6',
-                          'reviewer_session': 'arbiter-session-1', 'evidence_ref': RULING_REF})
+                          'reviewer': 'codex-reviewer', 'reviewer_task': result['reviewer_task'],
+                          'reviewer_session': result['reviewer_session'],
+                          'evidence_ref': RULING_REF})
         self.assertGreaterEqual(ruling['ruled_at'], entry['opened_at'])
         # The disputed entry keeps its fields; nothing else in the Task moves.
-        self.assertEqual({key: entry[key] for key in entry if key not in ('state', 'ruling')},
+        self.assertEqual({key: entry[key] for key in entry
+                          if key not in ('state', 'ruling', 'arbiter_claim', 'history')},
                          {key: value for key, value in before['review_disputes'][0].items()
                           if key != 'state'})
         self.assertEqual({key: value for key, value in after.items()
-                          if key not in ('review_disputes', 'record_sha256')},
+                          if key not in ('review_disputes', 'review_dispatch_claim',
+                                         'record_sha256')},
                          {key: value for key, value in before.items()
-                          if key not in ('review_disputes', 'record_sha256')})
+                          if key not in ('review_disputes', 'review_dispatch_claim',
+                                         'record_sha256')})
         self.assertIs(result['formal_pass_required'], True)
         self.assertEqual(result['outcome'], 'WITHDRAWN')
 
     def test_upheld_is_recorded_the_same_way(self):
         self.use(_task())
         self.open('F3')
-        self.assertEqual(self.rule('F3', outcome='UPHELD')['outcome'], 'UPHELD')
-        self.assertEqual(self.disputes()[0]['ruling']['outcome'], 'UPHELD')
+        result = self.arbitrate('F3', outcome='UPHELD')
+        self.assertEqual(result['outcome'], 'UPHELD')
+        [entry] = self.disputes()
+        self.assertEqual(entry['state'], 'RULED')
+        self.assertEqual(entry['ruling']['outcome'], 'UPHELD')
+        self.assertEqual(entry['ruling']['path'], 'arbitrate')
 
     def test_rule_refuses_without_an_open_dispute_of_the_current_head(self):
         self.use(_task())
@@ -914,7 +924,7 @@ class LiveHeadTests(_Case):
         self.use(_task(published_head=NEW_HEAD))
         self.assertEqual(self.open(live=True)['head_sha'], HEAD)
         self.assertEqual(self.defer('F2', live=True)['head_sha'], HEAD)
-        self.assertEqual(self.rule(live=True)['head_sha'], HEAD)
+        self.assertEqual(self.arbitrate(live=True)['head_sha'], HEAD)
 
     def test_a_recorded_published_head_never_stands_in_for_the_live_one(self):
         self.use(_task(published_head=HEAD))
@@ -1281,7 +1291,16 @@ class TrustedRepositoryTests(_Case):
                 self.refused('DISPUTE_REPOSITORY_UNKNOWN', self.open)
                 self.refused('DISPUTE_REPOSITORY_UNKNOWN', self.defer, 'F2')
         self.trusted = REPOSITORY
-        self.open()
+        ac = _arbiter_claim(version=2, text=_ruling_body(version=1), verdict='RULING',
+                            outcome='WITHDRAWN',
+                            source={'kind': 'CODEX_JSONL', 'output_sha256': '0' * 64})
+        ac['purpose'] = 'dispute_ruling'
+        ac['reviewer'] = 'codex-reviewer'
+        ac['dispute'] = {'pr': PR, 'finding_id': 'F1', 'head_sha': HEAD,
+                         'review_version': 1, 'dispute_text_sha256': '0' * 64}
+        entry = _entry()
+        entry['arbiter_claim'] = {'reviewer_task': 'arbiter-d6', 'version': 2}
+        self.use(_task(claims=[_review_claim(), ac], disputes=[entry]))
         for trusted in (LLMToolError('trust source unreadable'), None, 'a/b/c'):
             with self.subTest(rule_trusted=trusted):
                 self.trusted = trusted
