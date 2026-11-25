@@ -656,33 +656,118 @@ class TaskStoreTests(unittest.TestCase):
         self.store.update(task_id, review_disputes=[deferred])
         self.assertEqual(self.store.get(task_id)['review_disputes'], [deferred])
 
+    def _seed_arbitrate_claim_and_ruling(self, task_id, opened, *, outcome='WITHDRAWN',
+                                         evidence_ref=None):
+        """Claim and complete a Codex arbiter on task_id; return (opened_claimed, ruling, ruled_ev)."""
+        rec = self.store.get(task_id)
+        at_2 = '2026-11-13T00:01:00Z'
+        at_3 = '2026-11-13T01:00:00Z'
+        reviewer_task = 'reviewer-00000000000000000002'
+        session_id = '0123456789abcdef0123456789abcdef'
+        rules_sha = '1' * 64
+        output_sha = '3' * 64
+        cd = rec['task_binding']['contract_digest']
+        ruling_text = (
+            f'<!-- activity: type=dispute_ruling actor=Codex target=PM status={outcome} -->\n'
+            f"Ruling: {opened['finding_id']} {outcome} | PR: #{opened['pr']} | "
+            f"Version: {opened['review_version']} | HEAD: {opened['head_sha']}\n"
+            f"LLMTOOL-REVIEW-BINDING v1 task={task_id} run={rec['run_id']} "
+            f"contract={cd} head={opened['head_sha']}\n"
+            'Arbitration reasoning.'
+        )
+        claimed = {
+            'executor_task': 'executor-d6', 'pr': opened['pr'],
+            'head_sha': opened['head_sha'], 'version': 2, 'state': 'CLAIMED',
+            'reviewer_task': reviewer_task, 'native_session_id': None,
+            'account_mode': 'ROLES', 'account': 'reviewer-b',
+            'rules_sha256': rules_sha, 'claimed_at': at_2, 'updated_at': at_2,
+            'purpose': 'dispute_ruling',
+            'dispute': {
+                'pr': opened['pr'], 'finding_id': opened['finding_id'],
+                'head_sha': opened['head_sha'],
+                'review_version': opened['review_version'],
+                'dispute_text_sha256': '2' * 64,
+            },
+            'reviewer': 'codex-reviewer',
+        }
+        opened_claimed = dict(
+            opened,
+            arbiter_claim={'reviewer_task': reviewer_task, 'version': 2},
+            history=list(opened['history']) + [{
+                'event': 'ARBITER_CLAIMED', 'at': at_2, 'actor': 'llmtool',
+                'head_sha': opened['head_sha'],
+                'refs': {'reviewer_task': reviewer_task, 'version': 2},
+            }],
+        )
+        self.store.update(task_id, review_dispatch_claim=[claimed],
+                          review_disputes=[opened_claimed])
+        completed = dict(
+            claimed, state='COMPLETED', native_session_id=session_id, updated_at=at_3,
+            review_result={
+                'task_id': task_id, 'run_id': rec['run_id'], 'contract_digest': cd,
+                'head': opened['head_sha'], 'verdict': 'RULING', 'outcome': outcome,
+                'review_text': ruling_text,
+                'source': {'kind': 'CODEX_JSONL', 'output_sha256': output_sha},
+            },
+        )
+        self.store.update(task_id, review_dispatch_claim=[completed])
+        ruling = {
+            'outcome': outcome, 'head_sha': opened['head_sha'],
+            'reviewer': 'codex-reviewer', 'reviewer_task': reviewer_task,
+            'reviewer_session': session_id,
+            'evidence_ref': self._RULING_REF if evidence_ref is None else evidence_ref,
+            'ruled_at': at_3, 'path': 'arbitrate',
+            'finding_id': opened['finding_id'],
+            'review_version': opened['review_version'],
+            'arbiter_claim_version': 2, 'rules_sha256': rules_sha,
+            'review_text_sha256': hashlib.sha256(ruling_text.encode('utf-8')).hexdigest(),
+            'claim_sha256': task_store_module._canonical_claim_sha256(completed),
+            'source_kind': 'CODEX_JSONL', 'output_sha256': output_sha,
+            'comment_id': 1002, 'contract_digest': cd, 'run_id': rec['run_id'],
+        }
+        ruled_ev = {
+            'event': 'RULED', 'at': at_3, 'actor': 'llmtool',
+            'head_sha': opened['head_sha'], 'refs': {'comment_id': 1002},
+        }
+        return opened_claimed, ruling, ruled_ev
+
     def test_review_disputes_append_and_rule_once(self):
         # #1502 WP-D D13: append-only; OPEN moves once; one ruling per (pr, finding_id).
         task = self._codex_dispatch_task()
         self.store.create(task)
         task_id = task['task_id']
-        opened = self._dispute()
+        opened = self._dispute(history=[{
+            'event': 'OPENED', 'at': '2026-11-13T00:00:00Z',
+            'actor': f"pm:{task['pm_session_id']}", 'head_sha': 'a' * 40, 'refs': {},
+        }])
         self.store.update(task_id, review_disputes=[opened])
         self._assert_store_code('REVIEW_DISPUTE_INVALID', task_id,
                                 review_disputes=[opened, self._dispute()])
-        for bad_ruling in (self._ruling(head_sha='b' * 40), self._ruling(outcome='DENIED'),
-                           self._ruling(reviewer='pm'), self._ruling(reviewer_session=''),
-                           self._ruling(evidence_ref=self._DISPUTE_REF),
-                           self._ruling(ruled_at='2026-11-12T00:00:00Z'),
-                           dict(self._ruling(), extra=1)):
+        opened_claimed, valid_ruling, ruled_ev = self._seed_arbitrate_claim_and_ruling(
+            task_id, opened)
+        for bad_ruling in (dict(valid_ruling, head_sha='b' * 40),
+                           dict(valid_ruling, outcome='DENIED'),
+                           dict(valid_ruling, reviewer='pm'),
+                           dict(valid_ruling, reviewer_session=''),
+                           dict(valid_ruling, evidence_ref=self._DISPUTE_REF),
+                           dict(valid_ruling, ruled_at='2026-11-12T00:00:00Z'),
+                           dict(valid_ruling, extra=1)):
             with self.subTest(ruling=bad_ruling):
                 self._assert_store_code(
                     'REVIEW_DISPUTE_INVALID', task_id,
-                    review_disputes=[dict(opened, state='RULED', ruling=bad_ruling)])
+                    review_disputes=[dict(opened_claimed, state='RULED', ruling=bad_ruling,
+                                          history=opened_claimed['history'] + [ruled_ev])])
         self._assert_store_code(
             'REVIEW_DISPUTE_TRANSITION_INVALID', task_id,
-            review_disputes=[dict(opened, state='RULED', ruling=self._ruling(),
-                                  severity='Low')])
-        ruled = dict(opened, state='RULED', ruling=self._ruling())
+            review_disputes=[dict(opened_claimed, state='RULED', ruling=valid_ruling,
+                                  severity='Low',
+                                  history=opened_claimed['history'] + [ruled_ev])])
+        ruled = dict(opened_claimed, state='RULED', ruling=valid_ruling,
+                     history=opened_claimed['history'] + [ruled_ev])
         self.store.update(task_id, review_disputes=[ruled])
         self.assertEqual(self.store.get(task_id)['review_disputes'], [ruled])
-        for bad in ([], [dict(ruled, ruling=self._ruling(outcome='UPHELD'))],
-                    [dict(ruled, state='WITHDRAWN')], [opened]):
+        for bad in ([], [dict(ruled, ruling=dict(valid_ruling, outcome='UPHELD'))],
+                    [dict(ruled, state='WITHDRAWN')], [opened_claimed]):
             with self.subTest(rewrite=bad):
                 self._assert_store_code('REVIEW_DISPUTE_TRANSITION_INVALID', task_id,
                                         review_disputes=bad)
@@ -703,23 +788,34 @@ class TaskStoreTests(unittest.TestCase):
         task = self._codex_dispatch_task()
         self.store.create(task)
         task_id = task['task_id']
-        opened = self._dispute()
+        opened = self._dispute(history=[{
+            'event': 'OPENED', 'at': '2026-11-13T00:00:00Z',
+            'actor': f"pm:{task['pm_session_id']}", 'head_sha': 'a' * 40, 'refs': {},
+        }])
         self.store.update(task_id, review_disputes=[opened])
+        opened_claimed, bad_ruling, ruled_ev = self._seed_arbitrate_claim_and_ruling(
+            task_id, opened, evidence_ref=other_ruling)
         self._assert_store_code(
             'REVIEW_DISPUTE_INVALID', task_id,
-            review_disputes=[dict(opened, state='RULED',
-                                  ruling=self._ruling(evidence_ref=other_ruling))])
+            review_disputes=[dict(opened_claimed, state='RULED', ruling=bad_ruling,
+                                  history=opened_claimed['history'] + [ruled_ev])])
         self._assert_store_code(
             'REVIEW_DISPUTE_INVALID', task_id,
-            review_disputes=[opened, self._dispute(finding_id='F3', severity='Medium',
-                                                   evidence_ref=other_ref)])
-        self.assertEqual(self.store.get(task_id)['review_disputes'], [opened])
+            review_disputes=[opened_claimed, self._dispute(finding_id='F3', severity='Medium',
+                                                           evidence_ref=other_ref)])
+        self.assertEqual(self.store.get(task_id)['review_disputes'], [opened_claimed])
         # A Task whose disputes all name another repository is shaped correctly.
         other_task = self._codex_dispatch_task()
         self.store.create(other_task)
-        other = self._dispute(evidence_ref=other_ref)
+        other = self._dispute(evidence_ref=other_ref, history=[{
+            'event': 'OPENED', 'at': '2026-11-13T00:00:00Z',
+            'actor': f"pm:{other_task['pm_session_id']}", 'head_sha': 'a' * 40, 'refs': {},
+        }])
         self.store.update(other_task['task_id'], review_disputes=[other])
-        ruled = dict(other, state='RULED', ruling=self._ruling(evidence_ref=other_ruling))
+        other_claimed, other_arbitrate_ruling, other_ev = self._seed_arbitrate_claim_and_ruling(
+            other_task['task_id'], other, evidence_ref=other_ruling)
+        ruled = dict(other_claimed, state='RULED', ruling=other_arbitrate_ruling,
+                     history=other_claimed['history'] + [other_ev])
         self.store.update(other_task['task_id'], review_disputes=[ruled])
         self.assertEqual(self.store.get(other_task['task_id'])['review_disputes'], [ruled])
 
