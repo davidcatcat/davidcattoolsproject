@@ -412,70 +412,13 @@ class TrustCliTest(unittest.TestCase):
             "git@github.com:example/project.git",
             "https://github.com/example/project.git"])
 
-    def test_verify_legacy_uses_legacy_constants_and_effective_dispatch_settings(self):
-        from llmtool import config
-
-        trust = mock.Mock()
-        trust.tasks_root = "/tasks"
-        trust.canonical_root = "/repo"
-        trust.workspace_root = "/workspaces"
-        trust.repository = {
-            "allowed_origins": [
-                "git@github.com:davidcatcat/davidcattoolsproject.git",
-                "https://github.com/davidcatcat/davidcattoolsproject.git"],
-            "slug": "davidcatcat/davidcattoolsproject",
-            "approval_refs": {"reviewer_host_policy_issue": 120,
-                               "worker_dispatch_issue": 410,
-                               "worker_dispatch_evidence_pr": 411,
-                               "retain_release_issues": [289, 352]}}
-        trust.ci_trust = {"workflows": [
-            {"path": task_completion._CI_WORKFLOW_PATH,
-             "name": task_completion._CI_WORKFLOW_NAME,
-             "runner_names": sorted(task_completion._CI_RUNNER_NAMES),
-             "runner_labels": None, "code_check": task_completion._MAC_CHECK,
-             "docs_check": None},
-            {"path": task_completion._LINUX_CI_WORKFLOW_PATH,
-             "name": task_completion._LINUX_CI_WORKFLOW_NAME,
-             "runner_names": sorted(task_completion._LINUX_CI_RUNNER_NAMES),
-             "runner_labels": None, "code_check": task_completion._LINUX_CHECK,
-             "docs_check": task_completion._DOCS_CHECK}],
-            "not_run_checks": task_completion._NOT_RUN_CHECKS}
-        output = __import__("io").StringIO()
-        with mock.patch.object(trust_cli, "load_trust", return_value=trust), \
-             mock.patch.object(trust_cli, "_owner_home", return_value=self.home), \
-             mock.patch.object(config, "legacy_repository_config", return_value={
-                 "slug": trust.repository["slug"], "dispatch_issue": 410,
-                 "dispatch_evidence_pr": 411}), \
-             mock.patch.object(task_completion, "_DOCS_CHECK", "changed legacy docs check"), \
-             mock.patch("sys.stdout", output):
-            self.assertEqual(trust_cli._verify_legacy(), 1)
-        self.assertIn("worker_dispatch_issue: MATCH", output.getvalue())
-        self.assertIn("worker_dispatch_evidence_pr: MATCH", output.getvalue())
-        self.assertIn("workflows: MISMATCH", output.getvalue())
-        self.assertNotIn("410", output.getvalue())
-
-    def test_verify_legacy_prints_field_names_and_match_or_mismatch_only(self):
-        keys = ("tasks_root", "canonical_root", "allowed_origins", "slug",
-                "reviewer_host_policy_issue", "worker_dispatch_issue",
-                "worker_dispatch_evidence_pr", "retain_release_issues", "workflows",
-                "not_run_checks", "workspace_root")
-        expected = {key: object() for key in keys}
-        fields = dict(expected)
-        output = __import__("io").StringIO()
-        with mock.patch.object(trust_cli, "load_trust", return_value=object()), \
-             mock.patch.object(trust_cli, "_legacy_fields", return_value=(fields, expected)), \
-             mock.patch("sys.stdout", output):
-            self.assertEqual(trust_cli._verify_legacy(), 0)
-        self.assertEqual(output.getvalue().count(": MATCH"), len(keys))
-        self.assertNotIn("object at", output.getvalue())
-        fields["slug"] = "private/value"
-        output = __import__("io").StringIO()
-        with mock.patch.object(trust_cli, "load_trust", return_value=object()), \
-             mock.patch.object(trust_cli, "_legacy_fields", return_value=(fields, expected)), \
-             mock.patch("sys.stdout", output):
-            self.assertEqual(trust_cli._verify_legacy(), 1)
-        self.assertIn("slug: MISMATCH", output.getvalue())
-        self.assertNotIn("private/value", output.getvalue())
+    def test_parser_refuses_verify_legacy_as_unknown_action(self):
+        parser = argparse.ArgumentParser()
+        trust_cli.add_trust_parser(parser.add_subparsers(dest="command"))
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                parser.parse_args(["trust", "verify-legacy"])
+        self.assertEqual(caught.exception.code, 2)
 
 
 if __name__ == "__main__":

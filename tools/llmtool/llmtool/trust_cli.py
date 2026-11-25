@@ -66,7 +66,6 @@ def add_trust_parser(sub):
     init.add_argument("--confirm-rotation", metavar="OLD_SHA256")
     show = actions.add_parser("show", help="Show sanitized trust configuration")
     show.add_argument("--reveal-paths", action="store_true")
-    actions.add_parser("verify-legacy", help="Compare trust fields with legacy repository values")
 
 
 def _owner_home():
@@ -453,58 +452,9 @@ def _show(args):
     return 0
 
 
-def _legacy_fields(trust):
-    repository = trust.repository
-    ci = trust.ci_trust
-    refs = repository["approval_refs"]
-    fields = {
-        "tasks_root": trust.tasks_root,
-        "workspace_root": (trust.workspace_root
-                           if Path(trust.tasks_root).parent == Path(trust.workspace_root)
-                           else None),
-        "canonical_root": trust.canonical_root,
-        "allowed_origins": tuple(sorted(repository["allowed_origins"])),
-        "slug": repository["slug"],
-        "reviewer_host_policy_issue": refs["reviewer_host_policy_issue"],
-        "worker_dispatch_issue": refs["worker_dispatch_issue"],
-        "worker_dispatch_evidence_pr": refs["worker_dispatch_evidence_pr"],
-        "retain_release_issues": tuple(refs["retain_release_issues"]),
-        "workflows": tuple((w["path"], w["name"], tuple(w["runner_names"] or ()),
-                             tuple(w["runner_labels"] or ()), w["code_check"], w["docs_check"])
-                           for w in ci["workflows"]),
-        "not_run_checks": tuple(ci["not_run_checks"]),
-    }
-    legacy = _legacy_sources()
-    expected = {key: legacy[key] for key in fields}
-    return fields, expected
-
-
-def _verify_legacy():
-    try:
-        trust = load_trust()
-        fields, expected = _legacy_fields(trust)
-    except TrustError as exc:
-        print(f"STOP: trust rejected ({exc.code})")
-        return 1
-    except (OSError, ValueError):
-        print("STOP: trust rejected (TRUST_LEGACY_UNAVAILABLE)")
-        return 1
-    matched = True
-    for key in ("tasks_root", "canonical_root", "allowed_origins", "slug",
-                "reviewer_host_policy_issue", "worker_dispatch_issue",
-                "worker_dispatch_evidence_pr", "retain_release_issues", "workflows",
-                "not_run_checks", "workspace_root"):
-        ok = fields[key] == expected[key]
-        matched = matched and ok
-        print(f"{key}: {'MATCH' if ok else 'MISMATCH'}")
-    return 0 if matched else 1
-
-
 def run_trust(args):
     if args.action == "show":
         return _show(args)
-    if args.action == "verify-legacy":
-        return _verify_legacy()
     try:
         return _init(args)
     except TrustError as exc:
