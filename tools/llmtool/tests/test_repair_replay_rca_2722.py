@@ -3,7 +3,7 @@ import json
 import tempfile
 import unittest
 from argparse import Namespace
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -235,7 +235,11 @@ class RepairReplayRca2722Tests(unittest.TestCase):
              patch.object(task_submission_cli.trust, 'load_trust',
                           return_value=SimpleNamespace(repository={'slug': SLUG})), \
              patch.object(task_submission_cli, 'run_task_agy_delegate',
-                          side_effect=fake_agy_delegate):
+                          side_effect=fake_agy_delegate), \
+             patch.object(task_submission_cli, '_auto_direct_replacement',
+                          side_effect=lambda args, _store: args):
+            # Route replacement is not under test; _recorder returns the repair
+            # Task without writing it, so the real lookup would find no record.
             result = review_repair.repair_review(
                 store=self.store,
                 task_id=TASK,
@@ -271,7 +275,7 @@ class RepairReplayRca2722Tests(unittest.TestCase):
                 '--high-debug-ref', HD_REF,
                 '--high-debug-family', HD_FAMILY,
             ])
-        self.assertEqual(rc, 0)
+        self.assertFalse(rc)   # run_task_repair prints its result and returns None
         self.assertEqual(seen[0]['high_debug_task'], TASK)
         self.assertEqual(seen[0]['high_debug_ref'], HD_REF)
         self.assertEqual(seen[0]['high_debug_family'], HD_FAMILY)
@@ -312,7 +316,6 @@ class RepairReplayRca2722Tests(unittest.TestCase):
         self.assertEqual(dispatched, [])
 
     def test_r3c_invalid_high_debug_values_refuse_without_dispatch(self):
-        self._seed_debug_required_replay()
         cases = (
             ('invalid ref', dict(high_debug_task=TASK, high_debug_ref='https://example.com/bad',
                                  high_debug_family=HD_FAMILY), 'DELEGATE_HIGH_DEBUG_REF_INVALID'),
@@ -323,6 +326,8 @@ class RepairReplayRca2722Tests(unittest.TestCase):
         )
         for label, kwargs, expected_prefix in cases:
             with self.subTest(label=label):
+                # A refusal leaves the claim UNKNOWN, so each case starts fresh.
+                self._seed_debug_required_replay()
                 dispatched = []
                 with self.assertRaises(LLMToolError) as caught:
                     self._run_through_delegate(dispatched=dispatched, **kwargs)
@@ -339,16 +344,19 @@ class RepairReplayRca2722Tests(unittest.TestCase):
             with self.subTest(flag=flag):
                 with patch('llmtool.source_freshness.require_fresh_source'), \
                      patch('llmtool.pm_caller.check_caller', return_value='pm-session'), \
-                     patch('llmtool.review_repair_recovery.recover_unknown_claim') as recover:
-                    with self.assertRaises(LLMToolError) as caught:
-                        cli.main([
-                            'task', 'repair', TASK,
-                            '--executor-task', EXECUTOR,
-                            '--pr', str(PR),
-                            '--recover-claim', '1' * 32,
-                            flag, value,
-                        ])
-                self.assertIn('--recover-claim', str(caught.exception))
+                     patch('llmtool.review_repair_recovery.recover_unknown_claim') as recover, \
+                     redirect_stdout(StringIO()), redirect_stderr(StringIO()) as err:
+                    rc = cli.main([
+                        'task', 'repair', TASK,
+                        '--executor-task', EXECUTOR,
+                        '--pr', str(PR),
+                        '--recover-claim', '1' * 32,
+                        flag, value,
+                    ])
+                # cli.main reports the refusal on stderr with exit status 1.
+                self.assertEqual(rc, 1)
+                self.assertIn('--recover-claim takes no', err.getvalue())
+                self.assertIn(flag, err.getvalue())
                 recover.assert_not_called()
 
     def test_r3e_families_needing_no_debug_are_unchanged(self):
