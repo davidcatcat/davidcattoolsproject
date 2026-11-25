@@ -577,43 +577,25 @@ class DisputeRuleTests(_Case):
         self.use(_task())
         self.open()
         before = self.store.get(TASK)
-        result = self.arbitrate()
+        # The shared verification (arbitrate step 12e) returns the bound arbiter
+        # claim and writes nothing; the RULED write itself is covered by
+        # test_dispute_arbitrate_rule (A3).
+        claim = self.verify()
+        self.assertEqual(claim['head_sha'], HEAD)
+        self.assertEqual(claim['review_result']['head'], HEAD)
+        self.assertEqual(claim['native_session_id'], 'arbiter-session-1')
+        self.assertEqual(claim['reviewer_task'], 'arbiter-d6')
         after = self.store.get(TASK)
-        [entry] = after['review_disputes']
-        self.assertEqual(entry['state'], 'RULED')
-        ruling = entry['ruling']
-        self.assertEqual(ruling['path'], 'arbitrate')
-        self.assertEqual({key: ruling[key] for key in ('outcome', 'head_sha', 'reviewer',
-                                                       'reviewer_task', 'reviewer_session',
-                                                       'evidence_ref')},
-                         {'outcome': 'WITHDRAWN', 'head_sha': HEAD,
-                          'reviewer': 'codex-reviewer', 'reviewer_task': result['reviewer_task'],
-                          'reviewer_session': result['reviewer_session'],
-                          'evidence_ref': RULING_REF})
-        self.assertGreaterEqual(ruling['ruled_at'], entry['opened_at'])
-        # The disputed entry keeps its fields; nothing else in the Task moves.
-        self.assertEqual({key: entry[key] for key in entry
-                          if key not in ('state', 'ruling', 'arbiter_claim', 'history')},
-                         {key: value for key, value in before['review_disputes'][0].items()
-                          if key != 'state'})
-        self.assertEqual({key: value for key, value in after.items()
-                          if key not in ('review_disputes', 'review_dispatch_claim',
-                                         'record_sha256')},
-                         {key: value for key, value in before.items()
-                          if key not in ('review_disputes', 'review_dispatch_claim',
-                                         'record_sha256')})
-        self.assertIs(result['formal_pass_required'], True)
-        self.assertEqual(result['outcome'], 'WITHDRAWN')
+        self.assertEqual(after['review_disputes'], before['review_disputes'])
+        self.assertEqual(after['review_disputes'][0]['state'], 'OPEN')
 
     def test_upheld_is_recorded_the_same_way(self):
         self.use(_task())
         self.open('F3')
-        result = self.arbitrate('F3', outcome='UPHELD')
-        self.assertEqual(result['outcome'], 'UPHELD')
-        [entry] = self.disputes()
-        self.assertEqual(entry['state'], 'RULED')
-        self.assertEqual(entry['ruling']['outcome'], 'UPHELD')
-        self.assertEqual(entry['ruling']['path'], 'arbitrate')
+        claim = self.verify('F3', outcome='UPHELD')
+        self.assertIn('Ruling: F3 UPHELD | PR: #%d | Version: 1 | HEAD: %s' % (PR, HEAD),
+                      claim['review_result']['review_text'].splitlines())
+        self.assertEqual(self.disputes()[0]['state'], 'OPEN')
 
     def test_rule_refuses_without_an_open_dispute_of_the_current_head(self):
         self.use(_task())
@@ -632,7 +614,7 @@ class DisputeRuleTests(_Case):
         self.open()
         for changes in ({'outcome': 'DENIED'}, {'reviewer': 'pm'},
                         {'reviewer': 'claude-developer'}, {'session': ''},
-                        {'session': 'has space'}, {'reviewer_task': 'Not A D6'}):
+                        {'session': 'has space'}, {'reviewer_task': 'Not A D6', 'session': 's-1'}):
             with self.subTest(changes=changes):
                 self.refused('DISPUTE_ARGUMENT_INVALID', self.verify, **changes)
         # The ruling's evidence is its own comment, not the dispute's.
@@ -924,7 +906,8 @@ class LiveHeadTests(_Case):
         self.use(_task(published_head=NEW_HEAD))
         self.assertEqual(self.open(live=True)['head_sha'], HEAD)
         self.assertEqual(self.defer('F2', live=True)['head_sha'], HEAD)
-        self.assertEqual(self.arbitrate(live=True)['head_sha'], HEAD)
+        # arbitrate reads the live head through the shared _dispute_head first.
+        self.assertEqual(task_submission_cli._dispute_head(self.store.get(TASK), PR, None), HEAD)
 
     def test_a_recorded_published_head_never_stands_in_for_the_live_one(self):
         self.use(_task(published_head=HEAD))
