@@ -11,13 +11,16 @@ security sign-off, QA verdict, or merge authority.
 
 Research findings and benchmark history are preserved in [the 2026-11-03 history](../../../docs/history/company-llm-delegation-research-20261103.md).
 
-Home LLM `gw` may act as an agent-mode Developer through `gw-agent` on real repository
-code; Developer choice, mode and scope are PM decisions under the standing Owner
-authorization (#120, 2026-11-10), which supersedes the 2026-11-03 synthetic-only limit.
-Every result receives formal cross-family review. Pause after two consecutive failures
-at the lowest tier, a write outside allowed paths, a credential or audit finding, or HTTP 429.
-
-**Gateway only (Owner 2026-11-11, #120):** Home LLM (`gw-agent`) model work runs only through the API Agent Gateway. The direct and proposal routes (`company-gw`) are retired: llmtool refuses them (`COMPANY_GW_DIRECT_RETIRED`; worker `company-gw` is PAUSED), and a Gateway failure reports UNAVAILABLE without any fallback.
+The home LLM `gw` may act as an agent-mode Developer through `gw-agent` on real repository
+code, with the PM choosing Developer, mode and scope under the standing Owner
+authorization (#120, 2026-11-10), which supersedes the 2026-11-03 synthetic-only limit, and
+every result receives formal cross-family review, per the home LLM gw-agent Developer (E9)
+rule in [AGENTS.md](../../../AGENTS.md#current-authority-restructured-per-owner-decision-010-step-2).
+Pause after two consecutive failures at the lowest tier, a write outside allowed paths,
+a credential or audit finding, or HTTP 429; **Gateway only (Owner 2026-11-11, #120):**
+`gw-agent` model work runs only through the API Agent Gateway, the direct and proposal
+routes (`company-gw`) are retired and refused (`COMPANY_GW_DIRECT_RETIRED`; worker `company-gw`
+is PAUSED), and a Gateway failure reports UNAVAILABLE without any fallback.
 
 ## Decision order
 
