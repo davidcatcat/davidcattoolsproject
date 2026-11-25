@@ -222,7 +222,8 @@ class RecordReviewResultUsageTests(unittest.TestCase):
         self.home = os.path.join(self.temp.name, 'claude-home')
         os.makedirs(self.home)
         self.store_dir = os.path.join(self.temp.name, 'store')
-        os.makedirs(self.store_dir)
+        os.makedirs(self.store_dir, mode=0o700)
+        os.chmod(self.store_dir, 0o700)
 
     def test_records_usage_once_and_never_overwrites(self):
         store = _make_store(self.store_dir)
