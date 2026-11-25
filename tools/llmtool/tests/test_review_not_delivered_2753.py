@@ -263,8 +263,7 @@ class TaskAdvanceNotDeliveredRedispatchTests(unittest.TestCase):
                     'REVIEW_UNUSABLE_STOPPED',
                 )
 
-    def test_advance_redispatches_once_with_real_store_and_stops_on_second(self):
-        store, task_id = trd._real_store(Path(self.temp.name) / 'advance_store')
+    def _dispatch_not_delivered(self, store, task_id, *, version, refusal_rerun=False):
         executor = SimpleNamespace(root='/repo/worktree', common_dir='/repo/.git')
         preflight = (store.get(task_id), executor, trd.HEAD, 'd' * 40, 'claude-reviewer')
         proc = _bridge_proc({
@@ -290,11 +289,16 @@ class TaskAdvanceNotDeliveredRedispatchTests(unittest.TestCase):
                     task_id=task_id,
                     executor_task='executor-d6',
                     pr_number=42,
-                    version=1,
+                    version=version,
                     create_d6=lambda **_kw: None,
                     bind_session=Mock(),
                     prompt_renderer=lambda *_: 'prompt',
+                    refusal_rerun=refusal_rerun,
                 )
+
+    def test_advance_redispatches_once_with_real_store_and_stops_on_second(self):
+        store, task_id = trd._real_store(Path(self.temp.name) / 'advance_store')
+        self._dispatch_not_delivered(store, task_id, version=1)
 
         orig_get = store.get
 
@@ -342,17 +346,7 @@ class TaskAdvanceNotDeliveredRedispatchTests(unittest.TestCase):
         self.assertEqual(redispatch_calls[0]['version'], 2)
         self.assertTrue(redispatch_calls[0]['refusal_rerun'])
 
-        fresh = orig_get(task_id)
-        second_claim = dict(
-            fresh['review_dispatch_claim'][0],
-            version=2,
-            reviewer_task='reviewer-2',
-        )
-        store.compare_and_update(
-            task_id,
-            expected={'record_sha256': fresh['record_sha256']},
-            review_dispatch_claim=fresh['review_dispatch_claim'] + [second_claim],
-        )
+        self._dispatch_not_delivered(store, task_id, version=2, refusal_rerun=True)
         with patch.object(store, 'get', side_effect=_get_with_completion), \
              patch.object(task_advance, '_d6_snapshot', return_value=d6), \
              patch.object(task_advance, '_pr_snapshot', return_value=pr), \
