@@ -46,11 +46,15 @@ def _is_prelaunch_coded_refusal(exc, store, repair_task_id):
 
 def _invoke_claimed_adapter(*, store, task_id, claim, repair_task, developer,
                             packet, executor_task, profile, dispatch_adapter,
-                            delegate_callable):
+                            delegate_callable, high_debug_task=None,
+                            high_debug_ref=None, high_debug_family=None):
     adapter = dispatch_adapter
     if adapter is None:
         adapter = lambda **request: _delegate_repair(
-            **request, delegate=delegate_callable, store=store)
+            **request, delegate=delegate_callable, store=store,
+            high_debug_task=high_debug_task,
+            high_debug_ref=high_debug_ref,
+            high_debug_family=high_debug_family)
     try:
         result = adapter(task=repair_task, developer=developer, packet=packet,
                          executor_task=executor_task, provider_profile=profile,
@@ -315,7 +319,9 @@ def _repair_dispatch_guard(store, repair_task_id):
 
 def _replay_claimed_test_repair(*, store, task_id, existing, developer, packet,
                                 executor_task, profile, dispatch_adapter,
-                                delegate_callable, packet_version):
+                                delegate_callable, packet_version,
+                                high_debug_task=None, high_debug_ref=None,
+                                high_debug_family=None):
     """Replay the delegation of one CLAIMED claim whose repair Task has no Developer.
 
     #2475 F2: the dispatch lock is taken first and the claim and the repair Task
@@ -347,7 +353,10 @@ def _replay_claimed_test_repair(*, store, task_id, existing, developer, packet,
             store=store, task_id=task_id, claim=fresh, repair_task=repair_task,
             developer=developer, packet=packet, executor_task=executor_task,
             profile=profile, dispatch_adapter=dispatch_adapter,
-            delegate_callable=delegate_callable)
+            delegate_callable=delegate_callable,
+            high_debug_task=high_debug_task,
+            high_debug_ref=high_debug_ref,
+            high_debug_family=high_debug_family)
         claim = dict(fresh, state='DISPATCHED')
         return {'result': result, 'attempt': claim['attempt'],
                 'repair_task_id': repair_task_id, 'claim': claim, 'replayed': True,
@@ -402,7 +411,8 @@ def _worker_key(profile):
 
 
 def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
-                     store=None, **_route_metadata):
+                     store=None, high_debug_task=None, high_debug_ref=None,
+                     high_debug_family=None, **_route_metadata):
     """Resume the original direct Developer route with a bounded repair request."""
     from . import task_submission_cli
 
@@ -439,6 +449,9 @@ def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
         write_path=list(write_paths), acceptance=list(acceptance),
         egress_basis=developer.get('egress_basis'), repair_packet=packet,
         data_class=data_class,
+        high_debug_task=high_debug_task,
+        high_debug_ref=high_debug_ref,
+        high_debug_family=high_debug_family,
     )
     # #2503: the repair keeps its read scope; files the findings name outside it are
     # shown and recorded as advice. The advice never changes or blocks the repair.
@@ -992,7 +1005,9 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                   review_dispatcher=None, delegate_callable=None,
                   repair_task_recorder=None, retry_claim_id=None,
                   remote_test_receipt=None, ci_failure=None, auto=False,
-                  extra_read_paths=None, remote_test_details=None):
+                  extra_read_paths=None, remote_test_details=None,
+                  high_debug_task=None, high_debug_ref=None,
+                  high_debug_family=None):
     """Claim and dispatch one repair for a failed review, remote test or CI check.
 
     remote_test_receipt (EC2) and ci_failure (#1502 WP-D D11) are exclusive; both
@@ -1186,7 +1201,10 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                 _auto_replay_claim(store, task, task_id, existing)
             value = _delegate_repair(task=repair_task, developer=developer, packet=packet,
                                      executor_task=executor_task, delegate=delegate_callable,
-                                     store=store)
+                                     store=store,
+                                     high_debug_task=high_debug_task,
+                                     high_debug_ref=high_debug_ref,
+                                     high_debug_family=high_debug_family)
             saved = store.get(task_id)
             bound = next(claim for claim in saved['review_repair_claims']
                          if claim['repair_task_id'] == existing['repair_task_id'])
@@ -1206,7 +1224,10 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                 store=store, task_id=task_id, existing=existing, developer=developer,
                 packet=packet, executor_task=executor_task, profile=profile,
                 dispatch_adapter=dispatch_adapter, delegate_callable=delegate_callable,
-                packet_version=packet_version)
+                packet_version=packet_version,
+                high_debug_task=high_debug_task,
+                high_debug_ref=high_debug_ref,
+                high_debug_family=high_debug_family)
         task_id_for_repair = existing.get('repair_task_id')
         dispatched = existing.get('state') == 'DISPATCHED'
         return {'claim': existing, 'repair_task_id': task_id_for_repair,
@@ -1363,7 +1384,10 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
             store=store, task_id=task_id, claim=claim, repair_task=repair_task,
             developer=developer, packet=packet, executor_task=executor_task,
             profile=profile, dispatch_adapter=dispatch_adapter,
-            delegate_callable=delegate_callable)
+            delegate_callable=delegate_callable,
+            high_debug_task=high_debug_task,
+            high_debug_ref=high_debug_ref,
+            high_debug_family=high_debug_family)
     finally:
         dispatch_guard.close()
     claim['state'] = 'DISPATCHED'
