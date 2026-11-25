@@ -110,7 +110,7 @@ def _registration(*, task='arbiter-d6', agent='codex-reviewer', session='arbiter
     """A registered D6 Reviewer record as task_completion.read_d6_registration returns it."""
     return SimpleNamespace(task_id=task, trusted_agent_id=agent, native_session_id=session,
                            result_sha=head, root='/registered/' + task, common_dir=COMMON_DIR,
-                           branch=task + '-branch', github_login=login)
+                           branch='llmtool/' + task, github_login=login)
 
 
 def setUpModule():
@@ -215,7 +215,8 @@ class _Case(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         worker_policy_fixture.install(self)
-        self.github = {f'pulls/{PR}': {'number': PR, 'state': 'open', 'head': {'sha': HEAD}},
+        self.github = {f'pulls/{PR}': {'number': PR, 'state': 'open', 'head': {'sha': HEAD},
+                                       'base': {'sha': '0' * 40}},
                        f'issues/comments/{1001}': {
                            'id': 1001, 'body': 'Dispute reasoning for F1.',
                            'issue_url': f'https://api.github.com/repos/{REPOSITORY}/issues/{PR}',
@@ -261,7 +262,8 @@ class _Case(unittest.TestCase):
 
     def live(self, **pull):
         self.github[f'pulls/{PR}'] = dict({'number': PR, 'state': 'open',
-                                           'head': {'sha': HEAD}}, **pull)
+                                           'head': {'sha': HEAD},
+                                           'base': {'sha': '0' * 40}}, **pull)
 
     def use(self, record):
         self.store = DisputeStore(self.temp.name, record)
