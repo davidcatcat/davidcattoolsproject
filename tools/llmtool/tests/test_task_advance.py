@@ -4962,8 +4962,9 @@ class CodexReviewFailureReasonTests(unittest.TestCase):
             rejected = self._reason(codex_jsonl(thread_started(),
                                                 agent_message(bound_verdict())))
         self.assertEqual(rejected, 'REVIEW_CLASSIFIER_REJECTED')
+        bridge_reasons = {'SESSION_NOT_STARTED', 'PROMPT_NOT_DELIVERED'}
         self.assertEqual(set(cases) | {rejected} | review_dispatch._D6_CREATE_FAILURE_REASONS |
-                         {'REVIEW_PROMPT_REFUSED'},
+                         {'REVIEW_PROMPT_REFUSED'} | bridge_reasons,
                          review_dispatch.REVIEW_FAILURE_REASONS)
 
     def _dispatch(self, runner):
