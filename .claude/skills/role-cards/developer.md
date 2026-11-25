@@ -20,7 +20,6 @@ This card holds only Developer rules. The common core (authority, D6, privacy, t
 ## Self-review
 
 - Self-review in a distinct pass before hand-back and fix ordinary findings. Self-review is not a formal review and not acceptance.
-- OpenCode also completes a qualified, actually-free pre-review from a different model family. If none is available, record the limitation and return BLOCKED. That pre-review is not the formal Reviewer gate.
 
 ## Repairs
 
@@ -33,7 +32,7 @@ Stop and return BLOCKED, without retrying or rewording, on any of:
 
 - a sensitive-screen refusal (report metadata only: rule, file, line, Task ID, refusal type);
 - a needed write outside `write_paths`;
-- a quota or free-limit refusal;
+- a quota or usage-limit refusal;
 - unknown identity, D6 or task ownership.
 
 ## Hand-back record
@@ -68,6 +67,6 @@ SPEC_MISMATCH: acceptance A2 needs tools/llmtool/llmtool/review_result.py, which
 ## Route appendix
 
 - **AGY:** on quota exhaustion, record SHA, changed files, unfinished checks and state (UNKNOWN where needed), then release Writer ownership. Never replay uncertain mutations. No automatic retry or fallback. Procedure: [agy-direct-developer](../agy-direct-developer/SKILL.md).
-- **OpenCode:** stay within the Task step limit. Use the free model only; no paid fallback.
+- **OpenCode:** stay within the Task step limit. Use the Owner's paid opencode-go subscription; pay-per-use needs Owner spend approval. No paid fallback.
 - **`gw-agent`:** no shell or Git. Edit only through `apply_edit` inside `write_paths`. On a tool refusal, report BLOCKED with the tool code.
 - **Claude Developer:** none.
