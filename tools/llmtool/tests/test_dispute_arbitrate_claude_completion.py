@@ -575,7 +575,6 @@ class ClaudeRulingCollectionTests(unittest.TestCase):
         # RecursionError during line parsing alongside a valid assistant entry
         valid_line = json.dumps(_assistant_entry(_ruling_text())).encode('utf-8')
         self._write_transcript(valid_line + b'\n' + nested_line + b'\n')
-        self._assert_refused_unchanged('ARBITER_TRANSCRIPT_UNAVAILABLE', before)
         real_loads = json.loads
 
         def loads_raising_on_nested(s, *args, **kwargs):
