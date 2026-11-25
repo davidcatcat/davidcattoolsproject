@@ -8481,11 +8481,41 @@ def _recover_direct_child_dispatch(args, task, developer, store, *, expected_age
 
 
 def _normalize_agy_usage(value):
-    """Keep only the token fields accepted by TaskStore; unknown shapes stay unknown."""
+    """Map AGY CLI usage to TaskStore usage fields; unknown shapes stay unknown.
+
+    AGY CLI 1.5.17 reports input_tokens, output_tokens, thinking_tokens,
+    cache_read_tokens and total_tokens. Those map to prompt_tokens,
+    completion_tokens, reasoning_tokens, cached_prompt_tokens and the reported
+    total_tokens (never recomputed). Extra AGY keys are ignored only when every
+    value is a non-negative integer. A missing, partial, negative, non-integer
+    or mixed AGY/legacy object gives None. The older accepted
+    prompt/completion/total shape, with its optional fields, is returned
+    unchanged.
+    """
+    if type(value) is not dict:
+        return None
+    agy_fields = {'input_tokens', 'output_tokens', 'thinking_tokens',
+                  'cache_read_tokens'}
+    if agy_fields & set(value):
+        if (not {'input_tokens', 'output_tokens', 'total_tokens'}.issubset(value) or
+                not {'prompt_tokens', 'completion_tokens', 'cached_prompt_tokens',
+                     'reasoning_tokens'}.isdisjoint(value) or
+                any(type(count) is not int or count < 0 for count in value.values())):
+            return None
+        mapped = {
+            'prompt_tokens': value['input_tokens'],
+            'completion_tokens': value['output_tokens'],
+            'total_tokens': value['total_tokens'],
+        }
+        if 'thinking_tokens' in value:
+            mapped['reasoning_tokens'] = value['thinking_tokens']
+        if 'cache_read_tokens' in value:
+            mapped['cached_prompt_tokens'] = value['cache_read_tokens']
+        return mapped
     fields = {'prompt_tokens', 'completion_tokens', 'total_tokens',
               'cached_prompt_tokens', 'reasoning_tokens', 'tool_calls'}
-    if (type(value) is not dict or not {'prompt_tokens', 'completion_tokens',
-                                        'total_tokens'}.issubset(value) or
+    if (not {'prompt_tokens', 'completion_tokens',
+             'total_tokens'}.issubset(value) or
             not set(value).issubset(fields) or
             any(type(count) is not int or count < 0 for count in value.values())):
         return None
