@@ -6,6 +6,8 @@
 > back into the original A architecture and gates**. This file preserves the
 > original C terminology for traceability; all new product task contracts and
 > progress status use **A11b/A11c**, with C only as a legacy measurement alias.
+> These legacy C-numbered outcomes are unrelated to the 2026-11-26 A11c gates
+> C1–C5 on [Issue #1019](https://github.com/davidcatcat/davidcattoolsproject/issues/1019).
 > The standalone, transitional ai-loop helper is documented in
 > [tools/ai-loop/README.md](../ai-loop/README.md); it is not an llmtool route.
 > No existing permission, security, QA, Mac or provider egress gate is waived.
