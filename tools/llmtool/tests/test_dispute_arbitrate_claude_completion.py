@@ -222,11 +222,14 @@ class ClaudeRulingCollectionTests(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def _seed(self, *, claims=None, extra_disputes=None, claim_overrides=None):
+    def _seed(self, *, claims=None, extra_disputes=None, claim_overrides=None,
+              developer=None):
         temp_store = tempfile.TemporaryDirectory()
         self.addCleanup(temp_store.cleanup)
         self.store = task_store.TaskStore(Path(temp_store.name).resolve() / 'tasks')
         base, contract_digest = tdrcr._base_task_record()
+        if developer is not None:
+            base['developer'] = developer
         base['completion'] = _default_completion(root=self.exec_root, common_dir=self.common_dir)
         formal = tdrcr._formal_claim(contract_digest, version=REVIEW_VERSION, verdict='FAIL',
                                      actor='Codex')
@@ -329,7 +332,34 @@ class ClaudeRulingCollectionTests(unittest.TestCase):
         self.assertEqual(self.comment_poster_calls, [])
 
     def test_bound_native_output_succeeds_and_replay_adds_nothing(self):
-        self._seed()
+        diff = 'diff --git a/tools/a.py b/tools/a.py\n'
+        self._seed(developer={
+            'assignment_id': 'f' * 32,
+            'selection_source': 'PM',
+            'state': 'DEVELOPER_RESPONDED',
+            'provider_profile': 'codex',
+            'provider_type': 'codex-cli',
+            'model': 'gpt-6.1-sol',
+            'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+            'session_id': 'dev-' + ('1' * 32),
+            'source_sha': HEAD,
+            'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+            'read_paths': ['tools/a.py'],
+            'write_paths': ['tools/a.py'],
+            'acceptance': ['A1'],
+            'context_sha256': '1' * 64,
+            'egress_basis': 'bounded test',
+            'input_bytes': 10,
+            'max_tokens': None,
+            'artifact_format': 'unified_diff',
+            'artifact': diff,
+            'artifact_sha256': hashlib.sha256(diff.encode('utf-8')).hexdigest(),
+            'usage': None,
+            'error_code': None,
+            'created_at': STAMP_1,
+            'owner_assignment_ref': None,
+            'executor_task_id': EXECUTOR,
+        })
         ruling = _ruling_text(actor='Claude', marker_status='WITHDRAWN', header_outcome='WITHDRAWN')
         raw = _transcript_bytes([
             _user_entry('OUTPUT CONTRACT:\n' + _ruling_text(actor='Claude')),

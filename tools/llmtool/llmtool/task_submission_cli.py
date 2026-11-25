@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 import unicodedata
 from datetime import datetime, timezone
 from types import SimpleNamespace
