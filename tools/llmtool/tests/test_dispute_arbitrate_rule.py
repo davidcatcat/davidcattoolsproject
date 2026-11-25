@@ -659,11 +659,11 @@ class DisputeArbitrateRuleTests(unittest.TestCase):
         # Direct TaskStore conflict raises TaskStoreConflict specifically
         self.store.compare_and_update(
             TASK, expected={'record_sha256': rec['record_sha256']},
-            pm_error_code='OTHER_UPDATE')
+            error_code='OTHER_UPDATE')
         with self.assertRaises(task_store.TaskStoreConflict):
             self.store.compare_and_update(
                 TASK, expected={'record_sha256': rec['record_sha256']},
-                pm_error_code='SECOND')
+                error_code='SECOND')
 
         # Non-CAS LLMToolError from store is not retried and reports DISPUTE_RULE_WRITE_UNKNOWN
         calls = []

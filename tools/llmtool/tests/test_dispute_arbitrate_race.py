@@ -507,7 +507,7 @@ class DisputeArbitrateRaceTests(unittest.TestCase):
                 r = self.store.get(TASK)
                 self.store.compare_and_update(
                     TASK, expected={'record_sha256': r['record_sha256']},
-                    pm_error_code='UNRELATED_WRITE')
+                    error_code='UNRELATED_WRITE')
             return HEAD
 
         res = task_submission_cli.dispute_arbitrate(
@@ -525,7 +525,8 @@ class DisputeArbitrateRaceTests(unittest.TestCase):
         self._seed_arbiter(arbiter='codex-reviewer', state='COMPLETED')
         results = []
         errors = []
-        barrier = threading.Barrier(2)
+        posted_event = threading.Event()
+        both_at_f3 = threading.Barrier(2)
         lock = threading.Lock()
 
         def locked_lister(_pr):
@@ -539,23 +540,36 @@ class DisputeArbitrateRaceTests(unittest.TestCase):
                 self.posted.append(c)
                 return c
 
-        def worker():
+        def worker(is_poster):
+            calls = [0]
+
+            def racing_head(_r, _p):
+                calls[0] += 1
+                if calls[0] == 4:
+                    if is_poster:
+                        posted_event.set()
+                    both_at_f3.wait(timeout=5)
+                return HEAD
+
             try:
-                barrier.wait(timeout=5)
+                if not is_poster:
+                    posted_event.wait(timeout=5)
                 r = task_submission_cli.dispute_arbitrate(
                     self.store, TASK, pr=PR, finding_id=FINDING,
-                    current_head=lambda _r, _p: HEAD,
+                    current_head=racing_head,
                     github_get=self.fake_github_get,
                     comment_lister=locked_lister,
                     comment_poster=locked_poster,
                     login_resolver=lambda: REVIEW_LOGIN,
                 )
-                results.append(r)
+                with lock:
+                    results.append(r)
             except Exception as exc:
-                errors.append(exc)
+                with lock:
+                    errors.append(exc)
 
-        t1 = threading.Thread(target=worker)
-        t2 = threading.Thread(target=worker)
+        t1 = threading.Thread(target=worker, args=(True,))
+        t2 = threading.Thread(target=worker, args=(False,))
         t1.start()
         t2.start()
         t1.join(timeout=10)
@@ -576,7 +590,7 @@ class DisputeArbitrateRaceTests(unittest.TestCase):
                 r = self.store.get(TASK)
                 self.store.compare_and_update(
                     TASK, expected={'record_sha256': r['record_sha256']},
-                    pm_error_code=f'CONFLICT_{head_calls2[0]}')
+                    error_code=f'CONFLICT_{head_calls2[0]}')
             return HEAD
 
         with self.assertRaises(LLMToolError) as caught:
