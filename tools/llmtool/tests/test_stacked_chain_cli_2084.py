@@ -15,7 +15,9 @@ from unittest import mock
 from llmtool import skill_gate
 from llmtool import task_completion
 from llmtool import task_submission_cli
+from llmtool import worker_dispatch
 from llmtool.task_store import TaskStore
+import worker_policy_fixture
 
 _ENV = {
     'PATH': '/usr/bin:/bin',
@@ -248,6 +250,13 @@ class StackedChainCliTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
+        worker_policy_fixture.install(self)
+        repository = mock.patch.object(
+            worker_dispatch, 'repository_config',
+            return_value={'slug': 'davidcatcat/davidcattoolsproject',
+                          'dispatch_issue': 289, 'dispatch_evidence_pr': 283})
+        repository.start()
+        self.addCleanup(repository.stop)
         self.base_dir = Path(temporary.name).resolve()
         self.root = str(self.base_dir / 'repo')
         os.makedirs(self.root, mode=0o700)
@@ -764,7 +773,9 @@ class StackedChainCliTests(unittest.TestCase):
         with mock.patch.object(task_completion, 'collect_claude_result',
                                side_effect=fake_claude_collector), \
                 mock.patch.object(task_submission_cli, '_completion_repair_artifact_segments',
-                                  return_value=None):
+                                  return_value=None), \
+                mock.patch.object(task_submission_cli, '_matching_remote_test_receipt',
+                                  return_value=(None, None)):
             self.assertEqual(
                 self._run_complete(_id(2), 'd6-2', main_sha=s0, store=fake_store),
                 0)
