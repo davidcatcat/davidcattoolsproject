@@ -1191,6 +1191,13 @@ def add_task_submission_parsers(actions):
                               'repair Task has no Developer assignment, the D6 is clean at '
                               'the claim head and no process is bound to it; dispatches '
                               'nothing'))
+    repair.add_argument('--high-debug-ref',
+                        help='trusted GitHub Issue comment URL of the confirmed High Debug '
+                             'diagnosis for a review repair that requires RCA')
+    repair.add_argument('--high-debug-task',
+                        help='32-character Task ID containing the confirmed High Debug diagnosis')
+    repair.add_argument('--high-debug-family',
+                        help='root-cause family matching the confirmed High Debug diagnosis')
     repair.add_argument('--pm-session',
                         help=('caller PM session (native UUID or pm- ID); must own '
                               'the Task; default: CLAUDE_CODE_SESSION_ID or '
@@ -2677,8 +2684,13 @@ def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
         return 1
     recover = getattr(args, 'recover_claim', None)
     if recover is not None:
-        if getattr(args, 'auto_review', False) or getattr(args, 'family', None) is not None:
-            raise LLMToolError('--recover-claim takes no --auto-review or --family')
+        if (getattr(args, 'auto_review', False) or getattr(args, 'family', None) is not None or
+                getattr(args, 'high_debug_task', None) is not None or
+                getattr(args, 'high_debug_ref', None) is not None or
+                getattr(args, 'high_debug_family', None) is not None):
+            raise LLMToolError(
+                '--recover-claim takes no --auto-review, --family, '
+                '--high-debug-task, --high-debug-ref or --high-debug-family')
         from .review_repair_recovery import recover_unknown_claim
         return _print(recover_unknown_claim(
             store=store, task_id=args.task_id, executor_task=args.executor_task,
@@ -2693,7 +2705,10 @@ def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
         auto_review=getattr(args, 'auto_review', False),
         review_dispatcher=review_dispatcher,
         delegate_callable=delegate_callable,
-        repair_task_recorder=repair_task_recorder)
+        repair_task_recorder=repair_task_recorder,
+        high_debug_task=getattr(args, 'high_debug_task', None),
+        high_debug_ref=getattr(args, 'high_debug_ref', None),
+        high_debug_family=getattr(args, 'high_debug_family', None))
     return _print(result)
 
 
