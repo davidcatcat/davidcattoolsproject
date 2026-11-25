@@ -625,8 +625,30 @@ def main(argv: list[str] | None = None) -> int:
         if isinstance(value, dict):
             entries.append(value)
 
-    route = 'gw-agent' if spec.get('provider') == 'gw-agent' else None
+    is_gw_agent = spec.get("provider") == "gw-agent"
+    route = "gw-agent" if is_gw_agent else None
     current = ladder_tier(entries, route=route)[0]
+    if not is_gw_agent:
+        context_bytes = 0
+        context_file = spec.get("context_file")
+        if isinstance(context_file, str) and context_file:
+            cf_path = Path(context_file)
+            try:
+                if cf_path.is_file():
+                    context_bytes = cf_path.stat().st_size
+            except OSError:
+                context_bytes = 0
+        required = spec_tier(spec, context_bytes, repo=repo_dir if repo_given else None)
+        if required > current:
+            print(f"SPEC_LADDER_TIER_EXCEEDED:required={required},current={current}")
+            return 2
+        print(f"SPEC_PREFLIGHT_OK:tier={required},current={current}")
+        return 0
+
+    if not repo_given or not repo_dir.is_dir():
+        print("SPEC_PREFLIGHT_FAIL:trusted_root_missing")
+        return 1
+
     base: str | None = None
     if "base" in spec and spec["base"] is not None:
         if not isinstance(spec["base"], str) or not spec["base"].strip():
@@ -643,8 +665,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     context_bytes = read_bytes + _measure_packet_parts(spec, repo_dir)
-    tier_repo = repo_dir if (repo_given or base is not None) else None
-    required = _match_tier(spec, context_bytes, repo=tier_repo)
+    required = _match_tier(spec, context_bytes, repo=repo_dir)
     if required is None:
         print(f"SPEC_LADDER_TIER_EXCEEDED:required=beyond_t6,max={LADDER_MAX_TIER},current={current}")
         return 2
