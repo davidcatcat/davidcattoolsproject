@@ -114,6 +114,15 @@ class DisputeStoreLegacyRulingTests(unittest.TestCase):
         root = Path(temp.name).resolve()
         return task_store.TaskStore(root), root / f'{TASK}.json'
 
+    @staticmethod
+    def _append_open(store, record, entries):
+        """Append OPEN entries one per write: the store admits one appended entry per write."""
+        for count in range(1, len(entries) + 1):
+            record = store.compare_and_update(
+                TASK, expected={'record_sha256': record['record_sha256']},
+                review_disputes=list(entries[:count]))
+        return record
+
     def _assert_transition_refused(self, task_path, fn):
         before = task_path.read_bytes()
         with self.assertRaises(LLMToolError) as caught:
@@ -132,9 +141,7 @@ class DisputeStoreLegacyRulingTests(unittest.TestCase):
                     if with_other:
                         entries.append(
                             _open_entry('F2', evidence_ref=REF_2, with_history=with_history))
-                    rec = store.compare_and_update(
-                        TASK, expected={'record_sha256': created['record_sha256']},
-                        review_disputes=entries)
+                    rec = self._append_open(store, created, entries)
                     ruled_f1 = dict(entries[0], state='RULED', ruling=_legacy_ruling())
                     if with_history:
                         ruled_f1['history'] = list(entries[0]['history']) + [
@@ -157,9 +164,7 @@ class DisputeStoreLegacyRulingTests(unittest.TestCase):
         open_f1 = _open_entry('F1', evidence_ref=REF, with_history=False)
         open_f2 = _open_entry('F2', evidence_ref=REF_2, with_history=False)
         open_f3 = _open_entry('F3', evidence_ref=REF_3, with_history=False)
-        store.compare_and_update(
-            TASK, expected={'record_sha256': created['record_sha256']},
-            review_disputes=[open_f1, open_f2, open_f3])
+        self._append_open(store, created, [open_f1, open_f2, open_f3])
 
         # Load the persisted record file, set F1 to a legacy RULED entry, recompute
         # digest with task_store._digest, and write atomically.
