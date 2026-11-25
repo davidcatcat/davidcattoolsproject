@@ -22,7 +22,6 @@ The Owner's binding working rules for PM runs (2026-11-16 – 2026-11-18), recor
 - 停止接受與啟動新的功能需求；已授權但尚未啟動的非必要工作暫停；優先完成已經開始的工作。 (Owner date: 2026-11-22, evidence link: [#1817 c7076653433](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-7076653433))
 - Developer 錯誤、EC2／CI／Reviewer FAIL、read scope 修正、仍有修復額度、需要 AI Debug／RCA、額度等待、可處理的衝突、可縮小的 Task、合法 continuation／recovery／REPLAN／D3 都不是流程死結，由 PM 繼續處理；不得因困難、修復次數多、Reviewer 嚴格或進度慢而轉交獨立開發。 (Owner date: 2026-11-22, evidence link: [#1817 c7076653433](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-7076653433))
 - 只有經查證沒有合法路徑的 llmtool 工具死結才交獨立開發：先在既有 Issue 補證據，沒有才開一張流程死結候選 Issue；PM 不得自行宣布工具修復已獲授權、重置計數、清除 UNKNOWN 或製造測試證據。 (Owner date: 2026-11-22, evidence link: [#1817 c7076653433](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-7076653433))
-- 同時進行中的工作上限：PM 正常開發最多 2 條主要工作線；獨立開發最多 1 條已確認的死結修復線；同一工作線先把未完成 PR 結案再啟動下一件。 (Owner date: 2026-11-22, evidence link: [#1817 c7076653433](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-7076653433))
 - 已被取代的舊 PR 確認後續版本包含必要內容後關閉並標記 superseded；不得為了讓 PR 好完成而不斷拆出新的 Issue、ROOT、REPLAN 或治理需求。 (Owner date: 2026-11-22, evidence link: [#1817 c7076653433](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-7076653433))
 - 每天一次收斂檢查：開始時 Open Issue／PR 數、新增數、完成或合併數、以 superseded／duplicate／not planned 關閉數、淨變化、最卡的真正死結；功能完成、PR 合併、Issue 結案、已被取代分開報告；新增多於關閉時說明原因。 (Owner date: 2026-11-22, evidence link: [#1817 c7076653433](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-7076653433))
 - 只有需要新增 Owner 授權、變更安全邊界或無法從現有規則判定的政策衝突才升級 Owner（Advisor → Owner）；正常修復與既有程序不送 Owner 裁決。 (Owner date: 2026-11-22, evidence link: [#1817 c7076653433](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-7076653433))
@@ -34,7 +33,7 @@ The Owner's binding working rules for PM runs (2026-11-16 – 2026-11-18), recor
 - Developer routes are Claude Developer, OpenCode, AGY and `gw-agent`. Codex reviews and debugs only. Prefer `gw-agent` for small, low-risk, bounded Tasks.
 - Before every Developer dispatch or repair, apply the [read scope rule (#2503)](../../../AGENTS.md) to the spec `read` list.
 - Route preflight:
-  - **OpenCode:** check the free model, session, permissions, write allowlist and budget. Pause on a free-limit refusal or after two consecutive failures.
+  - **OpenCode:** check the Owner's subscription models, session, permissions, write allowlist and budget (pay-per-use needs Owner spend approval; no paid fallback). Pause on a quota or usage-limit refusal or after two consecutive failures.
   - **AGY:** check the D6, auth, executable, actual model, allowlist and quota. Pause after two consecutive failures. See [agy-direct-developer](../agy-direct-developer/SKILL.md).
   - **`gw-agent`:** before each call, record the egress basis and budget. On a failure, step down one tier. Pause per E9. Classify availability by the [four-layer rule](../company-llm-delegation/SKILL.md#availability-classification).
 - Follow [dispatch hygiene](../ai-team-delivery/pm-continuation.md#dispatch-hygiene). A sent dispatch counts only once there is a start receipt ([Transition record](../ai-team-delivery/pm-continuation.md#transition-record)).
