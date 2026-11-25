@@ -658,15 +658,93 @@ class SplitAndDisputeGatesTests(TwoPhaseCase):
     change passes only when both gates pass; otherwise it writes nothing.
     """
 
+    def _seed_arbitrate_ruled(self, task_id, opened):
+        rec = self.store.get(task_id)
+        at_2 = '2026-11-13T00:01:00Z'
+        at_3 = '2026-11-13T01:00:00Z'
+        reviewer_task = 'reviewer-00000000000000000002'
+        session_id = '0123456789abcdef0123456789abcdef'
+        rules_sha = '1' * 64
+        output_sha = '3' * 64
+        cd = rec['task_binding']['contract_digest']
+        ruling_text = (
+            '<!-- activity: type=dispute_ruling actor=Codex target=PM status=WITHDRAWN -->\n'
+            f"Ruling: {opened['finding_id']} WITHDRAWN | PR: #{opened['pr']} | "
+            f"Version: {opened['review_version']} | HEAD: {opened['head_sha']}\n"
+            f"LLMTOOL-REVIEW-BINDING v1 task={task_id} run={rec['run_id']} "
+            f"contract={cd} head={opened['head_sha']}\n"
+            'Arbitration reasoning.'
+        )
+        claimed = {
+            'executor_task': 'executor-d6', 'pr': opened['pr'],
+            'head_sha': opened['head_sha'], 'version': 2, 'state': 'CLAIMED',
+            'reviewer_task': reviewer_task, 'native_session_id': None,
+            'account_mode': 'ROLES', 'account': 'reviewer-b',
+            'rules_sha256': rules_sha, 'claimed_at': at_2, 'updated_at': at_2,
+            'purpose': 'dispute_ruling',
+            'dispute': {
+                'pr': opened['pr'], 'finding_id': opened['finding_id'],
+                'head_sha': opened['head_sha'],
+                'review_version': opened['review_version'],
+                'dispute_text_sha256': '2' * 64,
+            },
+            'reviewer': 'codex-reviewer',
+        }
+        opened_claimed = dict(
+            opened,
+            arbiter_claim={'reviewer_task': reviewer_task, 'version': 2},
+            history=list(opened['history']) + [{
+                'event': 'ARBITER_CLAIMED', 'at': at_2, 'actor': 'llmtool',
+                'head_sha': opened['head_sha'],
+                'refs': {'reviewer_task': reviewer_task, 'version': 2},
+            }],
+        )
+        self.store.update(task_id, review_dispatch_claim=[claimed],
+                          review_disputes=[opened_claimed])
+        completed = dict(
+            claimed, state='COMPLETED', native_session_id=session_id, updated_at=at_3,
+            review_result={
+                'task_id': task_id, 'run_id': rec['run_id'], 'contract_digest': cd,
+                'head': opened['head_sha'], 'verdict': 'RULING', 'outcome': 'WITHDRAWN',
+                'review_text': ruling_text,
+                'source': {'kind': 'CODEX_JSONL', 'output_sha256': output_sha},
+            },
+        )
+        self.store.update(task_id, review_dispatch_claim=[completed])
+        arbitrate_ruling = {
+            'outcome': 'WITHDRAWN', 'head_sha': opened['head_sha'],
+            'reviewer': 'codex-reviewer', 'reviewer_task': reviewer_task,
+            'reviewer_session': session_id, 'evidence_ref': RULING_REF,
+            'ruled_at': at_3, 'path': 'arbitrate',
+            'finding_id': opened['finding_id'],
+            'review_version': opened['review_version'],
+            'arbiter_claim_version': 2, 'rules_sha256': rules_sha,
+            'review_text_sha256': hashlib.sha256(ruling_text.encode('utf-8')).hexdigest(),
+            'claim_sha256': task_store._canonical_claim_sha256(completed),
+            'source_kind': 'CODEX_JSONL', 'output_sha256': output_sha,
+            'comment_id': 1002, 'contract_digest': cd, 'run_id': rec['run_id'],
+        }
+        ruled = dict(
+            opened_claimed, state='RULED', ruling=arbitrate_ruling,
+            history=list(opened_claimed['history']) + [{
+                'event': 'RULED', 'at': at_3, 'actor': 'llmtool',
+                'head_sha': opened['head_sha'], 'refs': {'comment_id': 1002},
+            }],
+        )
+        return opened_claimed, ruled
+
     def test_the_dispute_gate_holds_alone_on_split_tasks(self):
         root, first, second = self.task(), self.task(), self.task()
         self.split(root, [first, second])
         for task_id in (root, first):
             with self.subTest(task=task_id):
                 line = self.line(task_id)
-                opened = dispute()
-                ruled = dict(opened, state='RULED', ruling=ruling())
-                for bad in ([ruled], [dict(opened, state='WITHDRAWN')]):
+                opened = dispute(history=[{
+                    'event': 'OPENED', 'at': AT, 'actor': f'pm:{PM}',
+                    'head_sha': 'a' * 40, 'refs': {},
+                }])
+                legacy_ruled = dict(opened, state='RULED', ruling=ruling())
+                for bad in ([legacy_ruled], [dict(opened, state='WITHDRAWN')]):
                     self.refused('REVIEW_DISPUTE_TRANSITION_INVALID',
                                  lambda bad=bad: self.store.update(task_id,
                                                                    review_disputes=bad))
@@ -675,9 +753,11 @@ class SplitAndDisputeGatesTests(TwoPhaseCase):
                     self.refused('REVIEW_DISPUTE_TRANSITION_INVALID',
                                  lambda bad=bad: self.store.update(task_id,
                                                                    review_disputes=bad))
+                opened_claimed, ruled = self._seed_arbitrate_ruled(task_id, opened)
                 self.store.update(task_id, review_disputes=[ruled])
                 self.refused('REVIEW_DISPUTE_TRANSITION_INVALID',
-                             lambda: self.store.update(task_id, review_disputes=[opened]))
+                             lambda oc=opened_claimed: self.store.update(
+                                 task_id, review_disputes=[oc]))
                 self.assertEqual(self.store.get(task_id)['review_disputes'], [ruled])
                 self.assertEqual(self.line(task_id), line)  # the split lineage is untouched
 

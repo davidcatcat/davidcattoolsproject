@@ -2105,9 +2105,11 @@ def _check_review_disputes_transition(old, new, *, old_claims=None, new_claims=N
                 not _arbiter_claim_transition_matches(
                     'ARBITER_CLAIMED', after['arbiter_claim'], old_claims, new_claims)):
             _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
-    # ruling is added only on OPEN -> RULED.
+    # ruling is added only on OPEN -> RULED; new writes require the arbitrate key set (#2087 PR A4).
     if after.get('state') == 'RULED':
         if 'ruling' not in after or 'ruling' in before:
+            _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
+        if type(after['ruling']) is dict and set(after['ruling']) == _REVIEW_DISPUTE_RULING_FIELDS:
             _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
     elif 'ruling' in after or 'ruling' in before:
         _fail('REVIEW_DISPUTE_TRANSITION_INVALID')

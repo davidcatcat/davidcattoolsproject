@@ -341,18 +341,31 @@ class DisputeStoreSchemaTests(unittest.TestCase):
             review_disputes=[entry])
         self.assertEqual(store.get(TASK), saved)
 
-        # Stored legacy RULED entry without arbitrate keys still validates.
-        legacy_store, _ = self._new_store(with_history=False)
+        # New legacy-set OPEN -> RULED write refuses REVIEW_DISPUTE_TRANSITION_INVALID (#2087 PR A4).
+        legacy_store, legacy_path = self._new_store(with_history=False)
         rec_leg = legacy_store.get(TASK)
         leg_entry = dict(rec_leg['review_disputes'][0], state='RULED', ruling={
             'outcome': 'UPHELD', 'head_sha': HEAD, 'reviewer': 'codex-reviewer',
             'reviewer_task': ARBITER_REVIEWER, 'reviewer_session': CODEX_THREAD,
             'evidence_ref': RULING_REF, 'ruled_at': STAMP_2,
         })
-        saved_leg = legacy_store.compare_and_update(
-            TASK, expected={'record_sha256': rec_leg['record_sha256']},
-            review_disputes=[leg_entry])
-        self.assertEqual(legacy_store.get(TASK)['review_disputes'], saved_leg['review_disputes'])
+        before_leg = legacy_path.read_bytes()
+        with self.assertRaises(LLMToolError) as caught:
+            legacy_store.compare_and_update(
+                TASK, expected={'record_sha256': rec_leg['record_sha256']},
+                review_disputes=[leg_entry])
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'REVIEW_DISPUTE_TRANSITION_INVALID')
+        self.assertEqual(legacy_path.read_bytes(), before_leg)
+
+        # Stored legacy RULED entry (persisted before A4) still validates and reads back.
+        stored_leg = json.loads(before_leg.decode('utf-8'))
+        stored_leg['review_disputes'] = [leg_entry]
+        stored_leg['record_sha256'] = task_store._digest(stored_leg)
+        legacy_path.write_bytes(task_store._json_bytes(stored_leg))
+        loaded_leg = legacy_store.get(TASK)
+        self.assertEqual(loaded_leg['review_disputes'], [leg_entry])
+        task_store._validate(loaded_leg)
 
     def test_open_to_withdrawn_still_accepted(self):
         store, _ = self._new_store(with_history=False)

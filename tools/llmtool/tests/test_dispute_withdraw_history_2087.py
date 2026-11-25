@@ -164,15 +164,62 @@ class DisputeWithdrawHistoryTests(unittest.TestCase):
     def test_ruled_entry_with_history_still_refused_as_already_ruled(self):
         store, task_path = self._new_store(with_history=True)
         rec = store.get(TASK)
+        cd = rec['task_binding']['contract_digest']
+        ruling_text = (
+            '<!-- activity: type=dispute_ruling actor=Codex target=PM status=UPHELD -->\n'
+            f'Ruling: F1 UPHELD | PR: #{PR} | Version: 1 | HEAD: {HEAD}\n'
+            f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} contract={cd} head={HEAD}\n'
+            'Arbitration reasoning.'
+        )
+        claimed = {
+            'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD, 'version': 2,
+            'state': 'CLAIMED', 'reviewer_task': ARBITER_REVIEWER,
+            'native_session_id': None, 'account_mode': 'ROLES', 'account': 'reviewer-b',
+            'rules_sha256': RULES_DIGEST, 'claimed_at': STAMP_2, 'updated_at': STAMP_2,
+            'purpose': 'dispute_ruling',
+            'dispute': {
+                'pr': PR, 'finding_id': 'F1', 'head_sha': HEAD,
+                'review_version': 1, 'dispute_text_sha256': DISPUTE_TEXT_DIGEST,
+            },
+            'reviewer': 'codex-reviewer',
+        }
+        entry_claimed = dict(rec['review_disputes'][0])
+        entry_claimed['arbiter_claim'] = {'reviewer_task': ARBITER_REVIEWER, 'version': 2}
+        entry_claimed['history'] = list(entry_claimed['history']) + [
+            _history_event('ARBITER_CLAIMED', actor='llmtool', at=STAMP_2,
+                           refs={'reviewer_task': ARBITER_REVIEWER, 'version': 2}),
+        ]
+        rec = store.compare_and_update(
+            TASK, expected={'record_sha256': rec['record_sha256']},
+            review_dispatch_claim=rec['review_dispatch_claim'] + [claimed],
+            review_disputes=[entry_claimed])
+        completed = dict(
+            claimed, state='COMPLETED', native_session_id=CODEX_THREAD, updated_at=STAMP_3,
+            review_result={
+                'task_id': TASK, 'run_id': RUN, 'contract_digest': cd,
+                'head': HEAD, 'verdict': 'RULING', 'outcome': 'UPHELD',
+                'review_text': ruling_text,
+                'source': {'kind': 'CODEX_JSONL', 'output_sha256': OUTPUT_DIGEST},
+            },
+        )
+        rec = store.compare_and_update(
+            TASK, expected={'record_sha256': rec['record_sha256']},
+            review_dispatch_claim=[rec['review_dispatch_claim'][0], completed])
         entry = dict(rec['review_disputes'][0])
         entry['state'] = 'RULED'
         entry['ruling'] = {
             'outcome': 'UPHELD', 'head_sha': HEAD, 'reviewer': 'codex-reviewer',
             'reviewer_task': ARBITER_REVIEWER, 'reviewer_session': CODEX_THREAD,
-            'evidence_ref': RULING_REF, 'ruled_at': STAMP_2,
+            'evidence_ref': RULING_REF, 'ruled_at': STAMP_3, 'path': 'arbitrate',
+            'finding_id': 'F1', 'review_version': 1, 'arbiter_claim_version': 2,
+            'rules_sha256': RULES_DIGEST,
+            'review_text_sha256': hashlib.sha256(ruling_text.encode('utf-8')).hexdigest(),
+            'claim_sha256': task_store._canonical_claim_sha256(completed),
+            'source_kind': 'CODEX_JSONL', 'output_sha256': OUTPUT_DIGEST,
+            'comment_id': RULING_COMMENT_ID, 'contract_digest': cd, 'run_id': RUN,
         }
         entry['history'] = list(entry['history']) + [
-            _history_event('RULED', actor='llmtool', at=STAMP_2,
+            _history_event('RULED', actor='llmtool', at=STAMP_3,
                            refs={'comment_id': RULING_COMMENT_ID}),
         ]
         store.compare_and_update(
