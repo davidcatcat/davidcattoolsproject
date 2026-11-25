@@ -11377,6 +11377,8 @@ def _repair_head_admitted(task, store, evidence, *, executor_task, head):
             trusted_base_sha=main_sha)
         if segments is None:
             return False
+        # #2084: segments is never None here (see above); stacked_chain is built
+        # and passed only when artifact_segments is None, so it is omitted here.
         common = dict(
             task_id=executor_task, expected_common_dir=evidence.get('common_dir'),
             expected_root=root, expected_branch=evidence.get('branch'),
@@ -11535,7 +11537,8 @@ def _stacked_chain(task, store):
                 break
             completion = pred.get('completion')
             evidence = completion.get('evidence') if type(completion) is dict else None
-            result_head = evidence.get('result_head') if type(evidence) is dict else None
+            result = evidence.get('result') if type(evidence) is dict else None
+            result_head = result.get('result_head') if type(result) is dict else None
             pred_dev = pred.get('developer')
             pred_source = pred_dev.get('source_sha') if type(pred_dev) is dict else None
             pred_writes = pred_dev.get('write_paths') if type(pred_dev) is dict else None
@@ -11684,7 +11687,7 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
             trusted_base_sha=main_pin['sha'])
         stacked_chain = _stacked_chain(task, store) if artifact_segments is None else None
         chain_kwarg = ({'stacked_chain': stacked_chain}
-                       if type(stacked_chain) is list and artifact_segments is None else {})
+                       if type(stacked_chain) is list else {})
         if claude_route:
             git_evidence = task_completion.collect_claude_result(
                 task_id=args.executor_task, expected_common_dir=initial.get('common_dir'),

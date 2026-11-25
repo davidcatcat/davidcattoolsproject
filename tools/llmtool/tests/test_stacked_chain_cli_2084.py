@@ -60,7 +60,7 @@ def _make_record(task_id, *, continues=None, source_sha=None, result_head=None,
         },
         'completion': {
             'state': completion_state,
-            'evidence': {'result_head': result_head},
+            'evidence': {'result': {'result_head': result_head}},
         },
     }
     if continues is not None:
@@ -157,6 +157,78 @@ class StackedChainBuilderTests(unittest.TestCase):
                               write_paths=['b.txt'])
         self.assertIsNone(task_submission_cli._stacked_chain(
             t2_err, _DictStore(fail_on={_id(1)})))
+
+    def test_real_pm_evidence_ready_shape_and_evidence_level_ignored(self):
+        s0, s1 = _hex('0'), _hex('1')
+        real_pred = {
+            'task_id': _id(1),
+            'developer': {'source_sha': s0, 'write_paths': ['a.txt']},
+            'completion': {
+                'state': 'PM_EVIDENCE_READY',
+                'executor_task_id': 'd6-1',
+                'reviewer_task_id': 'rev-1',
+                'missing_gates': [],
+                'pm_dispatch': 'NOT_STARTED',
+                'evidence': {
+                    'task_id': _id(1),
+                    'run_id': _id(101),
+                    'contract_digest': 'a' * 64,
+                    'execution_mode': 'DIRECT_D6',
+                    'source_sha': s0,
+                    'result_head': s0,
+                    'result': {
+                        'executor_task_id': 'd6-1',
+                        'source_sha': s0,
+                        'result_head': s1,
+                        'changed_paths': ['a.txt'],
+                        'developer_changed_paths': ['a.txt'],
+                        'diff_sha256': 'b' * 64,
+                    },
+                    'tests': [],
+                    'review_pr_ci': {'formal_review_state': 'ACCEPTED'},
+                },
+            },
+        }
+        t2 = _make_record(_id(2), continues=_id(1), source_sha=s1, write_paths=['b.txt'])
+        self.assertEqual(
+            task_submission_cli._stacked_chain(
+                t2, _DictStore({_id(1): real_pred, _id(2): t2})),
+            [{'source_sha': s0, 'result_sha': s1, 'write_paths': ['a.txt']}],
+        )
+
+        evidence_only = {
+            'task_id': _id(1),
+            'developer': {'source_sha': s0, 'write_paths': ['a.txt']},
+            'completion': {
+                'state': 'PM_EVIDENCE_READY',
+                'evidence': {'result_head': s1},
+            },
+        }
+        bad_cases = [
+            ('evidence-level only', evidence_only),
+            ('evidence not dict', {
+                'task_id': _id(1),
+                'developer': {'source_sha': s0, 'write_paths': ['a.txt']},
+                'completion': {'state': 'PM_EVIDENCE_READY', 'evidence': [s1]},
+            }),
+            ('result not dict', {
+                'task_id': _id(1),
+                'developer': {'source_sha': s0, 'write_paths': ['a.txt']},
+                'completion': {'state': 'PM_EVIDENCE_READY', 'evidence': {'result': [s1]}},
+            }),
+            ('result_head not 40-hex', {
+                'task_id': _id(1),
+                'developer': {'source_sha': s0, 'write_paths': ['a.txt']},
+                'completion': {
+                    'state': 'PM_EVIDENCE_READY',
+                    'evidence': {'result': {'result_head': '0' * 39}},
+                },
+            }),
+        ]
+        for label, pred in bad_cases:
+            with self.subTest(case=label):
+                self.assertIsNone(task_submission_cli._stacked_chain(
+                    t2, _DictStore({_id(1): pred, _id(2): t2})))
 
 
 class StackedChainCliTests(unittest.TestCase):
@@ -316,12 +388,14 @@ class StackedChainCliTests(unittest.TestCase):
             'common_dir': self.common,
             'branch': branch,
             'source_sha': source,
-            'result_head': result_head,
+            'result_head': source,
             'executor_identity': _AGENT,
             'executor_session_ref': _SESSION,
             'executor_native_session_id': None,
             'executor_native_session': 'UNKNOWN',
         }
+        if result_head is not None:
+            evidence['result'] = {'result_head': result_head}
         record['developer'] = developer
         record['completion'] = {
             'state': completion_state,
@@ -563,6 +637,35 @@ class StackedChainCliTests(unittest.TestCase):
         self.assertEqual(len(repair_kwargs), 1)
         self.assertNotIn('stacked_chain', repair_kwargs[0])
         self.assertIn('artifact_segments', repair_kwargs[0])
+
+        # _repair_head_admitted also passes no stacked_chain keyword to collect_claude_result.
+        self.create_task(
+            _id(6), d6_id='d6-6', source=s1, branch='task6',
+            write_paths=['b.txt'], continues=_id(1), result_head=s2,
+            claude_route=True)
+        claude_repair_kwargs = []
+
+        def fake_claude_repair_collector(**kwargs):
+            claude_repair_kwargs.append(dict(kwargs))
+            return {'result_head': s2}
+
+        task6 = self.store.get(_id(6))
+        task6['review_repair_claims'] = [{'repair_task_id': _id(7)}]
+        with mock.patch.object(task_completion, 'read_authenticated_main_sha',
+                               return_value=s0), \
+                mock.patch.object(task_completion, 'ensure_main_commit',
+                                  return_value=True), \
+                mock.patch.object(task_submission_cli, '_completion_repair_artifact_segments',
+                                  return_value=[('a', 'd', s1, s2)]), \
+                mock.patch.object(task_completion, 'collect_claude_result',
+                                  side_effect=fake_claude_repair_collector):
+            claude_admitted = task_submission_cli._repair_head_admitted(
+                task6, self.store, task6['completion']['evidence'],
+                executor_task='d6-6', head=s2)
+        self.assertTrue(claude_admitted)
+        self.assertEqual(len(claude_repair_kwargs), 1)
+        self.assertNotIn('stacked_chain', claude_repair_kwargs[0])
+        self.assertIn('artifact_segments', claude_repair_kwargs[0])
 
     def test_claude_route_passes_stacked_chain_only_when_stacked(self):
         s0, s1, s2 = _hex('0'), _hex('1'), _hex('2')
