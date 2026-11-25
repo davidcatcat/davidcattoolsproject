@@ -514,7 +514,7 @@ class DisputeArbitrateRaceTests(unittest.TestCase):
         self.assertEqual(after['review_disputes'], before['review_disputes'])
         self.assertEqual(after['review_dispatch_claim'], before['review_dispatch_claim'])
 
-    def test_cas_loser_reevaluates_and_concurrent_calls_and_three_conflicts(self):
+    def test_cas_loser_reevaluates(self):
         # 1. Unrelated write between F3 read and CAS -> second round wins
         self._seed_arbiter(arbiter='codex-reviewer', state='COMPLETED')
         head_calls = [0]
@@ -536,13 +536,42 @@ class DisputeArbitrateRaceTests(unittest.TestCase):
         self.assertEqual(res['state'], 'RULED')
         self.assertEqual(self.poster_calls, 1)
 
-        # 2. Two racing calls: poster called once, one RULED written, loser returns winner's result
+    def test_concurrent_calls_record_one_ruling_and_return_winners_result(self):
         self._seed_arbiter(arbiter='codex-reviewer', state='COMPLETED')
         results = []
         errors = []
         posted_event = threading.Event()
         both_at_f3 = threading.Barrier(2)
+        phase = threading.local()
         lock = threading.Lock()
+        ruled_writes = []
+        cas_losses = []
+        real_post = review_dispatch._ensure_verdict_posted
+        real_cas = self.store.compare_and_update
+
+        def post_then_mark_f3(**kwargs):
+            result = real_post(**kwargs)
+            if result.get('state') in ('POSTED', 'ALREADY_POSTED'):
+                # Both paths have released the posting lock, but only a new
+                # post ran F2. Synchronize the actual F3 read, not a read count.
+                phase.at_f3 = True
+                posted_event.set()
+            return result
+
+        def counted_cas(*args, **kwargs):
+            disputes = kwargs.get('review_disputes') or []
+            ruling = any(d.get('state') == 'RULED' for d in disputes)
+            try:
+                result = real_cas(*args, **kwargs)
+            except task_store.TaskStoreConflict:
+                if ruling:
+                    with lock:
+                        cas_losses.append(1)
+                raise
+            if ruling:
+                with lock:
+                    ruled_writes.append(1)
+            return result
 
         def locked_lister(_pr):
             with lock:
@@ -556,19 +585,16 @@ class DisputeArbitrateRaceTests(unittest.TestCase):
                 return c
 
         def worker(is_poster):
-            calls = [0]
-
             def racing_head(_r, _p):
-                calls[0] += 1
-                if calls[0] == 4:
-                    if is_poster:
-                        posted_event.set()
+                if getattr(phase, 'at_f3', False):
+                    phase.at_f3 = False
+                    # _ruling_current has already read each caller's snapshot.
                     both_at_f3.wait(timeout=5)
                 return HEAD
 
             try:
                 if not is_poster:
-                    posted_event.wait(timeout=5)
+                    self.assertTrue(posted_event.wait(timeout=5))
                 r = task_submission_cli.dispute_arbitrate(
                     self.store, TASK, pr=PR, finding_id=FINDING,
                     current_head=racing_head,
@@ -585,17 +611,24 @@ class DisputeArbitrateRaceTests(unittest.TestCase):
 
         t1 = threading.Thread(target=worker, args=(True,))
         t2 = threading.Thread(target=worker, args=(False,))
-        t1.start()
-        t2.start()
-        t1.join(timeout=10)
-        t2.join(timeout=10)
+        with patch.object(review_dispatch, '_ensure_verdict_posted',
+                          side_effect=post_then_mark_f3), \
+                patch.object(self.store, 'compare_and_update', side_effect=counted_cas):
+            t1.start()
+            t2.start()
+            t1.join(timeout=10)
+            t2.join(timeout=10)
+        self.assertFalse(t1.is_alive())
+        self.assertFalse(t2.is_alive())
         self.assertEqual(errors, [])
+        self.assertEqual(len(ruled_writes), 1)
+        self.assertEqual(len(cas_losses), 1)
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0], results[1])
         self.assertEqual(results[0]['state'], 'RULED')
         self.assertEqual(self.poster_calls, 1)
 
-        # 3. Three conflicts in a row -> DISPUTE_RULE_CAS_CONFLICT, then replay rules without second post
+    def test_three_conflicts_then_replay_reuses_post(self):
         self._seed_arbiter(arbiter='codex-reviewer', state='COMPLETED')
         head_calls2 = [0]
 

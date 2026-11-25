@@ -2853,6 +2853,11 @@ def _dispute_arbiter_registration(record, *, reviewer, reviewer_task, reviewer_s
     initial = completion.get('initial') if type(completion) is dict else None
     if type(initial) is dict:
         developer_sessions.add(initial.get('executor_native_session_id'))
+    # Direct-result evidence also retains the Developer session when an older
+    # record has no execution block or initial completion snapshot.
+    evidence = completion.get('evidence') if type(completion) is dict else None
+    if type(evidence) is dict:
+        developer_sessions.add(evidence.get('executor_native_session_id'))
     if reviewer_session in developer_sessions:
         _dispute_refuse('DISPUTE_ARBITER_NOT_INDEPENDENT')
     return registration

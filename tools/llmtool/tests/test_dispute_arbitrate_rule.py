@@ -226,7 +226,9 @@ class DisputeArbitrateRuleTests(unittest.TestCase):
                 }
             if path == f'issues/comments/{RULING_COMMENT_ID}':
                 return {
-                    'id': RULING_COMMENT_ID, 'body': self.posted[0]['body'],
+                    'id': RULING_COMMENT_ID,
+                    'body': next(c['body'] for c in self.posted
+                                 if c['id'] == RULING_COMMENT_ID),
                     'issue_url': f'https://api.github.com/repos/{REPOSITORY}/issues/{PR}',
                     'created_at': self.comment_times['created_at'],
                     'updated_at': self.comment_times['updated_at'],
@@ -838,6 +840,7 @@ class DisputeArbitrateRuleTests(unittest.TestCase):
         self.comment_times = {'created_at': '2026-11-23T00:05:00Z',
                               'updated_at': '2026-11-23T00:05:00Z'}
         self._seed_completed_codex(session='exec-session-1')
+        before_dev = self._record_bytes()
         with self.assertRaises(LLMToolError) as caught_dev:
             task_submission_cli.dispute_arbitrate(
                 self.store, TASK, pr=PR, finding_id=FINDING,
@@ -848,6 +851,7 @@ class DisputeArbitrateRuleTests(unittest.TestCase):
                 login_resolver=lambda: REVIEW_LOGIN,
             )
         self.assertEqual(caught_dev.exception.dispute_code, 'DISPUTE_ARBITER_NOT_INDEPENDENT')
+        self.assertEqual(self._record_bytes(), before_dev)
 
         # First-review session refuses DISPUTE_ARBITER_NOT_FRESH
         self.posted.clear()
