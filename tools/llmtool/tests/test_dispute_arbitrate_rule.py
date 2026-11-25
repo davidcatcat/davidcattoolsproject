@@ -211,6 +211,13 @@ class DisputeArbitrateRuleTests(unittest.TestCase):
         self.agents_rows = [{'sessionId': CLAUDE_SESSION, 'state': 'done'}]
 
         def fake_github_get(path):
+            if path == f'pulls/{PR}':
+                return {
+                    'number': PR,
+                    'state': 'open',
+                    'head': {'sha': self.pr_head},
+                    'base': {'sha': '0' * 40},
+                }
             if path == f'issues/comments/{DISPUTE_COMMENT_ID}':
                 return {
                     'id': DISPUTE_COMMENT_ID, 'body': 'Dispute reasoning for F1.',

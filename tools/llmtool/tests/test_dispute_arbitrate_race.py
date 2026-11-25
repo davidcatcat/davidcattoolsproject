@@ -184,6 +184,7 @@ class DisputeArbitrateRaceTests(unittest.TestCase):
         base, cd = tdrcr._base_task_record()
         first_actor = 'Claude' if arbiter == 'codex-reviewer' else 'Codex'
         dev_profile = 'agy' if arbiter == 'codex-reviewer' else 'codex'
+        diff = 'diff --git a/tools/a.py b/tools/a.py\n'
         base['developer'] = {
             'assignment_id': 'f' * 32, 'selection_source': 'PM',
             'state': 'DEVELOPER_RESPONDED', 'provider_profile': dev_profile,
@@ -194,8 +195,9 @@ class DisputeArbitrateRaceTests(unittest.TestCase):
             'read_paths': ['tools/a.py'], 'write_paths': ['tools/a.py'],
             'acceptance': ['A1'], 'context_sha256': '1' * 64,
             'egress_basis': 'bounded', 'input_bytes': 10, 'max_tokens': None,
-            'artifact_format': 'unified_diff', 'artifact': 'diff --git a/tools/a.py b/tools/a.py\n',
-            'artifact_sha256': '1' * 64, 'usage': None, 'error_code': None,
+            'artifact_format': 'unified_diff', 'artifact': diff,
+            'artifact_sha256': hashlib.sha256(diff.encode('utf-8')).hexdigest(),
+            'usage': None, 'error_code': None,
             'created_at': STAMP_1, 'executor_task_id': EXECUTOR,
             **({'owner_assignment_ref': None} if dev_profile == 'agy' else {}),
         }
