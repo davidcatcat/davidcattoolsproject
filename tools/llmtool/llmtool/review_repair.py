@@ -1000,6 +1000,87 @@ def _auto_replay_claim(store, task, task_id, existing):
         release_chain()
 
 
+def _manual_unknown_retry_allowed(task, claim, repair_task, executor_task,
+                                  pr_number, github_get):
+    """True only when task_advance's unknown-repair checks report no blocking reason.
+
+    #2781: the same checks that guard an automatic retry of a launched repair
+    with an unknown outcome guard this manual retry. The D6 read must show the
+    claim's head still recorded and the worktree clean; the repair Developer's
+    cleanup must be confirmed; and the PR head, when readable, must still be the
+    claim head. Any doubt returns False, which leaves the command a replay.
+    """
+    from . import task_advance
+    try:
+        registration, snapshot = _registered_d6(task, executor_task)
+    except Exception:
+        return False
+    if getattr(snapshot, 'clean', None) is not True:
+        return False
+    d6 = {'dirty': False, 'result_head': snapshot.head,
+          'recorded_result_head': registration.result_sha}
+    pr = None
+    if callable(github_get) and type(pr_number) is int:
+        try:
+            snapshot_pr = github_get(f'pulls/{pr_number}')
+        except Exception:
+            snapshot_pr = None
+        if type(snapshot_pr) is dict:
+            pr = snapshot_pr
+    try:
+        return task_advance.unknown_repair_reason(repair_task, claim, d6, pr) is None
+    except Exception:
+        return False
+
+
+def _retry_unknown_claimed_repair(*, store, task_id, existing, repair_task, developer,
+                                  packet, executor_task, profile, pr_number, github_get,
+                                  dispatch_adapter, delegate_callable, packet_version,
+                                  high_debug_task=None, high_debug_ref=None,
+                                  high_debug_family=None):
+    """Retry one DISPATCHED review claim whose repair run ended unknown.
+
+    The same claim and repair Task are reused, so no new claim and no extra
+    repair count are created. The claim, the repair Task and the unknown-repair
+    checks are read again under the repair Task's dispatch lock before the
+    provider call, and a claim that is no longer retryable is only replayed.
+    """
+    repair_task_id = existing['repair_task_id']
+    guard = _repair_dispatch_guard(store, repair_task_id)
+    with guard:
+        try:
+            current = store.get(task_id)
+            fresh_repair = store.get(repair_task_id)
+        except Exception:
+            _refuse('REPAIR_CLAIM_UNAVAILABLE')
+        claims = current.get('review_repair_claims') if type(current) is dict else None
+        fresh = next((item for item in claims
+                      if type(item) is dict and
+                      item.get('repair_task_id') == repair_task_id),
+                     None) if type(claims) is list else None
+        if type(fresh) is not dict or type(fresh_repair) is not dict:
+            _refuse('REPAIR_CLAIM_UNAVAILABLE')
+        if (fresh.get('state') != 'DISPATCHED' or
+                not _manual_unknown_retry_allowed(
+                    current, fresh, fresh_repair, executor_task, pr_number, github_get)):
+            return {'claim': fresh, 'repair_task_id': repair_task_id,
+                    'attempt': fresh.get('attempt'), 'replayed': True,
+                    'next_action': f"review-dispatch --version {packet_version + 1}"}
+        result = _invoke_claimed_adapter(
+            store=store, task_id=task_id, claim=fresh, repair_task=fresh_repair,
+            developer=developer, packet=packet, executor_task=executor_task,
+            profile=profile, dispatch_adapter=dispatch_adapter,
+            delegate_callable=delegate_callable,
+            high_debug_task=high_debug_task,
+            high_debug_ref=high_debug_ref,
+            high_debug_family=high_debug_family)
+        claim = dict(fresh, state='DISPATCHED')
+        return {'result': result, 'attempt': claim['attempt'],
+                'repair_task_id': repair_task_id, 'claim': claim,
+                'replayed': True,
+                'next_action': f"review-dispatch --version {packet_version + 1}"}
+
+
 def repair_review(*, store, task_id, executor_task, pr_number, family=None, github_get=None,
                   dispatch_adapter=None, current_head=None, auto_review=False,
                   review_dispatcher=None, delegate_callable=None,
@@ -1193,6 +1274,39 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                          if claim['repair_task_id'] == existing['repair_task_id'])
             return {'claim': bound, 'repair_task_id': existing['repair_task_id'],
                     'attempt': bound['attempt'], 'replayed': True, 'next_action': 'task advance'}
+        manual_repair_task = repair_task
+        if (not auto and not test_failure and
+                existing.get('state') == 'DISPATCHED' and
+                type(manual_repair_task) is not dict):
+            try:
+                manual_repair_task = store.get(existing['repair_task_id'])
+            except (LLMToolError, KeyError):
+                manual_repair_task = None
+        manual_developer = (manual_repair_task.get('developer')
+                            if type(manual_repair_task) is dict else None)
+        if (not auto and not test_failure and
+                existing.get('state') == 'DISPATCHED' and
+                type(manual_developer) is dict and
+                manual_developer.get('state') == 'DEVELOPER_OUTCOME_UNKNOWN'):
+            # #2781: a manual task repair retries the same claim only when the
+            # existing unknown-repair checks find no blocking reason. Otherwise
+            # the claim is replayed and nothing is dispatched.
+            if _manual_unknown_retry_allowed(
+                    task, existing, manual_repair_task, executor_task, pr_number, github_get):
+                return _retry_unknown_claimed_repair(
+                    store=store, task_id=task_id, existing=existing,
+                    repair_task=manual_repair_task, developer=developer, packet=packet,
+                    executor_task=executor_task, profile=profile,
+                    pr_number=pr_number, github_get=github_get,
+                    dispatch_adapter=dispatch_adapter,
+                    delegate_callable=delegate_callable,
+                    packet_version=packet_version,
+                    high_debug_task=high_debug_task,
+                    high_debug_ref=high_debug_ref,
+                    high_debug_family=high_debug_family)
+            return {'claim': existing, 'repair_task_id': existing['repair_task_id'],
+                    'attempt': existing.get('attempt'), 'replayed': True,
+                    'next_action': f"review-dispatch --version {packet_version + 1}"}
         if (direct_reassignment.replacement_candidate(repair_developer) and
                 (repair_developer.get('provider_profile') == profile or
                  (history and history[-1]['old_profile'] == profile))):
