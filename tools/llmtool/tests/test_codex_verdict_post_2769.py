@@ -69,7 +69,7 @@ def _create_real_task(tmp_dir, *, executor_root):
         'pm_provider_type': 'test',
         'pm_model': None,
         'pm_route_binding': {'type': 'test', 'model': None, 'base_url': None},
-        'backend_session_semantics': 'NOT_STARTED',
+        'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
         'native_session_id': None,
         'state': 'PM_RESPONDED',
         'created_at': stamp,
@@ -109,6 +109,11 @@ def _create_real_task(tmp_dir, *, executor_root):
                 'https://github.com/davidcatcat/davidcattoolsproject/issues/525'
                 '#issuecomment-6468216854'
             ),
+            'claude_result': {
+                'executor_task_id': EXEC,
+                'head_sha': HEAD,
+                'recorded_at': stamp,
+            },
         },
         'pm_assignment': {
             'schema_version': 1,
@@ -118,7 +123,7 @@ def _create_real_task(tmp_dir, *, executor_root):
             'acceptance': ['Post Codex verdict before recording or merging.'],
         },
         'completion': {
-            'state': 'PM_EVIDENCE_READY',
+            'state': 'WAITING_REVIEW',
             'executor_task_id': EXEC,
             'reviewer_task_id': None,
             'evidence': {
@@ -150,8 +155,9 @@ def _create_real_task(tmp_dir, *, executor_root):
             'executor_task': EXEC,
             'sha': HEAD,
             'modules': [],
+            'at': stamp,
         }],
-        'published_pr': {'pr': PR_NUMBER, 'head_sha': HEAD},
+        'published_pr': {'pr': PR_NUMBER, 'head_sha': HEAD, 'recorded_at': stamp},
     }
     store.create(record)
     return store, task_id
