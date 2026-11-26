@@ -65,12 +65,16 @@ All `gw-agent` slices live in `tools/llmtool-npm/` (outside `tools/llmtool/sensi
 
 ### 5.2 Non-Home-LLM Slices (AGY / OpenCode)
 
-- **S7: CLI wiring & version/uninstall subcommands (`AGY` or `OpenCode`):** Wire any new flags or subcommands in `tools/llmtool/llmtool/cli.py` / `entrypoint.py` (large/shared CLI files) and add `uninstall` / `update` / `rollback` commands (A13.3).
-- **S8: Clean-machine acceptance & CI job (`AGY` or `OpenCode` + Owner gate):** Add the offline CI job (named below) under `.github/workflows/` (listed in `tools/llmtool/sensitive-paths.json`) and run clean-machine macOS/Linux acceptance (A13.4).
+Slices below require `AGY` or `OpenCode` due to multi-file state transitions or end-to-end acceptance harnesses. No slice reads or writes oversized files (`tools/llmtool/llmtool/cli.py` and `.github/workflows/llmtool-mac-ci.yml` exceed 24,576 bytes and are excluded; Python-side `cli.py` wiring or `.github/workflows/` edits must wait until those files are split or handled outside the 24,576-byte ceiling).
+
+| Slice | Tier | Read paths | Write paths | Size ceiling (files + packet) | Verification (offline) |
+|---|---|---|---|---|---|
+| **S7: Launcher lifecycle commands** | `AGY` / `OpenCode` (medium) | `tools/llmtool-npm/package.json`, `tools/llmtool-npm/manifest.json`, `tools/llmtool-npm/lib/verify_hash.js`, `tools/llmtool-npm/lib/venv_bootstrap.js`, `tools/llmtool-npm/bin/llmtool.js` | `tools/llmtool-npm/lib/lifecycle.js`, `tools/llmtool-npm/bin/llmtool.js`, `tools/llmtool-npm/tests/lifecycle.test.js` | <= 12 KiB files (<= 24,576 B total) | `node --test` verifying `update`, `uninstall`, and `rollback` (staging backup, hash check, clean removal) in temp dirs |
+| **S8: Offline CI runner & clean-machine harness** | `AGY` / `OpenCode` (medium) | `tools/llmtool-npm/package.json`, `tools/llmtool-npm/manifest.json`, `tools/llmtool-npm/bin/llmtool.js`, `tools/llmtool-npm/lib/lifecycle.js` | `tools/llmtool-npm/scripts/ci_check.sh`, `tools/llmtool-npm/tests/clean_machine.test.js` | <= 12 KiB files (<= 24,576 B total) | `sh tools/llmtool-npm/scripts/ci_check.sh` against isolated temp `HOME` and local fixture archive (no network, no lifecycle scripts) |
 
 ---
 
 ## 6. Needed CI Job (Not Added Here) (P5)
 
-- **Job name:** `check (npm-launcher)` (added to `.github/workflows/llmtool-linux-ci.yml` and `.github/workflows/llmtool-mac-ci.yml` in S8).
-- **Commands:** Run `node --test tools/llmtool-npm/tests/*.test.js` and `pytest tools/llmtool/tests/test_doctor_runtime.py`, plus a static check asserting `package.json` has no `preinstall`/`postinstall` scripts and no network calls occur.
+- **Job name:** `check (npm-launcher)` (needed in Linux and macOS CI workflows; not added here and excluded from S1–S8 because `.github/workflows/` is in `tools/llmtool/sensitive-paths.json` and `llmtool-mac-ci.yml` exceeds 24,576 bytes).
+- **Commands:** Run `sh tools/llmtool-npm/scripts/ci_check.sh` (which executes `node --test tools/llmtool-npm/tests/*.test.js` and asserts `package.json` has no `preinstall`/`install`/`postinstall` scripts) and `pytest tools/llmtool/tests/test_doctor_runtime.py` offline with no network calls.
