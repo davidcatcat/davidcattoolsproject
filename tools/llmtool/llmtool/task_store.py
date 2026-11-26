@@ -1119,6 +1119,25 @@ def _validate_usage(value):
     validate_provider_usage({name: value[name] for name in _USAGE_FIELDS})
 
 
+def _gw_agent_budget_usage_allowed(developer, usage):
+    """#2812: only a gw-agent budget result may keep usage while unavailable.
+
+    The record must be a gw-agent budget result (its fixed budget error code)
+    and its execution must report that the usage came from the provider. Any
+    other unavailable record, route, error code or usage source refuses usage.
+    """
+    if usage is None:
+        return False
+    error_code = developer.get('error_code')
+    execution = developer.get('execution')
+    return (developer.get('provider_profile') == 'gw-agent' and
+            type(error_code) is str and
+            error_code.startswith('DEVELOPER_GW_AGENT_BUDGET_EXCEEDED') and
+            type(execution) is dict and
+            execution.get('status') == 'UNKNOWN' and
+            execution.get('usage_source') == 'CLI_REPORTED')
+
+
 class TaskStoreConflict(LLMToolError):
     """A compare-and-update precondition lost to another task writer."""
 
@@ -3810,7 +3829,9 @@ def _validate(record, *, strict=True, repository_pattern=None):
                     (token_cap_required and developer['max_tokens'] is None)):
                 _fail()
             if dev_state == 'DEVELOPER_UNAVAILABLE' and (
-                    artifact is not None or usage is not None or
+                    artifact is not None or
+                    (usage is not None and
+                     not _gw_agent_budget_usage_allowed(developer, usage)) or
                     developer['error_code'] is None):
                 _fail()
             if dev_state == 'DEVELOPER_OUTCOME_UNKNOWN' and (

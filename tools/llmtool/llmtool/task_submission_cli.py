@@ -8439,6 +8439,14 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             # block the failure record itself.
             records.append({key: value for key, value in failed.items()
                             if key != 'error_cause'})
+        if usage is not None:
+            # #2812 R6: a store that refuses the usage-carrying record must
+            # still keep the failure, without usage and with an UNKNOWN source.
+            without_usage = {**failed, 'usage': None}
+            if type(without_usage.get('execution')) is dict:
+                without_usage['execution'] = {
+                    **without_usage['execution'], 'usage_source': 'UNKNOWN'}
+            records.append(without_usage)
         for record in records:
             try:
                 store.compare_and_update(
