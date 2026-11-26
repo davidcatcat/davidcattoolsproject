@@ -338,6 +338,8 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(self.sent[0]['env']['CLAUDE_CONFIG_DIR'], account)
         self.assertEqual(self.store.get(TASK)['review_dispatch_claim'][0]['account'],
                          'claude-account')
+        self.assertEqual(self.store.get(TASK)['review_dispatch_claim'][0]['reviewer'],
+                         'claude-reviewer')
 
     def test_preflight_version_range_checked_per_kind(self):
         executor = SimpleNamespace(
@@ -1041,6 +1043,7 @@ class ReviewDispatchTests(unittest.TestCase):
                     'effort': 'medium', 'source': 'roles'})
         claim = self.store.get(TASK)['review_dispatch_claim'][0]
         self.assertEqual(result['account_mode'], 'ROLES')
+        self.assertEqual(claim['reviewer'], 'codex-reviewer')
         self.assertEqual(claim['account'], 'review-account')
         self.assertNotIn('/private/codex-review', repr(claim))
         self.assertEqual(calls[0]['model'], CODEX_REVIEW_MODEL)
@@ -1503,8 +1506,9 @@ class ReviewDispatchTests(unittest.TestCase):
                     read_d6.assert_not_called()
 
     def test_paused_worker_policy_refuses_before_claim_or_side_effect(self):
-        with self.assertRaises(LLMToolError):
+        with self.assertRaises(LLMToolError) as raised:
             self.invoke(policy=False)
+        self.assertEqual(raised.exception.review_dispatch_reviewer, 'claude-reviewer')
         self.assertNotIn('review_dispatch_claim', self.store.get(TASK))
         self.assertEqual(self.created, [])
 
@@ -1665,6 +1669,7 @@ def _claim(*, head=HEAD, version=1, reviewer='reviewer-a'):
     stamp = '2026-10-27T00:00:00Z'
     return {'executor_task': 'executor-d6', 'pr': 42, 'head_sha': head,
             'version': version, 'state': 'CLAIMED', 'reviewer_task': reviewer,
+            'reviewer': 'codex-reviewer',
             'native_session_id': None, 'account_mode': 'DEFAULT_SECOND_ACCOUNT',
             'claimed_at': stamp, 'updated_at': stamp}
 

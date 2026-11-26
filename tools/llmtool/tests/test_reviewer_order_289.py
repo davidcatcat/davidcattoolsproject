@@ -157,7 +157,27 @@ class ReviewerOrderTests(unittest.TestCase):
         self.assertEqual(task_advance._reviewer_fallback(task, error),
                          ('claude-reviewer', 'REVIEWER_NOT_ALLOWED'))
         claimed = dict(task, review_dispatch_claim=[{
-            'pr': 42, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}])
+            'pr': 42, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED',
+            'reviewer': 'codex-reviewer'}])
+        self.assertEqual(task_advance._blocked_fallback_reviewer(claimed, HEAD),
+                         'claude-reviewer')
+
+    def test_fallback_excludes_the_reviewer_that_was_attempted_after_it_pauses(self):
+        self._use_policy(['codex-reviewer', 'claude-reviewer'])
+        # codex-reviewer was attempted while ALLOWED, then its route became PAUSED.
+        self._use_worker_policy(paused=('codex-reviewer',))
+        task = self._task('agy', 'gemini-2.5-pro')
+        error = LLMToolError('route unavailable')
+        error.review_dispatch_code = 'REVIEWER_NOT_ALLOWED'
+        self.assertEqual(task_advance._reviewer_fallback(task, error, 'codex-reviewer'),
+                         ('claude-reviewer', 'REVIEWER_NOT_ALLOWED'))
+        # A refusal that names its attempted Reviewer carries the same identity.
+        error.review_dispatch_reviewer = 'codex-reviewer'
+        self.assertEqual(task_advance._reviewer_fallback(task, error),
+                         ('claude-reviewer', 'REVIEWER_NOT_ALLOWED'))
+        claimed = dict(task, review_dispatch_claim=[{
+            'pr': 42, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED',
+            'reviewer': 'codex-reviewer'}])
         self.assertEqual(task_advance._blocked_fallback_reviewer(claimed, HEAD),
                          'claude-reviewer')
 

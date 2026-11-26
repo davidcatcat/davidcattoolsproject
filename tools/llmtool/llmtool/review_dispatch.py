@@ -80,9 +80,12 @@ def _unique_json_object(pairs):
 
 def _refuse(code, message='Reviewer dispatch refused; details omitted', *, reason=None,
             mismatch_keys=None, excerpt=None, reply_diagnostic=None,
-            reply_diagnostic_label=None):
+            reply_diagnostic_label=None, reviewer=None):
     error = LLMToolError(message)
     error.review_dispatch_code = code
+    if reviewer is not None:
+        # The attempted Reviewer, so a route fallback never skips the wrong one.
+        error.review_dispatch_reviewer = reviewer
     if reason is not None:
         error.review_failure_reason = reason
     if mismatch_keys is not None:
@@ -156,8 +159,8 @@ def _admit_review_model(reviewer_key, model):
         return role_config.check_registry_model(reviewer_key, model)
     except LLMToolError as error:
         if getattr(error, 'role_config_code', None) == role_config.ROUTE_CONFIG_UNAVAILABLE:
-            _refuse('ROUTE_CONFIG_UNAVAILABLE')
-        _refuse('ROLE_MODEL_NOT_ALLOWED')
+            _refuse('ROUTE_CONFIG_UNAVAILABLE', reviewer=reviewer_key)
+        _refuse('ROLE_MODEL_NOT_ALLOWED', reviewer=reviewer_key)
 
 
 def _resolve_reviewer_role(reviewer_key):
@@ -171,6 +174,7 @@ def _resolve_reviewer_role(reviewer_key):
             exc.review_dispatch_code = 'ROUTE_CONFIG_UNAVAILABLE'
         elif code == role_config.ROLE_MODEL_NOT_ALLOWED:
             exc.review_dispatch_code = 'ROLE_MODEL_NOT_ALLOWED'
+        exc.review_dispatch_reviewer = reviewer_key
         raise
 
 
@@ -185,8 +189,8 @@ def _review_default_model(reviewer_key):
         _, model = role_config._registry_default(reviewer_key, None)
     except LLMToolError as error:
         if getattr(error, 'role_config_code', None) == role_config.ROUTE_CONFIG_UNAVAILABLE:
-            _refuse('ROUTE_CONFIG_UNAVAILABLE')
-        _refuse('ROLE_MODEL_NOT_ALLOWED')
+            _refuse('ROUTE_CONFIG_UNAVAILABLE', reviewer=reviewer_key)
+        _refuse('ROLE_MODEL_NOT_ALLOWED', reviewer=reviewer_key)
     return model
 
 
@@ -239,7 +243,7 @@ def _select_reviewer(task, requested=None):
         _refuse('REVIEWER_SAME_FAMILY')
     policy = _policy(task, reviewer_key)
     if not policy.allowed:
-        _refuse('REVIEWER_NOT_ALLOWED')
+        _refuse('REVIEWER_NOT_ALLOWED', reviewer=reviewer_key)
     return reviewer_key
 
 
@@ -1732,7 +1736,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
     # policy is re-read again immediately before each external side effect.
     gate = _policy(task, reviewer_key)
     if not gate.allowed:
-        _refuse('REVIEWER_NOT_ALLOWED')
+        _refuse('REVIEWER_NOT_ALLOWED', reviewer=reviewer_key)
     stored_claims = task.get('review_dispatch_claim')
     claims = ([stored_claims] if type(stored_claims) is dict else
               list(stored_claims) if type(stored_claims) is list else [])
@@ -1832,6 +1836,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
     reviewer_task = 'reviewer-' + os.urandom(10).hex()
     claim = {'executor_task': executor_task, 'pr': pr_number, 'head_sha': head,
              'version': version, 'state': 'CLAIMED', 'reviewer_task': reviewer_task,
+             'reviewer': reviewer_key,
              'native_session_id': None, 'account_mode': account_mode,
              'claimed_at': _now(), 'updated_at': _now(),
              'rules_sha256': rules_sha256, 'review_kind': kind}
@@ -1854,7 +1859,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         # Authorization is deliberately re-read immediately before each side effect.
         gate = _policy(task, reviewer_key)
         if not gate.allowed:
-            _refuse(gate.reason_code)
+            _refuse(gate.reason_code, reviewer=reviewer_key)
         github_login = _resolve_github_login()
         create(task_id=reviewer_task, base_sha=head, repo_root=repo_root,
                executor_task=executor_task, github_login=github_login,
@@ -1891,7 +1896,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             _refuse('REVIEW_PROMPT_PR_HEAD_MISMATCH')
         gate = _policy(task, reviewer_key)
         if not gate.allowed:
-            _refuse(gate.reason_code)
+            _refuse(gate.reason_code, reviewer=reviewer_key)
         env = os.environ.copy()
         if config_dir:
             env['CLAUDE_CONFIG_DIR'] = config_dir

@@ -3922,12 +3922,12 @@ _REVIEWER_ROUTE_UNAVAILABLE = ('ROLE_MODEL_NOT_ALLOWED', 'REVIEWER_ACCOUNT_UNCON
                                'REVIEWER_NOT_ALLOWED')
 
 
-def _alternate_reviewer(record):
+def _alternate_reviewer(record, failed=None):
     """#289: the other cross-family ALLOWED Reviewer from the formal order.
 
-    Without the order key the old single alternate is kept. The chosen key is
-    passed through review_dispatch._select_reviewer, so family and the worker
-    policy are checked again before it is returned.
+    failed is the Reviewer that was attempted (or the claim identity). The
+    chosen key is passed through review_dispatch._select_reviewer, so family
+    and the worker policy are checked again before it is returned.
     """
     family = task_completion._reviewer_author_family(record.get('developer'))
     if family is None:
@@ -3938,18 +3938,21 @@ def _alternate_reviewer(record):
         return None
     if order is None:
         candidates = ('claude-reviewer' if family == 'claude' else 'codex-reviewer',)
-        primary = None
+        primary = failed
     else:
-        cross_family = [key for key in order
-                        if review_dispatch._reviewer_family(key) != family]
-        try:
-            primary = next((key for key in cross_family
-                            if review_dispatch._policy(record, key).allowed), None)
-        except Exception:
-            return None
-        if primary is None:
-            return None
         candidates = order
+        if failed is not None:
+            primary = failed
+        else:
+            cross_family = [key for key in order
+                            if review_dispatch._reviewer_family(key) != family]
+            try:
+                primary = next((key for key in cross_family
+                                if review_dispatch._policy(record, key).allowed), None)
+            except Exception:
+                return None
+            if primary is None:
+                return None
     for candidate in candidates:
         if candidate == primary:
             continue
@@ -3961,18 +3964,24 @@ def _alternate_reviewer(record):
     return None
 
 
-def _reviewer_fallback(record, exc):
+def _reviewer_fallback(record, exc, attempted=None):
     """#1831 P1: return (alternate Reviewer or None, code) for a route refusal.
 
     None when the refusal is not a route-unavailable code. The alternate is the
-    other cross-family key from the #289 formal Reviewer order, and only when
-    review_dispatch's own family and policy check admits it; dispatch_review
-    (reviewer=alt) checks it again.
+    other cross-family key from the #289 formal Reviewer order, excluding the
+    Reviewer that was actually attempted, and only when review_dispatch's own
+    family and policy check admits it; dispatch_review (reviewer=alt) checks it
+    again.
     """
     code = getattr(exc, 'review_dispatch_code', None)
     if code not in _REVIEWER_ROUTE_UNAVAILABLE:
         return None
-    alternate = _alternate_reviewer(record)
+    failed = getattr(exc, 'review_dispatch_reviewer', None)
+    if failed not in repair_policy.FORMAL_REVIEWER_KEYS:
+        failed = attempted
+    if failed not in repair_policy.FORMAL_REVIEWER_KEYS:
+        failed = None
+    alternate = _alternate_reviewer(record, failed)
     if alternate is None:
         return None, code
     return alternate, code
@@ -3980,10 +3989,14 @@ def _reviewer_fallback(record, exc):
 
 def _blocked_fallback_reviewer(record, head):
     """#1831 P2: the other eligible Reviewer while the head has one claim, else None."""
-    if sum(type(item) is dict and item.get('head_sha') == head
-           for item in _non_ruling_claims(record)) != 1:
+    claims = [item for item in _non_ruling_claims(record)
+              if type(item) is dict and item.get('head_sha') == head]
+    if len(claims) != 1:
         return None
-    return _alternate_reviewer(record)
+    failed = claims[0].get('reviewer')
+    if failed not in repair_policy.FORMAL_REVIEWER_KEYS:
+        failed = None
+    return _alternate_reviewer(record, failed)
 
 
 def _refusal(exc, attribute):
@@ -5036,6 +5049,12 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             if redispatch_reason is not None:
                 codes.extend(('REVIEW_REDISPATCHED', redispatch_reason))
             rerun_kwargs = ({} if rerun_version is None else {'refusal_rerun': True})
+            attempted_reviewer = None
+            if blocked_reviewer is None:
+                try:
+                    attempted_reviewer = review_dispatch._select_reviewer(record)
+                except Exception:
+                    attempted_reviewer = None
             try:
                 try:
                     result = invoke(store=store, task_id=task_id, executor_task=executor_task,
@@ -5045,7 +5064,8 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                                     **rerun_kwargs)
                 except Exception as exc:
                     # A P2 redispatch already uses the alternate: no P1 fallback on top.
-                    fallback = None if blocked_reviewer else _reviewer_fallback(record, exc)
+                    fallback = (None if blocked_reviewer else
+                                _reviewer_fallback(record, exc, attempted_reviewer))
                     if fallback is None:
                         raise
                     # #1831 P1: one fallback per step, through dispatch_review only.
