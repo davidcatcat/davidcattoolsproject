@@ -2283,6 +2283,180 @@ def run_task_review_prompt(args, *, store=None):
     return 0
 
 
+def _caller_posts_verdict(result):
+    """True only when this caller, not dispatch_review, must post the verdict."""
+    if 'verdict_post' not in result:
+        return True
+    verdict_post = result.get('verdict_post')
+    return (type(verdict_post) is dict and
+            verdict_post.get('state') in ('CALLER_POSTING', 'RECEIPT_UNAVAILABLE'))
+
+
+def _post_caller_verdict_under_lock(*, fd, directory, name, task, task_id, claim,
+                                     text, root):
+    from . import review_dispatch
+    identity = review_dispatch._receipt_identity(task_id, claim, text)
+    lock_path = Path(directory) / (name + '.lock')
+    receipt = review_dispatch._read_receipt(directory, name)
+    if receipt is not None:
+        review_dispatch._check_receipt(receipt, identity)
+    binding_line = review_dispatch._verdict_binding_line(task, task_id, claim, text)
+    now = time.time()
+    if (receipt is not None and receipt['state'] == 'POSTING' and
+            receipt['owner'] == 'dispatch' and
+            now - receipt['started_at'] < review_dispatch._VERDICT_POST_STALE_SECONDS):
+        return {'state': 'IN_PROGRESS'}, False
+    login = review_dispatch._resolve_github_login()
+    if receipt is not None and receipt['state'] == 'POSTED':
+        try:
+            comments = review_dispatch._list_issue_comments(claim.get('pr'))
+        except Exception:
+            comments = None
+        match, _conflict, duplicate = (
+            review_dispatch._match_posted(comments, login, text, binding_line, claim)
+            if type(comments) is list else (None, False, False))
+        if duplicate:
+            try:
+                review_dispatch._write_receipt(directory, name, dict(
+                    receipt, code='VERDICT_POST_DUPLICATE', updated_at=time.time()))
+            except review_dispatch._PostError:
+                raise review_dispatch._verdict_post_failure(
+                    'VERDICT_POST_DUPLICATE', receipt_failed=True) from None
+            raise review_dispatch._verdict_post_failure('VERDICT_POST_DUPLICATE')
+        if match is not None:
+            return {'state': 'ALREADY_POSTED',
+                    'comment_id': review_dispatch._comment_id(match)}, False
+        output = {'state': 'POSTED_UNVERIFIED'}
+        if review_dispatch._comment_id(receipt) is not None:
+            output['comment_id'] = receipt['comment_id']
+        return output, False
+
+    attempt = os.urandom(16).hex()
+    base = dict(identity, owner='caller', attempt=attempt, started_at=now)
+
+    def record(state, **extra):
+        review_dispatch._write_receipt(
+            directory, name, dict(base, state=state, updated_at=time.time(), **extra))
+
+    def failed(code):
+        try:
+            record('FAILED', code=code)
+        except review_dispatch._PostError:
+            return review_dispatch._verdict_post_failure(code, receipt_failed=True)
+        return review_dispatch._verdict_post_failure(code)
+
+    try:
+        record('POSTING')
+    except review_dispatch._PostError as exc:
+        raise review_dispatch._verdict_post_failure(exc.code, receipt_failed=True) from None
+    try:
+        comments = review_dispatch._list_issue_comments(claim.get('pr'))
+    except Exception:
+        comments = None
+    if type(comments) is not list:
+        raise failed('VERDICT_POST_LIST_FAILED')
+    match, conflict, duplicate = review_dispatch._match_posted(
+        comments, login, text, binding_line, claim)
+    if duplicate:
+        raise failed('VERDICT_POST_DUPLICATE')
+    if match is not None:
+        output = {'state': 'ALREADY_POSTED',
+                  'comment_id': review_dispatch._comment_id(match)}
+        try:
+            record('POSTED', comment_id=review_dispatch._comment_id(match), verified=True)
+        except review_dispatch._PostError:
+            output['receipt'] = 'WRITE_FAILED'
+        return output, False
+    if conflict:
+        raise failed('VERDICT_POST_CONFLICT')
+    if not review_dispatch._policy(task, 'codex-reviewer').allowed:
+        raise failed('VERDICT_POST_NOT_ALLOWED')
+    try:
+        current = review_dispatch._read_receipt(directory, name)
+    except review_dispatch._PostError:
+        current = None
+    if (type(current) is not dict or current.get('attempt') != attempt or
+            current.get('state') != 'POSTING' or
+            not review_dispatch._lock_current(fd, lock_path)):
+        raise review_dispatch._verdict_post_failure('VERDICT_POST_FENCED')
+    try:
+        created = review_dispatch._create_issue_comment(root, claim.get('pr'), text)
+    except review_dispatch._PostError as exc:
+        raise failed(exc.code) from None
+    except Exception:
+        raise failed('VERDICT_POST_COMMAND_FAILED') from None
+    user = created.get('user') if type(created) is dict else None
+    verified = (type(created) is dict and created.get('body') == text and
+                type(user) is dict and user.get('login') == login)
+    output = {'state': 'POSTED' if verified else 'POSTED_UNVERIFIED'}
+    if review_dispatch._comment_id(created) is not None:
+        output['comment_id'] = review_dispatch._comment_id(created)
+    try:
+        record('POSTED', comment_id=review_dispatch._comment_id(created), verified=verified)
+    except review_dispatch._PostError:
+        output['receipt'] = 'WRITE_FAILED'
+    return output, False
+
+
+def _post_caller_verdict(store, args, result):
+    """Post a completed Codex verdict handed to the manual CLI caller (#2769)."""
+    from . import review_dispatch
+    text = result['review_text']
+    task_id = args.task_id
+    pr_number = args.pr
+    try:
+        task = store.get(task_id)
+        stored_claims = task.get('review_dispatch_claim') if type(task) is dict else None
+        claims = ([stored_claims] if type(stored_claims) is dict else
+                  list(stored_claims) if type(stored_claims) is list else [])
+        claim = next((
+            item for item in claims
+            if type(item) is dict and
+            item.get('state') == 'COMPLETED' and
+            item.get('pr') == pr_number and
+            item.get('head_sha') == result.get('head_sha') and
+            item.get('version') == result.get('version') and
+            item.get('reviewer_task') == result.get('reviewer_task')
+        ), None)
+        if claim is None:
+            raise review_dispatch._PostError('VERDICT_POST_BINDING_INVALID')
+        completion = task.get('completion')
+        evidence = completion.get('evidence') if type(completion) is dict else None
+        root = evidence.get('root') if type(evidence) is dict else None
+        if type(root) is not str or not root:
+            root = os.getcwd()
+        directory = review_dispatch._verdict_post_dir(store)
+        name = review_dispatch._verdict_post_name(task_id, claim)
+        fd = review_dispatch._acquire_post_lock(directory, name)
+    except review_dispatch._PostError as exc:
+        return {'state': 'FAILED', 'code': exc.code}, True
+    except LLMToolError as exc:
+        code = (getattr(exc, 'review_verdict_post_code', None) or
+                getattr(exc, 'review_dispatch_code', None) or 'VERDICT_POST_FAILED')
+        return {'state': 'FAILED', 'code': code}, True
+    except Exception:
+        return {'state': 'FAILED', 'code': 'VERDICT_POST_FAILED'}, True
+    if fd is None:
+        return {'state': 'IN_PROGRESS'}, False
+    try:
+        return _post_caller_verdict_under_lock(
+            fd=fd, directory=directory, name=name, task=task, task_id=task_id,
+            claim=claim, text=text, root=root)
+    except review_dispatch._PostError as exc:
+        return {'state': 'FAILED', 'code': exc.code}, True
+    except LLMToolError as exc:
+        code = (getattr(exc, 'review_verdict_post_code', None) or
+                getattr(exc, 'review_dispatch_code', None) or 'VERDICT_POST_FAILED')
+        failed = {'state': 'FAILED', 'code': code}
+        if getattr(exc, 'review_verdict_receipt', None) == 'WRITE_FAILED':
+            failed['receipt'] = 'WRITE_FAILED'
+        return failed, True
+    except Exception:
+        return {'state': 'FAILED', 'code': 'VERDICT_POST_FAILED'}, True
+    finally:
+        os.close(fd)
+
+
 def run_task_review_dispatch(args, *, store=None):
     """Thin CLI adapter for the one-shot Reviewer dispatcher.
 
@@ -2303,6 +2477,21 @@ def run_task_review_dispatch(args, *, store=None):
                              task_id=args.task_id, executor_task=args.executor_task,
                              pr_number=args.pr, version=getattr(args, 'version', 1),
                              reviewer=getattr(args, 'reviewer', None))
+    failed_post = False
+    if type(result) is dict:
+        review_text = result.get('review_text')
+        if (result.get('state') == 'COMPLETED' and
+                type(review_text) is str and review_text and
+                _caller_posts_verdict(result)):
+            verdict_post, failed_post = _post_caller_verdict(store, args, result)
+            result = dict(result)
+            result['verdict_post'] = verdict_post
+        elif 'review_text' in result:
+            result = dict(result)
+        result.pop('review_text', None)
+    if failed_post:
+        _print(result)
+        return 1
     return _print(result)
 
 
