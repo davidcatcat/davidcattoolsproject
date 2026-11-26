@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from llmtool import review_dispatch, task_advance
+from llmtool import repair_policy, review_dispatch, task_advance
 
 
 HEAD = 'a' * 40
@@ -244,7 +244,11 @@ class SecurityDispatchTests(unittest.TestCase):
             developer={'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'agy',
                        'model': 'gemini-3.8-flash-medium'})
         policy = type('P', (), {'allowed': True})()
-        with mock.patch.object(review_dispatch, '_policy', return_value=policy):
+        # Legacy behaviour: no configured reviewer order. Pin that explicitly so
+        # the case does not read the live policy.json, which may carry an order.
+        with mock.patch.object(review_dispatch, '_policy', return_value=policy), \
+                mock.patch.object(repair_policy, 'formal_reviewer_order',
+                                  return_value=None, create=True):
             outcome = self._advance(record, _github([_security_comment('FAIL')]))
         self.assertRefused(outcome, NOT_PASS)
 
