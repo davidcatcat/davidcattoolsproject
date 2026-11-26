@@ -158,7 +158,8 @@ _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS = (
     _REVIEW_DISPATCH_CLAIM_FIELDS | frozenset(('account',)))
 _REVIEW_DISPATCH_RESULT_FIELDS = frozenset((
     'task_id', 'run_id', 'contract_digest', 'head', 'verdict', 'review_text'))
-_REVIEW_USAGE_UNKNOWN_REASONS = frozenset(('TRANSCRIPT_UNAVAILABLE', 'USAGE_ABSENT'))
+_REVIEW_USAGE_UNKNOWN_REASONS = frozenset((
+    'TRANSCRIPT_UNAVAILABLE', 'USAGE_ABSENT', 'STREAM_USAGE_ABSENT'))
 _REVIEW_REPAIR_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'attempt', 'state',
     'comment_id', 'packet_sha256', 'claimed_at'))
@@ -7026,6 +7027,12 @@ class TaskStore:
                                   type(after.get('review_result')) is dict and
                                   type(after['review_result'].get('source')) is dict and
                                   after['review_result']['source'].get('kind') == 'CODEX_JSONL')) and
+                                (('usage' not in after and 'usage_unknown' not in after) or
+                                 (after.get('state') == 'COMPLETED' and
+                                  'purpose' not in before and
+                                  'usage' not in before and
+                                  'usage_unknown' not in before and
+                                  ('usage' in after) != ('usage_unknown' in after))) and
                                 all(old == new for i, (old, new) in
                                     enumerate(zip(old_claims, new_claims)) if i != index))
                             if (not allowed_claim_transition and not ruled_entry and

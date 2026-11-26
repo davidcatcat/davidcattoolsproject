@@ -840,9 +840,34 @@ def _record_codex_quota(raw_stdout):
         pass
 
 
+def _codex_stream_usage(raw):
+    """Return (usage, usage_unknown_reason) parsed from a Codex exec JSONL stream."""
+    from . import high_debug, task_store
+    parsed = high_debug._usage_from_events(raw) if type(raw) is bytes else 'UNKNOWN'
+    if type(parsed) is not dict:
+        return None, 'STREAM_USAGE_ABSENT'
+    prompt_tokens = parsed['input']
+    completion_tokens = parsed['output']
+    total_tokens = prompt_tokens + completion_tokens
+    if total_tokens <= 0:
+        return None, 'STREAM_USAGE_ABSENT'
+    usage = {
+        'prompt_tokens': prompt_tokens,
+        'completion_tokens': completion_tokens,
+        'total_tokens': total_tokens,
+        'cached_prompt_tokens': parsed['cached'],
+    }
+    try:
+        task_store._validate_usage(usage)
+    except Exception:
+        return None, 'STREAM_USAGE_ABSENT'
+    return usage, None
+
+
 def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
                     model=None, effort=_CODEX_REVIEW_EFFORT,
-                    config_dir=None, parser=_parse_codex_review):
+                    config_dir=None, parser=_parse_codex_review,
+                    usage_out=None):
     model = _review_model('codex-reviewer', model)
     try:
         timeout = developer_routes.role_timeout('codex-reviewer')
@@ -876,10 +901,17 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
     if type(binding) is not dict:
         _refuse('REVIEW_PROMPT_BINDING_MISSING')
     _record_codex_quota(result.stdout)
-    return parser(
+    parsed = parser(
         result.stdout, task_id=task.get('task_id'), run_id=task.get('run_id'),
         contract_digest=binding.get('contract_digest'),
         head=head, version=version)
+    if usage_out is not None:
+        usage, reason = _codex_stream_usage(result.stdout)
+        if usage is not None:
+            usage_out['usage'] = usage
+        else:
+            usage_out['usage_unknown'] = {'reason': reason}
+    return parsed
 
 
 def _dispatch(*, task_id, prompt, repo_root, env, model,
@@ -1879,15 +1911,23 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             env.pop('CLAUDE_CONFIG_DIR', None)
         home = env.get('HOME') or os.path.expanduser('~')
         env = github_identity.ai_github_env(env, home)
+        codex_usage = {}
         if reviewer_key == 'codex-reviewer':
             reviewer = task_completion.read_d6_registration(
                 reviewer_task, executor.common_dir,
                 allowed_states=task_completion._D6_EVIDENCE_STATES)
-            run_codex = codex_runner or _dispatch_codex
-            codex_result = run_codex(reviewer_root=reviewer.root, prompt=prompt,
-                                     task=task, head=head, version=version,
-                                     model=codex_model, effort=codex_effort,
-                                     config_dir=config_dir)
+            if codex_runner is None:
+                codex_result = _dispatch_codex(
+                    reviewer_root=reviewer.root, prompt=prompt,
+                    task=task, head=head, version=version,
+                    model=codex_model, effort=codex_effort,
+                    config_dir=config_dir, usage_out=codex_usage)
+            else:
+                codex_result = codex_runner(
+                    reviewer_root=reviewer.root, prompt=prompt,
+                    task=task, head=head, version=version,
+                    model=codex_model, effort=codex_effort,
+                    config_dir=config_dir)
             if type(codex_result) is not dict:
                 _refuse('REVIEW_NOT_POSTED')
             session_id = codex_result.get('thread_id')
@@ -1917,6 +1957,12 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                 'contract_digest': binding.get('contract_digest'), 'head': head,
                 'verdict': verdict, 'review_text': review_text,
             }
+            if 'usage' in codex_usage:
+                dispatched['usage'] = codex_usage['usage']
+            elif 'usage_unknown' in codex_usage:
+                dispatched['usage_unknown'] = codex_usage['usage_unknown']
+            else:
+                dispatched['usage_unknown'] = {'reason': 'STREAM_USAGE_ABSENT'}
         updated_claims = [dispatched if item is claim else item for item in claims + [claim]]
         store.compare_and_update(task_id, expected={'review_dispatch_claim': claims + [claim]},
                                  review_dispatch_claim=updated_claims)
