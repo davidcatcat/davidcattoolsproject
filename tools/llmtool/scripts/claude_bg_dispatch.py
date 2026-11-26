@@ -91,10 +91,11 @@ NO_PROMPT_MARKER = "send a prompt to start"
 CLI_TIMEOUT = 30
 OUTPUT_LIMIT = 4 * 1024 * 1024
 PROMPT_LIMIT = 64 * 1024
-# #1019 row 4: a Claude Reviewer session starts without file-editing tools.
-# Bash stays, because the Reviewer posts its verdict with gh; this is an accident
-# guard, not a containment boundary. #1502 WP-H E7: Skill is denied too, so
-# project skills under .claude/skills cannot steer the Reviewer.
+# #1019 row 4: a Claude Reviewer session has no file-editing tools (`Edit`,
+# `Write`, `NotebookEdit`). `Bash` stays available, intended for read-only git
+# inspection, while llmtool relays the verdict instead of the Reviewer posting
+# it with `gh`; this is an accident guard, not a security boundary.
+# #1502 WP-H E7: `Skill` is also denied so project skills cannot steer it.
 REVIEWER_DISALLOWED_TOOLS_ARG = "--disallowedTools=Edit,Write,NotebookEdit,Skill"
 # #1502 WP-H E7 prerequisite 3: every other launched role (every Claude
 # Developer name) is denied Skill too, so project skills cannot steer it either.

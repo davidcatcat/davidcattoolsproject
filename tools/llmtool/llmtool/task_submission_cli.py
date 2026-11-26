@@ -2212,9 +2212,10 @@ def run_task_review_prompt(args, *, store=None):
         ))
     else:
         lines.extend((
-            'Run only tests relevant to the reviewed change.',
-            'Do not run the full test suite locally; exact-head CI is the full-suite gate.',
-            'After posting the verdict and sending the summary, end this session and leave no background process.',
+            'Do not run tests here: this session is read-only and may run only read-only git inspection.',
+            'Not running a test is never by itself a reason for FAIL, even when the Task contract names a test run.',
+            'Do not post to GitHub; llmtool relays the verdict you return.',
+            'After returning the verdict, end this session and leave no background process.',
         ))
     lines.extend((
         '',
@@ -2266,11 +2267,11 @@ def run_task_review_prompt(args, *, store=None):
         ))
     else:
         lines.extend((
-            'Verdict FAIL if any acceptance item is unmet; a missing required test is unmet.',
+            'Verdict FAIL if any acceptance item is unmet; a required test absent from the diff is unmet, and a test not run here is not unmet.',
             '<<< END PM TASK CONTRACT DATA >>>',
             *original_lines,
             '',
-            'Post these exact lines in your review:',
+            'Use these exact lines in your returned review:',
             verdict_line,
             f'Verdict: PASS | Version: v{version} | HEAD: {expected_head}',
             task_completion._FORMAL_ACCEPT,

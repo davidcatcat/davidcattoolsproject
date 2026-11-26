@@ -821,8 +821,8 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.assertEqual(dispatch_tool.REVIEWER_DISALLOWED_TOOLS_ARG,
                          '--disallowedTools=Edit,Write,NotebookEdit,Skill')
         self.assertEqual(dispatch_tool.SKILL_DISALLOWED_TOOLS_ARG, '--disallowedTools=Skill')
-        for name, expected in (('claude-reviewer', [dispatch_tool.REVIEWER_DISALLOWED_TOOLS_ARG]),
-                               ('claude-developer', [dispatch_tool.SKILL_DISALLOWED_TOOLS_ARG])):
+        for name, expected in (('claude-reviewer', dispatch_tool.REVIEWER_DISALLOWED_TOOLS_ARG),
+                               ('claude-developer', dispatch_tool.SKILL_DISALLOWED_TOOLS_ARG)):
             with self.subTest(name=name):
                 self.reset()
                 self.scenario(after=[[row('NEW-SESSION', name=name, cwd=self.root)]],
@@ -835,9 +835,9 @@ class ClaudeBgDispatchTests(unittest.TestCase):
                 self.assertEqual(code, 0, receipt)
                 [launch] = self.launches()
                 argv = launch['argv']
-                self.assertEqual([arg for arg in argv if arg.startswith('--disallowedTools')],
-                                 expected)
-                self.assertLess(argv.index(expected[0]), argv.index('-n'))
+                limits = [arg for arg in argv if arg.startswith('--disallowedTools')]
+                self.assertEqual(limits, [expected])
+                self.assertLess(argv.index(expected), argv.index('-n'))
                 self.assertEqual(argv[-2:], ['--', 'work'])
                 self.assertEqual(self.parsed(), [{'add_dirs': [self.root], 'prompt': 'work'}])
 
@@ -871,8 +871,8 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         # The developer argv carries exactly one tool limit, and it denies only Skill.
         developer_limits = [arg for arg in developer_argv if arg.startswith('--disallowedTools')]
         self.assertEqual(developer_limits, ['--disallowedTools=Skill'])
-        # Apart from the Reviewer-only model and the tool limit value, both argvs
-        # are identical, with the tool limit in the same place.
+        # Apart from the Reviewer-only model, both argvs are identical, with the
+        # --disallowedTools flag in the same place.
         model_at = reviewer_argv.index('--model')
         self.assertEqual(reviewer_argv[model_at + 1], REVIEW_MODEL)
         reviewer_rest = reviewer_argv[:model_at] + reviewer_argv[model_at + 2:]
