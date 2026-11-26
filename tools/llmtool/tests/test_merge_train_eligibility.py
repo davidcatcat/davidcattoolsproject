@@ -438,6 +438,60 @@ class ReviewRefusalTests(_Base):
         self.assertRefused(self.check(record=record, routes=routes),
                            'TRAIN_MEMBER_REVIEW_NOT_PASS')
 
+    def test_codex_posted_verdict_gate_enforced_and_claude_unchanged(self):
+        run_id = 'r' * 32
+        digest = 'c' * 64
+        verdict_text = (
+            '<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->\n'
+            f'Verdict: PASS | Version: v2 | HEAD: {HEAD}\n'
+            'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n'
+            f'LLMTOOL-REVIEW-BINDING v1 task={TASK_ID} run={run_id} '
+            f'contract={digest} head={HEAD}'
+        )
+        record = _record(
+            run_id=run_id,
+            developer={'provider_profile': 'claude'},
+            task_binding={'contract_digest': digest},
+            review_dispatch_claim=[{
+                'pr': PR, 'head_sha': HEAD, 'state': 'COMPLETED', 'version': 2,
+                'review_result': {'verdict': 'PASS', 'review_text': verdict_text},
+            }],
+            remote_test_receipts=[{
+                'source_sha': HEAD, 'result': 'PASS', 'task_id': TASK_ID,
+                'run_id': run_id, 'executor_task': EXECUTOR,
+                'modules': ['test_merge_train_eligibility'], 'ran_total': 3,
+                'final': ['OK'], 'failures': [], 'elapsed_s': 1.5,
+            }],
+        )
+        record['remote_test_receipts'][0]['receipt_digest'] = hashlib.sha256(
+            task_store._json_bytes(record['remote_test_receipts'][0])).hexdigest()
+
+        with mock.patch.object(eligibility.task_advance.github_identity, 'ai_login',
+                               return_value='verified-ai'):
+            self.assertRefused(self.check(record=record), 'MERGE_REVIEW_VERDICT_NOT_POSTED')
+
+            other_comment = [{
+                'id': 501, 'body': verdict_text, 'user': {'login': 'other-user'},
+                'created_at': '2026-11-26T00:05:00Z', 'updated_at': '2026-11-26T00:05:00Z',
+            }]
+            self.assertRefused(
+                self.check(record=record, routes=_routes(**{COMMENTS: other_comment})),
+                'MERGE_REVIEW_VERDICT_NOT_POSTED')
+
+            verified_comment = [{
+                'id': 502, 'body': verdict_text, 'user': {'login': 'verified-ai'},
+                'created_at': '2026-11-26T00:05:00Z', 'updated_at': '2026-11-26T00:05:00Z',
+            }]
+            self.assertTrue(
+                self.check(record=record, routes=_routes(**{COMMENTS: verified_comment}))['eligible'])
+
+        claude_record = _record(
+            review_dispatch_claim=[{
+                'pr': PR, 'head_sha': HEAD, 'state': 'DISPATCHED', 'version': 2,
+            }],
+        )
+        self.assertTrue(self.check(record=claude_record)['eligible'])
+
 
 class CiRefusalTests(_Base):
     def assertCi(self, checks, code, files=None, pull=None):

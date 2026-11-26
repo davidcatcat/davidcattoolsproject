@@ -324,6 +324,50 @@ class MergeTrainOpsTest(unittest.TestCase):
         self._assert_refused(result, merge_train_ops.TRAIN_MEMBER_CHANGED)
         self.assertEqual(result['result']['task_id'], TASK_B)
 
+    def test_member_posted_verdict_gate_enforced_and_claude_unchanged(self):
+        self._create()
+        run_id = 'e' * 32
+        digest = 'f' * 64
+        verdict_text = (
+            '<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->\n'
+            f'Verdict: PASS | Version: v1 | HEAD: {self.head_a}\n'
+            'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n'
+            f'LLMTOOL-REVIEW-BINDING v1 task={TASK_A} run={run_id} '
+            f'contract={digest} head={self.head_a}'
+        )
+        self.store.records[TASK_A].update({
+            'developer': {'provider_profile': 'claude'},
+            'task_binding': {'contract_digest': digest},
+            'review_dispatch_claim': [{
+                'pr': PR_A, 'head_sha': self.head_a, 'state': 'COMPLETED', 'version': 1,
+                'review_result': {'verdict': 'PASS', 'review_text': verdict_text},
+            }],
+        })
+        self.store.records[TASK_B]['review_dispatch_claim'] = [{
+            'pr': PR_B, 'head_sha': self.head_b, 'state': 'DISPATCHED', 'version': 1,
+        }]
+
+        with mock.patch.object(merge_train_ops.task_advance.github_identity, 'ai_login',
+                               return_value='verified-ai'):
+            result = self._merge()
+            self._assert_refused(result, merge_train_ops.TRAIN_MEMBER_CHANGED)
+            self.assertEqual(result['result']['task_id'], TASK_A)
+
+            self.github.comments[PR_A] = [{
+                'id': 601, 'body': verdict_text, 'user': {'login': 'other-user'},
+                'created_at': '2026-11-26T00:05:00Z', 'updated_at': '2026-11-26T00:05:00Z',
+            }]
+            copy_result = self._merge()
+            self._assert_refused(copy_result, merge_train_ops.TRAIN_MEMBER_CHANGED)
+            self.assertEqual(copy_result['result']['task_id'], TASK_A)
+
+            self.github.comments[PR_A] = [{
+                'id': 602, 'body': verdict_text, 'user': {'login': 'verified-ai'},
+                'created_at': '2026-11-26T00:05:00Z', 'updated_at': '2026-11-26T00:05:00Z',
+            }]
+            merged = self._merge()
+            self.assertEqual(merged['step'], 'MERGED', merged)
+
     def test_member_with_pushed_head_refuses(self):
         self._create()
         self.github.pulls[PR_A]['head']['sha'] = OTHER_SHA

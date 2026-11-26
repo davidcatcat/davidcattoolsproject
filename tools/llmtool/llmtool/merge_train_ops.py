@@ -186,9 +186,12 @@ def _member_unchanged(member, store, github_get):
         except Exception:
             pass
         version = task_advance._merge_pass_claim(record, member['pr'], member['head'], events)
+        if type(version) is not int or version != member['review_version']:
+            return False
+        return task_advance._posted_verdict_code(
+            record, member['pr'], member['head'], version, github_get) is None
     except Exception:
         return False
-    return type(version) is int and version == member['review_version']
 
 
 def _provenance(record, merge_sha):

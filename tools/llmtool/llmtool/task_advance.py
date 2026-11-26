@@ -1917,6 +1917,50 @@ def _caller_posts_verdict(result):
             verdict_post.get('state') in _CALLER_VERDICT_POST_STATES)
 
 
+def _posted_verdict_code(record, number, head, review_version, github_get):
+    """Require a verified PR comment for a COMPLETED Codex PASS with review_text."""
+    winning_claim = next((
+        claim for claim in _claims(record)
+        if type(claim) is dict and claim.get('pr') == number and
+        claim.get('head_sha') == head and
+        review_result.review_kind(claim) == 'formal' and
+        claim.get('version') == review_version
+    ), None)
+    if type(winning_claim) is not dict or winning_claim.get('state') != 'COMPLETED':
+        return None
+    winning_res = winning_claim.get('review_result')
+    winning_text = (winning_res.get('review_text')
+                    if type(winning_res) is dict else None)
+    if type(winning_text) is not str or not winning_text:
+        return None
+    try:
+        expected_login = github_identity.ai_login()
+    except Exception:
+        expected_login = None
+    if type(expected_login) is not str or not expected_login:
+        return 'MERGE_REVIEW_VERDICT_NOT_POSTED'
+    comments, comments_code = _issue_comments(number, github_get)
+    if comments_code is not None or type(comments) is not list:
+        return 'MERGE_REVIEW_VERDICT_NOT_POSTED'
+    for comment in comments:
+        if type(comment) is not dict or comment.get('body') != winning_text:
+            continue
+        user = comment.get('user')
+        if type(user) is not dict or user.get('login') != expected_login:
+            continue
+        cid = comment.get('id')
+        if type(cid) is not int or isinstance(cid, bool) or cid <= 0:
+            continue
+        try:
+            verdict = review_result._comment_verdict(
+                comment, head=head, version=review_version, task=record)
+        except Exception:
+            verdict = None
+        if verdict is not None and verdict[2] == 'REVIEW_PASS':
+            return None
+    return 'MERGE_REVIEW_VERDICT_NOT_POSTED'
+
+
 def _merge_pass_claim(record, number, head, events):
     candidates = []
     for claim in _claims(record):
@@ -2541,38 +2585,9 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         review_version = _merge_pass_claim(record, number, head, events)
         if type(review_version) is not int:
             return _merge_refusal(review_version or 'MERGE_REVIEW_NOT_PASS')
-        winning_claim = next((
-            claim for claim in _claims(record)
-            if type(claim) is dict and claim.get('pr') == number and
-            claim.get('head_sha') == head and
-            review_result.review_kind(claim) == 'formal' and
-            claim.get('version') == review_version
-        ), None)
-        if type(winning_claim) is dict and winning_claim.get('state') == 'COMPLETED':
-            winning_res = winning_claim.get('review_result')
-            winning_text = (winning_res.get('review_text')
-                            if type(winning_res) is dict else None)
-            if type(winning_text) is str and winning_text:
-                comments, comments_code = _issue_comments(number, github_get)
-                if comments_code is not None or type(comments) is not list:
-                    return _merge_refusal('MERGE_REVIEW_VERDICT_NOT_POSTED')
-                posted_ok = False
-                for comment in comments:
-                    if type(comment) is not dict or comment.get('body') != winning_text:
-                        continue
-                    cid = comment.get('id')
-                    if type(cid) is not int or isinstance(cid, bool) or cid <= 0:
-                        continue
-                    try:
-                        verdict = review_result._comment_verdict(
-                            comment, head=head, version=review_version, task=record)
-                    except Exception:
-                        verdict = None
-                    if verdict is not None and verdict[2] == 'REVIEW_PASS':
-                        posted_ok = True
-                        break
-                if not posted_ok:
-                    return _merge_refusal('MERGE_REVIEW_VERDICT_NOT_POSTED')
+        posted_code = _posted_verdict_code(record, number, head, review_version, github_get)
+        if posted_code is not None:
+            return _merge_refusal(posted_code)
     security_code = _merge_security_claim(record, number, head, events, github_get=github_get)
     if security_code is not None:
         return _security_merge_refusal(security_code, number=number, head=head)

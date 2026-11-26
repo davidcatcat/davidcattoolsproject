@@ -126,6 +126,13 @@ def _review_version(record, pr, head, github_get):
     except Exception:
         return TRAIN_MEMBER_REVIEW_NOT_PASS
     if type(version) is int and version >= 1:
+        try:
+            posted_code = task_advance._posted_verdict_code(
+                record, pr, head, version, github_get)
+        except Exception:
+            return 'MERGE_REVIEW_VERDICT_NOT_POSTED'
+        if posted_code is not None:
+            return posted_code
         return version
     if type(version) is str and version:
         return version

@@ -446,7 +446,8 @@ class CodexVerdictPost2769Tests(unittest.TestCase):
             return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
 
         with patch.object(task_advance, '_d6_snapshot', return_value=self._d6()), \
-                patch.object(task_advance, '_pr_snapshot', return_value=self._pr()):
+                patch.object(task_advance, '_pr_snapshot', return_value=self._pr()), \
+                patch.object(task_advance.github_identity, 'ai_login', return_value=LOGIN):
             refused = task_advance.advance(
                 task_id=self.task_id, store=self.store, pr_number=PR_NUMBER,
                 merge=True, github_get=self._github_get, merge_gh_runner=gh_runner)
@@ -454,10 +455,29 @@ class CodexVerdictPost2769Tests(unittest.TestCase):
         self.assertEqual(refused['codes'], ['MERGE_REVIEW_VERDICT_NOT_POSTED'])
         self.assertEqual(merges, [])
 
-        # Once the exact comment is posted on the PR, the merge gate accepts it.
+        # A copy posted by another GitHub login is still refused.
+        self.comments.append({
+            'id': 900,
+            'body': self.verdict_text,
+            'user': {'login': 'other-user'},
+            'created_at': '2026-11-26T00:05:00Z',
+            'updated_at': '2026-11-26T00:05:00Z',
+        })
+        with patch.object(task_advance, '_d6_snapshot', return_value=self._d6()), \
+                patch.object(task_advance, '_pr_snapshot', return_value=self._pr()), \
+                patch.object(task_advance.github_identity, 'ai_login', return_value=LOGIN):
+            copy_refused = task_advance.advance(
+                task_id=self.task_id, store=self.store, pr_number=PR_NUMBER,
+                merge=True, github_get=self._github_get, merge_gh_runner=gh_runner)
+        self.assertEqual(copy_refused['step'], 'MERGE_REFUSED')
+        self.assertEqual(copy_refused['codes'], ['MERGE_REVIEW_VERDICT_NOT_POSTED'])
+        self.assertEqual(merges, [])
+
+        # Once the exact comment is posted by the verified posting identity, the merge gate accepts it.
         self._poster(self.root, PR_NUMBER, self.verdict_text)
         with patch.object(task_advance, '_d6_snapshot', return_value=self._d6()), \
-                patch.object(task_advance, '_pr_snapshot', return_value=self._pr()):
+                patch.object(task_advance, '_pr_snapshot', return_value=self._pr()), \
+                patch.object(task_advance.github_identity, 'ai_login', return_value=LOGIN):
             merged = task_advance.advance(
                 task_id=self.task_id, store=self.store, pr_number=PR_NUMBER,
                 merge=True, github_get=self._github_get, merge_gh_runner=gh_runner)
