@@ -183,7 +183,12 @@ class CodexArbiterUsageTests(tdal._ArbitrateLaunchCase):
         raw_jsonl = _codex_stream({
             'task_id': TASK, 'run_id': RUN, 'head': HEAD,
             'outcome': 'UPHELD', 'ruling': ruling_text,
-        }, usage={'input_tokens': 90, 'cached_input_tokens': 10, 'output_tokens': 20})
+        }, usage={
+            'input_tokens': 90,
+            'cached_input_tokens': 10,
+            'output_tokens': 20,
+            'reasoning_output_tokens': 0,
+        })
         def screen_selective(text, _limit):
             if text == ruling_text:
                 raise LLMToolError('WITHHELD')
@@ -374,7 +379,7 @@ class ClaudeArbiterUsageTests(tdacc.ClaudeRulingCollectionTests):
             _claude_assistant_entry(ruling, usage={'input_tokens': 40, 'output_tokens': 10}),
         ]))
         def screen_selective(text, _limit):
-            if text == ruling_text:
+            if text == ruling:
                 raise LLMToolError('WITHHELD')
             return text
 
