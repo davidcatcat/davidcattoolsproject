@@ -9489,6 +9489,7 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
     newest_assignment = None
     d6_unchanged = _d6_unchanged_probe(args, d6_binding)
 
+    d6_records = []
     for task_id in task_ids:
         if task_id == current_task_id:
             continue
@@ -9498,6 +9499,7 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
             raise _prelaunch_error(
                 f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}',
                 'DELEGATE_REPAIR_COUNT_UNAVAILABLE') from None
+        d6_records.append(record)
         completion = record.get('completion')
         if (type(completion) is dict and
                 completion.get('executor_task_id') == executor_task):
@@ -9515,7 +9517,62 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
             stamps[task_id] = stamp
             newest_assignment = max(newest_assignment, stamp) if newest_assignment else stamp
     _check_repair_limits(args, store, d6_binding, policy, current_task_id, counted,
-                         new_ec2_ids, legacy_ec2_ids, newest_assignment, stamps=stamps)
+                         new_ec2_ids, legacy_ec2_ids, newest_assignment, stamps=stamps,
+                         reviewed_heads=_formal_reviewed_heads(d6_records))
+
+
+def _formal_reviewed_heads(records):
+    """#2775: how many distinct heads hold formal review evidence, or None.
+
+    #1502 D1 (O4): AI Debug is first required after the third effective review
+    repair receives a formal FAIL, so at least REVIEW_REPAIRS_WITHOUT_DEBUG + 1
+    heads have had a formal review by then. A PM_SPEC_CORRECTION continuation
+    that fixes an EC2 or CI test failure is counted as a run but answers no
+    formal review. Evidence is a formal, non-ruling review claim that reached
+    DISPATCHED or COMPLETED, or a formal REVIEWER completion event; re-reviews
+    and new versions of one head count once.
+
+    The count is used only when the D6 also carries test evidence (an
+    EC2_REMOTE_TEST completion event): then a run that no formal review
+    answered is known to be a test repair. Without test evidence, or with
+    anything malformed, it returns None, which keeps the root-cause
+    requirement (fail closed).
+    """
+    if type(records) not in (list, tuple):
+        return None
+    heads = set()
+    tested = False
+    for record in records:
+        if type(record) is not dict:
+            return None
+        claims = record.get('review_dispatch_claim') or []
+        events = record.get('completion_events') or []
+        if type(claims) is not list or type(events) is not list:
+            return None
+        for claim in claims:
+            if type(claim) is not dict:
+                return None
+            if 'purpose' in claim or claim.get('review_kind', 'formal') != 'formal':
+                continue
+            if claim.get('state') not in ('DISPATCHED', 'COMPLETED'):
+                continue
+            head = claim.get('head_sha')
+            if type(head) is not str or not head:
+                return None
+            heads.add(head)
+        for event in events:
+            if type(event) is not dict:
+                return None
+            if event.get('source') == 'EC2_REMOTE_TEST':
+                tested = True
+            if (event.get('source') != 'REVIEWER' or
+                    event.get('review_kind', 'formal') != 'formal'):
+                continue
+            head = event.get('source_sha')
+            if type(head) is not str or not head:
+                return None
+            heads.add(head)
+    return len(heads) if tested else None
 
 
 def _recorded_start_failure(record):
@@ -9673,8 +9730,15 @@ def _formal_pass_at_repair_head(args, store, d6_binding, current_task_id):
 
 
 def _check_repair_limits(args, store, d6_binding, policy, current_task_id, counted,
-                         new_ec2_ids, legacy_ec2_ids, newest_assignment, stamps=None):
-    """Apply the review and EC2 limits to counted runs, then the root cause."""
+                         new_ec2_ids, legacy_ec2_ids, newest_assignment, stamps=None,
+                         reviewed_heads=None):
+    """Apply the review and EC2 limits to counted runs, then the root cause.
+
+    #2775: the root cause is required only when at least
+    REVIEW_REPAIRS_WITHOUT_DEBUG + 1 heads hold formal review evidence
+    (``reviewed_heads``, see _formal_reviewed_heads); None keeps it required.
+    The repair_max limit still counts every review-bucket run.
+    """
     from .repair_policy import REVIEW_REPAIRS_WITHOUT_DEBUG
 
     if current_task_id in new_ec2_ids or current_task_id in legacy_ec2_ids:
@@ -9702,6 +9766,15 @@ def _check_repair_limits(args, store, d6_binding, policy, current_task_id, count
         return
     if (getattr(args, 'repair_packet', None) is None and
             _formal_pass_at_repair_head(args, store, d6_binding, current_task_id)):
+        return
+    if (type(reviewed_heads) is int and not isinstance(reviewed_heads, bool) and
+            0 <= reviewed_heads <= REVIEW_REPAIRS_WITHOUT_DEBUG):
+        # #2775: fewer formally reviewed heads than D1 needs before a Debug;
+        # the other runs fixed test failures. A supplied root cause is still checked.
+        packet = getattr(args, 'repair_packet', None)
+        if type(packet) is dict and 'high_debug_report_sha256' in packet:
+            _check_repair_packet_rca(packet, store, getattr(args, 'executor_task', None),
+                                     current_task_id)
         return
     if count == REVIEW_REPAIRS_WITHOUT_DEBUG + 1:
         _check_repair_rca(args, store, d6_binding, newest_assignment)
@@ -9930,7 +10003,10 @@ def _check_chain_repair_count(args, store, d6_binding, policy, view):
         stamps[member_id] = stamp
         newest_assignment = max(newest_assignment, stamp) if newest_assignment else stamp
     _check_repair_limits(args, store, d6_binding, policy, task_id, counted,
-                         new_ec2_ids, legacy_ec2_ids, newest_assignment, stamps=stamps)
+                         new_ec2_ids, legacy_ec2_ids, newest_assignment, stamps=stamps,
+                         reviewed_heads=_formal_reviewed_heads(
+                             [view['members'][key] for key in sorted(view['members'])
+                              if key != task_id]))
 
 
 def _delegate_chain_gate(args, store, d6_binding, claim):
