@@ -184,8 +184,13 @@ class CodexArbiterUsageTests(tdal._ArbitrateLaunchCase):
             'task_id': TASK, 'run_id': RUN, 'head': HEAD,
             'outcome': 'UPHELD', 'ruling': ruling_text,
         }, usage={'input_tokens': 90, 'cached_input_tokens': 10, 'output_tokens': 20})
+        def screen_selective(text, _limit):
+            if text == ruling_text:
+                raise LLMToolError('WITHHELD')
+            return text
+
         with patch.object(task_submission_cli, '_screen_text',
-                          side_effect=LLMToolError('WITHHELD')):
+                          side_effect=screen_selective):
             with self.assertRaises(LLMToolError) as caught:
                 self._run_codex_arbitrate(raw_jsonl)
         self.assertEqual(caught.exception.dispute_code, 'DISPUTE_RULING_WITHHELD')
@@ -368,8 +373,13 @@ class ClaudeArbiterUsageTests(tdacc.ClaudeRulingCollectionTests):
         self._write_transcript(tdacc._transcript_bytes([
             _claude_assistant_entry(ruling, usage={'input_tokens': 40, 'output_tokens': 10}),
         ]))
+        def screen_selective(text, _limit):
+            if text == ruling_text:
+                raise LLMToolError('WITHHELD')
+            return text
+
         with patch.object(task_submission_cli, '_screen_text',
-                          side_effect=LLMToolError('WITHHELD')):
+                          side_effect=screen_selective):
             with self.assertRaises(LLMToolError) as caught:
                 self._arbitrate()
         self.assertEqual(caught.exception.dispute_code, 'DISPUTE_RULING_WITHHELD')
@@ -397,7 +407,14 @@ class TaskStoreArbiterUsageTests(unittest.TestCase):
         base, cd = tdrcr._base_task_record()
         base['review_dispatch_claim'] = [tdrcr._formal_claim(cd, verdict='FAIL', actor='Claude')]
         rec = store.create(base)
-        entry = dict(tdrcr._dispute_entry(), evidence_ref=EVIDENCE_REF)
+        entry = dict(
+            tdrcr._dispute_entry(),
+            evidence_ref=EVIDENCE_REF,
+            history=[{
+                'event': 'OPENED', 'at': STAMP_1, 'actor': f'pm:{PM_SESSION}',
+                'head_sha': HEAD, 'refs': {},
+            }],
+        )
         rec = store.compare_and_update(
             TASK, expected={'record_sha256': rec['record_sha256']},
             review_disputes=[entry])
@@ -405,6 +422,11 @@ class TaskStoreArbiterUsageTests(unittest.TestCase):
         entry_ac = dict(
             entry,
             arbiter_claim={'reviewer_task': claimed['reviewer_task'], 'version': claimed['version']},
+            history=entry['history'] + [{
+                'event': 'ARBITER_CLAIMED', 'at': STAMP_2, 'actor': 'llmtool',
+                'head_sha': HEAD,
+                'refs': {'reviewer_task': claimed['reviewer_task'], 'version': claimed['version']},
+            }],
         )
         rec = store.compare_and_update(
             TASK, expected={'record_sha256': rec['record_sha256']},
