@@ -44,17 +44,11 @@ def _transcript_path(session_id, config_dir, reviewer_task):
     return paths[0]
 
 
-def turn_complete(session_id, config_dir, reviewer_task):
-    """#2552: True only when the transcript proves the reviewer's turn finished.
-
-    A background reviewer that answered sits in `claude agents` state 'blocked'
-    (waiting for the next input), which also covers waiting on a tool approval.
-    The turn counts as finished only when the last assistant message stopped with
-    end_turn and every tool_use has a tool_result. Any doubt returns False.
-    """
+def _turn_state(session_id, config_dir, reviewer_task):
+    """Return 'COMPLETE', 'INCOMPLETE', or 'UNAVAILABLE' for a Reviewer transcript."""
     path = _transcript_path(session_id, config_dir, reviewer_task)
     if path is None:
-        return False
+        return 'UNAVAILABLE'
     last_stop, pending = None, set()
     try:
         with open(path, encoding='utf-8', errors='replace') as handle:
@@ -76,8 +70,110 @@ def turn_complete(session_id, config_dir, reviewer_task):
                     pending -= {item.get('tool_use_id') for item in items
                                 if type(item) is dict and item.get('type') == 'tool_result'}
     except OSError:
-        return False
-    return last_stop == 'end_turn' and not pending
+        return 'UNAVAILABLE'
+    return 'COMPLETE' if last_stop == 'end_turn' and not pending else 'INCOMPLETE'
+
+
+def turn_complete(session_id, config_dir, reviewer_task):
+    """#2552: True only when the transcript proves the reviewer's turn finished.
+
+    A background reviewer that answered sits in `claude agents` state 'blocked'
+    (waiting for the next input), which also covers waiting on a tool approval.
+    The turn counts as finished only when the last assistant message stopped with
+    end_turn and every tool_use has a tool_result. Any doubt returns False.
+    """
+    return _turn_state(session_id, config_dir, reviewer_task) == 'COMPLETE'
+
+
+def _parse_assistant_usage(usage):
+    if type(usage) is not dict:
+        return None
+    counts = []
+    for key in ('input_tokens', 'cache_creation_input_tokens',
+                'cache_read_input_tokens', 'output_tokens'):
+        value = usage.get(key, 0)
+        if value is None:
+            value = 0
+        if type(value) is not int or value < 0:
+            return None
+        counts.append(value)
+    return tuple(counts)
+
+
+def transcript_usage(session_id, config_dir, reviewer_task):
+    """Sum assistant message.usage in the bound transcript, counting each message id once.
+
+    Returns (usage_dict, None) or (None, reason_code) where reason_code is
+    'TRANSCRIPT_UNAVAILABLE' or 'USAGE_ABSENT'. Never returns zero usage.
+    """
+    path = _transcript_path(session_id, config_dir, reviewer_task)
+    if path is None:
+        return None, 'TRANSCRIPT_UNAVAILABLE'
+    seen_ids = set()
+    prompt_tokens = 0
+    completion_tokens = 0
+    cached_prompt_tokens = 0
+    counted = False
+    try:
+        with open(path, encoding='utf-8', errors='replace') as handle:
+            for line in handle:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if type(entry) is not dict or entry.get('type') != 'assistant':
+                    continue
+                message = entry.get('message')
+                if type(message) is not dict:
+                    continue
+                msg_id = message.get('id')
+                if type(msg_id) is str and msg_id and msg_id in seen_ids:
+                    continue
+                parsed = _parse_assistant_usage(message.get('usage'))
+                if parsed is None:
+                    continue
+                if type(msg_id) is str and msg_id:
+                    seen_ids.add(msg_id)
+                inp, cache_create, cache_read, out = parsed
+                prompt_tokens += inp + cache_create + cache_read
+                completion_tokens += out
+                cached_prompt_tokens += cache_read
+                counted = True
+    except OSError:
+        return None, 'TRANSCRIPT_UNAVAILABLE'
+    total_tokens = prompt_tokens + completion_tokens
+    if not counted or total_tokens <= 0:
+        return None, 'USAGE_ABSENT'
+    return {
+        'prompt_tokens': prompt_tokens,
+        'completion_tokens': completion_tokens,
+        'total_tokens': total_tokens,
+        'cached_prompt_tokens': cached_prompt_tokens,
+    }, None
+
+
+def claim_usage(claim, *, config_dir=None):
+    """Return {'usage': ...} or {'usage_unknown': {'reason': ...}} for a Claude claim, else None."""
+    if type(claim) is not dict or 'purpose' in claim or claim.get('account_mode') == 'CODEX_CLI':
+        return None
+    session, reviewer = claim.get('native_session_id'), claim.get('reviewer_task')
+    if (type(session) is not str or not _UUID.fullmatch(session) or
+            type(reviewer) is not str or not _REVIEWER.fullmatch(reviewer)):
+        return None
+    if config_dir is None:
+        resolved = _claim_config_dir(claim)
+        if isinstance(resolved, tuple) or not resolved:
+            return {'usage_unknown': {'reason': 'TRANSCRIPT_UNAVAILABLE'}}
+        config_dir = resolved
+    state = _turn_state(session, config_dir, reviewer)
+    if state == 'INCOMPLETE':
+        return None
+    if state == 'UNAVAILABLE':
+        return {'usage_unknown': {'reason': 'TRANSCRIPT_UNAVAILABLE'}}
+    usage, reason = transcript_usage(session, config_dir, reviewer)
+    if usage is not None:
+        return {'usage': usage}
+    return {'usage_unknown': {'reason': reason}}
 
 
 def verdict_blocks(session_id, config_dir, reviewer_task):

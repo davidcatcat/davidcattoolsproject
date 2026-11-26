@@ -133,6 +133,9 @@ class FamilyStore:
     def record_completion_event(self, *args, **kwargs):
         return self.store.record_completion_event(*args, **kwargs)
 
+    def compare_and_update(self, *args, **kwargs):
+        return self.store.compare_and_update(*args, **kwargs)
+
 
 def _comment(status='PASS', *, actor='Claude', head=HEAD, version=1,
              comment_id=7, created='2026-10-27T01:00:00Z', extra=''):
