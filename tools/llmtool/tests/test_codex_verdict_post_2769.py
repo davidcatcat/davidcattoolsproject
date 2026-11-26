@@ -309,7 +309,8 @@ class CodexVerdictPost2769Tests(unittest.TestCase):
 
         args = SimpleNamespace(
             task_id=self.task_id, executor_task=EXEC, pr=PR_NUMBER,
-            version=1, reviewer='codex-reviewer', pm_session=PM_SESSION)
+            version=1, reviewer='codex-reviewer',
+            pm_session=self.task['pm_session_id'])
         out = io.StringIO()
         with patch.object(review_dispatch.worker_dispatch, 'evaluate',
                           return_value=SimpleNamespace(allowed=True, reason_code='')):
@@ -366,7 +367,8 @@ class CodexVerdictPost2769Tests(unittest.TestCase):
 
         args = SimpleNamespace(
             task_id=self.task_id, executor_task=EXEC, pr=PR_NUMBER,
-            version=1, reviewer='codex-reviewer', pm_session=PM_SESSION)
+            version=1, reviewer='codex-reviewer',
+            pm_session=self.task['pm_session_id'])
         out = io.StringIO()
 
         def failing_poster(_root, _pr, _body):
