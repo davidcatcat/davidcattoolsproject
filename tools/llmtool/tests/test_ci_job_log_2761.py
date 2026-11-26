@@ -133,6 +133,42 @@ class CiJobLog2761Tests(unittest.TestCase):
                                  ['gh'], 1, b'', b'')):
             self.assertIsNone(task_advance._fetch_ci_job_log(JOB_ID))
 
+    def test_fetch_command_allows_escape_sequences(self):
+        log = b'FAIL: test_alpha_one (test_alpha.AlphaTests)\n'
+        with patch.object(task_advance.task_completion, '_trusted_slug',
+                          return_value='owner/repo'), \
+                patch.object(task_advance, '_publish_run_gh',
+                             return_value=subprocess.CompletedProcess(
+                                 ['gh'], 0, log, b'')) as runner:
+            self.assertEqual(task_advance._fetch_ci_job_log(JOB_ID),
+                             log.decode('utf-8'))
+        self.assertEqual(runner.call_args.args[1], [
+            'api', '--allow-escape-sequences', '--method', 'GET',
+            f'repos/owner/repo/actions/jobs/{JOB_ID}/logs'])
+
+    def test_ansi_coloured_log_yields_names_and_modules_without_escape_bytes(self):
+        esc = '\x1b'
+        log = '\n'.join([
+            f'{esc}[36;1mFAIL: test_alpha_one (test_alpha.AlphaTests){esc}[0m',
+            f'{esc}[31mAssertionError: expected 1{esc}[0m',
+            f'{esc}[36;1mERROR: test_beta_two (test_beta.BetaTests.test_beta_two){esc}[0m',
+            f'{esc}[31mAssertionError: boom{esc}[0m',
+        ])
+        with patch.object(task_advance, '_fetch_ci_job_log', return_value=log):
+            details = task_advance._ci_failure_details(_run(), str(self.root))
+        excerpt, failing_tests, failing_modules, _run_id, _job_id, unavailable = details
+        self.assertEqual(failing_tests, [
+            'test_alpha_one (test_alpha.AlphaTests)',
+            'test_beta_two (test_beta.BetaTests.test_beta_two)',
+        ])
+        self.assertEqual(failing_modules, [
+            'tools/llmtool/tests/test_alpha.py',
+            'tools/llmtool/tests/test_beta.py',
+        ])
+        self.assertIn('AssertionError: expected 1', excerpt)
+        self.assertNotIn('\x1b', excerpt)
+        self.assertFalse(unavailable)
+
 
 if __name__ == '__main__':
     unittest.main()

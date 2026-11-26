@@ -839,6 +839,11 @@ def _ci_excerpt(run):
 # unavailable packet.
 _CI_JOB_LOG_TAIL_BYTES = 512 * 1024
 _CI_JOB_LOG_HARD_CAP_BYTES = 4 * 1024 * 1024
+# #2761: GitHub Actions logs carry ANSI terminal escape sequences, which the
+# gh api read itself only prints with --allow-escape-sequences. Strip them
+# before the tail bound, screening, excerpt and FAIL/ERROR parsing so no ESC
+# byte reaches the excerpt or the packet.
+_ANSI_ESCAPE_RE = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])')
 
 
 def _ci_job_log_text(value):
@@ -850,6 +855,7 @@ def _ci_job_log_text(value):
             return None
     if type(value) is not str or not value.strip():
         return None
+    value = _ANSI_ESCAPE_RE.sub('', value).replace('\x1b', '')
     try:
         raw = value.encode('utf-8')
     except UnicodeEncodeError:
@@ -872,7 +878,7 @@ def _fetch_ci_job_log(job_id):
         return None
     try:
         result = _publish_run_gh(os.getcwd(), [
-            'api', '--method', 'GET',
+            'api', '--allow-escape-sequences', '--method', 'GET',
             f'repos/{slug}/actions/jobs/{job_id}/logs'])
     except Exception:
         return None
