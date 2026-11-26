@@ -31,6 +31,17 @@ TASK_ID = 'a' * 32
 RUN_ID = 'b' * 32
 SOURCE_SHA = 'd' * 40
 POLICY_DIGEST = 'f' * 64
+# Every reason the Gateway contract table lists under BUDGET_EXCEEDED.
+CONTRACT_BUDGET_REASONS = (
+    'TURN_BUDGET_EXCEEDED',
+    'INPUT_TOKEN_BUDGET_EXCEEDED',
+    'OUTPUT_TOKEN_BUDGET_EXCEEDED',
+    'OUTPUT_TRUNCATED',
+    'WALL_TIME_EXCEEDED',
+    'SENT_BYTES_EXCEEDED',
+    'TOOL_RESULT_BYTES_EXCEEDED',
+    'CONTEXT_EXHAUSTED',
+)
 
 
 def _task():
@@ -239,6 +250,60 @@ class GwAgentUsage2812Tests(unittest.TestCase):
         self.assertEqual(developer['execution']['status'], 'UNKNOWN')
         self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
 
+    def test_every_contract_budget_reason_records_reported_usage(self):
+        for reason in CONTRACT_BUDGET_REASONS:
+            with self.subTest(reason=reason):
+                status, developer, store = self._run(_result(
+                    'BUDGET_EXCEEDED', reason,
+                    {'status': 'REPORTED', 'input_tokens': 1200, 'output_tokens': 340}))
+                self.assertEqual(status, 1)
+                self.assertEqual(developer['state'], 'DEVELOPER_UNAVAILABLE')
+                self.assertEqual(
+                    developer['error_code'],
+                    'DEVELOPER_GW_AGENT_BUDGET_EXCEEDED_' + reason)
+                self.assertEqual(developer['usage'], {
+                    'prompt_tokens': 1200, 'completion_tokens': 340,
+                    'total_tokens': 1540, 'served_model': 'qwen-authorized'})
+                task_store._validate_usage(developer['usage'])
+                reloaded = task_store.TaskStore(store.root).get(TASK_ID)
+                self.assertEqual(reloaded['developer'], developer)
+                self.assertEqual(developer['execution']['status'], 'UNKNOWN')
+                self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
+
+    def test_every_contract_budget_reason_without_usage_stays_unknown(self):
+        for reason in CONTRACT_BUDGET_REASONS:
+            with self.subTest(reason=reason):
+                status, developer, store = self._run(_result(
+                    'BUDGET_EXCEEDED', reason,
+                    {'status': 'UNKNOWN', 'input_tokens': None, 'output_tokens': None}))
+                self.assertEqual(status, 1)
+                self.assertEqual(developer['state'], 'DEVELOPER_UNAVAILABLE')
+                self.assertEqual(
+                    developer['error_code'],
+                    'DEVELOPER_GW_AGENT_BUDGET_EXCEEDED_' + reason)
+                self.assertIsNone(developer['usage'])
+                self.assertEqual(developer['execution']['status'], 'UNKNOWN')
+                self.assertEqual(developer['execution']['usage_source'], 'UNKNOWN')
+                reloaded = task_store.TaskStore(store.root).get(TASK_ID)
+                self.assertEqual(reloaded['developer'], developer)
+
+    def test_non_budget_statuses_never_keep_reported_usage(self):
+        for status_name, code in (
+                ('MODEL_ERROR', 'HTTP_500'),
+                ('POLICY_REFUSED', 'RUN_AUTHORIZATION_INVALID'),
+                ('BLOCKED', 'NO_TOOL_CALL')):
+            with self.subTest(status=status_name):
+                status, developer, store = self._run(_result(
+                    status_name, code,
+                    {'status': 'REPORTED', 'input_tokens': 1200, 'output_tokens': 340}))
+                self.assertEqual(status, 1)
+                self.assertEqual(developer['state'], 'DEVELOPER_UNAVAILABLE')
+                self.assertIn('DEVELOPER_GW_AGENT_' + status_name,
+                              developer['error_code'])
+                self.assertIsNone(developer['usage'])
+                reloaded = task_store.TaskStore(store.root).get(TASK_ID)
+                self.assertEqual(reloaded['developer'], developer)
+
     def test_budget_exceeded_usage_and_model_name_the_served_model(self):
         status, developer, _store = self._run(
             _result('BUDGET_EXCEEDED', 'TURN_BUDGET_EXCEEDED',
@@ -303,6 +368,26 @@ class GwAgentUsage2812Tests(unittest.TestCase):
         lookalike['error_code'] = (
             'DEVELOPER_GW_AGENT_BUDGET_EXCEEDED_CONTEXT_EXHAUSTEDNESS')
         self._assert_refused(store, lookalike)
+
+    def test_usage_is_refused_for_an_unlisted_budget_reason(self):
+        _status, developer, store = self._run(_result(
+            'BUDGET_EXCEEDED', 'WALL_TIME_EXCEEDED',
+            {'status': 'REPORTED', 'input_tokens': 1200, 'output_tokens': 340}))
+        for reason in ('FAKE_BUDGET_EXCEEDED', 'OUTPUT_TRUNCATEDNESS',
+                       'TURN_BUDGET_EXCEEDED_EXTRA'):
+            with self.subTest(reason=reason):
+                unlisted = copy.deepcopy(developer)
+                unlisted['error_code'] = (
+                    'DEVELOPER_GW_AGENT_BUDGET_EXCEEDED_' + reason)
+                self._assert_refused(store, unlisted)
+
+    def test_usage_is_refused_without_a_listed_budget_reason(self):
+        _status, developer, store = self._run(_result(
+            'BUDGET_EXCEEDED', 'TURN_BUDGET_EXCEEDED',
+            {'status': 'REPORTED', 'input_tokens': 1200, 'output_tokens': 340}))
+        bare = copy.deepcopy(developer)
+        bare['error_code'] = 'DEVELOPER_GW_AGENT_BUDGET_EXCEEDED'
+        self._assert_refused(store, bare)
 
     def test_usage_is_refused_without_a_provider_usage_source(self):
         _status, developer, store = self._run(_result(

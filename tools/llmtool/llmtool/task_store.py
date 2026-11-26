@@ -1119,14 +1119,28 @@ def _validate_usage(value):
     validate_provider_usage({name: value[name] for name in _USAGE_FIELDS})
 
 
-def _gw_agent_budget_usage_allowed(developer, usage):
-    """#2812: only a gw-agent budget result may keep usage while unavailable.
+# The Gateway's BUDGET_EXCEEDED reasons, exactly as its contract lists them
+# (tools/api-agent-gateway/README.md and api_agent_gateway/contract.py). The
+# TaskStore exception is this list only: a new or lookalike reason, or any
+# other unavailable error code, still refuses usage (#2812).
+_GW_AGENT_BUDGET_REASONS = frozenset((
+    'TURN_BUDGET_EXCEEDED',
+    'INPUT_TOKEN_BUDGET_EXCEEDED',
+    'OUTPUT_TOKEN_BUDGET_EXCEEDED',
+    'OUTPUT_TRUNCATED',
+    'WALL_TIME_EXCEEDED',
+    'SENT_BYTES_EXCEEDED',
+    'TOOL_RESULT_BYTES_EXCEEDED',
+    'CONTEXT_EXHAUSTED',
+))
 
-    The record must be a gw-agent budget result (its fixed budget error code,
-    or that code followed by a delimiter and a gateway budget reason) and its
-    execution must report that the usage came from the provider. A gateway
-    budget reason is a bounded ``*_BUDGET_EXCEEDED`` code or the gateway's
-    context-exhaustion code. Any other unavailable record, route, error code or
+
+def _gw_agent_budget_usage_allowed(developer, usage):
+    """#2812: only a listed gw-agent budget result may keep usage.
+
+    The record's fixed budget error code must name one of the Gateway's
+    BUDGET_EXCEEDED reasons, and its execution must report that the usage came
+    from the provider. Any other unavailable record, route, error code or
     usage source refuses usage.
     """
     if usage is None:
@@ -1136,14 +1150,9 @@ def _gw_agent_budget_usage_allowed(developer, usage):
     reason = (error_code[len(budget_code) + 1:]
               if type(error_code) is str and error_code.startswith(budget_code + '_')
               else None)
-    exact_budget = error_code == budget_code
-    bounded_reason = (type(reason) is str and
-                      re.fullmatch(r'[A-Z0-9_]{1,29}', reason) is not None and
-                      (reason.endswith('BUDGET_EXCEEDED') or
-                       reason == 'CONTEXT_EXHAUSTED'))
     execution = developer.get('execution')
     return (developer.get('provider_profile') == 'gw-agent' and
-            (exact_budget or bounded_reason) and
+            reason in _GW_AGENT_BUDGET_REASONS and
             type(execution) is dict and
             execution.get('status') == 'UNKNOWN' and
             execution.get('usage_source') == 'CLI_REPORTED')
