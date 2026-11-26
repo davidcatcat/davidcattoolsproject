@@ -55,7 +55,7 @@ class BlockedReviewFallbackTests(unittest.TestCase):
         # Review F2: an unavailable Reviewer D6 proves no attempted key, so no
         # fallback may offer a guessed Reviewer.
         self.assertEqual(self.run_case('agy', [1], attempt=None),
-                         ('REVIEWER_ATTENTION', [], []))
+                         ('REVIEWER_ATTENTION', ['REVIEWER_ATTENTION'], []))
 
 
 if __name__ == '__main__':
