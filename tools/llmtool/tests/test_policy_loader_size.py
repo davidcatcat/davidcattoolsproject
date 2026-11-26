@@ -69,7 +69,8 @@ class PolicyLoaderSizeTests(unittest.TestCase):
             GOOD, parent_debug_max=3, timeout_continuation_max=1,
             route_failure_pause_after=3, spec_preflight_large_file_lines=2000,
             merge_train_members_max=6, merge_train_files_per_pr_max=100,
-            revert_scope_prs_max=5, d6_writer_lease_hours=24))
+            revert_scope_prs_max=5, d6_writer_lease_hours=24,
+            formal_reviewer_order=['codex-reviewer', 'claude-reviewer']))
 
     def test_repository_policy_is_well_within_the_bound(self):
         # #2281 L0b: with every optional key present the file stays far below
