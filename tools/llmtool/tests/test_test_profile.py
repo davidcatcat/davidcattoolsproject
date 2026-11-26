@@ -72,7 +72,7 @@ class RefusalCodeTests(unittest.TestCase):
         with self.assertRaises(TestProfileError) as caught:
             TestProfile(entries)
         error = caught.exception
-        self.assertEqual(error.code, 'TEST_PROFILE_INVALID')
+        self.assertEqual(error.CODE, 'TEST_PROFILE_INVALID')
         self.assertEqual(str(error), 'TEST_PROFILE_INVALID')
         if sample is not None:
             self.assertNotIn(sample, str(error))
