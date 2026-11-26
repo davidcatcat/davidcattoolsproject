@@ -6218,7 +6218,7 @@ class ReviewerFallbackTests(unittest.TestCase):
         self.assertEqual(result['codes'], ['ROLE_MODEL_NOT_ALLOWED', 'REVIEWER_FALLBACK'])
         self.assertEqual(result['result'], {'state': 'DISPATCHED'})
         self.assertEqual([call.get('reviewer') for call in calls],
-                         [None, 'codex-reviewer'])
+                         ['codex-reviewer', 'claude-reviewer'])
         self.assertEqual(calls[0]['version'], calls[1]['version'])
 
     def test_refused_alternate_stops_once_as_reviewer_unavailable(self):

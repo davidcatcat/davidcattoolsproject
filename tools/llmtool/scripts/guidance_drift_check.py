@@ -369,6 +369,10 @@ RULE_SCHEMAS: dict[str, Any] = {
         # failures after which a Developer route pauses; same optional
         # positive-integer rule as the keys above.
         "route_failure_pause_after": Int(1),
+        # #289: optional formal Reviewer preference order; each entry is one
+        # known Reviewer key, with no repeats and at least one entry.
+        "formal_reviewer_order": ListOf(
+            OneOf("claude-reviewer", "codex-reviewer"), min_items=1),
     }),
     "worker-dispatch.json": Obj({
         "schema_version": Const(1),

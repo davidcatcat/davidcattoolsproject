@@ -67,7 +67,9 @@ class PolicyLoaderSizeTests(unittest.TestCase):
         # count at the Owner value (repair_policy.ROUTE_FAILURE_PAUSE_AFTER).
         self.assertEqual(rp.load_policy(), dict(
             GOOD, parent_debug_max=3, timeout_continuation_max=1,
-            route_failure_pause_after=3, spec_preflight_large_file_lines=2000,
+            route_failure_pause_after=3,
+            formal_reviewer_order=['codex-reviewer', 'claude-reviewer'],
+            spec_preflight_large_file_lines=2000,
             merge_train_members_max=6, merge_train_files_per_pr_max=100,
             revert_scope_prs_max=5, d6_writer_lease_hours=24))
 

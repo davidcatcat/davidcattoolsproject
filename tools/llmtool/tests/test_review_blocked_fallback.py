@@ -10,7 +10,8 @@ MODELS = {'agy': 'gemini-3.8-flash-medium', 'claude': 'claude-opus-5-5'}
 
 
 class BlockedReviewFallbackTests(unittest.TestCase):
-    def run_case(self, profile, versions, refuse=False, done=False):
+    def run_case(self, profile, versions, refuse=False, done=False,
+                 attempt='codex-reviewer'):
         calls = []
 
         def dispatch(**kwargs):
@@ -31,6 +32,7 @@ class BlockedReviewFallbackTests(unittest.TestCase):
         with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
              patch.object(task_advance, '_pr_snapshot', return_value=PR), \
              patch.object(task_advance, '_review_outcomes', return_value=[]), \
+             patch.object(task_advance, '_review_claim_reviewer', return_value=attempt), \
              patch.object(task_advance.active_pm_inbox, 'ack'), \
              patch.object(review_dispatch, '_policy', return_value=type('P', (), {'allowed': True})()):
             out = task_advance.advance(task_id=record['task_id'], store=ClaimStore(record),
@@ -40,14 +42,20 @@ class BlockedReviewFallbackTests(unittest.TestCase):
 
     def test_blocked_head_redispatches_once_with_the_other_reviewer(self):
         fb = ['REVIEW_BLOCKED', 'REVIEWER_FALLBACK']
-        self.assertEqual(self.run_case('agy', [1]), ('DISPATCH_REVIEW', fb, [('codex-reviewer', 2)]))
+        self.assertEqual(self.run_case('agy', [1]), ('DISPATCH_REVIEW', fb, [('claude-reviewer', 2)]))
         self.assertEqual(self.run_case('agy', [1], refuse=True),
-                         ('DISPATCH_REVIEW', fb + ['REVIEWER_NOT_ALLOWED'], [('codex-reviewer', 2)]))
+                         ('DISPATCH_REVIEW', fb + ['REVIEWER_NOT_ALLOWED'], [('claude-reviewer', 2)]))
         for args, kw, step in ((('agy', [1, 2]), {}, 'REVIEWER_ATTENTION'),
                                (('claude', [1]), {}, 'REVIEWER_ATTENTION'),
                                (('agy', [1]), {'done': True}, 'REVIEW_NOT_POSTED')):
             with self.subTest(args=args, kw=kw):
                 self.assertEqual(self.run_case(*args, **kw)[::2], (step, []))
+
+    def test_blocked_head_without_attempt_evidence_does_not_guess(self):
+        # Review F2: an unavailable Reviewer D6 proves no attempted key, so no
+        # fallback may offer a guessed Reviewer.
+        self.assertEqual(self.run_case('agy', [1], attempt=None),
+                         ('REVIEWER_ATTENTION', ['REVIEWER_ATTENTION'], []))
 
 
 if __name__ == '__main__':

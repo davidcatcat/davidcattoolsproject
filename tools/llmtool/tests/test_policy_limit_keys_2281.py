@@ -77,6 +77,10 @@ TURN_CAP_KEY = 'gw_agent_max_turns'
 # #2622 (Owner decision relayed in the issue): consecutive route failures after
 # which a Developer route pauses; set in the repository policy.json.
 ROUTE_FAILURE_KEY = 'route_failure_pause_after'
+# #289: optional formal Reviewer preference order; set in the repository
+# policy.json to Codex Reviewer then Claude Reviewer.
+FORMAL_REVIEWER_ORDER_KEY = 'formal_reviewer_order'
+FORMAL_REVIEWER_ORDER = ['codex-reviewer', 'claude-reviewer']
 # #2281 row 10 (basis #1703): the per-module timeout of the task complete
 # local test run; omitted from the repository policy.json (default
 # repair_policy.LOCAL_TEST_TIMEOUT_SECONDS and task_completion._TEST_TIMEOUT).
@@ -125,6 +129,8 @@ class PolicyLimitKeysTests(unittest.TestCase):
         # #2622 (Owner decision relayed in the issue): the route-failure pause
         # count is recorded in the repository policy.json.
         self.assertEqual(policy[ROUTE_FAILURE_KEY], 3)
+        # #289: the repository policy sets the formal Reviewer preference order.
+        self.assertEqual(policy[FORMAL_REVIEWER_ORDER_KEY], FORMAL_REVIEWER_ORDER)
         # Row 18 is not in the repository policy.json; the repository file is
         # still accepted because the keys are optional.
         for key in (ROW18_KEY, EXPIRY_ROW18_KEY, PACKET_ROW12_KEY,
@@ -391,8 +397,10 @@ class PolicyLimitKeysTests(unittest.TestCase):
         # Row 12 (and row 18) are omitted from the repository policy.json;
         # #2622 adds route_failure_pause_after at its Owner value, 3.
         self.assertEqual(set(policy), {*BASE, 'timeout_continuation_max', *LIMITS,
-                                       *LATER_LIMITS, ROUTE_FAILURE_KEY})
+                                       *LATER_LIMITS, ROUTE_FAILURE_KEY,
+                                       FORMAL_REVIEWER_ORDER_KEY})
         self.assertEqual(policy[ROUTE_FAILURE_KEY], 3)
+        self.assertEqual(policy[FORMAL_REVIEWER_ORDER_KEY], FORMAL_REVIEWER_ORDER)
         self.assertNotIn(PACKET_ROW12_KEY, policy)
         self.assertNotIn(SOURCE_ROW12_KEY, policy)
         self.assertNotIn(ROW12_KEY, policy)
