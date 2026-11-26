@@ -32,7 +32,7 @@ class TestProfileError(ValueError):
 class TestProfile:
     """Immutable ordered profile of (compiled path pattern, runner kind)."""
 
-    __slots__ = ('_entries', '_sources')
+    __slots__ = ('_entries', '_keys')
 
     def __init__(self, entries):
         """Build a profile from an ordered iterable of (pattern, kind) pairs.
@@ -53,8 +53,12 @@ class TestProfile:
             validated.append((pattern, kind))
         if not validated:
             raise TestProfileError()
-        self._entries = tuple(validated)
-        self._sources = tuple((p.pattern, k) for p, k in validated)
+        # object.__setattr__ bypasses the __setattr__ guard below, which is
+        # what makes every post-construction attribute assignment fail.
+        object.__setattr__(self, '_entries', tuple(validated))
+        object.__setattr__(
+            self, '_keys',
+            tuple((p.pattern, p.flags, k) for p, k in validated))
 
     @property
     def entries(self):
@@ -63,28 +67,38 @@ class TestProfile:
 
     def kind_for(self, relative_path):
         """Return the kind of the first entry whose pattern matches the whole
-        relative path from its start, or ``None`` when none matches.
+        relative path, or ``None`` when none matches.
 
-        The match is anchored at the start of the path and the registry
-        patterns carry their own end anchor, so only whole-path matches
-        count.  This is pure string matching: no file, network, or process
-        access.  ``relative_path`` is a slash-separated path relative to the
-        project root.
+        The lookup anchors the match at both ends, so a caller-supplied
+        pattern only counts when it matches the entire path: a pattern of
+        ``foo`` never matches ``foobar``, even without an end anchor.  This
+        is pure string matching: no file, network, or process access.
+        ``relative_path`` is a slash-separated path relative to the project
+        root.
         """
         for pattern, kind in self._entries:
-            if pattern.match(relative_path) is not None:
+            if pattern.fullmatch(relative_path) is not None:
                 return kind
         return None
 
     def __eq__(self, other):
-        """Profiles are equal when entry order, pattern sources, and kinds
-        all match; pattern objects are compared by source, not identity."""
+        """Profiles are equal when entry order, pattern sources, pattern
+        flags, and kinds all match; pattern objects are compared by source
+        and flags, not identity."""
         if type(other) is not TestProfile:
             return NotImplemented
-        return other._sources == self._sources
+        return other._keys == self._keys
 
     def __hash__(self):
-        return hash(self._sources)
+        return hash(self._keys)
+
+    def __setattr__(self, name, value):
+        raise AttributeError(
+            'TestProfile is immutable; it cannot change after construction')
+
+    def __delattr__(self, name):
+        raise AttributeError(
+            'TestProfile is immutable; it cannot change after construction')
 
     def __repr__(self):
         parts = ', '.join('(re.compile(%r), %r)' % (p.pattern, k)
