@@ -5304,6 +5304,39 @@ class TaskStore:
             trusted_completion_events=events is not None,
             trusted_pm_session_adoption=True)
 
+    @staticmethod
+    def _abandon_acked_events(record):
+        """Return this Task's completion events with every unACKED one ACKED.
+
+        #2764: the abandonment write applies the same consume and ack fields and
+        digest as ``task ack`` (active_pm_inbox.ack), so an abandoned Task leaves
+        no PENDING inbox event behind. An already ACKED event is returned exactly
+        as stored. None means there is nothing to change (no events or only
+        ACKED events), so the abandon write stays exactly as before.
+        """
+        events = record.get('completion_events')
+        if type(events) is not list:
+            return None
+        from .active_pm_inbox import ack_decision_sha256
+        now = TaskStore._completion_now()
+        changed, acked = False, []
+        for event in events:
+            event = dict(event)
+            if event['state'] != 'ACKED':
+                digest = ack_decision_sha256(event['event_id'])
+                if event['state'] == 'PENDING':
+                    event.update(state='PM_CONSUMED', consumed_at=now,
+                                 pm_decision_sha256=digest)
+                elif event['pm_decision_sha256'] != digest:
+                    _fail('COMPLETION_EVENT_BINDING_MISMATCH')
+                intent = event['dispatch_intent']
+                if intent is not None and intent['state'] != 'CONFIRMED':
+                    _fail('COMPLETION_EVENT_STATE_INVALID')
+                event.update(state='ACKED', acked_at=now)
+                changed = True
+            acked.append(event)
+        return acked if changed else None
+
     def abandon(self, task_id, *, pm_session_id, reason):
         """Record a PM-only terminal abandonment, idempotent for the same reason."""
         if (not _safe_identifier(pm_session_id, SESSION_ID) or type(reason) is not str or
@@ -5321,11 +5354,16 @@ class TaskStore:
                 _fail('TASK_ABANDONMENT_CONFLICT')
             stamped = dict(reason=reason, abandoned_at=self._completion_now(),
                            pm_session_id=pm_session_id)
+            changes = {'abandonment': stamped}
+            acked_events = self._abandon_acked_events(current)
+            if acked_events is not None:
+                changes['completion_events'] = acked_events
             try:
                 return self._update(
                     task_id, expected={'record_sha256': current['record_sha256']},
-                    changes={'abandonment': stamped}, trusted_abandonment=True,
-                    abandonment_pm_session_id=pm_session_id)
+                    changes=changes, trusted_abandonment=True,
+                    abandonment_pm_session_id=pm_session_id,
+                    trusted_completion_events=acked_events is not None)
             except TaskStoreConflict:
                 continue
         _fail('TASK_STORE_BUSY')
@@ -6643,7 +6681,9 @@ class TaskStore:
         if ({'pm_provenance', 'pm_session_adoptions'} & set(changes) and
                 not trusted_pm_session_adoption):
             _fail('PM_SESSION_ADOPTION_INVALID')
-        if trusted_abandonment and (set(changes) != {'abandonment'} or
+        if trusted_abandonment and (
+                set(changes) not in ({'abandonment'},
+                                     {'abandonment', 'completion_events'}) or
                 not _safe_identifier(abandonment_pm_session_id, SESSION_ID)):
             _fail('TASK_ABANDONMENT_MUTATION_FORBIDDEN')
         if trusted_pm_session_adoption and (
