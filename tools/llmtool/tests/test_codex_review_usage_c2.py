@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from llmtool import review_dispatch, task_store
+from llmtool import review_dispatch, task_store, worker_dispatch
 from llmtool.developer_routes import load_route_config
 from llmtool.errors import LLMToolError
 import worker_policy_fixture
@@ -91,11 +91,26 @@ def _codex_stream(contract_digest, *, usage=None):
     return '\n'.join(json.dumps(event) for event in events).encode('utf-8')
 
 
+def _install_worker_policy(testcase):
+    worker_policy_fixture.install(testcase)
+    repository = patch.object(
+        worker_dispatch,
+        'repository_config',
+        return_value={
+            'slug': 'davidcatcat/davidcattoolsproject',
+            'dispatch_issue': 289,
+            'dispatch_evidence_pr': 283,
+        },
+    )
+    repository.start()
+    testcase.addCleanup(repository.stop)
+
+
 class CodexReviewUsageDispatchTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        worker_policy_fixture.install(self)
+        _install_worker_policy(self)
         self.store = _make_store(Path(self.temp.name) / 'store')
         self.post_dir = Path(self.temp.name).resolve() / 'posts'
         self.executor = SimpleNamespace(root='/repo/executor', common_dir='/repo/.git')
@@ -171,7 +186,7 @@ class TaskStoreCodexReviewUsageTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        worker_policy_fixture.install(self)
+        _install_worker_policy(self)
 
     def _claimed_store(self, sub_name):
         store = _make_store(Path(self.temp.name) / sub_name)
