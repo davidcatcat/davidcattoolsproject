@@ -1,9 +1,10 @@
 """#2812: a budget-exceeded gw-agent run keeps reported cumulative usage.
 
 The gateway result carries a usage object for every status. A run that ends
-BUDGET_EXCEEDED (including a turn-budget result) records the fully reported
-token pair on its Developer record; when the gateway reports no usable usage,
-the record keeps no usage and its execution source stays UNKNOWN.
+BUDGET_EXCEEDED (including turn-budget and context-exhaustion results) records
+the fully reported token pair on its Developer record; when the gateway reports
+no usable usage, the record keeps no usage and its execution source stays
+UNKNOWN.
 
 The run below goes through the real TaskStore: the store accepts usage on an
 unavailable Developer record only for this gw-agent budget shape, and keeps a
@@ -221,6 +222,23 @@ class GwAgentUsage2812Tests(unittest.TestCase):
         self.assertEqual(developer['execution']['status'], 'UNKNOWN')
         self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
 
+    def test_context_exhaustion_result_records_reported_usage(self):
+        status, developer, store = self._run(_result(
+            'BUDGET_EXCEEDED', 'CONTEXT_EXHAUSTED',
+            {'status': 'REPORTED', 'input_tokens': 1200, 'output_tokens': 340}))
+        self.assertEqual(status, 1)
+        self.assertEqual(developer['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertEqual(developer['error_code'],
+                         'DEVELOPER_GW_AGENT_BUDGET_EXCEEDED_CONTEXT_EXHAUSTED')
+        self.assertEqual(developer['usage'], {
+            'prompt_tokens': 1200, 'completion_tokens': 340, 'total_tokens': 1540,
+            'served_model': 'qwen-authorized'})
+        # The real store wrote and revalidated the context-budget record.
+        reloaded = task_store.TaskStore(store.root).get(TASK_ID)
+        self.assertEqual(reloaded['developer'], developer)
+        self.assertEqual(developer['execution']['status'], 'UNKNOWN')
+        self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
+
     def test_budget_exceeded_usage_and_model_name_the_served_model(self):
         status, developer, _store = self._run(
             _result('BUDGET_EXCEEDED', 'TURN_BUDGET_EXCEEDED',
@@ -275,6 +293,15 @@ class GwAgentUsage2812Tests(unittest.TestCase):
             {'status': 'REPORTED', 'input_tokens': 1200, 'output_tokens': 340}))
         lookalike = copy.deepcopy(developer)
         lookalike['error_code'] = 'DEVELOPER_GW_AGENT_BUDGET_EXCEEDEDNESS'
+        self._assert_refused(store, lookalike)
+
+    def test_usage_is_refused_for_a_context_lookalike_error_code(self):
+        _status, developer, store = self._run(_result(
+            'BUDGET_EXCEEDED', 'CONTEXT_EXHAUSTED',
+            {'status': 'REPORTED', 'input_tokens': 1200, 'output_tokens': 340}))
+        lookalike = copy.deepcopy(developer)
+        lookalike['error_code'] = (
+            'DEVELOPER_GW_AGENT_BUDGET_EXCEEDED_CONTEXT_EXHAUSTEDNESS')
         self._assert_refused(store, lookalike)
 
     def test_usage_is_refused_without_a_provider_usage_source(self):

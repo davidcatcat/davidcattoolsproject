@@ -1124,8 +1124,10 @@ def _gw_agent_budget_usage_allowed(developer, usage):
 
     The record must be a gw-agent budget result (its fixed budget error code,
     or that code followed by a delimiter and a gateway budget reason) and its
-    execution must report that the usage came from the provider. Any other
-    unavailable record, route, error code or usage source refuses usage.
+    execution must report that the usage came from the provider. A gateway
+    budget reason is a bounded ``*_BUDGET_EXCEEDED`` code or the gateway's
+    context-exhaustion code. Any other unavailable record, route, error code or
+    usage source refuses usage.
     """
     if usage is None:
         return False
@@ -1137,7 +1139,8 @@ def _gw_agent_budget_usage_allowed(developer, usage):
     exact_budget = error_code == budget_code
     bounded_reason = (type(reason) is str and
                       re.fullmatch(r'[A-Z0-9_]{1,29}', reason) is not None and
-                      reason.endswith('BUDGET_EXCEEDED'))
+                      (reason.endswith('BUDGET_EXCEEDED') or
+                       reason == 'CONTEXT_EXHAUSTED'))
     execution = developer.get('execution')
     return (developer.get('provider_profile') == 'gw-agent' and
             (exact_budget or bounded_reason) and
