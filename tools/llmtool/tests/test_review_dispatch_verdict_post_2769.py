@@ -13,7 +13,16 @@ from llmtool.cli import parser_for_cli
 from llmtool.task_store import TaskStore, new_id
 from llmtool.task_verification import AcceptanceCriterion, CriterionKind, TaskContract
 
+import review_trust_fixture
 import worker_policy_fixture
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
 
 
 OWNER_SESSION = '3f2b8c1e-4d5a-4b6c-8d7e-9f0a1b2c3d4e'
