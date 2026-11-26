@@ -48,6 +48,12 @@ HARD_MAX_DIFF_BYTES = 5 * 1024 * 1024
 # #2281 (Owner 2026-11-21): 5 MiB is the hard ceiling for every route-level
 # byte bound in developer-routes.json. A larger value is refused at load.
 HARD_MAX_BYTE_BOUND = 5 * 1024 * 1024
+# The Git state snapshot reads every ref (refname, object, peeled object,
+# type). A repository with many task branches and remote-tracking refs passed
+# the former 1 MiB bound (1,049,417 bytes on 2026-11-26), which refused every
+# AGY and gw-agent dispatch. Same bound as the other route byte limits; the
+# snapshot still compares every ref.
+REF_SNAPSHOT_MAX_BYTES = 5 * 1024 * 1024
 # #2157, #2281: Developer read and write path caps per route. TaskStore stores
 # at most 1024 of each per Developer record, so a route may lower the cap but
 # not raise it above the stored-record bound.
@@ -776,7 +782,7 @@ def capture_snapshot(root):
     refs_raw = git(
         'for-each-ref',
         '--format=%(refname) %(objectname) %(*objectname) %(objecttype)',
-        limit=1024 * 1024)
+        limit=REF_SNAPSHOT_MAX_BYTES)
     refs = {}
     for line in refs_raw.decode().splitlines():
         name, object_id, peeled_id, object_type = line.split(' ', 3)
