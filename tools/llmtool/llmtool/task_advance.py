@@ -5524,6 +5524,13 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                             # Auto: review_repair applies the chain-wide auto
                             # limit under its chain lock; advance never pre-checks it.
                             auto=True)
+                        # #2782: the repair follows the recorded verdict of the
+                        # newest claim at this head, never an older one.
+                        review_claim = _head_review_claim(record, number,
+                                                          d6['result_head'])
+                        if (type(review_claim) is dict and
+                                type(review_claim.get('version')) is int):
+                            repair_args['version'] = review_claim['version']
                         if remote_status == 'FAIL':
                             repair_args['remote_test_receipt'] = failure_receipt
                             remote_details, extra_read = _remote_test_failure_details(
