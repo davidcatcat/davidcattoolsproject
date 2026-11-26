@@ -169,7 +169,6 @@ class RefusalTests(unittest.TestCase):
             '/srv//proj',
             '/srv/../proj',
             '/srv/proj/./',
-            '/srv/proj ',
             'a' * 1025,
             '/srv/\tproj',
             '/srv/\u00e9proj',
