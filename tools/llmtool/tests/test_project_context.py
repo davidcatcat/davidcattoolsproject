@@ -184,11 +184,11 @@ class RefusalTests(unittest.TestCase):
 
     def test_root_disjointness_refusals(self):
         cases = (
-            ('canonical_root', '/srv/projects/repo'),
-            ('workspace_root', '/srv/projects/repo'),
-            ('tasks_root', '/srv/projects/repo'),
-            ('workspace_root', '/srv/projects/repo/inner'),
-            ('tasks_root', '/srv'),
+            ('canonical_root', '/srv/projects/work'),   # equals workspace root
+            ('workspace_root', '/srv/projects/repo'),   # equals canonical root
+            ('tasks_root', '/srv/projects/repo'),       # equals canonical root
+            ('workspace_root', '/srv/projects/repo/inner'),  # inside canonical
+            ('tasks_root', '/srv'),                     # contains all others
         )
         for key, root in cases:
             with self.subTest(key=key):
