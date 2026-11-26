@@ -1122,17 +1122,25 @@ def _validate_usage(value):
 def _gw_agent_budget_usage_allowed(developer, usage):
     """#2812: only a gw-agent budget result may keep usage while unavailable.
 
-    The record must be a gw-agent budget result (its fixed budget error code)
-    and its execution must report that the usage came from the provider. Any
-    other unavailable record, route, error code or usage source refuses usage.
+    The record must be a gw-agent budget result (its fixed budget error code,
+    or that code followed by a delimiter and a gateway budget reason) and its
+    execution must report that the usage came from the provider. Any other
+    unavailable record, route, error code or usage source refuses usage.
     """
     if usage is None:
         return False
+    budget_code = 'DEVELOPER_GW_AGENT_BUDGET_EXCEEDED'
     error_code = developer.get('error_code')
+    reason = (error_code[len(budget_code) + 1:]
+              if type(error_code) is str and error_code.startswith(budget_code + '_')
+              else None)
+    exact_budget = error_code == budget_code
+    bounded_reason = (type(reason) is str and
+                      re.fullmatch(r'[A-Z0-9_]{1,29}', reason) is not None and
+                      reason.endswith('BUDGET_EXCEEDED'))
     execution = developer.get('execution')
     return (developer.get('provider_profile') == 'gw-agent' and
-            type(error_code) is str and
-            error_code.startswith('DEVELOPER_GW_AGENT_BUDGET_EXCEEDED') and
+            (exact_budget or bounded_reason) and
             type(execution) is dict and
             execution.get('status') == 'UNKNOWN' and
             execution.get('usage_source') == 'CLI_REPORTED')

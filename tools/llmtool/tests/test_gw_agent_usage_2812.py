@@ -269,6 +269,14 @@ class GwAgentUsage2812Tests(unittest.TestCase):
         other_code['error_code'] = 'DEVELOPER_GW_AGENT_TIMEOUT'
         self._assert_refused(store, other_code)
 
+    def test_usage_is_refused_for_a_budget_lookalike_error_code(self):
+        _status, developer, store = self._run(_result(
+            'BUDGET_EXCEEDED', 'TURN_BUDGET_EXCEEDED',
+            {'status': 'REPORTED', 'input_tokens': 1200, 'output_tokens': 340}))
+        lookalike = copy.deepcopy(developer)
+        lookalike['error_code'] = 'DEVELOPER_GW_AGENT_BUDGET_EXCEEDEDNESS'
+        self._assert_refused(store, lookalike)
+
     def test_usage_is_refused_without_a_provider_usage_source(self):
         _status, developer, store = self._run(_result(
             'BUDGET_EXCEEDED', 'TURN_BUDGET_EXCEEDED',
