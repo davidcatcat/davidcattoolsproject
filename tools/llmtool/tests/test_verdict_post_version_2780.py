@@ -3,12 +3,13 @@
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from llmtool import review_dispatch, task_store  # noqa: E402
+from llmtool import review_dispatch  # noqa: E402
 from llmtool.errors import LLMToolError  # noqa: E402
 
 import review_trust_fixture  # noqa: E402
@@ -54,20 +55,16 @@ class VerdictPostVersionTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         root = Path(self.temp.name).resolve()
-        self.store = task_store.TaskStore(root / 'store')
-        self.store.create({
-            'schema_version': 2,
+        self.store = SimpleNamespace(root=root / 'store')
+        self.task = {
             'task_id': TASK,
             'run_id': RUN,
-            'pm_session_id': 'pm-session',
             'task_binding': {
                 'task_id': TASK,
                 'run_id': RUN,
                 'contract_digest': CONTRACT,
             },
-            'developer': {'provider_profile': 'agy'},
-        })
-        self.task = self.store.get(TASK)
+        }
         self.post_dir = root / 'posts'
         patcher = patch.object(
             review_dispatch, '_verdict_post_dir',
