@@ -3922,21 +3922,58 @@ _REVIEWER_ROUTE_UNAVAILABLE = ('ROLE_MODEL_NOT_ALLOWED', 'REVIEWER_ACCOUNT_UNCON
                                'REVIEWER_NOT_ALLOWED')
 
 
+def _alternate_reviewer(record):
+    """#289: the other cross-family ALLOWED Reviewer from the formal order.
+
+    Without the order key the old single alternate is kept. The chosen key is
+    passed through review_dispatch._select_reviewer, so family and the worker
+    policy are checked again before it is returned.
+    """
+    family = task_completion._reviewer_author_family(record.get('developer'))
+    if family is None:
+        return None
+    try:
+        order = repair_policy.formal_reviewer_order()
+    except Exception:
+        return None
+    if order is None:
+        candidates = ('claude-reviewer' if family == 'claude' else 'codex-reviewer',)
+        primary = None
+    else:
+        cross_family = [key for key in order
+                        if review_dispatch._reviewer_family(key) != family]
+        try:
+            primary = next((key for key in cross_family
+                            if review_dispatch._policy(record, key).allowed), None)
+        except Exception:
+            return None
+        if primary is None:
+            return None
+        candidates = order
+    for candidate in candidates:
+        if candidate == primary:
+            continue
+        try:
+            review_dispatch._select_reviewer(record, candidate)
+        except Exception:
+            continue
+        return candidate
+    return None
+
+
 def _reviewer_fallback(record, exc):
     """#1831 P1: return (alternate Reviewer or None, code) for a route refusal.
 
     None when the refusal is not a route-unavailable code. The alternate is the
-    other formal Reviewer key, and only when review_dispatch's own family and
-    policy check admits it; dispatch_review(reviewer=alt) checks it again.
+    other cross-family key from the #289 formal Reviewer order, and only when
+    review_dispatch's own family and policy check admits it; dispatch_review
+    (reviewer=alt) checks it again.
     """
     code = getattr(exc, 'review_dispatch_code', None)
     if code not in _REVIEWER_ROUTE_UNAVAILABLE:
         return None
-    family = task_completion._reviewer_author_family(record.get('developer'))
-    alternate = 'claude-reviewer' if family == 'claude' else 'codex-reviewer'
-    try:
-        review_dispatch._select_reviewer(record, alternate)
-    except Exception:
+    alternate = _alternate_reviewer(record)
+    if alternate is None:
         return None, code
     return alternate, code
 
@@ -3946,13 +3983,7 @@ def _blocked_fallback_reviewer(record, head):
     if sum(type(item) is dict and item.get('head_sha') == head
            for item in _non_ruling_claims(record)) != 1:
         return None
-    family = task_completion._reviewer_author_family(record.get('developer'))
-    alternate = 'claude-reviewer' if family == 'claude' else 'codex-reviewer'
-    try:
-        review_dispatch._select_reviewer(record, alternate)
-    except Exception:
-        return None
-    return alternate
+    return _alternate_reviewer(record)
 
 
 def _refusal(exc, attribute):

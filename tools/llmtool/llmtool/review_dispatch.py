@@ -17,7 +17,8 @@ import sys
 import time
 
 from .errors import LLMToolError
-from . import developer_routes, github_identity, role_config, skill_manifest, task_completion, worker_dispatch
+from . import (developer_routes, github_identity, repair_policy, role_config,
+               skill_manifest, task_completion, worker_dispatch)
 
 
 # #1502 WP-G: no Reviewer default model is kept here. When no model is
@@ -203,18 +204,37 @@ def _policy(task, reviewer_key):
     return worker_dispatch.evaluate(reviewer_key, assignment, task.get('task_id'))
 
 
+def _reviewer_family(reviewer_key):
+    return 'claude' if reviewer_key == 'claude-reviewer' else 'codex'
+
+
 def _select_reviewer(task, requested=None):
-    """Choose the default or explicit Reviewer and enforce family separation."""
+    """Choose the default or explicit Reviewer and enforce family separation.
+
+    #289: with no explicit reviewer and a formal_reviewer_order key, take the
+    first key in that order that is cross-family to the author and ALLOWED.
+    Without the key the old single-default rule is unchanged.
+    """
     developer = task.get('developer') if type(task) is dict else None
     family = task_completion._reviewer_author_family(developer)
     if family is None:
         _refuse('REVIEWER_FAMILY_UNSUPPORTED')
-    reviewer_key = requested
-    if reviewer_key is None:
+    if requested is None:
+        order = repair_policy.formal_reviewer_order()
+        if order is not None:
+            cross_family = [key for key in order if _reviewer_family(key) != family]
+            if not cross_family:
+                _refuse('REVIEWER_SAME_FAMILY')
+            for candidate in cross_family:
+                if _policy(task, candidate).allowed:
+                    return candidate
+            _refuse('REVIEWER_NOT_ALLOWED')
         reviewer_key = 'codex-reviewer' if family == 'claude' else 'claude-reviewer'
+    else:
+        reviewer_key = requested
     if reviewer_key not in ('claude-reviewer', 'codex-reviewer'):
         _refuse('REVIEWER_INVALID')
-    reviewer_family = 'claude' if reviewer_key == 'claude-reviewer' else 'codex'
+    reviewer_family = _reviewer_family(reviewer_key)
     if reviewer_family == family:
         _refuse('REVIEWER_SAME_FAMILY')
     policy = _policy(task, reviewer_key)

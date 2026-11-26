@@ -14,5 +14,6 @@
   "merge_train_files_per_pr_max": 100,
   "revert_scope_prs_max": 5,
   "d6_writer_lease_hours": 24,
-  "route_failure_pause_after": 3
+  "route_failure_pause_after": 3,
+  "formal_reviewer_order": ["codex-reviewer", "claude-reviewer"]
 }

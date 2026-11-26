@@ -103,6 +103,11 @@ OPTIONAL_POSITIVE_POLICY_KEYS = ('spec_preflight_large_file_lines', 'merge_train
                                  'remote_test_total_timeout_seconds',
                                  'reviewer_excerpt_max_chars', 'ci_excerpt_max_lines',
                                  'monitor_ec2_busy_window_seconds')
+# #289 (Owner 2026-11-26): optional formal Reviewer order. A present key is a
+# non-empty list of distinct known formal Reviewer keys; an absent key keeps
+# the caller's existing default.
+FORMAL_REVIEWER_KEYS = ('claude-reviewer', 'codex-reviewer')
+OPTIONAL_REVIEWER_ORDER_KEYS = ('formal_reviewer_order',)
 # #2281 row 18 (basis #819): Developer assignment wait. The key above is
 # optional; a policy that omits it keeps the caller default, the hard-coded
 # wait at its point of use (llmtool.developer_assignment_inbox).
@@ -216,12 +221,17 @@ def load_policy(path=None):
     except (OSError, ValueError, UnicodeError):
         _refuse('POLICY_INVALID')
     allowed = {'schema_version', *POLICY_KEYS, *OPTIONAL_POLICY_LIMITS,
-               *OPTIONAL_POSITIVE_POLICY_KEYS}
+               *OPTIONAL_POSITIVE_POLICY_KEYS, *OPTIONAL_REVIEWER_ORDER_KEYS}
     if (type(data) is not dict or not {'schema_version', *POLICY_KEYS} <= set(data) <= allowed or
             any(key in data and (type(data[key]) is not int or not low <= data[key] <= high)
                 for key, (low, high) in OPTIONAL_POLICY_LIMITS.items()) or
             any(key in data and (type(data[key]) is not int or data[key] < 1)
                 for key in OPTIONAL_POSITIVE_POLICY_KEYS) or
+            any(key in data and (type(data[key]) is not list or not data[key] or
+                                 any(type(item) is not str or item not in FORMAL_REVIEWER_KEYS
+                                     for item in data[key]) or
+                                 len(set(data[key])) != len(data[key]))
+                for key in OPTIONAL_REVIEWER_ORDER_KEYS) or
             type(data['schema_version']) is not int or data['schema_version'] != 1 or
             any(type(data[key]) is not int or not 0 <= data[key] <= 1000
                 for key in POLICY_KEYS)):
@@ -369,6 +379,17 @@ def route_failure_pause_after(path=None):
     """
     policy = load_policy(path)
     return policy.get('route_failure_pause_after', ROUTE_FAILURE_PAUSE_AFTER)
+
+
+def formal_reviewer_order(path=None):
+    """#289: the optional formal Reviewer order, or None when the key is absent.
+
+    A present key is validated by load_policy: a non-empty list of distinct
+    known formal Reviewer keys. Callers keep their existing default when it is
+    absent.
+    """
+    policy = load_policy(path)
+    return policy.get('formal_reviewer_order')
 
 
 def local_test_timeout_seconds(path=None, default=LOCAL_TEST_TIMEOUT_SECONDS):
