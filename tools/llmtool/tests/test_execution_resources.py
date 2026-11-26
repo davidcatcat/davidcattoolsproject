@@ -71,8 +71,8 @@ class ExecutionResourcesTests(unittest.TestCase):
         # #1502 O1 / WP-C: Codex is Reviewer and AI Debug only.
         workers = worker_dispatch._parse_policy(POLICY_PATH.read_bytes())['workers']
         self.assertEqual(workers['codex-developer']['dispatch'], 'PAUSED')
-        # Owner 2026-11-25 (#289 c7153323324): Codex Reviewer and Debug paused.
-        self.assertEqual(workers['codex-reviewer']['dispatch'], 'PAUSED')
+        # Owner 2026-11-26 (#289 c7181570990): Codex Reviewer resumed.
+        self.assertEqual(workers['codex-reviewer']['dispatch'], 'ALLOWED')
         self.assertEqual(workers['codex-debug']['dispatch'], 'PAUSED')
         self.assertNotIn('gemini', workers['agy']['reason'].lower())
 

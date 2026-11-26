@@ -400,8 +400,8 @@ class WorkerDispatchTests(unittest.TestCase):
              'claude-developer': 'PAUSED',
              'opencode-developer': 'ALLOWED', 'agy': 'ALLOWED',
              'company-gw': 'PAUSED', 'gw-agent': 'ALLOWED',
-             # #289 c7153323324 (Owner 2026-11-25): claude-reviewer ALLOWED; codex-reviewer and codex-debug PAUSED.
-             'claude-reviewer': 'ALLOWED', 'codex-reviewer': 'PAUSED',
+             # #289 c7181570990 (Owner 2026-11-26): codex-reviewer ALLOWED; codex-debug PAUSED.
+             'claude-reviewer': 'ALLOWED', 'codex-reviewer': 'ALLOWED',
              'codex-debug': 'PAUSED', 'claude-debug': 'ALLOWED'})
         with self._real_policy():
             decisions = {key: worker_dispatch.evaluate(key) for key in policy['workers']}
@@ -413,13 +413,13 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertTrue(decisions['agy'].allowed)
         self.assertTrue(decisions['claude-reviewer'].allowed)
         self.assertEqual(decisions['claude-reviewer'].reason_code, 'OWNER_POLICY_ALLOWED')
-        self.assertFalse(decisions['codex-reviewer'].allowed)
-        self.assertEqual(decisions['codex-reviewer'].reason_code, 'OWNER_PAUSED')
+        self.assertTrue(decisions['codex-reviewer'].allowed)
+        self.assertEqual(decisions['codex-reviewer'].reason_code, 'OWNER_POLICY_ALLOWED')
         self.assertFalse(decisions['codex-debug'].allowed)
         self.assertEqual(decisions['codex-debug'].reason_code, 'OWNER_PAUSED')
 
-    # #289 (Owner decision relayed on c7153323324): claude-reviewer is ALLOWED
-    # and codex-reviewer / codex-debug are PAUSED.
+    # #289 (Owner decision relayed on c7153323324): claude-reviewer is ALLOWED.
+    # #289 c7181570990 (Owner 2026-11-26): codex-reviewer resumed; codex-debug PAUSED.
     _CLAUDE_REVIEWER_GRANT_REF = ('https://github.com/davidcatcat/davidcattoolsproject/'
                                   'issues/289#issuecomment-7153323324')
     _CLAUDE_REVIEWER_TASK_ID = '5cf4cde1dcd249578092e8f0f1244244'
@@ -454,8 +454,8 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(without_task.reason_code, 'OWNER_POLICY_ALLOWED')
         self.assertTrue(for_task.allowed)
         self.assertEqual(for_task.reason_code, 'OWNER_POLICY_ALLOWED')
-        self.assertFalse(codex.allowed)
-        self.assertEqual(codex.reason_code, 'OWNER_PAUSED')
+        self.assertTrue(codex.allowed)
+        self.assertEqual(codex.reason_code, 'OWNER_POLICY_ALLOWED')
 
     @staticmethod
     def _review_task(model):
@@ -467,7 +467,7 @@ class WorkerDispatchTests(unittest.TestCase):
     # test_gw_agent_route_wiring.RealPolicyReviewerFallbackTests: importing
     # task_advance here would make ci_mac_modules select this module for #781
     # (test_ci_mac_modules uses it as the unrelated control).
-    def test_real_policy_refuses_claude_reviewer_and_keeps_codex_for_claude_authors(self):
+    def test_real_policy_admits_both_reviewers_for_cross_family_authors(self):
         from llmtool import review_dispatch
         # A non-Claude, non-Codex author (family "other").
         task = self._review_task('gemini-2.5-pro')
@@ -479,16 +479,14 @@ class WorkerDispatchTests(unittest.TestCase):
                              'claude-reviewer')
             # The default Reviewer for this author is claude-reviewer, and it is admitted.
             self.assertEqual(review_dispatch._select_reviewer(task), 'claude-reviewer')
-            # An explicit codex-reviewer request is refused under the paused row.
-            with self.assertRaises(LLMToolError) as explicit_refused:
-                review_dispatch._select_reviewer(task, 'codex-reviewer')
-            self.assertEqual(explicit_refused.exception.review_dispatch_code,
-                             'REVIEWER_NOT_ALLOWED')
-            # A Claude-authored Task defaults to codex-reviewer, which is refused.
-            with self.assertRaises(LLMToolError) as claude_author_refused:
-                review_dispatch._select_reviewer(self._review_task('claude-sonnet-5-5-medium'))
-            self.assertEqual(claude_author_refused.exception.review_dispatch_code,
-                             'REVIEWER_NOT_ALLOWED')
+            # #289 c7181570990 (Owner 2026-11-26): the resumed codex-reviewer row
+            # admits an explicit codex-reviewer request for a cross-family author.
+            self.assertEqual(review_dispatch._select_reviewer(task, 'codex-reviewer'),
+                             'codex-reviewer')
+            # A Claude-authored Task defaults to codex-reviewer, which is admitted.
+            self.assertEqual(
+                review_dispatch._select_reviewer(self._review_task('claude-sonnet-5-5-medium')),
+                'codex-reviewer')
 
     def test_paused_agy_row_refuses_every_agy_taskstore_entry_point(self):
         returned = {'review_return': {'state': 'RETURNED',

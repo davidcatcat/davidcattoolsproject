@@ -1435,8 +1435,9 @@ class GwAgentShippedServedModelTests(unittest.TestCase):
 
 
 class RealPolicyReviewerFallbackTests(unittest.TestCase):
-    """#289 c7153323324 (Owner 2026-11-25): the live worker-dispatch.json
-    allows claude-reviewer and pauses codex-reviewer and codex-debug.
+    """#289 c7153323324 (Owner 2026-11-25) and c7181570990 (Owner 2026-11-26):
+    the live worker-dispatch.json allows claude-reviewer and codex-reviewer and
+    pauses codex-debug.
 
     Decisions go through the real reader, parser and gate on the repository
     policy file; only the trusted repository config is pinned.
@@ -1462,7 +1463,7 @@ class RealPolicyReviewerFallbackTests(unittest.TestCase):
             review_dispatch._select_reviewer(task, reviewer)
         self.assertEqual(refused.exception.review_dispatch_code, code)
 
-    def test_non_claude_authors_get_claude_reviewer_and_codex_is_refused(self):
+    def test_non_claude_authors_get_claude_reviewer_and_codex_is_admitted(self):
         for developer in ({'provider_profile': 'gw-agent'},
                           {'provider_profile': 'agy', 'model': 'gemini-2.5-pro'},
                           {'provider_profile': 'opencode'}):
@@ -1471,17 +1472,23 @@ class RealPolicyReviewerFallbackTests(unittest.TestCase):
                 self.assertEqual(review_dispatch._select_reviewer(task), 'claude-reviewer')
                 self.assertEqual(review_dispatch._select_reviewer(task, 'claude-reviewer'),
                                  'claude-reviewer')
-                self._assert_refused(task, 'codex-reviewer', 'REVIEWER_NOT_ALLOWED')
+                # #289 c7181570990 (Owner 2026-11-26): the resumed codex-reviewer
+                # row admits an explicit cross-family Reviewer request.
+                self.assertEqual(review_dispatch._select_reviewer(task, 'codex-reviewer'),
+                                 'codex-reviewer')
 
     def test_codex_family_author_gets_claude_reviewer(self):
         task = self._task({'provider_profile': 'agy', 'model': 'gpt-6-luna'})
         self.assertEqual(review_dispatch._select_reviewer(task), 'claude-reviewer')
         self._assert_refused(task, 'codex-reviewer', 'REVIEWER_SAME_FAMILY')
 
-    def test_claude_authored_task_has_no_formal_reviewer(self):
-        # codex-reviewer is paused and claude-reviewer is the same family.
+    def test_claude_authored_task_gets_codex_reviewer(self):
+        # codex-reviewer is resumed (#289 c7181570990) and cross-family for a
+        # Claude author; claude-reviewer is the same family and still refused.
         task = self._task({'provider_profile': 'claude'})
-        self._assert_refused(task, None, 'REVIEWER_NOT_ALLOWED')
+        self.assertEqual(review_dispatch._select_reviewer(task), 'codex-reviewer')
+        self.assertEqual(review_dispatch._select_reviewer(task, 'codex-reviewer'),
+                         'codex-reviewer')
         self._assert_refused(task, 'claude-reviewer', 'REVIEWER_SAME_FAMILY')
 
 
