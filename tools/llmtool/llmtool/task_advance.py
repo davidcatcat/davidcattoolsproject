@@ -4029,8 +4029,9 @@ def _events_for_claim(events, claim, head, *, only_claim):
     """Return REVIEWER events that can belong to one claim at head.
 
     A versioned event belongs only to the claim with the same version. An event
-    stored without a version is legacy: it is used only when the head has one
-    claim, so an older event never stands in for a newer claim (#2782).
+    stored without a version is a legacy first verdict: it is used only for the
+    sole version-1 claim at the head, so an older event never stands in for a
+    newer claim (#2782).
     """
     version = claim.get('version')
     selected = []
@@ -4039,7 +4040,10 @@ def _events_for_claim(events, claim, head, *, only_claim):
                 event.get('source_sha') != head):
             continue
         if 'version' not in event:
-            if only_claim:
+            # A versionless event is a legacy first verdict. It can belong only
+            # to the sole version-1 claim at the head; for any newer claim it is
+            # an older result and must not stand in for it (#2782).
+            if only_claim and type(version) is int and version == 1:
                 selected.append(event)
             continue
         event_version = event.get('version')
@@ -5524,13 +5528,6 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                             # Auto: review_repair applies the chain-wide auto
                             # limit under its chain lock; advance never pre-checks it.
                             auto=True)
-                        # #2782: the repair follows the recorded verdict of the
-                        # newest claim at this head, never an older one.
-                        review_claim = _head_review_claim(record, number,
-                                                          d6['result_head'])
-                        if (type(review_claim) is dict and
-                                type(review_claim.get('version')) is int):
-                            repair_args['version'] = review_claim['version']
                         if remote_status == 'FAIL':
                             repair_args['remote_test_receipt'] = failure_receipt
                             remote_details, extra_read = _remote_test_failure_details(

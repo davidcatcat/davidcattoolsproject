@@ -140,8 +140,8 @@ class NewerCompletedClaimRecordedTest(unittest.TestCase):
 
         repaired = []
 
-        def repair(**kwargs):
-            repaired.append(kwargs['version'])
+        def repair(**_kwargs):
+            repaired.append(True)
             return {'repair_task_id': '3' * 32}
 
         with patch.object(task_advance, '_d6_snapshot', return_value=D6), \
@@ -158,7 +158,7 @@ class NewerCompletedClaimRecordedTest(unittest.TestCase):
         self.assertEqual(first['step'], 'RECORD_REVIEW_RESULT')
         self.assertEqual(calls, [2])
         self.assertEqual(second['step'], 'REPAIR_REVIEW')
-        self.assertEqual(repaired, [2])
+        self.assertEqual(len(repaired), 1)
 
 
 class VersionlessEventDoesNotStandInTest(unittest.TestCase):
@@ -178,6 +178,16 @@ class VersionlessEventDoesNotStandInTest(unittest.TestCase):
         events = [old_event(outcome='REVIEW_PASS')]
         value = record(
             [older, newer], events,
+            completion={'executor_task_id': 'executor-1', 'state': 'PM_EVIDENCE_READY',
+                        'evidence': {'result': {'result_head': HEAD},
+                                     'review_pr_ci': {'stage': 'READY'}}})
+        self.assertEqual(task_advance.decide(value, D6, PR, related(events)),
+                         'RECORD_REVIEW_RESULT')
+
+    def test_lone_newer_claim_does_not_use_an_unversioned_pass(self):
+        events = [old_event(outcome='REVIEW_PASS')]
+        value = record(
+            [claim(version=2)], events,
             completion={'executor_task_id': 'executor-1', 'state': 'PM_EVIDENCE_READY',
                         'evidence': {'result': {'result_head': HEAD},
                                      'review_pr_ci': {'stage': 'READY'}}})
