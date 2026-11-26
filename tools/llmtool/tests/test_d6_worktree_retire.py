@@ -932,7 +932,6 @@ class D6RetireTests(unittest.TestCase):
         before = self._record("owner-cli-task")
         output = io.StringIO()
         with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
-                patch.object(lifecycle, "TASKS_ROOT", self.tasks), \
                 contextlib.redirect_stdout(output):
             code = lifecycle._main([
                 "--owner-approved-retain-release",

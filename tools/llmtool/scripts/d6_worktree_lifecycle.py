@@ -27,19 +27,6 @@ import threading
 import time
 
 
-# Legacy-only constants (#369): no lifecycle decision reads these any more;
-# trust.json is authoritative. They stay defined, with their pre-PR-3 values,
-# until PR-10 so `llmtool trust verify-legacy` can compare against them.
-TASKS_ROOT = Path(
-    "/Users/davidsun/.local/share/llmtool-dev-workspaces/"
-    "davidcattoolsproject/tasks"
-)
-ORIGINS = frozenset((
-    "git@github.com:davidcatcat/davidcattoolsproject.git",
-    "https://github.com/davidcatcat/davidcattoolsproject.git",
-))
-D6_INTEGRATOR_DISPATCHER_ROOT = Path(
-    "/Users/davidsun/git/davidcataiporject/davidcattoolsproject")
 TASK_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,95}\Z")
 AGENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 RETENTION_PATHS = [
@@ -2688,15 +2675,6 @@ def release_expired_lease(*, canonical_root, task_id, pm_session, workspace_root
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
-
-
-# Legacy-only (#369): --release-retain now builds its pattern from trust.json
-# (repository.slug and approval_refs.retain_release_issues, see
-# _retain_release_re). This pre-trust value stays until PR-10 only so
-# `llmtool trust verify-legacy` can compare against it.
-OWNER_APPROVAL_RE = re.compile(
-    r"https://github\.com/davidcatcat/davidcattoolsproject/issues/(?:289|352)"
-    r"#issuecomment-[0-9]+\Z")
 
 
 def _parse_release_retain(values, trust=None):

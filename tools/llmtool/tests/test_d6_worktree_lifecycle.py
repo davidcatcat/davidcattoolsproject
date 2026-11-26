@@ -469,6 +469,10 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
                                                workspace_root=self.tasks)
 
     def test_release_retain_pattern_and_help_derive_from_trust(self):
+        # The trust-built pattern replaces the removed legacy constant and
+        # carries the same issue numbers.
+        self.assertIn("(?:289|352)",
+                      lifecycle._retain_release_re(lifecycle._load_trust()).pattern)
         self._write_trust(retain_release_issues=[900, 901])
         pattern = lifecycle._retain_release_re(lifecycle._load_trust())
         self.assertTrue(pattern.fullmatch(
@@ -484,8 +488,6 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
                           side_effect=lifecycle.TrustError("TRUST_MISSING")):
             self.assertIn("trust.json approval_refs.retain_release_issues",
                           lifecycle._release_retain_help())
-        # The legacy constant stays only for `llmtool trust verify-legacy`.
-        self.assertIn("(?:289|352)", lifecycle.OWNER_APPROVAL_RE.pattern)
 
     def _registered_result_fixture(self, task_id="record-result-test"):
         root = self.tasks / task_id

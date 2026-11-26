@@ -56,21 +56,6 @@ _D6_LIFECYCLE = 'tools/llmtool/scripts/d6_worktree_lifecycle.py'
 
 ALLOWLIST = {
     (_D6_LIFECYCLE,
-     '"/Users/davidsun/.local/share/llmtool-dev-workspaces/"'):
-        LEGACY_VERIFY,
-    (_D6_LIFECYCLE,
-     '"git@github.com:davidcatcat/davidcattoolsproject.git",'):
-        LEGACY_VERIFY,
-    (_D6_LIFECYCLE,
-     '"https://github.com/davidcatcat/davidcattoolsproject.git",'):
-        LEGACY_VERIFY,
-    (_D6_LIFECYCLE,
-     '"/Users/davidsun/git/davidcataiporject/davidcattoolsproject")'):
-        LEGACY_VERIFY,
-    (_D6_LIFECYCLE,
-     r'r"https://github\.com/davidcatcat/davidcattoolsproject/issues/(?:289|352)"'):
-        LEGACY_VERIFY,
-    (_D6_LIFECYCLE,
      r'r"https://github\.com/" + re.escape(trust["slug"]) + r"/issues/(?:" +'):
         RETAIN_RELEASE_REFS,
     (_D6_LIFECYCLE,
