@@ -29,6 +29,14 @@ _INTEGER_REFERENCE_KEYS = (
     "worker_dispatch_evidence_pr",
 )
 _MAX_REFERENCE = 10 ** 9
+_FIELDS = (
+    "project_id",
+    "slug",
+    "allowed_origins",
+    "canonical_root",
+    "workspace_root",
+    "tasks_root",
+)
 
 
 class ProjectContextError(ValueError):
@@ -124,8 +132,24 @@ class ProjectContext:
         "tasks_root",
     )
 
-    def __init__(self, project_id, slug, allowed_origins,
-                 canonical_root, workspace_root, tasks_root):
+    def __init__(self, *args, **kwargs):
+        # Bind explicitly so unexpected keywords, duplicate fields and missing
+        # fields all take the fixed-code refusal path instead of raising TypeError.
+        if len(args) > len(_FIELDS):
+            _fail()
+        values = dict(zip(_FIELDS, args))
+        for name, value in kwargs.items():
+            if name not in _FIELDS or name in values:
+                _fail()
+            values[name] = value
+        if len(values) != len(_FIELDS):
+            _fail()
+        project_id = values["project_id"]
+        slug = values["slug"]
+        allowed_origins = values["allowed_origins"]
+        canonical_root = values["canonical_root"]
+        workspace_root = values["workspace_root"]
+        tasks_root = values["tasks_root"]
         _validate_project_id(project_id)
         _validate_slug(slug)
         _validate_origins(allowed_origins, slug)

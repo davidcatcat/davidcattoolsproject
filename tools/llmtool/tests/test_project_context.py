@@ -73,6 +73,16 @@ class ProjectContextTests(unittest.TestCase):
         self.assertEqual(context.workspace_root, WORKSPACE)
         self.assertEqual(context.tasks_root, TASKS)
 
+    def test_public_constructor_refuses_malformed_arguments(self):
+        self.assertCode(lambda: _context(extra="value"))
+        self.assertCode(lambda: ProjectContext(project_id="project-1"))
+        self.assertCode(
+            lambda: ProjectContext("project-1", SLUG, [SSH_ORIGIN], ROOT, WORKSPACE,
+                                   TASKS, "extra"))
+        self.assertCode(
+            lambda: ProjectContext("project-1", SLUG, [SSH_ORIGIN], ROOT, WORKSPACE,
+                                   TASKS, project_id="other-project"))
+
     def test_from_trust_without_approval_refs(self):
         context = ProjectContext.from_trust("project-1", _trust())
         self.assertEqual(context, _context())
