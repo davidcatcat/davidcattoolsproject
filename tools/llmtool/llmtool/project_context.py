@@ -66,11 +66,12 @@ def _valid_slug(value):
 def _valid_origins(value, slug):
     if type(value) is not list or not 1 <= len(value) <= 2:
         return False
-    if len(set(value)) != len(value):
-        return False
     for origin in value:
         if type(origin) is not str:
             return False
+    if len(value) == 2 and value[0] == value[1]:
+        return False
+    for origin in value:
         match = _ORIGIN_RE.match(origin)
         if match is None or match.group('slug') != slug:
             return False
@@ -109,13 +110,15 @@ class _FrozenType(type):
 class ProjectContext(metaclass=_FrozenType):
     """Immutable project context: id, slug, allowed origins, three roots."""
 
+    __slots__ = ('project_id', 'slug', 'allowed_origins', 'canonical_root',
+                 'workspace_root', 'tasks_root')
     _fields = ('project_id', 'slug', 'allowed_origins', 'canonical_root',
                'workspace_root', 'tasks_root')
     _code = PROJECT_CONTEXT_INVALID
 
     def __init__(self, project_id, slug, allowed_origins, canonical_root,
                  workspace_root, tasks_root):
-        if type(project_id) is not str or not project_id:
+        if not _is_printable_ascii(project_id, 1, _MAX_PROJECT_ID):
             raise _refuse()
         if not _valid_slug(slug):
             raise _refuse()
