@@ -81,3 +81,12 @@ One prevention line each.
 - **Route switch after a Claude quota stop (#1817):** plan a fresh D6 and a new High Debug, since the moved repair loses the original binding ([#1817 comment](https://github.com/davidcatcat/davidcattoolsproject/issues/1817#issuecomment-6932763555)).
 - **Reviewer choice (#2223):** `claude-reviewer` is `ALLOWED` in [worker-dispatch.json](worker-dispatch.json), so the formal Reviewer is chosen by the cross-family pairing rule (the model family different from the Developer) instead of a hardcoded `codex-reviewer` ([PR #2223](https://github.com/davidcatcat/davidcattoolsproject/pull/2223)).
 - **Read scope misses touched test modules:** dispatch a read-only Developer investigation to find every test module that patches or asserts a symbol the change touches ([PR #2232](https://github.com/davidcatcat/davidcattoolsproject/pull/2232), [PR #2240](https://github.com/davidcatcat/davidcattoolsproject/pull/2240)).
+
+## Verified repair and High Debug rules
+
+Checked by the Advisor on main `47cfbbd8` ([Issue #2775](https://github.com/davidcatcat/davidcattoolsproject/issues/2775), [PR #2776](https://github.com/davidcatcat/davidcattoolsproject/pull/2776)); the linked source wins if this page differs.
+
+- **Review repair RCA:** a review repair needs an RCA only when at least four heads on the D6 carry formal review evidence and the D6 has EC2 test evidence; otherwise it does not ([PR #2776](https://github.com/davidcatcat/davidcattoolsproject/pull/2776)).
+- **Repair write paths:** task repair and the EC2 or CI repair that `task advance` routes keep the write paths of the ROOT Task; widening write paths needs a `PM_SPEC_CORRECTION` continuation, and that run counts in the review bucket ([review_repair.py](llmtool/review_repair.py)).
+- **Review bucket counts:** `repair_max` counts every effective run in the review bucket, including a run that started and changed files but whose result was refused ([task_submission_cli.py](llmtool/task_submission_cli.py)).
+- **High Debug `-ec2` families:** a High Debug whose family ends in `-ec2` needs an EC2 FAIL receipt at the head for an admitted module; a hosted CI failure does not count ([high_debug.py](llmtool/high_debug.py)).
