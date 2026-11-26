@@ -4,7 +4,7 @@ This archive preserves historical workflow text removed from the current [llmtoo
 
 ## Historical role and stop decisions
 
-Earlier D7 role order and one-round S3 wording are preserved in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md); current tasks follow D6/D8/D8a and the 2026-10-21 Developer routing in [ai-team delivery](../../skills/ai-team-delivery/SKILL.md). D4 screening/admission applies to the llmtool-driven Host route; D4 Live Smoke is not a prerequisite for direct Developer sessions. The parked-source archive/removal scope is recorded in the [Roadmap](../../docs/history/llmtool-roadmap-archive-20261028.md#historical-role-decisions) and [README](../../tools/llmtool/README.md#archived-parked-implementations).
+Earlier D7 role order and one-round S3 wording are preserved in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md); current tasks follow D6/D8/D8a and the 2026-10-21 Developer routing in [ai-team delivery](../../skills/ai-team-delivery/SKILL.md). D4 screening/admission applies to the llmtool-driven Host route; D4 Live Smoke is not a prerequisite for direct Developer sessions. The parked-source archive/removal scope is recorded in the [Roadmap](../../docs/history/llmtool-roadmap-archive-20261028.md#historical-role-decisions) and [README history](llmtool-readme-history-20261126.md#archived-parked-implementations).
 
 
 
