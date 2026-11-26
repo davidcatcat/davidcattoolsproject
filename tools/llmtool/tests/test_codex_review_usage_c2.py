@@ -47,9 +47,9 @@ def _make_store(root):
         'developer': {
             'assignment_id': 'e' * 32, 'selection_source': 'PM',
             'state': 'DEVELOPER_RESPONDED',
-            'provider_profile': 'claude', 'provider_type': 'claude-cli',
-            'model': 'claude-sonnet-5-5-medium',
-            'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
+            'provider_profile': 'codex', 'provider_type': 'codex-cli',
+            'model': 'gpt-6-luna',
+            'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
             'session_id': 'dev-session', 'source_sha': HEAD,
             'source_sha_binding': 'D6_REGISTRY_OBSERVED',
             'read_paths': ['tools/llmtool'], 'write_paths': ['tools/llmtool'],
