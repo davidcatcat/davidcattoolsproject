@@ -381,6 +381,59 @@ class ContinuationArtifactChainTests(unittest.TestCase):
                           (reviewed, continued), (continued, head)])
         self.assertEqual(self._collect(root, segments)['result_head'], head)
 
+    def _unlaunched_claim_repair(self, task_id, head):
+        """A claimed repair Task whose Developer never ran (no artifact, no commit)."""
+        return {'task_id': task_id, 'run_id': _hex32('run ' + task_id),
+                'developer': {'provider_profile': 'codex', 'state': 'DEVELOPER_UNAVAILABLE',
+                              'source_sha': head},
+                'completion': {'executor_task_id': self.d6}}
+
+    def test_continuation_of_a_claimed_repair_task_joins_the_chain(self):
+        # 2026-11-27 (#2799 shape): review repair claim 1 never ran; a PM
+        # continuation continues that claimed repair Task (not the root), then
+        # a later review repair claim moves the head again.
+        original = self._commit('# original change\n')
+        continued = self._commit('# continuation of the claimed repair\n')
+        head = self._register_head(self._commit('# second review repair\n'))
+        unlaunched_id, second_id = _hex32('unlaunched repair'), _hex32('second repair')
+        continuation_id = _hex32('continuation of claimed repair')
+        root_id = _hex32('claimed repair root')
+        root = self._root(root_id, self._artifact(self.source_sha, original), claims=[
+            self._claim('pr-9', 1, original, unlaunched_id, pr=9),
+            self._claim('pr-9', 2, continued, second_id, pr=9)])
+        store = _Store(
+            root,
+            self._unlaunched_claim_repair(unlaunched_id, original),
+            self._continuation(continuation_id, unlaunched_id, original,
+                               self._artifact(original, continued)),
+            self._claim_repair(second_id, continued, self._artifact(continued, head)))
+        segments = self._segments(root, store)
+        self.assertEqual([segment[2:] for segment in segments],
+                         [(self.source_sha, original), (original, continued),
+                          (continued, head)])
+        self.assertEqual(self._collect(root, segments)['result_head'], head)
+
+    def test_continuation_of_an_unclaimed_task_still_does_not_join(self):
+        original = self._commit('# original change\n')
+        continued = self._commit('# continuation of an unrelated task\n')
+        head = self._register_head(self._commit('# second review repair\n'))
+        unlaunched_id, second_id = _hex32('unlaunched repair b'), _hex32('second repair b')
+        unrelated_id = _hex32('unrelated task b')
+        root_id = _hex32('unclaimed root b')
+        root = self._root(root_id, self._artifact(self.source_sha, original), claims=[
+            self._claim('pr-9', 1, original, unlaunched_id, pr=9),
+            self._claim('pr-9', 2, continued, second_id, pr=9)])
+        unrelated = self._unlaunched_claim_repair(unrelated_id, original)
+        unrelated['completion'] = {'executor_task_id': 'another-d6'}
+        store = _Store(
+            root,
+            self._unlaunched_claim_repair(unlaunched_id, original),
+            unrelated,
+            self._continuation(_hex32('continuation of unrelated'), unrelated_id, original,
+                               self._artifact(original, continued)),
+            self._claim_repair(second_id, continued, self._artifact(continued, head)))
+        self.assertEqual(self._refusal(root, store), CHAIN_INVALID)
+
     # -- A2: an artifact that differs from the result tree still refuses --
 
     def test_continuation_artifact_that_differs_from_its_commit_is_refused(self):
