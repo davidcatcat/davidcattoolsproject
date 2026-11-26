@@ -579,7 +579,7 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertIn('owner_assignment_ref', saved['developer'])
         self.assertIsNone(saved['developer']['owner_assignment_ref'])
 
-    def test_agy_developer_routes_to_claude_reviewer(self):
+    def test_agy_developer_routes_to_codex_reviewer(self):
         task = {
             'task_id': 'a' * 32, 'run_id': 'b' * 32,
             'task_binding': {'contract_digest': 'c' * 64},
@@ -598,7 +598,7 @@ class AgyRouteWiringTests(unittest.TestCase):
                 patch.object(task_completion, '_github_get', return_value=pull):
             result = review_dispatch._preflight(
                 None, 'a' * 32, 'executor-d6', 7, 1, task=task)
-        self.assertEqual(result[-1], 'claude-reviewer')
+        self.assertEqual(result[-1], 'codex-reviewer')
 
     def test_agy_success_records_response_and_emits_direct_result_event(self):
         status, task, inbox_events, _prompts = self._run_agy_delegate()

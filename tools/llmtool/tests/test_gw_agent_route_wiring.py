@@ -441,7 +441,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             'task_id': 'a' * 32, 'run_id': 'b' * 32, 'role': 'developer',
             'route': 'gw-agent', 'reason_code': 'ROUTE_NOT_SUPPORTED'})
 
-    def test_gw_agent_uses_claude_formal_reviewer(self):
+    def test_gw_agent_uses_codex_formal_reviewer(self):
         # The default Reviewer route for a gw-agent author, under the shared
         # all-ALLOWED test policy (#1692), never the live worker-dispatch.json
         # (its claude-reviewer row is an Owner decision; the real-file cases are
@@ -462,7 +462,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_completion, 'collect_git_snapshot', return_value=snapshot), \
              patch.object(task_completion, '_github_get', return_value=pull):
             result = review_dispatch._preflight(None, 'a' * 32, 'executor-d6', 7, 1, task=task)
-        self.assertEqual(result[-1], 'claude-reviewer')
+        self.assertEqual(result[-1], 'codex-reviewer')
 
     def test_paused_dispatch_claims_once_without_running_provider(self):
         task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
@@ -1463,17 +1463,17 @@ class RealPolicyReviewerFallbackTests(unittest.TestCase):
             review_dispatch._select_reviewer(task, reviewer)
         self.assertEqual(refused.exception.review_dispatch_code, code)
 
-    def test_non_claude_authors_get_claude_reviewer_and_codex_is_admitted(self):
+    def test_non_claude_authors_get_codex_reviewer_and_claude_is_admitted(self):
         for developer in ({'provider_profile': 'gw-agent'},
                           {'provider_profile': 'agy', 'model': 'gemini-2.5-pro'},
                           {'provider_profile': 'opencode'}):
             with self.subTest(developer=developer):
                 task = self._task(developer)
-                self.assertEqual(review_dispatch._select_reviewer(task), 'claude-reviewer')
+                self.assertEqual(review_dispatch._select_reviewer(task), 'codex-reviewer')
                 self.assertEqual(review_dispatch._select_reviewer(task, 'claude-reviewer'),
                                  'claude-reviewer')
-                # #289 c7181570990 (Owner 2026-11-26): the resumed codex-reviewer
-                # row admits an explicit cross-family Reviewer request.
+                # #289: the shipped formal order puts codex-reviewer first; an
+                # explicit cross-family request for either Reviewer is admitted.
                 self.assertEqual(review_dispatch._select_reviewer(task, 'codex-reviewer'),
                                  'codex-reviewer')
 
