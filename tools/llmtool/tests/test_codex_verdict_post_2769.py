@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -185,6 +186,11 @@ class CodexVerdictPost2769Tests(unittest.TestCase):
             lambda _store: review_dispatch._private_post_dir(self.post_dir))
         post_dir_patch.start()
         self.addCleanup(post_dir_patch.stop)
+
+        env_patch = patch.dict(
+            os.environ, {'CLAUDE_CODE_SESSION_ID': '', 'CODEX_THREAD_ID': ''})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
 
     def _d6(self):
         return {

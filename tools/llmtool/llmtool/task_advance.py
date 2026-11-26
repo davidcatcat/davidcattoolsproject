@@ -4960,7 +4960,6 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                                     git_runner=publish_git_runner)
     if merged is not None:
         merge_number, merge_sha = merged
-        import hashlib
         event_id = hashlib.sha256(
             f'GITHUB\0merge\0{merge_number}\0{merge_sha}'.encode()).hexdigest()[:32]
         invoke = record_github_event_call or github_events._record
@@ -5544,7 +5543,6 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             if delta_unverified:
                 codes.append('INTEGRATION_DELTA_UNVERIFIED')
             elif merged and type(merge_sha) is str and re.fullmatch(r'[0-9a-f]{40}', merge_sha):
-                import hashlib
                 event_id = hashlib.sha256(
                     f'GITHUB\0merge\0{integration_pr or number}\0{merge_sha}'.encode()).hexdigest()[:32]
                 invoke = record_github_event_call or github_events._record
