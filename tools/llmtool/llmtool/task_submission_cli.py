@@ -2281,7 +2281,10 @@ def run_task_review_prompt(args, *, store=None):
     return 0
 
 
-def run_task_review_dispatch(args, *, store=None):
+def run_task_review_dispatch(args, *, store=None, stdout=None, github_get=None,
+                             comment_lister=None, comment_poster=None,
+                             login_resolver=None, post_clock=None,
+                             dispatch_review_call=None):
     """Thin CLI adapter for the one-shot Reviewer dispatcher.
 
     #1230 A1 (#1124 rest, item 2): the caller's PM session must own the Task.
@@ -2294,14 +2297,46 @@ def run_task_review_dispatch(args, *, store=None):
     try:
         pm_caller.check_caller(store, args.task_id, getattr(args, 'pm_session', None))
     except pm_caller.PMCallerRefused as exc:
-        _print(pm_caller.refusal(args.task_id, exc.code))
+        _print(pm_caller.refusal(args.task_id, exc.code), stdout=stdout)
         return 1
     from .review_dispatch import dispatch_review
-    result = dispatch_review(store=store,
-                             task_id=args.task_id, executor_task=args.executor_task,
-                             pr_number=args.pr, version=getattr(args, 'version', 1),
-                             reviewer=getattr(args, 'reviewer', None))
-    return _print(result)
+    from . import task_advance
+    invoke = dispatch_review_call or dispatch_review
+    result = invoke(store=store,
+                    task_id=args.task_id, executor_task=args.executor_task,
+                    pr_number=args.pr, version=getattr(args, 'version', 1),
+                    reviewer=getattr(args, 'reviewer', None))
+    if (type(result) is dict and result.get('state') == 'COMPLETED' and
+            type(result.get('review_text')) is str and result['review_text'] and
+            task_advance._caller_posts_verdict(result)):
+        task = store.get(args.task_id)
+        completion = task.get('completion') if type(task) is dict else None
+        evidence = completion.get('evidence') if type(completion) is dict else None
+        root = (evidence.get('root') if type(evidence) is dict and
+                type(evidence.get('root')) is str and evidence.get('root')
+                else os.getcwd())
+        try:
+            post_state = task_advance.post_caller_verdict(
+                store=store, task_id=args.task_id, pr_number=args.pr,
+                root=root, result=result, github_get=github_get,
+                login_resolver=login_resolver, comment_lister=comment_lister,
+                comment_poster=comment_poster, clock=post_clock)
+        except LLMToolError as exc:
+            code = (getattr(exc, 'review_verdict_post_code', None) or
+                    getattr(exc, 'review_dispatch_code', None) or
+                    'REVIEW_VERDICT_POST_FAILED')
+            failed_post = {'state': 'FAILED', 'code': code}
+            if getattr(exc, 'review_verdict_receipt', None) == 'WRITE_FAILED':
+                failed_post['receipt'] = 'WRITE_FAILED'
+            result = dict(result, verdict_post=failed_post)
+            result.pop('review_text', None)
+            _print(result, stdout=stdout)
+            return 1
+        result = dict(result)
+        if type(post_state) is dict:
+            result['verdict_post'] = post_state
+        result.pop('review_text', None)
+    return _print(result, stdout=stdout)
 
 
 # #1519: (step, code) pairs that still exit 0; every other code exits 1.

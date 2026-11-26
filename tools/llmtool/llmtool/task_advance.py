@@ -1731,6 +1731,175 @@ def _post_review_verdict_comment(gh_runner, root, number, review_text):
         raise _PublishRefusal('REVIEW_VERDICT_COMMENT_FAILED')
 
 
+def _completed_claim_for_result(record, pr_number, result):
+    """Return the COMPLETED formal claim matching a dispatch_review result, or None."""
+    if type(record) is not dict or type(result) is not dict:
+        return None
+    head = result.get('head_sha')
+    version = result.get('version')
+    executor_task = result.get('executor_task')
+    reviewer_task = result.get('reviewer_task')
+    for claim in reversed(_non_ruling_claims(record)):
+        if (type(claim) is dict and claim.get('state') == 'COMPLETED' and
+                claim.get('pr') == pr_number and
+                (head is None or claim.get('head_sha') == head) and
+                (version is None or claim.get('version') == version) and
+                (executor_task is None or claim.get('executor_task') == executor_task) and
+                (reviewer_task is None or claim.get('reviewer_task') == reviewer_task)):
+            return claim
+    return None
+
+
+def _lister_for_verdict_post(github_get, comment_lister):
+    if comment_lister is not None:
+        return comment_lister
+    if github_get is None or github_get is task_completion._github_get:
+        return review_dispatch._list_issue_comments
+
+    def lister(pr_number):
+        comments, code = _issue_comments(pr_number, github_get)
+        if code is not None or type(comments) is not list:
+            raise review_dispatch._PostError('VERDICT_POST_LIST_FAILED')
+        return comments
+
+    return lister
+
+
+def post_caller_verdict(*, store, task_id, pr_number, root, result,
+                        gh_runner=None, github_get=None,
+                        login_resolver=None, comment_lister=None,
+                        comment_poster=None, clock=None):
+    """Post a caller-owned COMPLETED Codex verdict once, verbatim, under its lock."""
+    review_text = result.get('review_text') if type(result) is dict else None
+    if type(review_text) is not str or not review_text:
+        return {'state': 'WITHHELD'}
+    if gh_runner is not None and comment_poster is None:
+        _post_review_verdict_comment(gh_runner, root, pr_number, review_text)
+        return None
+    task = store.get(task_id)
+    claim = _completed_claim_for_result(task, pr_number, result)
+    if claim is None:
+        raise review_dispatch._verdict_post_failure('VERDICT_POST_BINDING_INVALID')
+    now_fn = clock or time.time
+    lister = _lister_for_verdict_post(github_get, comment_lister)
+    poster = comment_poster or review_dispatch._create_issue_comment
+    resolve_login = login_resolver or review_dispatch._resolve_github_login
+    reviewer_key = claim.get('reviewer') or 'codex-reviewer'
+    try:
+        directory = review_dispatch._verdict_post_dir(store)
+        name = review_dispatch._verdict_post_name(task_id, claim)
+        fd = review_dispatch._acquire_post_lock(directory, name)
+    except review_dispatch._PostError as exc:
+        raise review_dispatch._verdict_post_failure(exc.code) from None
+    if fd is None:
+        return {'state': 'IN_PROGRESS'}
+    try:
+        identity = review_dispatch._receipt_identity(task_id, claim, review_text)
+        lock_path = Path(directory) / (name + '.lock')
+        try:
+            receipt = review_dispatch._read_receipt(directory, name)
+            if receipt is not None:
+                review_dispatch._check_receipt(receipt, identity)
+            binding_line = review_dispatch._verdict_binding_line(
+                task, task_id, claim, review_text)
+        except review_dispatch._PostError as exc:
+            raise review_dispatch._verdict_post_failure(exc.code) from None
+        login = resolve_login()
+        if receipt is not None and receipt['state'] == 'POSTED':
+            try:
+                comments = lister(pr_number)
+            except Exception:
+                comments = None
+            match, _conflict, duplicate = (
+                review_dispatch._match_posted(
+                    comments, login, review_text, binding_line, claim)
+                if type(comments) is list else (None, False, False))
+            if duplicate:
+                try:
+                    review_dispatch._write_receipt(directory, name, dict(
+                        receipt, code='VERDICT_POST_DUPLICATE', updated_at=now_fn()))
+                except review_dispatch._PostError:
+                    raise review_dispatch._verdict_post_failure(
+                        'VERDICT_POST_DUPLICATE', receipt_failed=True) from None
+                raise review_dispatch._verdict_post_failure('VERDICT_POST_DUPLICATE')
+            if match is not None:
+                return {'state': 'ALREADY_POSTED',
+                        'comment_id': review_dispatch._comment_id(match)}
+            output = {'state': 'POSTED_UNVERIFIED'}
+            if review_dispatch._comment_id(receipt) is not None:
+                output['comment_id'] = receipt['comment_id']
+            return output
+        attempt = os.urandom(16).hex()
+        base = dict(identity, owner='caller', attempt=attempt, started_at=now_fn())
+
+        def record_receipt(state, **extra):
+            review_dispatch._write_receipt(
+                directory, name, dict(base, state=state, updated_at=now_fn(), **extra))
+
+        def failed(code):
+            try:
+                record_receipt('FAILED', code=code)
+            except review_dispatch._PostError:
+                return review_dispatch._verdict_post_failure(code, receipt_failed=True)
+            return review_dispatch._verdict_post_failure(code)
+
+        try:
+            record_receipt('POSTING')
+        except review_dispatch._PostError as exc:
+            raise review_dispatch._verdict_post_failure(
+                exc.code, receipt_failed=True) from None
+        try:
+            comments = lister(pr_number)
+        except Exception:
+            comments = None
+        if type(comments) is not list:
+            raise failed('VERDICT_POST_LIST_FAILED')
+        match, conflict, duplicate = review_dispatch._match_posted(
+            comments, login, review_text, binding_line, claim)
+        if duplicate:
+            raise failed('VERDICT_POST_DUPLICATE')
+        if match is not None:
+            cid = review_dispatch._comment_id(match)
+            output = {'state': 'ALREADY_POSTED', 'comment_id': cid}
+            try:
+                record_receipt('POSTED', comment_id=cid, verified=True)
+            except review_dispatch._PostError:
+                output['receipt'] = 'WRITE_FAILED'
+            return output
+        if conflict:
+            raise failed('VERDICT_POST_CONFLICT')
+        if not review_dispatch._policy(task, reviewer_key).allowed:
+            raise failed('VERDICT_POST_NOT_ALLOWED')
+        try:
+            current = review_dispatch._read_receipt(directory, name)
+        except review_dispatch._PostError:
+            current = None
+        if (type(current) is not dict or current.get('attempt') != attempt or
+                current.get('state') != 'POSTING' or
+                not review_dispatch._lock_current(fd, lock_path)):
+            raise review_dispatch._verdict_post_failure('VERDICT_POST_FENCED')
+        try:
+            created = poster(root, pr_number, review_text)
+        except review_dispatch._PostError as exc:
+            raise failed(exc.code) from None
+        except Exception:
+            raise failed('VERDICT_POST_COMMAND_FAILED') from None
+        user = created.get('user') if type(created) is dict else None
+        verified = (type(created) is dict and created.get('body') == review_text and
+                    type(user) is dict and user.get('login') == login)
+        cid = review_dispatch._comment_id(created)
+        output = {'state': 'POSTED' if verified else 'POSTED_UNVERIFIED'}
+        if cid is not None:
+            output['comment_id'] = cid
+        try:
+            record_receipt('POSTED', comment_id=cid, verified=verified)
+        except review_dispatch._PostError:
+            output['receipt'] = 'WRITE_FAILED'
+        return output
+    finally:
+        os.close(fd)
+
+
 # #1705: dispatch_review hands the verdict to this caller to post only in these
 # states. Every other verdict_post state means dispatch_review already posted
 # or verified the comment, another poster holds the claim, or the text is
@@ -2372,6 +2541,38 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         review_version = _merge_pass_claim(record, number, head, events)
         if type(review_version) is not int:
             return _merge_refusal(review_version or 'MERGE_REVIEW_NOT_PASS')
+        winning_claim = next((
+            claim for claim in _claims(record)
+            if type(claim) is dict and claim.get('pr') == number and
+            claim.get('head_sha') == head and
+            review_result.review_kind(claim) == 'formal' and
+            claim.get('version') == review_version
+        ), None)
+        if type(winning_claim) is dict and winning_claim.get('state') == 'COMPLETED':
+            winning_res = winning_claim.get('review_result')
+            winning_text = (winning_res.get('review_text')
+                            if type(winning_res) is dict else None)
+            if type(winning_text) is str and winning_text:
+                comments, comments_code = _issue_comments(number, github_get)
+                if comments_code is not None or type(comments) is not list:
+                    return _merge_refusal('MERGE_REVIEW_VERDICT_NOT_POSTED')
+                posted_ok = False
+                for comment in comments:
+                    if type(comment) is not dict or comment.get('body') != winning_text:
+                        continue
+                    cid = comment.get('id')
+                    if type(cid) is not int or isinstance(cid, bool) or cid <= 0:
+                        continue
+                    try:
+                        verdict = review_result._comment_verdict(
+                            comment, head=head, version=review_version, task=record)
+                    except Exception:
+                        verdict = None
+                    if verdict is not None and verdict[2] == 'REVIEW_PASS':
+                        posted_ok = True
+                        break
+                if not posted_ok:
+                    return _merge_refusal('MERGE_REVIEW_VERDICT_NOT_POSTED')
     security_code = _merge_security_claim(record, number, head, events, github_get=github_get)
     if security_code is not None:
         return _security_merge_refusal(security_code, number=number, head=head)
@@ -4082,7 +4283,33 @@ def _review_outcomes(record, claims, github_get):
                     task, claim, version=version)
             except Exception:
                 continue
-            if any(event.get('event_id') == event_id for event in events):
+            matched = any(event.get('event_id') == event_id for event in events)
+            if not matched and events and callable(github_get):
+                review_text = (claim.get('review_result') or {}).get('review_text')
+                if type(review_text) is str and review_text:
+                    try:
+                        comments = github_get(f'issues/{number}/comments?per_page=100')
+                    except Exception:
+                        comments = None
+                    if type(comments) is list and len(comments) < 100:
+                        import hashlib
+                        import json
+                        for comment in comments:
+                            if (type(comment) is not dict or
+                                    comment.get('body') != review_text):
+                                continue
+                            cid = comment.get('id')
+                            if type(cid) is not int or isinstance(cid, bool) or cid <= 0:
+                                continue
+                            identity = {'task': record['task_id'], 'run': record['run_id'],
+                                        'head': head, 'version': version,
+                                        'outcome': latest[2], 'comment_id': cid}
+                            cid_event_id = hashlib.sha256(json.dumps(
+                                identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()[:32]
+                            if any(event.get('event_id') == cid_event_id for event in events):
+                                matched = True
+                                break
+            if matched:
                 outcomes.append({'source': 'REVIEWER', 'source_sha': head,
                                  'version': version, 'outcome': latest[2],
                                  'findings_count': latest[3]})
@@ -5050,9 +5277,13 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                     type(review_text) is str and review_text and
                     _caller_posts_verdict(result)):
                 try:
-                    _post_review_verdict_comment(
-                        _publish_run_gh if publish_gh_runner is None else publish_gh_runner,
-                        d6.get('root') or cwd or os.getcwd(), number, review_text)
+                    post_state = post_caller_verdict(
+                        store=store, task_id=task_id, pr_number=number,
+                        root=d6.get('root') or cwd or os.getcwd(),
+                        result=result, gh_runner=publish_gh_runner,
+                        github_get=get)
+                    if type(post_state) is dict:
+                        result = dict(result, verdict_post=post_state)
                 except Exception:
                     codes.append('REVIEW_VERDICT_COMMENT_FAILED')
             if 'review_text' in result:
@@ -5063,49 +5294,117 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                      c.get('pr') == number and c.get('head_sha') == d6['result_head'])
         invoke = record_review_result_call or review_result.record_review_result
         try:
-            # First check for a posted comment without creating a
-            # REVIEW_BLOCKED event for a missing verdict.
-            review_args = dict(store=store, task_id=task_id, executor_task=executor_task,
-                               pr_number=number, version=claim['version'],
-                               reviewer_session_done=False, github_get=get)
-            result = invoke(**review_args)
-            relay_codes, relayed = [], False
-            if (type(result) is dict and result.get('state') == 'NOT_READY' and
-                    claim.get('state') == 'DISPATCHED'):
-                # #1568: a read-only Claude Reviewer cannot post its own verdict.
-                # Post its one claim-bound transcript block unedited, then re-read.
-                _, relay_code, block = (relay_verdict_call or
-                                        review_transcript.unposted_verdict)(claim, record)
-                if relay_code is not None:
-                    relay_codes = ['REVIEWER_VERDICT_UNPOSTED', relay_code]
-                elif block is not None:
-                    try:
-                        _post_review_verdict_comment(
-                            _publish_run_gh if publish_gh_runner is None else publish_gh_runner,
-                            d6.get('root') or cwd or os.getcwd(), number, block)
-                    except _PublishRefusal:
-                        relay_codes = ['REVIEWER_VERDICT_UNPOSTED',
-                                       'REVIEW_VERDICT_COMMENT_FAILED']
-                    else:
-                        relayed, result = True, invoke(**review_args)
-            if relay_codes:
-                step = 'REVIEW_NOT_POSTED'
-                codes.extend(relay_codes)
-            elif relayed and (type(result) is not dict or result.get('state') == 'NOT_READY'):
-                # Posted but not read back yet: stop instead of posting twice.
-                step = 'REVIEW_OUTCOME_UNKNOWN'
-                codes.append('REVIEWER_VERDICT_RELAY_UNCONFIRMED')
-            elif type(result) is dict and result.get('state') == 'REVIEW_BLOCKED':
-                step = 'REVIEWER_ATTENTION'
-                codes.append('REVIEWER_ATTENTION')
-            elif (type(result) is dict and result.get('state') == 'NOT_READY' and
-                  reviewer_session_done):
-                step = 'REVIEW_NOT_POSTED'
-                codes.append('REVIEW_VERDICT_NOT_POSTED')
-                result = {'reviewer_task': claim.get('reviewer_task'),
-                          'reviewer_session_id': claim.get('native_session_id'),
-                          'pr': claim.get('pr'), 'head_sha': claim.get('head_sha'),
-                          'version': claim.get('version')}
+            if claim.get('state') == 'COMPLETED' and record_review_result_call is None:
+                review_res = claim.get('review_result')
+                review_text = (review_res.get('review_text')
+                               if type(review_res) is dict else None)
+                if type(review_text) is not str or not review_text:
+                    review_result._refuse('REVIEW_RESULT_INVALID')
+                root = (d6.get('root') if type(d6) is dict else None) or cwd or os.getcwd()
+                reviewer_key = claim.get('reviewer') or 'codex-reviewer'
+                post_result = review_dispatch._ensure_verdict_posted(
+                    store=store, task=record, task_id=task_id, claim=claim,
+                    text=review_text,
+                    login_resolver=review_dispatch._resolve_github_login,
+                    root=root,
+                    lister=_lister_for_verdict_post(get, None),
+                    poster=review_dispatch._create_issue_comment,
+                    clock=time.time,
+                    allowed=lambda: review_dispatch._policy(record, reviewer_key).allowed)
+                post_state = post_result.get('state') if type(post_result) is dict else None
+                real_cid = post_result.get('comment_id') if type(post_result) is dict else None
+                if (post_state not in ('POSTED', 'ALREADY_POSTED') or
+                        type(real_cid) is not int or isinstance(real_cid, bool) or
+                        real_cid <= 0):
+                    step = 'REVIEW_NOT_POSTED'
+                    codes.append('REVIEW_VERDICT_NOT_POSTED')
+                    result = {'reviewer_task': claim.get('reviewer_task'),
+                              'reviewer_session_id': claim.get('native_session_id'),
+                              'pr': claim.get('pr'), 'head_sha': claim.get('head_sha'),
+                              'version': claim.get('version')}
+                else:
+                    head = claim['head_sha']
+                    version = claim['version']
+                    claim_stamp = claim.get('updated_at')
+                    latest = review_result._comment_verdict(
+                        {'id': real_cid, 'body': review_text,
+                         'created_at': claim_stamp, 'updated_at': claim_stamp},
+                        head=head, version=version, task=record)
+                    if latest is None:
+                        review_result._refuse('REVIEW_RESULT_INVALID')
+                    _, comment_id, outcome, findings_count = latest
+                    expected_verdict = 'PASS' if outcome == 'REVIEW_PASS' else 'FAIL'
+                    if (review_res['verdict'] == 'PASS') != (expected_verdict == 'PASS'):
+                        review_result._refuse('REVIEW_RESULT_INVALID')
+                    payload = {'outcome': outcome, 'head': head, 'version': version,
+                               'comment_id': comment_id, 'findings_count': findings_count}
+                    payload_bytes = json.dumps(
+                        payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
+                    if len(payload_bytes) > 512:
+                        review_result._refuse('REVIEW_RESULT_INVALID')
+                    payload_sha256 = hashlib.sha256(payload_bytes).hexdigest()
+                    identity = {'task': task_id, 'run': record['run_id'], 'head': head,
+                                'version': version, 'outcome': outcome,
+                                'comment_id': comment_id}
+                    event_id = hashlib.sha256(json.dumps(
+                        identity, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()[:32]
+                    ev_res = store.record_completion_event(
+                        task_id, event_id=event_id, run_id=record['run_id'],
+                        session_id='review-' + event_id, source='REVIEWER',
+                        source_sha=head, sequence=0, payload_sha256=payload_sha256,
+                        review_kind='formal')
+                    result = {'state': outcome, 'event_id': event_id,
+                              'created': ev_res['created'], 'comment_id': comment_id,
+                              'head': head, 'version': version}
+                    if ev_res['created'] is True:
+                        counts = review_result._inline_copies(
+                            number, head, review_text, inline_io=None, github_get=get)
+                        if counts is not None:
+                            result['inline_copies'] = counts
+            else:
+                # First check for a posted comment without creating a
+                # REVIEW_BLOCKED event for a missing verdict.
+                review_args = dict(store=store, task_id=task_id, executor_task=executor_task,
+                                   pr_number=number, version=claim['version'],
+                                   reviewer_session_done=False, github_get=get)
+                result = invoke(**review_args)
+                relay_codes, relayed = [], False
+                if (type(result) is dict and result.get('state') == 'NOT_READY' and
+                        claim.get('state') == 'DISPATCHED'):
+                    # #1568: a read-only Claude Reviewer cannot post its own verdict.
+                    # Post its one claim-bound transcript block unedited, then re-read.
+                    _, relay_code, block = (relay_verdict_call or
+                                            review_transcript.unposted_verdict)(claim, record)
+                    if relay_code is not None:
+                        relay_codes = ['REVIEWER_VERDICT_UNPOSTED', relay_code]
+                    elif block is not None:
+                        try:
+                            _post_review_verdict_comment(
+                                _publish_run_gh if publish_gh_runner is None else publish_gh_runner,
+                                d6.get('root') or cwd or os.getcwd(), number, block)
+                        except _PublishRefusal:
+                            relay_codes = ['REVIEWER_VERDICT_UNPOSTED',
+                                           'REVIEW_VERDICT_COMMENT_FAILED']
+                        else:
+                            relayed, result = True, invoke(**review_args)
+                if relay_codes:
+                    step = 'REVIEW_NOT_POSTED'
+                    codes.extend(relay_codes)
+                elif relayed and (type(result) is not dict or result.get('state') == 'NOT_READY'):
+                    # Posted but not read back yet: stop instead of posting twice.
+                    step = 'REVIEW_OUTCOME_UNKNOWN'
+                    codes.append('REVIEWER_VERDICT_RELAY_UNCONFIRMED')
+                elif type(result) is dict and result.get('state') == 'REVIEW_BLOCKED':
+                    step = 'REVIEWER_ATTENTION'
+                    codes.append('REVIEWER_ATTENTION')
+                elif (type(result) is dict and result.get('state') == 'NOT_READY' and
+                      reviewer_session_done):
+                    step = 'REVIEW_NOT_POSTED'
+                    codes.append('REVIEW_VERDICT_NOT_POSTED')
+                    result = {'reviewer_task': claim.get('reviewer_task'),
+                              'reviewer_session_id': claim.get('native_session_id'),
+                              'pr': claim.get('pr'), 'head_sha': claim.get('head_sha'),
+                              'version': claim.get('version')}
         except Exception as exc:
             codes.append(_refusal(exc, 'review_dispatch_code'))
     elif step in ('REPAIR_REVIEW', 'REPAIR_RETRY'):
