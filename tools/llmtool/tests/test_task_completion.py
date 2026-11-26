@@ -6314,7 +6314,23 @@ class TaskCompletionTests(unittest.TestCase):
                 return {'thread_id': '0123456789abcdef', 'verdict': 'PASS',
                         'review_text': body}
 
+            posted_comments = []
+
+            def create_comment(_root, pr_num, comment_body):
+                self.assertEqual(pr_num, 10)
+                comment_obj = {
+                    'id': 44 + len(posted_comments),
+                    'user': {'login': 'reviewer-user'},
+                    'body': comment_body,
+                    'created_at': '2026-11-05T00:00:00Z',
+                    'updated_at': '2026-11-05T00:00:00Z',
+                }
+                posted_comments.append(comment_obj)
+                return comment_obj
+
             def dispatch_github(path):
+                if path.startswith('issues/10/comments'):
+                    return list(posted_comments)
                 self.assertEqual(path, 'pulls/10')
                 return pr
 
@@ -6329,6 +6345,8 @@ class TaskCompletionTests(unittest.TestCase):
                         patch.object(review_dispatch, '_create_d6', side_effect=create_d6), \
                         patch.object(review_dispatch, '_bind_d6', side_effect=bind_d6), \
                         patch.object(review_dispatch, '_dispatch_codex', side_effect=codex), \
+                        patch.object(review_dispatch, '_create_issue_comment',
+                                     side_effect=create_comment), \
                         patch('llmtool.task_completion._github_get',
                               side_effect=dispatch_github):
                     rc, dispatched = call(['task', 'review-dispatch', task_id,
@@ -6411,14 +6429,21 @@ class TaskCompletionTests(unittest.TestCase):
                     return {'thread_id': 'fedcba9876543210', 'verdict': 'PASS',
                             'review_text': review_text}
 
+                def review_github(path):
+                    if path.startswith('issues/10/comments'):
+                        return []
+                    return github_get(path)
+
                 with patch.object(review_dispatch, '_resolve_github_login',
                                   return_value='reviewer-user'), \
                         patch.object(review_dispatch, '_create_d6', side_effect=create_d6), \
                         patch.object(review_dispatch, '_bind_d6', side_effect=bind_d6), \
                         patch.object(review_dispatch, '_dispatch_codex',
                                      side_effect=reviewer_run), \
+                        patch.object(review_dispatch, '_create_issue_comment',
+                                     side_effect=create_comment), \
                         patch('llmtool.task_completion._github_get',
-                              side_effect=github_get):
+                              side_effect=review_github):
                     rc, result = call(['task', 'review-dispatch', task_id,
                         '--executor-task', d6_task, '--pr', '10',
                         '--reviewer', 'codex-reviewer', '--version', str(version),

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import review_trust_fixture
-import worker_policy_fixture  # noqa: F401
+import worker_policy_fixture
 from llmtool import review_dispatch, task_advance, task_store, task_submission_cli
 
 
@@ -23,9 +23,11 @@ LOGIN = 'reviewer-user'
 
 def setUpModule():
     review_trust_fixture.start_module()
+    worker_policy_fixture.start_module()
 
 
 def tearDownModule():
+    worker_policy_fixture.stop_module()
     review_trust_fixture.stop_module()
 
 
