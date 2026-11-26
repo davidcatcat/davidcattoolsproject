@@ -45,7 +45,9 @@ REVIEW_FAILURE_REASONS = _D6_CREATE_FAILURE_REASONS | frozenset((
     'REVIEW_HEADER_MISMATCH', 'REVIEW_BINDING_LINE_MISSING',
     'REVIEW_CLASSIFIER_REJECTED',
     # The review prompt was refused before any Reviewer session started.
-    'REVIEW_PROMPT_REFUSED'))
+    'REVIEW_PROMPT_REFUSED',
+    # Claude Reviewer bridge reported the launched session never took the prompt (#2753).
+    'SESSION_NOT_STARTED', 'PROMPT_NOT_DELIVERED'))
 # #1909 item 1: fixed codes for a Reviewer session bind that failed after the session started; kept apart from REVIEW_FAILURE_REASONS (nothing-posted reasons).
 REVIEWER_BIND_FAILURE_REASONS = frozenset(('REVIEWER_SESSION_BIND_FAILED', 'REVIEWER_SESSION_BIND_TIMEOUT'))
 REVIEW_OUTPUT_WITHHELD = 'REVIEW_OUTPUT_WITHHELD'
@@ -903,6 +905,14 @@ def _dispatch(*, task_id, prompt, repo_root, env, model,
             receipt.get('reason') in ('OWNER_ASSIGNMENT_REQUIRED', 'OWNER_PAUSED')):
         error = RuntimeError('REVIEWER_DISPATCH_REJECTED')
         error.launch_refusal = {'result': 'REJECTED', 'reason': receipt['reason']}
+        raise error
+    if (type(receipt) is dict and receipt.get('result') == 'NOT_DELIVERED' and
+            receipt.get('reason') in ('SESSION_NOT_STARTED', 'PROMPT_NOT_DELIVERED')):
+        error = RuntimeError('REVIEWER_DISPATCH_UNKNOWN')
+        error.review_failure_reason = receipt['reason']
+        session_id = receipt.get('actual_session_id')
+        if type(session_id) is str and session_id:
+            error.native_session_id = session_id
         raise error
     if result.returncode or type(receipt) is not dict or receipt.get('result') != 'DELIVERED':
         raise RuntimeError('REVIEWER_DISPATCH_UNKNOWN')
@@ -1915,6 +1925,9 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         output = _review_return(dispatched, codex_result)
     except Exception as exc:
         unknown = dict(claim, state='UNKNOWN', updated_at=_now())
+        exc_session_id = getattr(exc, 'native_session_id', None)
+        if session_id is None and type(exc_session_id) is str and exc_session_id:
+            session_id = exc_session_id
         if session_id is not None:
             unknown['native_session_id'] = session_id
         reason = getattr(exc, 'review_failure_reason', None)
@@ -1984,6 +1997,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             raise
         outcome_error = LLMToolError('Reviewer dispatch refused; details omitted')
         outcome_error.review_dispatch_code = 'REVIEW_DISPATCH_OUTCOME_UNKNOWN'
+        if reason in REVIEW_FAILURE_REASONS:
+            outcome_error.review_failure_reason = reason
         if hasattr(exc, 'review_refusal'):
             outcome_error.review_refusal = exc.review_refusal
         raise outcome_error from None
