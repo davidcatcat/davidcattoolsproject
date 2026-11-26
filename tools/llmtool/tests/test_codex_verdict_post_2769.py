@@ -107,10 +107,7 @@ def _create_real_task(tmp_dir, *, executor_root):
             'usage': None,
             'error_code': None,
             'created_at': stamp,
-            'owner_assignment_ref': (
-                'https://github.com/davidcatcat/davidcattoolsproject/issues/525'
-                '#issuecomment-6468216854'
-            ),
+            'owner_assignment_ref': None,
             'claude_result': {
                 'executor_task_id': EXEC,
                 'head_sha': HEAD,
