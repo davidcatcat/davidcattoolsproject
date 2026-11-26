@@ -302,7 +302,7 @@ class GwAgentUsage2812Tests(unittest.TestCase):
         status, developer, store = self._run(_result(
             'BUDGET_EXCEEDED', 'TURN_BUDGET_EXCEEDED',
             {'status': 'REPORTED', 'input_tokens': 1200, 'output_tokens': 340}),
-            store_wrapper=wrapper)
+            requested_model='gw', store_wrapper=wrapper)
         self.assertEqual(status, 1)
         self.assertGreater(wrappers[0].refused, 0)
         self.assertIn('DEVELOPER_GW_AGENT_BUDGET_EXCEEDED', developer['error_code'])
@@ -310,6 +310,10 @@ class GwAgentUsage2812Tests(unittest.TestCase):
         self.assertIsNone(developer['usage'])
         self.assertEqual(developer['execution']['status'], 'UNKNOWN')
         self.assertEqual(developer['execution']['usage_source'], 'UNKNOWN')
+        # The refused usage write also drops the served-model fields it added;
+        # the fallback names the model the assignment was dispatched with.
+        self.assertEqual(developer['model'], 'gw')
+        self.assertIsNone(developer['model_provenance']['provider_model'])
         self.assertEqual(store.get(TASK_ID)['developer'], developer)
 
     def test_route_exposes_normalized_budget_usage(self):

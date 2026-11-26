@@ -8442,10 +8442,13 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         if usage is not None:
             # #2812 R6: a store that refuses the usage-carrying record must
             # still keep the failure, without usage and with an UNKNOWN source.
-            without_usage = {**failed, 'usage': None}
-            if type(without_usage.get('execution')) is dict:
+            # Rebuild from the stored assignment so the fallback never carries
+            # the served-model fields that were added only for the usage.
+            without_usage = {**expected_developer, 'state': state,
+                             'error_code': error_code[:64], 'usage': None}
+            if type(failed.get('execution')) is dict:
                 without_usage['execution'] = {
-                    **without_usage['execution'], 'usage_source': 'UNKNOWN'}
+                    **failed['execution'], 'usage_source': 'UNKNOWN'}
             records.append(without_usage)
         for record in records:
             try:
