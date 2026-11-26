@@ -898,6 +898,8 @@ def add_task_submission_parsers(actions):
     github_events.add_argument('--since')
     ack = actions.add_parser('ack', help='Acknowledge one completion event; repeating is inert')
     ack.add_argument('event_id', help='32-character event ID from task inbox')
+    ack.add_argument('--task', metavar='TASK_ID',
+                     help='optional 32-character Task ID: load only that Task record')
     ack.add_argument('--pm-session', required=True,
                      help='native PM session UUID (or stored pm- session ID)')
     assign = actions.add_parser(
@@ -10908,7 +10910,10 @@ def run_task_github_events(args, *, store=None, stdout=None, github_get=None):
 def run_task_ack(args, *, store=None, stdout=None):
     store = TaskStore() if store is None else store
     key = active_pm_inbox.pm_session_key(args.pm_session)
-    _print(active_pm_inbox.ack(store, args.event_id, key), stdout=stdout)
+    task_id = getattr(args, 'task', None)
+    if task_id is None:
+        task_id = getattr(args, 'task_id', None)
+    _print(active_pm_inbox.ack(store, args.event_id, key, task_id=task_id), stdout=stdout)
     return 0
 
 

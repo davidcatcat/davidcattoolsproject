@@ -34,7 +34,7 @@ from pathlib import Path
 
 from .errors import LLMToolError
 from .task_index import TaskStatusIndex
-from .task_store import PM_NATIVE_SESSION_ID, SESSION_ID, TaskStoreConflict
+from .task_store import PM_NATIVE_SESSION_ID, SESSION_ID, TASK_ID, TaskStoreConflict
 
 DEFAULT_WAIT_SECONDS = 540
 MAX_WAIT_SECONDS = 3600
@@ -663,26 +663,23 @@ def ack_decision_sha256(event_id):
     return hashlib.sha256(_ACK_DOMAIN + event_id.encode('ascii')).hexdigest()
 
 
-def ack(store, event_id, session_key):
-    """Mark one of this PM session's events received; repeating it is inert."""
-    if type(event_id) is not str or len(event_id) != 32 or any(
-            char not in '0123456789abcdef' for char in event_id):
-        raise LLMToolError('event ID must be 32 lowercase hex characters')
-    records, _ = _session_records(store, session_key)
-    for record in records:
-        tombstone = next((item for item in record.get('completion_event_tombstones', [])
-                          if item['event_id'] == event_id), None)
-        if tombstone is not None:
-            # Compaction keeps only ACKED events: this ack already happened.
-            return {'event': dict(tombstone, task_id=record['task_id'], state='ACKED',
-                                  compacted=True),
-                    'task_id': record['task_id'], 'acknowledged_now': False}
-    owner = next((record for record in records
-                  if any(event['event_id'] == event_id
-                         for event in record.get('completion_events', []))), None)
-    if owner is None:
-        # Also covers an event that belongs to a different PM session.
-        raise LLMToolError('completion event not found for this PM session')
+_ACK_NOT_FOUND = 'completion event not found for this PM session'
+
+
+def _tombstone_ack(event_id, record):
+    """The inert result for an event already compacted into this record, else None."""
+    tombstone = next((item for item in record.get('completion_event_tombstones', [])
+                      if item['event_id'] == event_id), None)
+    if tombstone is None:
+        return None
+    # Compaction keeps only ACKED events: this ack already happened.
+    return {'event': dict(tombstone, task_id=record['task_id'], state='ACKED',
+                          compacted=True),
+            'task_id': record['task_id'], 'acknowledged_now': False}
+
+
+def _ack_event(store, event_id, session_key, owner):
+    """Consume then ack the event in one record, exactly as the session scan does."""
     digest = ack_decision_sha256(event_id)
     event = next(event for event in owner['completion_events']
                  if event['event_id'] == event_id)
@@ -695,3 +692,45 @@ def ack(store, event_id, session_key):
                                         pm_decision_sha256=digest)
     return {'event': result['event'], 'task_id': owner['task_id'],
             'acknowledged_now': result['created']}
+
+
+def ack(store, event_id, session_key, task_id=None):
+    """Mark one of this PM session's events received; repeating it is inert.
+
+    With ``task_id`` only that Task is read, and it must be owned by
+    ``session_key`` and hold the event or its tombstone; the event steps and
+    result are those of the session-scan path.
+    """
+    if type(event_id) is not str or len(event_id) != 32 or any(
+            char not in '0123456789abcdef' for char in event_id):
+        raise LLMToolError('event ID must be 32 lowercase hex characters')
+    if task_id is not None:
+        if type(task_id) is not str or TASK_ID.fullmatch(task_id) is None:
+            raise LLMToolError('task ID must be 32 lowercase hex characters')
+        try:
+            record = store.get(task_id)
+        except LLMToolError:
+            raise LLMToolError(_ACK_NOT_FOUND) from None
+        if record.get('pm_session_id') != session_key:
+            raise LLMToolError(_ACK_NOT_FOUND)
+        result = _tombstone_ack(event_id, record)
+        if result is not None:
+            return result
+        owner = (record if any(event['event_id'] == event_id
+                               for event in record.get('completion_events', []))
+                 else None)
+        if owner is None:
+            raise LLMToolError(_ACK_NOT_FOUND)
+        return _ack_event(store, event_id, session_key, owner)
+    records, _ = _session_records(store, session_key)
+    for record in records:
+        result = _tombstone_ack(event_id, record)
+        if result is not None:
+            return result
+    owner = next((record for record in records
+                  if any(event['event_id'] == event_id
+                         for event in record.get('completion_events', []))), None)
+    if owner is None:
+        # Also covers an event that belongs to a different PM session.
+        raise LLMToolError(_ACK_NOT_FOUND)
+    return _ack_event(store, event_id, session_key, owner)
