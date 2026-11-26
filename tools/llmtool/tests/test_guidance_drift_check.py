@@ -459,6 +459,26 @@ class RuleFileSchemaTests(unittest.TestCase):
                     value,
                 )
 
+    def test_policy_schema_accepts_the_289_formal_reviewer_order(self):
+        # #289: an optional non-empty, duplicate-free list of known Reviewer keys.
+        policy = self.valid["policy.json"]
+        for value in (["codex-reviewer"], ["codex-reviewer", "claude-reviewer"],
+                      ["claude-reviewer", "codex-reviewer"]):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    self.findings_after("policy.json",
+                                        {**policy, "formal_reviewer_order": value}), [])
+        for value in ([], ["claude-reviewer", "claude-reviewer"],
+                      ["claude-reviewer", "other-reviewer"], ["Claude-Reviewer"],
+                      "codex-reviewer", [1], None):
+            with self.subTest(value=value):
+                self.assertTrue(
+                    any(item.startswith("tools/llmtool/policy.json: RULE_SCHEMA ")
+                        for item in self.findings_after(
+                            "policy.json", {**policy, "formal_reviewer_order": value})),
+                    value,
+                )
+
     def test_repository_policy_passes_the_rule_schema(self):
         # The real policy.json, with the #2281 keys, matches the registered schema.
         repository = Path(__file__).resolve().parents[3]

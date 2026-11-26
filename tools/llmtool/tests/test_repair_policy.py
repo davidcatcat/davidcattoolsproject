@@ -36,7 +36,9 @@ class PolicyFileTests(unittest.TestCase):
     def test_repository_policy_has_the_owner_limits(self):
         self.assertEqual(rp.load_policy(),
                          dict(OWNER, timeout_continuation_max=1,
-                              route_failure_pause_after=3, **LIMIT_TABLE_2281))
+                              route_failure_pause_after=3,
+                              formal_reviewer_order=['codex-reviewer', 'claude-reviewer'],
+                              **LIMIT_TABLE_2281))
         self.assertEqual(rp.policy_path().name, 'policy.json')
 
     def test_repair_attempts_max_is_read_from_the_policy(self):

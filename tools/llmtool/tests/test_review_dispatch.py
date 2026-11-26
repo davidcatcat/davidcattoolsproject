@@ -171,7 +171,9 @@ class ReviewDispatchTests(unittest.TestCase):
                         read_d6.assert_not_called()
 
             with self.subTest(family=family, reviewer='default'):
-                expected = 'codex-reviewer' if family == 'claude' else 'claude-reviewer'
+                # #289: the shipped order prefers codex-reviewer; a codex-family
+                # author skips it and gets claude-reviewer instead.
+                expected = 'claude-reviewer' if family == 'codex' else 'codex-reviewer'
                 with patch.object(
                         review_dispatch.worker_dispatch, 'evaluate',
                         return_value=SimpleNamespace(allowed=True)):
@@ -180,7 +182,7 @@ class ReviewDispatchTests(unittest.TestCase):
     def test_agy_reviewer_selection_uses_model_family_and_fails_closed(self):
         for model, expected in (
                 ('claude-sonnet-5-5-medium', 'codex-reviewer'),
-                ('gemini-2.5-pro', 'claude-reviewer')):
+                ('gemini-2.5-pro', 'codex-reviewer')):
             task = {'task_id': TASK, 'developer': {
                 'provider_profile': 'agy', 'model': model}}
             with self.subTest(model=model), patch.object(

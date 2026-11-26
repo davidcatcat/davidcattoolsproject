@@ -17,12 +17,17 @@ import sys
 import time
 
 from .errors import LLMToolError
-from . import developer_routes, github_identity, role_config, skill_manifest, task_completion, worker_dispatch
+from . import developer_routes, github_identity, repair_policy, role_config, skill_manifest, task_completion, worker_dispatch
 
 
 # #1502 WP-G: no Reviewer default model is kept here. When no model is
 # resolved, it comes from developer-routes.json's roles registry.
 _CODEX_REVIEW_EFFORT = 'high'
+# #289: the formal Reviewer keys and the model family each one authors in.
+# formal_reviewer_order, when present, is the preference order for an implicit
+# selection; an absent key keeps the legacy default below.
+_FORMAL_REVIEWERS = ('claude-reviewer', 'codex-reviewer')
+_REVIEWER_FAMILIES = {'claude-reviewer': 'claude', 'codex-reviewer': 'codex'}
 # #2281: the Codex Reviewer run timeout comes from role_timeout('codex-reviewer');
 # this fallback names the same 3 h role default, not a separate value.
 _CODEX_REVIEW_TIMEOUT = developer_routes.DEFAULT_ROLE_TIMEOUT_SECONDS
@@ -203,18 +208,40 @@ def _policy(task, reviewer_key):
     return worker_dispatch.evaluate(reviewer_key, assignment, task.get('task_id'))
 
 
+def _reviewer_family(reviewer_key):
+    """#289: the model family a formal Reviewer key authors in, or None."""
+    return _REVIEWER_FAMILIES.get(reviewer_key)
+
+
+def _formal_reviewer_order():
+    """#289: the optional formal Reviewer preference order, or None when absent."""
+    return repair_policy.formal_reviewer_order()
+
+
 def _select_reviewer(task, requested=None):
     """Choose the default or explicit Reviewer and enforce family separation."""
     developer = task.get('developer') if type(task) is dict else None
     family = task_completion._reviewer_author_family(developer)
     if family is None:
         _refuse('REVIEWER_FAMILY_UNSUPPORTED')
+    if requested is None:
+        order = _formal_reviewer_order()
+        if order is not None:
+            # #289: an implicit selection takes the first cross-family key in
+            # the order whose route is ALLOWED. If none qualifies, the existing
+            # Reviewer refusal applies; no key outside the order is chosen.
+            for reviewer_key in order:
+                if _reviewer_family(reviewer_key) == family:
+                    continue
+                if _policy(task, reviewer_key).allowed:
+                    return reviewer_key
+            _refuse('REVIEWER_NOT_ALLOWED')
     reviewer_key = requested
     if reviewer_key is None:
         reviewer_key = 'codex-reviewer' if family == 'claude' else 'claude-reviewer'
-    if reviewer_key not in ('claude-reviewer', 'codex-reviewer'):
+    if reviewer_key not in _FORMAL_REVIEWERS:
         _refuse('REVIEWER_INVALID')
-    reviewer_family = 'claude' if reviewer_key == 'claude-reviewer' else 'codex'
+    reviewer_family = _reviewer_family(reviewer_key)
     if reviewer_family == family:
         _refuse('REVIEWER_SAME_FAMILY')
     policy = _policy(task, reviewer_key)

@@ -27,6 +27,9 @@ UNKNOWN = 'UNKNOWN'
 POLICY_KEYS = ('repair_max', 'parent_debug_max', 'group_debug_max', 'child_max',
                'replan_max', 'test_fail_max', 'review_fail_max',
                'waiting_notify_after_hours')
+# #289: the optional formal Reviewer preference order. Every entry is one known
+# formal Reviewer key, the list is non-empty, and no key repeats.
+FORMAL_REVIEWER_KEYS = ('claude-reviewer', 'codex-reviewer')
 # #1815 T3: optional limits as key -> (min, max); an absent key keeps its caller default.
 OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
 # #2281 L0b: optional AI-set limits from the #2281 limit table, each a positive
@@ -216,17 +219,36 @@ def load_policy(path=None):
     except (OSError, ValueError, UnicodeError):
         _refuse('POLICY_INVALID')
     allowed = {'schema_version', *POLICY_KEYS, *OPTIONAL_POLICY_LIMITS,
-               *OPTIONAL_POSITIVE_POLICY_KEYS}
+               *OPTIONAL_POSITIVE_POLICY_KEYS, 'formal_reviewer_order'}
     if (type(data) is not dict or not {'schema_version', *POLICY_KEYS} <= set(data) <= allowed or
             any(key in data and (type(data[key]) is not int or not low <= data[key] <= high)
                 for key, (low, high) in OPTIONAL_POLICY_LIMITS.items()) or
             any(key in data and (type(data[key]) is not int or data[key] < 1)
                 for key in OPTIONAL_POSITIVE_POLICY_KEYS) or
+            ('formal_reviewer_order' in data and
+             (type(data['formal_reviewer_order']) is not list or
+              not data['formal_reviewer_order'] or
+              any(type(key) is not str or key not in FORMAL_REVIEWER_KEYS
+                  for key in data['formal_reviewer_order']) or
+              len(set(data['formal_reviewer_order'])) !=
+              len(data['formal_reviewer_order']))) or
             type(data['schema_version']) is not int or data['schema_version'] != 1 or
             any(type(data[key]) is not int or not 0 <= data[key] <= 1000
                 for key in POLICY_KEYS)):
         _refuse('POLICY_INVALID')
     return dict(data)
+
+
+def formal_reviewer_order(path=None):
+    """#289: the optional formal Reviewer preference order, or None when absent.
+
+    The loader validates each entry as one known formal Reviewer key, with no
+    repeats; an absent key keeps the caller's legacy default.
+    """
+    policy = load_policy(path)
+    if 'formal_reviewer_order' not in policy:
+        return None
+    return list(policy['formal_reviewer_order'])
 
 
 def repair_attempts_max(path=None):
