@@ -38,17 +38,14 @@ _STATIC_RULES = (
     re.compile(r'-self-runner|-self-action'),
 )
 
-LEGACY_VERIFY = 'LEGACY_VERIFY'
 RETAIN_RELEASE_REFS = 'RETAIN_RELEASE_REFS'
 GW_AGENT_POLICY_REFS = 'GW_AGENT_POLICY_REFS'
 TRIAGE_AUTHORIZER = 'TRIAGE_AUTHORIZER'
 GITHUB_LOGINS = 'GITHUB_LOGINS'
-LABELS = frozenset((LEGACY_VERIFY, RETAIN_RELEASE_REFS, GW_AGENT_POLICY_REFS,
+LABELS = frozenset((RETAIN_RELEASE_REFS, GW_AGENT_POLICY_REFS,
                     TRIAGE_AUTHORIZER, GITHUB_LOGINS))
 
 # Exact (repository-relative path, stripped line text) -> label.
-# LEGACY_VERIFY: legacy constants kept for ``llmtool trust verify-legacy``,
-# removed by #369 PR-10b.
 _TRIAGE_WORKER = 'tools/llmtool/llmtool/test_triage_worker.py'
 _WORKER_DISPATCH = 'tools/llmtool/llmtool/worker_dispatch.py'
 _GITHUB_IDENTITY = 'tools/llmtool/llmtool/github_identity.py'
@@ -180,6 +177,14 @@ class OwnerLiteralGuardTest(unittest.TestCase):
             self.assertEqual(text, text.strip(), key)
             self.assertTrue(text, key)
 
+    def test_production_python_has_no_verify_legacy(self):
+        for rel, path in production_files():
+            text = path.read_text(encoding='utf-8')
+            self.assertNotIn(
+                'verify-legacy',
+                text,
+                f'{rel} contains a verify-legacy subcommand reference')
+
 
 class FindHitsTest(unittest.TestCase):
     LOGIN = 'example-ai-bot'
@@ -240,7 +245,7 @@ class FindViolationsTest(unittest.TestCase):
 
     def test_allowlisted_line_is_not_reported(self):
         line = "    LEGACY = 'https://github.com/acme/widget.git'"
-        allowlist = {(self.REL, line.strip()): LEGACY_VERIFY}
+        allowlist = {(self.REL, line.strip()): RETAIN_RELEASE_REFS}
         violations, matched = find_violations(self.REL, line, self.LOGIN, allowlist)
         self.assertEqual(violations, [])
         self.assertEqual(matched, {(self.REL, line.strip())})
@@ -248,8 +253,8 @@ class FindViolationsTest(unittest.TestCase):
 
     def test_allowlist_is_exact_per_path_and_text(self):
         line = "LEGACY = 'https://github.com/acme/widget.git'"
-        allowlist = {('tools/llmtool/llmtool/other.py', line): LEGACY_VERIFY,
-                     (self.REL, line + ' # changed'): LEGACY_VERIFY}
+        allowlist = {('tools/llmtool/llmtool/other.py', line): RETAIN_RELEASE_REFS,
+                     (self.REL, line + ' # changed'): RETAIN_RELEASE_REFS}
         violations, matched = find_violations(self.REL, line, self.LOGIN, allowlist)
         self.assertEqual(violations, [(self.REL, 1, line)])
         self.assertEqual(matched, set())
@@ -262,7 +267,7 @@ class FindViolationsTest(unittest.TestCase):
         self.assertIn(self.REL + ':2:', message)
 
     def test_unmatched_allowlist_entry_is_stale(self):
-        allowlist = {(self.REL, "OLD = '/Users/someone/gone'"): LEGACY_VERIFY}
+        allowlist = {(self.REL, "OLD = '/Users/someone/gone'"): RETAIN_RELEASE_REFS}
         violations, matched = find_violations(self.REL, 'x = 1\n', self.LOGIN, allowlist)
         self.assertEqual(violations, [])
         self.assertEqual(stale_entries(allowlist, matched),
