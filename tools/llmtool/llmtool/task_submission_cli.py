@@ -11312,7 +11312,10 @@ def _continuation_repair_members(task, store, executor_task):
                 if (type(predecessor) is not str or predecessor in seen or
                         depth > _CONTINUATION_LINEAGE_MAX):
                     _artifact_chain_invalid()
-                if predecessor == root_id:
+                # A PM continuation may also continue one of the root's own
+                # claimed repair Tasks (that repair Task records no
+                # ``continues``): it is still this root's lineage.
+                if predecessor == root_id or predecessor in claimed:
                     break
                 seen.add(predecessor)
                 current = store.get(predecessor)
