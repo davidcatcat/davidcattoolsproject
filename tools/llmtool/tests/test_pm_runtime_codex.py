@@ -52,6 +52,9 @@ class CodexRuntimeTests(unittest.TestCase):
                 exec_index = args.index('exec')
                 if any(flag in args[exec_index:] for flag in ('--cd', '--sandbox')):
                     sys.exit(2)
+                if (not (pathlib.Path.cwd() / '.git').exists() and
+                        '--skip-git-repo-check' not in args[exec_index:]):
+                    sys.exit(2)
             with open(__LOG__, 'a', encoding='utf-8') as stream:
                 stream.write(json.dumps({'args': args,
                     'sentinel_present': 'FAKE_VALUE' in os.environ}) + '\\n')
@@ -100,23 +103,28 @@ class CodexRuntimeTests(unittest.TestCase):
         return runtime
 
     def test_first_and_resumed_send_share_codex_thread_and_event_shapes(self):
+        self.assertFalse((self.cwd / '.git').exists())
         runtime = self.make_runtime()
         first = list(runtime.send('first'))
         second = list(runtime.send('second'))
         self.assertEqual([event['type'] for event in first],
                          ['TOOL_USE', 'TOOL_RESULT', 'TEXT_DELTA', 'ASSISTANT_TEXT', 'TURN_END'])
+        self.assertEqual(first[-1]['status'], 'COMPLETED')
         self.assertEqual(first[-1]['usage'], {'input_tokens': 2, 'output_tokens': 3})
         self.assertEqual(second[-1]['status'], 'COMPLETED')
         calls = [json.loads(line) for line in self.log.read_text().splitlines()]
         self.assertNotIn('resume', calls[0]['args'])
         self.assertIn('resume', calls[1]['args'])
         self.assertIn(THREAD, calls[1]['args'])
+        self.assertIn('--skip-git-repo-check', calls[0]['args'])
+        self.assertIn('--skip-git-repo-check', calls[1]['args'])
         expected_common = ['--cd', str(self.cwd), '--sandbox', 'workspace-write',
                            '--no-daemon', '--ask-for-approval', 'never', 'exec']
         self.assertEqual(calls[0]['args'], expected_common + [
-            '--json', '-c', 'sandbox_workspace_write.network_access=true', '-'])
+            '--skip-git-repo-check', '--json', '-c',
+            'sandbox_workspace_write.network_access=true', '-'])
         self.assertEqual(calls[1]['args'], expected_common + [
-            'resume', THREAD, '--json', '-c',
+            'resume', THREAD, '--skip-git-repo-check', '--json', '-c',
             'sandbox_workspace_write.network_access=true', '-'])
         self.assertFalse(any(call['sentinel_present'] for call in calls))
         allowed_env = {'PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE',
