@@ -40,9 +40,9 @@ class BlockedReviewFallbackTests(unittest.TestCase):
 
     def test_blocked_head_redispatches_once_with_the_other_reviewer(self):
         fb = ['REVIEW_BLOCKED', 'REVIEWER_FALLBACK']
-        self.assertEqual(self.run_case('agy', [1]), ('DISPATCH_REVIEW', fb, [('codex-reviewer', 2)]))
+        self.assertEqual(self.run_case('agy', [1]), ('DISPATCH_REVIEW', fb, [('claude-reviewer', 2)]))
         self.assertEqual(self.run_case('agy', [1], refuse=True),
-                         ('DISPATCH_REVIEW', fb + ['REVIEWER_NOT_ALLOWED'], [('codex-reviewer', 2)]))
+                         ('DISPATCH_REVIEW', fb + ['REVIEWER_NOT_ALLOWED'], [('claude-reviewer', 2)]))
         for args, kw, step in ((('agy', [1, 2]), {}, 'REVIEWER_ATTENTION'),
                                (('claude', [1]), {}, 'REVIEWER_ATTENTION'),
                                (('agy', [1]), {'done': True}, 'REVIEW_NOT_POSTED')):

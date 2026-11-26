@@ -471,14 +471,14 @@ class WorkerDispatchTests(unittest.TestCase):
         from llmtool import review_dispatch
         # A non-Claude, non-Codex author (family "other").
         task = self._review_task('gemini-2.5-pro')
-        # Control: under the shared all-ALLOWED policy the default is claude-reviewer.
-        self.assertEqual(review_dispatch._select_reviewer(task), 'claude-reviewer')
+        # Control: under the shared all-ALLOWED policy the default is codex-reviewer.
+        self.assertEqual(review_dispatch._select_reviewer(task), 'codex-reviewer')
         with self._real_policy():
             # The allowed row admits an explicit claude-reviewer request.
             self.assertEqual(review_dispatch._select_reviewer(task, 'claude-reviewer'),
                              'claude-reviewer')
-            # The default Reviewer for this author is claude-reviewer, and it is admitted.
-            self.assertEqual(review_dispatch._select_reviewer(task), 'claude-reviewer')
+            # The default Reviewer for this author is codex-reviewer, and it is admitted.
+            self.assertEqual(review_dispatch._select_reviewer(task), 'codex-reviewer')
             # #289 c7181570990 (Owner 2026-11-26): the resumed codex-reviewer row
             # admits an explicit codex-reviewer request for a cross-family author.
             self.assertEqual(review_dispatch._select_reviewer(task, 'codex-reviewer'),
