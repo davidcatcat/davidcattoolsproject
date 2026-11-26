@@ -19,6 +19,7 @@ from llmtool import (  # noqa: E402
     merge_train,
     merge_train_ops,
     merge_train_store,
+    task_advance,
     task_completion,
 )
 from llmtool.errors import LLMToolError  # noqa: E402
@@ -34,6 +35,9 @@ MERGE_SHA = 'c' * 40
 OTHER_SHA = 'd' * 40
 LINUX = 'check (Linux 3.14)'
 MACOS = 'check (macOS 3.13)'
+# #2769: the injected posted-verdict double's verified posting login and text.
+VERIFIED_LOGIN = 'verified-posting-login'
+VERDICT_TEXT = 'Codex PASS verdict at the exact head.'
 
 
 def _git(root, *args):
@@ -343,6 +347,51 @@ class MergeTrainOpsTest(unittest.TestCase):
         result = self._merge()
         self._assert_refused(result, merge_train_ops.TRAIN_MEMBER_CHANGED)
         self.assertEqual(result['result']['task_id'], TASK_B)
+
+    # #2769: the final member recheck requires a verified posted Codex verdict.
+
+    def _codex_claim(self, pr, head, version):
+        return {'pr': pr, 'head_sha': head, 'version': version,
+                'review_result': {'verdict': 'PASS', 'review_text': VERDICT_TEXT}}
+
+    def _posted_verdict_id(self, record, claim, github_get):
+        comments = github_get(f"issues/{claim['pr']}/comments?per_page=100")
+        copies = [item for item in comments if type(item) is dict and
+                  item.get('body') == VERDICT_TEXT]
+        verified = [item for item in copies
+                    if (item.get('user') or {}).get('login') == VERIFIED_LOGIN]
+        return verified[0]['id'] if len(copies) == 1 and len(verified) == 1 else None
+
+    def _comment(self, login):
+        return {'id': 77, 'body': VERDICT_TEXT,
+                'user': {'login': login, 'type': 'User'}}
+
+    def _merge_codex(self, comments):
+        self.github.comments[PR_A] = comments
+        self.github.comments[PR_B] = comments
+        with mock.patch.object(task_advance, '_completed_codex_pass_claim',
+                               side_effect=self._codex_claim), \
+                mock.patch.object(task_advance, '_verified_posted_verdict_id',
+                                  side_effect=self._posted_verdict_id):
+            return self._merge()
+
+    def test_codex_pass_without_posted_verdict_refuses(self):
+        self._create()
+        result = self._merge_codex([])
+        self._assert_refused(result, merge_train_ops.TRAIN_MEMBER_CHANGED)
+        self.assertEqual(result['result']['task_id'], TASK_A)
+
+    def test_codex_pass_posted_by_another_login_refuses(self):
+        self._create()
+        result = self._merge_codex([self._comment('another-login')])
+        self._assert_refused(result, merge_train_ops.TRAIN_MEMBER_CHANGED)
+        self.assertEqual(result['result']['task_id'], TASK_A)
+
+    def test_codex_pass_with_verified_posted_verdict_merges(self):
+        self._create()
+        result = self._merge_codex([self._comment(VERIFIED_LOGIN)])
+        self.assertEqual(result['step'], 'MERGED', result)
+        self.assertEqual(self._record()['state'], 'MERGED')
 
     def test_missing_macos_adds_mac_ci_once(self):
         self._create()

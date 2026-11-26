@@ -12,7 +12,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from llmtool import merge_train_eligibility as eligibility  # noqa: E402
-from llmtool import merge_train_store, sensitive_paths, task_store  # noqa: E402
+from llmtool import merge_train_store, sensitive_paths, task_advance, task_store  # noqa: E402
 from llmtool.errors import LLMToolError  # noqa: E402
 
 TASK_ID = '0123456789abcdef0123456789abcdef'
@@ -437,6 +437,52 @@ class ReviewRefusalTests(_Base):
         routes = _routes(**{CHECKS: _checks(_run(101, LINUX, 'failure'))})
         self.assertRefused(self.check(record=record, routes=routes),
                            'TRAIN_MEMBER_REVIEW_NOT_PASS')
+
+
+class CodexPostedVerdictTests(_Base):
+    """#2769: an admitted Codex PASS must have a verified posted verdict.
+
+    The shared posted-verdict helper is injected here; the double models its
+    rule that only a copy under the verified posting login counts, so the
+    member gate is exercised for both refusal cases and the accepted case.
+    """
+
+    VERIFIED_LOGIN = 'verified-posting-login'
+    VERDICT_TEXT = 'Codex PASS verdict at the exact head.'
+
+    def _posted_verdict_id(self, record, claim, github_get):
+        comments = github_get(COMMENTS)
+        copies = [item for item in comments if type(item) is dict and
+                  item.get('body') == self.VERDICT_TEXT]
+        verified = [item for item in copies
+                    if (item.get('user') or {}).get('login') == self.VERIFIED_LOGIN]
+        return verified[0]['id'] if len(copies) == 1 and len(verified) == 1 else None
+
+    def _comment(self, login):
+        return {'id': 77, 'body': self.VERDICT_TEXT,
+                'user': {'login': login, 'type': 'User'}}
+
+    def _check_codex(self, comments):
+        claim = {'pr': PR, 'head_sha': HEAD, 'version': 2,
+                 'review_result': {'verdict': 'PASS',
+                                   'review_text': self.VERDICT_TEXT}}
+        with mock.patch.object(task_advance, '_completed_codex_pass_claim',
+                               return_value=claim), \
+                mock.patch.object(task_advance, '_verified_posted_verdict_id',
+                                  side_effect=self._posted_verdict_id):
+            return self.check(routes=_routes(**{COMMENTS: comments}))
+
+    def test_missing_posted_verdict_refuses(self):
+        self.assertRefused(self._check_codex([]), 'MERGE_REVIEW_VERDICT_NOT_POSTED')
+
+    def test_copy_posted_by_another_login_refuses(self):
+        result = self._check_codex([self._comment('another-login')])
+        self.assertRefused(result, 'MERGE_REVIEW_VERDICT_NOT_POSTED')
+
+    def test_verified_posted_verdict_admits(self):
+        result = self._check_codex([self._comment(self.VERIFIED_LOGIN)])
+        self.assertTrue(result['eligible'], result)
+        self.assertEqual(result['member']['review_version'], 2)
 
 
 class CiRefusalTests(_Base):
