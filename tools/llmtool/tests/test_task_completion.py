@@ -6329,6 +6329,11 @@ class TaskCompletionTests(unittest.TestCase):
                         patch.object(review_dispatch, '_create_d6', side_effect=create_d6), \
                         patch.object(review_dispatch, '_bind_d6', side_effect=bind_d6), \
                         patch.object(review_dispatch, '_dispatch_codex', side_effect=codex), \
+                        patch.object(review_dispatch, '_list_issue_comments',
+                                     return_value=[]), \
+                        patch.object(review_dispatch, '_create_issue_comment',
+                                     return_value={'id': 44, 'user': {'login': 'reviewer-user'},
+                                                   'body': body}), \
                         patch('llmtool.task_completion._github_get',
                               side_effect=dispatch_github):
                     rc, dispatched = call(['task', 'review-dispatch', task_id,
@@ -6417,6 +6422,11 @@ class TaskCompletionTests(unittest.TestCase):
                         patch.object(review_dispatch, '_bind_d6', side_effect=bind_d6), \
                         patch.object(review_dispatch, '_dispatch_codex',
                                      side_effect=reviewer_run), \
+                        patch.object(review_dispatch, '_list_issue_comments',
+                                     return_value=[]), \
+                        patch.object(review_dispatch, '_create_issue_comment',
+                                     return_value={'id': 45, 'user': {'login': 'reviewer-user'},
+                                                   'body': review_text}), \
                         patch('llmtool.task_completion._github_get',
                               side_effect=github_get):
                     rc, result = call(['task', 'review-dispatch', task_id,

@@ -111,6 +111,29 @@ def _pr_snapshot(pr, github_get):
     return value, sha
 
 
+def _codex_verdict_code(record, pr, head, review_version, github_get):
+    """Refuse a Codex PASS that has no verified posted verdict (#2769).
+
+    The merge-train member gate applies the same requirement as the single-PR
+    merge: a COMPLETED Codex PASS counts only when its exact text is posted
+    under the verified posting login. Claude Reviewer claims carry no Codex
+    verdict text, so they are unaffected.
+    """
+    if type(review_version) is int:
+        claim = task_advance._completed_codex_pass_claim(record, pr, head, review_version)
+    elif review_version == 'MERGE_REVIEW_NOT_PASS':
+        claim = task_advance._completed_codex_pass_claim(record, pr, head)
+    else:
+        return None
+    if claim is None:
+        return None
+    try:
+        posted = task_advance._verified_posted_verdict_id(record, claim, github_get)
+    except Exception:
+        return task_advance.MERGE_REVIEW_VERDICT_NOT_POSTED
+    return None if posted is not None else task_advance.MERGE_REVIEW_VERDICT_NOT_POSTED
+
+
 def _review_version(record, pr, head, github_get):
     """Return the PASS review version (int) or a refusal code (str)."""
     events = list(record.get('completion_events') or [])
@@ -322,8 +345,13 @@ def member_check(store, task_id, pr, github_get, train_root=None, sleep=None):
     if record.get('merge_attempt') is not None:
         return _refused(TRAIN_MEMBER_MERGE_CLAIMED)
 
-    # 6. Formal review PASS bound to this PR and head.
+    # 6. Formal review PASS bound to this PR and head. A Codex PASS also needs
+    # its exact verdict posted under the verified login, as the single-PR merge
+    # requires (#2769).
     review_version = _review_version(record, pr, head, get)
+    verdict_code = _codex_verdict_code(record, pr, head, review_version, get)
+    if verdict_code is not None:
+        return _refused(verdict_code)
     if type(review_version) is not int:
         return _refused(review_version)
 

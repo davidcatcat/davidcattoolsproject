@@ -23,8 +23,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from llmtool import (review_dispatch, review_result, review_transcript, task_advance,
-                     task_store, task_submission_cli)
+from llmtool import (repair_policy, review_dispatch, review_result, review_transcript,
+                     task_advance, task_store, task_submission_cli)
 from llmtool.errors import LLMToolError
 
 import review_trust_fixture
@@ -340,9 +340,13 @@ class ClaimChoiceHelpersSkipRulingClaimsTest(unittest.TestCase):
     def test_blocked_fallback_counts_formal_claims_only(self):
         _, digest = _base_task_record()
         formal, rulings = self._claims(digest)
+        # No configured reviewer order: pin the legacy fallback path so this
+        # test never depends on the live policy file (#289).
         with patch.object(task_advance.task_completion, '_reviewer_author_family',
                           return_value='codex'), \
-                patch.object(review_dispatch, '_select_reviewer', return_value=object()):
+                patch.object(review_dispatch, '_select_reviewer', return_value=object()), \
+                patch.object(repair_policy, 'formal_reviewer_order', return_value=None,
+                             create=True):
             baseline = task_advance._blocked_fallback_reviewer(
                 {'developer': {}, 'review_dispatch_claim': [formal]}, ta.HEAD)
             self.assertEqual(baseline, 'codex-reviewer')

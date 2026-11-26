@@ -186,9 +186,20 @@ def _member_unchanged(member, store, github_get):
         except Exception:
             pass
         version = task_advance._merge_pass_claim(record, member['pr'], member['head'], events)
+        if type(version) is not int or version != member['review_version']:
+            return False
+        # #2769: the final recheck applies the single-PR merge rule. A Codex
+        # PASS counts only when its exact verdict is posted under the verified
+        # posting login; Claude Reviewer claims carry no Codex text.
+        codex_pass = task_advance._completed_codex_pass_claim(
+            record, member['pr'], member['head'], version)
+        if (codex_pass is not None and
+                task_advance._verified_posted_verdict_id(
+                    record, codex_pass, github_get) is None):
+            return False
     except Exception:
         return False
-    return type(version) is int and version == member['review_version']
+    return True
 
 
 def _provenance(record, merge_sha):
