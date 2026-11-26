@@ -36,6 +36,7 @@ class CiJobLog2761Tests(unittest.TestCase):
         tests.mkdir(parents=True)
         (tests / 'test_alpha.py').write_text('import unittest\n', encoding='utf-8')
         (tests / 'test_beta.py').write_text('import unittest\n', encoding='utf-8')
+        (tests / 'test_task_advance.py').write_text('import unittest\n', encoding='utf-8')
 
     def test_real_shaped_log_gives_failing_tests_and_admissible_modules(self):
         log = '\n'.join([
@@ -60,6 +61,56 @@ class CiJobLog2761Tests(unittest.TestCase):
         ])
         self.assertIn('AssertionError: expected 1', excerpt)
         self.assertEqual((workflow_run_id, job_id), (9001, JOB_ID))
+        self.assertFalse(unavailable)
+
+    def test_timestamp_prefixed_log_yields_names_and_modules(self):
+        log = '\n'.join([
+            '2026-11-25T21:05:43.6237580Z ##[group]Run python -m unittest',
+            '2026-11-25T21:05:43.6237590Z FAIL: '
+            'test_each_refusal_point_records_its_fixed_reason '
+            '(test_task_advance.TaskAdvanceTests.'
+            'test_each_refusal_point_records_its_fixed_reason)',
+            '2026-11-25T21:05:43.6237600Z AssertionError: expected fixed reason',
+        ])
+        with patch.object(task_advance, '_fetch_ci_job_log',
+                          return_value=log) as fetch:
+            details = task_advance._ci_failure_details(_run(), str(self.root))
+        fetch.assert_called_once_with(JOB_ID)
+        excerpt, failing_tests, failing_modules, workflow_run_id, job_id, unavailable = details
+        self.assertEqual(failing_tests, [
+            'test_each_refusal_point_records_its_fixed_reason '
+            '(test_task_advance.TaskAdvanceTests.'
+            'test_each_refusal_point_records_its_fixed_reason)',
+        ])
+        self.assertEqual(failing_modules, ['tools/llmtool/tests/test_task_advance.py'])
+        self.assertIn('AssertionError: expected fixed reason', excerpt)
+        self.assertNotIn('2026-11-25T21:05:43.6237590Z', excerpt)
+        self.assertEqual((workflow_run_id, job_id), (9001, JOB_ID))
+        self.assertFalse(unavailable)
+
+    def test_timestamp_prefixed_ansi_log_yields_names_and_modules(self):
+        esc = '\x1b'
+        log = '\n'.join([
+            f'{esc}[36;1m2026-11-25T21:05:43.6237580Z '
+            f'##[group]Run python -m unittest{esc}[0m',
+            f'{esc}[36;1m2026-11-25T21:05:43.6237590Z FAIL: '
+            f'test_each_refusal_point_records_its_fixed_reason '
+            f'(test_task_advance.TaskAdvanceTests.'
+            f'test_each_refusal_point_records_its_fixed_reason){esc}[0m',
+            f'{esc}[31m2026-11-25T21:05:43.6237600Z '
+            f'AssertionError: expected fixed reason{esc}[0m',
+        ])
+        with patch.object(task_advance, '_fetch_ci_job_log', return_value=log):
+            details = task_advance._ci_failure_details(_run(), str(self.root))
+        excerpt, failing_tests, failing_modules, _run_id, _job_id, unavailable = details
+        self.assertEqual(failing_tests, [
+            'test_each_refusal_point_records_its_fixed_reason '
+            '(test_task_advance.TaskAdvanceTests.'
+            'test_each_refusal_point_records_its_fixed_reason)',
+        ])
+        self.assertEqual(failing_modules, ['tools/llmtool/tests/test_task_advance.py'])
+        self.assertIn('AssertionError: expected fixed reason', excerpt)
+        self.assertNotIn('\x1b', excerpt)
         self.assertFalse(unavailable)
 
     def test_404_log_keeps_the_unavailable_packet(self):

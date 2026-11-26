@@ -844,6 +844,12 @@ _CI_JOB_LOG_HARD_CAP_BYTES = 4 * 1024 * 1024
 # before the tail bound, screening, excerpt and FAIL/ERROR parsing so no ESC
 # byte reaches the excerpt or the packet.
 _ANSI_ESCAPE_RE = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])')
+# #2761: every Actions log line starts with an ISO timestamp and one space, for
+# example '2026-11-25T21:05:43.6237590Z FAIL: test_alpha (test_alpha.Tests)'.
+# Remove that one prefix after the ANSI strip, so the shared FAIL/ERROR regex
+# still matches at a line start. Lines without the prefix are unchanged.
+_ACTIONS_TIMESTAMP_RE = re.compile(
+    r'(?m)^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z ')
 
 
 def _ci_job_log_text(value):
@@ -856,6 +862,7 @@ def _ci_job_log_text(value):
     if type(value) is not str or not value.strip():
         return None
     value = _ANSI_ESCAPE_RE.sub('', value).replace('\x1b', '')
+    value = _ACTIONS_TIMESTAMP_RE.sub('', value)
     try:
         raw = value.encode('utf-8')
     except UnicodeEncodeError:
