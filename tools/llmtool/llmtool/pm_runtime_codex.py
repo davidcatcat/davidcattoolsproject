@@ -268,7 +268,8 @@ class CodexRuntime:
                 '--no-daemon', '--ask-for-approval', 'never', 'exec']
         if self._thread_id is not None:
             argv.extend(('resume', self._thread_id))
-        argv.extend(('--json', '-c', 'sandbox_workspace_write.network_access=true', '-'))
+        argv.extend(('--skip-git-repo-check', '--json', '-c',
+                     'sandbox_workspace_write.network_access=true', '-'))
         try:
             child = subprocess.Popen(argv, cwd=self.owner.cwd, env=self._environment(),
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
