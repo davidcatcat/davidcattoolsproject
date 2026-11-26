@@ -15,8 +15,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from llmtool import (gw_agent_sessions, repair_policy, task_submission_cli,
-                     worker_availability, worker_dispatch)
+from llmtool import (gw_agent_sessions, repair_policy, task_store,
+                     task_submission_cli, worker_availability, worker_dispatch)
 from llmtool.developer_routes import GwAgentRoute, RouteError
 from llmtool.developer_routes.gw_agent import _normalize_gw_agent_usage
 
@@ -196,7 +196,10 @@ class GwAgentUsage2812Tests(unittest.TestCase):
         self.assertEqual(developer['state'], 'DEVELOPER_UNAVAILABLE')
         self.assertIn('DEVELOPER_GW_AGENT_BUDGET_EXCEEDED', developer['error_code'])
         self.assertEqual(developer['usage'], {
-            'prompt_tokens': 1200, 'completion_tokens': 340, 'total_tokens': 1540})
+            'prompt_tokens': 1200, 'completion_tokens': 340, 'total_tokens': 1540,
+            'served_model': 'qwen-authorized'})
+        # The recorded usage is the real store's accepted shape.
+        task_store._validate_usage(developer['usage'])
         self.assertEqual(developer['execution']['status'], 'UNKNOWN')
         self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
 

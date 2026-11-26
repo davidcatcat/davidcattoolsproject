@@ -8109,7 +8109,21 @@ def _gw_agent_refusal_usage(exc, route):
         result = getattr(route, '_result', None)
         if type(result) is dict:
             usage = result.get('usage')
-    return _normalize_gw_agent_usage(usage)
+    usage = _normalize_gw_agent_usage(usage)
+    if usage is None:
+        return None
+    # #2812: a gw-agent usage record names the served model, exactly like an
+    # accepted run's usage does (#1773). Only a verified gateway-reported model is
+    # kept; an unverified one leaves no served model rather than inventing it.
+    verifier = getattr(route, 'verified_model', None)
+    if callable(verifier):
+        try:
+            served_model = verifier(None, None)
+        except Exception:
+            served_model = None
+        if type(served_model) is str and served_model:
+            usage['served_model'] = served_model
+    return usage
 
 
 def _gw_agent_budget_execution(usage):
