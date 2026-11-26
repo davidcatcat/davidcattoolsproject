@@ -47,7 +47,8 @@ def _is_prelaunch_coded_refusal(exc, store, repair_task_id):
 def _invoke_claimed_adapter(*, store, task_id, claim, repair_task, developer,
                             packet, executor_task, profile, dispatch_adapter,
                             delegate_callable, high_debug_task=None,
-                            high_debug_ref=None, high_debug_family=None):
+                            high_debug_ref=None, high_debug_family=None,
+                            route_metadata=None, failure_state='UNKNOWN'):
     adapter = dispatch_adapter
     if adapter is None:
         adapter = lambda **request: _delegate_repair(
@@ -55,13 +56,17 @@ def _invoke_claimed_adapter(*, store, task_id, claim, repair_task, developer,
             high_debug_task=high_debug_task,
             high_debug_ref=high_debug_ref,
             high_debug_family=high_debug_family)
+    request = {'task': repair_task, 'developer': developer, 'packet': packet,
+               'executor_task': executor_task, 'provider_profile': profile,
+               'model': developer.get('model')}
+    if route_metadata:
+        request.update(route_metadata)
     try:
-        result = adapter(task=repair_task, developer=developer, packet=packet,
-                         executor_task=executor_task, provider_profile=profile,
-                         model=developer.get('model'))
+        result = adapter(**request)
     except Exception as exc:
-        if not _is_prelaunch_coded_refusal(exc, store, claim['repair_task_id']):
-            _update_claim_state(store, task_id, claim, 'UNKNOWN')
+        if (failure_state is not None and
+                not _is_prelaunch_coded_refusal(exc, store, claim['repair_task_id'])):
+            _update_claim_state(store, task_id, claim, failure_state)
         raise
     _update_claim_state(store, task_id, claim, 'DISPATCHED')
     return result
@@ -412,7 +417,7 @@ def _worker_key(profile):
 
 def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
                      store=None, high_debug_task=None, high_debug_ref=None,
-                     high_debug_family=None, **_route_metadata):
+                     high_debug_family=None, reassign_from=None, **_route_metadata):
     """Resume the original direct Developer route with a bounded repair request."""
     from . import task_submission_cli
 
@@ -453,6 +458,11 @@ def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
         high_debug_ref=high_debug_ref,
         high_debug_family=high_debug_family,
     )
+    if reassign_from is not None:
+        # #2781 F1: a manual unknown-repair retry asks the delegate for the
+        # authorized alternate direct reassignment instead of reusing the
+        # existing DEVELOPER_OUTCOME_UNKNOWN assignment, which it would refuse.
+        args.reassign_from = reassign_from
     # #2503: the repair keeps its read scope; files the findings name outside it are
     # shown and recorded as advice. The advice never changes or blocks the repair.
     return task_submission_cli._delegate_with_scope_advice(
@@ -1033,6 +1043,40 @@ def _manual_unknown_retry_allowed(task, claim, repair_task, executor_task,
         return False
 
 
+def _retry_reassignment(developer, repair_developer):
+    """Return (retry_developer, reassign_from) for a supported direct retry.
+
+    #2781 F1: a repair Task whose Developer ended unknown still holds that
+    assignment, so an ordinary delegate refuses it. AGY and OpenCode have the
+    authorized alternate direct reassignment path; that path needs the repair
+    Task's existing assignment id and a different admitted direct route. The
+    current authoring route is kept when it already differs from the repair
+    route, otherwise the other direct route is used. Claude and gw-agent have
+    no such path, so they only replay.
+    """
+    from . import direct_reassignment
+    if (type(developer) is not dict or type(repair_developer) is not dict or
+            not direct_reassignment.replacement_candidate(repair_developer)):
+        return None
+    source = repair_developer.get('provider_profile')
+    current = developer.get('provider_profile')
+    old_assignment = repair_developer.get('assignment_id')
+    if (source not in direct_reassignment.AGENTS or
+            current not in direct_reassignment.AGENTS or
+            type(old_assignment) is not str or
+            re.fullmatch(r'[0-9a-f]{32}', old_assignment) is None):
+        return None
+    target = (current if current != source else
+              next((profile for profile in direct_reassignment.AGENTS
+                    if profile != source), None))
+    if target is None:
+        return None
+    # Reassign from the failed assignment's own scope, so the delegate's
+    # reassignment check compares like with like; only the route changes.
+    return dict(repair_developer, provider_profile=target,
+                owner_assignment_ref=None), old_assignment
+
+
 def _retry_unknown_claimed_repair(*, store, task_id, existing, repair_task, developer,
                                   packet, executor_task, profile, pr_number, github_get,
                                   dispatch_adapter, delegate_callable, packet_version,
@@ -1066,14 +1110,27 @@ def _retry_unknown_claimed_repair(*, store, task_id, existing, repair_task, deve
             return {'claim': fresh, 'repair_task_id': repair_task_id,
                     'attempt': fresh.get('attempt'), 'replayed': True,
                     'next_action': f"review-dispatch --version {packet_version + 1}"}
+        retry = _retry_reassignment(developer, fresh_repair.get('developer'))
+        if retry is None:
+            # No supported retry or reassignment path for this route: keep the
+            # DISPATCHED claim and do not call a delegate that would refuse it.
+            return {'claim': fresh, 'repair_task_id': repair_task_id,
+                    'attempt': fresh.get('attempt'), 'replayed': True,
+                    'next_action': f"review-dispatch --version {packet_version + 1}"}
+        retry_developer, reassign_from = retry
         result = _invoke_claimed_adapter(
             store=store, task_id=task_id, claim=fresh, repair_task=fresh_repair,
-            developer=developer, packet=packet, executor_task=executor_task,
-            profile=profile, dispatch_adapter=dispatch_adapter,
+            developer=retry_developer, packet=packet, executor_task=executor_task,
+            profile=retry_developer.get('provider_profile'),
+            dispatch_adapter=dispatch_adapter,
             delegate_callable=delegate_callable,
             high_debug_task=high_debug_task,
             high_debug_ref=high_debug_ref,
-            high_debug_family=high_debug_family)
+            high_debug_family=high_debug_family,
+            route_metadata={'reassign_from': reassign_from},
+            # A retry that never reached a provider keeps the claim DISPATCHED,
+            # so a later manual repair can take this path again (#2781 F1).
+            failure_state=None)
         claim = dict(fresh, state='DISPATCHED')
         return {'result': result, 'attempt': claim['attempt'],
                 'repair_task_id': repair_task_id, 'claim': claim,

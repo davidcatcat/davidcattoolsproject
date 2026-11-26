@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from llmtool import review_repair
+from llmtool import review_repair, task_submission_cli
 from llmtool.errors import LLMToolError
 
 import test_review_repair as trr
@@ -48,9 +48,16 @@ def _repair_record(*, cleanup='CONFIRMED', state='DEVELOPER_OUTCOME_UNKNOWN'):
             'acceptance': ['Repair the reported issue.'],
         },
         'developer': {
+            'assignment_id': 'a' * 32,
             'provider_profile': 'agy',
+            'source_sha': trr.HEAD,
             'state': state,
             'dispatch_boundary': 'STOPPED',
+            'read_paths': ['tools/llmtool/llmtool'],
+            'write_paths': ['tools/llmtool/llmtool/review_repair.py'],
+            'acceptance': ['Repair the reported issue.'],
+            'egress_basis': 'Task authorized source files only.',
+            'selection_source': 'PM',
             'execution': {'status': 'BLOCKED', 'cleanup_status': cleanup},
         },
     }
@@ -85,7 +92,7 @@ class ReviewRepairUnknownRetry2781Tests(unittest.TestCase):
         self.temp.cleanup()
 
     def _run(self, *, repair=None, registration=None, snapshot=None,
-             pr_head=trr.HEAD, auto=False, retry_claim_id=None):
+             pr_head=trr.HEAD, auto=False, retry_claim_id=None, delegate=None):
         calls = []
 
         def adapter(**request):
@@ -98,19 +105,22 @@ class ReviewRepairUnknownRetry2781Tests(unittest.TestCase):
         store = trr.TempTaskStore(self.temp.name, [_root_record(), repair])
         self.last_calls = calls
         self.last_store = store
+        dispatch = ({'delegate_callable': delegate} if delegate is not None
+                    else {'dispatch_adapter': adapter})
         with patch.object(review_repair.task_completion, 'read_d6_registration',
                           return_value=registration), \
              patch.object(review_repair.task_completion, 'collect_git_snapshot',
                           return_value=snapshot), \
              patch.object(review_repair.worker_dispatch, 'evaluate',
                           return_value=SimpleNamespace(allowed=True)), \
-             patch.object(review_repair.shutil, 'which', return_value='/usr/bin/codex'):
+             patch.object(review_repair.shutil, 'which', return_value='/usr/bin/codex'), \
+             patch.object(task_submission_cli, '_delegate_with_scope_advice',
+                          side_effect=lambda args, store, invoke: invoke()):
             return review_repair.repair_review(
                 store=store, task_id=trr.TASK, executor_task=trr.EXECUTOR,
                 pr_number=trr.PR, github_get=_github(pr_head),
                 current_head=lambda _task, _executor: trr.HEAD,
-                dispatch_adapter=adapter, auto=auto,
-                retry_claim_id=retry_claim_id)
+                auto=auto, retry_claim_id=retry_claim_id, **dispatch)
 
     def _assert_replayed_without_dispatch(self, result):
         self.assertTrue(result['replayed'])
@@ -122,9 +132,21 @@ class ReviewRepairUnknownRetry2781Tests(unittest.TestCase):
         self.assertEqual(claims[0]['state'], 'DISPATCHED')
 
     def test_manual_repair_retries_the_same_dispatched_unknown_claim(self):
-        result = self._run()
-        self.assertEqual(len(self.last_calls), 1)
-        self.assertEqual(self.last_calls[0]['task']['task_id'], REPAIR_ID)
+        seen = []
+
+        def delegate(args, store):
+            seen.append(args)
+            return 0
+
+        result = self._run(delegate=delegate)
+        # The retry goes through the real delegate construction, not an adapter.
+        self.assertEqual(len(seen), 1)
+        args = seen[0]
+        self.assertEqual(args.task_id, REPAIR_ID)
+        # It asks for the authorized alternate direct reassignment of the
+        # existing unknown assignment instead of reusing it.
+        self.assertEqual(args.reassign_from, 'a' * 32)
+        self.assertEqual(args.provider, 'opencode')
         claims = self.last_store.get(trr.TASK)['review_repair_claims']
         self.assertEqual(len(claims), 1)
         self.assertEqual(claims[0]['repair_task_id'], REPAIR_ID)
@@ -133,6 +155,39 @@ class ReviewRepairUnknownRetry2781Tests(unittest.TestCase):
         self.assertEqual(result['repair_task_id'], REPAIR_ID)
         self.assertEqual(result['claim']['attempt'], 1)
         self.assertTrue(result['replayed'])
+
+    def test_route_without_a_reassignment_path_only_replays(self):
+        repair = _repair_record()
+        repair['developer']['provider_profile'] = 'claude'
+        repair['developer']['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        record = _root_record()
+        record['developer']['provider_profile'] = 'claude'
+        record['developer']['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        self.last_calls = []
+        calls = []
+
+        def delegate(args, store):
+            calls.append(args)
+            return 0
+
+        store = trr.TempTaskStore(self.temp.name, [record, repair])
+        with patch.object(review_repair.task_completion, 'read_d6_registration',
+                          return_value=_registration()), \
+             patch.object(review_repair.task_completion, 'collect_git_snapshot',
+                          return_value=_snapshot()), \
+             patch.object(review_repair.worker_dispatch, 'evaluate',
+                          return_value=SimpleNamespace(allowed=True)), \
+             patch.object(review_repair.shutil, 'which', return_value='/usr/bin/claude'):
+            result = review_repair.repair_review(
+                store=store, task_id=trr.TASK, executor_task=trr.EXECUTOR,
+                pr_number=trr.PR, github_get=_github(),
+                current_head=lambda _task, _executor: trr.HEAD,
+                delegate_callable=delegate)
+        self.assertEqual(calls, [])
+        self.assertTrue(result['replayed'])
+        claims = store.get(trr.TASK)['review_repair_claims']
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims[0]['state'], 'DISPATCHED')
 
     def test_dirty_d6_only_replays(self):
         result = self._run(snapshot=_snapshot(clean=False))
