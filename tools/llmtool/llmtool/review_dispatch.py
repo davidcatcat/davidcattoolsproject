@@ -1448,14 +1448,35 @@ def _verdict_binding_line(task, task_id, claim, text):
     return line
 
 
-def _find_posted_verdict(comments, login, text, binding_line):
+def _comment_verdict_version(body, binding_line, *, head=None):
+    """Return the verdict version of a bound review_verdict comment, or None."""
+    lines = [line for line in body.splitlines() if line.strip()]
+    if len(lines) < 3 or _VERDICT_MARKER_LINE.match(lines[0]) is None:
+        return None
+    if binding_line not in lines[2:]:
+        return None
+    from . import review_result
+    status_line = review_result._VERDICT_VERSION_HEAD.fullmatch(lines[1])
+    if status_line is None:
+        return None
+    raw_version, raw_head = status_line.group(2), status_line.group(3)
+    if head is not None and raw_head != head:
+        return None
+    return int(raw_version)
+
+
+def _find_posted_verdict(comments, login, text, binding_line, *, version=None, head=None):
     """Return (exact comment, conflict, duplicate) from the expected login's comments.
 
     A body alone never counts: the author must be the posting login and the
     body must equal the stored text byte for byte, binding line included. A
-    bound comment by that login whose body differs is a conflict, not a match.
-    More than one exact match is a duplicate, never an already-posted verdict.
+    bound comment by that login of the same version (or whose version cannot
+    be established) whose body differs is a conflict, not a match. Comments of
+    a different verdict version are ignored. More than one exact match is a
+    duplicate, never an already-posted verdict.
     """
+    target_version = (version if type(version) is int and not isinstance(version, bool) and
+                      version >= 1 else None)
     match, conflict, duplicate = None, False, False
     for comment in comments:
         if type(comment) is not dict:
@@ -1470,6 +1491,10 @@ def _find_posted_verdict(comments, login, text, binding_line):
             else:
                 duplicate = True
         else:
+            comment_version = _comment_verdict_version(body, binding_line, head=head)
+            if (target_version is not None and comment_version is not None and
+                    comment_version != target_version):
+                continue
             conflict = True
     return match, conflict, duplicate
 
@@ -1546,7 +1571,10 @@ def _match_posted(comments, login, text, binding_line, claim):
             head=dispute.get('head_sha'),
             review_version=dispute.get('review_version'),
         )
-    return _find_posted_verdict(comments, login, text, binding_line)
+    version = claim.get('version') if type(claim) is dict else None
+    head = claim.get('head_sha') if type(claim) is dict else None
+    return _find_posted_verdict(
+        comments, login, text, binding_line, version=version, head=head)
 
 
 def _comment_id(comment):
