@@ -1472,9 +1472,13 @@ class ReviewDispatchTests(unittest.TestCase):
                 task['developer']['provider_profile'] = family
                 if family == 'agy':
                     task['developer']['model'] = 'gemini-2.5-pro'
+                # #289: the shipped order (codex-reviewer, claude-reviewer) makes
+                # codex-reviewer the default for a non-Claude author too; it is
+                # still cross-family, and the absent-key legacy default is
+                # covered by test_reviewer_order_289.
                 self.assertEqual(review_dispatch._preflight(
                     self.store, TASK, 'executor-d6', 42, 1, task=task)[4],
-                    'claude-reviewer')
+                    'codex-reviewer')
             task['developer']['provider_profile'] = 'unknown'
             with self.assertRaises(LLMToolError) as raised:
                 review_dispatch._preflight(
