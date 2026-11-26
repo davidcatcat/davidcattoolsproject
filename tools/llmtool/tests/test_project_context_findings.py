@@ -21,8 +21,8 @@ def make_mapping(slug='owner/repo', origins=('git@github.com:owner/repo.git',),
                  extra_repo_key=None):
     mapping = {
         'canonical_root': '/srv/projects/repo',
-        'workspace_root': '/srv/projects/repo/work',
-        'tasks_root': '/srv/projects/repo/tasks',
+        'workspace_root': '/srv/workspaces/repo',
+        'tasks_root': '/srv/tasks/repo',
         'repository': {'slug': slug, 'allowed_origins': list(origins)},
     }
     if extra_repo_key is not None:
@@ -49,8 +49,8 @@ class FindingTests(unittest.TestCase):
         origins = ['git@github.com:owner/repo.git', ['git@github.com:owner/repo.git']]
         self.assert_refused(lambda: ProjectContext('proj-1', 'owner/repo', origins,
                                                    '/srv/projects/repo',
-                                                   '/srv/projects/repo/work',
-                                                   '/srv/projects/repo/tasks'))
+                                                   '/srv/workspaces/repo',
+                                                   '/srv/tasks/repo'))
 
     # T2: invalid project id (non-printable or over 100 chars) is refused.
 
@@ -62,8 +62,8 @@ class FindingTests(unittest.TestCase):
                 self.assert_refused(lambda: ProjectContext(project_id, 'owner/repo',
                                                            ['git@github.com:owner/repo.git'],
                                                            '/srv/projects/repo',
-                                                           '/srv/projects/repo/work',
-                                                           '/srv/projects/repo/tasks'))
+                                                           '/srv/workspaces/repo',
+                                                           '/srv/tasks/repo'))
 
     def test_overlong_project_id_is_refused(self):
         for project_id in ('p' * 101, 'p' * 1024):
@@ -73,8 +73,8 @@ class FindingTests(unittest.TestCase):
                 self.assert_refused(lambda: ProjectContext(project_id, 'owner/repo',
                                                            ['git@github.com:owner/repo.git'],
                                                            '/srv/projects/repo',
-                                                           '/srv/projects/repo/work',
-                                                           '/srv/projects/repo/tasks'))
+                                                           '/srv/workspaces/repo',
+                                                           '/srv/tasks/repo'))
 
     def test_boundary_project_ids(self):
         ok_100 = 'p' * 100
@@ -83,8 +83,8 @@ class FindingTests(unittest.TestCase):
         self.assert_refused(lambda: ProjectContext('p' * 101, 'owner/repo',
                                                    ['git@github.com:owner/repo.git'],
                                                    '/srv/projects/repo',
-                                                   '/srv/projects/repo/work',
-                                                   '/srv/projects/repo/tasks'))
+                                                   '/srv/workspaces/repo',
+                                                   '/srv/tasks/repo'))
 
     # T3: a constructed context cannot be mutated.
 
@@ -110,8 +110,8 @@ class FindingTests(unittest.TestCase):
         self.assertEqual(context.slug, 'owner/repo')
         self.assertEqual(context.allowed_origins, ('git@github.com:owner/repo.git',))
         self.assertEqual(context.canonical_root, '/srv/projects/repo')
-        self.assertEqual(context.workspace_root, '/srv/projects/repo/work')
-        self.assertEqual(context.tasks_root, '/srv/projects/repo/tasks')
+        self.assertEqual(context.workspace_root, '/srv/workspaces/repo')
+        self.assertEqual(context.tasks_root, '/srv/tasks/repo')
 
 
 if __name__ == '__main__':
