@@ -7029,7 +7029,6 @@ class TaskStore:
                                   after['review_result']['source'].get('kind') == 'CODEX_JSONL')) and
                                 (('usage' not in after and 'usage_unknown' not in after) or
                                  (after.get('state') == 'COMPLETED' and
-                                  'purpose' not in before and
                                   'usage' not in before and
                                   'usage_unknown' not in before and
                                   ('usage' in after) != ('usage_unknown' in after))) and
@@ -7041,7 +7040,14 @@ class TaskStore:
                                     before.get('purpose') == 'dispute_ruling' and
                                     before.get('reviewer') == 'claude-reviewer' and
                                     type(before.get('native_session_id')) is str and
-                                    set(after) == set(before) | {'review_result'} and
+                                    (('usage' not in after and 'usage_unknown' not in after and
+                                      set(after) == set(before) | {'review_result'}) or
+                                     ('usage' not in before and 'usage_unknown' not in before and
+                                      ('usage' in after) != ('usage_unknown' in after) and
+                                      set(after) == set(before) | {
+                                          'review_result',
+                                          'usage' if 'usage' in after else 'usage_unknown',
+                                      })) and
                                     all(before.get(key) == after.get(key) for key in before
                                         if key not in ('state', 'updated_at')) and
                                     type(after.get('review_result')) is dict and
