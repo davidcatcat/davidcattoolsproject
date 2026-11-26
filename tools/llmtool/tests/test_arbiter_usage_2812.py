@@ -274,7 +274,33 @@ class ClaudeArbiterUsageTests(tdacc.ClaudeRulingCollectionTests):
             review_transcript.claim_usage(other_purpose, config_dir=str(self.claude_home)))
 
     def test_claude_arbiter_stores_reported_usage_once_and_replay_preserves(self):
-        self._seed()
+        diff = 'diff --git a/tools/a.py b/tools/a.py\n'
+        self._seed(developer={
+            'assignment_id': 'f' * 32,
+            'selection_source': 'PM',
+            'state': 'DEVELOPER_RESPONDED',
+            'provider_profile': 'codex',
+            'provider_type': 'codex-cli',
+            'model': 'gpt-6.1-sol',
+            'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+            'session_id': 'dev-' + ('1' * 32),
+            'source_sha': HEAD,
+            'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+            'read_paths': ['tools/a.py'],
+            'write_paths': ['tools/a.py'],
+            'acceptance': ['A1'],
+            'context_sha256': '1' * 64,
+            'egress_basis': 'bounded test',
+            'input_bytes': 10,
+            'max_tokens': None,
+            'artifact_format': 'unified_diff',
+            'artifact': diff,
+            'artifact_sha256': hashlib.sha256(diff.encode('utf-8')).hexdigest(),
+            'usage': None,
+            'error_code': None,
+            'created_at': STAMP_1,
+            'executor_task_id': EXECUTOR,
+        })
         ruling = tdacc._ruling_text(
             actor='Claude', marker_status='WITHDRAWN', header_outcome='WITHDRAWN')
         raw = tdacc._transcript_bytes([
