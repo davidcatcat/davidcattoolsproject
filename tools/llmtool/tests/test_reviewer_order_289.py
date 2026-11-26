@@ -160,6 +160,30 @@ class AdvanceReviewerFallbackOrderTests(unittest.TestCase):
                              (None, 'REVIEWER_NOT_ALLOWED'))
             select.assert_not_called()
 
+    def test_route_fallback_propagates_invalid_policy(self):
+        task = _task('agy', 'gemini-2.5-pro')
+        with patch.object(rp, 'formal_reviewer_order',
+                          side_effect=LLMToolError('POLICY_INVALID')), \
+                patch.object(review_dispatch, '_select_reviewer') as select:
+            with self.assertRaises(LLMToolError) as caught:
+                task_advance._reviewer_fallback(task, _refusal(), 'codex-reviewer')
+        self.assertEqual(str(caught.exception), 'POLICY_INVALID')
+        select.assert_not_called()
+
+    def test_blocked_fallback_propagates_invalid_policy(self):
+        task = dict(_task('agy', 'gemini-2.5-pro'),
+                    review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD,
+                                            'version': 1, 'state': 'DISPATCHED'}])
+        with patch.object(rp, 'formal_reviewer_order',
+                          side_effect=LLMToolError('POLICY_INVALID')), \
+                patch.object(task_advance, '_review_claim_reviewer',
+                             return_value='codex-reviewer'), \
+                patch.object(review_dispatch, '_select_reviewer') as select:
+            with self.assertRaises(LLMToolError) as caught:
+                task_advance._blocked_fallback_reviewer(task, HEAD)
+        self.assertEqual(str(caught.exception), 'POLICY_INVALID')
+        select.assert_not_called()
+
     def _advance(self, dispatch):
         record = base_record(developer={
             'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'agy',
@@ -205,6 +229,40 @@ class AdvanceReviewerFallbackOrderTests(unittest.TestCase):
         self.assertEqual(out['step'], 'DISPATCH_REVIEW')
         self.assertEqual(seen, ['codex-reviewer', 'claude-reviewer'])
         self.assertIn('REVIEWER_FALLBACK', out['codes'])
+
+    def test_blocked_fallback_invalid_policy_dispatches_nothing(self):
+        event = {'event_id': 'e' * 32, 'source': 'REVIEWER', 'source_sha': HEAD,
+                 'version': 1, 'outcome': 'REVIEW_BLOCKED',
+                 'state': 'PM_CONSUMED'}
+        record = base_record(
+            developer={'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'agy',
+                       'model': 'gemini-2.5-pro'},
+            pm_session_id='pm', completion_events=[event],
+            review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD, 'version': 1,
+                                    'state': 'DISPATCHED'}])
+        dispatched = []
+
+        def dispatch(**kwargs):
+            dispatched.append(kwargs)
+            return {'state': 'DISPATCHED'}
+
+        with patch.object(rp, 'formal_reviewer_order',
+                          side_effect=LLMToolError('POLICY_INVALID')), \
+                patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+                patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+                patch.object(task_advance, '_review_outcomes', return_value=[]), \
+                patch.object(task_advance, '_review_claim_reviewer',
+                             return_value='codex-reviewer'), \
+                patch.object(task_advance.active_pm_inbox, 'ack'), \
+                patch.object(review_dispatch, '_policy',
+                             return_value=SimpleNamespace(allowed=True,
+                                                          reason_code='ALLOWED')):
+            with self.assertRaises(LLMToolError) as caught:
+                task_advance.advance(
+                    task_id=record['task_id'], store=ClaimStore(record), pr_number=17,
+                    github_get=green_linux_ci, dispatch_review_call=dispatch)
+        self.assertEqual(str(caught.exception), 'POLICY_INVALID')
+        self.assertEqual(dispatched, [])
 
     def test_absent_order_keeps_the_legacy_alternate(self):
         task = _task('agy', 'gemini-2.5-pro')

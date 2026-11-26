@@ -4133,11 +4133,12 @@ _REVIEWER_ROUTE_UNAVAILABLE = ('ROLE_MODEL_NOT_ALLOWED', 'REVIEWER_ACCOUNT_UNCON
 
 
 def _reviewer_order():
-    """#289: the optional formal Reviewer order, or None when it is absent."""
-    try:
-        return repair_policy.formal_reviewer_order()
-    except LLMToolError:
-        return None
+    """#289: the optional formal Reviewer order, or None when it is absent.
+
+    #289 review F1: an invalid policy refuses here. Treating it as absent would
+    let a fallback dispatch an explicit Reviewer without the order's checks.
+    """
+    return repair_policy.formal_reviewer_order()
 
 
 def _review_claim_reviewer(record, claim):
