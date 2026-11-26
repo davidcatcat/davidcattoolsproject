@@ -832,6 +832,103 @@ def _ci_excerpt(run):
     return task_submission_cli._screen_text(excerpt, review_repair.CI_EXCERPT_MAX_BYTES + 1024)
 
 
+# #2761: GitHub Actions leaves a failed hosted check run's output empty, but the
+# job log is available at repos/OWNER/REPO/actions/jobs/JOB_ID/logs. The log is
+# read with the same GitHub credential environment as the other gh calls and
+# only a bounded tail is kept; an unreadable or oversize log keeps today's
+# unavailable packet.
+_CI_JOB_LOG_TAIL_BYTES = 512 * 1024
+_CI_JOB_LOG_HARD_CAP_BYTES = 4 * 1024 * 1024
+# #2761: GitHub Actions logs carry ANSI terminal escape sequences, which the
+# gh api read itself only prints with --allow-escape-sequences. Strip them
+# before the tail bound, screening, excerpt and FAIL/ERROR parsing so no ESC
+# byte reaches the excerpt or the packet.
+_ANSI_ESCAPE_RE = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])')
+# #2761: every Actions log line starts with an ISO timestamp and one space, for
+# example '2026-11-25T21:05:43.6237590Z FAIL: test_alpha (test_alpha.Tests)'.
+# Remove that one prefix after the ANSI strip, so the shared FAIL/ERROR regex
+# still matches at a line start. Lines without the prefix are unchanged.
+_ACTIONS_TIMESTAMP_RE = re.compile(
+    r'(?m)^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z ')
+
+
+def _ci_job_log_text(value):
+    """Return the bounded last 512 KiB of one job log, or None."""
+    if type(value) is bytes:
+        try:
+            value = value.decode('utf-8')
+        except UnicodeDecodeError:
+            return None
+    if type(value) is not str or not value.strip():
+        return None
+    value = _ANSI_ESCAPE_RE.sub('', value).replace('\x1b', '')
+    value = _ACTIONS_TIMESTAMP_RE.sub('', value)
+    try:
+        raw = value.encode('utf-8')
+    except UnicodeEncodeError:
+        return None
+    if len(raw) > _CI_JOB_LOG_HARD_CAP_BYTES:
+        return None
+    return raw[-_CI_JOB_LOG_TAIL_BYTES:].decode('utf-8', 'ignore')
+
+
+def _fetch_ci_job_log(job_id):
+    """Read one Actions job log through the existing GitHub credential path."""
+    if type(job_id) is not int or isinstance(job_id, bool) or job_id < 1:
+        return None
+    try:
+        slug = task_completion._trusted_slug()
+    except Exception:
+        return None
+    if type(slug) is not str or re.fullmatch(
+            r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', slug) is None:
+        return None
+    try:
+        result = _publish_run_gh(os.getcwd(), [
+            'api', '--allow-escape-sequences', '--method', 'GET',
+            f'repos/{slug}/actions/jobs/{job_id}/logs'])
+    except Exception:
+        return None
+    if getattr(result, 'returncode', 1) != 0:
+        return None
+    return _ci_job_log_text(getattr(result, 'stdout', None))
+
+
+def _read_ci_job_log(job_id):
+    """Indirection so a caller or test can inject the log fetch."""
+    return _fetch_ci_job_log(job_id)
+
+
+def _ci_log_excerpt(text):
+    """Bounded untrusted excerpt from the tail of a job log."""
+    from . import task_submission_cli
+    max_lines = min(repair_policy.ci_excerpt_max_lines(),
+                    review_repair.CI_EXCERPT_MAX_LINES)
+    lines = text.splitlines()[-max_lines:]
+    raw = '\n'.join(lines).encode('utf-8', errors='replace')
+    excerpt = raw[-review_repair.CI_EXCERPT_MAX_BYTES:].decode('utf-8', errors='ignore')
+    if not excerpt.strip():
+        return ''
+    return task_submission_cli._screen_text(excerpt, review_repair.CI_EXCERPT_MAX_BYTES + 1024)
+
+
+def _ci_log_failing_modules(text):
+    """Module candidates from the dotted module part of log FAIL/ERROR lines."""
+    found = []
+    seen = set()
+    for match in _UNITTEST_FAIL_RE.finditer(text):
+        method, dotted = match.group(1), match.group(2)
+        segments = dotted.split('.')
+        if len(segments) > 1 and segments[-1] == method:
+            segments = segments[:-1]
+        for segment in segments:
+            if (_TEST_MODULE_TOKEN_RE.fullmatch(segment) and
+                    segment != method and segment not in seen):
+                seen.add(segment)
+                found.append(segment)
+    return found
+
+
 def _read_check_run(head, name, run_id, github_get):
     """Read one check run by id; None unless it is this completed exact-head check."""
     if type(run_id) is not int or run_id < 1:
@@ -1239,8 +1336,10 @@ def _ci_run_identity(run):
     return workflow_run_id, job_id
 
 
-def _ci_failure_details(run, d6_root):
+def _ci_failure_details(run, d6_root, job_log_fetch=None, log_fetch=None):
     """Build failing_tests, failing_modules, workflow_run_id, job_id, details_unavailable."""
+    if job_log_fetch is None:
+        job_log_fetch = log_fetch
     output = run.get('output') if type(run) is dict else None
     parts = ([output.get(k) for k in ('title', 'summary', 'text')
               if type(output.get(k)) is str and output.get(k)]
@@ -1250,6 +1349,21 @@ def _ci_failure_details(run, d6_root):
     failing_modules = _resolve_admissible_test_modules(_failing_test_modules(run), d6_root)
     workflow_run_id, job_id = _ci_run_identity(run)
     excerpt = _ci_excerpt(run)
+    # #2761: only a check-run output with no failing test falls back to the
+    # failed job's Actions log. A present output failure is used as before.
+    if not failing_tests and job_id is not None:
+        fetch = _read_ci_job_log if job_log_fetch is None else job_log_fetch
+        try:
+            log_text = _ci_job_log_text(fetch(job_id))
+        except Exception:
+            log_text = None
+        if log_text is not None:
+            log_tests = _failing_test_names(log_text)
+            if log_tests:
+                excerpt = _ci_log_excerpt(log_text)
+                failing_tests = log_tests
+                failing_modules = _resolve_admissible_test_modules(
+                    _ci_log_failing_modules(log_text), d6_root)
     details_unavailable = not excerpt.strip() and not failing_tests
     return excerpt, failing_tests, failing_modules, workflow_run_id, job_id, details_unavailable
 
@@ -1297,7 +1411,8 @@ def _remote_test_failure_details(receipt, executor_task, d6_root):
 
 
 def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, related,
-                      run, fail_code, github_get, repair_review_call):
+                      run, fail_code, github_get, repair_review_call,
+                      job_log_fetch=None):
     """#1502 WP-D D11: route one completed exact-head required check that did not pass.
 
     Return (step, codes, result), or None when the conclusion keeps today's
@@ -1367,7 +1482,7 @@ def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, rela
     if profile in ('codex', 'claude') and shutil.which(profile) is None:
         return 'RUNTIME_NOT_ON_PATH', ['RUNTIME_NOT_ON_PATH'], None
     excerpt, failing_tests, failing_modules, workflow_run_id, job_id, details_unavailable = (
-        _ci_failure_details(run, d6.get('root')))
+        _ci_failure_details(run, d6.get('root'), job_log_fetch=job_log_fetch))
     ci_failure = {
         'head': head,
         'check_name': run['name'],
@@ -4510,8 +4625,10 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                   github_get=None, cwd=None, publish_git_runner, publish_gh_runner,
                   record_result_call=None, merge_gh_runner, label_gh_runner=None,
                   owner_acceptance=None, owner_exception=None, executor_task=None,
-                  sleep_fn=None, sleep=None):
+                  sleep_fn=None, sleep=None, ci_job_log_fetch=None, job_log_fetch=None):
     """One advance step; the caller holds the advance lease and passes guarded runners."""
+    if ci_job_log_fetch is None:
+        ci_job_log_fetch = job_log_fetch
     try:
         record = store.get(task_id)
     except Exception:
@@ -4691,7 +4808,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                 store=store, record=record, task_id=task_id,
                 executor_task=executor_task, number=number, d6=d6, related=related,
                 run=mac_run, fail_code='MAC_CI_FAILED', github_get=get,
-                repair_review_call=repair_review_call)
+                repair_review_call=repair_review_call, job_log_fetch=ci_job_log_fetch)
             if routed is not None:
                 merge_result = {'step': routed[0], 'codes': list(routed[1]),
                                 'result': routed[2]}
@@ -4796,7 +4913,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                     store=store, record=record, task_id=task_id,
                     executor_task=executor_task, number=number, d6=d6, related=related,
                     run=check_run, fail_code='LINUX_CI_FAILED', github_get=get,
-                    repair_review_call=repair_review_call)
+                    repair_review_call=repair_review_call, job_log_fetch=ci_job_log_fetch)
                 if routed is not None:
                     step, codes, result = routed[0], list(routed[1]), routed[2]
                     ci_routed = True
@@ -5102,7 +5219,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                 store=store, record=record, task_id=task_id,
                 executor_task=executor_task, number=number, d6=d6, related=related,
                 run=mac_run, fail_code='MAC_CI_FAILED', github_get=get,
-                repair_review_call=repair_review_call)
+                repair_review_call=repair_review_call, job_log_fetch=ci_job_log_fetch)
             if routed is not None:
                 step, codes, result = routed[0], list(routed[1]), routed[2]
     elif step == 'READY_FOR_INTEGRATION':
