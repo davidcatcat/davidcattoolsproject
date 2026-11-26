@@ -244,6 +244,26 @@ class CodexVerdictPost2769Tests(unittest.TestCase):
         self.comments.append(comment)
         return comment
 
+    def _install_claim(self, claim):
+        current = self.store.get(self.task_id)
+        claimed = {
+            key: value for key, value in claim.items()
+            if key not in ('state', 'updated_at', 'native_session_id', 'review_result')
+        }
+        claimed['state'] = 'CLAIMED'
+        claimed['updated_at'] = claim['claimed_at']
+        updated = self.store.compare_and_update(
+            self.task_id,
+            expected={'record_sha256': current['record_sha256']},
+            review_dispatch_claim=[claimed],
+        )
+        self.store.compare_and_update(
+            self.task_id,
+            expected={'record_sha256': updated['record_sha256']},
+            review_dispatch_claim=[claim],
+        )
+        return claim
+
     def _install_completed_codex_claim(self):
         current = self.store.get(self.task_id)
         claim = {
@@ -266,12 +286,7 @@ class CodexVerdictPost2769Tests(unittest.TestCase):
                 'review_text': self.verdict_text,
             },
         }
-        self.store.compare_and_update(
-            self.task_id,
-            expected={'record_sha256': current['record_sha256']},
-            review_dispatch_claim=[claim],
-        )
-        return claim
+        return self._install_claim(claim)
 
     def test_manual_review_dispatch_posts_caller_verdict_and_prints_real_state(self):
         claim = self._install_completed_codex_claim()
@@ -441,7 +456,6 @@ class CodexVerdictPost2769Tests(unittest.TestCase):
         self.assertEqual(len(merges), 1)
 
     def test_claude_reviewer_dispatched_claim_is_unchanged(self):
-        current = self.store.get(self.task_id)
         claude_claim = {
             'executor_task': EXEC,
             'pr': PR_NUMBER,
@@ -454,11 +468,7 @@ class CodexVerdictPost2769Tests(unittest.TestCase):
             'claimed_at': '2026-11-26T00:01:00Z',
             'updated_at': '2026-11-26T00:02:00Z',
         }
-        self.store.compare_and_update(
-            self.task_id,
-            expected={'record_sha256': current['record_sha256']},
-            review_dispatch_claim=[claude_claim],
-        )
+        self._install_claim(claude_claim)
         identity = {
             'task': self.task_id, 'run': self.task['run_id'], 'head': HEAD,
             'version': 1, 'outcome': 'REVIEW_PASS', 'comment_id': 77,
