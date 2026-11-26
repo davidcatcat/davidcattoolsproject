@@ -16,7 +16,7 @@ from llmtool import review_dispatch, task_advance, task_store, task_submission_c
 HEAD = 'b' * 40
 MAIN_SHA = 'e' * 40
 EXEC = 'executor-d6'
-PM_SESSION = 'pm-test-session'
+PM_SESSION = 'test-session'
 PR_NUMBER = 2769
 LOGIN = 'reviewer-user'
 
@@ -248,9 +248,10 @@ class CodexVerdictPost2769Tests(unittest.TestCase):
         current = self.store.get(self.task_id)
         claimed = {
             key: value for key, value in claim.items()
-            if key not in ('state', 'updated_at', 'native_session_id', 'review_result')
+            if key not in ('state', 'updated_at', 'review_result')
         }
         claimed['state'] = 'CLAIMED'
+        claimed['native_session_id'] = None
         claimed['updated_at'] = claim['claimed_at']
         updated = self.store.compare_and_update(
             self.task_id,
@@ -405,8 +406,9 @@ class CodexVerdictPost2769Tests(unittest.TestCase):
                              side_effect=AssertionError('must not launch new review')):
             next_res = task_advance.advance(
                 task_id=self.task_id, store=self.store, pr_number=PR_NUMBER,
-                github_get=self._github_get)
-        self.assertEqual(next_res['step'], 'READY_FOR_INTEGRATION')
+                github_get=self._github_get,
+                run_task_complete_call=lambda *_a, **_kw: 0)
+        self.assertEqual(next_res['step'], 'RUN_TASK_COMPLETE')
         self.assertEqual(len(self.posts), 1)
 
     def test_merge_gate_refuses_unposted_codex_pass_and_accepts_posted_one(self):
