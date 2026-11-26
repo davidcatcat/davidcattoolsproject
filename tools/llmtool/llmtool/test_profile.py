@@ -39,7 +39,7 @@ class TestProfile:
 
         Raises :class:`TestProfileError` when the entry list is empty, when an
         entry is not a two-item pair whose first item is a compiled pattern,
-        or when a kind is not ``unittest`` or ``script``.
+        or when a kind is not exactly the string ``unittest`` or ``script``.
         """
         validated = []
         for entry in entries:
@@ -48,7 +48,9 @@ class TestProfile:
             pattern, kind = entry
             if not isinstance(pattern, re.Pattern):
                 raise TestProfileError()
-            if kind not in _RUNNER_KINDS:
+            # A type check first: plain membership relies on __eq__, so an
+            # object with a permissive __eq__ could otherwise be accepted.
+            if not isinstance(kind, str) or kind not in _RUNNER_KINDS:
                 raise TestProfileError()
             validated.append((pattern, kind))
         if not validated:
