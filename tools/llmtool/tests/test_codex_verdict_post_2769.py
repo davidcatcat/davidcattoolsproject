@@ -186,6 +186,53 @@ class CompletedCodexPostTests(unittest.TestCase):
             'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
             'outcome': 'REVIEW_PASS', 'findings_count': 0}])
 
+    def test_posts_later_version_beside_an_older_posted_version(self):
+        claim = codex_claim('PASS', version=2)
+        store = self._store(rec(claim))
+
+        result = self._advance(
+            store, comments=[posted(100, codex_text('PASS', 1))])
+
+        self.assertEqual(result['step'], 'RECORD_REVIEW_RESULT')
+        self.assertEqual(result['result']['comment_id'], 321)
+        self.assertEqual(len(store.events), 1)
+        _, event = store.events[0]
+        self.assertEqual(event['event_id'],
+                         event_id_for(store.record, claim, 'REVIEW_PASS', 321))
+
+    def test_already_posted_later_version_is_reused_beside_older_post(self):
+        claim = codex_claim('PASS', version=2)
+        store = self._store(rec(claim))
+        comments = [posted(100, codex_text('PASS', 1)),
+                    posted(777, claim['review_result']['review_text'])]
+
+        result = self._advance(store, comments=comments)
+
+        self.assertEqual(result['step'], 'RECORD_REVIEW_RESULT')
+        self.assertEqual(result['result']['comment_id'], 777)
+        _, event = store.events[0]
+        self.assertEqual(event['event_id'],
+                         event_id_for(store.record, claim, 'REVIEW_PASS', 777))
+
+    def test_recorded_later_version_is_recognised_beside_older_post(self):
+        claim = codex_claim('PASS', version=2)
+        record = rec(claim)
+        event_id = event_id_for(record, claim, 'REVIEW_PASS', 321)
+        record['completion_events'] = [{
+            'event_id': event_id, 'source': 'REVIEWER', 'source_sha': HEAD,
+            'review_kind': 'formal'}]
+        comments = [posted(100, codex_text('PASS', 1)),
+                    posted(321, claim['review_result']['review_text'])]
+
+        with patch.object(review_dispatch, '_resolve_github_login',
+                          return_value=LOGIN):
+            outcomes = task_advance._review_outcomes(
+                record, [claim], self._github(comments))
+
+        self.assertEqual(outcomes, [{
+            'source': 'REVIEWER', 'source_sha': HEAD, 'version': 2,
+            'outcome': 'REVIEW_PASS', 'findings_count': 0}])
+
 
 class MergeCodexPassPostTests(unittest.TestCase):
     def _github(self, comments):
@@ -284,6 +331,33 @@ class MergeCodexPassPostTests(unittest.TestCase):
         text = claim['review_result']['review_text']
         result, calls = self._merge(
             [posted(501, text)], resolved=LLMToolError('unresolved'))
+
+        self.assertEqual(result['step'], 'MERGE_REFUSED')
+        self.assertEqual(result['codes'], ['MERGE_REVIEW_VERDICT_NOT_POSTED'])
+        self.assertEqual(calls, [])
+
+    def test_older_posted_version_does_not_block_the_current_pass(self):
+        claim = codex_claim('PASS', version=2)
+        text = claim['review_result']['review_text']
+        result, calls = self._merge(
+            [posted(500, codex_text('PASS', 1)), posted(501, text)])
+
+        self.assertEqual(result['step'], 'MERGED')
+        self.assertEqual(sum(call[:2] == ['pr', 'merge'] for call in calls), 1)
+
+    def test_only_the_older_posted_version_is_refused(self):
+        result, calls = self._merge([posted(500, codex_text('PASS', 1))])
+
+        self.assertEqual(result['step'], 'MERGE_REFUSED')
+        self.assertEqual(result['codes'], ['MERGE_REVIEW_VERDICT_NOT_POSTED'])
+        self.assertEqual(calls, [])
+
+    def test_current_pass_by_another_login_is_refused_beside_older_post(self):
+        claim = codex_claim('PASS', version=2)
+        text = claim['review_result']['review_text']
+        result, calls = self._merge(
+            [posted(500, codex_text('PASS', 1)),
+             posted(501, text, login='other-user')])
 
         self.assertEqual(result['step'], 'MERGE_REFUSED')
         self.assertEqual(result['codes'], ['MERGE_REVIEW_VERDICT_NOT_POSTED'])

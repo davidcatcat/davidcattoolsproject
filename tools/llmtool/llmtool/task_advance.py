@@ -1798,6 +1798,50 @@ def _completed_codex_pass_claim(record, number, head, version=None):
     return max(found, key=lambda item: item['version'], default=None)
 
 
+def _verdict_text_version(text):
+    """Return the one verdict header version text names, or None when doubtful.
+
+    Only a canonical verdict status line counts. Zero such lines, several
+    different versions or a malformed value are not a version proof, so the
+    caller keeps such a comment and fails closed.
+    """
+    if type(text) is not str:
+        return None
+    versions = set()
+    for line in text.splitlines():
+        match = review_result._VERDICT_VERSION_HEAD.fullmatch(line.strip())
+        if match is not None:
+            versions.add(int(match.group(2)))
+    return versions.pop() if len(versions) == 1 else None
+
+
+def _claim_version_comments(comments, claim):
+    """Keep only posted copies that may belong to claim's verdict version (#2769).
+
+    A later verdict on the same Task, run, contract and head carries the same
+    binding line as an older one. The older copy is a separate result, not a
+    conflict for the newer claim, but a body whose version is missing or
+    ambiguous stays in the list so doubt still refuses. When the claim's own
+    stored text does not prove the claim version, nothing is filtered.
+    """
+    if type(comments) is not list:
+        return comments
+    result = claim.get('review_result') if type(claim) is dict else None
+    text = result.get('review_text') if type(result) is dict else None
+    version = claim.get('version') if type(claim) is dict else None
+    if (type(version) is not int or isinstance(version, bool) or
+            _verdict_text_version(text) != version):
+        return comments
+    kept = []
+    for comment in comments:
+        body = comment.get('body') if type(comment) is dict else None
+        found = _verdict_text_version(body)
+        if found is not None and found != version:
+            continue
+        kept.append(comment)
+    return kept
+
+
 def _review_event_id(task, claim, outcome, comment_id):
     """Hash a REVIEWER event identity, including the real posted comment id."""
     identity = {'task': task.get('task_id'), 'run': task.get('run_id'),
@@ -1832,6 +1876,7 @@ def _verified_posted_verdict_id(task, claim, github_get):
     comments, code = _issue_comments(number, github_get)
     if code is not None or type(comments) is not list:
         return None
+    comments = _claim_version_comments(comments, claim)
     match, conflict, duplicate = review_dispatch._find_posted_verdict(
         comments, login, text, binding_line)
     if conflict or duplicate or match is None:
@@ -1852,7 +1897,7 @@ def _ensure_completed_codex_posted(*, store, task, task_id, claim, root, github_
         comments, code = _issue_comments(pr_number, github_get)
         if code is not None or type(comments) is not list:
             raise review_dispatch._PostError('VERDICT_POST_LIST_FAILED')
-        return comments
+        return _claim_version_comments(comments, claim)
 
     def allowed():
         try:
