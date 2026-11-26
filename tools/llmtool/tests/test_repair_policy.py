@@ -23,6 +23,9 @@ OWNER = dict(GOOD, repair_max=5, test_fail_max=5, review_fail_max=6, parent_debu
 LIMIT_TABLE_2281 = {'spec_preflight_large_file_lines': 2000, 'merge_train_members_max': 6,
                     'merge_train_files_per_pr_max': 100, 'revert_scope_prs_max': 5,
                     'd6_writer_lease_hours': 24}
+# #289 (Owner 2026-11-26): the repository policy records the formal Reviewer
+# order: codex-reviewer first, then claude-reviewer.
+FORMAL_REVIEWER_ORDER = ['codex-reviewer', 'claude-reviewer']
 
 
 class PolicyFileTests(unittest.TestCase):
@@ -36,7 +39,9 @@ class PolicyFileTests(unittest.TestCase):
     def test_repository_policy_has_the_owner_limits(self):
         self.assertEqual(rp.load_policy(),
                          dict(OWNER, timeout_continuation_max=1,
-                              route_failure_pause_after=3, **LIMIT_TABLE_2281))
+                              route_failure_pause_after=3,
+                              formal_reviewer_order=FORMAL_REVIEWER_ORDER,
+                              **LIMIT_TABLE_2281))
         self.assertEqual(rp.policy_path().name, 'policy.json')
 
     def test_repair_attempts_max_is_read_from_the_policy(self):
