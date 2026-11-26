@@ -91,28 +91,9 @@ NO_PROMPT_MARKER = "send a prompt to start"
 CLI_TIMEOUT = 30
 OUTPUT_LIMIT = 4 * 1024 * 1024
 PROMPT_LIMIT = 64 * 1024
-# #1019 row 4, #2790: a Claude Reviewer session starts with Read, Glob, Grep,
-# and Bash only, with Bash allowed only for read-only git inspection
-# subcommands (diff, show, log, status, rev-parse) and no-prompt permissions so
-# any other command is refused without waiting for approval; llmtool relays the
-# returned verdict. Edit, Write, NotebookEdit and Skill remain unavailable
-# (#1502 WP-H E7). This is an accident guard, not a security boundary.
+# #1019 row 4: a Claude Reviewer session has no file-editing tools, and
+# #1502 WP-H E7: Skill is also denied so project skills cannot steer it.
 REVIEWER_DISALLOWED_TOOLS_ARG = "--disallowedTools=Edit,Write,NotebookEdit,Skill"
-REVIEWER_TOOLS_ARG = "--tools=Read,Glob,Grep,Bash"
-REVIEWER_ALLOWED_TOOLS_ARG = (
-    "--allowedTools=Read,Glob,Grep,"
-    "Bash(git diff:*),Bash(git show:*),Bash(git log:*),"
-    "Bash(git status:*),Bash(git rev-parse:*)"
-)
-REVIEWER_PERMISSION_MODE_ARG = "--permission-mode=default"
-REVIEWER_PERMISSION_PROMPTS_ARG = "--permission-prompts=none"
-REVIEWER_TOOL_ARGS = (
-    REVIEWER_TOOLS_ARG,
-    REVIEWER_ALLOWED_TOOLS_ARG,
-    REVIEWER_PERMISSION_MODE_ARG,
-    REVIEWER_PERMISSION_PROMPTS_ARG,
-    REVIEWER_DISALLOWED_TOOLS_ARG,
-)
 # #1502 WP-H E7 prerequisite 3: every other launched role (every Claude
 # Developer name) is denied Skill too, so project skills cannot steer it either.
 SKILL_DISALLOWED_TOOLS_ARG = "--disallowedTools=Skill"
@@ -507,7 +488,7 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
         "launched_at": None, "receipt_at": None, "status": None, "state": None,
         "first_action": None, "stop": {"attempted": False}, "warnings": [],
     }
-    tool_limit = (list(REVIEWER_TOOL_ARGS) if role == "claude-reviewer"
+    tool_limit = ([REVIEWER_DISALLOWED_TOOLS_ARG] if role == "claude-reviewer"
                   else [SKILL_DISALLOWED_TOOLS_ARG])
     model_args = ["--model", launch_model] if launch_model is not None else []
     argv = ([claude, "--bg"] + session_args + model_args + tool_limit +
