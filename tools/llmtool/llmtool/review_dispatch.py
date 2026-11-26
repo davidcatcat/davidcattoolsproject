@@ -2340,19 +2340,24 @@ def dispatch_arbiter(*, store, task_id, executor_task, pr_number, finding_id,
         home = env.get('HOME') or os.path.expanduser('~')
         env = github_identity.ai_github_env(env, home)
 
+        codex_usage = {}
         if selected == 'codex-reviewer':
-            run_codex = codex_runner or _dispatch_codex
-
             def ruling_parser(raw, *, task_id, run_id, contract_digest, head, version=1):
                 return dispute_arbiter.parse_codex_ruling(
                     raw, task_id=task_id, run_id=run_id,
                     contract_digest=contract_digest, head=head,
                     finding_id=finding_id, pr=pr_number, review_version=review_version)
 
-            codex_result = run_codex(
-                reviewer_root=reg.root, prompt=prompt, task=task,
-                head=head, version=version, model=codex_model, effort=codex_effort,
-                config_dir=config_dir, parser=ruling_parser)
+            if codex_runner is None:
+                codex_result = _dispatch_codex(
+                    reviewer_root=reg.root, prompt=prompt, task=task,
+                    head=head, version=version, model=codex_model, effort=codex_effort,
+                    config_dir=config_dir, parser=ruling_parser, usage_out=codex_usage)
+            else:
+                codex_result = codex_runner(
+                    reviewer_root=reg.root, prompt=prompt, task=task,
+                    head=head, version=version, model=codex_model, effort=codex_effort,
+                    config_dir=config_dir, parser=ruling_parser)
             if type(codex_result) is not dict:
                 _refuse('REVIEW_NOT_POSTED')
             session_id = codex_result.get('thread_id')
@@ -2434,6 +2439,12 @@ def dispatch_arbiter(*, store, task_id, executor_task, pr_number, finding_id,
                 fresh_claims[claim_idx], state='COMPLETED',
                 native_session_id=session_id, updated_at=done_at,
                 review_result=review_result)
+            if 'usage' in codex_usage:
+                next_claim['usage'] = codex_usage['usage']
+            elif 'usage_unknown' in codex_usage:
+                next_claim['usage_unknown'] = codex_usage['usage_unknown']
+            else:
+                next_claim['usage_unknown'] = {'reason': 'STREAM_USAGE_ABSENT'}
             hist_event = 'ARBITER_WITHHELD' if withheld else 'ARBITER_COMPLETED'
             refs = {'reviewer_task': reviewer_task, 'version': version,
                     'output_sha256': output_sha256}

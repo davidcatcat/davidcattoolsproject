@@ -509,8 +509,11 @@ def collect_claude_ruling(store, task, entry, claim, *, run=subprocess.run,
     if claim_idx is None or entry_idx is None:
         return 'DISPUTE_RULING_CLAIM_INVALID'
 
+    usage_patch = review_transcript.claim_usage(claim, config_dir=config_dir)
+    if usage_patch is None:
+        usage_patch = {'usage_unknown': {'reason': 'USAGE_ABSENT'}}
     next_claim = dict(claims[claim_idx], state='COMPLETED', updated_at=now,
-                      review_result=review_result)
+                      review_result=review_result, **usage_patch)
     updated_claims = list(claims)
     updated_claims[claim_idx] = next_claim
     updated_entry = dict(disputes[entry_idx])

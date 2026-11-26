@@ -154,7 +154,11 @@ def transcript_usage(session_id, config_dir, reviewer_task):
 
 def claim_usage(claim, *, config_dir=None):
     """Return {'usage': ...} or {'usage_unknown': {'reason': ...}} for a Claude claim, else None."""
-    if type(claim) is not dict or 'purpose' in claim or claim.get('account_mode') == 'CODEX_CLI':
+    if type(claim) is not dict or claim.get('account_mode') == 'CODEX_CLI':
+        return None
+    if 'purpose' in claim and (
+            claim.get('purpose') != 'dispute_ruling' or
+            claim.get('reviewer') != 'claude-reviewer'):
         return None
     session, reviewer = claim.get('native_session_id'), claim.get('reviewer_task')
     if (type(session) is not str or not _UUID.fullmatch(session) or
