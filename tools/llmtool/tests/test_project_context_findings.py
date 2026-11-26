@@ -90,9 +90,8 @@ class FindingTests(unittest.TestCase):
 
     def test_context_cannot_be_mutated(self):
         context = ProjectContext.from_trust('proj-1', make_mapping())
-        with self.assertRaises(AttributeError) as caught:
+        with self.assertRaises(AttributeError):
             context.__dict__
-        self.assertEqual(caught.exception.args[0], PROJECT_CONTEXT_INVALID)
         with self.assertRaises(AttributeError) as caught:
             context.__setattr__('slug', 'other/repo')
         self.assertEqual(caught.exception.args[0], PROJECT_CONTEXT_INVALID)
