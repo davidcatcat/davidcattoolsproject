@@ -103,7 +103,7 @@ class ReviewDispatchVerdictPostTests(unittest.TestCase):
             'pm_provider_type': 'active-pm-runtime',
             'pm_model': None,
             'pm_route_binding': {'type': 'active-pm-runtime', 'model': None, 'base_url': None},
-            'backend_session_semantics': 'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL',
+            'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
             'native_session_id': None,
             'state': 'PM_RESPONDED',
             'created_at': stamp,
