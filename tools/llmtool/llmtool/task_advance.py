@@ -1748,6 +1748,204 @@ def _caller_posts_verdict(result):
             verdict_post.get('state') in _CALLER_VERDICT_POST_STATES)
 
 
+# #2769: a COMPLETED Codex verdict is not a recorded result until its exact text
+# is posted, and a merge PASS must be proven by that posted comment.
+MERGE_REVIEW_VERDICT_NOT_POSTED = 'MERGE_REVIEW_VERDICT_NOT_POSTED'
+
+
+def _codex_verdict_marker(text):
+    """Return the Codex verdict marker of stored review text, or None."""
+    if type(text) is not str:
+        return None
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return None
+    return task_completion._VERDICT_MARKER.fullmatch(lines[0])
+
+
+def _completed_codex_claim(claim):
+    """True for a COMPLETED formal claim holding Codex verdict text."""
+    if (type(claim) is not dict or claim.get('state') != 'COMPLETED' or
+            review_result.review_kind(claim) != 'formal'):
+        return False
+    result = claim.get('review_result')
+    if type(result) is not dict:
+        return False
+    marker = _codex_verdict_marker(result.get('review_text'))
+    return marker is not None and marker.group(1) == 'Codex'
+
+
+def _completed_codex_pass_claim(record, number, head, version=None):
+    """Return the newest COMPLETED Codex PASS claim for one PR head.
+
+    With a version, only that claim is considered. With None, the highest
+    version at the head is returned.
+    """
+    found = []
+    for claim in _claims(record):
+        if (type(claim) is not dict or claim.get('pr') != number or
+                claim.get('head_sha') != head or
+                review_result.review_kind(claim) != 'formal' or
+                type(claim.get('version')) is not int or
+                (version is not None and claim.get('version') != version)):
+            continue
+        result = claim.get('review_result')
+        if (type(result) is not dict or result.get('verdict') != 'PASS'):
+            continue
+        marker = _codex_verdict_marker(result.get('review_text'))
+        if marker is not None and marker.group(1) == 'Codex' and marker.group(2) == 'PASS':
+            found.append(claim)
+    return max(found, key=lambda item: item['version'], default=None)
+
+
+def _verdict_text_version(text):
+    """Return the one verdict header version text names, or None when doubtful.
+
+    Only a canonical verdict status line counts. Zero such lines, several
+    different versions or a malformed value are not a version proof, so the
+    caller keeps such a comment and fails closed.
+    """
+    if type(text) is not str:
+        return None
+    versions = set()
+    for line in text.splitlines():
+        match = review_result._VERDICT_VERSION_HEAD.fullmatch(line.strip())
+        if match is not None:
+            versions.add(int(match.group(2)))
+    return versions.pop() if len(versions) == 1 else None
+
+
+def _claim_version_comments(comments, claim):
+    """Keep only posted copies that may belong to claim's verdict version (#2769).
+
+    A later verdict on the same Task, run, contract and head carries the same
+    binding line as an older one. The older copy is a separate result, not a
+    conflict for the newer claim, but a body whose version is missing or
+    ambiguous stays in the list so doubt still refuses. When the claim's own
+    stored text does not prove the claim version, nothing is filtered.
+    """
+    if type(comments) is not list:
+        return comments
+    result = claim.get('review_result') if type(claim) is dict else None
+    text = result.get('review_text') if type(result) is dict else None
+    version = claim.get('version') if type(claim) is dict else None
+    if (type(version) is not int or isinstance(version, bool) or
+            _verdict_text_version(text) != version):
+        return comments
+    kept = []
+    for comment in comments:
+        body = comment.get('body') if type(comment) is dict else None
+        found = _verdict_text_version(body)
+        if found is not None and found != version:
+            continue
+        kept.append(comment)
+    return kept
+
+
+def _review_event_id(task, claim, outcome, comment_id):
+    """Hash a REVIEWER event identity, including the real posted comment id."""
+    identity = {'task': task.get('task_id'), 'run': task.get('run_id'),
+                'head': claim.get('head_sha'), 'version': claim.get('version'),
+                'outcome': outcome, 'comment_id': comment_id}
+    return hashlib.sha256(json.dumps(
+        identity, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()[:32]
+
+
+def _verified_posted_verdict_id(task, claim, github_get):
+    """Return the exact posted Codex verdict comment id, or None.
+
+    The comment must carry the stored text byte for byte, its binding line, and
+    be authored by the verified posting login. An unreadable comment list, a
+    conflicting or duplicate copy, or an unresolved login is not a posted
+    verdict, so every caller fails closed.
+    """
+    if type(task) is not dict or type(claim) is not dict:
+        return None
+    result = claim.get('review_result')
+    text = result.get('review_text') if type(result) is dict else None
+    number = claim.get('pr')
+    if (type(text) is not str or not text or type(number) is not int or
+            not 1 <= number <= 9999999):
+        return None
+    try:
+        login = review_dispatch._resolve_github_login()
+        binding_line = review_dispatch._verdict_binding_line(
+            task, task.get('task_id'), claim, text)
+    except Exception:
+        return None
+    comments, code = _issue_comments(number, github_get)
+    if code is not None or type(comments) is not list:
+        return None
+    comments = _claim_version_comments(comments, claim)
+    match, conflict, duplicate = review_dispatch._find_posted_verdict(
+        comments, login, text, binding_line)
+    if conflict or duplicate or match is None:
+        return None
+    comment_id = review_dispatch._comment_id(match)
+    return (comment_id if type(comment_id) is int and
+            not isinstance(comment_id, bool) and comment_id > 0 else None)
+
+
+def _ensure_completed_codex_posted(*, store, task, task_id, claim, root, github_get):
+    """Post a COMPLETED Codex verdict once; return its positive comment id."""
+    result = claim.get('review_result')
+    text = result.get('review_text') if type(result) is dict else None
+    if type(text) is not str or not text:
+        return None
+
+    def lister(pr_number):
+        comments, code = _issue_comments(pr_number, github_get)
+        if code is not None or type(comments) is not list:
+            raise review_dispatch._PostError('VERDICT_POST_LIST_FAILED')
+        return _claim_version_comments(comments, claim)
+
+    def allowed():
+        try:
+            return review_dispatch._policy(task, 'codex-reviewer').allowed
+        except Exception:
+            return False
+
+    output = review_dispatch._ensure_verdict_posted(
+        store=store, task=task, task_id=task_id, claim=claim, text=text,
+        login_resolver=review_dispatch._resolve_github_login, root=root,
+        lister=lister, poster=review_dispatch._create_issue_comment,
+        clock=time.time, allowed=allowed)
+    if type(output) is not dict or output.get('state') not in (
+            'POSTED', 'ALREADY_POSTED'):
+        return None
+    comment_id = output.get('comment_id')
+    return (comment_id if type(comment_id) is int and
+            not isinstance(comment_id, bool) and comment_id > 0 else None)
+
+
+def _record_completed_codex_result(*, store, task, claim, comment_id):
+    """Record one COMPLETED Codex event bound to its real posted comment id."""
+    latest, _legacy_event_id = review_result._completed_claim_result(
+        task, claim, version=claim.get('version'))
+    outcome = latest[2]
+    event_id = _review_event_id(task, claim, outcome, comment_id)
+    payload = {'outcome': outcome, 'head': claim.get('head_sha'),
+               'version': claim.get('version'), 'comment_id': comment_id,
+               'findings_count': latest[3]}
+    payload_sha256 = hashlib.sha256(json.dumps(
+        payload, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
+    saved = store.record_completion_event(
+        task.get('task_id'), event_id=event_id, run_id=task.get('run_id'),
+        session_id='review-' + event_id, source='REVIEWER',
+        source_sha=claim.get('head_sha'), sequence=0,
+        payload_sha256=payload_sha256, review_kind='formal')
+    return {'state': outcome, 'event_id': event_id,
+            'created': saved['created'], 'comment_id': comment_id,
+            'head': claim.get('head_sha'), 'version': claim.get('version')}
+
+
+def _head_record_claim(record, number, head):
+    """Return the newest non-ruling review claim for one PR head, or None."""
+    return next((claim for claim in reversed(_non_ruling_claims(record))
+                 if type(claim) is dict and claim.get('pr') == number and
+                 claim.get('head_sha') == head), None)
+
+
 def _merge_pass_claim(record, number, head, events):
     candidates = []
     for claim in _claims(record):
@@ -2371,7 +2569,19 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     else:
         review_version = _merge_pass_claim(record, number, head, events)
         if type(review_version) is not int:
+            if review_version == 'MERGE_REVIEW_NOT_PASS':
+                # A COMPLETED Codex PASS with no usable pass result is still not
+                # a mergeable PASS until its exact text is posted.
+                codex_pass = _completed_codex_pass_claim(record, number, head)
+                if (codex_pass is not None and
+                        _verified_posted_verdict_id(
+                            record, codex_pass, github_get) is None):
+                    return _merge_refusal(MERGE_REVIEW_VERDICT_NOT_POSTED)
             return _merge_refusal(review_version or 'MERGE_REVIEW_NOT_PASS')
+        codex_pass = _completed_codex_pass_claim(record, number, head, review_version)
+        if (codex_pass is not None and
+                _verified_posted_verdict_id(record, codex_pass, github_get) is None):
+            return _merge_refusal(MERGE_REVIEW_VERDICT_NOT_POSTED)
     security_code = _merge_security_claim(record, number, head, events, github_get=github_get)
     if security_code is not None:
         return _security_merge_refusal(security_code, number=number, head=head)
@@ -4082,7 +4292,18 @@ def _review_outcomes(record, claims, github_get):
                     task, claim, version=version)
             except Exception:
                 continue
-            if any(event.get('event_id') == event_id for event in events):
+            recognised = any(event.get('event_id') == event_id for event in events)
+            if not recognised and events:
+                # #2769: a result recorded after the verdict was posted uses the
+                # real comment id in its event identity. Only an exact posted
+                # copy under the verified login reproduces that identity.
+                comment_id = _verified_posted_verdict_id(task, claim, github_get)
+                if comment_id is not None:
+                    posted_event_id = _review_event_id(
+                        task, claim, latest[2], comment_id)
+                    recognised = any(event.get('event_id') == posted_event_id
+                                     for event in events)
+            if recognised:
                 outcomes.append({'source': 'REVIEWER', 'source_sha': head,
                                  'version': version, 'outcome': latest[2],
                                  'findings_count': latest[3]})
@@ -5058,6 +5279,34 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             if 'review_text' in result:
                 result = dict(result)
                 result.pop('review_text', None)
+    elif (step == 'RECORD_REVIEW_RESULT' and
+          _completed_codex_claim(_head_record_claim(record, number, d6['result_head']))):
+        # #2769 B1: post the stored Codex verdict before recording its result.
+        # Without a positive comment id nothing is recorded.
+        claim = _head_record_claim(record, number, d6['result_head'])
+        root = (d6.get('root') if type(d6) is dict and type(d6.get('root')) is str
+                else (cwd or os.getcwd()))
+        comment_id = None
+        try:
+            comment_id = _ensure_completed_codex_posted(
+                store=store, task=record, task_id=task_id, claim=claim,
+                root=root, github_get=get)
+        except Exception as exc:
+            codes.append(_refusal(exc, 'review_dispatch_code'))
+        if comment_id is None:
+            step = 'REVIEW_NOT_POSTED'
+            if 'REVIEW_VERDICT_NOT_POSTED' not in codes:
+                codes.append('REVIEW_VERDICT_NOT_POSTED')
+            result = {'reviewer_task': claim.get('reviewer_task'),
+                      'reviewer_session_id': claim.get('native_session_id'),
+                      'pr': claim.get('pr'), 'head_sha': claim.get('head_sha'),
+                      'version': claim.get('version')}
+        else:
+            try:
+                result = _record_completed_codex_result(
+                    store=store, task=record, claim=claim, comment_id=comment_id)
+            except Exception as exc:
+                codes.append(_refusal(exc, 'review_dispatch_code'))
     elif step == 'RECORD_REVIEW_RESULT':
         claim = next(c for c in reversed(_non_ruling_claims(record)) if type(c) is dict and
                      c.get('pr') == number and c.get('head_sha') == d6['result_head'])
