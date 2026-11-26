@@ -10,6 +10,7 @@ from unittest.mock import patch
 from llmtool import repair_policy as rp
 from llmtool import review_dispatch, task_advance
 from llmtool.errors import LLMToolError
+from test_task_advance import ClaimStore, PR, base_record, d6, green_linux_ci
 
 HEAD = 'a' * 40
 ORDER = ['codex-reviewer', 'claude-reviewer']
@@ -141,16 +142,69 @@ class AdvanceReviewerFallbackOrderTests(unittest.TestCase):
             self.assertEqual(task_advance._blocked_fallback_reviewer(task, HEAD),
                              'claude-reviewer')
 
-    def test_blocked_review_assumes_the_order_default_when_unproven(self):
+    def test_blocked_review_without_attempt_evidence_offers_no_fallback(self):
         task = dict(_task('agy', 'gemini-2.5-pro'),
                     review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD,
                                             'version': 1, 'state': 'DISPATCHED'}])
         with patch.object(rp, 'formal_reviewer_order', return_value=ORDER), \
                 patch.object(task_advance, '_review_claim_reviewer', return_value=None), \
-                patch.object(review_dispatch, '_select_reviewer',
-                             side_effect=lambda record, reviewer=None: reviewer):
-            self.assertEqual(task_advance._blocked_fallback_reviewer(task, HEAD),
-                             'claude-reviewer')
+                patch.object(review_dispatch, '_select_reviewer') as select:
+            self.assertIsNone(task_advance._blocked_fallback_reviewer(task, HEAD))
+            select.assert_not_called()
+
+    def test_route_fallback_without_attempt_evidence_offers_nothing(self):
+        task = _task('agy', 'gemini-2.5-pro')
+        with patch.object(rp, 'formal_reviewer_order', return_value=ORDER), \
+                patch.object(review_dispatch, '_select_reviewer') as select:
+            self.assertEqual(task_advance._reviewer_fallback(task, _refusal(), None),
+                             (None, 'REVIEWER_NOT_ALLOWED'))
+            select.assert_not_called()
+
+    def _advance(self, dispatch):
+        record = base_record(developer={
+            'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'agy',
+            'model': 'gemini-2.5-pro'})
+        with patch.object(rp, 'formal_reviewer_order', return_value=ORDER), \
+                patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+                patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+                patch.object(task_advance, '_review_outcomes', return_value=[]), \
+                patch.object(task_advance.active_pm_inbox, 'ack'), \
+                patch.object(review_dispatch, '_policy',
+                             return_value=SimpleNamespace(allowed=True,
+                                                          reason_code='ALLOWED')):
+            return task_advance.advance(
+                task_id=record['task_id'], store=ClaimStore(record), pr_number=17,
+                github_get=green_linux_ci, dispatch_review_call=dispatch)
+
+    def test_advance_passes_the_reviewer_it_selected(self):
+        seen = []
+
+        def dispatch(**kwargs):
+            seen.append(kwargs.get('reviewer'))
+            return {'state': 'DISPATCHED'}
+
+        out = self._advance(dispatch)
+        self.assertEqual(out['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(seen, ['codex-reviewer'])
+
+    def test_advance_fallback_never_retries_the_attempted_reviewer(self):
+        seen = []
+
+        def dispatch(**kwargs):
+            # Review F1: the route changes after the preselection. Without an
+            # explicit reviewer dispatch would pick claude-reviewer here; a
+            # fallback that excluded only the stale codex-reviewer would then
+            # retry claude-reviewer instead of excluding the actual attempt.
+            chosen = kwargs.get('reviewer') or 'claude-reviewer'
+            seen.append(chosen)
+            if len(seen) == 1:
+                raise _refusal()
+            return {'state': 'DISPATCHED'}
+
+        out = self._advance(dispatch)
+        self.assertEqual(out['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(seen, ['codex-reviewer', 'claude-reviewer'])
+        self.assertIn('REVIEWER_FALLBACK', out['codes'])
 
     def test_absent_order_keeps_the_legacy_alternate(self):
         task = _task('agy', 'gemini-2.5-pro')

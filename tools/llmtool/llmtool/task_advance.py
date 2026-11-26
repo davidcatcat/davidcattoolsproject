@@ -4182,9 +4182,10 @@ def _reviewer_fallback(record, exc, attempted=None):
 
     None when the refusal is not a route-unavailable code. The alternate is the
     other cross-family key from formal_reviewer_order, never the Reviewer that
-    was actually attempted (even when its route has since become PAUSED). With
-    no order the legacy alternate behaviour is unchanged. dispatch_review checks
-    the alternate again.
+    was actually attempted (even when its route has since become PAUSED). When
+    the order is present and the attempted Reviewer cannot be established, no
+    fallback is offered. With no order the legacy alternate behaviour is
+    unchanged. dispatch_review checks the alternate again.
     """
     code = getattr(exc, 'review_dispatch_code', None)
     if code not in _REVIEWER_ROUTE_UNAVAILABLE:
@@ -4192,18 +4193,19 @@ def _reviewer_fallback(record, exc, attempted=None):
     family = task_completion._reviewer_author_family(record.get('developer'))
     if family is None:
         return None, code
-    if attempted is None:
-        try:
-            attempted = review_dispatch._select_reviewer(record)
-        except Exception:
-            attempted = None
     order = _reviewer_order()
     if order is not None and attempted is None:
-        # Without a provable attempt, the implicit default is the first
-        # cross-family key in the order, so it is never offered as the fallback.
-        attempted = next((key for key in order
-                          if review_dispatch._reviewer_family(key) != family), None)
+        # #289 review F1: the Reviewer dispatch actually selects is passed in
+        # explicitly. Without that proof no key is safe to offer, because a
+        # guess could be the Reviewer that was actually attempted.
+        return None, code
     if order is None:
+        # The absent-key legacy path keeps its old alternate selection.
+        if attempted is None:
+            try:
+                attempted = review_dispatch._select_reviewer(record)
+            except Exception:
+                attempted = None
         alternate = _legacy_reviewer_alternate(family)
         candidates = (alternate, _legacy_reviewer_default(family))
         if attempted is None:
@@ -4224,10 +4226,10 @@ def _reviewer_fallback(record, exc, attempted=None):
 def _blocked_fallback_reviewer(record, head):
     """#1831 P2/#289: the other eligible Reviewer while the head has one claim.
 
-    The attempted Reviewer is proved from its Reviewer D6 registration when
-    possible; otherwise it is the first cross-family key in the order (the
-    implicit default at dispatch). The alternate is the other cross-family
-    ALLOWED key from the order, never the attempted Reviewer.
+    The attempted Reviewer is proved from its Reviewer D6 registration. If that
+    record is unavailable the attempted Reviewer is not provable, so no fallback
+    is offered. The alternate is the other cross-family ALLOWED key from the
+    order, never the attempted Reviewer.
     """
     claims = [item for item in _non_ruling_claims(record)
               if type(item) is dict and item.get('head_sha') == head]
@@ -4245,8 +4247,10 @@ def _blocked_fallback_reviewer(record, head):
                       _legacy_reviewer_default(family))
     else:
         if attempted is None:
-            attempted = next((key for key in order
-                              if review_dispatch._reviewer_family(key) != family), None)
+            # #289 review F2: the Reviewer D6 registration is the only proof of
+            # the attempted key. Without it no key is safe to offer, because a
+            # guess could be the Reviewer that was actually attempted.
+            return None
         candidates = order
     for alternate in candidates:
         if alternate == attempted:
@@ -5320,20 +5324,25 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             if redispatch_reason is not None:
                 codes.extend(('REVIEW_REDISPATCHED', redispatch_reason))
             rerun_kwargs = ({} if rerun_version is None else {'refusal_rerun': True})
-            # #289: remember the implicit Reviewer before dispatch, so a later
-            # route pause cannot make the fallback offer the attempted one again.
+            # #289: select the implicit Reviewer once and pass it explicitly, so
+            # the Reviewer dispatch actually attempts is the one the fallback
+            # excludes (review F1: a second selection could pick another key).
             attempted_reviewer = None
+            reviewer_kwargs = ({} if blocked_reviewer is None else
+                               {'reviewer': blocked_reviewer})
             if blocked_reviewer is None:
                 try:
                     attempted_reviewer = review_dispatch._select_reviewer(record)
                 except Exception:
                     attempted_reviewer = None
+                else:
+                    if attempted_reviewer is not None:
+                        reviewer_kwargs = {'reviewer': attempted_reviewer}
             try:
                 try:
                     result = invoke(store=store, task_id=task_id, executor_task=executor_task,
                                     pr_number=number, version=version,
-                                    **({} if blocked_reviewer is None else
-                                       {'reviewer': blocked_reviewer}),
+                                    **reviewer_kwargs,
                                     **rerun_kwargs)
                 except Exception as exc:
                     # A P2 redispatch already uses the alternate: no P1 fallback on top.
