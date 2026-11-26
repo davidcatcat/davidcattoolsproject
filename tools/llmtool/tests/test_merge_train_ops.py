@@ -350,7 +350,7 @@ class MergeTrainOpsTest(unittest.TestCase):
 
     # #2769: the final member recheck requires a verified posted Codex verdict.
 
-    def _codex_claim(self, pr, head, version):
+    def _codex_claim(self, record, pr, head, version):
         return {'pr': pr, 'head_sha': head, 'version': version,
                 'review_result': {'verdict': 'PASS', 'review_text': VERDICT_TEXT}}
 
