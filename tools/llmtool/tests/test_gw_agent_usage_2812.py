@@ -134,7 +134,7 @@ class GwAgentUsage2812Tests(unittest.TestCase):
             selection_source='PM', executor_task='executor-d6',
             read_path=['src.py'], write_path=['src.py'], timeout=None)
 
-    def _run(self, result):
+    def _run(self, result, *, requested_model='qwen-authorized'):
         store = _Store(_task())
         self.addCleanup(store.cleanup)
         route = _route_for(result)
@@ -164,10 +164,10 @@ class GwAgentUsage2812Tests(unittest.TestCase):
             patch.object(task_submission_cli, 'load_route_config',
                          return_value={'routes': {'gw-agent': _route_config()}}),
             patch.object(task_submission_cli, '_gw_agent_endpoint', return_value=({
-                'type': 'openai-compatible', 'model': 'qwen-authorized',
+                'type': 'openai-compatible', 'model': requested_model,
                 'base_url': 'http://10.20.30.40:8080'}, {'max_tokens': 49152})),
             patch.object(task_submission_cli, '_gw_agent_developer_profile',
-                         return_value=('qwen-authorized', 'low')),
+                         return_value=(requested_model, 'low')),
             patch.object(task_submission_cli, 'GwAgentRoute', return_value=route),
             patch.object(task_submission_cli, 'for_platform', return_value=object()),
             patch.object(task_submission_cli, 'installed_gateway_stale',
@@ -202,6 +202,17 @@ class GwAgentUsage2812Tests(unittest.TestCase):
         task_store._validate_usage(developer['usage'])
         self.assertEqual(developer['execution']['status'], 'UNKNOWN')
         self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
+
+    def test_budget_exceeded_usage_and_model_name_the_served_model(self):
+        status, developer = self._run(
+            _result('BUDGET_EXCEEDED', 'TURN_BUDGET_EXCEEDED',
+                    {'status': 'REPORTED', 'input_tokens': 1200, 'output_tokens': 340}),
+            requested_model='gw')
+        self.assertEqual(status, 1)
+        self.assertEqual(developer['model'], 'qwen-authorized')
+        self.assertEqual(developer['model_provenance']['provider_model'],
+                         'qwen-authorized')
+        self.assertEqual(developer['usage']['served_model'], 'qwen-authorized')
 
     def test_budget_exceeded_without_usage_keeps_usage_unknown(self):
         status, developer = self._run(_result(

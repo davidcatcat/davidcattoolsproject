@@ -8398,6 +8398,12 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         if usage is not None:
             # #2812: only the gateway's fully reported token pair is kept.
             failed['usage'] = dict(usage)
+            # The record names the served model exactly when the usage does, so
+            # the TaskStore sees one consistent model and usage provenance.
+            served_model = usage.get('served_model')
+            if type(served_model) is str and served_model:
+                failed['model'] = served_model
+                _record_provider_model(failed, served_model)
         if budget:
             # #2812: a budget result still names whether usage was reported;
             # no usage keeps the source UNKNOWN and invents no value.
