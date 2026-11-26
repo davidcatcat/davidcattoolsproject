@@ -221,9 +221,11 @@ def _select_reviewer(task, requested=None):
     """
     developer = task.get('developer') if type(task) is dict else None
     family = task_completion._reviewer_author_family(developer)
-    if family is None:
-        _refuse('REVIEWER_FAMILY_UNSUPPORTED')
     if requested is None:
+        # An explicit reviewer keeps its pre-#289 checks: only the default
+        # selection needs a known author family to choose a cross-family key.
+        if family is None:
+            _refuse('REVIEWER_FAMILY_UNSUPPORTED')
         order = repair_policy.formal_reviewer_order()
         if order is not None:
             cross_family = [key for key in order if _reviewer_family(key) != family]
