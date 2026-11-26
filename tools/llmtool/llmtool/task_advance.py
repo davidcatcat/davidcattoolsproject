@@ -1941,9 +1941,7 @@ def _record_completed_codex_result(*, store, task, claim, comment_id):
 
 def _head_record_claim(record, number, head):
     """Return the newest non-ruling review claim for one PR head, or None."""
-    return next((claim for claim in reversed(_non_ruling_claims(record))
-                 if type(claim) is dict and claim.get('pr') == number and
-                 claim.get('head_sha') == head), None)
+    return _head_review_claim(record, number, head)
 
 
 def _merge_pass_claim(record, number, head, events):
@@ -4027,6 +4025,30 @@ def _pre_review_action(record, d6, pr, related, result_head, docs_only=False,
     return 'DISPATCH_REVIEW'
 
 
+def _events_for_claim(events, claim, head, *, only_claim):
+    """Return REVIEWER events that can belong to one claim at head.
+
+    A versioned event belongs only to the claim with the same version. An event
+    stored without a version is legacy: it is used only when the head has one
+    claim, so an older event never stands in for a newer claim (#2782).
+    """
+    version = claim.get('version')
+    selected = []
+    for event in events:
+        if (type(event) is not dict or event.get('source') != 'REVIEWER' or
+                event.get('source_sha') != head):
+            continue
+        if 'version' not in event:
+            if only_claim:
+                selected.append(event)
+            continue
+        event_version = event.get('version')
+        if (type(event_version) is int and not isinstance(event_version, bool) and
+                event_version == version):
+            selected.append(event)
+    return selected
+
+
 def decide(record, d6, pr, related, docs_only=False, extra_modules=()):
     """Return the next action name using only supplied snapshots."""
     if type(record) is not dict:
@@ -4073,9 +4095,8 @@ def decide(record, d6, pr, related, docs_only=False, extra_modules=()):
         return 'REVIEW_REDISPATCH' if action == 'DISPATCH_REVIEW' else action
     if claim.get('state') in ('CLAIMED', 'UNKNOWN'):
         return 'REVIEW_OUTCOME_UNKNOWN'
-    events = [event for event in _events(related) if type(event) is dict and
-              event.get('source') == 'REVIEWER' and event.get('source_sha') == result_head and
-              event.get('version', claim.get('version')) == claim.get('version')]
+    events = _events_for_claim(_events(related), claim, result_head,
+                               only_claim=len(matching) == 1)
     if claim.get('state') in ('DISPATCHED', 'COMPLETED') and not events:
         return 'RECORD_REVIEW_RESULT'
     if events:
@@ -5421,8 +5442,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             except Exception as exc:
                 codes.append(_refusal(exc, 'review_dispatch_code'))
     elif step == 'RECORD_REVIEW_RESULT':
-        claim = next(c for c in reversed(_non_ruling_claims(record)) if type(c) is dict and
-                     c.get('pr') == number and c.get('head_sha') == d6['result_head'])
+        claim = _head_review_claim(record, number, d6['result_head'])
         invoke = record_review_result_call or review_result.record_review_result
         try:
             # First check for a posted comment without creating a
