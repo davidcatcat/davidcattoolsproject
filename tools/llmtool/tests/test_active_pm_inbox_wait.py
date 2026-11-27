@@ -500,6 +500,7 @@ class ActivePMInboxWaitTests(unittest.TestCase):
             'route': 'agy',
             'session_id': 'synthetic-session',
             'source_sha': 'a' * 40,
+            'direct_result_callback': {'state': 'PM_EVIDENCE_READY'},
         }
         handoff = {'packet': {'synthetic': True}}
         binding = active_pm_inbox._handoff_event(scanned, handoff)
