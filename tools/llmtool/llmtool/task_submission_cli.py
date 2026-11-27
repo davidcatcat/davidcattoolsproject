@@ -6900,6 +6900,14 @@ def _codex_developer_profile():
     return provider, effort
 
 
+_AGY_BLOCKED_REPLY = re.compile(r'\s*BLOCKED(?:$|[:.\s,])')
+
+
+def _is_agy_blocked_reply(summary):
+    """True only when AGY's final reply explicitly starts with BLOCKED."""
+    return type(summary) is str and _AGY_BLOCKED_REPLY.match(summary) is not None
+
+
 def _optional_agy_owner_ref(args):
     """Return the AGY --owner-ref, which may be None (#785 M18).
 
@@ -7188,6 +7196,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                 expected_developer=expected_developer)
             _print(_task_view(saved))
             return 1
+        summary = getattr(result, 'summary', None)
         developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
             artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
             error_code=None, execution=_with_provider_evidence({
@@ -7198,12 +7207,15 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None},
                 getattr(result, 'provider_evidence', None), 'agy'), usage=usage)
-        if not raw and not (getattr(result, 'summary', '') or '').strip():
+        if not raw and not (summary if type(summary) is str else '').strip():
             developer.update(state='BLOCKED', error_code='AGY_EMPTY_RESULT',
+                             artifact=None, artifact_sha256=None)
+        elif not changed_paths and not raw and _is_agy_blocked_reply(summary):
+            developer.update(state='BLOCKED', error_code='AGY_BLOCKED',
                              artifact=None, artifact_sha256=None)
         # #2503: the PM sees AGY's own reply (for example BLOCKED with the
         # missing read paths), whether or not the worktree changed.
-        _attach_developer_reply(developer, getattr(result, 'summary', None))
+        _attach_developer_reply(developer, summary)
         _attach_stderr_excerpt(developer, getattr(result, 'stderr_excerpt', None))
         if (type(result.session_id) is str and
                 AGY_CONVERSATION.fullmatch(result.session_id)):
