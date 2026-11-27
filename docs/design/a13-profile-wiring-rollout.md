@@ -28,35 +28,38 @@ Stage 0 — record (before any merge)
 1. Record the `main` HEAD (pre-sync baseline).
 2. Record the controller revision in use.
 3. Record the HEAD of every reviewed wiring PR, one row per slice in §3.
-4. Record the intended post-sync revisions: the `main` revision and
-   controller revision the live checkout must report once all listed
-   slices have merged.
+   The post-sync `main` revision is not predictable, so it is recorded
+   as it happens in Stage 2.
 
 Stage 1 — verify each slice on its recorded HEAD, dependency order
-5. Default parity: at the real entry points the default profile yields
+4. Default parity: at the real entry points the default profile yields
    exactly the check set from `default_profile()`.
-6. Non-default fixture use: the real entry points accept and honour a
-   non-default profile; no hard-coded names at the entry points.
-7. Fail-closed validation: an invalid profile name is rejected with
-   `CiProfileError` at construction, never silently coerced.
-8. EC2 evidence: the existing remote EC2 run reports the expected
+5. Non-default path use: the real test entry points accept and honour a
+   non-default profile; the test-profile consumers and the non-default
+   test-path fixture use it, with no hard-coded names.
+6. Refusal evidence: for missing, invalid, or ambiguous profile
+   configuration the real entry points refuse (fail-closed); an invalid
+   name is rejected with `CiProfileError` at construction, never
+   silently coerced or defaulted.
+7. EC2 evidence: the existing remote EC2 run reports the expected
    checks; record the output in the slice row in §3.
-9. Required CI: every check in the profile passes — Linux code check,
+8. Required CI: every check in the profile passes — Linux code check,
    docs check, gateway check, ai-loop check, macOS check.
-10. Independent review: signed off by a reviewer outside the slice's
+9. Independent review: signed off by a reviewer outside the slice's
     author set. Gates held: exact-head hosted docs check; formal review
     by codex-reviewer.
 
 Stage 2 — sync
-11. Merge one slice at a time in dependency order; each slice must be
+10. Merge one slice at a time in dependency order; each slice must be
     at its Stage 0 recorded HEAD (no rebase or re-recording). Before
     each merge, record the then-current `main` HEAD in that slice's
-    rollback target column in §3.
-12. After the last merge, confirm the live checkout uses the intended
-    revision: the live `main` revision and the controller revision must
-    equal the intended post-sync values from step 4. After a successful
-    rollout `main` is deliberately past the step 1 baseline, so compare
-    only against the step 4 values.
+    rollback target column in §3; after each merge, record the actual
+    new `main` HEAD.
+11. After the last merge, confirm the live checkout uses the intended
+    revision: the live `main` revision must equal the final recorded
+    post-merge `main` HEAD, and the controller must report the revision
+    from step 2. `main` is deliberately past the step 1 baseline, so
+    compare only against the recorded post-merge value.
 
 ## 2. Rollback
 
@@ -89,16 +92,16 @@ requirement.
 
 ## 3. Per-slice evidence checklist
 
-`head` = recorded slice HEAD; `verdict` = ok only when steps 5–10 all
+`head` = recorded slice HEAD; `verdict` = ok only when steps 4–9 all
 pass for that HEAD. Rollback target = the `main` HEAD recorded before
-that slice's merge (step 11) — always a recorded HEAD, never a slice
+that slice's merge (step 10) — always a recorded HEAD, never a slice
 name, never a hand-edited state.
 
 | slice | feature | head | verdict | tests (evidence) | rollback target |
 |-------|---------|------|---------|------------------|-----------------|
-| S1 | profile value + fail-closed validation (`ci_profile.py`) | pending | pending | construction and parity tests (pending) | `main` HEAD recorded before S1 merge (pending) |
-| S2 | real entry points wired to the profile | pending | pending | default parity + non-default fixture; EC2 evidence (pending) | `main` HEAD recorded before S2 merge (pending) |
-| S3 | required CI names and coverage | pending | pending | full CI run on the recorded HEAD (pending) | `main` HEAD recorded before S3 merge (pending) |
+| S1 | profile value + fail-closed validation (`ci_profile.py`) | pending | pending | construction and refusal (missing/invalid/ambiguous) tests (pending) | `main` HEAD before S1 merge (pending) |
+| S2 | real test entry points wired to the profile | pending | pending | default parity, non-default test-path fixture, EC2 evidence (pending) | `main` HEAD before S2 merge (pending) |
+| S3 | required CI names and coverage | pending | pending | full CI run on the recorded HEAD (pending) | `main` HEAD before S3 merge (pending) |
 
 The rollback target column is filled in during Stage 2; rows stay
 pending until every cell is recorded or checked.
