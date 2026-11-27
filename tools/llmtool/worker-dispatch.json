@@ -58,11 +58,11 @@
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-7181570990"
     },
     "codex-debug": {
-      "dispatch": "PAUSED",
+      "dispatch": "ALLOWED",
       "decided_by": "Owner",
-      "decided_at": "2026-11-25",
-      "reason": "Owner decision 2026-11-25 (#289 comment 7153323324): codex-debug is PAUSED; claude-debug remains available for AI Debug.",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-7153323324"
+      "decided_at": "2026-11-27",
+      "reason": "Owner decision 2026-11-27 (#289 comment 7218927310, relayed by PM): codex-debug is ALLOWED again for AI Debug; claude-debug remains the fallback route.",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-7218927310"
     },
     "claude-debug": {
       "dispatch": "ALLOWED",

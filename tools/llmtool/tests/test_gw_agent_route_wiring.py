@@ -1435,9 +1435,9 @@ class GwAgentShippedServedModelTests(unittest.TestCase):
 
 
 class RealPolicyReviewerFallbackTests(unittest.TestCase):
-    """#289 c7153323324 (Owner 2026-11-25) and c7181570990 (Owner 2026-11-26):
-    the live worker-dispatch.json allows claude-reviewer and codex-reviewer and
-    pauses codex-debug.
+    """#289 c7153323324 (Owner 2026-11-25), c7181570990 (Owner 2026-11-26) and
+    c7218927310 (Owner 2026-11-27): the live worker-dispatch.json allows
+    claude-reviewer, codex-reviewer and codex-debug.
 
     Decisions go through the real reader, parser and gate on the repository
     policy file; only the trusted repository config is pinned.

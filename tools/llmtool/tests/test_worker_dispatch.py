@@ -400,9 +400,10 @@ class WorkerDispatchTests(unittest.TestCase):
              'claude-developer': 'PAUSED',
              'opencode-developer': 'ALLOWED', 'agy': 'ALLOWED',
              'company-gw': 'PAUSED', 'gw-agent': 'ALLOWED',
-             # #289 c7181570990 (Owner 2026-11-26): codex-reviewer ALLOWED; codex-debug PAUSED.
+             # #289 c7181570990 (Owner 2026-11-26): codex-reviewer ALLOWED.
+             # #289 c7218927310 (Owner 2026-11-27): codex-debug ALLOWED.
              'claude-reviewer': 'ALLOWED', 'codex-reviewer': 'ALLOWED',
-             'codex-debug': 'PAUSED', 'claude-debug': 'ALLOWED'})
+             'codex-debug': 'ALLOWED', 'claude-debug': 'ALLOWED'})
         with self._real_policy():
             decisions = {key: worker_dispatch.evaluate(key) for key in policy['workers']}
         for key, decision in decisions.items():
@@ -415,8 +416,8 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(decisions['claude-reviewer'].reason_code, 'OWNER_POLICY_ALLOWED')
         self.assertTrue(decisions['codex-reviewer'].allowed)
         self.assertEqual(decisions['codex-reviewer'].reason_code, 'OWNER_POLICY_ALLOWED')
-        self.assertFalse(decisions['codex-debug'].allowed)
-        self.assertEqual(decisions['codex-debug'].reason_code, 'OWNER_PAUSED')
+        self.assertTrue(decisions['codex-debug'].allowed)
+        self.assertEqual(decisions['codex-debug'].reason_code, 'OWNER_POLICY_ALLOWED')
 
     # #289 (Owner decision relayed on c7153323324): claude-reviewer is ALLOWED.
     # #289 c7181570990 (Owner 2026-11-26): codex-reviewer resumed; codex-debug PAUSED.
