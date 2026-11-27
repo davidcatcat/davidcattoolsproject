@@ -26,6 +26,7 @@ from llmtool import main_incident as mi  # noqa: E402
 from llmtool import main_incident_cli as mic  # noqa: E402
 from llmtool import main_incident_store as store  # noqa: E402
 from llmtool import pm_caller  # noqa: E402
+from llmtool import task_completion  # noqa: E402
 
 A, B, C, D = 'a' * 40, 'b' * 40, 'c' * 40, 'd' * 40
 TEST_ID = 'tests.test_mod.Case.test_x'
@@ -101,7 +102,8 @@ class FakeGitHub:
             return {'workflow_runs': self.mac}
         for sha in self.commits:
             if path == mic.LINUX_RUNS.format(sha=sha):
-                return {'check_runs': self.linux.get(sha, [])}
+                runs = self.linux.get(sha, [])
+                return {'total_count': len(runs), 'check_runs': runs}
             if path == f'commits/{sha}/pulls':
                 return self.pulls[sha]
         for run_id, jobs in self.jobs.items():
@@ -308,6 +310,78 @@ class MainIncidentCliTests(unittest.TestCase):
         status, payload = self.run_cli(['scan'], broken)
         self.assertEqual((status, payload['code']), (2, mic.UNAVAILABLE))
         self.assertEqual(store.list_records(self.root), [])
+
+    def test_scan_through_real_github_read_admission_filters_and_orders(self):
+        github = FakeGitHub([C, A])
+        github.passed(A)
+        github.mac_run(C, 'failure', tests=True)
+        github.merged(C, 12)
+        older_pass = {'id': 10, 'name': mi.LINUX_CHECK, 'head_sha': C,
+                      'status': 'completed', 'conclusion': 'success'}
+        newer_fail = {'id': 20, 'name': mi.LINUX_CHECK, 'head_sha': C,
+                      'status': 'completed', 'conclusion': 'failure'}
+        wrong_head = {'id': 30, 'name': mi.LINUX_CHECK, 'head_sha': A,
+                      'status': 'completed', 'conclusion': 'success'}
+        other_check = {'id': 40, 'name': 'docs', 'head_sha': C,
+                       'status': 'completed', 'conclusion': 'success'}
+        github.linux[C] = [older_pass, other_check, wrong_head, newer_fail]
+        github.annotations[20] = [{'message': FAIL_LINE}]
+
+        class FakeProcess:
+            def __init__(self, payload):
+                r_fd, w_fd = os.pipe()
+                os.write(w_fd, json.dumps(payload).encode('utf-8'))
+                os.close(w_fd)
+                self.stdout = os.fdopen(r_fd, 'rb')
+                self.pid = 99999
+
+            def poll(self):
+                return 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        def fake_popen(argv, **kwargs):
+            prefix = 'repos/owner/repo/'
+            self.assertTrue(argv[-1].startswith(prefix))
+            return FakeProcess(github(argv[-1][len(prefix):]))
+
+        with mock.patch.object(task_completion.shutil, 'which', return_value='/usr/bin/gh'), \
+                mock.patch.object(task_completion, '_trusted_slug', return_value='owner/repo'), \
+                mock.patch.object(task_completion.subprocess, 'Popen', side_effect=fake_popen):
+            status, payload = self.run_cli(['scan'], github=None)
+        self.assertEqual((status, payload['code'], payload['class']),
+                         (0, mic.CREATED, mi.CODE))
+        self.assertIn(mic.linux_runs_path(mi.LINUX_CHECK, C), github.calls)
+        latest = store.get(payload['incident_id'], self.root)['observations'][0]
+        linux_ids = [run['id'] for run in latest['failing_runs'] if run['kind'] == mi.LINUX]
+        self.assertEqual(linux_ids, [20])
+
+    def test_scan_incomplete_or_malformed_linux_check_runs_is_unavailable(self):
+        full_page = [{'id': idx, 'name': 'docs', 'head_sha': A,
+                      'status': 'completed', 'conclusion': 'success'} for idx in range(100)]
+        valid_run = {'id': 1, 'name': mi.LINUX_CHECK, 'head_sha': A,
+                     'status': 'completed', 'conclusion': 'success'}
+        bad_responses = (
+            ('full_page', {'total_count': len(full_page), 'check_runs': full_page}),
+            ('missing_total_count', {'check_runs': [valid_run]}),
+            ('total_count_mismatch', {'total_count': 2, 'check_runs': [valid_run]}),
+            ('total_count_str', {'total_count': '1', 'check_runs': [valid_run]}),
+            ('total_count_bool', {'total_count': True, 'check_runs': [valid_run]}),
+            ('check_runs_not_list', {'total_count': 1, 'check_runs': 'bad'}),
+            ('check_runs_non_dict', {'total_count': 1, 'check_runs': [None]}),
+        )
+        for kind, response in bad_responses:
+            with self.subTest(kind=kind):
+                github = FakeGitHub([A])
+                github.mac_run(A, 'success')
+                def bad_get(path, resp=response, base=github):
+                    if path == mic.linux_runs_path(mi.LINUX_CHECK, A):
+                        return resp
+                    return base(path)
+                status, payload = self.run_cli(['scan'], bad_get)
+                self.assertEqual((status, payload['code']), (2, mic.UNAVAILABLE))
+                self.assertEqual(store.list_records(self.root), [])
 
     def test_scan_by_another_session_cannot_touch_the_incident(self):
         github = self.single()
