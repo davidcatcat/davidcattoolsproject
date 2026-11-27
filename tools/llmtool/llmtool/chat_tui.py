@@ -3265,12 +3265,14 @@ class ChatTUI:
         thread_id = self._codex_thread_id(session_id, runtime=runtime_obj)
         if not thread_id or thread_id == session_id:
             return ()
+        thread_session = thread_id if thread_id.startswith("pm-") else "pm-" + thread_id
         try:
-            if active_pm_inbox.pm_session_key(thread_id) == active_pm_inbox.pm_session_key(session_id):
+            thread_key = active_pm_inbox.pm_session_key(thread_session)
+            if thread_key == active_pm_inbox.pm_session_key(session_id):
                 return ()
         except LLMToolError:
             return ()
-        return (thread_id,)
+        return (thread_key,)
 
     def _read_background(self, loop, key):
         extra = self._codex_pm_sessions(key)

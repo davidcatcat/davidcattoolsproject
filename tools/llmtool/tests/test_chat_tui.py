@@ -9496,6 +9496,7 @@ class CodexThreadTaskReadTests(unittest.TestCase):
 
     NATIVE_ID = '11111111-1111-4111-8111-111111111111'
     THREAD_ID = '22222222-2222-4222-8222-222222222222'
+    UNDASHED_THREAD_ID = '22222222222242228222222222222222'
     OTHER_ID = '33333333-3333-4333-8333-333333333333'
 
     @staticmethod
@@ -9533,60 +9534,63 @@ class CodexThreadTaskReadTests(unittest.TestCase):
     def test_read_background_and_attention_include_codex_thread_and_keep_native_isolation(self):
         from llmtool import active_pm_inbox
 
-        native_running = self.active_record('1' * 32, 'pm-' + self.NATIVE_ID,
-                                            updated_at='2026-11-27T00:01:00Z')
-        thread_running = self.active_record('2' * 32, 'pm-' + self.THREAD_ID,
-                                            updated_at='2026-11-27T00:02:00Z')
-        thread_blocked = self.active_record(
-            '3' * 32, 'pm-' + self.THREAD_ID,
-            developer={'state': 'DEVELOPER_OUTCOME_UNKNOWN',
-                       'error_code': 'CODEX_BLOCKED',
-                       'blocked_reason': 'codex thread block'})
-        native_failed = self.active_record(
-            '4' * 32, 'pm-' + self.NATIVE_ID,
-            state='PM_RESPONSE_REJECTED', developer=None)
-        thread_event = self.active_record(
-            '7' * 32, 'pm-' + self.THREAD_ID,
-            developer={'state': 'DEVELOPER_RESPONDED'},
-            completion={'state': 'WAITING_PM'},
-            completion_events=[{
-                'task_id': '7' * 32, 'event_id': 'a' * 32, 'state': 'PENDING', 'current': True,
-                'received_at': '2026-11-27T00:03:00Z', 'sequence': 0,
-                'source': 'DIRECT_D6_DEVELOPER', 'session_id': 's' * 32,
-                'run_id': 'r' * 32, 'source_sha': '0' * 40, 'payload_sha256': '1' * 64,
-            }])
-        other_running = self.active_record('5' * 32, 'pm-' + self.OTHER_ID)
-        other_blocked = self.active_record(
-            '6' * 32, 'pm-' + self.OTHER_ID,
-            developer={'state': 'DEVELOPER_PENDING', 'blocked_reason': 'other pm block'})
-        store = self.make_store(
-            [native_running, thread_running, thread_blocked, native_failed,
-             thread_event, other_running, other_blocked],
-            unreadable_ids=['9' * 32])
+        for thread_id, extra in ((self.THREAD_ID, self.THREAD_ID),
+                                 (self.UNDASHED_THREAD_ID, 'pm-' + self.UNDASHED_THREAD_ID)):
+            with self.subTest(thread_id=thread_id):
+                native_running = self.active_record('1' * 32, 'pm-' + self.NATIVE_ID,
+                                                    updated_at='2026-11-27T00:01:00Z')
+                thread_running = self.active_record('2' * 32, 'pm-' + thread_id,
+                                                    updated_at='2026-11-27T00:02:00Z')
+                thread_blocked = self.active_record(
+                    '3' * 32, 'pm-' + thread_id,
+                    developer={'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                               'error_code': 'CODEX_BLOCKED',
+                               'blocked_reason': 'codex thread block'})
+                native_failed = self.active_record(
+                    '4' * 32, 'pm-' + self.NATIVE_ID,
+                    state='PM_RESPONSE_REJECTED', developer=None)
+                thread_event = self.active_record(
+                    '7' * 32, 'pm-' + thread_id,
+                    developer={'state': 'DEVELOPER_RESPONDED'},
+                    completion={'state': 'WAITING_PM'},
+                    completion_events=[{
+                        'task_id': '7' * 32, 'event_id': 'a' * 32, 'state': 'PENDING', 'current': True,
+                        'received_at': '2026-11-27T00:03:00Z', 'sequence': 0,
+                        'source': 'DIRECT_D6_DEVELOPER', 'session_id': 's' * 32,
+                        'run_id': 'r' * 32, 'source_sha': '0' * 40, 'payload_sha256': '1' * 64,
+                    }])
+                other_running = self.active_record('5' * 32, 'pm-' + self.OTHER_ID)
+                other_blocked = self.active_record(
+                    '6' * 32, 'pm-' + self.OTHER_ID,
+                    developer={'state': 'DEVELOPER_PENDING', 'blocked_reason': 'other pm block'})
+                store = self.make_store(
+                    [native_running, thread_running, thread_blocked, native_failed,
+                     thread_event, other_running, other_blocked],
+                    unreadable_ids=['9' * 32])
 
-        with patch.object(active_pm_inbox, 'TaskStatusIndex',
-                          return_value=Mock(enabled=False)), \
-                patch.object(active_pm_inbox, '_developer_assignments',
-                             return_value=([], [], None)):
-            bg_codex = chat_tui_status.read_background(
-                self.NATIVE_ID, store=store, extra_sessions=(self.THREAD_ID,))
-            bg_native = chat_tui_status.read_background(self.NATIVE_ID, store=store)
-            att_codex = chat_tui_status.read_attention(
-                self.NATIVE_ID, store=store, extra_sessions=(self.THREAD_ID,))
-            att_native = chat_tui_status.read_attention(self.NATIVE_ID, store=store)
+                with patch.object(active_pm_inbox, 'TaskStatusIndex',
+                                  return_value=Mock(enabled=False)), \
+                        patch.object(active_pm_inbox, '_developer_assignments',
+                                     return_value=([], [], None)):
+                    bg_codex = chat_tui_status.read_background(
+                        self.NATIVE_ID, store=store, extra_sessions=(extra,))
+                    bg_native = chat_tui_status.read_background(self.NATIVE_ID, store=store)
+                    att_codex = chat_tui_status.read_attention(
+                        self.NATIVE_ID, store=store, extra_sessions=(extra,))
+                    att_native = chat_tui_status.read_attention(self.NATIVE_ID, store=store)
 
-        self.assertEqual([item['task'] for item in bg_codex], ['1' * 32, '2' * 32])
-        self.assertEqual([item['task'] for item in bg_native], ['1' * 32])
-        self.assertEqual(
-            {(item['task'], item['label']) for item in att_codex['items']},
-            {('3' * 32, '卡住'), ('4' * 32, '失敗')})
-        self.assertEqual(att_codex['unread'], 1)
-        self.assertEqual(att_codex['task_unreadable_count'], 1)
-        self.assertEqual(att_codex['inbox_unreadable_count'], 1)
-        self.assertEqual(
-            {(item['task'], item['label']) for item in att_native['items']},
-            {('4' * 32, '失敗')})
-        self.assertEqual(att_native['unread'], 0)
+                self.assertEqual([item['task'] for item in bg_codex], ['1' * 32, '2' * 32])
+                self.assertEqual([item['task'] for item in bg_native], ['1' * 32])
+                self.assertEqual(
+                    {(item['task'], item['label']) for item in att_codex['items']},
+                    {('3' * 32, '卡住'), ('4' * 32, '失敗')})
+                self.assertEqual(att_codex['unread'], 1)
+                self.assertEqual(att_codex['task_unreadable_count'], 1)
+                self.assertEqual(att_codex['inbox_unreadable_count'], 1)
+                self.assertEqual(
+                    {(item['task'], item['label']) for item in att_native['items']},
+                    {('4' * 32, '失敗')})
+                self.assertEqual(att_native['unread'], 0)
 
     @unittest.skipUnless(HAVE_TOOLKIT, 'prompt_toolkit not installed')
     def test_tui_codex_pm_background_attention_and_auto_resume_include_thread_tasks(self):
@@ -9594,86 +9598,87 @@ class CodexThreadTaskReadTests(unittest.TestCase):
         from prompt_toolkit.input import create_pipe_input
         from prompt_toolkit.output import DummyOutput
 
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            home = root / 'home'
-            config_path = home / '.config/llmtool/config.yaml'
-            config_path.parent.mkdir(parents=True)
-            config_path.write_text(CONFIG)
-            state_root = root / 'pm-state'
-            state_root.mkdir(parents=True, mode=0o700)
-            pm_runtime._write_json_atomic(
-                state_root,
-                pm_runtime._runtime_state_path(state_root, 'pm-' + self.NATIVE_ID),
-                {'codex_thread_id': self.THREAD_ID})
+        for thread_id in (self.THREAD_ID, self.UNDASHED_THREAD_ID):
+            with self.subTest(thread_id=thread_id), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                home = root / 'home'
+                config_path = home / '.config/llmtool/config.yaml'
+                config_path.parent.mkdir(parents=True)
+                config_path.write_text(CONFIG)
+                state_root = root / 'pm-state'
+                state_root.mkdir(parents=True, mode=0o700)
+                pm_runtime._write_json_atomic(
+                    state_root,
+                    pm_runtime._runtime_state_path(state_root, 'pm-' + self.NATIVE_ID),
+                    {'codex_thread_id': thread_id})
 
-            thread_running = self.active_record('2' * 32, 'pm-' + self.THREAD_ID)
-            thread_blocked = self.active_record(
-                '3' * 32, 'pm-' + self.THREAD_ID,
-                developer={'state': 'DEVELOPER_OUTCOME_UNKNOWN',
-                           'error_code': 'CODEX_BLOCKED',
-                           'blocked_reason': 'thread block'})
-            other_blocked = self.active_record(
-                '6' * 32, 'pm-' + self.OTHER_ID,
-                developer={'state': 'DEVELOPER_OUTCOME_UNKNOWN',
-                           'error_code': 'CODEX_BLOCKED',
-                           'blocked_reason': 'other block'})
-            store = self.make_store([thread_running, thread_blocked, other_blocked])
+                thread_running = self.active_record('2' * 32, 'pm-' + thread_id)
+                thread_blocked = self.active_record(
+                    '3' * 32, 'pm-' + thread_id,
+                    developer={'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                               'error_code': 'CODEX_BLOCKED',
+                               'blocked_reason': 'thread block'})
+                other_blocked = self.active_record(
+                    '6' * 32, 'pm-' + self.OTHER_ID,
+                    developer={'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                               'error_code': 'CODEX_BLOCKED',
+                               'blocked_reason': 'other block'})
+                store = self.make_store([thread_running, thread_blocked, other_blocked])
 
-            session = ChatSession(resolve_config(environ={}, cwd=home, home=home))
-            api = chat_tui_pm.PMRuntimeAPI(state_root=state_root, environ={'HOME': str(home)})
-            with patch('llmtool.chat_tui_theme.settings_path',
-                       return_value=root / 'tui-settings.json'):
-                with create_pipe_input() as pipe:
-                    ui = chat_tui.ChatTUI(session, input=pipe, output=DummyOutput(), pm_api=api)
-            ui.pm_runtime = Mock(runtime='codex', _root=state_root, state_root=state_root,
-                                 turn_active=Mock(return_value=False),
-                                 automatic_sends_blocked=Mock(return_value=False))
-            ui.pm_binding = {'runtime': 'codex', 'account': 'codex-test',
-                             'native_session_id': self.NATIVE_ID}
-            ui.pm_target = (self.NATIVE_ID, str(root))
-            ui.pm_mode = True
-            ui.pm_state = 'idle'
+                session = ChatSession(resolve_config(environ={}, cwd=home, home=home))
+                api = chat_tui_pm.PMRuntimeAPI(state_root=state_root, environ={'HOME': str(home)})
+                with patch('llmtool.chat_tui_theme.settings_path',
+                           return_value=root / 'tui-settings.json'):
+                    with create_pipe_input() as pipe:
+                        ui = chat_tui.ChatTUI(session, input=pipe, output=DummyOutput(), pm_api=api)
+                ui.pm_runtime = Mock(runtime='codex', _root=state_root, state_root=state_root,
+                                     turn_active=Mock(return_value=False),
+                                     automatic_sends_blocked=Mock(return_value=False))
+                ui.pm_binding = {'runtime': 'codex', 'account': 'codex-test',
+                                 'native_session_id': self.NATIVE_ID}
+                ui.pm_target = (self.NATIVE_ID, str(root))
+                ui.pm_mode = True
+                ui.pm_state = 'idle'
 
-            posted = []
+                posted = []
 
-            class FakeLoop:
-                def call_soon_threadsafe(self, fn, *args):
-                    posted.append((fn, args))
+                class FakeLoop:
+                    def call_soon_threadsafe(self, fn, *args):
+                        posted.append((fn, args))
 
-            with patch('llmtool.task_store.TaskStore', return_value=store), \
-                    patch.object(active_pm_inbox, 'TaskStatusIndex',
-                                 return_value=Mock(enabled=False)), \
-                    patch.object(active_pm_inbox, '_developer_assignments',
-                                 return_value=([], [], None)):
-                ui._read_background(FakeLoop(), self.NATIVE_ID)
-                connection = object()
-                ui._auto_resume_connection = connection
-                ui._auto_resume_pending = True
-                ui._auto_resume_unconfirmed = True
-                ui._read_auto_resume(connection, ui.pm_runtime, self.NATIVE_ID, FakeLoop())
+                with patch('llmtool.task_store.TaskStore', return_value=store), \
+                        patch.object(active_pm_inbox, 'TaskStatusIndex',
+                                     return_value=Mock(enabled=False)), \
+                        patch.object(active_pm_inbox, '_developer_assignments',
+                                     return_value=([], [], None)):
+                    ui._read_background(FakeLoop(), self.NATIVE_ID)
+                    connection = object()
+                    ui._auto_resume_connection = connection
+                    ui._auto_resume_pending = True
+                    ui._auto_resume_unconfirmed = True
+                    ui._read_auto_resume(connection, ui.pm_runtime, self.NATIVE_ID, FakeLoop())
 
-            for fn, args in posted:
-                if fn != ui.finish_auto_resume_read:
-                    fn(*args)
-            self.assertEqual([item['task'] for item in ui.background], ['2' * 32])
-            report = ui.attention_report()
-            self.assertIn('thread block', report)
-            self.assertNotIn('other block', report)
+                for fn, args in posted:
+                    if fn != ui.finish_auto_resume_read:
+                        fn(*args)
+                self.assertEqual([item['task'] for item in ui.background], ['2' * 32])
+                report = ui.attention_report()
+                self.assertIn('thread block', report)
+                self.assertNotIn('other block', report)
 
-            resume_calls = [args for fn, args in posted if fn == ui.finish_auto_resume_read]
-            self.assertEqual(len(resume_calls), 1)
-            self.assertEqual([item['task'] for item in resume_calls[0][3]], ['2' * 32])
+                resume_calls = [args for fn, args in posted if fn == ui.finish_auto_resume_read]
+                self.assertEqual(len(resume_calls), 1)
+                self.assertEqual([item['task'] for item in resume_calls[0][3]], ['2' * 32])
 
-            # Claude PM keeps single-session calls without extra_sessions.
-            ui.pm_binding = {'runtime': 'claude-code', 'account': 'default',
-                             'native_session_id': self.NATIVE_ID}
-            ui.pm_runtime = Mock(runtime='claude-code')
-            with patch.object(chat_tui_status, 'read_background', return_value=[]) as bg_mock, \
-                    patch.object(chat_tui_status, 'read_attention', return_value=None) as att_mock:
-                ui._read_background(FakeLoop(), self.NATIVE_ID)
-            bg_mock.assert_called_once_with(self.NATIVE_ID)
-            att_mock.assert_called_once_with(self.NATIVE_ID)
+                # Claude PM keeps single-session calls without extra_sessions.
+                ui.pm_binding = {'runtime': 'claude-code', 'account': 'default',
+                                 'native_session_id': self.NATIVE_ID}
+                ui.pm_runtime = Mock(runtime='claude-code')
+                with patch.object(chat_tui_status, 'read_background', return_value=[]) as bg_mock, \
+                        patch.object(chat_tui_status, 'read_attention', return_value=None) as att_mock:
+                    ui._read_background(FakeLoop(), self.NATIVE_ID)
+                bg_mock.assert_called_once_with(self.NATIVE_ID)
+                att_mock.assert_called_once_with(self.NATIVE_ID)
 
 
 if __name__ == '__main__':
