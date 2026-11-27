@@ -22,7 +22,8 @@ from llmtool.ci_profile import CiProfile, CiProfileError, default_profile  # noq
 HEAD = 'a' * 40
 TASK_ID = '1' * 32
 EXECUTOR = 'executor-1'
-PR = {'number': 17, 'head': {'sha': HEAD}, 'merged': False}
+PR = {'number': 17, 'head': {'sha': HEAD}, 'merged': False,
+      'state': 'open', 'mergeable': True}
 FILES = [{'filename': 'src/app.py'}]
 MAC_FILES = [{'filename': 'tools/llmtool/llmtool/a.py'}]
 WORKFLOW_RUN_ID = 101

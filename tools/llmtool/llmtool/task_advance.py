@@ -5007,6 +5007,7 @@ def advance(*, task_id, store=None, merge=False, owner_acceptance=None,
         return _advance_refused(task_id, 'OWNER_EXCEPTION_REQUIRES_MERGE')
     # #2793 A13.0: resolve once per advance step, before the lease or any record
     # read. An unusable profile refuses the step and never uses the old names.
+    explicit_profile = options.get('profile', _UNSET) is not _UNSET
     try:
         options['profile'] = _resolve_ci_profile(options.get('profile', _UNSET))
     except mac_full_due.ProfileError:
@@ -5014,6 +5015,7 @@ def advance(*, task_id, store=None, merge=False, owner_acceptance=None,
             return dict(_merge_refusal(MERGE_CI_PROFILE_INVALID), task_id=task_id,
                         next='MERGE_REFUSED', acked=[])
         return _advance_refused(task_id, MERGE_CI_PROFILE_INVALID)
+    options['label_profile'] = options['profile'] if explicit_profile else _UNSET
     store = TaskStore() if store is None else store
     with contextlib.ExitStack() as held:
         lease = getattr(store, 'advance_lease', None)
@@ -5055,6 +5057,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                   run_task_complete_call=None, record_github_event_call=None,
                   github_get=None, cwd=None, publish_git_runner, publish_gh_runner,
                   record_result_call=None, merge_gh_runner, label_gh_runner=None,
+                  label_profile=_UNSET,
                   owner_acceptance=None, owner_exception=None, executor_task=None,
                   sleep_fn=None, sleep=None, ci_job_log_fetch=None, job_log_fetch=None,
                   profile=_UNSET):
@@ -5689,7 +5692,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                     label_result = label_mac_ci_for_skipped_check(
                         task_id=task_id, store=store, pr_number=number,
                         github_get=get, merge_gh_runner=label_gh_runner, cwd=cwd,
-                        profile=resolved_profile)
+                        **({} if label_profile is _UNSET else {'profile': label_profile}))
                     if type(label_result) is dict:
                         if label_result.get('step') == 'WAITING_CI':
                             step = 'WAITING_CI'
