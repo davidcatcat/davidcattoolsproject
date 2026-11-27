@@ -259,6 +259,11 @@ class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):
             ai_loop_check='d', macos_check='e',
             linux_workflow_file='l.yml', macos_workflow_file='dir/m.yml',
         )
+        duplicate_workflow = CiProfile(
+            linux_code_check='a', docs_check='b', gateway_check='c',
+            ai_loop_check='d', macos_check='e',
+            linux_workflow_file='same-ci.yml', macos_workflow_file='same-ci.yml',
+        )
         shard_collisions = tuple(
             (
                 f'macos_check_collides_shard_{idx}',
@@ -277,6 +282,7 @@ class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):
             ('invalid_namespace', types.SimpleNamespace(macos_workflow_file='llmtool-mac-ci.yml')),
             ('mutated_empty', mutated),
             ('path_separator', bad_path),
+            ('duplicate_workflow', duplicate_workflow),
             ('ambiguous_list', [ALT_PROFILE, default_profile()]),
             ('ambiguous_tuple', (ALT_PROFILE,)),
         ) + shard_collisions
@@ -358,6 +364,26 @@ class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):
                     due.sha_result(github, [run], SHA, profile=colliding)
                 with self.assertRaises(due.ProfileError):
                     due.decide(github, now=T0, profile=colliding)
+
+    def test_duplicate_workflow_profile_rejected_in_direct_helpers(self):
+        github = mock.Mock(side_effect=AssertionError('github_get must not be called'))
+        run = {'id': 11, 'status': 'completed', 'conclusion': 'success', 'head_sha': SHA}
+        duplicate = CiProfile(
+            linux_code_check='a', docs_check='b', gateway_check='c',
+            ai_loop_check='d', macos_check='e',
+            linux_workflow_file='same-ci.yml', macos_workflow_file='same-ci.yml',
+        )
+        with self.assertRaises(due.ProfileError):
+            due.resolve_profile(duplicate)
+        with self.assertRaises(due.ProfileError):
+            due.full_runs(github, profile=duplicate)
+        with self.assertRaises(due.ProfileError):
+            due.trusted(github, run, profile=duplicate)
+        with self.assertRaises(due.ProfileError):
+            due.sha_result(github, [run], SHA, profile=duplicate)
+        with self.assertRaises(due.ProfileError):
+            due.decide(github, now=T0, profile=duplicate)
+        self.assertEqual(github.call_count, 0)
 
 
 if __name__ == '__main__':

@@ -75,6 +75,8 @@ def resolve_profile(profile=_UNSET):
     if not (_is_plain_workflow_name(candidate.linux_workflow_file)
             and _is_plain_workflow_name(candidate.macos_workflow_file)):
         raise ProfileError('ci_profile')
+    if candidate.linux_workflow_file == candidate.macos_workflow_file:
+        raise ProfileError('ci_profile')
     if candidate.macos_check in SHARD_JOBS:
         raise ProfileError('ci_profile')
     return candidate
