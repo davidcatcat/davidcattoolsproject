@@ -90,7 +90,7 @@ def _identity(check_name):
     value = {'kind': 'CI', 'task': TASK, 'pr': PR, 'executor_task': D6,
              'head': HEAD, 'check_name': check_name, 'check_run_id': 9001,
              'conclusion': 'failure'}
-    return hashlib.sha256(start_failure.canonical(value)).hexdigest()
+    return hashlib.sha256(start_failure.canonical(value).encode('utf-8')).hexdigest()
 
 
 def _header(packet):
