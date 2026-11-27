@@ -279,6 +279,9 @@ class MainCiJobFetchTests(unittest.TestCase):
             ('not-a-date', '2026-11-20T00:00:00Z'),  # main date unparseable
             ('2026-11-21T00:00:00Z', None),          # run date missing
             ('2026-11-21T00:00:00Z', 'not-a-date'),  # run date unparseable
+            ('9999-12-31T23:59:59-01:00', '2026-11-20T00:00:00Z'),  # main date UTC overflow
+            ('2026-11-21T00:00:00Z', '9999-12-31T23:59:59-01:00'),  # run date UTC overflow
+            ('2026-11-21T00:00:00Z', '0001-01-01T00:00:00+01:00'),  # run date UTC underflow
             ('2026-11-21T00:00:00Z', '2026-11-21T00:00:00Z'),  # not earlier
         )
         for main_date, created_at in cases:
