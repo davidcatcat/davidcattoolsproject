@@ -135,15 +135,15 @@ def _stop(code):
     raise error from None
 
 
-def _classify_test_path(path):
-    """Return the runner kind the live test-evidence profile gives a path.
+def _test_profile_snapshot():
+    """Return one validated profile from the live provider, or refuse.
 
     ``test_profile.default_profile`` is looked up at use time so a caller can
     substitute a profile. A provider that is missing, raises, or returns
     anything other than a :class:`TestProfile` refuses with
-    ``TEST_PROFILE_INVALID``, as does a path that matches entries with
-    different runner kinds. Classification never falls back to an older
-    registry.
+    ``TEST_PROFILE_INVALID``. Callers classify every path of one completion
+    pass against this single snapshot, so a provider that changes its answer
+    between calls cannot split a path's admission from its runner kind.
     """
     provider = getattr(test_profile, 'default_profile', None)
     if not callable(provider):
@@ -154,22 +154,50 @@ def _classify_test_path(path):
         _stop('TEST_PROFILE_INVALID')
     if type(profile) is not test_profile.TestProfile:
         _stop('TEST_PROFILE_INVALID')
-    if type(path) is not str:
-        return None
-    entries = profile.entries
     # A compiled bytes pattern passed the TestProfile type check but cannot
     # fullmatch a str path, so refuse it here with the fixed code instead of
     # letting TypeError escape classification.
-    if any(type(pattern.pattern) is not str for pattern, _ in entries):
+    if any(type(pattern.pattern) is not str for pattern, _ in profile.entries):
         _stop('TEST_PROFILE_INVALID')
+    return profile
+
+
+def _profile_kind(profile, path):
+    """Return the kind one profile snapshot gives a path, or ``None``.
+
+    A path that matches entries with different runner kinds refuses with
+    ``TEST_PROFILE_INVALID``. Classification never falls back to an older
+    registry.
+    """
+    if type(path) is not str:
+        return None
     try:
-        kinds = {kind for pattern, kind in entries
+        kinds = {kind for pattern, kind in profile.entries
                  if pattern.fullmatch(path) is not None}
     except Exception:
         _stop('TEST_PROFILE_INVALID')
     if len(kinds) > 1:
         _stop('TEST_PROFILE_INVALID')
     return kinds.pop() if kinds else None
+
+
+def _classify_test_path(path):
+    """Return the runner kind one live test-evidence profile gives a path."""
+    return _profile_kind(_test_profile_snapshot(), path)
+
+
+def _eligible_registered_tests(paths):
+    """Return sorted ``(path, kind)`` pairs from one profile snapshot."""
+    unique = sorted(set(paths))
+    if not unique:
+        return []
+    profile = _test_profile_snapshot()
+    eligible = []
+    for path in unique:
+        kind = _profile_kind(profile, path)
+        if kind is not None:
+            eligible.append((path, kind))
+    return eligible
 
 
 def _canonical_json_bytes(value, code):
@@ -974,8 +1002,7 @@ def run_bounded_tests(*, root, source_sha, result_sha, read_paths, write_paths,
     conflict or hand resolution, still counts its paths. Without it the plain
     source_sha..result_sha diff decides, as before.
     """
-    eligible = sorted({(p, _registered_test(p)) for p in (*read_paths, *write_paths)
-                       if _registered_test(p) is not None})
+    eligible = _eligible_registered_tests((*read_paths, *write_paths))
     before = collect_git_snapshot(root)
     if before.head != result_sha or not before.clean:
         _stop('TEST_SOURCE_MISMATCH')
@@ -1015,8 +1042,7 @@ def run_bounded_worktree_tests(*, root, source_sha, diff_sha256,
         return [{'status': 'NOT_APPLICABLE_DOCS_ONLY',
                  'changed_paths': before['changed_paths'], 'source_sha': source_sha,
                  'diff_sha256': diff_sha256, 'result_head': None, 'docs_only': True}]
-    eligible = sorted({(p, _registered_test(p)) for p in (*read_paths, *write_paths)
-                       if _registered_test(p) is not None})
+    eligible = _eligible_registered_tests((*read_paths, *write_paths))
     if not eligible:
         _stop('TEST_SCOPE_MISSING')
     with tempfile.TemporaryDirectory(prefix='llmtool-task-worktree-tests-') as home, \

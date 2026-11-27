@@ -92,6 +92,34 @@ class SubstitutedProfileTests(unittest.TestCase):
         ])
 
 
+class SingleSnapshotTests(unittest.TestCase):
+    def test_real_completion_resolves_each_path_from_one_profile_snapshot(self):
+        paths = ['tools/llmtool/tests/test_custom_one.py']
+        snapshot = {'diff_sha256': DIFF_SHA256, 'changed_paths': list(paths),
+                    'source_sha': SOURCE_SHA}
+        captured = []
+
+        def run_tests(root, source_sha, eligible, **kwargs):
+            captured.append(list(eligible))
+            return []
+
+        provider = mock.Mock(
+            side_effect=[CUSTOM_PROFILE, test_profile.default_profile()])
+        with mock.patch.object(test_profile, 'default_profile', provider), \
+                mock.patch.object(task_completion, '_worktree_snapshot',
+                                  side_effect=[dict(snapshot), dict(snapshot)]), \
+                mock.patch.object(task_completion, '_run_registered_tests',
+                                  side_effect=run_tests):
+            task_completion.run_bounded_worktree_tests(
+                root='/nonexistent', source_sha=SOURCE_SHA,
+                diff_sha256=DIFF_SHA256, changed_paths=list(paths),
+                read_paths=list(paths), write_paths=[])
+        self.assertEqual(captured[0], [
+            ('tools/llmtool/tests/test_custom_one.py', 'script'),
+        ])
+        self.assertEqual(provider.call_count, 1)
+
+
 class RefusalTests(unittest.TestCase):
     DEFAULT_PATH = 'tools/llmtool/tests/test_regular.py'
 
