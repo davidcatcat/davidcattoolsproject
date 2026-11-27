@@ -72,6 +72,7 @@ and no OSR-27 count is added to any total here.
   extra blockers. Merge was out of run scope, not a technical refusal.
 - Unavailable raw inventory and recheck IDs from the historical run remain
   **unverified**; nothing beyond the linked sources is inferred.
-- Gates: exact-head hosted docs check at pinned main
-  `be913e781e8194fdd36e256d76e021f24a1454cb`; formal review by
-  codex-reviewer.
+- Gates: the exact-head hosted docs check runs against this document's exact
+  PR HEAD — the pinned main
+  `be913e781e8194fdd36e256d76e021f24a1454cb` is the crosswalk reference only,
+  not the revision the docs gate checks; formal review by codex-reviewer.
