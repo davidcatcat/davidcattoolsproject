@@ -1674,18 +1674,22 @@ class ChatTUI:
             lines = ["狀態（PM 模式）",
                      "PM session：" + self.pm_target[0] + "（" + chat_tui_pm.safe_text(runtime)
                      + "，cwd " + chat_tui_pm.safe_text(pm_runtime.display_path(
-                         str(self.pm_target[1])) or "UNKNOWN") + "）"]
+                         str(self.pm_target[1])) or "UNKNOWN") + "）",
+                     "PM 模型：" + chat_tui_pm.pm_model(runtime, self.pm_binding,
+                                                       self.pm_api)]
             if runtime == "claude-code":
                 lines.extend((
                     "Claude 帳號目錄：" + chat_tui_pm.safe_text(
                         pm_runtime.display_path(
                             getattr(self.pm_runtime, "claude_config_dir", None)) or "UNKNOWN"),
-                    "權限模式（本機設定）：" + chat_tui_pm.permission_mode()
+                    "權限模式（本機設定）：" + chat_tui_pm.permission_label(runtime)
                     + "（自動，不跳出確認）"))
             else:
-                # The folder and permission rows describe Claude only (#683 B6).
+                # The folder row describes Claude only (#683 B6).
                 binding = self.pm_binding if type(self.pm_binding) is dict else {}
-                lines.append("帳號：" + chat_tui_pm.safe_text(binding.get("account") or None))
+                lines.extend((
+                    "帳號：" + chat_tui_pm.safe_text(binding.get("account") or None),
+                    "權限模式（本機設定）：" + chat_tui_pm.permission_label(runtime)))
             lines.extend((
                 "PM 狀態：" + self.pm_status_fields(lambda value, _width: value)["state"],
                 "背景：" + ("讀取中" if count is None else
@@ -3141,11 +3145,10 @@ class ChatTUI:
             state = PM_STATE_LABELS.get(state, state)
         # Keep the PM mode and permission state in the lead; runtime/account can drop first.
         binding = self.pm_binding if type(self.pm_binding) is dict else {}
-        runtime = self._pm_runtime_name()
-        if runtime == 'claude-code':
-            runtime = 'claude'
+        runtime_name = self._pm_runtime_name()
+        runtime = 'claude' if runtime_name in ('claude-code', 'claude') else runtime_name
         account = binding.get('account') or 'default'
-        lead = ["▸▸ " + PM_LABEL + " 模式", (chat_tui_pm.permission_mode() if runtime == 'claude' else 'workspace-write')]
+        lead = ["▸▸ " + PM_LABEL + " 模式", chat_tui_pm.permission_label(runtime_name)]
         count = self.background_count()
         if count is not None:
             lead.append("背景 %s" % count)
