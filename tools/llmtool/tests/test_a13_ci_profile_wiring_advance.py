@@ -386,6 +386,46 @@ class R2SubstitutedProfileTests(unittest.TestCase):
         self.assertEqual(calls, [('/repo/task', [
             'pr', 'edit', '17', '--add-label', 'mac-ci'])])
 
+    def test_default_profile_is_resolved_once_before_the_mac_label(self):
+        # F1: when the first provider answer equals the import-time default,
+        # the step must still pass that answer on, never let the label helper
+        # resolve a different second answer.
+        defaults = default_profile()
+        record = _record(
+            review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD, 'version': 1,
+                                    'state': 'DISPATCHED'}],
+            completion_events=[{'source': 'REVIEWER', 'source_sha': HEAD,
+                                'version': 1, 'outcome': 'REVIEW_PASS'}])
+        github = _GitHub([
+            _run(1, defaults.linux_code_check),
+            _run(2, defaults.macos_check, 'skipped'),
+        ], MAC_FILES)
+        calls = []
+
+        def completion(_args, *, store):
+            store.record['completion']['missing_gates'] = ['CI_WORKFLOW_JOBS_INVALID']
+            return 1
+
+        def runner(root, args):
+            calls.append((root, list(args)))
+            return types.SimpleNamespace(returncode=0)
+
+        with mock.patch.object(
+                ci_profile, 'default_profile',
+                side_effect=[defaults, ALT_PROFILE]) as patched, \
+                mock.patch.object(task_advance, '_d6_snapshot', return_value=_d6()):
+            result = task_advance.advance(
+                task_id=record['task_id'], store=_Store(record), pr_number=17,
+                github_get=github, run_task_complete_call=completion,
+                merge_gh_runner=runner,
+                dispatch_review_call=lambda **_kwargs: {'state': 'DISPATCHED'},
+                repair_review_call=lambda **_kwargs: {'state': 'DISPATCHED'})
+        self.assertEqual(patched.call_count, 1)
+        self.assertEqual(result['step'], 'WAITING_CI')
+        self.assertIn('MAC_CI_LABEL_READY', result['codes'])
+        self.assertEqual(calls, [('/repo/task', [
+            'pr', 'edit', '17', '--add-label', 'mac-ci'])])
+
 
 class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):
     def _bad_profiles(self):
