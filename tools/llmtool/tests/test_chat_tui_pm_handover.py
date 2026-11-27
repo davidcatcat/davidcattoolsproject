@@ -572,6 +572,32 @@ class TUIHandoverTests(unittest.TestCase):
         ui.run_pm_command("/pm handover")
         self.assertEqual(self.store.get(task["task_id"])["pm_session_id"], "pm-" + third)
 
+    def test_explicit_connect_disconnect_then_use_offers_handover_for_last_connected_session(self):
+        saved, saved_task = self.stopped_claude_with_task()
+        connected, task_one = self.stopped_claude_with_task()
+        task_two = self.record_task(connected)
+        third = self.bound_claude(account="claude-one", config_dir=self.first)
+        pm_runtime.select_binding(saved, state_root=self.state)
+
+        ui = self.make_ui()
+        with patch.object(ui.pm_api, "runtime",
+                          side_effect=lambda sid, cwd: _FakeRuntime(sid, cwd)):
+            ui.run_pm_command("/pm connect " + connected + " " + str(self.cwd))
+            ui.run_pm_command("/pm disconnect")
+            before = len(ui.conversation.text)
+            ui.run_pm_command("/pm use " + third)
+
+        self.assertIn("2 open Task(s)", ui.conversation.text[before:])
+        self.assertIsNotNone(ui.pm_handover_offer)
+        self.assertEqual(ui.pm_handover_offer["old_session"], connected)
+        self.assertEqual(ui.pm_handover_offer["new_session"], third)
+        self.assertEqual(ui.pm_handover_offer["count"], 2)
+
+        ui.run_pm_command("/pm handover")
+        self.assertEqual(self.store.get(task_one["task_id"])["pm_session_id"], "pm-" + third)
+        self.assertEqual(self.store.get(task_two["task_id"])["pm_session_id"], "pm-" + third)
+        self.assertEqual(self.store.get(saved_task["task_id"])["pm_session_id"], "pm-" + saved)
+
 
 if __name__ == "__main__":
     unittest.main()
