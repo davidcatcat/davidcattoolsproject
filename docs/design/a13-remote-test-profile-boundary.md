@@ -6,9 +6,8 @@ no external repo changes.
 **Citations:** Issue #2793; Coordinator review comment 7210501920.
 **Kept in A13.2:** runner relocation and execution-mode implementation.
 
-This handoff covers the remaining test-profile consumers: what each selection
-path does on pinned main, and the regression cases a behaviour-neutral wiring
-change must preserve. All facts below were advisor-verified on pinned main.
+This handoff lists the advisor-verified selection paths on pinned main and
+the regression cases a behaviour-neutral wiring change must preserve.
 
 ## 1. Verified selection paths (pinned main)
 
@@ -24,36 +23,46 @@ change must preserve. All facts below were advisor-verified on pinned main.
 
 - `TestProfile.kind_for` matches a broader path set than the remote side:
   unittest paths may include uppercase letters, and `scripts/test_*.py`
-  paths get a separate `script` runner kind (kinds are exactly `unittest`
-  and `script`, as returned by `default_profile`).
+  paths get a separate `script` runner kind; `default_profile` kinds are
+  exactly `unittest` and `script`.
 - `TestProfile.kind_for` and `default_profile` only classify paths. They are
   not a remote-runner admission decision.
 - `TestProfileError` (code `TEST_PROFILE_INVALID`) rejects invalid entries at
-  construction: empty entry list, a non two-item pair, a non-compiled
-  pattern, or a kind that is not exactly `unittest` or `script`. The error
-  message never carries caller data.
+  construction: empty entry list, non two-item pair, non-compiled pattern,
+  or a kind other than exactly `unittest` or `script`.
 
 ### 1.3 `task_advance._pr_changed_test_modules`, `remote_test_part5._pr_changed_test_modules_for_admission`, `remote_test_part2.run_remote_test`
 
 - `task_advance._pr_changed_test_modules` independently matches changed
   module paths and ignores removed files at the exact head.
 - `remote_test_part5._pr_changed_test_modules_for_admission` uses that
-  reader.
-- `remote_test_part2.run_remote_test` consumes the union (declared plus
-  PR-changed) for run admission.
+  reader to widen the module set for run admission.
+- In `remote_test_part2.run_remote_test` the modules actually executed are
+  the explicit modules supplied, which on pinned main may be any nonempty
+  subset of the admitted set; the PR-changed admission helper is called
+  only when that set needs widening. A declared-only subset can therefore
+  run without the PR-changed module.
 
 ### 1.4 Parity obligation
 
-For the same exact head, validation-side and runner-side selection must agree module for module. Validation derives through `remote_test_part1._task_path_modules`, `_admitted_modules`, `remote_required_modules`; the runner path runs `remote_test_part5._pr_changed_test_modules_for_admission` into `remote_test_part2.run_remote_test`. Any divergence at one head is a regression, because run admission trusts the union while the runner trusts the pinned stems.
+Three sets must not be conflated: the **required coverage set** (default
+declared stems plus exact-head PR-changed stems), the **admitted set** the
+runner may execute, and the **modules actually executed** (explicit modules
+passed to `remote_test_part2.run_remote_test`, a nonempty subset of the
+admitted set on pinned main). Parity obligation for the future wiring
+change: the validation-side derivation (`remote_test_part1._task_path_modules`,
+`_admitted_modules`, `remote_required_modules`) and the admission-side
+derivation (`remote_test_part5._pr_changed_test_modules_for_admission`) must
+agree on the required coverage set for the same exact head; the modules
+actually executed need not equal it.
 
 ## 2. Regression table
 
-All cases are behaviour checks against pinned main; each must hold before and
-after the wiring change.
+Each case must hold before and after the behaviour-neutral wiring change.
 
 | Case | Required behaviour |
 | --- | --- |
-| Default declared plus PR-changed union | `remote_test_part1._task_path_modules` derives the default declared stems; `task_advance._pr_changed_test_modules` adds exact-head PR-changed stems; `remote_test_part5._pr_changed_test_modules_for_admission` and `remote_test_part2.run_remote_test` select the identical module set at the same head. |
+| Default declared plus PR-changed union | `remote_test_part1._task_path_modules` derives the default declared stems; `task_advance._pr_changed_test_modules` adds exact-head PR-changed stems; together they form the required coverage set validation and admission must agree on at the same head. The modules actually executed by `remote_test_part2.run_remote_test` are the explicit modules supplied (any nonempty subset of the admitted set), widened by `remote_test_part5._pr_changed_test_modules_for_admission` only when needed. |
 | Removed file | Removal at the exact head adds no PR-changed stem: `task_advance._pr_changed_test_modules` ignores removed files. Declared stems are accounted separately: `remote_test_part1._task_path_modules` still derives a module from declared `read_paths` or `write_paths`, and `remote_required_modules` can select it. |
 | Darwin-only exclusion | `remote_required_modules` excludes classified Darwin-only modules. |
 | Invalid path | A path matching no profile entry (`TestProfile.kind_for` returns `None`) or unmatched on the remote side is not admitted; an unmatched path must never become PASS. |
