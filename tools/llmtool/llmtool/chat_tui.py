@@ -877,6 +877,7 @@ class ChatTUI:
         self.pm_binding = None       # pm_runtime.current_binding() of the connected session
         self.pm_handover_offer = None
         self._last_pm_session = None
+        self._last_disk_binding = None
         self.pm_block_index = None   # block_index of the streaming text block
         self.pm_target = None        # (session_id, cwd) of the connected PM
         self.pm_mode = False
@@ -3863,7 +3864,7 @@ class ChatTUI:
                 self.append("llmtool: PM session not selected; use /pm list and /pm use N|SESSION")
                 return
             if type(binding) is dict and binding.get('native_session_id'):
-                self._last_pm_session = binding['native_session_id']
+                self._remember_pm_session(binding['native_session_id'])
             self.append("PM selected: " + chat_tui_pm.safe_text(binding.get('runtime', 'claude-code'))
                         + " account " + chat_tui_pm.safe_text(binding.get('account') or 'default')
                         + " · " + chat_tui_pm.safe_text(binding.get('native_session_id'))[:8]
@@ -4074,15 +4075,27 @@ class ChatTUI:
         except Exception:
             return None
 
+    def _remember_pm_session(self, session_id):
+        self._last_pm_session = session_id
+        binding = self._safe_current_binding()
+        self._last_disk_binding = (
+            binding["native_session_id"]
+            if type(binding) is dict and binding.get("native_session_id")
+            else None
+        )
+
     def _previous_pm_session(self):
         if self.pm_target:
             return self.pm_target[0]
-        if self._last_pm_session:
-            return self._last_pm_session
         binding = self._safe_current_binding()
-        if type(binding) is dict and binding.get("native_session_id"):
-            return binding["native_session_id"]
-        return None
+        disk_id = (binding["native_session_id"]
+                   if type(binding) is dict and binding.get("native_session_id")
+                   else None)
+        if self._last_pm_session:
+            if disk_id is not None and disk_id != self._last_disk_binding:
+                return disk_id
+            return self._last_pm_session
+        return disk_id
 
     def _offer_pm_handover(self, old_session, new_session, cwd):
         if not old_session or not new_session or old_session == new_session:
@@ -4203,7 +4216,7 @@ class ChatTUI:
             return
         binding = outcome["binding"] if type(outcome["binding"]) is dict else {}
         if binding.get("native_session_id"):
-            self._last_pm_session = binding["native_session_id"]
+            self._remember_pm_session(binding["native_session_id"])
         self.append("Dedicated PM session " + chat_tui_pm.safe_text(binding.get("native_session_id"))
                     + " dedicated binding created (cwd " + chat_tui_pm.safe_text(binding.get("cwd"))
                     + "); the session starts on the first message. /pm connect connects to it.")
@@ -4336,7 +4349,7 @@ class ChatTUI:
             threading.Thread(target=self._pm_watch, args=(self.pm_runtime, self._loop),
                              name="llmtool-chat-pm-watch", daemon=True).start()
         self.pm_target = (outcome["session"], getattr(self.pm_runtime, "cwd", outcome["cwd"]))
-        self._last_pm_session = self.pm_target[0]
+        self._remember_pm_session(self.pm_target[0])
         self.pm_mode, self.task_profile, self.pm_state = True, None, "idle"
         # Status shows 暖機中… until the first turn's first output; W41 A: no warm-up message.
         self.pm_warm = True
