@@ -49,9 +49,11 @@ not represent a new test run or live runtime execution.
     `start_failure.repair_packet_matches`, fails the first start in
     `cli.run_task_claude_delegate`, and retries via `cli.run_task_retry_start`.
     `R2SubstitutedProfileTests.test_substituted_names_build_and_bind_and_original_names_are_refused`
-    verifies `review_repair._ci_failure` and `start_failure.repair_packet_matches`
-    accept all `ALT_PROFILE` check names under `ALT_PROFILE` and refuse
-    original default check names with `CI_FAILURE_INVALID`. Default-profile
+    verifies `review_repair._ci_failure` builds packets for all `ALT_PROFILE`
+    check names under `ALT_PROFILE` and `start_failure.repair_packet_matches`
+    returns `True` for those packets (both via patched `default_profile` and
+    `profile=ALT_PROFILE`), while `review_repair._ci_failure` refuses original
+    default check names under `ALT_PROFILE` with `CI_FAILURE_INVALID`. Default-profile
     parity and unchanged `TaskStore` claim fields (`_REVIEW_REPAIR_CLAIM_FIELDS`,
     `_REVIEW_REPAIR_OPTIONAL_FIELDS`) are covered by `R1DefaultProfileTests` and
     `RealTaskStoreRepairAndRetryTests.test_default_profile_builds_persists_verifies_and_retries_without_new_claim_fields`.
