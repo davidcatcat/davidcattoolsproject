@@ -286,5 +286,134 @@ class ValidVerdictTests(unittest.TestCase):
         self.assertFalse(self.receipt_dir.exists())
 
 
+class MalformedStreamPositionTests(unittest.TestCase):
+    """Distinguish malformed JSONL position and category with bounded fixed metadata."""
+
+    setUp = base.ReviewRefusalReceiptTests.setUp
+    tearDown = base.ReviewRefusalReceiptTests.tearDown
+    _invoke_refusal = base.ReviewRefusalReceiptTests._invoke_refusal
+
+    def _refusal(self, raw, *, screen_side_effect=_pass_screen):
+        task = self.store.get(self.task_id)
+
+        def runner(**_kwargs):
+            return review_dispatch._parse_codex_review(
+                raw, task_id=self.task_id, run_id=task['run_id'],
+                contract_digest=task['task_binding']['contract_digest'], head=HEAD)
+
+        with patch.object(task_submission_cli, '_screen_text', side_effect=screen_side_effect), \
+                self.assertRaises(LLMToolError) as raised:
+            self._invoke_refusal(runner=runner)
+        return raised.exception
+
+    def _receipt(self, exc):
+        path = Path(exc.review_refusal['receipt_path'])
+        self.receipt_text = path.read_text(encoding='utf-8')
+        return json.loads(self.receipt_text)
+
+    def _assert_not_a_verdict_and_no_text(self, receipt, forbidden):
+        self.assertEqual(receipt['failure_reason'], 'OUTPUT_NOT_JSONL')
+        self.assertIs(receipt['not_a_verdict'], True)
+        self.assertNotIn('verdict', receipt)
+        self.assertNotIn('review_text', receipt)
+        for text in forbidden:
+            self.assertNotIn(text, self.receipt_text)
+        claim = self.store.get(self.task_id)['review_dispatch_claim'][0]
+        self.assertEqual(claim['state'], 'UNKNOWN')
+        self.assertNotIn('review_result', claim)
+
+    def test_malformed_before_any_valid_event(self):
+        bad_line = 'not valid json before any event'
+        raw = (bad_line + '\n').encode('utf-8')
+        exc = self._refusal(raw)
+        receipt = self._receipt(exc)
+
+        self._assert_not_a_verdict_and_no_text(receipt, [bad_line])
+        diag = receipt['stream_diagnostic']
+        self.assertEqual(diag['position'], review_dispatch.STREAM_MALFORMED_BEFORE_VALID_EVENT)
+        self.assertEqual(diag['category'], review_dispatch.STREAM_MALFORMED_INVALID_JSON)
+        self.assertEqual(diag['line'], 1)
+        self.assertEqual(diag['valid_events'], 0)
+        self.assertEqual(diag['agent_messages'], 0)
+        self.assertIs(diag['agent_message_observed'], False)
+        self.assertIs(diag['useful_agent_message_observed'], False)
+        self.assertEqual(exc.review_refusal['stream_diagnostic'], diag)
+
+    def test_malformed_after_valid_event_before_agent_message(self):
+        bad_line = '{"unterminated": '
+        raw = (
+            json.dumps({'type': 'thread.started', 'thread_id': '0123456789abcdef'}) + '\n'
+            + json.dumps({'type': 'turn.started'}) + '\n'
+            + bad_line + '\n'
+        ).encode('utf-8')
+        exc = self._refusal(raw)
+        receipt = self._receipt(exc)
+
+        self._assert_not_a_verdict_and_no_text(receipt, [bad_line, '0123456789abcdef'])
+        diag = receipt['stream_diagnostic']
+        self.assertEqual(diag['position'], review_dispatch.STREAM_MALFORMED_AFTER_VALID_EVENT)
+        self.assertEqual(diag['category'], review_dispatch.STREAM_MALFORMED_INVALID_JSON)
+        self.assertEqual(diag['line'], 3)
+        self.assertEqual(diag['valid_events'], 2)
+        self.assertEqual(diag['agent_messages'], 0)
+        self.assertIs(diag['agent_message_observed'], False)
+        self.assertIs(diag['useful_agent_message_observed'], False)
+        self.assertEqual(exc.review_refusal['stream_diagnostic'], diag)
+
+    def test_malformed_after_useful_agent_message_keeps_position_and_category(self):
+        task = self.store.get(self.task_id)
+        review_body = base._codex_review_text(
+            run_id=task['run_id'],
+            contract=task['task_binding']['contract_digest'])
+        bad_line = '{"dup": 1, "dup": 2}'
+        raw = (
+            json.dumps({'type': 'thread.started', 'thread_id': '0123456789abcdef'}) + '\n'
+            + json.dumps({'type': 'item.completed',
+                          'item': {'type': 'agent_message', 'text': review_body}}) + '\n'
+            + bad_line + '\n'
+        ).encode('utf-8')
+        exc = self._refusal(raw)
+        receipt = self._receipt(exc)
+
+        self._assert_not_a_verdict_and_no_text(receipt, [bad_line, review_body])
+        diag = receipt['stream_diagnostic']
+        self.assertEqual(diag['position'], review_dispatch.STREAM_MALFORMED_AFTER_AGENT_MESSAGE)
+        self.assertEqual(diag['category'], review_dispatch.STREAM_MALFORMED_DUPLICATE_KEY)
+        self.assertEqual(diag['line'], 3)
+        self.assertEqual(diag['valid_events'], 2)
+        self.assertEqual(diag['agent_messages'], 1)
+        self.assertIs(diag['agent_message_observed'], True)
+        self.assertIs(diag['useful_agent_message_observed'], True)
+        self.assertEqual(receipt['reply_diagnostic']['kind'], 'json_object')
+        self.assertIn('verdict', receipt['reply_diagnostic']['keys'])
+
+    def test_invalid_utf8_after_withheld_agent_message_preserves_stream_diagnostic(self):
+        agent_text = 'synthetic agent message text withheld by screen'
+        raw = (
+            json.dumps({'type': 'thread.started', 'thread_id': '0123456789abcdef'}).encode('utf-8') + b'\n'
+            + json.dumps({'type': 'item.completed',
+                          'item': {'type': 'agent_message', 'text': agent_text}}).encode('utf-8') + b'\n'
+            + b'\xff\xfe\n'
+        )
+
+        def withhold(_text, _limit):
+            raise LLMToolError('withheld')
+
+        exc = self._refusal(raw, screen_side_effect=withhold)
+        receipt = self._receipt(exc)
+
+        self._assert_not_a_verdict_and_no_text(receipt, [agent_text])
+        self.assertEqual(receipt['label'], review_dispatch.REVIEW_OUTPUT_WITHHELD)
+        self.assertNotIn('reply_diagnostic', receipt)
+        diag = receipt['stream_diagnostic']
+        self.assertEqual(diag['position'], review_dispatch.STREAM_MALFORMED_AFTER_AGENT_MESSAGE)
+        self.assertEqual(diag['category'], review_dispatch.STREAM_MALFORMED_INVALID_UTF8)
+        self.assertEqual(diag['line'], 3)
+        self.assertEqual(diag['valid_events'], 2)
+        self.assertEqual(diag['agent_messages'], 1)
+        self.assertIs(diag['agent_message_observed'], True)
+        self.assertIs(diag['useful_agent_message_observed'], True)
+
+
 if __name__ == '__main__':
     unittest.main()

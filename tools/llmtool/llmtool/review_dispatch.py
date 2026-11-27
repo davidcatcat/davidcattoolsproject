@@ -84,7 +84,7 @@ def _unique_json_object(pairs):
 
 def _refuse(code, message='Reviewer dispatch refused; details omitted', *, reason=None,
             mismatch_keys=None, excerpt=None, reply_diagnostic=None,
-            reply_diagnostic_label=None):
+            reply_diagnostic_label=None, stream_diagnostic=None):
     error = LLMToolError(message)
     error.review_dispatch_code = code
     if reason is not None:
@@ -99,6 +99,9 @@ def _refuse(code, message='Reviewer dispatch refused; details omitted', *, reaso
         error.review_reply_diagnostic = reply_diagnostic
     if reply_diagnostic_label is not None:
         error.review_reply_diagnostic_label = reply_diagnostic_label
+    if stream_diagnostic is not None:
+        # Fixed-word stream position/category and bounded counts only; never stream text.
+        error.review_stream_diagnostic = stream_diagnostic
     raise error from None
 
 
@@ -545,6 +548,23 @@ def _reply_shape(text):
 # marked truncated; its text is never stored.
 _REPLY_EXCERPT_MAX_BYTES = 2048
 _REPLY_EXCERPT_MAX_LINES = 40
+# Closed-list positions and categories for a malformed Codex JSONL stream record.
+STREAM_MALFORMED_BEFORE_VALID_EVENT = 'before_valid_event'
+STREAM_MALFORMED_AFTER_VALID_EVENT = 'after_valid_event'
+STREAM_MALFORMED_AFTER_AGENT_MESSAGE = 'after_agent_message'
+STREAM_MALFORMED_POSITIONS = frozenset((
+    STREAM_MALFORMED_BEFORE_VALID_EVENT,
+    STREAM_MALFORMED_AFTER_VALID_EVENT,
+    STREAM_MALFORMED_AFTER_AGENT_MESSAGE,
+))
+STREAM_MALFORMED_INVALID_UTF8 = 'invalid_utf8'
+STREAM_MALFORMED_INVALID_JSON = 'invalid_json'
+STREAM_MALFORMED_DUPLICATE_KEY = 'duplicate_key'
+STREAM_MALFORMED_CATEGORIES = frozenset((
+    STREAM_MALFORMED_INVALID_UTF8,
+    STREAM_MALFORMED_INVALID_JSON,
+    STREAM_MALFORMED_DUPLICATE_KEY,
+))
 # #2487 security v91 (CWE-532): these fixed words are the only reply-derived
 # values a receipt may keep. A pattern screen cannot prove free text safe.
 _REPLY_STATUS_WORDS = ('PASS', 'FIX', 'FAIL', 'BLOCKED')
@@ -682,6 +702,66 @@ def _codex_final_message(raw):
     return final
 
 
+def _codex_stream_diagnostic(raw):
+    """Return bounded fixed metadata describing where a malformed JSONL record occurred."""
+    if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_STREAM_CEILING:
+        return None
+    raw_lines = raw.split(b'\n')
+    if raw_lines and not raw_lines[-1]:
+        raw_lines.pop()
+    valid_events = 0
+    agent_messages = 0
+    final = None
+    for index, raw_line in enumerate(raw_lines, 1):
+        if not raw_line:
+            continue
+        category = None
+        try:
+            line = raw_line.decode('utf-8')
+        except UnicodeError:
+            category = STREAM_MALFORMED_INVALID_UTF8
+        if category is None:
+            try:
+                event = json.loads(line, object_pairs_hook=_unique_json_object)
+            except ValueError as exc:
+                category = (STREAM_MALFORMED_DUPLICATE_KEY
+                            if str(exc) == 'duplicate key'
+                            else STREAM_MALFORMED_INVALID_JSON)
+            except RecursionError:
+                category = STREAM_MALFORMED_INVALID_JSON
+        if category is not None:
+            if agent_messages > 0:
+                position = STREAM_MALFORMED_AFTER_AGENT_MESSAGE
+            elif valid_events > 0:
+                position = STREAM_MALFORMED_AFTER_VALID_EVENT
+            else:
+                position = STREAM_MALFORMED_BEFORE_VALID_EVENT
+            return {
+                'position': position,
+                'category': category,
+                'line': index,
+                'valid_events': valid_events,
+                'agent_messages': agent_messages,
+                'agent_message_observed': agent_messages > 0,
+                'useful_agent_message_observed': (
+                    final is not None and bool(final.strip())),
+            }
+        if type(event) is dict:
+            valid_events += 1
+            item = event.get('item')
+            if (event.get('type') == 'item.completed' and
+                    type(item) is dict and
+                    item.get('type') == 'agent_message' and
+                    type(item.get('text')) is str):
+                agent_messages += 1
+                text = item['text']
+                if len(text.encode('utf-8')) > _CODEX_REVIEW_MAX_OUTPUT:
+                    final = None
+                else:
+                    final = text
+    return None
+
+
 def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=1):
     """Parse a bound review; refusals carry a shape and a content-free diagnostic."""
     try:
@@ -696,24 +776,30 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=
             # The reply holds the returned values, so no excerpt is added.
             raise
         final = _codex_final_message(raw)
+        stream_diagnostic = (_codex_stream_diagnostic(raw)
+                             if reason == 'OUTPUT_NOT_JSONL' else None)
         if reason == 'OUTPUT_NOT_JSONL' and (final is None or not final.strip()):
             # #1163 keeps the fixed-word shape of the bad line. #2486 adds a
             # content-free diagnostic; #2487 never persists the raw reply text.
             diagnostic, label = _reply_diagnostic_for_raw(raw)
             _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=_jsonl_shape(raw),
-                    reply_diagnostic=diagnostic, reply_diagnostic_label=label)
+                    reply_diagnostic=diagnostic, reply_diagnostic_label=label,
+                    stream_diagnostic=stream_diagnostic)
         if final is None or not final.strip():
-            _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=REVIEW_OUTPUT_ABSENT)
+            _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=REVIEW_OUTPUT_ABSENT,
+                    stream_diagnostic=stream_diagnostic)
         from .task_submission_cli import _screen_text
         try:
             _screen_text(final, _CODEX_REVIEW_MAX_OUTPUT)
         except LLMToolError:
-            _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=REVIEW_OUTPUT_WITHHELD)
+            _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=REVIEW_OUTPUT_WITHHELD,
+                    stream_diagnostic=stream_diagnostic)
         cut = '\n'.join(final.splitlines()[:40]).encode('utf-8')[:2048].decode('utf-8', 'ignore')
         try:
             excerpt = _screen_text(cut, 2048)
         except LLMToolError:
-            _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=REVIEW_OUTPUT_WITHHELD)
+            _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=REVIEW_OUTPUT_WITHHELD,
+                    stream_diagnostic=stream_diagnostic)
         # #1938: the message holds fixed words and the reply shape, never reply text.
         # #2487: the receipt diagnostic is fixed words/counts, never reply text.
         _refuse('REVIEW_NOT_POSTED', 'Reviewer dispatch refused: %s; %s' % (
@@ -721,7 +807,8 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=
                     _reply_shape(excerpt)),
                 reason=reason, excerpt=excerpt,
                 reply_diagnostic=(_reply_diagnostic(final)
-                                  if reason == 'OUTPUT_NOT_JSONL' else None))
+                                  if reason == 'OUTPUT_NOT_JSONL' else None),
+                stream_diagnostic=stream_diagnostic)
 
 
 def _review_return(claim, result):
@@ -1030,8 +1117,8 @@ def _prune_receipts(directory, limit=_RECEIPT_PRUNE_LIMIT):
 
 def _write_refusal_receipt(*, store, task_id, pr_number, head, version,
                            reviewer_task, reason, excerpt_key, excerpt_val,
-                           reply_diagnostic=None, contract_digest=None,
-                           automatic_rerun=False):
+                           reply_diagnostic=None, stream_diagnostic=None,
+                           contract_digest=None, automatic_rerun=False):
     root = getattr(store, 'root', None)
     if not isinstance(root, Path):
         return None
@@ -1055,6 +1142,9 @@ def _write_refusal_receipt(*, store, task_id, pr_number, head, version,
     if reply_diagnostic is not None:
         # #2486/#2487: fixed-word diagnostic beside the fixed-word shape; no text.
         record['reply_diagnostic'] = reply_diagnostic
+    if stream_diagnostic is not None:
+        # Fixed-word stream position/category and bounded counts only; no text.
+        record['stream_diagnostic'] = stream_diagnostic
     if type(contract_digest) is str:
         # #2486: the contract this refusal was bound to, so a re-run can prove
         # the Task contract has not changed since.
@@ -2055,6 +2145,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             raw_excerpt = getattr(exc, 'review_excerpt', None)
             reply_diagnostic = getattr(exc, 'review_reply_diagnostic', None)
             reply_label = getattr(exc, 'review_reply_diagnostic_label', None)
+            stream_diagnostic = getattr(exc, 'review_stream_diagnostic', None)
             if reply_label is not None:
                 # #2486: a fixed word when the screen refused or bytes did not decode.
                 excerpt_key = 'label'
@@ -2077,6 +2168,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                 excerpt_key: excerpt_val,
                 'receipt_path': None,
             }
+            if stream_diagnostic is not None:
+                refusal['stream_diagnostic'] = stream_diagnostic
             binding = task.get('task_binding')
             contract_digest = (binding.get('contract_digest')
                                if type(binding) is dict else None)
@@ -2086,6 +2179,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                     version=version, reviewer_task=reviewer_task, reason=reason,
                     excerpt_key=excerpt_key, excerpt_val=excerpt_val,
                     reply_diagnostic=reply_diagnostic,
+                    stream_diagnostic=stream_diagnostic,
                     contract_digest=contract_digest,
                     automatic_rerun=refusal_rerun)
                 # #1927: task advance accepts only a str receipt path or None.
@@ -2102,6 +2196,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             outcome_error.review_failure_reason = reason
         if hasattr(exc, 'review_refusal'):
             outcome_error.review_refusal = exc.review_refusal
+        if hasattr(exc, 'review_stream_diagnostic'):
+            outcome_error.review_stream_diagnostic = exc.review_stream_diagnostic
         raise outcome_error from None
     # The claim is durably COMPLETED. Nothing below may turn it UNKNOWN.
     text = output.get('review_text')
