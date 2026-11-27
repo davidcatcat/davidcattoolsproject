@@ -28,6 +28,7 @@ RUNS = (f'actions/workflows/{_DEFAULT_PROFILE.macos_workflow_file}'
         '/runs?branch=main&event=workflow_dispatch&per_page=50')
 JOBS = SHARD_JOBS + (_DEFAULT_PROFILE.macos_check,)
 ACTIVE = frozenset({'queued', 'waiting', 'pending', 'requested', 'in_progress'})
+KNOWN = ACTIVE | frozenset({'completed', 'cancelled', 'failure'})
 FAILED = frozenset({'failure', 'timed_out', 'startup_failure'})
 SHA = re.compile(r'[0-9a-f]{40}\Z')
 DUE = 'MAC_FULL_SUITE_DUE'
@@ -138,7 +139,9 @@ def full_runs(github_get, *, profile=_UNSET):
     data = _get(github_get, path)
     runs = data.get('workflow_runs') if isinstance(data, dict) else None
     if not isinstance(runs, list) or not all(
-            isinstance(run, dict) and isinstance(run.get('status'), str) for run in runs):
+            isinstance(run, dict) and isinstance(run.get('status'), str)
+            and run['status'].strip() and run['status'].lower() in KNOWN
+            for run in runs):
         raise StateError(path)
     return runs
 

@@ -217,6 +217,33 @@ class MacFullDueCases(unittest.TestCase):
         self.assertEqual(self.gh.calls, [])
         self.assertEqual(len(self.github.runs), 1)
 
+    def test_unknown_or_blank_run_status_is_unavailable_without_dispatch(self):
+        for label, status in (('unknown', 'mystery'), ('blank', ''), ('spaces', '  ')):
+            with self.subTest(case=label):
+                self.setUp()
+                self.github.runs = [{'id': 1, 'status': status,
+                                     'head_sha': self.github.main, 'html_url': 'u'}]
+                self.assertEqual(self.sweep(T0 + 1800), due.UNAVAILABLE)
+                self.assertEqual(self.gh.calls, [])
+
+    def test_unknown_or_blank_status_in_pre_dispatch_reread_is_unavailable(self):
+        for label, status in (('unknown', 'mystery'), ('blank', '')):
+            with self.subTest(case=label):
+                self.setUp()
+                reads = []
+
+                def inject():
+                    reads.append(1)
+                    if len(reads) == 2:
+                        self.github.runs.append({'id': 1, 'status': status,
+                                                 'head_sha': self.github.main,
+                                                 'html_url': 'u'})
+
+                self.github.on_runs = inject
+                self.assertEqual(self.sweep(T0 + 1800), due.UNAVAILABLE)
+                self.assertEqual(self.gh.calls, [])
+                self.assertEqual(len(reads), 2)
+
     def test_l_merge_train_requests_full_at_once_without_duplicate(self):
         self.github.merge('1' * 40, T0)
         self.assertEqual(due.request_train_full(self.gh, '/repo', self.github), due.DISPATCHED)
