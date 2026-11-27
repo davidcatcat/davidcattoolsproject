@@ -983,7 +983,13 @@ def _run_registered_tests(root, source_sha, eligible, *, home, pycache=None):
             'command_sha256': hashlib.sha256(json.dumps(argv, separators=(',', ':')).encode()).hexdigest(),
         }
         ran = re.findall(rb'(?m)^Ran ([0-9]+) tests?\b', output)
-        if code or not ran or int(ran[-1]) == 0:
+        # A reported zero is always a failure, whatever the runner kind. The
+        # discovery kinds (unittest and script) always report their count, so
+        # no count at all is a zero-test run too. A direct script may print
+        # anything or nothing and its exit code is its evidence, as before.
+        zero_tests = bool(ran) and int(ran[-1]) == 0
+        discovery = kind in ('unittest', 'script')
+        if code or zero_tests or (discovery and not ran):
             item['output_excerpt'] = _test_excerpt(home, output, code)
             item['status'] = 'FAILED'
         else:
