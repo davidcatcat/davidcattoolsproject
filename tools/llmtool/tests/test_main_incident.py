@@ -111,6 +111,28 @@ class HeadStateTests(unittest.TestCase):
         self.assertFalse(mi.trusted_pass(runs(linux(1, A), full(2, A), linux(3, A, 'failure')), A))
         self.assertTrue(mi.trusted_pass(runs(linux(1, A, 'failure'), full(2, A), linux(3, A)), A))
 
+    def test_conflicting_duplicate_required_job_is_never_a_trusted_pass(self):
+        # A later record for a required job must not hide an earlier failure.
+        name = mac_full_due.JOBS[0]
+        others = [{'name': other, 'conclusion': 'success'}
+                  for other in mac_full_due.JOBS if other != name]
+        for conclusions in (('failure', 'success'), ('success', 'failure')):
+            with self.subTest(conclusions=conclusions):
+                jobs = ([{'name': name, 'conclusion': conclusions[0]}] + others +
+                        [{'name': name, 'conclusion': conclusions[1]}])
+                data = runs(linux(1, A), full(2, A, jobs=jobs))
+                self.assertFalse(mi.trusted_pass(data, A))
+                self.assertIsNone(mi.check_states(data, A)[mi.FULL_MAC])
+
+    def test_duplicate_success_job_records_are_not_trusted(self):
+        # Every required job needs exactly one success record, as mac_full_due.trusted.
+        jobs = [{'name': name, 'conclusion': 'success'} for name in mac_full_due.JOBS]
+        jobs.append(dict(jobs[0]))
+        self.assertFalse(mi.trusted_pass(runs(linux(1, A), full(2, A, jobs=jobs)), A))
+
+    def test_unique_success_jobs_still_pass_with_the_matching_linux_check(self):
+        self.assertTrue(mi.trusted_pass(runs(linux(1, A), full(2, A)), A))
+
     def test_failed_run_then_green_rerun_on_same_sha_is_not_failing(self):
         self.assertFalse(mi.head_failed(runs(full(1, A, 'failure'), full(2, A)), A))
         self.assertTrue(mi.head_failed(runs(full(1, A), full(2, A, 'failure')), A))

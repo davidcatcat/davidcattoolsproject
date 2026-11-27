@@ -109,14 +109,23 @@ def _completed(run):
 
 
 def _passed(kind, run, *, profile=_UNSET):
-    """A completed Linux run passes on success; FULL Mac only when every FULL job succeeded too."""
+    """A completed Linux run passes on success; FULL Mac needs one success per FULL job."""
     resolved = mac_full_due.resolve_profile(profile)
     if not _completed(run) or run['conclusion'] != 'success':
         return False
     if kind == LINUX:
         return True
-    done = {job.get('name'): job.get('conclusion') for job in run['jobs'] if isinstance(job, dict)}
-    return all(done.get(name) == 'success' for name in mac_full_due.full_jobs(resolved))
+    required = set(mac_full_due.full_jobs(resolved))
+    conclusions = {}
+    for job in run['jobs']:
+        if not isinstance(job, dict) or job.get('name') not in required:
+            continue
+        name = job['name']
+        if name in conclusions:
+            # Two records for one required job: fail closed, as mac_full_due.trusted does.
+            return False
+        conclusions[name] = job.get('conclusion')
+    return all(conclusions.get(name) == 'success' for name in required)
 
 
 def _failed(run):
