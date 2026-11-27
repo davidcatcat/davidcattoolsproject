@@ -73,7 +73,8 @@ class ExecutionResourcesTests(unittest.TestCase):
         self.assertEqual(workers['codex-developer']['dispatch'], 'PAUSED')
         # Owner 2026-11-26 (#289 c7181570990): Codex Reviewer resumed.
         self.assertEqual(workers['codex-reviewer']['dispatch'], 'ALLOWED')
-        self.assertEqual(workers['codex-debug']['dispatch'], 'PAUSED')
+        # Owner 2026-11-27 (#289 c7218927310): Codex Debug resumed.
+        self.assertEqual(workers['codex-debug']['dispatch'], 'ALLOWED')
         self.assertNotIn('gemini', workers['agy']['reason'].lower())
 
 
