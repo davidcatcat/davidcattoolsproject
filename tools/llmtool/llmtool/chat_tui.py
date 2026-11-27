@@ -10,6 +10,7 @@ any UI starts. A UI failure never drops into, or replays input through, the REPL
 
 import asyncio
 import collections
+import json
 import os
 import re
 import shlex
@@ -3194,15 +3195,98 @@ class ChatTUI:
             name="llmtool-chat-pm-background", daemon=True)
         self.background_reader.start()
 
-    def _read_background(self, loop, key):
+    def _codex_thread_id(self, session_id, runtime=None):
+        """Read the connected Codex PM's thread id from runtime or its persisted state file."""
+        from . import active_pm_inbox
+
+        runtime_obj = self.pm_runtime if runtime is None else runtime
+        for candidate in (
+            getattr(runtime_obj, "codex_thread_id", None),
+            getattr(runtime_obj, "_thread_id", None),
+            getattr(getattr(runtime_obj, "_driver", None), "_thread_id", None),
+        ):
+            if type(candidate) is str and candidate:
+                return candidate
         try:
-            outcome = (chat_tui_status.read_background(key), None)
+            key = active_pm_inbox.pm_session_key(session_id)
+        except LLMToolError:
+            return None
+        root = None
+        for candidate in (
+            getattr(runtime_obj, "_root", None),
+            getattr(runtime_obj, "state_root", None),
+            getattr(self.pm_api, "state_root", None),
+        ):
+            if isinstance(candidate, (str, Path)):
+                root = candidate
+                break
+        if root is None:
+            env = None
+            for candidate in (
+                getattr(runtime_obj, "environ", None),
+                getattr(self.pm_api, "environ", None),
+            ):
+                if type(candidate) is dict:
+                    env = candidate
+                    break
+            env = os.environ if env is None else env
+            home = env.get("HOME") or str(Path.home())
+            root = Path(home) / ".local/state/llmtool/pm-runtime"
+        fd = -1
+        try:
+            root_path = Path(root)
+            if not root_path.is_dir():
+                return None
+            state_path = pm_runtime._runtime_state_path(root_path, key)
+            fd = os.open(state_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                return None
+            with os.fdopen(fd, encoding="utf-8") as stream:
+                fd = -1
+                data = json.load(stream)
+            thread_id = data.get("codex_thread_id") if type(data) is dict else None
+            return thread_id if type(thread_id) is str and thread_id else None
+        except (LLMToolError, OSError, TypeError, ValueError, UnicodeError):
+            return None
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+    def _codex_pm_sessions(self, session_id, runtime=None):
+        """Extra PM session id formed from the connected Codex PM thread id, when known."""
+        from . import active_pm_inbox
+
+        runtime_obj = self.pm_runtime if runtime is None else runtime
+        binding = self.pm_binding if type(self.pm_binding) is dict else {}
+        runtime_name = binding.get("runtime", getattr(runtime_obj, "runtime", None))
+        if runtime_name != "codex":
+            return ()
+        thread_id = self._codex_thread_id(session_id, runtime=runtime_obj)
+        if not thread_id or thread_id == session_id:
+            return ()
+        thread_session = thread_id if thread_id.startswith("pm-") else "pm-" + thread_id
+        try:
+            thread_key = active_pm_inbox.pm_session_key(thread_session)
+            if thread_key == active_pm_inbox.pm_session_key(session_id):
+                return ()
+        except LLMToolError:
+            return ()
+        return (thread_key,)
+
+    def _read_background(self, loop, key):
+        extra = self._codex_pm_sessions(key)
+        try:
+            items = (chat_tui_status.read_background(key, extra_sessions=extra)
+                     if extra else chat_tui_status.read_background(key))
+            outcome = (items, None)
         except LLMToolError as exc:
             outcome = ([], str(exc))
         except Exception:
             outcome = ([], "TaskStore read failed; details omitted")
         try:
-            attention = chat_tui_status.read_attention(key)
+            attention = (chat_tui_status.read_attention(key, extra_sessions=extra)
+                         if extra else chat_tui_status.read_attention(key))
         except Exception:
             attention = None
         try:
@@ -4084,8 +4168,10 @@ class ChatTUI:
 
     def _read_auto_resume(self, connection, runtime, session, loop):
         """Read resume evidence off the UI thread, bound to one adopted connection."""
+        extra = self._codex_pm_sessions(session, runtime=runtime)
         try:
-            result = chat_tui_status.read_background(session)
+            result = (chat_tui_status.read_background(session, extra_sessions=extra)
+                      if extra else chat_tui_status.read_background(session))
         except Exception:
             result = None
         self._post(loop, self.finish_auto_resume_read, connection, runtime, session, result)
