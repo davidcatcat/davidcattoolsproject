@@ -16,12 +16,12 @@ fixture `594c63a8`. Do not conflate the two.
 - Coordinator review: #2793, comment 7210501920 (test-mode requirement and
   evidence binding).
 - Linked notes in this directory:
-  - `docs/design/a13-external-repo-dry-run-baseline.md` — historical run facts
-    and the two root blockers.
-  - `docs/design/a13-test-execution-modes.md` — `local` / `github` / `remote`
-    modes and the conceptual evidence binding.
-  - `docs/design/a13-inventory-count-reconciliation.md` — counting units and
-    the minimum fields a crosswalk row must carry.
+  - [A13 external-repo dry-run baseline](a13-external-repo-dry-run-baseline.md) —
+    historical run facts and the two root blockers.
+  - [A13 test execution modes](a13-test-execution-modes.md) — `local` /
+    `github` / `remote` modes and the conceptual evidence binding.
+  - [A13 inventory count reconciliation](a13-inventory-count-reconciliation.md)
+    — counting units and the minimum fields a crosswalk row must carry.
 
 ## Blocker crosswalk
 
@@ -43,11 +43,11 @@ produce valid evidence for a requested check, the check fails.
 ### A13.2 — GitHub pre-PR approach (open)
 
 The pre-PR selection remains open and belongs to A13.2, per
-`docs/design/a13-test-execution-modes.md`. The exact-head question the PM
-must settle: **does the chosen GitHub setup attest the pushed head before the
-PR exists — a branch CI run over the committed push itself — or is it
-PR-trigger-only, whose first run is tied to the PR and may check out a
-different ref than the pushed head, requiring an explicit later gate design
+[a13-test-execution-modes.md](a13-test-execution-modes.md). The exact-head
+question the PM must settle: **does the chosen GitHub setup attest the pushed
+head before the PR exists — a branch CI run over the committed push itself —
+or is it PR-trigger-only, whose first run is tied to the PR and may check out
+a different ref than the pushed head, requiring an explicit later gate design
 (which PR event counts, which ref it attests, how the pre-PR state is
 reconciled)?**
 
@@ -55,7 +55,8 @@ reconciled)?**
 
 The later test-mode requirement (#2793, comment 7208490147) and its possible
 overlap with the historical remote-execution finding OSR-27 are carried in
-`docs/design/a13-inventory-count-reconciliation.md`. This crosswalk flags the
+[a13-inventory-count-reconciliation.md](a13-inventory-count-reconciliation.md).
+This crosswalk flags the
 overlap by reference only: it is **not** counted as another dry-run blocker,
 and no OSR-27 count is added to any total here.
 
