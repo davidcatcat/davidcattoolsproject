@@ -23,6 +23,7 @@ from llmtool import main_incident as mi  # noqa: E402
 from llmtool import main_incident_cli as mic  # noqa: E402
 from llmtool import main_incident_store as store  # noqa: E402
 from llmtool import pm_caller  # noqa: E402
+from llmtool import task_completion  # noqa: E402
 from llmtool.ci_profile import CiProfile, CiProfileError, default_profile  # noqa: E402
 
 A, B = 'a' * 40, 'b' * 40
@@ -283,6 +284,68 @@ class R2SubstitutedProfileTests(unittest.TestCase):
                 status = mic.run_main_incident(args, github_get=github, profile=ALT_PROFILE)
         self.assertEqual(status, 0)
         inspect_mock.assert_called_once_with(github, profile=ALT_PROFILE)
+
+    def test_main_incident_cli_scan_through_real_github_read_admission(self):
+        paren_profile = CiProfile(
+            linux_code_check='alt check (Linux 3.15)',
+            docs_check='alt-docs-check',
+            gateway_check='alt-gateway-check',
+            ai_loop_check='alt-ai-loop-check',
+            macos_check='alt-macos-check',
+            linux_workflow_file='alt-linux-ci.yml',
+            macos_workflow_file='alt-mac-ci.yml',
+        )
+
+        class FakeProcess:
+            def __init__(self, payload):
+                r_fd, w_fd = os.pipe()
+                os.write(w_fd, json.dumps(payload).encode('utf-8'))
+                os.close(w_fd)
+                self.stdout = os.fdopen(r_fd, 'rb')
+                self.pid = 99999
+
+            def poll(self):
+                return 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        for label, profile in (('default', default_profile()),
+                               ('alt', ALT_PROFILE),
+                               ('paren', paren_profile)):
+            with self.subTest(profile=label):
+                root = self.root / f'admission_{label}' / 'tasks'
+                github = _IncidentGitHub([B, A], profile)
+                github.passed(A)
+                github.code_failure(B)
+                github.merged(B, 12)
+                github.linux[B].insert(0, {'id': 900, 'name': profile.docs_check, 'head_sha': B,
+                                           'status': 'completed', 'conclusion': 'success'})
+                github.linux[B].insert(0, {'id': 901, 'name': profile.linux_code_check,
+                                           'head_sha': A, 'status': 'completed',
+                                           'conclusion': 'success'})
+
+                def fake_popen(argv, **kwargs):
+                    prefix = 'repos/owner/repo/'
+                    self.assertTrue(argv[-1].startswith(prefix))
+                    return FakeProcess(github(argv[-1][len(prefix):]))
+
+                args = cli.parser_for_cli().parse_args(
+                    ['ci', 'main-incident', 'scan', '--pm-session', OWNER_SESSION])
+                out = io.StringIO()
+                with mock.patch.object(task_completion.shutil, 'which', return_value='/usr/bin/gh'), \
+                        mock.patch.object(task_completion, '_trusted_slug',
+                                          return_value='owner/repo'), \
+                        mock.patch.object(task_completion.subprocess, 'Popen',
+                                          side_effect=fake_popen), \
+                        redirect_stdout(out):
+                    status = mic.run_main_incident(
+                        args, github_get=None, root=root, environ={},
+                        state_root=self.state_root, now=NOW, profile=profile)
+                payload = json.loads(out.getvalue())
+                self.assertEqual((status, payload['code'], payload['class']),
+                                 (0, mic.CREATED, mi.CODE))
+                self.assertIn(mic.linux_runs_path(profile.linux_code_check, B), github.calls)
 
 
 class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):

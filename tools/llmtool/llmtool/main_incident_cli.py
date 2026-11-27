@@ -18,8 +18,9 @@ Read plan (``github_get(path)`` is relative to the repository API):
 
 * ``commits?sha=main&per_page=40``: main history, newest first.
 * ``mac_full_due.RUNS`` and ``actions/runs/<id>/jobs``: FULL Mac runs.
-* ``commits/<sha>/check-runs?check_name=check (Linux 3.14)``: Linux runs.
-  Commits are walked from newest until a trusted PASS, at most MAX_COMMITS.
+* ``commits/<sha>/check-runs?per_page=100``: Linux runs (filtered by check name
+  and head SHA). Commits are walked from newest until a trusted PASS, at most
+  MAX_COMMITS.
 * For failed runs on the failing head only: ``actions/jobs/<id>`` (failed
   step) and ``check-runs/<id>/annotations`` (unittest ``FAIL:``/``ERROR:``
   lines give test IDs). These reads are best effort: a missing value stays
@@ -40,7 +41,6 @@ from __future__ import annotations
 import json
 import re
 import sys
-from urllib.parse import quote
 
 from . import main_ci_job_fetch
 from . import main_incident as mi
@@ -53,8 +53,7 @@ from .errors import LLMToolError
 MAX_COMMITS = 40
 MAX_FILES = 100
 COMMITS = 'commits?sha=main&per_page=' + str(MAX_COMMITS)
-LINUX_RUNS = 'commits/{sha}/check-runs?check_name=' + quote(mi.LINUX_CHECK, safe='') + \
-    '&per_page=100'
+LINUX_RUNS = 'commits/{sha}/check-runs?per_page=100'
 
 NONE = 'MAIN_INCIDENT_NONE'
 CREATED = 'MAIN_INCIDENT_CREATED'
@@ -138,8 +137,7 @@ def _main_commits(github_get):
 
 def linux_runs_path(linux_check, sha):
     """Return the GitHub check-runs API path for one Linux check name and SHA."""
-    return (f'commits/{sha}/check-runs?check_name='
-            f'{quote(linux_check, safe="")}&per_page=100')
+    return f'commits/{sha}/check-runs?per_page=100'
 
 
 def _linux_runs(github_get, sha, *, profile=mac_full_due._UNSET):
@@ -147,12 +145,17 @@ def _linux_runs(github_get, sha, *, profile=mac_full_due._UNSET):
     path = linux_runs_path(resolved.linux_code_check, sha)
     data = _read(github_get, path)
     runs = data.get('check_runs') if isinstance(data, dict) else None
-    if not isinstance(runs, list):
+    if not isinstance(runs, list) or len(runs) >= 100:
+        raise mac_full_due.StateError(path)
+    if 'total_count' in data:
+        total = data['total_count']
+        if type(total) is not int or total != len(runs):
+            raise mac_full_due.StateError(path)
+    if any(not isinstance(run, dict) for run in runs):
         raise mac_full_due.StateError(path)
     out = []
     for run in runs:
-        if not isinstance(run, dict) or run.get('name') != resolved.linux_code_check or \
-                run.get('head_sha') != sha:
+        if run.get('name') != resolved.linux_code_check or run.get('head_sha') != sha:
             continue
         if type(run.get('id')) is not int or not isinstance(run.get('status'), str):
             raise mac_full_due.StateError(path)
