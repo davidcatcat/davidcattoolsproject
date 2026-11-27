@@ -1045,9 +1045,11 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
 
     remote_test_receipt (EC2) and ci_failure (#1502 WP-D D11) are exclusive; both
     are test failures and share one count, the '<base>-ec2' family. For a
-    ci_failure, profile is the CiProfile whose check names are accepted; a
-    missing or invalid profile refuses CI_REPAIR_PROFILE_INVALID. Building and
-    later verification share the same effective CI profile resolution.
+    ci_failure, the accepted check names come from the effective CI profile
+    resolver; an explicit profile refuses CI_REPAIR_PROFILE_INVALID because
+    later claim-verification and retry callers resolve the same effective
+    profile without a per-call profile argument, and an unresolvable or invalid
+    resolved profile also refuses CI_REPAIR_PROFILE_INVALID.
 
     auto is True only from task advance / drive. An auto review repair (a retry
     included) is refused REVIEW_REPAIR_PM_REQUIRED, inside the chain-locked
@@ -1060,6 +1062,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     """
     if ci_failure is not None and remote_test_receipt is not None:
         _refuse('CI_FAILURE_INVALID')
+    if profile is not _UNSET:
+        _refuse(CI_REPAIR_PROFILE_INVALID)
     test_failure = remote_test_receipt is not None or ci_failure is not None
     task = store.get(task_id)
     if type(task) is not dict or task.get('task_id') != task_id:

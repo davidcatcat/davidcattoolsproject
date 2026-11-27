@@ -431,6 +431,35 @@ class RealTaskStoreRepairAndRetryTests(unittest.TestCase):
         self.assertTrue(str(caught.exception).startswith(
             'START_RETRY_REPAIR_PACKET_MISMATCH'))
 
+    def test_explicit_profile_at_repair_review_refuses_without_persisting_claim(self):
+        for check_name, explicit in (
+                (_alt_checks()[0], ALT_PROFILE),
+                (_default_checks()[0], default_profile()),
+        ):
+            with self.subTest(check_name=check_name):
+                store = self._new_store()
+                root_id = task_store.new_id()
+                store.create(_task_record(root_id, with_developer=True))
+                dispatched = []
+                with self.assertRaises(LLMToolError) as caught:
+                    review_repair.repair_review(
+                        store=store,
+                        task_id=root_id,
+                        executor_task=D6,
+                        pr_number=PR,
+                        github_get=lambda _path: [],
+                        dispatch_adapter=lambda **request: dispatched.append(request),
+                        current_head=lambda _task, _executor: HEAD,
+                        repair_task_recorder=lambda **request: store.create(
+                            _task_record(request['repair_task_id'])),
+                        ci_failure=_failure(check_name),
+                        profile=explicit,
+                    )
+                self.assertEqual(caught.exception.review_repair_code,
+                                 'CI_REPAIR_PROFILE_INVALID')
+                self.assertIsNone(store.get(root_id).get('review_repair_claims'))
+                self.assertEqual(dispatched, [])
+
 
 class R1DefaultProfileTests(unittest.TestCase):
     def test_default_names_build_and_bind_exactly_as_before(self):
