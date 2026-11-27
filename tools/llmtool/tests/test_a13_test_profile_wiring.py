@@ -116,6 +116,33 @@ class RefusalTests(unittest.TestCase):
     def test_non_profile_result_refuses(self):
         self._refused(mock.Mock(return_value=object()))
 
+    def test_bytes_pattern_profile_refuses(self):
+        bytes_profile = test_profile.TestProfile((
+            (re.compile(b'test'), 'unittest'),
+        ))
+        self._refused(mock.Mock(return_value=bytes_profile))
+
+    def test_real_completion_refuses_a_bytes_pattern_profile(self):
+        bytes_profile = test_profile.TestProfile((
+            (re.compile(b'test'), 'unittest'),
+        ))
+        paths = ['tools/llmtool/tests/test_alpha.py']
+        snapshot = {'diff_sha256': DIFF_SHA256, 'changed_paths': list(paths),
+                    'source_sha': SOURCE_SHA}
+        with mock.patch.object(test_profile, 'default_profile',
+                               return_value=bytes_profile), \
+                mock.patch.object(task_completion, '_worktree_snapshot',
+                                  side_effect=[dict(snapshot), dict(snapshot)]), \
+                mock.patch.object(task_completion, '_run_registered_tests',
+                                  return_value=[]):
+            with self.assertRaises(LLMToolError) as caught:
+                task_completion.run_bounded_worktree_tests(
+                    root='/nonexistent', source_sha=SOURCE_SHA,
+                    diff_sha256=DIFF_SHA256, changed_paths=list(paths),
+                    read_paths=list(paths), write_paths=[])
+        self.assertEqual(caught.exception.completion_code,
+                         'TEST_PROFILE_INVALID')
+
     def test_ambiguous_profile_for_a_path_refuses(self):
         ambiguous = test_profile.TestProfile((
             (re.compile(r'custom/tests/.*\.py\Z'), 'unittest'),

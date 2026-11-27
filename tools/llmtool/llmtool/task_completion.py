@@ -156,8 +156,17 @@ def _classify_test_path(path):
         _stop('TEST_PROFILE_INVALID')
     if type(path) is not str:
         return None
-    kinds = {kind for pattern, kind in profile.entries
-             if pattern.fullmatch(path) is not None}
+    entries = profile.entries
+    # A compiled bytes pattern passed the TestProfile type check but cannot
+    # fullmatch a str path, so refuse it here with the fixed code instead of
+    # letting TypeError escape classification.
+    if any(type(pattern.pattern) is not str for pattern, _ in entries):
+        _stop('TEST_PROFILE_INVALID')
+    try:
+        kinds = {kind for pattern, kind in entries
+                 if pattern.fullmatch(path) is not None}
+    except Exception:
+        _stop('TEST_PROFILE_INVALID')
     if len(kinds) > 1:
         _stop('TEST_PROFILE_INVALID')
     return kinds.pop() if kinds else None
