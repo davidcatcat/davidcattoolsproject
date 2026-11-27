@@ -150,6 +150,27 @@ class ScriptModuleResultTests(unittest.TestCase):
         for name in ('workspace', 'archive', 'venv', 'requirements', 'package', 'tests', 'cleanup', 'receipt'):
             self.assertIn(f'mark("{name}")', rt._REMOTE_SCRIPT)
 
+    def test_script_emits_module_markers_to_stderr_only(self):
+        parsed = ast.parse(rt._REMOTE_SCRIPT)
+        helper = next(
+            node for node in parsed.body
+            if isinstance(node, ast.FunctionDef) and node.name == 'mark_module'
+        )
+        namespace = dict(sys=sys)
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), '<remote-mark-module>', 'exec'), namespace)
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+            namespace['mark_module'](1, 2)
+            namespace['mark_module'](2, 2)
+        self.assertEqual(stdout_buf.getvalue(), '')
+        self.assertEqual(
+            stderr_buf.getvalue().splitlines(),
+            ['LLMTOOL_REMOTE_MODULE:1/2', 'LLMTOOL_REMOTE_MODULE:2/2'],
+        )
+        self.assertIn('for idx,mod in enumerate(mods,1):', rt._REMOTE_SCRIPT)
+        self.assertIn('mark_module(idx,len(mods))', rt._REMOTE_SCRIPT)
+
 
 if __name__ == '__main__':
     unittest.main()

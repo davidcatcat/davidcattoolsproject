@@ -151,9 +151,11 @@ _SSH_TIMEOUT_PHASES = {
     'receipt': ('CLEANUP_OR_RECEIPT', 'RECEIPT'),
 }
 _SSH_TIMEOUT_MARKER = re.compile(r'LLMTOOL_REMOTE_PHASE:([a-z]{1,24})')
+_SSH_TIMEOUT_MODULE_MARKER = re.compile(r'LLMTOOL_REMOTE_MODULE:([1-9][0-9]{0,3})/([1-9][0-9]{0,3})')
+_SSH_TIMEOUT_MAX_MODULES = 1024
 
 
-def _ssh_timeout_diagnostic(exc):
+def _ssh_timeout_diagnostic(exc, *, module_count=None):
     """Return a fixed, content-free phase diagnostic from TimeoutExpired stderr."""
     raw = getattr(exc, 'stderr', None)
     if type(raw) is bytes:
@@ -163,13 +165,50 @@ def _ssh_timeout_diagnostic(exc):
     else:
         text = ''
     phase, stage = 'NONE', 'NONE'
+    module_seen = False
+    module_invalid = False
+    expected_ordinal = 1
+    observed_total = None
+    last_ordinal = None
     for line in text.splitlines():
-        match = _SSH_TIMEOUT_MARKER.fullmatch(line.strip())
+        stripped = line.strip()
+        match = _SSH_TIMEOUT_MARKER.fullmatch(stripped)
         if match:
             mapped = _SSH_TIMEOUT_PHASES.get(match.group(1))
             if mapped is not None:
+                if mapped[0] == 'TESTS' and (phase == 'TESTS' or module_seen):
+                    module_invalid = True
                 phase, stage = mapped
-    return {'phase': phase, 'stage': stage}
+            continue
+        if stripped.startswith('LLMTOOL_REMOTE_MODULE:'):
+            module_seen = True
+            if phase != 'TESTS':
+                module_invalid = True
+                continue
+            mod_match = _SSH_TIMEOUT_MODULE_MARKER.fullmatch(stripped)
+            if not mod_match:
+                module_invalid = True
+                continue
+            ordinal = int(mod_match.group(1))
+            total = int(mod_match.group(2))
+            if (total > _SSH_TIMEOUT_MAX_MODULES or ordinal > total or
+                    (module_count is not None and total != module_count) or
+                    (observed_total is not None and total != observed_total) or
+                    ordinal != expected_ordinal):
+                module_invalid = True
+                continue
+            observed_total = total
+            last_ordinal = ordinal
+            expected_ordinal += 1
+    diagnostic = {'phase': phase, 'stage': stage}
+    if phase == 'TESTS' and module_seen:
+        if module_invalid or last_ordinal is None or observed_total is None:
+            diagnostic['module_stage'] = 'INVALID'
+        else:
+            diagnostic['module_stage'] = 'STARTED'
+            diagnostic['module_ordinal'] = last_ordinal
+            diagnostic['module_total'] = observed_total
+    return diagnostic
 
 
 def _record_outcome(store, task_id, task, *, result, code, executor_task, sha, modules,
@@ -371,7 +410,7 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
     except subprocess.TimeoutExpired as exc:
         return _record_outcome(store, task_id, task, result='TIMEOUT', code='SSH_TIMEOUT',
                                executor_task=executor_task, sha=sha, modules=selected,
-                               diagnostic=_ssh_timeout_diagnostic(exc))
+                               diagnostic=_ssh_timeout_diagnostic(exc, module_count=len(selected)))
     except (OSError, ConnectionError):
         return _record_outcome(store, task_id, task, result='UNAVAILABLE', code='SSH_UNAVAILABLE',
                                executor_task=executor_task, sha=sha, modules=selected)
