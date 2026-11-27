@@ -38,6 +38,19 @@ class MacFullDueTests(unittest.TestCase):
         self.assertEqual((code, stdout.getvalue()), (1, ""))
         self.assertIn("unavailable", stderr.getvalue())
 
+    def test_malformed_sha_fails_before_reading_without_input_or_traceback(self):
+        def reader(path):
+            raise AssertionError("reader must not be called for a malformed sha")
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = ci_mac_full_due.main(["--repo", "o/r", "--sha", "not-a-sha",
+                                         "--event", "workflow_dispatch"], reader)
+        self.assertEqual((code, stdout.getvalue()), (1, ""))
+        self.assertEqual(stderr.getvalue(), ci_mac_full_due.SHA_ERROR + "\n")
+        self.assertNotIn("not-a-sha", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
     def test_schedule_is_rejected_as_unexpected(self):
         with self.assertRaisesRegex(ValueError, "unexpected event 'schedule'"):
             ci_mac_full_due.is_due("schedule", "a" * 40, None)
