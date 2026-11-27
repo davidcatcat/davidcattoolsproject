@@ -22,7 +22,8 @@ Exit behavior in `run_doctor` is:
 - A degraded diagnostics metadata finding is a real nonzero result, never a silent pass.
 - Strict not-ready: `strict=True` returns nonzero when overall is `not-ready`.
 - Non-strict not-ready: `strict=False` may still return zero when overall is `not-ready`.
-- Read errors, broken pipes, and other unexpected store failures are surfaced through defined error paths with nonzero results.
+- Read errors (`ReaderError`) and other unexpected store failures are surfaced with nonzero results.
+- `BrokenPipeError` is re-raised by `run_doctor` rather than converted to a nonzero return; the CLI layer handles the re-raised broken pipe separately and does not report it as a nonzero doctor exit.
 
 This is the part of OSR-10's offline diagnostic intent that the current implementation addresses: an overall readiness verdict and a strict/offline exit-code contract, computed without any network, provider, inference, or credential use.
 
@@ -50,4 +51,4 @@ Until those sections are accepted, the doctor's overall and strict behavior stan
 - Docs only: no command runs, provider calls, live checks, credential inspection, code, or workflow modifications accompany this note.
 - No environment values or historical paths are included.
 - Source references name files and functions only (e.g., `tools/llmtool/llmtool/doctor.py`: `doctor_output`, `run_doctor`); no line anchors.
-- Gates: exact-head hosted docs check against the pinned commit above, and formal review by codex-reviewer.
+- Gates: the exact-head hosted docs check applies to this note's commit HEAD; `d4380aed191a9bc534cce3adbd610563b55a8680` is the main source pin referenced by the note. Formal review by codex-reviewer.
