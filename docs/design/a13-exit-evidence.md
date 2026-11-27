@@ -10,11 +10,11 @@ runbook.
 - Advisor-verified snapshot facts, recorded as supplied.
 
 Admitted source notes (linked; their tables are not copied here):
-- `docs/design/a13-inventory-count-reconciliation.md` — admitted aggregates
-  and the outstanding item-level mapping.
-- `docs/design/a13-profile-wiring-evidence.md` — recorded wiring subset by
-  merged PR, with profile source `tools/llmtool/llmtool/ci_profile.py`
-  (`CiProfile`, `default_profile`).
+- [a13-inventory-count-reconciliation.md](./a13-inventory-count-reconciliation.md)
+  — admitted aggregates and the outstanding item-level mapping.
+- [a13-profile-wiring-evidence.md](./a13-profile-wiring-evidence.md) —
+  recorded wiring subset by merged PR, with profile source
+  `tools/llmtool/llmtool/ci_profile.py` (`CiProfile`, `default_profile`).
 
 ## Matrix
 
