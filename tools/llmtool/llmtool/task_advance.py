@@ -2935,7 +2935,13 @@ def label_mac_ci_for_skipped_check(*, task_id, store=None, pr_number=None,
 
     Return None when the available evidence is not specifically a skipped
     macOS check. A successful or already-present label returns WAITING_CI.
+    An unusable CI profile returns MERGE_REFUSED with
+    MERGE_CI_PROFILE_INVALID before any store, D6 or GitHub read.
     """
+    try:
+        resolved = _resolve_ci_profile(profile)
+    except mac_full_due.ProfileError:
+        return _merge_refusal(MERGE_CI_PROFILE_INVALID)
     store = TaskStore() if store is None else store
     try:
         record = store.get(task_id)
@@ -2965,7 +2971,9 @@ def label_mac_ci_for_skipped_check(*, task_id, store=None, pr_number=None,
         return None
     # #1576: Owner acceptance gates the merge only, never the Mac run that precedes it.
     code = _merge_checks(record, number, head, pr, get, allow_missing_macos=True,
-                         skip_owner_acceptance=True, profile=profile)
+                         skip_owner_acceptance=True, profile=resolved)
+    if code == MERGE_CI_PROFILE_INVALID:
+        return _merge_refusal(MERGE_CI_PROFILE_INVALID)
     if code != 'MERGE_MACOS_CHECK_SKIPPED':
         return None
     try:
@@ -5007,7 +5015,6 @@ def advance(*, task_id, store=None, merge=False, owner_acceptance=None,
         return _advance_refused(task_id, 'OWNER_EXCEPTION_REQUIRES_MERGE')
     # #2793 A13.0: resolve once per advance step, before the lease or any record
     # read. An unusable profile refuses the step and never uses the old names.
-    explicit_profile = options.get('profile', _UNSET) is not _UNSET
     try:
         options['profile'] = _resolve_ci_profile(options.get('profile', _UNSET))
     except mac_full_due.ProfileError:
@@ -5015,7 +5022,7 @@ def advance(*, task_id, store=None, merge=False, owner_acceptance=None,
             return dict(_merge_refusal(MERGE_CI_PROFILE_INVALID), task_id=task_id,
                         next='MERGE_REFUSED', acked=[])
         return _advance_refused(task_id, MERGE_CI_PROFILE_INVALID)
-    options['label_profile'] = options['profile'] if explicit_profile else _UNSET
+    options['label_profile'] = options['profile']
     store = TaskStore() if store is None else store
     with contextlib.ExitStack() as held:
         lease = getattr(store, 'advance_lease', None)
@@ -5073,6 +5080,10 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             return dict(_merge_refusal(MERGE_CI_PROFILE_INVALID), task_id=task_id,
                         next='MERGE_REFUSED', acked=[])
         return _advance_refused(task_id, MERGE_CI_PROFILE_INVALID)
+    # #2793 A13.0: the Mac-label helper takes this step's one resolved profile,
+    # never the legacy default names and never a second resolver read.
+    if label_profile is _UNSET:
+        label_profile = resolved_profile
     try:
         record = store.get(task_id)
     except Exception:

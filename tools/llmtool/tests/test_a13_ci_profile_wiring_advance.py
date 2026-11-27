@@ -321,22 +321,70 @@ class R2SubstitutedProfileTests(unittest.TestCase):
         self.assertEqual(repaired, [])
 
     def test_mac_label_uses_substituted_checks(self):
+        for via_patch in (False, True):
+            with self.subTest(via_patch=via_patch):
+                github = _GitHub([
+                    _run(1, ALT_PROFILE.linux_code_check),
+                    _run(2, ALT_PROFILE.macos_check, 'skipped'),
+                ], MAC_FILES)
+                if via_patch:
+                    with mock.patch.object(ci_profile, 'default_profile',
+                                           return_value=ALT_PROFILE) as patched:
+                        result, calls = _label(_record(), github)
+                    self.assertEqual(patched.call_count, 1)
+                else:
+                    result, calls = _label(_record(), github, profile=ALT_PROFILE)
+                self.assertEqual(result['step'], 'WAITING_CI')
+                self.assertEqual(calls, [('/repo/task', [
+                    'pr', 'edit', '17', '--add-label', 'mac-ci'])])
+
+                original = _GitHub([
+                    _run(1, 'check (Linux 3.14)'),
+                    _run(2, 'check (macOS 3.13)', 'skipped'),
+                ], MAC_FILES)
+                if via_patch:
+                    with mock.patch.object(ci_profile, 'default_profile',
+                                           return_value=ALT_PROFILE):
+                        result, calls = _label(_record(), original)
+                else:
+                    result, calls = _label(_record(), original, profile=ALT_PROFILE)
+                self.assertIsNone(result)
+                self.assertEqual(calls, [])
+
+    def test_advance_mac_label_uses_resolved_profile_once(self):
+        record = _record(
+            review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD, 'version': 1,
+                                    'state': 'DISPATCHED'}],
+            completion_events=[{'source': 'REVIEWER', 'source_sha': HEAD,
+                                'version': 1, 'outcome': 'REVIEW_PASS'}])
         github = _GitHub([
             _run(1, ALT_PROFILE.linux_code_check),
             _run(2, ALT_PROFILE.macos_check, 'skipped'),
         ], MAC_FILES)
-        result, calls = _label(_record(), github, profile=ALT_PROFILE)
+        calls = []
+
+        def completion(_args, *, store):
+            store.record['completion']['missing_gates'] = ['CI_WORKFLOW_JOBS_INVALID']
+            return 1
+
+        def runner(root, args):
+            calls.append((root, list(args)))
+            return types.SimpleNamespace(returncode=0)
+
+        with mock.patch.object(ci_profile, 'default_profile',
+                               return_value=ALT_PROFILE) as patched, \
+                mock.patch.object(task_advance, '_d6_snapshot', return_value=_d6()):
+            result = task_advance.advance(
+                task_id=record['task_id'], store=_Store(record), pr_number=17,
+                github_get=github, run_task_complete_call=completion,
+                merge_gh_runner=runner,
+                dispatch_review_call=lambda **_kwargs: {'state': 'DISPATCHED'},
+                repair_review_call=lambda **_kwargs: {'state': 'DISPATCHED'})
+        self.assertEqual(patched.call_count, 1)
         self.assertEqual(result['step'], 'WAITING_CI')
+        self.assertIn('MAC_CI_LABEL_READY', result['codes'])
         self.assertEqual(calls, [('/repo/task', [
             'pr', 'edit', '17', '--add-label', 'mac-ci'])])
-
-        original = _GitHub([
-            _run(1, 'check (Linux 3.14)'),
-            _run(2, 'check (macOS 3.13)', 'skipped'),
-        ], MAC_FILES)
-        result, calls = _label(_record(), original, profile=ALT_PROFILE)
-        self.assertIsNone(result)
-        self.assertEqual(calls, [])
 
 
 class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):
@@ -415,6 +463,21 @@ class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):
                 github.assert_not_called()
                 repair.assert_not_called()
 
+    def test_direct_label_refuses_bad_profile_before_any_read(self):
+        for kind, bad in self._bad_profiles():
+            with self.subTest(kind=kind):
+                github = mock.Mock(side_effect=AssertionError(
+                    'github_get must not be called'))
+                self.assertEqual(
+                    task_advance.label_mac_ci_for_skipped_check(
+                        task_id=TASK_ID, store=_NoReadStore(), pr_number=17,
+                        github_get=github, merge_gh_runner=mock.Mock(),
+                        profile=bad),
+                    {'step': 'MERGE_REFUSED',
+                     'codes': [task_advance.MERGE_CI_PROFILE_INVALID],
+                     'result': None})
+                github.assert_not_called()
+
     def test_patched_default_profile_error_refuses_before_any_read(self):
         for exc in (CiProfileError(), RuntimeError('missing profile')):
             with self.subTest(exc=type(exc).__name__):
@@ -424,9 +487,17 @@ class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):
                     result = task_advance.advance(
                         task_id=TASK_ID, store=_NoReadStore(), pr_number=17,
                         github_get=github)
+                    label = task_advance.label_mac_ci_for_skipped_check(
+                        task_id=TASK_ID, store=_NoReadStore(), pr_number=17,
+                        github_get=github, merge_gh_runner=mock.Mock())
                 self.assertEqual(result['step'], 'REFUSED')
                 self.assertEqual(result['codes'],
                                  [task_advance.MERGE_CI_PROFILE_INVALID])
+                self.assertEqual(label, {
+                    'step': 'MERGE_REFUSED',
+                    'codes': [task_advance.MERGE_CI_PROFILE_INVALID],
+                    'result': None,
+                })
                 github.assert_not_called()
 
     def test_one_advance_step_resolves_profile_once(self):
