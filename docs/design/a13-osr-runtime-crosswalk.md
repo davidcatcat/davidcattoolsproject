@@ -13,10 +13,10 @@ Evidence files (merged and advisor-verified), linked in the same directory:
 
 | source_id | linked evidence | consumer | disposition | owning milestone | duplicate_of |
 |---|---|---|---|---|---|
-| OSR-13 | File `role_config`, function `resolve_role` (`role_config.resolve_role`) is a configurable lookup, and file `review_dispatch` uses it ([./a13-role-session-assumptions.md](./a13-role-session-assumptions.md)) | File `review_dispatch` (uses `role_config.resolve_role`) | Lookup side resolved at the pinned main; remaining provider evidence stays open | A13.5 | unverified (raw ID unavailable) |
-| OSR-14 | In file `review_exchange`, function `_context` (the context step) still has fixed session comparisons, separate from formal review ([./a13-role-session-assumptions.md](./a13-role-session-assumptions.md)) | File `review_exchange`, function `_context` (context step) | Fixed session comparisons remain, kept separate from formal review | A13.5 | unverified (raw ID unavailable) |
-| OSR-15 | No longer Claude-only: dedicated runtime bindings can select Claude or Codex; the boundary is stated by the linked note and asserts no code symbol or live access ([./a13-pm-runtime-binding-boundary.md](./a13-pm-runtime-binding-boundary.md)) | PM runtime binding (dedicated bindings; Claude or Codex) | Partially resolved: Claude-only status withdrawn; clean-installed diagnostics and real user-owned runtime proof remain open. Source inspection does not prove current runtime access or expand authority | A13.4 / A13.5 / A13.7 | unverified (raw ID unavailable) |
-| OSR-21 | File `worker_dispatch`, symbol `WORKERS` (`worker_dispatch.WORKERS`) remains a fixed set ([./a13-role-session-assumptions.md](./a13-role-session-assumptions.md)) | File `worker_dispatch` (symbol `WORKERS`) | Fixed worker set remains; policy and provider handoff stay open | A13.1 (policy), A13.5 (provider handoff) | unverified (raw ID unavailable) |
+| OSR-13 | In file `role_config.py`, function `resolve_role` (`role_config.resolve_role`) is a configurable lookup, and file `review_dispatch.py` uses it ([./a13-role-session-assumptions.md](./a13-role-session-assumptions.md)) | File `review_dispatch.py` (uses `role_config.py`, function `resolve_role`) | Lookup side resolved at the pinned main; remaining provider evidence stays open | A13.5 | unverified (raw ID unavailable) |
+| OSR-14 | In file `review_exchange.py`, function `_context` (the context step) still has fixed session comparisons, separate from formal review ([./a13-role-session-assumptions.md](./a13-role-session-assumptions.md)) | File `review_exchange.py`, function `_context` (context step) | Fixed session comparisons remain, kept separate from formal review | A13.5 | unverified (raw ID unavailable) |
+| OSR-15 | No longer Claude-only: dedicated PM runtime binding — file `pm_runtime.py`, function `create_dedicated_pm` — can select Claude or Codex; source inspection asserts no live access ([./a13-pm-runtime-binding-boundary.md](./a13-pm-runtime-binding-boundary.md)) | PM runtime binding — file `pm_runtime.py`, function `create_dedicated_pm` (Claude or Codex) | Partially resolved: Claude-only status withdrawn; clean-installed diagnostics and real user-owned runtime proof remain open. Source inspection does not prove current runtime access or expand authority | A13.4 / A13.5 / A13.7 | unverified (raw ID unavailable) |
+| OSR-21 | File `worker_dispatch.py`, symbol `WORKERS` (`worker_dispatch.WORKERS`) remains a fixed set ([./a13-role-session-assumptions.md](./a13-role-session-assumptions.md)) | File `worker_dispatch.py` (symbol `WORKERS`) | Fixed worker set remains; policy and provider handoff stay open | A13.1 (policy), A13.5 (provider handoff) | unverified (raw ID unavailable) |
 
 ## Scope notes
 
@@ -24,9 +24,8 @@ Evidence files (merged and advisor-verified), linked in the same directory:
   mapping complete; rows outside this table remain unverified.
 - `duplicate_of` and original raw IDs are recorded as unverified where
   unavailable. No duplicates are claimed and no ID or count is inferred.
-- Every code reference names file and function or symbol, without line
-  anchors. The OSR-15 selection boundary carries no code symbol in the
-  supplied facts; none is asserted.
+- Every code reference names an actual `.py` file and its function or symbol,
+  without line anchors.
 - Limit: docs only. No policy, credentials, code or CI changes.
 
 ## Gates
