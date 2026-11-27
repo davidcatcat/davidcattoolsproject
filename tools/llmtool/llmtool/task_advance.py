@@ -5080,8 +5080,9 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             return dict(_merge_refusal(MERGE_CI_PROFILE_INVALID), task_id=task_id,
                         next='MERGE_REFUSED', acked=[])
         return _advance_refused(task_id, MERGE_CI_PROFILE_INVALID)
-    # #2793 A13.0: the Mac-label helper takes this step's one resolved profile,
-    # never the legacy default names and never a second resolver read.
+    # #2793 A13.0: a substituted profile reaches the Mac-label helper as this
+    # step's one resolved profile; the default profile keeps the legacy call
+    # shape because the helper's own default names are the same.
     if label_profile is _UNSET:
         label_profile = resolved_profile
     try:
@@ -5700,10 +5701,17 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                 step = 'WAITING_EXECUTOR'
             if 'CI_WORKFLOW_JOBS_INVALID' in missing:
                 try:
+                    # A default profile keeps the legacy call shape (and the
+                    # helper's own default); a substituted profile is passed
+                    # explicitly so it can never fall back to the old names.
+                    label_kwargs = {}
+                    if (label_profile is not _UNSET and
+                            label_profile != mac_full_due._DEFAULT_PROFILE):
+                        label_kwargs['profile'] = label_profile
                     label_result = label_mac_ci_for_skipped_check(
                         task_id=task_id, store=store, pr_number=number,
                         github_get=get, merge_gh_runner=label_gh_runner, cwd=cwd,
-                        **({} if label_profile is _UNSET else {'profile': label_profile}))
+                        **label_kwargs)
                     if type(label_result) is dict:
                         if label_result.get('step') == 'WAITING_CI':
                             step = 'WAITING_CI'
