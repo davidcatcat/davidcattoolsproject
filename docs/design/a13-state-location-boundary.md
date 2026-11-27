@@ -25,10 +25,11 @@ consult a valid `XDG_STATE_HOME` on Linux, while the two store defaults below do
 - Explicit: `TaskStore` accepts an explicit root, which supersedes the default.
 - The default does not consult `XDG_STATE_HOME`.
 
-### PM runtime — `pm_runtime.py`, `pm_runtime_codex.py`
+### PM runtime — `pm_runtime.py` (`_session_state_root`), `pm_runtime_codex.py` (`CodexRuntime.open`)
 
-- The session state root step in `pm_runtime.py` and `pm_runtime_codex.py` use a supplied
-  `state_root` or the user home plus `.local/state/llmtool/pm-runtime`.
+- The session state root step — `_session_state_root` in `pm_runtime.py`, reached through
+  `CodexRuntime.open` in `pm_runtime_codex.py` — uses a supplied `state_root` or the user home
+  plus `.local/state/llmtool/pm-runtime`.
 - The default does not consult `XDG_STATE_HOME`.
 
 ### Diagnostics — `diagnostics_settings.py`, `resolve_diagnostics_home`
@@ -52,7 +53,7 @@ Compared with the two store defaults, the diagnostics location resolution is dif
 | Component | Current source (file, function) | Platform behavior | Stage handoff |
 |---|---|---|---|
 | Task store | `task_store.py`: `default_root`, `TaskStore` | Default `~/.local/state/llmtool/tasks`; explicit root accepted by `TaskStore`; no `XDG_STATE_HOME` in the default | A13.1: project state selection and migration |
-| PM runtime | `pm_runtime.py` (session state root step), `pm_runtime_codex.py` | Supplied `state_root` or default `~/.local/state/llmtool/pm-runtime`; no `XDG_STATE_HOME` in the default | A13.1: project state selection and migration |
+| PM runtime | `pm_runtime.py`: `_session_state_root`; `pm_runtime_codex.py`: `CodexRuntime.open` | Supplied `state_root` or default `~/.local/state/llmtool/pm-runtime`; no `XDG_STATE_HOME` in the default | A13.1: project state selection and migration |
 | Diagnostics | `diagnostics_settings.py`: `resolve_diagnostics_home` | `LLMTOOL_HOME` if set; Darwin `~/Library/Application Support/llmtool`; Linux valid absolute `XDG_STATE_HOME` else `~/.local/state/llmtool`; Windows branch present, no support claim made | A13.3: isolation verification; installed-environment promise waits for its existing acceptance stage |
 
 ## Boundary and gates
