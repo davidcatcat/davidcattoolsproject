@@ -12,7 +12,7 @@ Historically PM creation was Claude-only: a single runtime, no selection, and th
 - `pm_runtime.py` · `create_dedicated_pm` accepts `claude-code` and `codex`, stores the selected runtime together with the resolved account, and rejects any other runtime with `PM_RUNTIME_UNSUPPORTED`. The default remains `claude-code`.
 - `pm_runtime.py` · `open` delegates a `codex` binding to `pm_runtime_codex.py` · `CodexRuntime`; `CodexRuntime.open` checks the dedicated codex binding and otherwise refuses with `PM_SESSION_NOT_DEDICATED`.
 
-`PM_PROCESS_START_FAILED` is recorded as the Claude launch failure code visible in the current source (file and symbol not separately identified in the supplied facts). It is Claude-side only: it is not generalized to both runtimes, and no supported version range is inferred from it.
+`pm_runtime.py` · `PMRuntime.open` is recorded as the site of the Claude launch failure code `PM_PROCESS_START_FAILED` visible in the current source. It is Claude-side only: it is not generalized to both runtimes, and no supported version range is inferred from it.
 
 Listing both runtimes in the creation boundary does not change which PM is authorized in a live repository: authorization follows the stored binding and its resolved account, not the menu of accepted runtimes.
 
@@ -26,7 +26,7 @@ The historical Claude-only limitation is resolved at the selection boundary; run
 |----|-----------------------------------|------------------------------|-------------------------|------------------|
 | PM-RT.1 | `pm_runtime.py` · `create_dedicated_pm` | Accepts `claude-code` and `codex`; stores the runtime and resolved account; unsupported runtime refused with `PM_RUNTIME_UNSUPPORTED`; default `claude-code` | Installed diagnostics: confirm the accepted runtime set and the `PM_RUNTIME_UNSUPPORTED` refusal on a clean installed product | A13.4 |
 | PM-RT.2 | `pm_runtime.py` · `open`; `pm_runtime_codex.py` · `CodexRuntime.open` | `codex` bindings delegate to `CodexRuntime`; non-dedicated codex binding refused with `PM_SESSION_NOT_DEDICATED` | Same installed-diagnostics milestone as PM-RT.1 | A13.4 |
-| PM-RT.3 | current source · `PM_PROCESS_START_FAILED` (file/symbol not separately identified in supplied facts) | Claude launch failure code; Claude-side only, no version range inferred | Actual user-owned session/provider evidence that the selected runtime launches and holds a dedicated session | A13.5 or A13.7 |
+| PM-RT.3 | `pm_runtime.py` · `PMRuntime.open` | Raises `PM_PROCESS_START_FAILED` on the Claude launch failure path; Claude-side only, no version range inferred | Actual user-owned session/provider evidence that the selected runtime launches and holds a dedicated session | A13.5 or A13.7 |
 
 ## Scope notes
 
