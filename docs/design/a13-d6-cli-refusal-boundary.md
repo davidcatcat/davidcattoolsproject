@@ -2,7 +2,7 @@
 
 Status: **Advisor-verified** at pinned main by static inspection. No runtime test was run for this note.
 Pinned main: `e59bbda9f0ccc72a6296fdd684a691f54b6ea431`.
-Evidence: #396 OSR-11 comment 6552370022 (historical missing-root traceback report) and #2793 Coordinator comment 7210501920 (verification record). All verified facts below were checked by the Advisor at pinned main. Source identifiers name file and symbol only, no line anchors; machine-specific paths are omitted.
+Evidence: #396 OSR-11 comment 6552370022 (historical missing-root traceback report). #2793 Coordinator comment 7210501920 is cited only as A13.0 exit-conditions context: it does not discuss the D6 missing-root handler and expressly states it did not independently verify every source inventory. The current-behaviour facts below are based on the Advisor's source inspection at pinned main, not on the #2793 comment. Source identifiers name file and symbol only, no line anchors; machine-specific paths are omitted.
 Context: `a13-platform-assumptions.md` (A13 platform assumptions inventory). This note does not restate the trust-schema, Git layout, or tool lookup notes, and it introduces no new policy.
 
 ## Comparison: historical traceback vs current CLI refusal
@@ -11,7 +11,7 @@ Context: `a13-platform-assumptions.md` (A13 platform assumptions inventory). Thi
 |--------|--------------------------------|------------------------------|
 | Trigger | Missing repository root in the D6 worktree lifecycle | Same missing-root condition |
 | Behaviour | Unhandled `FileNotFoundError` surfaced to the user as a raw traceback | The handler catches the `FileNotFoundError` (missing root), prints the fixed STOP with error code `D6_REPOSITORY_INVALID`, then exit 1 |
-| Basis | Reported in #396 comment 6552370022 | Static inspection by the Advisor, recorded in #2793 comment 7210501920 |
+| Basis | Reported in #396 comment 6552370022 | Advisor source inspection at pinned main (static inspection) |
 
 ## Verified facts at pinned main (static inspection)
 
