@@ -537,8 +537,55 @@ class ActivePMInboxWaitTests(unittest.TestCase):
             os.chmod(task_path, 0o600)
 
         self.assertEqual(after_damage['status'], 'ATTENTION')
+        self.assertEqual(after_damage['events'], [])
         self.assertEqual(len(after_damage['blocked']), 1)
         self.assertEqual(after_damage['blocked'][0]['task_id'], task['task_id'])
+
+    def test_r3_ready_handoff_changed_after_scan_records_new_event(self):
+        task = self._record_pm()
+        old_event = self._record_event(task, digest_char='b')
+        scanned = self.store.get(task['task_id'])
+        scanned['developer'] = {
+            'route': 'agy',
+            'session_id': 'synthetic-session',
+            'source_sha': 'a' * 40,
+            'direct_result_callback': {'state': 'PM_EVIDENCE_READY'},
+        }
+        old_handoff = {'packet': {'synthetic': 'old'}}
+        old_binding = active_pm_inbox._handoff_event(scanned, old_handoff)
+        scanned['completion_events'] = [dict(old_event, event_id=old_binding['event_id'])]
+
+        new_handoff = {'packet': {'synthetic': 'new'}}
+        fresh_record = self.store.get(task['task_id'])
+        fresh_record['developer'] = {
+            'route': 'agy',
+            'session_id': 'synthetic-session',
+            'source_sha': 'c' * 40,
+            'direct_result_callback': {'state': 'PM_EVIDENCE_READY'},
+        }
+        fresh_record['record_sha256'] = task_store_module._digest(fresh_record)
+        self.store._write(fresh_record, create=False)
+        expected_binding = active_pm_inbox._handoff_event(fresh_record, new_handoff)
+
+        def handoff_for_record(record):
+            if record.get('developer', {}).get('source_sha') == 'c' * 40:
+                return new_handoff
+            return old_handoff
+
+        with patch.object(task_submission_cli, '_active_pm_handoff',
+                          side_effect=handoff_for_record), \
+             patch.object(active_pm_inbox, '_session_records',
+                          return_value=([scanned], 0)):
+            result = active_pm_inbox.read_inbox(self.store, self.session_key)
+
+        self.assertEqual(result['blocked'], [])
+        self.assertEqual(result['status'], 'OK')
+        event_ids = [item['event_id'] for item in result['events']]
+        self.assertIn(expected_binding['event_id'], event_ids)
+        current_events = [item for item in result['events'] if item['current']]
+        self.assertEqual(len(current_events), 1)
+        self.assertEqual(current_events[0]['event_id'], expected_binding['event_id'])
+        self.assertEqual(current_events[0]['active_pm_handoff'], new_handoff)
 
     def test_t2_synthetic_five_thousand_record_measurement(self):
         other_session = self._claude_session()

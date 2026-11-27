@@ -373,6 +373,16 @@ def _session_records(store, session_key, *, include_idle=False):
     return records, unreadable
 
 
+def _handoff_already_recorded(record, handoff):
+    developer = record.get('developer')
+    if type(developer) is not dict:
+        return None, False
+    binding = _handoff_event(record, handoff)
+    known = (record.get('completion_events', []) +
+             record.get('completion_event_tombstones', []))
+    return binding, any(event['event_id'] == binding['event_id'] for event in known)
+
+
 def _inbox(store, session_key, *, reconcile):
     """Build an inbox view, optionally reconciling READY Tasks into events."""
     from .task_submission_cli import _active_pm_handoff
@@ -382,27 +392,24 @@ def _inbox(store, session_key, *, reconcile):
     for record in records:
         handoff = _active_pm_handoff(record)
         if handoff is not None:
-            developer = record.get('developer')
-            if type(developer) is dict:
-                binding = _handoff_event(record, handoff)
-                known = (record.get('completion_events', []) +
-                         record.get('completion_event_tombstones', []))
-                already_recorded = any(
-                    event['event_id'] == binding['event_id'] for event in known)
+            if not reconcile:
+                binding, already_recorded = _handoff_already_recorded(record, handoff)
+                if not already_recorded and binding is not None:
+                    pending.append({
+                        'task_id': record['task_id'], 'event_id': binding['event_id'],
+                        'source': binding['source'], 'session_id': binding['session_id'],
+                        'state': 'NOT_YET_RECORDED',
+                    })
             else:
-                binding = None
-                already_recorded = False
-            if not reconcile and not already_recorded and binding is not None:
-                pending.append({
-                    'task_id': record['task_id'], 'event_id': binding['event_id'],
-                    'source': binding['source'], 'session_id': binding['session_id'],
-                    'state': 'NOT_YET_RECORDED',
-                })
-            if reconcile:
                 try:
-                    if not already_recorded:
-                        record_ready_event(store, record['task_id'])
                     record = store.get(record['task_id'])
+                    fresh_handoff = _active_pm_handoff(record)
+                    if fresh_handoff is not None:
+                        _binding, already_recorded = _handoff_already_recorded(
+                            record, fresh_handoff)
+                        if not already_recorded:
+                            record_ready_event(store, record['task_id'])
+                            record = store.get(record['task_id'])
                 except LLMToolError as exc:
                     # Deliver what is already durable and report why the newest
                     # result has no event yet; the next read retries.
@@ -415,6 +422,10 @@ def _inbox(store, session_key, *, reconcile):
                             for event in record.get('completion_events', [])),
                         'action': _BLOCKED_ACTIONS.get(code, 'RETRY_INBOX'),
                     })
+                    try:
+                        record = store.get(record['task_id'])
+                    except LLMToolError:
+                        continue
         unacked = [event for event in record.get('completion_events', [])
                    if event['state'] != 'ACKED']
         if unacked:
