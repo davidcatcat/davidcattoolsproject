@@ -51,6 +51,7 @@ def _items():
              "state": "WAITING_REVIEW", "updated_at": (now - timedelta(minutes=3)).isoformat()}]
 
 
+@unittest.skipUnless(sys.platform == "darwin", "PTY theme tests run on macOS only")
 class ThemePTYTests(unittest.TestCase):
     def setUp(self):
         self.pyte = driver.require_pty()
