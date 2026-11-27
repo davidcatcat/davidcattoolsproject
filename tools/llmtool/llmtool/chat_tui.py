@@ -4077,10 +4077,10 @@ class ChatTUI:
     def _previous_pm_session(self):
         if self.pm_target:
             return self.pm_target[0]
-        if self._last_pm_session:
-            return self._last_pm_session
         binding = self._safe_current_binding()
-        return binding.get("native_session_id") if type(binding) is dict else None
+        if type(binding) is dict and binding.get("native_session_id"):
+            return binding["native_session_id"]
+        return self._last_pm_session
 
     def _offer_pm_handover(self, old_session, new_session, cwd):
         if not old_session or not new_session or old_session == new_session:
