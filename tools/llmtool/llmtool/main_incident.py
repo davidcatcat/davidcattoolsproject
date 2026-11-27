@@ -47,10 +47,14 @@ import copy
 import math
 import re
 
+from . import ci_profile
 from . import mac_full_due
 from . import main_incident_graph as graph
 
-LINUX_CHECK = 'check (Linux 3.14)'
+_UNSET = object()
+_DEFAULT_PROFILE = ci_profile.default_profile()
+
+LINUX_CHECK = _DEFAULT_PROFILE.linux_code_check
 LINUX = 'LINUX'
 FULL_MAC = 'FULL_MAC'
 KINDS = (LINUX, FULL_MAC)
@@ -83,18 +87,19 @@ def _ordered(items, newest_first):
     return items if newest_first else items[::-1]
 
 
-def run_kind(run):
+def run_kind(run, *, profile=_UNSET):
     """Return LINUX, FULL_MAC or None for one run; never a name match on 'mac'."""
+    resolved = mac_full_due.resolve_profile(profile)
     if (not isinstance(run, dict) or type(run.get('id')) is not int or
             _sha(run.get('head_sha')) is None):
         return None
-    if run.get('name') == LINUX_CHECK:
+    if run.get('name') == resolved.linux_code_check:
         return LINUX
     jobs = run.get('jobs')
     if (run.get('event') == 'workflow_dispatch' and run.get('head_branch') == 'main' and
             isinstance(jobs, list)):
         names = {job.get('name') for job in jobs if isinstance(job, dict)}
-        if set(mac_full_due.JOBS) <= names:
+        if set(mac_full_due.full_jobs(resolved)) <= names:
             return FULL_MAC
     return None
 
@@ -103,91 +108,99 @@ def _completed(run):
     return run.get('status') == 'completed' and isinstance(run.get('conclusion'), str)
 
 
-def _passed(kind, run):
+def _passed(kind, run, *, profile=_UNSET):
     """A completed Linux run passes on success; FULL Mac only when every FULL job succeeded too."""
+    resolved = mac_full_due.resolve_profile(profile)
     if not _completed(run) or run['conclusion'] != 'success':
         return False
     if kind == LINUX:
         return True
     done = {job.get('name'): job.get('conclusion') for job in run['jobs'] if isinstance(job, dict)}
-    return all(done.get(name) == 'success' for name in mac_full_due.JOBS)
+    return all(done.get(name) == 'success' for name in mac_full_due.full_jobs(resolved))
 
 
 def _failed(run):
     return _completed(run) and run['conclusion'] in BAD
 
 
-def _runs_on(runs, sha, newest_first):
+def _runs_on(runs, sha, newest_first, *, profile=_UNSET):
     """Completed required-check runs of sha, newest first, as (kind, run)."""
+    resolved = mac_full_due.resolve_profile(profile)
     out = []
     for run in _ordered(runs, newest_first):
-        kind = run_kind(run)
+        kind = run_kind(run, profile=resolved)
         if kind and run['head_sha'] == sha and _completed(run):
             out.append((kind, run))
     return out
 
 
-def newest_runs(runs, sha, newest_first=True):
+def newest_runs(runs, sha, newest_first=True, *, profile=_UNSET):
     """Return {kind: newest recognized run} for sha, whatever its status.
 
     The newest run is chosen before any status filter, so a queued or in-progress
     rerun hides every older completed run of that check.
     """
+    resolved = mac_full_due.resolve_profile(profile)
     newest = {}
     for run in _ordered(runs, newest_first):
-        kind = run_kind(run)
+        kind = run_kind(run, profile=resolved)
         if kind and run['head_sha'] == sha:
             newest.setdefault(kind, run)
     return newest
 
 
-def check_state(kind, run):
+def check_state(kind, run, *, profile=_UNSET):
     """PENDING, PASS or FAIL for one run of kind; None for any other completed result."""
+    resolved = mac_full_due.resolve_profile(profile)
     if not _completed(run):
         return PENDING
-    if _passed(kind, run):
+    if _passed(kind, run, profile=resolved):
         return PASS
     if _failed(run):
         return FAIL
     return None
 
 
-def newest_state(runs, sha, kind, newest_first=True):
+def newest_state(runs, sha, kind, newest_first=True, *, profile=_UNSET):
     """Return (newest recognized run of kind on sha, its state), or (None, None).
 
     The one shared rule for reading runs: the newest run is chosen first and
     only then is its status read, so a pending newest run is PENDING.
     """
-    run = newest_runs(runs, sha, newest_first).get(kind)
-    return (None, None) if run is None else (run, check_state(kind, run))
+    resolved = mac_full_due.resolve_profile(profile)
+    run = newest_runs(runs, sha, newest_first, profile=resolved).get(kind)
+    return (None, None) if run is None else (run, check_state(kind, run, profile=resolved))
 
 
-def check_states(runs, sha, newest_first=True):
+def check_states(runs, sha, newest_first=True, *, profile=_UNSET):
     """Return {kind: state of the newest run} for sha; a kind with no run is absent."""
+    resolved = mac_full_due.resolve_profile(profile)
     states = {}
     for kind in KINDS:
-        run, state = newest_state(runs, sha, kind, newest_first)
+        run, state = newest_state(runs, sha, kind, newest_first, profile=resolved)
         if run is not None:
             states[kind] = state
     return states
 
 
-def trusted_pass(runs, sha, newest_first=True):
+def trusted_pass(runs, sha, newest_first=True, *, profile=_UNSET):
     """True only when the newest Linux run passed and the newest FULL Mac run is trusted.
 
     A pending newest run of either check is never a trusted PASS.
     """
-    states = check_states(runs, sha, newest_first)
+    resolved = mac_full_due.resolve_profile(profile)
+    states = check_states(runs, sha, newest_first, profile=resolved)
     return all(states.get(kind) == PASS for kind in KINDS)
 
 
-def head_failed(runs, sha, newest_first=True):
+def head_failed(runs, sha, newest_first=True, *, profile=_UNSET):
     """True when the newest run of any required check on sha completed and did not pass.
 
     A failed run followed by a green rerun on the same SHA is not failing, and a
     failed run followed by a queued or in-progress rerun is PENDING, not failing.
     """
-    return FAIL in check_states(runs, sha, newest_first).values()
+    resolved = mac_full_due.resolve_profile(profile)
+    return FAIL in check_states(runs, sha, newest_first, profile=resolved).values()
 
 
 def _commits(commits, newest_first):
@@ -195,18 +208,19 @@ def _commits(commits, newest_first):
             if isinstance(commit, dict) and _sha(commit.get('sha'))]
 
 
-def find_heads(commits, runs, newest_first=True):
+def find_heads(commits, runs, newest_first=True, *, profile=_UNSET):
     """Return (last trusted PASS sha, failing sha) walking main from newest.
 
     The failing head is the newest failed head newer than every trusted PASS;
     a trusted PASS newer than every failure means no open incident (fail None).
     """
+    resolved = mac_full_due.resolve_profile(profile)
     fail = None
     for commit in _commits(commits, newest_first):
         sha = commit['sha']
-        if trusted_pass(runs, sha, newest_first):
+        if trusted_pass(runs, sha, newest_first, profile=resolved):
             return sha, fail
-        if fail is None and head_failed(runs, sha, newest_first):
+        if fail is None and head_failed(runs, sha, newest_first, profile=resolved):
             fail = sha
     return None, fail
 
@@ -253,19 +267,20 @@ def _test_ids(run):
     return frozenset(tests)
 
 
-def _failing_streak(runs, sha, newest_first):
+def _failing_streak(runs, sha, newest_first, *, profile=_UNSET):
     """Failing runs of sha newer than the newest pass of the same check, newest first.
 
     Only a check whose newest run (shared rule) is FAIL supplies runs; a check
     whose newest run is pending, passed or neither supplies none.
     """
-    states = check_states(runs, sha, newest_first)
+    resolved = mac_full_due.resolve_profile(profile)
+    states = check_states(runs, sha, newest_first, profile=resolved)
     stopped = {kind for kind in KINDS if states.get(kind) != FAIL}
     out = []
-    for kind, run in _runs_on(runs, sha, newest_first):
+    for kind, run in _runs_on(runs, sha, newest_first, profile=resolved):
         if kind in stopped:
             continue
-        if _passed(kind, run):
+        if _passed(kind, run, profile=resolved):
             stopped.add(kind)
         elif run['conclusion'] in BAD:
             out.append((kind, run))
@@ -304,33 +319,35 @@ def _reproduced(tested):
     return out
 
 
-def _later_pass(ordered, chain, kind, fail_sha, newest_fail):
+def _later_pass(ordered, chain, kind, fail_sha, newest_fail, *, profile=_UNSET):
     """Newest run of kind that passed on a later unchanged SHA and is newer than newest_fail.
 
     The candidate must be the newest run of kind on its SHA (shared rule): a
     newer queued, in-progress or failed run on that SHA means no pass there.
     """
+    resolved = mac_full_due.resolve_profile(profile)
     for run in ordered[:newest_fail]:
-        if run_kind(run) != kind:
+        if run_kind(run, profile=resolved) != kind:
             continue
         sha = run['head_sha']
         if sha == fail_sha or not _unchanged_after(chain, fail_sha, sha):
             continue
-        newest, state = newest_state(ordered, sha, kind)
+        newest, state = newest_state(ordered, sha, kind, profile=resolved)
         if newest is run and state == PASS:
             return run
     return None
 
 
-def _later_passes(tested, runs, commits, fail_sha, newest_first):
+def _later_passes(tested, runs, commits, fail_sha, newest_first, *, profile=_UNSET):
     """Evidence that every failing check later passed elsewhere with no change, else None."""
+    resolved = mac_full_due.resolve_profile(profile)
     ordered = _ordered(runs, newest_first)
     positions = {id(run): index for index, run in enumerate(ordered)}
     chain = _commits(commits, newest_first)[::-1]
     evidence = []
     for kind in sorted({kind for kind, _, _ in tested}):
         newest_fail = min(positions[id(run)] for k, run, _ in tested if k == kind)
-        later = _later_pass(ordered, chain, kind, fail_sha, newest_fail)
+        later = _later_pass(ordered, chain, kind, fail_sha, newest_fail, profile=resolved)
         if later is None:
             return None
         tests = set().union(*(ids for k, _, ids in tested if k == kind))
@@ -339,9 +356,10 @@ def _later_passes(tested, runs, commits, fail_sha, newest_first):
     return evidence
 
 
-def classify(fail_sha, commits, runs, newest_first=True):
+def classify(fail_sha, commits, runs, newest_first=True, *, profile=_UNSET):
     """Return (class, evidence list) for the failing runs of fail_sha."""
-    failing = _failing_streak(runs, fail_sha, newest_first)
+    resolved = mac_full_due.resolve_profile(profile)
+    failing = _failing_streak(runs, fail_sha, newest_first, profile=resolved)
     if not failing:
         return UNKNOWN, [{'code': 'NO_FAILING_RUN', 'sha': fail_sha}]
     evidence, tested, unexplained, env_runs = [], [], False, 0
@@ -361,7 +379,7 @@ def classify(fail_sha, commits, runs, newest_first=True):
     reproduced = _reproduced(tested) if tested else {}
     for test, run_ids in reproduced.items():
         evidence.append({'code': 'REPRODUCED', 'test': test, 'runs': run_ids})
-    later = (_later_passes(tested, runs, commits, fail_sha, newest_first)
+    later = (_later_passes(tested, runs, commits, fail_sha, newest_first, profile=resolved)
              if tested and not unexplained else None)
     evidence.extend(later or [])
     if reproduced and later:
@@ -376,16 +394,17 @@ def classify(fail_sha, commits, runs, newest_first=True):
     return UNKNOWN, evidence
 
 
-def classify_incident(commits, runs, newest_first=True):
+def classify_incident(commits, runs, newest_first=True, *, profile=_UNSET):
     """Find the incident heads, list the range and classify; return a new dict."""
-    pass_sha, fail_sha = find_heads(commits, runs, newest_first)
+    resolved = mac_full_due.resolve_profile(profile)
+    pass_sha, fail_sha = find_heads(commits, runs, newest_first, profile=resolved)
     result = {'incident': fail_sha is not None, 'pass_sha': pass_sha, 'fail_sha': fail_sha,
               'range': None, 'class': UNKNOWN, 'evidence': []}
     if fail_sha is None:
         result['evidence'] = [{'code': 'NO_FAILING_HEAD'}]
         return result
     result['range'] = commit_range(commits, pass_sha, fail_sha, newest_first)
-    result['class'], evidence = classify(fail_sha, commits, runs, newest_first)
+    result['class'], evidence = classify(fail_sha, commits, runs, newest_first, profile=resolved)
     if result['range'] is not None:
         evidence.append({'code': 'RANGE', 'commits': len(result['range']),
                          'prs': [item['pr'] for item in result['range'] if item['pr'] is not None]})
