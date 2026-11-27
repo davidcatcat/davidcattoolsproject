@@ -398,9 +398,10 @@ def _inbox(store, session_key, *, reconcile):
                     'source': binding['source'], 'session_id': binding['session_id'],
                     'state': 'NOT_YET_RECORDED',
                 })
-            if reconcile and not already_recorded:
+            if reconcile:
                 try:
-                    record_ready_event(store, record['task_id'])
+                    if not already_recorded:
+                        record_ready_event(store, record['task_id'])
                     record = store.get(record['task_id'])
                 except LLMToolError as exc:
                     # Deliver what is already durable and report why the newest

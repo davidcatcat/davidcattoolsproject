@@ -492,6 +492,53 @@ class ActivePMInboxWaitTests(unittest.TestCase):
         self.assertEqual(damaged['status'], 'ATTENTION')
         self.assertEqual(len(damaged['events']), 1)
 
+    def test_r3_r4_ready_handoff_rereads_before_reporting_events(self):
+        task = self._record_pm()
+        event = self._record_event(task, digest_char='b')
+        scanned = self.store.get(task['task_id'])
+        scanned['developer'] = {
+            'route': 'agy',
+            'session_id': 'synthetic-session',
+            'source_sha': 'a' * 40,
+        }
+        handoff = {'packet': {'synthetic': True}}
+        binding = active_pm_inbox._handoff_event(scanned, handoff)
+        scanned['completion_events'] = [dict(event, event_id=binding['event_id'])]
+
+        def scan_then_ack(_store, _session_key, *, include_idle=False):
+            active_pm_inbox.ack(
+                self.store, event['event_id'], self.session_key, task_id=task['task_id'])
+            return [scanned], 0
+
+        with patch.object(task_submission_cli, '_active_pm_handoff',
+                          return_value=handoff), \
+             patch.object(active_pm_inbox, '_session_records',
+                          side_effect=scan_then_ack):
+            after_ack = active_pm_inbox.read_inbox(self.store, self.session_key)
+
+        self.assertEqual(after_ack['events'], [])
+        self.assertEqual(after_ack['blocked'], [])
+        self.assertEqual(after_ack['status'], 'OK')
+
+        task_path = self.store.root / (task['task_id'] + '.json')
+
+        def scan_then_damage(_store, _session_key, *, include_idle=False):
+            os.chmod(task_path, 0o644)
+            return [scanned], 0
+
+        try:
+            with patch.object(task_submission_cli, '_active_pm_handoff',
+                              return_value=handoff), \
+                 patch.object(active_pm_inbox, '_session_records',
+                              side_effect=scan_then_damage):
+                after_damage = active_pm_inbox.read_inbox(self.store, self.session_key)
+        finally:
+            os.chmod(task_path, 0o600)
+
+        self.assertEqual(after_damage['status'], 'ATTENTION')
+        self.assertEqual(len(after_damage['blocked']), 1)
+        self.assertEqual(after_damage['blocked'][0]['task_id'], task['task_id'])
+
     def test_t2_synthetic_five_thousand_record_measurement(self):
         other_session = self._claude_session()
         realistic_request = (
