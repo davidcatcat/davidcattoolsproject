@@ -18,6 +18,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from llmtool import mac_full_due  # noqa: E402
 
+SHA_ERROR = "ERROR: sha must be a full 40-character commit id"
+
 
 def is_due(event, sha, github_get, run_id=None):
     """Return True (DUE) unless sha already has a trusted FULL success."""
@@ -51,6 +53,9 @@ def main(argv: list[str] | None = None, github_get=None) -> int:
     )
     parser.add_argument("--run-id", type=int, help="this run's id, left out of the lookup")
     args = parser.parse_args(argv)
+    if not mac_full_due.SHA.match(args.sha):
+        print(SHA_ERROR, file=sys.stderr)
+        return 1
     try:
         due = is_due(args.event, args.sha,
                      _reader(args.repo) if github_get is None else github_get, args.run_id)
