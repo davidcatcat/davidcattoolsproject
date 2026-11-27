@@ -451,6 +451,48 @@ class TUIHandoverTests(unittest.TestCase):
         self.assertNotIn("handover completed", ui.conversation.text)
         self.assertIsNotNone(ui.pm_handover_offer)
 
+    def test_exception_after_first_move_reports_incomplete_and_resumes(self):
+        old, first = self.stopped_claude_with_task()
+        second = self.record_task(old)
+        new = self.bound_claude(account="claude-one", config_dir=self.first)
+        pm_runtime.select_binding(old, state_root=self.state)
+
+        ui = self.make_ui()
+        ui.run_pm_command("/pm use " + new)
+
+        real_adopt = self.store.adopt_pm_session
+        calls = []
+
+        def fail_on_second(task_id, **kwargs):
+            calls.append(task_id)
+            if len(calls) == 1:
+                return real_adopt(task_id, **kwargs)
+            exc = LLMToolError("simulated write failure")
+            exc.task_store_error_code = "TASK_STORE_WRITE_FAILED"
+            raise exc
+
+        with patch.object(self.store, "adopt_pm_session", side_effect=fail_on_second):
+            ui.run_pm_command("/pm handover")
+
+        text = ui.conversation.text
+        self.assertIn("PM Task handover incomplete (TASK_STORE_WRITE_FAILED)", text)
+        self.assertIn("moved 1, 1 open Task(s) remain", text)
+        self.assertNotIn("handover completed", text)
+        self.assertNotIn("no Tasks moved", text)
+        moved_id = calls[0]
+        remaining_id = ({first["task_id"], second["task_id"]} - {moved_id}).pop()
+        self.assertEqual(self.store.get(moved_id)["pm_session_id"], "pm-" + new)
+        self.assertEqual(self.store.get(remaining_id)["pm_session_id"], "pm-" + old)
+        self.assertIsNotNone(ui.pm_handover_offer)
+        self.assertEqual(ui.pm_handover_offer["count"], 1)
+
+        before = len(ui.conversation.text)
+        ui.run_pm_command("/pm handover")
+        self.assertIn("PM Task handover completed: moved 1 open Task(s)",
+                      ui.conversation.text[before:])
+        self.assertEqual(self.store.get(remaining_id)["pm_session_id"], "pm-" + new)
+        self.assertIsNone(ui.pm_handover_offer)
+
     def test_connect_switch_offers_handover_without_claiming_task_handover(self):
         old, task = self.stopped_claude_with_task()
         new = self.bound_claude(account="claude-one", config_dir=self.first)

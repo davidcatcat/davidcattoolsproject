@@ -247,20 +247,24 @@ class PMRuntimeAPI:
             return None
         return TaskStore(root)
 
-    def open_task_count(self, session_id):
-        """Count open (non-abandoned) Tasks owned by ``session_id``."""
+    def open_task_ids(self, session_id):
+        """Return open (non-abandoned) Task IDs owned by ``session_id``."""
         from . import active_pm_inbox
         session_key = active_pm_inbox.pm_session_key(session_id)
         store = self._task_store(create=False)
         if store is None:
-            return 0
-        count = 0
+            return []
+        ids = []
         for task_id in store.task_ids():
             record = store.get(task_id)
             if (record.get('pm_session_id') == session_key and
                     record.get('abandonment') is None):
-                count += 1
-        return count
+                ids.append(task_id)
+        return ids
+
+    def open_task_count(self, session_id):
+        """Count open (non-abandoned) Tasks owned by ``session_id``."""
+        return len(self.open_task_ids(session_id))
 
     def adopt_session(self, old_session_id, new_session_id, *, cwd):
         """Adopt open Tasks from ``old_session_id`` to ``new_session_id`` via active_pm_inbox."""
@@ -292,6 +296,17 @@ def handover_outcome_text(outcome, old_session_id, new_session_id):
     new_short = safe_text(new_session_id)[:8] if type(new_session_id) is str else UNKNOWN
     if 'error' in outcome:
         code = safe_code(outcome['error'])
+        if outcome.get('partial'):
+            moved_count = outcome.get('moved_count')
+            remaining_count = outcome.get('remaining_count')
+            moved_text = str(moved_count) if type(moved_count) is int else UNKNOWN
+            remaining_text = str(remaining_count) if type(remaining_count) is int else UNKNOWN
+            return ("llmtool: PM Task handover incomplete (" + code + "): moved "
+                    + moved_text + ", " + remaining_text + " open Task(s) remain with "
+                    + old_short + "; retry /pm handover to resume.")
+        if outcome.get('unknown_progress'):
+            return ("llmtool: PM Task handover failed (" + code + "): transfer state for "
+                    + old_short + " is " + UNKNOWN + "; retry /pm handover to resume.")
         return ("llmtool: PM Task handover refused (" + code
                 + "): no Tasks moved from " + old_short + ".")
     result = outcome.get('result')

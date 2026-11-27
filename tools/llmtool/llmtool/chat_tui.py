@@ -4110,14 +4110,50 @@ class ChatTUI:
                            chat_tui_pm.safe_text(new_session)[:8]))
 
     def _pm_handover(self, offer, loop):
+        old_session = offer["old_session"]
+        new_session = offer["new_session"]
+        open_ids_fn = getattr(self.pm_api, "open_task_ids", None)
+        before_ids = before_count = None
+        try:
+            if callable(open_ids_fn):
+                before_ids = set(open_ids_fn(old_session))
+            else:
+                before_count = self.pm_api.open_task_count(old_session)
+        except Exception:
+            before_ids = before_count = None
         try:
             result = self.pm_api.adopt_session(
-                offer["old_session"], offer["new_session"], cwd=offer["cwd"])
+                old_session, new_session, cwd=offer["cwd"])
             outcome = {"offer": offer, "result": result}
         except LLMToolError as exc:
             outcome = {"offer": offer, "error": chat_tui_pm.adoption_error_code(exc)}
         except Exception:
             outcome = {"offer": offer, "error": chat_tui_task.UNKNOWN}
+        if "error" in outcome:
+            after_ids = after_count = None
+            try:
+                if callable(open_ids_fn):
+                    after_ids = set(open_ids_fn(old_session))
+                else:
+                    after_count = self.pm_api.open_task_count(old_session)
+            except Exception:
+                after_ids = after_count = None
+            if before_ids is not None and after_ids is not None:
+                moved_count = len(before_ids - after_ids)
+                remaining_count = len(after_ids)
+                outcome["partial"] = moved_count > 0
+                outcome["unknown_progress"] = False
+                outcome["moved_count"] = moved_count
+                outcome["remaining_count"] = remaining_count
+            elif before_count is not None and after_count is not None:
+                moved_count = max(0, before_count - after_count)
+                outcome["partial"] = moved_count > 0
+                outcome["unknown_progress"] = False
+                outcome["moved_count"] = moved_count
+                outcome["remaining_count"] = after_count
+            else:
+                outcome["partial"] = False
+                outcome["unknown_progress"] = True
         self._post(loop, self.finish_pm_handover, outcome)
 
     def finish_pm_handover(self, outcome):
@@ -4131,6 +4167,10 @@ class ChatTUI:
                 type(result.get("moved")) is list and type(result.get("skipped")) is list and
                 not result["skipped"]):
             self.pm_handover_offer = None
+        elif (type(self.pm_handover_offer) is dict and
+              type(outcome) is dict and
+              type(outcome.get("remaining_count")) is int):
+            self.pm_handover_offer["count"] = outcome["remaining_count"]
 
     def _pm_new(self, cwd, runtime, account, prior_session, loop):
         try:
