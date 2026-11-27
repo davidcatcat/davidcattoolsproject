@@ -38,7 +38,7 @@ performed. Current runtime behaviour and positive acceptance are
 | llmtool tests | did not run: `ADMISSION_DENIED`, `RECEIPT_HEAD_UNRECORDED` | Root blocker (no project-bound test evidence path) | A13.2 (project-bound test/CI evidence) |
 | Fixture CI | no fixture CI workflows existed | Root blocker (no hosted exact-head evidence source) | A13.2 (project-bound test/CI evidence) |
 | Review | did not launch: `REVIEW_PROMPT_BINDING_MISSING`, `REVIEWER_FAMILY_UNSUPPORTED` | Downstream refusal (no active assignment/Developer) | — (revisit once A13.1 items land) |
-| Merge | not attempted | Downstream refusal (upstream stages never passed) | — |
+| Merge | not attempted — merging was not authorized or intended for this dry run | Out of run scope (not a technical refusal) | — |
 
 ## Reading the table
 
@@ -48,9 +48,12 @@ performed. Current runtime behaviour and positive acceptance are
   not admitted and the fixture had no CI workflows, so no evidence could be
   bound per the modes note.
 - **Downstream refusals** (`D6_ORIGIN_INVALID`,
-  `ASSIGNMENT_D6_NOT_ACTIVE`, no Developer, no review, no merge) are the
-  expected cascade from the root blockers. Repeated downstream refusals are
+  `ASSIGNMENT_D6_NOT_ACTIVE`, no Developer, no review) are the expected
+  cascade from the root blockers. Repeated downstream refusals are
   **not** counted as distinct new portability blockers.
+- **Merge** is separate from that cascade: it was not attempted because
+  merging was not authorized or intended for this dry run — out of run
+  scope, not a technical refusal.
 - **Not evidence**: the manually run fixture tests were not llmtool evidence
   and do not offset the missing llmtool run.
 
