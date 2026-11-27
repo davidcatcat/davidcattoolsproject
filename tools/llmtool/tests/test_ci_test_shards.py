@@ -211,6 +211,144 @@ class CiTestShardsTests(unittest.TestCase):
                     [["test_listed.py"], ["test_unlisted.py"]],
                 )
 
+    def test_nan_default_timing_file_rejected_by_partition_and_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            timing_path = Path(directory) / "nan_timings.json"
+            timing_path.write_text(
+                '{"default_seconds": NaN, "modules": {}}',
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                ci_test_shards.partition(3, timings=timing_path)
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(TOOLS_ROOT / "scripts" / "ci_test_shards.py"),
+                    "3",
+                    "1",
+                    "--timings",
+                    str(timing_path),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout, "")
+            self.assertEqual(proc.stderr.strip(), ci_test_shards.INVALID_TIMING_DIAGNOSTIC)
+
+    def test_invalid_timing_files_rejected_by_partition_and_cli(self):
+        invalid_payloads = {
+            "default_inf": '{"default_seconds": Infinity, "modules": {}}',
+            "default_neg_inf": '{"default_seconds": -Infinity, "modules": {}}',
+            "module_nan": '{"default_seconds": 3, "modules": {"test_cli.py": NaN}}',
+            "module_inf": '{"default_seconds": 3, "modules": {"test_cli.py": Infinity}}',
+            "default_bool_true": json.dumps({"default_seconds": True, "modules": {}}),
+            "default_bool_false": json.dumps({"default_seconds": False, "modules": {}}),
+            "module_bool_true": json.dumps({"default_seconds": 3, "modules": {"test_cli.py": True}}),
+            "module_bool_false": json.dumps({"default_seconds": 3, "modules": {"test_cli.py": False}}),
+            "default_zero": json.dumps({"default_seconds": 0, "modules": {}}),
+            "default_zero_float": json.dumps({"default_seconds": 0.0, "modules": {}}),
+            "default_negative": json.dumps({"default_seconds": -5, "modules": {}}),
+            "module_negative": json.dumps({"default_seconds": 3, "modules": {"test_cli.py": -1}}),
+            "default_string": json.dumps({"default_seconds": "10", "modules": {}}),
+            "default_null": json.dumps({"default_seconds": None, "modules": {}}),
+            "module_string": json.dumps({"default_seconds": 3, "modules": {"test_cli.py": "5"}}),
+            "module_null": json.dumps({"default_seconds": 3, "modules": {"test_cli.py": None}}),
+            "shape_list": json.dumps([1, 2, 3]),
+            "shape_missing_default": json.dumps({"modules": {}}),
+            "shape_missing_modules": json.dumps({"default_seconds": 3}),
+            "shape_modules_list": json.dumps({"default_seconds": 3, "modules": []}),
+            "shape_empty_module_key": json.dumps({"default_seconds": 3, "modules": {"": 1}}),
+            "default_huge_int": '{"default_seconds": ' + ("1" + "0" * 400) + ', "modules": {}}',
+            "module_huge_int": (
+                '{"default_seconds": 3, "modules": {"test_cli.py": '
+                + ("1" + "0" * 400)
+                + "}}"
+            ),
+            "malformed_json": "{not json",
+        }
+        cli_checked = {
+            "module_nan",
+            "default_bool_true",
+            "module_negative",
+            "shape_modules_list",
+            "default_huge_int",
+            "module_huge_int",
+            "malformed_json",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, payload in invalid_payloads.items():
+                with self.subTest(case=name):
+                    timing_path = root / f"{name}.json"
+                    timing_path.write_text(payload, encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        ci_test_shards.partition(3, timings=timing_path)
+                    if name in cli_checked:
+                        proc = subprocess.run(
+                            [
+                                sys.executable,
+                                str(TOOLS_ROOT / "scripts" / "ci_test_shards.py"),
+                                "3",
+                                "1",
+                                "--timings",
+                                str(timing_path),
+                            ],
+                            capture_output=True,
+                            text=True,
+                        )
+                        self.assertNotEqual(proc.returncode, 0)
+                        self.assertEqual(proc.stdout, "")
+                        self.assertEqual(
+                            proc.stderr.strip(),
+                            ci_test_shards.INVALID_TIMING_DIAGNOSTIC,
+                        )
+
+    def test_valid_zero_module_weight_and_float_weights_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            test_dir = root / "tests"
+            test_dir.mkdir()
+            (test_dir / "test_zero.py").touch()
+            (test_dir / "test_heavy.py").touch()
+            timing_path = root / "float_timings.json"
+            timing_path.write_text(
+                json.dumps(
+                    {
+                        "default_seconds": 1.5,
+                        "modules": {"test_zero.py": 0, "test_heavy.py": 2.5},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(ci_test_shards, "TESTS", test_dir):
+                shards = ci_test_shards.partition(2, timings=timing_path)
+                self.assertEqual(shards, [["test_heavy.py"], ["test_zero.py"]])
+
+    def test_large_finite_weights_do_not_overflow_shard_totals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            test_dir = root / "tests"
+            test_dir.mkdir()
+            for index in range(6):
+                (test_dir / f"test_mod_{index}.py").touch()
+            timing_path = root / "large_timings.json"
+            timing_path.write_text(
+                '{"default_seconds": 1e308, "modules": {"test_mod_0.py": 1e308}}',
+                encoding="utf-8",
+            )
+            with patch.object(ci_test_shards, "TESTS", test_dir):
+                shards = ci_test_shards.partition(3, timings=timing_path)
+            self.assertEqual([len(shard) for shard in shards], [2, 2, 2])
+            self.assertEqual(
+                shards,
+                [
+                    ["test_mod_0.py", "test_mod_3.py"],
+                    ["test_mod_1.py", "test_mod_4.py"],
+                    ["test_mod_2.py", "test_mod_5.py"],
+                ],
+            )
+
     def test_workflow_has_aggregate_gate_and_third_runner_mapping(self):
         workflow = (TOOLS_ROOT.parent.parent / ".github/workflows/llmtool-linux-ci.yml").read_text(
             encoding="utf-8"
