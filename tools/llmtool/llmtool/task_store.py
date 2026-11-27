@@ -1120,7 +1120,7 @@ def _validate_usage(value):
 
 
 # The Gateway's BUDGET_EXCEEDED reasons, exactly as its contract lists them
-# (tools/api-agent-gateway/README.md and api_agent_gateway/contract.py). The
+# (tools/api-agent-gateway/README.md and that package's contract.py). The
 # TaskStore exception is this list only: a new or lookalike reason, or any
 # other unavailable error code, still refuses usage (#2812).
 _GW_AGENT_BUDGET_REASONS = frozenset((
