@@ -143,6 +143,34 @@ def full_runs(github_get, *, profile=_UNSET):
     return runs
 
 
+def _all_jobs(github_get, run_id):
+    """Return every job record for run_id, reading all pages and failing closed."""
+    jobs = []
+    total = None
+    page = 1
+    while True:
+        suffix = '' if page == 1 else f'&page={page}'
+        data = _get(github_get, f'actions/runs/{run_id}/jobs?per_page=100{suffix}')
+        page_jobs = data.get('jobs') if isinstance(data, dict) else None
+        if not isinstance(page_jobs, list):
+            raise StateError('jobs')
+        reported = data.get('total_count')
+        if reported is not None:
+            if type(reported) is not int or reported < 0:
+                raise StateError('jobs')
+            total = reported
+        jobs.extend(page_jobs)
+        if total is not None:
+            if len(jobs) == total:
+                return jobs
+            if len(jobs) > total or len(page_jobs) < 100:
+                # The response disagrees with total_count: refuse trust.
+                raise StateError('jobs')
+        elif len(page_jobs) < 100:
+            return jobs
+        page += 1
+
+
 def trusted(github_get, run, *, profile=_UNSET):
     """A success counts only when every required job has exactly one success record."""
     resolved = resolve_profile(profile)
@@ -151,10 +179,7 @@ def trusted(github_get, run, *, profile=_UNSET):
     run_id = run.get('id')
     if type(run_id) is not int:
         raise StateError('run id')
-    data = _get(github_get, f'actions/runs/{run_id}/jobs?per_page=100')
-    jobs = data.get('jobs') if isinstance(data, dict) else None
-    if not isinstance(jobs, list):
-        raise StateError('jobs')
+    jobs = _all_jobs(github_get, run_id)
     required = set(full_jobs(resolved))
     conclusions = {}
     for job in jobs:
