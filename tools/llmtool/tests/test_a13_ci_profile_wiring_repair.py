@@ -119,7 +119,7 @@ class _Route:
         if self.error is not None:
             raise RouteError(self.error)
         return types.SimpleNamespace(
-            session_id='native-ci-retry-run',
+            session_id='12345678-1234-1234-1234-123456789abd',
             exit_code=0,
             stdout_sha256=_sha256('ci retry output'),
             elapsed_ms=500,
