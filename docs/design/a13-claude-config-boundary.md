@@ -6,12 +6,12 @@ Evidence: historical OSR-20 (#396, comment 6552370022); #2793 Coordinator commen
 
 | ID | Source identifier (file · symbol) | Verified fact at pinned main |
 |----|-----------------------------------|------------------------------|
-| A13.5-a | `claude_cli.py` · Claude CLI provider child-environment step | The step builds an allowlisted environment for the child; it selects a user-home override or `HOME` and validates that the selected path is absolute and has no control characters below space. It does not copy `CLAUDE_CONFIG_DIR` from the caller. |
+| A13.5-a | `claude_cli.py` · `ClaudeCLIProvider._child_environment` | The step builds an allowlisted environment for the child; it selects a user-home override or `HOME` and validates that the selected path is absolute and has no control characters below space. It does not copy `CLAUDE_CONFIG_DIR` from the caller. |
 | A13.7-a | `pm_runtime.py` · `open` | `open` resolves the PM role and verifies account binding, then sets `CLAUDE_CONFIG_DIR` for the child when the resolved role supplies a configuration directory. |
 
 ## Comparison of the two boundaries
 
-| Aspect | `claude_cli.py` provider step | `pm_runtime.py` · `open` |
+| Aspect | `claude_cli.py` · `ClaudeCLIProvider._child_environment` | `pm_runtime.py` · `open` |
 |--------|-------------------------------|--------------------------|
 | Configuration selection | Selects a user-home override or `HOME`, validates that the selected path is absolute and has no control characters below space, and does not inherit the caller's `CLAUDE_CONFIG_DIR`. | Sets `CLAUDE_CONFIG_DIR` for the child only when the resolved role supplies a configuration directory. |
 | Boundary | The generic provider path: the configuration location derives from the allowlisted environment, not from caller-provided configuration variables. | The PM runtime path, kept distinct from the generic provider path: the configuration location derives from role resolution, after account binding is verified. |
@@ -22,7 +22,7 @@ Neither inspection proves authentication, live provider access, or shared accoun
 
 ## User-owned account verification still needed
 
-- **A13.5** — Verify user-owned account behavior for the generic provider path in `claude_cli.py`: that a user-owned account's configuration location is selected and validated as specified is still unverified at pinned main.
+- **A13.5** — Verify user-owned account behavior for the generic provider path in `claude_cli.py` · `ClaudeCLIProvider._child_environment`: that a user-owned account's configuration location is selected and validated as specified is still unverified at pinned main.
 - **A13.7** — Verify user-owned account behavior for the PM runtime path in `pm_runtime.py` · `open`: that account binding for a user-owned account results in the role-supplied configuration directory reaching the child is still unverified at pinned main.
 
 Scope: this note records inspection facts only. It does not prescribe new environment variables, does not broaden any environment allowlist, and does not repeat the PM runtime selection and state storage notes recorded elsewhere.
