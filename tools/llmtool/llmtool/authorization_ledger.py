@@ -50,7 +50,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 
-from .action_contract import MAX_APPROVAL_SECONDS, MAX_EPOCH, ContractValue, _hex, _typed
+from .action_contract import MAX_APPROVAL_SECONDS, MAX_EPOCH, ContractValue, _hex
 from .authorization_policy import (Decision, EffectKind, ObservedState, PolicyDecision, ReceiptBinding,
                                    ProviderReviewBinding,ProviderPolicyDecision,decide_provider_review,
                                    NotificationBinding,NotificationDecision,decide_notification)
