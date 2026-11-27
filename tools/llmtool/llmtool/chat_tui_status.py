@@ -735,12 +735,44 @@ def _terminal(record, current):
             or developer.get("state") in _TERMINAL)
 
 
-def read_background(pm_session, store=None):
+def _pm_session_keys(pm_session, extra_sessions=()):
+    """Normalised unique PM session keys, primary first."""
+    from .active_pm_inbox import pm_session_key
+
+    keys = [pm_session_key(pm_session)]
+    for session in extra_sessions or ():
+        if not session:
+            continue
+        key = pm_session_key(session)
+        if key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _pm_records(store, session_keys):
+    """Read active-runtime Tasks across ``session_keys`` without mutating TaskStore."""
+    from .active_pm_inbox import _session_records
+
+    records, seen, unreadable = [], set(), 0
+    for session_key in session_keys:
+        found, key_unreadable = _session_records(store, session_key)
+        unreadable = max(unreadable, key_unreadable)
+        for record in found:
+            task_id = record.get("task_id") if type(record) is dict else None
+            if type(task_id) is str and task_id:
+                if task_id in seen:
+                    continue
+                seen.add(task_id)
+            records.append(record)
+    return records, unreadable
+
+
+def read_background(pm_session, store=None, extra_sessions=()):
     """background_items of the Tasks bound to a PM session (the PM inbox's TaskStore read)."""
-    from .active_pm_inbox import _session_records, pm_session_key
     from .task_store import TaskStore
+
     store = TaskStore() if store is None else store
-    records, _unreadable = _session_records(store, pm_session_key(pm_session))
+    records, _unreadable = _pm_records(store, _pm_session_keys(pm_session, extra_sessions))
     return background_items(records)
 
 
@@ -762,17 +794,36 @@ def attention_items(records, ready_task_ids=()):
     return items
 
 
-def read_attention(pm_session, store=None):
+def read_attention(pm_session, store=None, extra_sessions=()):
     """Read attention facts and unread completion events without reconciling or acking."""
-    from .active_pm_inbox import _session_records, peek_inbox, pm_session_key
+    from .active_pm_inbox import peek_inbox
     from .task_store import TaskStore
 
     store = TaskStore() if store is None else store
-    session_key = pm_session_key(pm_session)
-    records, unreadable = _session_records(store, session_key)
-    inbox = peek_inbox(store, session_key)
-    events = inbox.get("events", [])
-    pending = inbox.get("pending", [])
+    session_keys = _pm_session_keys(pm_session, extra_sessions)
+    records, unreadable = _pm_records(store, session_keys)
+    events, seen_events = [], set()
+    pending, seen_pending = [], set()
+    inbox_unreadable = 0
+    for session_key in session_keys:
+        inbox = peek_inbox(store, session_key)
+        inbox_unreadable = max(inbox_unreadable, inbox.get("unreadable_task_count", 0))
+        for event in inbox.get("events", []):
+            identity = ((event.get("task_id"), event.get("event_id"))
+                        if type(event) is dict else None)
+            if identity is not None and all(identity):
+                if identity in seen_events:
+                    continue
+                seen_events.add(identity)
+            events.append(event)
+        for entry in inbox.get("pending", []):
+            identity = ((entry.get("task_id"), entry.get("event_id"))
+                        if type(entry) is dict else None)
+            if identity is not None and all(identity):
+                if identity in seen_pending:
+                    continue
+                seen_pending.add(identity)
+            pending.append(entry)
     ready_task_ids = {
         entry.get("task_id") for entry in pending
         if type(entry) is dict and entry.get("state") == "NOT_YET_RECORDED"
@@ -784,7 +835,7 @@ def read_attention(pm_session, store=None):
     return {"items": attention_items(records, ready_task_ids),
             "unread": len(events) + len(pending),
             "task_unreadable_count": unreadable,
-            "inbox_unreadable_count": inbox.get("unreadable_task_count", 0)}
+            "inbox_unreadable_count": inbox_unreadable}
 
 
 def age_text(timestamp, now=None):
