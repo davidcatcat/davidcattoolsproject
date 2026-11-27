@@ -346,6 +346,8 @@ class TUIHandoverTests(unittest.TestCase):
         # Claude (claude-one) -> Claude (claude-two)
         old, task = self.stopped_claude_with_task(account="claude-one", config_dir=self.first)
         new_claude = self.bound_claude(account="claude-two", config_dir=self.second)
+        new_codex = self.bound_codex()
+        final_claude = self.bound_claude(account="claude-one", config_dir=self.first)
         pm_runtime.select_binding(old, state_root=self.state)
 
         ui = self.make_ui(environ=self.account_env)
@@ -356,20 +358,20 @@ class TUIHandoverTests(unittest.TestCase):
                          "claude-two")
 
         # Claude (claude-two) -> Codex (codex-pm)
-        new_codex = self.bound_codex()
+        before = len(ui.conversation.text)
         ui.run_pm_command("/pm use " + new_codex)
         ui.run_pm_command("/pm handover")
-        self.assertIn("PM Task handover completed", ui.conversation.text)
+        self.assertIn("PM Task handover completed", ui.conversation.text[before:])
         record = self.store.get(task["task_id"])
         self.assertEqual(record["pm_session_id"], "pm-" + new_codex)
         self.assertEqual(record["pm_provenance"]["pm_runtime"], "codex")
         self.assertEqual(record["pm_session_adoptions"][-1]["new_account"], "codex-pm")
 
         # Codex -> Claude
-        final_claude = self.bound_claude(account="claude-one", config_dir=self.first)
+        before = len(ui.conversation.text)
         ui.run_pm_command("/pm use " + final_claude)
         ui.run_pm_command("/pm handover")
-        self.assertIn("PM Task handover completed", ui.conversation.text)
+        self.assertIn("PM Task handover completed", ui.conversation.text[before:])
         self.assertEqual(self.store.get(task["task_id"])["pm_session_id"], "pm-" + final_claude)
 
     def test_refused_codex_combination_without_thread_is_shown_with_code(self):
