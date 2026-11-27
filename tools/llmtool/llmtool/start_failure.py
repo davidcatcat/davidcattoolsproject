@@ -71,6 +71,8 @@ REVIEWER_EXCERPT_MAX_CHARS = 2000
 HIGH_DEBUG_EXCERPT_MAX_CHARS = 6000
 # review_repair._ci_failure writes '<CI_PACKET_HEADER> check=...' (section 4).
 _CI_EXCERPT_PREFIX = 'CI_CHECK_FAILURE '
+# #2793 A13.0: a verification call that names no profile uses the default one.
+_PROFILE_UNSET = object()
 
 
 @dataclass(frozen=True)
@@ -235,18 +237,38 @@ def _sha256_text(text):
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 
-def _ci_identity_sha256(base):
-    """The review_repair._ci_failure identity digest rebuilt from a CI packet, or None."""
+def _ci_identity_sha256(base, profile=_PROFILE_UNSET):
+    """The review_repair._ci_failure identity digest rebuilt from a CI packet, or None.
+
+    A CI packet is bound to the exact check name that was accepted when it was
+    built (#2793 A13.0). With a profile, only that profile's names are accepted;
+    without one, the name recorded in the packet is validated as a profile name
+    and the claim digest proves it was the built name. A name outside the given
+    profile, or a malformed name, returns None, so the packet never binds.
+    """
     from . import review_repair
-    checks = '|'.join(re.escape(name) for name in review_repair.CI_REPAIR_CHECKS)
+    if profile is _PROFILE_UNSET:
+        from . import ci_profile
+        name_pattern = r'(.{1,100})'
+    else:
+        try:
+            checks = review_repair._ci_repair_checks(profile)
+        except Exception:
+            return None
+        name_pattern = '(' + '|'.join(re.escape(name) for name in checks) + ')'
     header = re.compile(re.escape(review_repair.CI_PACKET_HEADER) +
-                        r' check=(' + checks + r') run=([1-9][0-9]*)'
+                        r' check=' + name_pattern + r' run=([1-9][0-9]*)'
                         r' conclusion=failure head=([0-9a-f]{40})')
     first_line = base['reviewer_text_excerpt_untrusted_data'].split('\n', 1)[0]
     match = header.fullmatch(first_line)
     if match is None:
         return None
     name, run_id, head = match.groups()
+    if profile is _PROFILE_UNSET:
+        try:
+            ci_profile._validate_name(name)
+        except Exception:
+            return None
     if head != base['failed_head']:
         return None
     identity = {'kind': 'CI', 'task': base['task'], 'pr': base['pr'],
@@ -301,7 +323,7 @@ def inherited_rca(store, root, packet, *, source_task_id=None, report_sha256=Non
     return None
 
 
-def _matches(packet, claim, root, store):
+def _matches(packet, claim, root, store, profile=_PROFILE_UNSET):
     if not (repair_packet_shape_ok(packet) and type(claim) is dict and type(root) is dict):
         return False
     # Identity: P matches the claim C and its root Task R.
@@ -326,7 +348,7 @@ def _matches(packet, claim, root, store):
             if key not in _PACKET_HIGH_DEBUG_FIELDS}
     if (comment_id is None and
             base['reviewer_text_excerpt_untrusted_data'].startswith(_CI_EXCERPT_PREFIX)):
-        digest = _ci_identity_sha256(base)
+        digest = _ci_identity_sha256(base, profile)
     else:
         digest = _sha256_text(canonical(base))
     stored_digest = claim.get('packet_sha256')
@@ -373,13 +395,15 @@ def local_rca_entries(packet, claim, root):
                ]
 
 
-def repair_packet_matches(packet, claim, root, store=None):
+def repair_packet_matches(packet, claim, root, store=None, profile=_PROFILE_UNSET):
     """Section 4 "Packet binding": True only when packet P is bound to claim C of root R.
 
     Pure. Any miss, malformed input or error gives False; the caller refuses
-    START_RETRY_REPAIR_PACKET_MISMATCH.
+    START_RETRY_REPAIR_PACKET_MISMATCH. For a CI packet the accepted check names
+    come from the CI profile (#2793 A13.0): the default profile when profile is
+    not given, else that profile.
     """
     try:
-        return _matches(packet, claim, root, store) is True
+        return _matches(packet, claim, root, store, profile) is True
     except Exception:
         return False
