@@ -22,7 +22,7 @@ Scope: A13.0 records OSR-22 (personal default routes and task-manifest discovery
 
 | ID | Source identifier (file · symbol) | Verified fact at pinned main |
 |----|-----------------------------------|------------------------------|
-| OSR-22-a | `high_debug.py` · route resolution (via `role_config.py` · `resolve_role`); `review_dispatch.py` · route resolution (via `role_config.py` · `resolve_role`) | `high_debug.py` and `review_dispatch.py` both call `resolve_role` in `role_config.py` for the respective routes. `resolve_role` loads account data from user configuration, resolves configured account aliases to provider and config directory, and supports one-shot CLI/environment precedence. |
+| OSR-22-a | `high_debug.py` · `_resolve_debug_role` (via `role_config.py` · `resolve_role`); `review_dispatch.py` · `_resolve_reviewer_role` (via `role_config.py` · `resolve_role`) | `_resolve_debug_role` in `high_debug.py` and `_resolve_reviewer_role` in `review_dispatch.py` both call `resolve_role` in `role_config.py` for the respective routes. `resolve_role` loads account data from user configuration, resolves configured account aliases to provider and config directory, and supports one-shot CLI/environment precedence. |
 | OSR-22-b | `llmtool_monitor.py` · `scan_tasks` | `scan_tasks` accepts a pattern and requires a regular manifest in matched directories. Recent task evidence is a separate condition: the recency check compares the cutoff against the newest timestamp among the manifest, stage, and result files, so an old manifest with a recent stage or result is accepted. The normal caller leaves the pattern at `TASK_GLOB`, a macOS temporary-directory default. |
 
 ## Remaining first-run portability (open)
