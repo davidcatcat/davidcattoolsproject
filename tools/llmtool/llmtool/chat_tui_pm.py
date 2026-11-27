@@ -156,25 +156,30 @@ class PMRuntimeAPI:
         return rows
 
     def configured_model(self, runtime, binding=None):
-        """The configured PM model for this runtime, or None when it is not known."""
+        """The PM model the runtime actually applies, or None when it is not known.
+
+        ``PMRuntime.open`` resolves the ``pm`` role, so its model is the Claude PM's
+        configured model. The Codex runtime selects its own model and never passes a
+        configured role model to the CLI, so no configured Codex model is reported.
+        """
         from . import role_config
         binding = binding if type(binding) is dict else {}
+        name = runtime if type(runtime) is str else getattr(runtime, 'runtime', None)
+        if name is None:
+            name = binding.get('runtime')
+        if name == 'codex':
+            return None
         account = binding.get('account')
         options = {'environ': self.environ,
                    'home': None if self.environ is None else self.environ.get('HOME')}
         if type(account) is str and account:
             options['cli'] = {'account': account}
-        roles = (('pm-codex-binding',) if runtime == 'codex'
-                 else ('pm', 'pm-claude-binding'))
-        for role in roles:
-            try:
-                resolved = role_config.resolve_role(role, **options)
-            except Exception:
-                continue
-            value = resolved.get('model') if type(resolved) is dict else None
-            if type(value) is str and value.strip():
-                return value.strip()
-        return None
+        try:
+            resolved = role_config.resolve_role('pm', **options)
+        except Exception:
+            return None
+        value = resolved.get('model') if type(resolved) is dict else None
+        return value.strip() if type(value) is str and value.strip() else None
 
     def account_checks(self):
         """Run provider login status probes, discarding all provider output."""

@@ -9713,12 +9713,32 @@ class PMStatusModelTests(unittest.TestCase):
         self.assertIn('PM 模型：claude-sonnet-test', status)
         self.assertIn('權限模式（本機設定）：auto（自動，不跳出確認）', status)
 
-    def test_codex_status_shows_configured_model_and_permission_label(self):
+    def test_codex_status_shows_observed_model_and_permission_label(self):
         status = self.status('codex', {
             'runtime': 'codex', 'account': 'codex-test', 'model': 'gpt-5-codex-test'})
         self.assertIn('PM 模型：gpt-5-codex-test', status)
         self.assertIn('權限模式（本機設定）：workspace-write', status)
         self.assertNotIn('Claude', status)
+
+    def test_configured_codex_role_model_is_not_reported(self):
+        # F1: the Codex runtime never passes a pm-codex-binding model to its CLI, so a
+        # configured role model is not the connected PM's model.
+        calls = []
+
+        def resolve(role, **_options):
+            calls.append(role)
+            return {'model': 'gpt-5-codex-configured'}
+
+        with patch('llmtool.role_config.resolve_role', side_effect=resolve):
+            api = Mock()
+            api.read_all_turns.return_value = []
+            resolver = chat_tui_pm.PMRuntimeAPI(environ={}).configured_model
+            api.configured_model.side_effect = resolver
+            status = self.status('codex', {'runtime': 'codex', 'account': 'codex-test'},
+                                 api=api)
+        self.assertIn('PM 模型：UNKNOWN', status)
+        self.assertNotIn('gpt-5-codex-configured', status)
+        self.assertEqual(calls, [])
 
     def test_unknown_pm_model_is_shown_as_unknown(self):
         api = Mock()
@@ -9729,10 +9749,25 @@ class PMStatusModelTests(unittest.TestCase):
         self.assertNotIn('PM 模型：None', status)
 
     def test_configured_role_model_is_used_when_the_binding_has_none(self):
+        # PMRuntime.open resolves the pm role for a Claude PM; its model is applied.
         with patch('llmtool.role_config.resolve_role',
-                   return_value={'model': 'configured-pm-model'}):
+                   return_value={'model': 'configured-pm-model'}) as resolve:
             api = chat_tui_pm.PMRuntimeAPI(environ={})
             self.assertEqual(api.configured_model('claude-code', {}), 'configured-pm-model')
+        self.assertEqual(resolve.call_args.args[0], 'pm')
+
+    def test_claude_configured_model_does_not_fall_back_to_pm_claude_binding(self):
+        # F2: PMRuntime.open resolves only pm, so pm-claude-binding's model is not applied.
+        calls = []
+
+        def resolve(role, **_options):
+            calls.append(role)
+            return {'model': 'binding-role-model'} if role == 'pm-claude-binding' else {}
+
+        with patch('llmtool.role_config.resolve_role', side_effect=resolve):
+            api = chat_tui_pm.PMRuntimeAPI(environ={})
+            self.assertIsNone(api.configured_model('claude-code', {}))
+        self.assertEqual(calls, ['pm'])
 
     def test_codex_status_does_not_fall_back_to_the_claude_pm_role(self):
         calls = []
@@ -9749,7 +9784,7 @@ class PMStatusModelTests(unittest.TestCase):
             status = self.status('codex', {'runtime': 'codex', 'account': 'codex-test'}, api=api)
         self.assertIn('PM 模型：UNKNOWN', status)
         self.assertNotIn('claude-pm-model', status)
-        self.assertEqual(calls, ['pm-codex-binding'])
+        self.assertEqual(calls, [])
 
 
 class PMUsageCodexCachedTokenTests(unittest.TestCase):
