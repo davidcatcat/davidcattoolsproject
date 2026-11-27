@@ -1,6 +1,7 @@
 """#1019: fingerprint_directory on a real temporary directory: the same value
-for an unchanged directory, a different value after an entry is added, and
-the fixed module error for a missing path. macOS temporary directories are
+for an unchanged directory, a different value after an entry is added, the
+same value when only a symbolic link target's contents change, and the
+fixed module error for a missing path. macOS temporary directories are
 reached through a symbolic link, so the resolved temporary path is used."""
 import os
 import tempfile
@@ -26,6 +27,18 @@ class FingerprintTests(unittest.TestCase):
         with open(os.path.join(self.tmp, 'entry-a.txt'), 'wb') as fh:
             fh.write(b'a')
         self.assertNotEqual(first, fingerprint_directory(self.tmp))
+
+    def test_link_target_content_change_keeps_fingerprint(self):
+        with tempfile.TemporaryDirectory() as base:
+            target = os.path.join(os.path.realpath(base), 'target.txt')
+            with open(target, 'wb') as fh:
+                fh.write(b'one')
+            link = os.path.join(self.tmp, 'link-to-target')
+            os.symlink(target, link)
+            first = fingerprint_directory(self.tmp)
+            with open(target, 'wb') as fh:
+                fh.write(b'two')
+            self.assertEqual(first, fingerprint_directory(self.tmp))
 
 
 class MissingPathTests(unittest.TestCase):
