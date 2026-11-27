@@ -39,6 +39,7 @@ from datetime import datetime, timezone
 from . import github_identity
 from . import repair_policy
 from . import source_freshness
+from . import test_profile
 from . import trust
 from . import worker_dispatch
 from .errors import LLMToolError
@@ -74,10 +75,6 @@ _GITHUB_ACTIONS_APP_ID = 15368
 _D6_EVIDENCE_STATES = frozenset(('ACTIVE', 'REVIEW_PENDING', 'REPAIR'))
 # A GitHub-hosted job reports this runner group; self-hosted groups never do.
 _GITHUB_HOSTED_RUNNER_GROUP = 'GitHub Actions'
-_TEST_REGISTRY = (
-    (re.compile(r'tools/llmtool/tests/test_[A-Za-z0-9_]+\.py\Z'), 'unittest'),
-    (re.compile(r'scripts/test_[A-Za-z0-9_]+\.py\Z'), 'script'),
-)
 _REVIEW_ID = re.compile(r'[a-z0-9][a-z0-9-]{0,95}\Z')
 _REVIEW_VERDICTS = frozenset(('PASS', 'FAIL', 'BLOCKED'))
 _GH_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
@@ -136,6 +133,71 @@ def _stop(code):
     error = LLMToolError('Executor completion evidence is unavailable; details omitted')
     error.completion_code = code
     raise error from None
+
+
+def _test_profile_snapshot():
+    """Return one validated profile from the live provider, or refuse.
+
+    ``test_profile.default_profile`` is looked up at use time so a caller can
+    substitute a profile. A provider that is missing, raises, or returns
+    anything other than a :class:`TestProfile` refuses with
+    ``TEST_PROFILE_INVALID``. Callers classify every path of one completion
+    pass against this single snapshot, so a provider that changes its answer
+    between calls cannot split a path's admission from its runner kind.
+    """
+    provider = getattr(test_profile, 'default_profile', None)
+    if not callable(provider):
+        _stop('TEST_PROFILE_INVALID')
+    try:
+        profile = provider()
+    except Exception:
+        _stop('TEST_PROFILE_INVALID')
+    if type(profile) is not test_profile.TestProfile:
+        _stop('TEST_PROFILE_INVALID')
+    # A compiled bytes pattern passed the TestProfile type check but cannot
+    # fullmatch a str path, so refuse it here with the fixed code instead of
+    # letting TypeError escape classification.
+    if any(type(pattern.pattern) is not str for pattern, _ in profile.entries):
+        _stop('TEST_PROFILE_INVALID')
+    return profile
+
+
+def _profile_kind(profile, path):
+    """Return the kind one profile snapshot gives a path, or ``None``.
+
+    A path that matches entries with different runner kinds refuses with
+    ``TEST_PROFILE_INVALID``. Classification never falls back to an older
+    registry.
+    """
+    if type(path) is not str:
+        return None
+    try:
+        kinds = {kind for pattern, kind in profile.entries
+                 if pattern.fullmatch(path) is not None}
+    except Exception:
+        _stop('TEST_PROFILE_INVALID')
+    if len(kinds) > 1:
+        _stop('TEST_PROFILE_INVALID')
+    return kinds.pop() if kinds else None
+
+
+def _classify_test_path(path):
+    """Return the runner kind one live test-evidence profile gives a path."""
+    return _profile_kind(_test_profile_snapshot(), path)
+
+
+def _eligible_registered_tests(paths):
+    """Return sorted ``(path, kind)`` pairs from one profile snapshot."""
+    unique = sorted(set(paths))
+    if not unique:
+        return []
+    profile = _test_profile_snapshot()
+    eligible = []
+    for path in unique:
+        kind = _profile_kind(profile, path)
+        if kind is not None:
+            eligible.append((path, kind))
+    return eligible
 
 
 def _canonical_json_bytes(value, code):
@@ -920,8 +982,11 @@ def _run_registered_tests(root, source_sha, eligible, *, home, pycache=None):
             'duration_ms': max(0, int((time.monotonic()-started)*1000)),
             'command_sha256': hashlib.sha256(json.dumps(argv, separators=(',', ':')).encode()).hexdigest(),
         }
-        ran = re.findall(rb'(?m)^Ran ([0-9]+) tests?\b', output) if kind == 'script' else None
-        if code or (kind == 'script' and (not ran or int(ran[-1]) == 0)):
+        ran = re.findall(rb'(?m)^Ran ([0-9]+) tests?\b', output)
+        # A reported zero fails; a discovery kind always reports a count.
+        zero_tests = bool(ran) and int(ran[-1]) == 0
+        discovery = kind in ('unittest', 'script')
+        if code or zero_tests or (discovery and not ran):
             item['output_excerpt'] = _test_excerpt(home, output, code)
             item['status'] = 'FAILED'
         else:
@@ -940,8 +1005,7 @@ def run_bounded_tests(*, root, source_sha, result_sha, read_paths, write_paths,
     conflict or hand resolution, still counts its paths. Without it the plain
     source_sha..result_sha diff decides, as before.
     """
-    eligible = sorted({(p, _registered_test(p)) for p in (*read_paths, *write_paths)
-                       if _registered_test(p) is not None})
+    eligible = _eligible_registered_tests((*read_paths, *write_paths))
     before = collect_git_snapshot(root)
     if before.head != result_sha or not before.clean:
         _stop('TEST_SOURCE_MISMATCH')
@@ -981,8 +1045,7 @@ def run_bounded_worktree_tests(*, root, source_sha, diff_sha256,
         return [{'status': 'NOT_APPLICABLE_DOCS_ONLY',
                  'changed_paths': before['changed_paths'], 'source_sha': source_sha,
                  'diff_sha256': diff_sha256, 'result_head': None, 'docs_only': True}]
-    eligible = sorted({(p, _registered_test(p)) for p in (*read_paths, *write_paths)
-                       if _registered_test(p) is not None})
+    eligible = _eligible_registered_tests((*read_paths, *write_paths))
     if not eligible:
         _stop('TEST_SCOPE_MISSING')
     with tempfile.TemporaryDirectory(prefix='llmtool-task-worktree-tests-') as home, \
