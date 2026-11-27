@@ -58,10 +58,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from . import ci_profile
 from . import mac_full_due
 from . import main_ci_job_pages as pages_mod
 from . import main_ci_job_summary as summary_mod
 from . import main_incident as mi
+
+_UNSET = mac_full_due._UNSET
+_DEFAULT_PROFILE = ci_profile.default_profile()
 
 RED = summary_mod.RED
 GREEN = summary_mod.GREEN
@@ -71,8 +75,8 @@ LINUX = 'linux'
 FULL_MAC = 'full_mac'
 
 MAIN = 'branches/main'
-LINUX_WORKFLOW = 'llmtool-linux-ci.yml'
-MAC_WORKFLOW = 'llmtool-mac-ci.yml'
+LINUX_WORKFLOW = _DEFAULT_PROFILE.linux_workflow_file
+MAC_WORKFLOW = _DEFAULT_PROFILE.macos_workflow_file
 RUNS = ('actions/workflows/{workflow}/runs?branch=main&event={event}'
         '&per_page={per_page}')
 JOBS = 'actions/runs/{run_id}/jobs?per_page={per_page}&page={page}'
@@ -110,6 +114,7 @@ PAGES_BOUND = 'pages_bound'
 FULL_EVIDENCE_MISSING = 'full_evidence_missing'
 FULL_MAC_NOT_RUN = 'full_mac_not_run'
 RUN_SCAN_BOUND = 'run_scan_bound'
+PROFILE_INVALID = 'ci_profile_invalid'
 
 # One entry per relevant check: kind, workflow path and the run event that
 # selects exactly the Linux push run and the FULL Mac (workflow_dispatch) run.
@@ -407,18 +412,27 @@ def _run_result(github_get, sha, kind, workflow, event, main_date):
     return first_skip
 
 
-def inspect_jobs(github_get):
+def inspect_jobs(github_get, *, profile=_UNSET):
     """Return the bounded, read-only failing-job report for current main."""
     result = {'sha': None, 'state': UNKNOWN, 'reason': None,
               'runs': [], 'failing': []}
+    try:
+        resolved = mac_full_due.resolve_profile(profile)
+    except mac_full_due.ProfileError:
+        result['reason'] = PROFILE_INVALID
+        return result
     try:
         sha, main_date = _main_commit(github_get)
     except mac_full_due.StateError:
         result['reason'] = MAIN_READ_FAILED
         return result
     result['sha'] = sha
+    kinds = (
+        (LINUX, resolved.linux_workflow_file, 'push'),
+        (FULL_MAC, resolved.macos_workflow_file, 'workflow_dispatch'),
+    )
     runs = [_run_result(github_get, sha, kind, workflow, event, main_date)
-            for kind, workflow, event in _KINDS]
+            for kind, workflow, event in kinds]
     result['runs'] = runs
     result['failing'] = [
         dict(job, kind=run['kind'], workflow=run['workflow'])

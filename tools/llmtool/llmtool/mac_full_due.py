@@ -9,6 +9,7 @@ A FULL run tests its own head_sha (the workflow checks out github.sha).
 
 from __future__ import annotations
 
+from dataclasses import fields
 import datetime
 import json
 import os
@@ -16,9 +17,16 @@ import re
 import sys
 import time
 
+from . import ci_profile
+
+_UNSET = object()
+_DEFAULT_PROFILE = ci_profile.default_profile()
+
 QUIET_SECONDS = 1800
-RUNS = 'actions/workflows/llmtool-mac-ci.yml/runs?branch=main&event=workflow_dispatch&per_page=50'
-JOBS = ('shards (1/3)', 'shards (2/3)', 'shards (3/3)', 'check (macOS 3.13)')
+SHARD_JOBS = ('shards (1/3)', 'shards (2/3)', 'shards (3/3)')
+RUNS = (f'actions/workflows/{_DEFAULT_PROFILE.macos_workflow_file}'
+        '/runs?branch=main&event=workflow_dispatch&per_page=50')
+JOBS = SHARD_JOBS + (_DEFAULT_PROFILE.macos_check,)
 ACTIVE = frozenset({'queued', 'waiting', 'pending', 'requested', 'in_progress'})
 FAILED = frozenset({'failure', 'timed_out', 'startup_failure'})
 SHA = re.compile(r'[0-9a-f]{40}\Z')
@@ -30,11 +38,55 @@ QUIET = 'MAC_FULL_SUITE_QUIET'
 FULL_FAILED = 'MAC_FULL_SUITE_FAILED'
 DISPATCH_FAILED = 'MAC_FULL_SUITE_DISPATCH_FAILED'
 UNAVAILABLE = 'MAC_FULL_SUITE_STATE_UNAVAILABLE'
+PROFILE_INVALID = 'MAC_FULL_SUITE_PROFILE_INVALID'
 OK_CODES = (DISPATCHED, ACTIVE_RUN, VERIFIED, QUIET)
 
 
 class StateError(Exception):
     """A GitHub read failed or returned an unexpected shape."""
+
+
+class ProfileError(StateError):
+    """The CI profile is missing, invalid or ambiguous."""
+
+
+def _is_plain_workflow_name(value):
+    return ('/' not in value and '\\' not in value and '?' not in value
+            and '#' not in value and value not in ('.', '..'))
+
+
+def resolve_profile(profile=_UNSET):
+    """Return a validated CiProfile or raise ProfileError."""
+    if profile is _UNSET:
+        try:
+            candidate = ci_profile.default_profile()
+        except Exception:
+            raise ProfileError('ci_profile') from None
+    else:
+        candidate = profile
+    if not isinstance(candidate, ci_profile.CiProfile):
+        raise ProfileError('ci_profile')
+    for field in fields(ci_profile.CiProfile):
+        value = getattr(candidate, field.name, None)
+        try:
+            ci_profile._validate_name(value)
+        except ci_profile.CiProfileError:
+            raise ProfileError('ci_profile') from None
+    if not (_is_plain_workflow_name(candidate.linux_workflow_file)
+            and _is_plain_workflow_name(candidate.macos_workflow_file)):
+        raise ProfileError('ci_profile')
+    return candidate
+
+
+def runs_path(workflow_file):
+    """Return the GitHub workflow runs API path for one Mac workflow file."""
+    return (f'actions/workflows/{workflow_file}'
+            '/runs?branch=main&event=workflow_dispatch&per_page=50')
+
+
+def full_jobs(profile):
+    """Return the required job names for a FULL Mac run under profile."""
+    return SHARD_JOBS + (profile.macos_check,)
 
 
 def _get(github_get, path):
@@ -75,18 +127,21 @@ def main_state(github_get):
         raise StateError('merge time') from None
 
 
-def full_runs(github_get):
+def full_runs(github_get, *, profile=_UNSET):
     """Return main workflow_dispatch runs of the Mac workflow, newest first."""
-    data = _get(github_get, RUNS)
+    resolved = resolve_profile(profile)
+    path = runs_path(resolved.macos_workflow_file)
+    data = _get(github_get, path)
     runs = data.get('workflow_runs') if isinstance(data, dict) else None
     if not isinstance(runs, list) or not all(
             isinstance(run, dict) and isinstance(run.get('status'), str) for run in runs):
-        raise StateError(RUNS)
+        raise StateError(path)
     return runs
 
 
-def trusted(github_get, run):
+def trusted(github_get, run, *, profile=_UNSET):
     """A success counts only when every shard job and the check job succeeded."""
+    resolved = resolve_profile(profile)
     if run.get('status') != 'completed' or run.get('conclusion') != 'success':
         return False
     run_id = run.get('id')
@@ -97,25 +152,27 @@ def trusted(github_get, run):
     if not isinstance(jobs, list):
         raise StateError('jobs')
     done = {job.get('name'): job.get('conclusion') for job in jobs if isinstance(job, dict)}
-    return all(done.get(name) == 'success' for name in JOBS)
+    return all(done.get(name) == 'success' for name in full_jobs(resolved))
 
 
-def sha_result(github_get, runs, sha, skip_id=None):
+def sha_result(github_get, runs, sha, skip_id=None, *, profile=_UNSET):
     """Return PASS, FAIL or None from the newest finished FULL run of sha."""
+    resolved = resolve_profile(profile)
     for run in runs:
         if run.get('id') == skip_id or run.get('head_sha') != sha or run['status'] != 'completed':
             continue
-        if trusted(github_get, run):
+        if trusted(github_get, run, profile=resolved):
             return 'PASS'
         if run.get('conclusion') in FAILED:
             return 'FAIL'
     return None
 
 
-def decide(github_get, *, now, quiet_seconds=QUIET_SECONDS):
+def decide(github_get, *, now, quiet_seconds=QUIET_SECONDS, profile=_UNSET):
     """Return (code, detail) from GitHub state; never writes."""
+    resolved = resolve_profile(profile)
     sha, merged_at = main_state(github_get)
-    runs = full_runs(github_get)
+    runs = full_runs(github_get, profile=resolved)
     detail = {'main_sha': sha, 'merge_age_seconds': int(now - merged_at)}
     finished = [run for run in runs if run['status'] == 'completed' and
                 run.get('conclusion') in FAILED | {'success'}]
@@ -125,7 +182,7 @@ def decide(github_get, *, now, quiet_seconds=QUIET_SECONDS):
     active = [run.get('id') for run in runs if run['status'].lower() in ACTIVE]
     if active:
         return ACTIVE_RUN, dict(detail, active_runs=active)
-    result = sha_result(github_get, runs, sha)
+    result = sha_result(github_get, runs, sha, profile=resolved)
     if result == 'PASS':
         return VERIFIED, detail
     if result == 'FAIL':
@@ -135,29 +192,36 @@ def decide(github_get, *, now, quiet_seconds=QUIET_SECONDS):
     return DUE, detail
 
 
-def request_full(gh_runner, root, github_get, *, now=None, quiet_seconds=QUIET_SECONDS):
+def request_full(gh_runner, root, github_get, *, now=None, quiet_seconds=QUIET_SECONDS,
+                 profile=_UNSET):
     """Dispatch one FULL on main when due; return (code, detail)."""
     now = time.time() if now is None else now
     try:
-        code, detail = decide(github_get, now=now, quiet_seconds=quiet_seconds)
+        resolved = resolve_profile(profile)
+        code, detail = decide(github_get, now=now, quiet_seconds=quiet_seconds,
+                              profile=resolved)
         if code != DUE:
             return code, detail
         # Re-read just before dispatch so a run from an overlapping sweep is seen.
-        if any(run['status'].lower() in ACTIVE for run in full_runs(github_get)):
+        if any(run['status'].lower() in ACTIVE
+               for run in full_runs(github_get, profile=resolved)):
             return ACTIVE_RUN, detail
+    except ProfileError:
+        return PROFILE_INVALID, {'profile': 'invalid'}
     except StateError as exc:
         return UNAVAILABLE, {'read': str(exc)}
     try:
-        result = gh_runner(root, ['workflow', 'run', 'llmtool-mac-ci.yml', '--ref', 'main'])
+        result = gh_runner(
+            root, ['workflow', 'run', resolved.macos_workflow_file, '--ref', 'main'])
         dispatched = getattr(result, 'returncode', 1) == 0
     except Exception:
         dispatched = False
     return (DISPATCHED if dispatched else DISPATCH_FAILED), detail
 
 
-def request_train_full(gh_runner, root, github_get):
+def request_train_full(gh_runner, root, github_get, *, profile=_UNSET):
     """Merge-train exception: no quiet period, same dedupe and SHA checks; return a code."""
-    return request_full(gh_runner, root, github_get, quiet_seconds=0)[0]
+    return request_full(gh_runner, root, github_get, quiet_seconds=0, profile=profile)[0]
 
 
 def add_ci_parser(sub):
@@ -169,16 +233,16 @@ def add_ci_parser(sub):
     return ci
 
 
-def run_ci(args, *, gh_runner=None, github_get=None, root=None, now=None):
+def run_ci(args, *, gh_runner=None, github_get=None, root=None, now=None, profile=_UNSET):
     """Print one JSON line; exit 0 normal, 1 failed FULL or alert, 2 read or dispatch error."""
     if github_get is None:
         from .task_completion import _github_get as github_get
     if gh_runner is None:
         from .task_advance import _publish_run_gh as gh_runner
     code, detail = request_full(gh_runner, os.getcwd() if root is None else root,
-                                github_get, now=now)
+                                github_get, now=now, profile=profile)
     print(json.dumps(dict(detail, code=code), sort_keys=True))
-    if code in (UNAVAILABLE, DISPATCH_FAILED):
+    if code in (UNAVAILABLE, DISPATCH_FAILED, PROFILE_INVALID):
         print(f'llmtool: {code}', file=sys.stderr)
         return 2
     return 0 if code in OK_CODES and 'alert' not in detail else 1
