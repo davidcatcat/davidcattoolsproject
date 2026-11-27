@@ -198,6 +198,33 @@ class TestMacFullSuite(unittest.TestCase):
                 self.assertEqual(github_get.calls, [_EXPECTED_PATH])
                 self.assertEqual(runner.calls, [])
 
+    def test_unknown_run_status_state_unavailable(self) -> None:
+        """An unrecognized run status yields STATE_UNAVAILABLE and no dispatch."""
+        for bad_status in ['mystery', 'starting', 'STALE', 'timed_out']:
+            with self.subTest(status=bad_status):
+                runner = FakeRunner(returncode=0)
+                github_get = FakeGithubGet(response={'workflow_runs': [
+                    {'status': bad_status},
+                ]})
+                result = request_full_suite(runner, '/repo/root', github_get)
+
+                self.assertEqual(result, MAC_FULL_SUITE_STATE_UNAVAILABLE)
+                self.assertEqual(github_get.calls, [_EXPECTED_PATH])
+                self.assertEqual(runner.calls, [])
+
+    def test_unknown_run_status_mixed_with_completed_state_unavailable(self) -> None:
+        """An unrecognized status among completed runs also blocks dispatch."""
+        runner = FakeRunner(returncode=0)
+        github_get = FakeGithubGet(response={'workflow_runs': [
+            {'status': 'completed', 'conclusion': 'success'},
+            {'status': 'mystery'},
+            {'status': 'completed', 'conclusion': 'failure'},
+        ]})
+        result = request_full_suite(runner, '/repo/root', github_get)
+
+        self.assertEqual(result, MAC_FULL_SUITE_STATE_UNAVAILABLE)
+        self.assertEqual(runner.calls, [])
+
     def test_none_runner_or_read(self) -> None:
         """Return MAC_FULL_SUITE_STATE_UNAVAILABLE when runner or github_get is None."""
         runner = FakeRunner(returncode=0)
