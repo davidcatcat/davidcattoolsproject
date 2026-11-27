@@ -51,7 +51,7 @@ from . import ci_profile
 from . import mac_full_due
 from . import main_incident_graph as graph
 
-_UNSET = object()
+_UNSET = mac_full_due._UNSET
 _DEFAULT_PROFILE = ci_profile.default_profile()
 
 LINUX_CHECK = _DEFAULT_PROFILE.linux_code_check
