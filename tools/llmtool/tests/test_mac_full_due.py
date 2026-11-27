@@ -25,6 +25,7 @@ class FakeGitHub:
     def __init__(self):
         self.main, self.merged_at, self.runs, self.jobs = 'a' * 40, T0, [], {}
         self.fail, self.reads, self.on_runs = None, [], None
+        self.total_override = None
 
     def merge(self, sha, at):
         self.main, self.merged_at = sha, at
@@ -47,7 +48,16 @@ class FakeGitHub:
                 self.on_runs()
             return {'workflow_runs': list(reversed(self.runs))}
         run_id = int(path.split('/')[2])
-        return {'jobs': self.jobs[run_id]}
+        jobs = self.jobs[run_id]
+        page = 1
+        if '?' in path:
+            for part in path.split('?', 1)[1].split('&'):
+                key, _, value = part.partition('=')
+                if key == 'page':
+                    page = int(value)
+        start = (page - 1) * 100
+        total = len(jobs) if self.total_override is None else self.total_override
+        return {'total_count': total, 'jobs': jobs[start:start + 100]}
 
 
 class FakeGh:
@@ -117,6 +127,62 @@ class MacFullDueCases(unittest.TestCase):
         self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
         self.github.finish(jobs=[dict(job, conclusion='skipped') for job in OK_JOBS])
         self.assertEqual(self.sweep(T0 + 2100), due.DISPATCHED)
+
+    def test_e_missing_required_job_is_not_trusted(self):
+        self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
+        self.github.finish(jobs=OK_JOBS[:-1])
+        self.assertNotEqual(self.sweep(T0 + 2100), due.VERIFIED)
+        self.assertEqual(len(self.gh.calls), 2)
+
+    def test_e_duplicate_required_job_is_never_trusted(self):
+        check = due.JOBS[-1]
+        cases = (
+            ('success_then_failure', OK_JOBS + [{'name': check, 'conclusion': 'failure'}]),
+            ('failure_then_success', [{'name': check, 'conclusion': 'failure'}] + OK_JOBS),
+            ('success_then_success', OK_JOBS + [{'name': check, 'conclusion': 'success'}]),
+            ('duplicate_shard', OK_JOBS + [{'name': due.SHARD_JOBS[0], 'conclusion': 'failure'}]),
+        )
+        for label, jobs in cases:
+            with self.subTest(case=label):
+                self.setUp()
+                self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
+                self.github.finish(jobs=jobs)
+                self.assertNotEqual(self.sweep(T0 + 2100), due.VERIFIED)
+                self.assertEqual(len(self.gh.calls), 2)
+
+    def test_e_duplicate_required_job_on_later_page_is_never_trusted(self):
+        self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
+        filler = [{'name': f'extra-{i}', 'conclusion': 'success'} for i in range(96)]
+        jobs = OK_JOBS + filler + [{'name': due.JOBS[-1], 'conclusion': 'failure'}]
+        self.assertEqual(len(jobs), 101)
+        self.github.finish(jobs=jobs)
+        self.assertNotEqual(self.sweep(T0 + 2100), due.VERIFIED)
+        self.assertEqual(len(self.gh.calls), 2)
+        self.assertTrue(any('page=2' in path for path in self.github.reads))
+
+    def test_e_required_jobs_on_later_page_are_trusted_once_each(self):
+        self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
+        filler = [{'name': f'extra-{i}', 'conclusion': 'success'} for i in range(100)]
+        self.github.finish(jobs=filler + OK_JOBS)
+        self.assertEqual(self.sweep(T0 + 2100), due.VERIFIED)
+        self.assertEqual(len(self.gh.calls), 1)
+        self.assertTrue(any('page=2' in path for path in self.github.reads))
+
+    def test_e_incomplete_job_response_is_not_trusted(self):
+        self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
+        self.github.finish(jobs=OK_JOBS)
+        self.github.total_override = 101
+        self.assertEqual(self.sweep(T0 + 2100), due.UNAVAILABLE)
+        self.assertEqual(len(self.gh.calls), 1)
+
+    def test_e_unrelated_job_names_do_not_change_trust(self):
+        self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
+        self.github.finish(jobs=OK_JOBS + [
+            {'name': 'lint', 'conclusion': 'failure'},
+            {'name': 'macos-check-extra', 'conclusion': 'success'},
+        ])
+        self.assertEqual(self.sweep(T0 + 2100), due.VERIFIED)
+        self.assertEqual(len(self.gh.calls), 1)
 
     def test_f_failed_full_keeps_fail_raises_alert_and_never_passes(self):
         self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
