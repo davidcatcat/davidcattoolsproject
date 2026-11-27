@@ -9539,7 +9539,9 @@ class CodexThreadTaskReadTests(unittest.TestCase):
                                             updated_at='2026-11-27T00:02:00Z')
         thread_blocked = self.active_record(
             '3' * 32, 'pm-' + self.THREAD_ID,
-            developer={'state': 'DEVELOPER_PENDING', 'blocked_reason': 'codex thread block'})
+            developer={'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                       'error_code': 'CODEX_BLOCKED',
+                       'blocked_reason': 'codex thread block'})
         native_failed = self.active_record(
             '4' * 32, 'pm-' + self.NATIVE_ID,
             state='PM_RESPONSE_REJECTED', developer=None)
@@ -9608,10 +9610,14 @@ class CodexThreadTaskReadTests(unittest.TestCase):
             thread_running = self.active_record('2' * 32, 'pm-' + self.THREAD_ID)
             thread_blocked = self.active_record(
                 '3' * 32, 'pm-' + self.THREAD_ID,
-                developer={'state': 'DEVELOPER_PENDING', 'blocked_reason': 'thread block'})
+                developer={'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                           'error_code': 'CODEX_BLOCKED',
+                           'blocked_reason': 'thread block'})
             other_blocked = self.active_record(
                 '6' * 32, 'pm-' + self.OTHER_ID,
-                developer={'state': 'DEVELOPER_PENDING', 'blocked_reason': 'other block'})
+                developer={'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                           'error_code': 'CODEX_BLOCKED',
+                           'blocked_reason': 'other block'})
             store = self.make_store([thread_running, thread_blocked, other_blocked])
 
             session = ChatSession(resolve_config(environ={}, cwd=home, home=home))
