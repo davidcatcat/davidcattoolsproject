@@ -365,17 +365,24 @@ class MalformedStreamPositionTests(unittest.TestCase):
         review_body = base._codex_review_text(
             run_id=task['run_id'],
             contract=task['task_binding']['contract_digest'])
+        agent_payload = json.dumps({
+            'task_id': self.task_id,
+            'run_id': task['run_id'],
+            'head': HEAD,
+            'verdict': 'PASS',
+            'review': review_body,
+        })
         bad_line = '{"dup": 1, "dup": 2}'
         raw = (
             json.dumps({'type': 'thread.started', 'thread_id': '0123456789abcdef'}) + '\n'
             + json.dumps({'type': 'item.completed',
-                          'item': {'type': 'agent_message', 'text': review_body}}) + '\n'
+                          'item': {'type': 'agent_message', 'text': agent_payload}}) + '\n'
             + bad_line + '\n'
         ).encode('utf-8')
         exc = self._refusal(raw)
         receipt = self._receipt(exc)
 
-        self._assert_not_a_verdict_and_no_text(receipt, [bad_line, review_body])
+        self._assert_not_a_verdict_and_no_text(receipt, [bad_line, review_body, agent_payload])
         diag = receipt['stream_diagnostic']
         self.assertEqual(diag['position'], review_dispatch.STREAM_MALFORMED_AFTER_AGENT_MESSAGE)
         self.assertEqual(diag['category'], review_dispatch.STREAM_MALFORMED_DUPLICATE_KEY)
