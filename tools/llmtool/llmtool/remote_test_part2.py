@@ -1,3 +1,5 @@
+from .remote_log_path import is_valid_remote_log_path
+
 # #2281 row 9: fixed total-deadline reserve and SSH-timeout safety margin.
 _REMOTE_WORK_RESERVE_SECONDS = 60
 _REMOTE_SSH_TIMEOUT_MARGIN_SECONDS = 60
@@ -37,10 +39,7 @@ def _validate_remote_receipt(raw, *, sha, modules):
             any(x not in modules for x in receipt['failures']) or
             type(receipt['log_bytes']) is not int or not 0 <= receipt['log_bytes'] <= 20_000_000 or
             type(receipt['log_sha256']) is not str or re.fullmatch(r'[0-9a-f]{64}', receipt['log_sha256']) is None or
-            (receipt['remote_log_path'] is not None and
-             (type(receipt['remote_log_path']) is not str or
-              re.fullmatch(r'/tmp/llmtool-remote-log\.[A-Za-z0-9]+/remote-test\.log',
-                           receipt['remote_log_path']) is None))):
+            not is_valid_remote_log_path(receipt['remote_log_path'])):
         return None
     if receipt['result'] == 'SHA_MISMATCH' and receipt['fetch_head'] == sha:
         return None

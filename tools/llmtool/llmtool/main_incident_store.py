@@ -55,6 +55,7 @@ from pathlib import Path
 from . import main_incident
 from . import task_store
 from .errors import LLMToolError
+from .remote_log_path import is_valid_remote_log_path
 
 SCHEMA_VERSION = 1
 DIRECTORY_NAME = 'main-incidents'
@@ -157,7 +158,6 @@ _TEST_MODULE = re.compile(r'test_[a-z0-9_]{1,80}')
 _TEST_PATH = re.compile(r'tools/llmtool/tests/(test_[a-z0-9_]{1,80})\.py')
 _REMOTE_CODE = re.compile(r'[A-Z][A-Z0-9_]{0,63}')
 _RECEIPT_STAMP = re.compile(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ')
-_REMOTE_LOG = re.compile(r'/tmp/llmtool-remote-log\.[A-Za-z0-9]+/remote-test\.log')
 
 
 def _safe_id(value):
@@ -425,8 +425,7 @@ def _valid_receipt_shape(receipt, item):
             type(receipt['log_bytes']) is int and 0 <= receipt['log_bytes'] <= MAX_LOG_BYTES and
             _sha256(receipt['log_sha256']) and _sha256(receipt['command_digest']) and
             _sha256(receipt['receipt_digest']) and
-            (log_path is None or (type(log_path) is str and
-                                  _REMOTE_LOG.fullmatch(log_path) is not None)))
+            is_valid_remote_log_path(log_path))
 
 
 def _valid_excerpt(value):

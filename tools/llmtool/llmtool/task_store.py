@@ -29,6 +29,7 @@ from . import file_ops
 from . import repair_policy, run_budget
 from . import start_failure
 from .opencode_direct_developer import is_free_model, is_valid_model
+from .remote_log_path import is_valid_remote_log_path
 from .developer_stderr import DEVELOPER_STDERR_EXCERPT_MAX_BYTES
 from .role_config import _NAME
 from .task_verification import parse_task_contract
@@ -1426,10 +1427,7 @@ def _validate_remote_test_receipts(record):
                 not 0 <= receipt['log_bytes'] <= 20_000_000 or
                 type(receipt.get('log_sha256')) is not str or
                 re.fullmatch(r'[0-9a-f]{64}', receipt['log_sha256']) is None or
-                (receipt.get('remote_log_path') is not None and
-                 (type(receipt['remote_log_path']) is not str or
-                  re.fullmatch(r'/tmp/llmtool-remote-log\.[A-Za-z0-9]+/remote-test\.log',
-                               receipt['remote_log_path']) is None)) or
+                not is_valid_remote_log_path(receipt.get('remote_log_path')) or
                 type(receipt.get('command_digest')) is not str or
                 re.fullmatch(r'[0-9a-f]{64}', receipt['command_digest']) is None or
                 type(receipt.get('receipt_digest')) is not str or

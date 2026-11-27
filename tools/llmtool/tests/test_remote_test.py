@@ -440,6 +440,34 @@ class RemoteTestTests(unittest.TestCase):
             json.dumps(receipt, separators=(',', ':')).encode(),
             sha=SHA, modules=('test_remote_test',)))
 
+    def test_receipt_rejects_malformed_log_path(self):
+        class _StrSubclass(str):
+            pass
+
+        self.assertTrue(remote_test.is_valid_remote_log_path(None))
+        self.assertTrue(remote_test.is_valid_remote_log_path(
+            '/tmp/llmtool-remote-log.Abc123/remote-test.log'))
+        self.assertFalse(remote_test.is_valid_remote_log_path(_StrSubclass(
+            '/tmp/llmtool-remote-log.Abc123/remote-test.log')))
+        for bad_path in (
+                '',
+                123,
+                '/tmp/llmtool-remote-log./remote-test.log',
+                '/tmp/llmtool-remote-log.Abc-123/remote-test.log',
+                '/tmp/llmtool-remote-log.Abc_123/remote-test.log',
+                '/tmp/llmtool-remote-log.Abc123/other.log',
+                '/var/tmp/llmtool-remote-log.Abc123/remote-test.log',
+                '/tmp/llmtool-remote-log.Abc123/remote-test.log\n',
+                '/tmp/llmtool-remote-log.Abc123/sub/remote-test.log',
+        ):
+            with self.subTest(bad_path=bad_path):
+                self.assertFalse(remote_test.is_valid_remote_log_path(bad_path))
+                receipt = json.loads(self.receipt().decode())
+                receipt['remote_log_path'] = bad_path
+                self.assertIsNone(remote_test._validate_remote_receipt(
+                    json.dumps(receipt, separators=(',', ':')).encode(),
+                    sha=SHA, modules=('test_remote_test',)))
+
     def test_pass_receipt_requires_tests_nonroot_identity_and_no_failures(self):
         for field, value in (
                 ('ran_total', 0), ('identity', {'uid': 0}),
