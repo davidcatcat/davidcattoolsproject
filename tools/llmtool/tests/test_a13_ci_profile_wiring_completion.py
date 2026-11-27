@@ -49,14 +49,16 @@ ALT_PROFILE = CiProfile(
     macos_workflow_file='alt-mac-ci.yml',
 )
 
-
-def _trust_with_mac_check(name):
-    """Return a trust fixture whose Mac workflow declares code check ``name``."""
-    document = review_trust_fixture.owner_ci_trust_document()
-    for workflow in document['workflows']:
-        if workflow['path'] == MAC_PATH:
-            workflow['code_check'] = name
-    return review_trust_fixture.make_trust(ci_trust=document)
+#: A valid profile whose Mac name collides with the Linux trust check.
+COLLIDING_MAC_PROFILE = CiProfile(
+    linux_code_check='alt-linux-check',
+    docs_check='alt-docs-check',
+    gateway_check='alt-gateway-check',
+    ai_loop_check='alt-ai-loop-check',
+    macos_check=LINUX_CHECK,
+    linux_workflow_file='alt-linux-ci.yml',
+    macos_workflow_file='alt-mac-ci.yml',
+)
 
 
 def _workflow(responses, check_runs, *, path, name, workflow_id, run_id,
@@ -167,13 +169,62 @@ class SubstitutedProfileTests(unittest.TestCase):
         self.assertEqual(
             result['check_outcomes'][ALT_PROFILE.macos_check], 'MISSING')
 
-    def test_non_mac_path_excludes_the_mac_workflow_by_profile_name(self):
-        trust = _trust_with_mac_check(ALT_PROFILE.macos_check)
+    def test_non_mac_path_excludes_the_mac_workflow_by_trust_identity(self):
         result, get = _collect(_responses(linux_only=True), NON_MAC_PATHS,
-                               profile=ALT_PROFILE, trust=trust)
+                               profile=ALT_PROFILE)
         self.assertEqual(result['required_checks'], [LINUX_CHECK])
         self.assertEqual(get.call_args_list[0].args[0],
                          'actions/workflows/llmtool-linux-ci.yml')
+
+    def test_non_mac_path_keeps_linux_when_macos_name_matches_it(self):
+        result, get = _collect(_responses(linux_only=True), NON_MAC_PATHS,
+                               profile=COLLIDING_MAC_PROFILE)
+        self.assertEqual(result['required_checks'], [LINUX_CHECK])
+        self.assertEqual(result['successful_checks'], [LINUX_CHECK])
+        self.assertEqual(get.call_args_list[0].args[0],
+                         'actions/workflows/llmtool-linux-ci.yml')
+
+    def _collect_github(self, responses, profile):
+        """Run collect_github_evidence with the real CI completion path."""
+        reviewer = SimpleNamespace(
+            trusted_agent_id='claude-reviewer', session_ref='Reviewer session',
+            native_session_id='native-reviewer', github_login='reviewer-user',
+            root='/reviewer', common_dir='/common', branch='review/branch')
+        snapshot = SimpleNamespace(
+            common_dir='/common', branch='review/branch', head=SHA)
+        with mock.patch.object(ci_profile, 'default_profile', return_value=profile), \
+                mock.patch.object(task_completion, '_github_get',
+                                  side_effect=lambda path: responses[path]), \
+                mock.patch.object(task_completion, 'read_d6_registration',
+                                  return_value=reviewer), \
+                mock.patch.object(task_completion, 'collect_git_snapshot',
+                                  return_value=snapshot):
+            return task_completion.collect_github_evidence(
+                pr_number=PR_NUMBER, result_sha=SHA, task_id='1' * 32,
+                run_id='2' * 32, contract_digest='3' * 64,
+                executor_identity='executor-agent',
+                executor_session_ref='Executor D6 session',
+                executor_native_session_id='native-executor',
+                reviewer_task_id='reviewer-task', common_dir='/common',
+                changed_paths=CODE_PATHS,
+                task_record={'developer': {'provider_profile': 'codex'}})
+
+    def test_github_entry_accepts_the_profile_name(self):
+        result = self._collect_github(
+            {**_review_responses(), **_responses(ALT_PROFILE.macos_check)},
+            ALT_PROFILE)
+        self.assertEqual(result['missing_gates'], [])
+        self.assertIn(ALT_PROFILE.macos_check,
+                      result['evidence']['successful_checks'])
+        self.assertNotIn(MAC_CHECK, result['evidence']['successful_checks'])
+
+    def test_github_entry_rejects_the_original_name(self):
+        result = self._collect_github(
+            {**_review_responses(), **_responses(MAC_CHECK)}, ALT_PROFILE)
+        self.assertIn('REQUIRED_CI_MISSING', result['missing_gates'])
+        self.assertNotIn(ALT_PROFILE.macos_check,
+                         result['evidence']['successful_checks'])
+        self.assertIn(LINUX_CHECK, result['evidence']['successful_checks'])
 
 
 class RefusedProfileTests(unittest.TestCase):
@@ -190,6 +241,11 @@ class RefusedProfileTests(unittest.TestCase):
             linux_code_check='same', docs_check='same', gateway_check='c',
             ai_loop_check='d', macos_check='e',
             linux_workflow_file='l.yml', macos_workflow_file='m.yml')
+        deleted = CiProfile(
+            linux_code_check='a', docs_check='b', gateway_check='c',
+            ai_loop_check='d', macos_check='e',
+            linux_workflow_file='l.yml', macos_workflow_file='m.yml')
+        object.__delattr__(deleted, 'macos_check')
         return (
             ('missing', None),
             ('not_callable', object()),
@@ -197,6 +253,7 @@ class RefusedProfileTests(unittest.TestCase):
             ('non_profile', mock.Mock(return_value=object())),
             ('ambiguous_sequence', mock.Mock(return_value=[ALT_PROFILE])),
             ('mutated_empty_name', mock.Mock(return_value=empty)),
+            ('deleted_field', mock.Mock(return_value=deleted)),
             ('ambiguous_duplicate_names', mock.Mock(return_value=duplicate)),
         )
 
@@ -212,6 +269,17 @@ class RefusedProfileTests(unittest.TestCase):
                 self.assertEqual(caught.exception.completion_code,
                                  'CI_PROFILE_INVALID')
                 get.assert_not_called()
+
+    def test_ambiguous_mac_mapping_refuses_before_any_read(self):
+        with mock.patch.object(ci_profile, 'default_profile',
+                               return_value=COLLIDING_MAC_PROFILE), \
+                mock.patch.object(task_completion, '_github_get') as get:
+            with self.assertRaises(LLMToolError) as caught:
+                task_completion._collect_ci_evidence(
+                    pr_number=PR_NUMBER, result_sha=SHA,
+                    changed_paths=CODE_PATHS)
+        self.assertEqual(caught.exception.completion_code, 'CI_PROFILE_INVALID')
+        get.assert_not_called()
 
     def test_github_entry_refuses_before_any_read(self):
         with mock.patch.object(ci_profile, 'default_profile', None), \

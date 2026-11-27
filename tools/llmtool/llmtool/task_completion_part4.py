@@ -330,15 +330,19 @@ def _resolve_ci_profile(profile=_UNSET):
                  for name in ci_profile.CiProfile.__dataclass_fields__]
         for name in names:
             ci_profile._validate_name(name)
-    except ci_profile.CiProfileError:
+    except (ci_profile.CiProfileError, AttributeError):
         _stop('CI_PROFILE_INVALID')
     if len(set(names)) != len(names):
         _stop('CI_PROFILE_INVALID')
     return profile
 
 
+def _is_mac_workflow(workflow, field):
+    return field == 'code_check' and workflow[field] == _m._MAC_CHECK
+
+
 def _profile_check_name(workflow, field, mac_check):
-    if field == 'code_check' and workflow[field] == _m._MAC_CHECK:
+    if _is_mac_workflow(workflow, field):
         return mac_check
     return workflow[field]
 
@@ -360,17 +364,21 @@ def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None,
     field = 'docs_check' if docs_only else 'code_check'
     selected = [workflow for workflow in ci_trust['workflows']
                 if workflow[field] is not None]
+    if sum(_is_mac_workflow(workflow, field) for workflow in selected) > 1:
+        _stop('CI_PROFILE_INVALID')
     # #1558: like task_advance._merge_checks, Mac only for Mac-workflow paths.
     if (not docs_only and type(changed_paths) is list and changed_paths and
             all(type(path) is str for path in changed_paths)):
         from . import task_advance  # imported here: task_advance imports this module
         if not task_advance._mac_ci_runs(changed_paths):
             selected = [workflow for workflow in selected
-                        if _profile_check_name(workflow, field, mac_check) != mac_check]
+                        if not _is_mac_workflow(workflow, field)]
     if not selected:
         _stop('TRUST_CI_INVALID')
     required_checks = [_profile_check_name(workflow, field, mac_check)
                        for workflow in selected]
+    if len(set(required_checks)) != len(required_checks):
+        _stop('CI_PROFILE_INVALID')
     results = []
     for index, workflow in enumerate(selected):
         try:
