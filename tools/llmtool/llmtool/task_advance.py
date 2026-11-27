@@ -763,7 +763,8 @@ def _merge_main_gate(head, github_get, pr):
     return 'MERGE_CHECKS_UNAVAILABLE', None
 
 
-def _review_ci_gate(number, head, github_get, latest_out=None, read_out=None):
+def _review_ci_gate(number, head, github_get, latest_out=None, read_out=None,
+                    *, profile=_UNSET):
     """Require every required exact-head Linux workflow check to pass before review.
 
     latest_out, when a dict, gets the newest completed non-success run so a
@@ -771,8 +772,18 @@ def _review_ci_gate(number, head, github_get, latest_out=None, read_out=None):
     whether the exact-head check-run read was usable, so the #2491 changed-test
     decision only follows a readable CI read. A PR whose file list cannot be
     read completely (more than GitHub's 3000-file limit) returns STOPPED with
-    PR_FILES_TOO_MANY instead of waiting forever (#1502 WP-G).
+    PR_FILES_TOO_MANY instead of waiting forever (#1502 WP-G). The check names
+    come from an explicit CI profile; a direct call without one keeps the
+    legacy names (existing callers), and an unusable explicit profile returns
+    STOPPED with MERGE_CI_PROFILE_INVALID before any GitHub read.
     """
+    if profile is _UNSET:
+        resolved = None
+    else:
+        try:
+            resolved = _resolve_ci_profile(profile)
+        except mac_full_due.ProfileError:
+            return 'STOPPED', MERGE_CI_PROFILE_INVALID
     try:
         checks = github_get(f'commits/{head}/check-runs?per_page=100')
     except Exception:
@@ -803,7 +814,8 @@ def _review_ci_gate(number, head, github_get, latest_out=None, read_out=None):
     runs = checks['check_runs']
     if any(type(item) is not dict for item in runs):
         return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
-    required_checks = _required_linux_checks(paths, old_paths)
+    required_checks = (_required_linux_checks(paths, old_paths) if resolved is None
+                       else _required_linux_checks(paths, old_paths, profile=resolved))
     if required_checks is None:
         return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
     # Any required Linux-workflow check failure routes to CI_FAILED; the Mac
@@ -839,7 +851,8 @@ def _review_ci_gate(number, head, github_get, latest_out=None, read_out=None):
     return None, None
 
 
-# #1502 WP-D D11: required exact-head CI checks a CI repair may answer.
+# #1502 WP-D D11: legacy default Mac check name for direct callers that pass
+# no CI profile; advance always passes the resolved profile instead.
 _MAC_CHECK = 'check (macOS 3.13)'
 # These conclusions say the CI environment stopped the check: wait uncounted,
 # never re-run or re-request CI (main PM open-item 1).
@@ -1043,16 +1056,27 @@ _ALLOWED_JOB_CONCLUSIONS = frozenset({
 })
 
 
-def _mac_capacity_cancel(run, head, github_get, number=None):
+def _mac_capacity_cancel(run, head, github_get, number=None, *, profile=_UNSET):
     """Classify a Mac CI failure as infrastructure capacity cancellation (#1786).
 
     Accepted cancellation is interrupted CI evidence, not verified capacity
     causation. Return ('WAITING_ENV', ['CI_ENV_MAC_CAPACITY_CANCELLED'],
     evidence) when positive sibling-job evidence shows select or shards were
     cancelled with no failed test job; otherwise return None (fail closed to
-    today's routing).
+    today's routing). An explicit CI profile supplies the check and workflow
+    names; a direct call without one keeps the legacy default names.
     """
-    if type(run) is not dict or run.get('name') != _MAC_CHECK:
+    if profile is _UNSET:
+        macos_check = _MAC_CHECK
+        macos_workflow_file = 'llmtool-mac-ci.yml'
+    else:
+        try:
+            resolved = _resolve_ci_profile(profile)
+        except mac_full_due.ProfileError:
+            return None
+        macos_check = resolved.macos_check
+        macos_workflow_file = resolved.macos_workflow_file
+    if type(run) is not dict or run.get('name') != macos_check:
         return None
     if type(run.get('id')) is not int or run['id'] < 1:
         return None
@@ -1089,7 +1113,7 @@ def _mac_capacity_cancel(run, head, github_get, number=None):
             return None
 
     # Trust 2: github_get(f'actions/runs/{run_id}') in try/except Exception -> must be
-    # a dict with head_sha == head and path == '.github/workflows/llmtool-mac-ci.yml';
+    # a dict with head_sha == head and the profile's Mac workflow path;
     # anything else -> None.
     try:
         workflow_run = github_get(f'actions/runs/{run_id}')
@@ -1097,7 +1121,8 @@ def _mac_capacity_cancel(run, head, github_get, number=None):
         return None
     if type(workflow_run) is not dict:
         return None
-    if workflow_run.get('head_sha') != head or workflow_run.get('path') != '.github/workflows/llmtool-mac-ci.yml':
+    if workflow_run.get('head_sha') != head or workflow_run.get('path') != (
+            f'.github/workflows/{macos_workflow_file}'):
         return None
 
     try:
@@ -1130,12 +1155,12 @@ def _mac_capacity_cancel(run, head, github_get, number=None):
         return None
     select_job = select_jobs[0]
 
-    mac_jobs = [j for j in jobs if j.get('name') == _MAC_CHECK]
+    mac_jobs = [j for j in jobs if j.get('name') == macos_check]
     if len(mac_jobs) != 1:
         return None
     mac_job = mac_jobs[0]
     # Trust 3: the job id parsed from details_url must equal the int 'id' of the single
-    # job named _MAC_CHECK in the jobs list; mismatch or missing -> None.
+    # job named macos_check in the jobs list; mismatch or missing -> None.
     mac_job_id = mac_job.get('id')
     if type(mac_job_id) is not int or mac_job_id != job_id:
         return None
@@ -1446,14 +1471,25 @@ def _remote_test_failure_details(receipt, executor_task, d6_root):
 
 def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, related,
                       run, fail_code, github_get, repair_review_call,
-                      job_log_fetch=None):
+                      job_log_fetch=None, profile=_UNSET):
     """#1502 WP-D D11: route one completed exact-head required check that did not pass.
 
     Return (step, codes, result), or None when the conclusion keeps today's
     CI_FAILED result (neutral, skipped, stale, action_required). A failure goes
     back to the original Developer through review_repair on the shared EC2/CI
-    count; an ENV conclusion waits uncounted and nothing re-runs CI.
+    count; an ENV conclusion waits uncounted and nothing re-runs CI. An explicit
+    CI profile supplies the check names and an unusable one refuses before any
+    read or repair; a direct call without one keeps the legacy names.
     """
+    if profile is _UNSET:
+        resolved = None
+        macos_check = _MAC_CHECK
+    else:
+        try:
+            resolved = _resolve_ci_profile(profile)
+        except mac_full_due.ProfileError:
+            return 'REFUSED', [MERGE_CI_PROFILE_INVALID], None
+        macos_check = resolved.macos_check
     head = d6['result_head']
     conclusion = run['conclusion']
     if conclusion in _CI_ENV_CONCLUSIONS:
@@ -1461,8 +1497,10 @@ def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, rela
                 {'check': run['name'], 'check_run_id': run['id'], 'head': head})
     if conclusion not in ('failure', 'timed_out'):
         return None
-    if conclusion == 'failure' and run.get('name') == _MAC_CHECK:
-        mac_capacity = _mac_capacity_cancel(run, head, github_get, number)
+    if conclusion == 'failure' and run.get('name') == macos_check:
+        mac_capacity = _mac_capacity_cancel(
+            run, head, github_get, number,
+            profile=profile if resolved is None else resolved)
         if mac_capacity is not None:
             return mac_capacity
     action = _remote_fail_action(related, head)
@@ -4967,6 +5005,15 @@ def advance(*, task_id, store=None, merge=False, owner_acceptance=None,
         return _advance_refused(task_id, 'OWNER_EXCEPTION_EXECUTOR_REQUIRES_EXCEPTION')
     if owner_exception is not None and not merge:
         return _advance_refused(task_id, 'OWNER_EXCEPTION_REQUIRES_MERGE')
+    # #2793 A13.0: resolve once per advance step, before the lease or any record
+    # read. An unusable profile refuses the step and never uses the old names.
+    try:
+        options['profile'] = _resolve_ci_profile(options.get('profile', _UNSET))
+    except mac_full_due.ProfileError:
+        if merge:
+            return dict(_merge_refusal(MERGE_CI_PROFILE_INVALID), task_id=task_id,
+                        next='MERGE_REFUSED', acked=[])
+        return _advance_refused(task_id, MERGE_CI_PROFILE_INVALID)
     store = TaskStore() if store is None else store
     with contextlib.ExitStack() as held:
         lease = getattr(store, 'advance_lease', None)
@@ -5014,6 +5061,15 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
     """One advance step; the caller holds the advance lease and passes guarded runners."""
     if ci_job_log_fetch is None:
         ci_job_log_fetch = job_log_fetch
+    try:
+        resolved_profile = _resolve_ci_profile(profile)
+    except mac_full_due.ProfileError:
+        # #2793 A13.0: one unusable profile refuses the whole step before any
+        # record, D6 or GitHub read, and never falls back to the original names.
+        if merge:
+            return dict(_merge_refusal(MERGE_CI_PROFILE_INVALID), task_id=task_id,
+                        next='MERGE_REFUSED', acked=[])
+        return _advance_refused(task_id, MERGE_CI_PROFILE_INVALID)
     try:
         record = store.get(task_id)
     except Exception:
@@ -5183,17 +5239,19 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             gh_runner=_publish_run_gh if merge_gh_runner is None else merge_gh_runner,
             root=d6.get('root') or cwd or os.getcwd(), owner_acceptance=owner_acceptance,
             owner_exception=owner_exception,
-            sleep_fn=sleep_fn, sleep=sleep, profile=profile)
+            sleep_fn=sleep_fn, sleep=sleep, profile=resolved_profile)
         if (owner_exception is None and type(number) is int and
                 merge_result.get('step') == 'MERGE_REFUSED' and
                 merge_result.get('codes') == ['MERGE_CHECKS_NOT_GREEN']):
             # #1502 WP-D D11: a failed exact-head Mac check after PASS goes to repair.
-            mac_run = _newest_check_run(d6['result_head'], _MAC_CHECK, get)
+            mac_run = _newest_check_run(
+                d6['result_head'], resolved_profile.macos_check, get)
             routed = None if mac_run is None else _route_ci_failure(
                 store=store, record=record, task_id=task_id,
                 executor_task=executor_task, number=number, d6=d6, related=related,
                 run=mac_run, fail_code='MAC_CI_FAILED', github_get=get,
-                repair_review_call=repair_review_call, job_log_fetch=ci_job_log_fetch)
+                repair_review_call=repair_review_call, job_log_fetch=ci_job_log_fetch,
+                profile=resolved_profile)
             if routed is not None:
                 merge_result = {'step': routed[0], 'codes': list(routed[1]),
                                 'result': routed[2]}
@@ -5280,13 +5338,19 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
     if step == 'DISPATCH_REVIEW':
         gate_step, ci_code = _review_ci_gate(
             number, d6['result_head'], get, latest_out=gate_latest,
-            read_out=gate_read)
+            read_out=gate_read, profile=resolved_profile)
         if gate_step is not None:
             step = gate_step
             if ci_code is not None:
                 codes.append(ci_code)
+        flag_checks = (
+            resolved_profile.linux_code_check,
+            resolved_profile.docs_check,
+            resolved_profile.gateway_check,
+            resolved_profile.ai_loop_check,
+        )
         failed_name = gate_latest.get('name')
-        if (step == 'CI_FAILED' and failed_name in _LINUX_FLAG_CHECKS and
+        if (step == 'CI_FAILED' and failed_name in flag_checks and
                 gate_latest.get('conclusion') in ('failure', 'timed_out', *_CI_ENV_CONCLUSIONS)):
             # #1502 WP-D D11, #2337: route the newest exact-head required check run before review.
             check_run = _read_check_run(d6['result_head'], failed_name,
@@ -5298,7 +5362,8 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                     store=store, record=record, task_id=task_id,
                     executor_task=executor_task, number=number, d6=d6, related=related,
                     run=check_run, fail_code='LINUX_CI_FAILED', github_get=get,
-                    repair_review_call=repair_review_call, job_log_fetch=ci_job_log_fetch)
+                    repair_review_call=repair_review_call, job_log_fetch=ci_job_log_fetch,
+                    profile=resolved_profile)
                 if routed is not None:
                     step, codes, result = routed[0], list(routed[1]), routed[2]
                     ci_routed = True
@@ -5623,7 +5688,8 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                 try:
                     label_result = label_mac_ci_for_skipped_check(
                         task_id=task_id, store=store, pr_number=number,
-                        github_get=get, merge_gh_runner=label_gh_runner, cwd=cwd)
+                        github_get=get, merge_gh_runner=label_gh_runner, cwd=cwd,
+                        profile=resolved_profile)
                     if type(label_result) is dict:
                         if label_result.get('step') == 'WAITING_CI':
                             step = 'WAITING_CI'
@@ -5640,12 +5706,14 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             codes.append(_refusal(exc, 'completion_code'))
         if step == 'CI_FAILED':
             # #1502 WP-D D11: after PASS, route the newest exact-head Mac run.
-            mac_run = _newest_check_run(d6['result_head'], _MAC_CHECK, get)
+            mac_run = _newest_check_run(
+                d6['result_head'], resolved_profile.macos_check, get)
             routed = None if mac_run is None else _route_ci_failure(
                 store=store, record=record, task_id=task_id,
                 executor_task=executor_task, number=number, d6=d6, related=related,
                 run=mac_run, fail_code='MAC_CI_FAILED', github_get=get,
-                repair_review_call=repair_review_call, job_log_fetch=ci_job_log_fetch)
+                repair_review_call=repair_review_call, job_log_fetch=ci_job_log_fetch,
+                profile=resolved_profile)
             if routed is not None:
                 step, codes, result = routed[0], list(routed[1]), routed[2]
     elif step == 'READY_FOR_INTEGRATION':
