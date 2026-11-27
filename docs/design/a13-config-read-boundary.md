@@ -7,14 +7,14 @@ Evidence: #396 comment 6552370022 (OSR-12); #2793 Coordinator comment 7210501920
 ## Verified at pinned main
 
 1. Trust authority path — `trust.py` · `load_trust`. `load_trust` resolves the normal home via the operating-system user record. Its read trust bytes step uses no-follow opens and requires a regular, current-user-owned, 0600, single-link file with bounded stable content. This is the trust authority path; it is not an assertion about ordinary preferences or about any other config reader.
-2. Worker policy file — `worker_dispatch.py` · read policy file step. This step separately uses no-follow, regular-file, single-link, size, and identity checks. Do not infer that this helper enforces current-user ownership or 0600, and do not assume its call chain has been fully audited. File-read checks are not repository or worker authorization: they protect the read; granting repository and worker authorization is a separate decision and is not established by these checks.
+2. Worker policy file — `worker_dispatch.py` · `_read_policy_file`. This function's read policy file step separately uses no-follow, regular-file, single-link, size, and identity checks. Do not infer that this helper enforces current-user ownership or 0600, and do not assume its call chain has been fully audited. File-read checks are not repository or worker authorization: they protect the read; granting repository and worker authorization is a separate decision and is not established by these checks.
 
 ## Inventory
 
 | Source symbol | Verified behavior at pinned main | A13.1 handoff |
 |---------------|----------------------------------|----------------|
 | `trust.py` · `load_trust` (read trust bytes step) | Home resolved via the operating-system user record; no-follow opens; requires a regular, current-user-owned, 0600, single-link file with bounded stable content. Trust authority path only; no assertion about ordinary preferences. | Carry this boundary into the project-scoped trust design: scope and per-project trust are A13.1 work, with these verified read-path checks recorded as-is. |
-| `worker_dispatch.py` · read policy file step | No-follow, regular-file, single-link, size, and identity checks. No verified ownership or 0600 enforcement recorded; call chain not fully audited. File-read checks do not constitute repository or worker authorization. | Carry this boundary into the project-scoped policy design: do not assume ownership or 0600 semantics, and keep file-read checks distinct from authorization in the A13.1 record. |
+| `worker_dispatch.py` · `_read_policy_file` (read policy file step) | No-follow, regular-file, single-link, size, and identity checks. No verified ownership or 0600 enforcement recorded; call chain not fully audited. File-read checks do not constitute repository or worker authorization. | Carry this boundary into the project-scoped policy design: do not assume ownership or 0600 semantics, and keep file-read checks distinct from authorization in the A13.1 record. |
 
 ## Scope notes
 
