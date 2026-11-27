@@ -1772,6 +1772,65 @@ def _refuse_version_used(claims, *, executor_task, pr_number, version, kind, mes
     _refuse('REVIEW_DISPATCH_VERSION_USED', message.format(next_version=next_version))
 
 
+# #1230: a Task that already has a newer continuation (a PM spec correction)
+# is replaced. Advancing it or dispatching its formal review would use only its
+# old contract, so both refuse and name the latest continuation.
+CONTINUATION_SUPERSEDED = 'TASK_CONTINUATION_SUPERSEDED'
+_CONTINUATION_SCAN_LIMIT = 256
+
+
+def latest_continuation(store, task_id):
+    """Return the latest Task continuing task_id, or None when there is none.
+
+    A continuation is a Task linked by ``continues`` directly or through a
+    chain. The latest is the deepest such Task; a depth tie takes the greater
+    task ID, so one fixed Task is named. An unreadable store or link returns
+    None, which leaves the caller's existing behaviour unchanged.
+    """
+    if type(task_id) is not str:
+        return None
+    try:
+        task_ids = store.task_ids()
+    except Exception:
+        return None
+    if type(task_ids) is not list:
+        return None
+    children = {}
+    seen = set()
+    for child_id in task_ids:
+        if type(child_id) is not str or child_id in seen:
+            continue
+        seen.add(child_id)
+        try:
+            record = store.get(child_id)
+        except Exception:
+            return None
+        if type(record) is not dict or record.get('task_id') != child_id:
+            return None
+        parent = record.get('continues')
+        if parent is None:
+            continue
+        if type(parent) is not str or not parent:
+            return None
+        children.setdefault(parent, []).append(child_id)
+    best = None
+    frontier = [(task_id, 0)]
+    visited = {task_id}
+    while frontier:
+        current, depth = frontier.pop(0)
+        for child_id in children.get(current, ()):
+            if child_id in visited:
+                continue
+            visited.add(child_id)
+            if len(visited) > _CONTINUATION_SCAN_LIMIT:
+                return None
+            candidate = (depth + 1, child_id)
+            if best is None or candidate > best:
+                best = candidate
+            frontier.append((child_id, depth + 1))
+    return best[1] if best is not None else None
+
+
 def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                     create_d6=None, dispatch_session=None, bind_session=None,
                     prompt_renderer=None, codex_runner=None, reviewer=None,
@@ -1792,6 +1851,11 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         _refuse('REVIEW_KIND_UNSUPPORTED')
     clock = post_clock or time.time
     task = store.get(task_id)
+    latest = latest_continuation(store, task_id)
+    if latest is not None:
+        _refuse(CONTINUATION_SUPERSEDED,
+                f'Task {task_id} has a newer continuation {latest}; advance or '
+                f'dispatch a review for that Task instead.')
     _, executor, head, _base, reviewer_key = _preflight(
         store, task_id, executor_task, pr_number, version, task=task,
         reviewer=reviewer, kind=kind)

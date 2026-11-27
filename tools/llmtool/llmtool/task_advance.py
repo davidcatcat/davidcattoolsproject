@@ -4827,6 +4827,16 @@ def _advance_refused(task_id, code):
             'next': 'REFUSED', 'codes': [code], 'acked': []}
 
 
+def _continuation_refused(task_id, latest):
+    """Refuse a Task that a newer continuation has replaced (#1230)."""
+    return {'task_id': task_id, 'step': 'REFUSED',
+            'result': {'latest_continuation': latest,
+                       'message': (f'Task {task_id} has a newer continuation {latest}; '
+                                   'advance that Task instead.')},
+            'next': 'REFUSED', 'codes': [review_dispatch.CONTINUATION_SUPERSEDED],
+            'acked': []}
+
+
 # #1781 (security v91, I4): split vs advance. Every external action of one
 # advance step re-reads the Task under its update lock right before it runs
 # (TaskStore.check_external_action). PR #1794 v91 F1 (CWE-362): the check is an
@@ -4978,6 +4988,11 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         record = store.get(task_id)
     except Exception:
         return _advance_refused(task_id, 'TASK_RECORD_UNAVAILABLE')
+    latest = review_dispatch.latest_continuation(store, task_id)
+    if latest is not None:
+        # #1230: a newer continuation replaced this Task's contract; refuse
+        # before any D6, PR, review, claim, publish or GitHub action.
+        return _continuation_refused(task_id, latest)
     lineage = record.get('lineage') if isinstance(record, dict) else None
     lineage_refusal = external_action_refusal(record)
     if lineage_refusal == 'TASK_LINEAGE_PENDING':
