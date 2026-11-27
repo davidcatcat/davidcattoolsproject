@@ -140,7 +140,40 @@ def pass_receipt_covers(receipt, required_modules):
         entry['ran'] > entry['skipped'] for entry in entries)
 
 
-def _record_outcome(store, task_id, task, *, result, code, executor_task, sha, modules):
+_SSH_TIMEOUT_PHASES = {
+    'workspace': ('PREPARATION', 'WORKSPACE'),
+    'archive': ('PREPARATION', 'ARCHIVE'),
+    'venv': ('PREPARATION', 'VENV'),
+    'requirements': ('PREPARATION', 'REQUIREMENTS'),
+    'package': ('PREPARATION', 'PACKAGE'),
+    'tests': ('TESTS', 'TESTS'),
+    'cleanup': ('CLEANUP_OR_RECEIPT', 'CLEANUP'),
+    'receipt': ('CLEANUP_OR_RECEIPT', 'RECEIPT'),
+}
+_SSH_TIMEOUT_MARKER = re.compile(r'LLMTOOL_REMOTE_PHASE:([a-z]{1,24})')
+
+
+def _ssh_timeout_diagnostic(exc):
+    """Return a fixed, content-free phase diagnostic from TimeoutExpired stderr."""
+    raw = getattr(exc, 'stderr', None)
+    if type(raw) is bytes:
+        text = raw[-65536:].decode('utf-8', 'replace')
+    elif type(raw) is str:
+        text = raw[-65536:]
+    else:
+        text = ''
+    phase, stage = 'NONE', 'NONE'
+    for line in text.splitlines():
+        match = _SSH_TIMEOUT_MARKER.fullmatch(line.strip())
+        if match:
+            mapped = _SSH_TIMEOUT_PHASES.get(match.group(1))
+            if mapped is not None:
+                phase, stage = mapped
+    return {'phase': phase, 'stage': stage}
+
+
+def _record_outcome(store, task_id, task, *, result, code, executor_task, sha, modules,
+                    diagnostic=None):
     safe_executor = executor_task if type(executor_task) is str and _TASK.fullmatch(executor_task) else None
     safe_sha = sha if type(sha) is str and _SHA.fullmatch(sha) else None
     safe_modules = sorted({item for item in modules
@@ -152,17 +185,26 @@ def _record_outcome(store, task_id, task, *, result, code, executor_task, sha, m
     try:
         persisted = store.append_remote_test_outcome(task_id, outcome)
     except (KeyError, LLMToolError):
-        return dict(result=result, code=code, outcome=outcome,
-                    persisted=False, delivery='NOT_DELIVERED_TASK_UNREADABLE', event_id=None)
+        reply = dict(result=result, code=code, outcome=outcome,
+                     persisted=False, delivery='NOT_DELIVERED_TASK_UNREADABLE', event_id=None)
+        if diagnostic is not None:
+            reply['diagnostic'] = diagnostic
+        return reply
     saved = persisted['outcome']
     try:
         event = record_remote_test_outcome_event(
             store, task_id, saved, persisted['counter'])
-        return dict(result=result, code=code, outcome=saved,
-                    persisted=True, event_id=event['event_id'])
+        reply = dict(result=result, code=code, outcome=saved,
+                     persisted=True, event_id=event['event_id'])
+        if diagnostic is not None:
+            reply['diagnostic'] = diagnostic
+        return reply
     except (KeyError, LLMToolError):
-        return dict(result=result, code=code, outcome=outcome,
-                    persisted=True, delivery='NOT_DELIVERED_INBOX_UNAVAILABLE', event_id=None)
+        reply = dict(result=result, code=code, outcome=outcome,
+                     persisted=True, delivery='NOT_DELIVERED_INBOX_UNAVAILABLE', event_id=None)
+        if diagnostic is not None:
+            reply['diagnostic'] = diagnostic
+        return reply
 
 
 def _fresh_pr_head(pr):
@@ -326,9 +368,10 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         transport = _ssh_transport
     try:
         result = transport(argv, _REMOTE_SCRIPT, timeout)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         return _record_outcome(store, task_id, task, result='TIMEOUT', code='SSH_TIMEOUT',
-                               executor_task=executor_task, sha=sha, modules=selected)
+                               executor_task=executor_task, sha=sha, modules=selected,
+                               diagnostic=_ssh_timeout_diagnostic(exc))
     except (OSError, ConnectionError):
         return _record_outcome(store, task_id, task, result='UNAVAILABLE', code='SSH_UNAVAILABLE',
                                executor_task=executor_task, sha=sha, modules=selected)
