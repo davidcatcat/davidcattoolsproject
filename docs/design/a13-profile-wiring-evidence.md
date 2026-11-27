@@ -85,14 +85,17 @@ not represent a new test run or live runtime execution.
     only `MAC_CHECK` is present. `SingleResolutionTests.test_github_decision_resolves_the_profile_once`
     verifies `collect_github_evidence` resolves `ci_profile.default_profile`
     once per decision, and `DefaultProfileTests` verifies default-profile parity.
-  - *Refusal coverage*: `RefusedProfileTests` (`test_ci_entry_refuses_before_any_github_read`,
-    `test_ambiguous_mac_mapping_refuses_before_any_read`,
-    `test_github_entry_refuses_before_any_read`) verifies missing (`None`),
-    non-callable, raising, non-`CiProfile`, ambiguous sequence, mutated-empty,
-    deleted-field, duplicate-check-name, and `COLLIDING_MAC_PROFILE` profiles
-    raise `LLMToolError` with `completion_code == 'CI_PROFILE_INVALID'` in
-    `task_completion._collect_ci_evidence` and `task_completion.collect_github_evidence`
-    before any `_github_get` call.
+  - *Refusal coverage*: `RefusedProfileTests.test_ci_entry_refuses_before_any_github_read`
+    verifies missing (`None`), non-callable, raising, non-`CiProfile`,
+    ambiguous sequence, mutated-empty, deleted-field, and duplicate-check-name
+    profiles raise `LLMToolError` with `completion_code == 'CI_PROFILE_INVALID'`
+    in `task_completion._collect_ci_evidence` before any `_github_get` call;
+    `RefusedProfileTests.test_ambiguous_mac_mapping_refuses_before_any_read`
+    verifies `COLLIDING_MAC_PROFILE` on Mac-requiring paths raises the same
+    error in `task_completion._collect_ci_evidence` before any `_github_get`
+    call; and `RefusedProfileTests.test_github_entry_refuses_before_any_read`
+    verifies a missing (`None`) resolver raises the same error in
+    `task_completion.collect_github_evidence` before any `_github_get` call.
 
 - **#2835 (`e8e883fb`) — review prompt CI lines**
   (`tools/llmtool/tests/test_a13_ci_profile_wiring_prompt.py`):
