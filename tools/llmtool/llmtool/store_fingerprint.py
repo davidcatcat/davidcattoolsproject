@@ -4,7 +4,7 @@ Issue #1019, G3 latency note. Computes a stable fingerprint of a directory
 from its immediate entries' names, sizes, and modification times in
 nanoseconds, taken with lstat. File contents are never read and symbolic
 links are never followed, neither for the directory itself nor for its
-entries. The module has no caller in this package.
+entries.
 """
 
 import hashlib
@@ -40,12 +40,15 @@ def fingerprint_directory(path):
     Any unexpected condition raises StoreFingerprintError with the fixed
     code STORE_FINGERPRINT_INVALID.
     """
+    failed = False
     try:
         return _digest(_collect_entries(path))
     except StoreFingerprintError:
         raise
     except Exception:
-        # Fail closed; the message never carries any input value.
+        # Fail closed; raise outside except so no context or cause is attached.
+        failed = True
+    if failed:
         raise StoreFingerprintError()
 
 

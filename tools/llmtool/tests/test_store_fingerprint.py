@@ -5,6 +5,7 @@ fixed module error for a missing path. macOS temporary directories are
 reached through a symbolic link, so the resolved temporary path is used."""
 import os
 import tempfile
+import traceback
 import unittest
 
 from llmtool.store_fingerprint import (StoreFingerprintError,
@@ -51,6 +52,24 @@ class MissingPathTests(unittest.TestCase):
                          'STORE_FINGERPRINT_INVALID')
         self.assertEqual(str(caught.exception),
                          'store directory fingerprint invalid')
+        self.assertIsNone(caught.exception.__context__)
+        self.assertIsNone(caught.exception.__cause__)
+        rendered = ''.join(traceback.format_exception(
+            type(caught.exception), caught.exception, caught.exception.__traceback__))
+        self.assertNotIn(path, rendered)
+        self.assertNotIn('FileNotFoundError', rendered)
+
+    def test_invalid_input_carries_no_context_or_cause_in_traceback(self):
+        with self.assertRaises(StoreFingerprintError) as caught:
+            fingerprint_directory(None)
+        self.assertEqual(caught.exception.code,
+                         'STORE_FINGERPRINT_INVALID')
+        self.assertIsNone(caught.exception.__context__)
+        self.assertIsNone(caught.exception.__cause__)
+        rendered = ''.join(traceback.format_exception(
+            type(caught.exception), caught.exception, caught.exception.__traceback__))
+        self.assertNotIn('TypeError', rendered)
+        self.assertNotIn('During handling of the above exception', rendered)
 
 
 if __name__ == '__main__':

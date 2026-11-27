@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 
 from .errors import LLMToolError
+from .store_fingerprint import fingerprint_directory
 from .task_index import TaskStatusIndex
 from .task_store import PM_NATIVE_SESSION_ID, SESSION_ID, TASK_ID, TaskStoreConflict
 
@@ -638,24 +639,55 @@ def peek_inbox(store, session_key):
     return _inbox(store, session_key, reconcile=False)
 
 
+def _store_fingerprint(store):
+    """Return the store root directory fingerprint, or None to fail closed."""
+    root = getattr(store, 'root', None)
+    if root is None:
+        return None
+    try:
+        return fingerprint_directory(root)
+    except Exception:
+        return None
+
+
+def _has_newly_unclaimed_assignment(store, session_key, already_unclaimed):
+    """True when any assignment became UNCLAIMED or assignments could not be read."""
+    unclaimed, _claimed, assignments_code = _developer_assignments(store, session_key)
+    if assignments_code is not None:
+        return True
+    return bool({item['assignment_id'] for item in unclaimed} - already_unclaimed)
+
+
 def wait_inbox(store, session_key, *, wait=False, timeout=DEFAULT_WAIT_SECONDS,
                poll=POLL_SECONDS, clock=time.monotonic, sleep=time.sleep):
     if type(timeout) is not int or not 0 <= timeout <= MAX_WAIT_SECONDS:
         raise LLMToolError('inbox timeout must be 0 to %d seconds' % MAX_WAIT_SECONDS)
     deadline = clock() + timeout
     already_unclaimed = None
+    last_fingerprint = None
+    last_inbox = None
     while True:
-        inbox = read_inbox(store, session_key)
-        unclaimed = {item['assignment_id'] for item in inbox['unclaimed_assignments']}
-        # Wake for assignments that become UNCLAIMED during this wait only, so a
-        # long-unclaimed assignment does not turn --wait into a tight loop.
-        newly_unclaimed = already_unclaimed is not None and bool(unclaimed - already_unclaimed)
-        already_unclaimed = unclaimed if already_unclaimed is None else already_unclaimed
-        if (inbox['events'] or inbox['blocked'] or newly_unclaimed or not wait or
-                clock() >= deadline):
-            inbox['timed_out'] = bool(wait and not inbox['events'] and not inbox['blocked']
-                                      and not newly_unclaimed)
-            return inbox
+        current_fingerprint = _store_fingerprint(store) if wait else None
+        if (not wait or last_inbox is None or current_fingerprint is None or
+                last_fingerprint is None or current_fingerprint != last_fingerprint or
+                _has_newly_unclaimed_assignment(store, session_key, already_unclaimed)):
+            inbox = read_inbox(store, session_key)
+            unclaimed = {item['assignment_id'] for item in inbox['unclaimed_assignments']}
+            # Wake for assignments that become UNCLAIMED during this wait only, so a
+            # long-unclaimed assignment does not turn --wait into a tight loop.
+            newly_unclaimed = (already_unclaimed is not None and
+                               bool(unclaimed - already_unclaimed))
+            already_unclaimed = unclaimed if already_unclaimed is None else already_unclaimed
+            last_fingerprint = current_fingerprint
+            last_inbox = inbox
+            if (inbox['events'] or inbox['blocked'] or newly_unclaimed or not wait or
+                    clock() >= deadline):
+                inbox['timed_out'] = bool(wait and not inbox['events'] and
+                                          not inbox['blocked'] and not newly_unclaimed)
+                return inbox
+        elif clock() >= deadline:
+            last_inbox['timed_out'] = True
+            return last_inbox
         sleep(max(0.0, min(poll, deadline - clock())))
 
 
