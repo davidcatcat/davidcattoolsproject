@@ -6,7 +6,7 @@ which becomes the single pending run. Status compare stays case-insensitive.
 
 from __future__ import annotations
 
-from .mac_full_due import ProfileError, _DEFAULT_PROFILE, _UNSET, resolve_profile
+from .mac_full_due import ProfileError, _UNSET, resolve_profile
 
 MAC_FULL_SUITE_DISPATCHED = 'MAC_FULL_SUITE_DISPATCHED'
 MAC_FULL_SUITE_ALREADY_QUEUED = 'MAC_FULL_SUITE_ALREADY_QUEUED'
@@ -15,10 +15,6 @@ MAC_FULL_SUITE_STATE_UNAVAILABLE = 'MAC_FULL_SUITE_STATE_UNAVAILABLE'
 MAC_FULL_SUITE_PROFILE_INVALID = 'MAC_FULL_SUITE_PROFILE_INVALID'
 
 _QUEUED_STATUSES = frozenset({'queued', 'waiting', 'pending', 'requested'})
-_WORKFLOW_FILE = _DEFAULT_PROFILE.macos_workflow_file
-_WORKFLOW_RUNS_PATH = (
-    f'actions/workflows/{_WORKFLOW_FILE}/runs?branch=main&event=workflow_dispatch&per_page=20'
-)
 
 
 def request_full_suite(gh_runner, root, github_get, *, profile=_UNSET):
