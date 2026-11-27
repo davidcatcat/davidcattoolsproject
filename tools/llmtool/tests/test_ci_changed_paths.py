@@ -94,6 +94,33 @@ def _run_script(
     )
 
 
+def _run_script_bytes(
+    base: str,
+    head: str,
+    format_opt: str,
+    repo_dir: Path | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    cmd = [
+        sys.executable,
+        "-I",
+        "-B",
+        str(SCRIPT_PATH),
+        "--base",
+        base,
+        "--head",
+        head,
+        "--format",
+        format_opt,
+    ]
+    if repo_dir is not None:
+        cmd.extend(["--repo", str(repo_dir)])
+    return subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
 class CIChangedPathsTests(unittest.TestCase):
     def test_owner_case_1_pr_behind_main(self) -> None:
         """Owner case 1 (#2062): branch from main, main adds a file, PR edits another.
@@ -331,6 +358,10 @@ class CIChangedPathsTests(unittest.TestCase):
             ordinary.write_text("ordinary\n", encoding="utf-8")
             newline_path = repo / "diag\nbreak.txt"
             newline_path.write_text("newline name\n", encoding="utf-8")
+            vertical_tab_path = repo / "diag\vbreak.txt"
+            vertical_tab_path.write_text("vertical tab name\n", encoding="utf-8")
+            space_path = repo / "diag space.txt"
+            space_path.write_text("space name\n", encoding="utf-8")
             escape_path = repo / "diag\\nliteral.txt"
             escape_path.write_text("escape-looking name\n", encoding="utf-8")
             _git_run(["add", "."], repo)
@@ -338,7 +369,14 @@ class CIChangedPathsTests(unittest.TestCase):
             base_sha = _get_sha(repo, "HEAD")
 
             _git_run(["checkout", "-b", "pr"], repo)
-            for path in (ordinary, newline_path, escape_path):
+            fixtures = (
+                ordinary,
+                newline_path,
+                vertical_tab_path,
+                space_path,
+                escape_path,
+            )
+            for path in fixtures:
                 path.write_text(
                     path.read_text(encoding="utf-8") + "edited\n",
                     encoding="utf-8",
@@ -355,17 +393,19 @@ class CIChangedPathsTests(unittest.TestCase):
             )
             self.assertEqual(res_lines.returncode, 0)
             line_paths = res_lines.stdout.splitlines()
-            self.assertEqual(len(line_paths), 3)
+            self.assertEqual(len(line_paths), 5)
             self.assertEqual(
                 set(line_paths),
                 {
                     "ordinary.txt",
                     "diag\\nbreak.txt",
+                    "diag\\vbreak.txt",
+                    "diag space.txt",
                     "diag\\\\nliteral.txt",
                 },
             )
 
-            res_nul = _run_script(
+            res_nul = _run_script_bytes(
                 base=base_sha,
                 head=head_sha,
                 format_opt="nul",
@@ -373,12 +413,12 @@ class CIChangedPathsTests(unittest.TestCase):
             )
             self.assertEqual(res_nul.returncode, 0)
             self.assertEqual(
-                {p for p in res_nul.stdout.split("\0") if p},
-                {
-                    "ordinary.txt",
-                    "diag\nbreak.txt",
-                    "diag\\nliteral.txt",
-                },
+                res_nul.stdout,
+                b"diag\nbreak.txt\0"
+                b"diag\vbreak.txt\0"
+                b"diag space.txt\0"
+                b"diag\\nliteral.txt\0"
+                b"ordinary.txt\0",
             )
 
 
