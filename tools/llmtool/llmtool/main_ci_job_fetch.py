@@ -164,11 +164,11 @@ def _parse_time(value):
         return None
     try:
         parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if parsed.tzinfo is None:
+            return None
+        return parsed.astimezone(timezone.utc)
     except (TypeError, ValueError, OverflowError):
         return None
-    if parsed.tzinfo is None:
-        return None
-    return parsed.astimezone(timezone.utc)
 
 
 def _full_mac_absent(runs, main_date):
