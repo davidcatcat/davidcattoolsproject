@@ -20,11 +20,12 @@ import unittest
 
 # Load the production module from its file location so the tests do not
 # depend on how the developer or CI environment puts the package on
-# sys.path.  The module sits next to this tests directory:
-# tools/llmtool/llmtool/test_profile.py
+# sys.path.  The module sits in the package directory next to this
+# tests directory:  <root>/tools/llmtool/llmtool/test_profile.py,
+# i.e. one level up from <root>/tools/llmtool/tests/.
 _MODULE_FILE = os.path.normpath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    'llmtool', 'test_profile.py'))
+    os.pardir, 'llmtool', 'test_profile.py'))
 _MODULE_SPEC = importlib.util.spec_from_file_location(
     'llmtool_test_profile', _MODULE_FILE)
 test_profile = importlib.util.module_from_spec(_MODULE_SPEC)
