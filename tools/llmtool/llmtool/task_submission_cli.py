@@ -36,6 +36,7 @@ from .task_store import (TaskStore, TaskStoreConflict, new_id, _json_bytes,
                          valid_claude_failure_evidence_record, _valid_reported_text,
                          DEVELOPER_STDERR_EXCERPT_MAX_BYTES)
 from . import active_pm_inbox
+from . import ci_profile
 from . import remote_test
 from . import task_completion
 from . import direct_reassignment
@@ -1958,11 +1959,44 @@ def run_task_remote_test_checked(args, *, store=None, stdout=None):
     return run_task_remote_test(args, store=store, stdout=stdout)
 
 
-_REVIEW_CI_CHECKS = ('check (Linux 3.14)', 'check (macOS 3.13)', 'check (docs)')
+_CI_PROFILE_UNSET = object()
 _REVIEW_CI_VALUE = re.compile(r'[a-z_]{1,32}')
 _REVIEW_EC2_NONE = 'EC2 remote-test: no receipt is recorded for this HEAD.'
 _REVIEW_CI_UNAVAILABLE = 'CI: unavailable; the check runs for this HEAD could not be read.'
 _REVIEW_CI_NONE = 'CI: no run of these checks is recorded for this HEAD yet.'
+
+
+def _review_ci_checks(profile=_CI_PROFILE_UNSET):
+    """Return the three CI check names from a validated CiProfile, or None."""
+    if profile is _CI_PROFILE_UNSET:
+        try:
+            candidate = ci_profile.default_profile()
+        except Exception:
+            return None
+    else:
+        candidate = profile
+    if not isinstance(candidate, ci_profile.CiProfile):
+        return None
+    for field in dataclasses.fields(ci_profile.CiProfile):
+        value = getattr(candidate, field.name, None)
+        try:
+            ci_profile._validate_name(value)
+        except Exception:
+            return None
+    all_checks = (
+        candidate.linux_code_check,
+        candidate.docs_check,
+        candidate.gateway_check,
+        candidate.ai_loop_check,
+        candidate.macos_check,
+    )
+    if len(set(all_checks)) != len(all_checks):
+        return None
+    return (
+        candidate.linux_code_check,
+        candidate.macos_check,
+        candidate.docs_check,
+    )
 
 
 def _review_ec2_line(task, head):
@@ -1991,8 +2025,11 @@ def _review_ci_value(value):
     return 'UNKNOWN'
 
 
-def _review_ci_lines(head):
+def _review_ci_lines(head, *, profile=_CI_PROFILE_UNSET):
     """Render status and conclusion only, for the newest run of each named check."""
+    check_names = _review_ci_checks(profile)
+    if check_names is None:
+        return [_REVIEW_CI_UNAVAILABLE]
     try:
         checks = task_completion._github_get(f'commits/{head}/check-runs?per_page=100')
     except Exception:
@@ -2001,7 +2038,7 @@ def _review_ci_lines(head):
     if type(runs) is not list or any(type(item) is not dict for item in runs):
         return [_REVIEW_CI_UNAVAILABLE]
     lines = []
-    for name in _REVIEW_CI_CHECKS:
+    for name in check_names:
         matching = [item for item in runs
                     if item.get('name') == name and item.get('head_sha') == head]
         if any(type(item.get('id')) is not int for item in matching):
