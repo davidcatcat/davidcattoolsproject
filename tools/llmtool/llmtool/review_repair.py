@@ -10,7 +10,6 @@ import shutil
 import threading
 from argparse import Namespace
 
-from . import ci_profile
 from . import review_result, run_budget, sensitive_paths, task_completion, worker_availability, worker_dispatch
 from .errors import LLMToolError
 from .task_store import REVIEW_DISPUTE_DEFERRABLE, REVIEW_DISPUTE_SEVERITIES, _json_bytes, new_id
@@ -699,15 +698,8 @@ def _remote_test_failure(task, *, executor_task, pr_number, receipt, details=Non
 
 
 # #1502 WP-D D11, #2337: exact-head required CI checks a CI repair may answer.
-# #2793 A13.0: the default names come from the CI profile module.
-_DEFAULT_CI_PROFILE = ci_profile.default_profile()
-CI_REPAIR_CHECKS = (
-    _DEFAULT_CI_PROFILE.linux_code_check,
-    _DEFAULT_CI_PROFILE.docs_check,
-    _DEFAULT_CI_PROFILE.gateway_check,
-    _DEFAULT_CI_PROFILE.ai_loop_check,
-    _DEFAULT_CI_PROFILE.macos_check,
-)
+# #2793 A13.0: resolved lazily via __getattr__ so a missing or invalid default
+# profile does not fail on cold import before _resolve_ci_profile can refuse.
 # #2793 A13.0: a missing, invalid or ambiguous profile refuses with this code.
 CI_REPAIR_PROFILE_INVALID = 'CI_REPAIR_PROFILE_INVALID'
 _UNSET = object()
@@ -726,12 +718,12 @@ def _resolve_ci_profile(value):
     1). A missing default and any invalid or ambiguous value refuse
     CI_REPAIR_PROFILE_INVALID; the original names are never used as a fallback.
     """
-    from . import mac_full_due
     try:
+        from . import mac_full_due
         if value is _UNSET:
             return mac_full_due.resolve_profile()
         return mac_full_due.resolve_profile(value)
-    except mac_full_due.ProfileError:
+    except Exception:
         _refuse(CI_REPAIR_PROFILE_INVALID)
 
 
@@ -741,6 +733,12 @@ def _ci_repair_checks(value=_UNSET):
     return (resolved.linux_code_check, resolved.docs_check,
             resolved.gateway_check, resolved.ai_loop_check,
             resolved.macos_check)
+
+
+def __getattr__(name):
+    if name == 'CI_REPAIR_CHECKS':
+        return _ci_repair_checks()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _ci_failure(task, *, executor_task, pr_number, ci_failure, profile=_UNSET):

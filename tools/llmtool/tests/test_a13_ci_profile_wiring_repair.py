@@ -20,6 +20,7 @@ from __future__ import annotations
 from argparse import Namespace
 from contextlib import ExitStack, redirect_stdout
 import hashlib
+import importlib
 import io
 import json
 import os
@@ -607,6 +608,41 @@ class R3InvalidProfileTests(unittest.TestCase):
                                        side_effect=exc):
                     self.assertFalse(start_failure.repair_packet_matches(
                         packet, claim, root))
+
+    def test_cold_import_with_unavailable_profile_refuses_on_call_not_import(self):
+        root = {'task_id': task_store.new_id()}
+        name = _default_checks()[0]
+        pkg = sys.modules['llmtool']
+        saved = {
+            mod: sys.modules.get(mod)
+            for mod in ('llmtool.review_repair', 'llmtool.mac_full_due')
+        }
+        try:
+            for patch_kwargs in (
+                    {'return_value': None},
+                    {'side_effect': RuntimeError('missing profile')},
+            ):
+                with self.subTest(patch_kwargs=patch_kwargs):
+                    for mod in saved:
+                        sys.modules.pop(mod, None)
+                    with mock.patch.object(ci_profile, 'default_profile', **patch_kwargs):
+                        reloaded = importlib.import_module('llmtool.review_repair')
+                        with self.assertRaises(LLMToolError) as caught:
+                            reloaded._ci_failure(
+                                root, executor_task=D6, pr_number=PR,
+                                ci_failure=_failure(name))
+                        self.assertEqual(caught.exception.review_repair_code,
+                                         'CI_REPAIR_PROFILE_INVALID')
+        finally:
+            for mod, module_obj in saved.items():
+                if module_obj is None:
+                    sys.modules.pop(mod, None)
+                else:
+                    sys.modules[mod] = module_obj
+            if saved['llmtool.review_repair'] is not None:
+                setattr(pkg, 'review_repair', saved['llmtool.review_repair'])
+            if saved['llmtool.mac_full_due'] is not None:
+                setattr(pkg, 'mac_full_due', saved['llmtool.mac_full_due'])
 
 
 if __name__ == '__main__':
