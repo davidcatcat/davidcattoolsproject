@@ -63,6 +63,7 @@ UNCHANGED = 'MAIN_INCIDENT_UNCHANGED'
 RESOLVED = 'MAIN_INCIDENT_RESOLVED'
 CONFIRMED = 'MAIN_INCIDENT_CONFIRMED'
 UNAVAILABLE = 'MAIN_INCIDENT_STATE_UNAVAILABLE'
+PROFILE_INVALID = 'MAIN_INCIDENT_PROFILE_INVALID'
 OPEN_AMBIGUOUS = 'MAIN_INCIDENT_OPEN_AMBIGUOUS'
 NOT_OPEN = 'MAIN_INCIDENT_NOT_OPEN'
 REVERT_CLASS_NOT_CODE = 'REVERT_CLASS_NOT_CODE'
@@ -135,15 +136,22 @@ def _main_commits(github_get):
     return commits
 
 
-def _linux_runs(github_get, sha):
-    path = LINUX_RUNS.format(sha=sha)
+def linux_runs_path(linux_check, sha):
+    """Return the GitHub check-runs API path for one Linux check name and SHA."""
+    return (f'commits/{sha}/check-runs?check_name='
+            f'{quote(linux_check, safe="")}&per_page=100')
+
+
+def _linux_runs(github_get, sha, *, profile=mac_full_due._UNSET):
+    resolved = mac_full_due.resolve_profile(profile)
+    path = linux_runs_path(resolved.linux_code_check, sha)
     data = _read(github_get, path)
     runs = data.get('check_runs') if isinstance(data, dict) else None
     if not isinstance(runs, list):
         raise mac_full_due.StateError(path)
     out = []
     for run in runs:
-        if not isinstance(run, dict) or run.get('name') != mi.LINUX_CHECK or \
+        if not isinstance(run, dict) or run.get('name') != resolved.linux_code_check or \
                 run.get('head_sha') != sha:
             continue
         if type(run.get('id')) is not int or not isinstance(run.get('status'), str):
@@ -171,9 +179,9 @@ def _mac_jobs(github_get, run_id):
              'steps': _steps(job)} for job in jobs if isinstance(job, dict)]
 
 
-def _mac_runs(github_get):
+def _mac_runs(github_get, *, profile=mac_full_due._UNSET):
     out = []
-    for run in mac_full_due.full_runs(github_get):
+    for run in mac_full_due.full_runs(github_get, profile=profile):
         if type(run.get('id')) is not int:
             raise mac_full_due.StateError('run id')
         out.append({key: run.get(key) for key in
@@ -185,19 +193,20 @@ def _ordered(linux, mac):
     return sorted(linux, key=lambda run: run['id'], reverse=True) + mac
 
 
-def collect(github_get):
+def collect(github_get, *, profile=mac_full_due._UNSET):
     """Return (walked commits newest first, runs) read from GitHub; raise StateError."""
+    resolved = mac_full_due.resolve_profile(profile)
     commits = _main_commits(github_get)
-    mac = _mac_runs(github_get)
+    mac = _mac_runs(github_get, profile=resolved)
     linux, walked = [], []
     for commit in commits:
         sha = commit['sha']
         walked.append(dict(commit))
-        linux.extend(_linux_runs(github_get, sha))
+        linux.extend(_linux_runs(github_get, sha, profile=resolved))
         for run in mac:
             if run['head_sha'] == sha and 'jobs' not in run:
                 run['jobs'] = _mac_jobs(github_get, run['id'])
-        if mi.trusted_pass(_ordered(linux, mac), sha):
+        if mi.trusted_pass(_ordered(linux, mac), sha, profile=resolved):
             break
     return walked, _ordered(linux, mac)
 
@@ -264,12 +273,13 @@ def _failure_detail(github_get, kind, run):
     return detail
 
 
-def _enrich(github_get, runs, fail_sha):
+def _enrich(github_get, runs, fail_sha, *, profile=mac_full_due._UNSET):
     """New run list with failure detail on the failed runs of the failing head."""
+    resolved = mac_full_due.resolve_profile(profile)
     out = []
     for run in runs:
-        kind = mi.run_kind(run)
-        if kind and run['head_sha'] == fail_sha and mi.check_state(kind, run) == mi.FAIL:
+        kind = mi.run_kind(run, profile=resolved)
+        if kind and run['head_sha'] == fail_sha and mi.check_state(kind, run, profile=resolved) == mi.FAIL:
             run = dict(run, **_failure_detail(github_get, kind, run))
         out.append(run)
     return out
@@ -291,10 +301,11 @@ def _closure(read_texts, sha, tests):
     return results, True
 
 
-def scan_state(github_get, *, observed_at, read_texts=None):
+def scan_state(github_get, *, observed_at, read_texts=None, profile=mac_full_due._UNSET):
     """Read GitHub and return {'pass_sha', 'fail_sha', 'observation' or None}."""
-    commits, runs = collect(github_get)
-    pass_sha, fail_sha = mi.find_heads(commits, runs)
+    resolved = mac_full_due.resolve_profile(profile)
+    commits, runs = collect(github_get, profile=resolved)
+    pass_sha, fail_sha = mi.find_heads(commits, runs, profile=resolved)
     if fail_sha is None:
         return {'pass_sha': pass_sha, 'fail_sha': None, 'observation': None}
     for item in mi.commit_range(commits, pass_sha, fail_sha) or []:
@@ -303,14 +314,14 @@ def scan_state(github_get, *, observed_at, read_texts=None):
             for commit in commits:
                 if commit['sha'] == item['sha']:
                     commit['pr'] = pr
-    runs = _enrich(github_get, runs, fail_sha)
-    result = mi.classify_incident(commits, runs)
-    states = mi.check_states(runs, fail_sha)
+    runs = _enrich(github_get, runs, fail_sha, profile=resolved)
+    result = mi.classify_incident(commits, runs, profile=resolved)
+    states = mi.check_states(runs, fail_sha, profile=resolved)
     signal = sorted(kind for kind, state in states.items() if state == mi.FAIL)
     failing_runs = [{'kind': kind, 'id': run['id'], 'conclusion': run['conclusion']}
                     for kind in signal for run in runs
-                    if mi.run_kind(run) == kind and run['head_sha'] == fail_sha and
-                    mi.check_state(kind, run) == mi.FAIL]
+                    if mi.run_kind(run, profile=resolved) == kind and run['head_sha'] == fail_sha and
+                    mi.check_state(kind, run, profile=resolved) == mi.FAIL]
     tests = sorted({test for entry in result['evidence']
                     if entry.get('code') == 'TEST_FAILURE' for test in entry['tests']})
     range_prs = [{'pr': item['pr'], 'merge_sha': item['sha'],
@@ -377,11 +388,15 @@ def _summary(code, record, **extra):
                  'last_good_head': record['last_good_head']}, **extra)
 
 
-def _scan(args, github_get, root, environ, state_root, now, read_texts):
+def _scan(args, github_get, root, environ, state_root, now, read_texts, *,
+          profile=mac_full_due._UNSET):
     caller = _caller(getattr(args, 'pm_session', None), environ, state_root)
     at = store.utc_stamp(now)
     try:
-        state = scan_state(github_get, observed_at=at, read_texts=read_texts)
+        resolved = mac_full_due.resolve_profile(profile)
+        state = scan_state(github_get, observed_at=at, read_texts=read_texts, profile=resolved)
+    except mac_full_due.ProfileError:
+        return {'code': PROFILE_INVALID, 'profile': 'invalid'}, 2
     except mac_full_due.StateError as exc:
         return {'code': UNAVAILABLE, 'read': str(exc)}, 2
     opened = store.find_open(root)
@@ -422,11 +437,11 @@ def _show(args, root):
     return store.get(args.incident, root), 0
 
 
-def _jobs(github_get):
+def _jobs(github_get, *, profile=mac_full_due._UNSET):
     """Print the bounded read-only main CI job report; never touches the store."""
     if github_get is None:
         from .task_completion import _github_get as github_get
-    payload = main_ci_job_fetch.inspect_jobs(github_get)
+    payload = main_ci_job_fetch.inspect_jobs(github_get, profile=profile)
     print(json.dumps(payload, sort_keys=True))
     if payload['state'] == main_ci_job_fetch.UNKNOWN:
         print(f'llmtool: {payload["reason"]}', file=sys.stderr)
@@ -490,11 +505,11 @@ def _confirm(args, root, environ, state_root, now):
 
 
 def run_main_incident(args, *, github_get=None, root=None, environ=None, state_root=None,
-                      now=None, read_texts=None):
+                      now=None, read_texts=None, profile=mac_full_due._UNSET):
     """Print one JSON document; exit 0 done, 1 refused or RED, 2 read unavailable."""
     action = args.incident_action
     if action == 'jobs':
-        return _jobs(github_get)
+        return _jobs(github_get, profile=profile)
     try:
         if action == 'show':
             payload, status = _show(args, root)
@@ -503,7 +518,8 @@ def run_main_incident(args, *, github_get=None, root=None, environ=None, state_r
         else:
             if github_get is None:
                 from .task_completion import _github_get as github_get
-            payload, status = _scan(args, github_get, root, environ, state_root, now, read_texts)
+            payload, status = _scan(args, github_get, root, environ, state_root, now, read_texts,
+                                    profile=profile)
     except pm_caller.PMCallerRefused as exc:
         payload, status = {'code': exc.code}, 1
     except Refused as exc:
