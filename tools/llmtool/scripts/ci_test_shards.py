@@ -2,6 +2,7 @@
 """Print a deterministic, timing-balanced shard of llmtool test modules."""
 
 import argparse
+from decimal import Decimal
 import json
 import math
 from pathlib import Path
@@ -15,11 +16,16 @@ INVALID_TIMING_DIAGNOSTIC = "invalid timing configuration"
 
 
 def _is_finite_number(value):
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    )
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _to_decimal(value):
+    return Decimal.from_float(value) if isinstance(value, float) else Decimal(value)
 
 
 def _reject_json_constant(value):
@@ -59,14 +65,14 @@ def partition(shard_count, timings=None):
     default, weights = _load_timings(path)
     modules = sorted(path.name for path in TESTS.glob("test_*.py"))
     shards = [[] for _ in range(shard_count)]
-    totals = [0] * shard_count
+    totals = [Decimal(0)] * shard_count
 
     # Longest processing time first keeps each bin balanced. Stable filename
     # ordering and shard-index tie breaks make the output reproducible.
     for module in sorted(modules, key=lambda name: (-weights.get(name, default), name)):
         shard = min(range(shard_count), key=lambda index: (totals[index], index))
         shards[shard].append(module)
-        totals[shard] += weights.get(module, default)
+        totals[shard] += _to_decimal(weights.get(module, default))
 
     return [sorted(shard) for shard in shards]
 

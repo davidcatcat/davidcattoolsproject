@@ -259,6 +259,12 @@ class CiTestShardsTests(unittest.TestCase):
             "shape_missing_modules": json.dumps({"default_seconds": 3}),
             "shape_modules_list": json.dumps({"default_seconds": 3, "modules": []}),
             "shape_empty_module_key": json.dumps({"default_seconds": 3, "modules": {"": 1}}),
+            "default_huge_int": '{"default_seconds": ' + ("1" + "0" * 400) + ', "modules": {}}',
+            "module_huge_int": (
+                '{"default_seconds": 3, "modules": {"test_cli.py": '
+                + ("1" + "0" * 400)
+                + "}}"
+            ),
             "malformed_json": "{not json",
         }
         cli_checked = {
@@ -266,6 +272,8 @@ class CiTestShardsTests(unittest.TestCase):
             "default_bool_true",
             "module_negative",
             "shape_modules_list",
+            "default_huge_int",
+            "module_huge_int",
             "malformed_json",
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -316,6 +324,30 @@ class CiTestShardsTests(unittest.TestCase):
             with patch.object(ci_test_shards, "TESTS", test_dir):
                 shards = ci_test_shards.partition(2, timings=timing_path)
                 self.assertEqual(shards, [["test_heavy.py"], ["test_zero.py"]])
+
+    def test_large_finite_weights_do_not_overflow_shard_totals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            test_dir = root / "tests"
+            test_dir.mkdir()
+            for index in range(6):
+                (test_dir / f"test_mod_{index}.py").touch()
+            timing_path = root / "large_timings.json"
+            timing_path.write_text(
+                '{"default_seconds": 1e308, "modules": {"test_mod_0.py": 1e308}}',
+                encoding="utf-8",
+            )
+            with patch.object(ci_test_shards, "TESTS", test_dir):
+                shards = ci_test_shards.partition(3, timings=timing_path)
+            self.assertEqual([len(shard) for shard in shards], [2, 2, 2])
+            self.assertEqual(
+                shards,
+                [
+                    ["test_mod_0.py", "test_mod_3.py"],
+                    ["test_mod_1.py", "test_mod_4.py"],
+                    ["test_mod_2.py", "test_mod_5.py"],
+                ],
+            )
 
     def test_workflow_has_aggregate_gate_and_third_runner_mapping(self):
         workflow = (TOOLS_ROOT.parent.parent / ".github/workflows/llmtool-linux-ci.yml").read_text(
