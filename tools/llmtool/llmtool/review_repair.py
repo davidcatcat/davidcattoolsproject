@@ -10,6 +10,7 @@ import shutil
 import threading
 from argparse import Namespace
 
+from . import ci_profile
 from . import review_result, run_budget, sensitive_paths, task_completion, worker_availability, worker_dispatch
 from .errors import LLMToolError
 from .task_store import REVIEW_DISPUTE_DEFERRABLE, REVIEW_DISPUTE_SEVERITIES, _json_bytes, new_id
@@ -698,13 +699,18 @@ def _remote_test_failure(task, *, executor_task, pr_number, receipt, details=Non
 
 
 # #1502 WP-D D11, #2337: exact-head required CI checks a CI repair may answer.
+# #2793 A13.0: the default names come from the CI profile module.
+_DEFAULT_CI_PROFILE = ci_profile.default_profile()
 CI_REPAIR_CHECKS = (
-    'check (Linux 3.14)',
-    'check (docs)',
-    'gateway tests (Linux 3.14)',
-    'ai-loop helper tests (Python 3.14)',
-    'check (macOS 3.13)',
+    _DEFAULT_CI_PROFILE.linux_code_check,
+    _DEFAULT_CI_PROFILE.docs_check,
+    _DEFAULT_CI_PROFILE.gateway_check,
+    _DEFAULT_CI_PROFILE.ai_loop_check,
+    _DEFAULT_CI_PROFILE.macos_check,
 )
+# #2793 A13.0: a missing, invalid or ambiguous profile refuses with this code.
+CI_REPAIR_PROFILE_INVALID = 'CI_REPAIR_PROFILE_INVALID'
+_UNSET = object()
 CI_EXCERPT_MAX_BYTES = 4096
 CI_EXCERPT_MAX_LINES = 40
 CI_PACKET_HEADER = 'CI_CHECK_FAILURE'
@@ -713,21 +719,47 @@ _CI_FAILURE_OPTIONAL_FIELDS = frozenset((
     'failing_tests', 'failing_modules', 'workflow_run_id', 'job_id', 'details_unavailable'))
 
 
-def _ci_failure(task, *, executor_task, pr_number, ci_failure):
+def _resolve_ci_profile(value):
+    """Return a validated CiProfile for the CI repair step.
+
+    The resolution and refusal follow mac_full_due.resolve_profile (#2793 slice
+    1). A missing default and any invalid or ambiguous value refuse
+    CI_REPAIR_PROFILE_INVALID; the original names are never used as a fallback.
+    """
+    from . import mac_full_due
+    try:
+        if value is _UNSET:
+            return mac_full_due.resolve_profile()
+        return mac_full_due.resolve_profile(value)
+    except mac_full_due.ProfileError:
+        _refuse(CI_REPAIR_PROFILE_INVALID)
+
+
+def _ci_repair_checks(value=_UNSET):
+    """Return the CI check names the repair step accepts, from the profile."""
+    resolved = _resolve_ci_profile(value)
+    return (resolved.linux_code_check, resolved.docs_check,
+            resolved.gateway_check, resolved.ai_loop_check,
+            resolved.macos_check)
+
+
+def _ci_failure(task, *, executor_task, pr_number, ci_failure, profile=_UNSET):
     """Build a repair packet from one failed exact-head required CI check.
 
     Returns (packet, identity_sha256). The identity binds the Task, PR, head and
     check run, so a replayed failure of the same run reuses its claim even when
     the untrusted excerpt differs. Any malformed input refuses CI_FAILURE_INVALID.
+    The accepted check names come from profile (#2793 A13.0).
     """
     from . import task_submission_cli
+    accepted_checks = _ci_repair_checks(profile)
     if (type(ci_failure) is not dict or
             not _CI_FAILURE_FIELDS <= set(ci_failure) or
             not set(ci_failure) <= (_CI_FAILURE_FIELDS | _CI_FAILURE_OPTIONAL_FIELDS) or
             type(ci_failure['head']) is not str or
             re.fullmatch(r'[0-9a-f]{40}', ci_failure['head']) is None or
             type(ci_failure['check_name']) is not str or
-            ci_failure['check_name'] not in CI_REPAIR_CHECKS or
+            ci_failure['check_name'] not in accepted_checks or
             type(ci_failure['check_run_id']) is not int or
             isinstance(ci_failure['check_run_id'], bool) or ci_failure['check_run_id'] < 1 or
             type(ci_failure['conclusion']) is not str or
@@ -1004,14 +1036,17 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                   dispatch_adapter=None, current_head=None, auto_review=False,
                   review_dispatcher=None, delegate_callable=None,
                   repair_task_recorder=None, retry_claim_id=None,
-                  remote_test_receipt=None, ci_failure=None, auto=False,
+                  remote_test_receipt=None, ci_failure=None, profile=_UNSET,
+                  auto=False,
                   extra_read_paths=None, remote_test_details=None,
                   high_debug_task=None, high_debug_ref=None,
                   high_debug_family=None):
     """Claim and dispatch one repair for a failed review, remote test or CI check.
 
     remote_test_receipt (EC2) and ci_failure (#1502 WP-D D11) are exclusive; both
-    are test failures and share one count, the '<base>-ec2' family.
+    are test failures and share one count, the '<base>-ec2' family. For a
+    ci_failure, profile is the CiProfile whose check names are accepted; a
+    missing or invalid profile refuses CI_REPAIR_PROFILE_INVALID.
 
     auto is True only from task advance / drive. An auto review repair (a retry
     included) is refused REVIEW_REPAIR_PM_REQUIRED, inside the chain-locked
@@ -1043,25 +1078,26 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
             developer.get('read_paths'), extra_read_paths, developer.get('write_paths'))
         if merged_read != developer.get('read_paths'):
             developer = dict(developer, read_paths=merged_read)
-    profile = developer.get('provider_profile')
-    claude_cli = (profile == 'claude' and
+    provider_profile = developer.get('provider_profile')
+    claude_cli = (provider_profile == 'claude' and
                   developer.get('backend_session_semantics') == 'CLI_REPORTED_SESSION_ID')
-    if profile == 'claude' and not claude_cli:
+    if provider_profile == 'claude' and not claude_cli:
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
-    if profile == 'codex':   # #1502 O1 / WP-C: Codex is Reviewer and AI Debug only
+    if provider_profile == 'codex':   # #1502 O1 / WP-C: Codex is Reviewer and AI Debug only
         _refuse('REPAIR_CODEX_DEVELOPER_RETIRED')
-    worker = _worker_key(profile)
+    worker = _worker_key(provider_profile)
     if worker is None:
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
-    if profile == 'company-gw':
+    if provider_profile == 'company-gw':
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
-    if profile == 'claude' and shutil.which(profile) is None:
+    if provider_profile == 'claude' and shutil.which(provider_profile) is None:
         _refuse('RUNTIME_NOT_ON_PATH')
     ci_identity_sha = None
     body_holder = []
     if ci_failure is not None:
         packet, ci_identity_sha = _ci_failure(task, executor_task=executor_task,
-                                              pr_number=pr_number, ci_failure=ci_failure)
+                                              pr_number=pr_number, ci_failure=ci_failure,
+                                              profile=profile)
     elif remote_test_receipt is None:
         packet, _event = _failed_event(task, executor_task=executor_task,
                                        pr_number=pr_number, github_get=github_get,
@@ -1194,8 +1230,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
             return {'claim': bound, 'repair_task_id': existing['repair_task_id'],
                     'attempt': bound['attempt'], 'replayed': True, 'next_action': 'task advance'}
         if (direct_reassignment.replacement_candidate(repair_developer) and
-                (repair_developer.get('provider_profile') == profile or
-                 (history and history[-1]['old_profile'] == profile))):
+                (repair_developer.get('provider_profile') == provider_profile or
+                 (history and history[-1]['old_profile'] == provider_profile))):
             if (auto and not test_failure and
                     repair_developer.get('dispatch_boundary') != 'PREPARED'):
                 _auto_replay_claim(store, task, task_id, existing)
@@ -1222,7 +1258,7 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
             # #2492: a review claim recovered to CLAIMED with no Developer replays the same way.
             return _replay_claimed_test_repair(
                 store=store, task_id=task_id, existing=existing, developer=developer,
-                packet=packet, executor_task=executor_task, profile=profile,
+                packet=packet, executor_task=executor_task, profile=provider_profile,
                 dispatch_adapter=dispatch_adapter, delegate_callable=delegate_callable,
                 packet_version=packet_version,
                 high_debug_task=high_debug_task,
@@ -1383,7 +1419,7 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         result = _invoke_claimed_adapter(
             store=store, task_id=task_id, claim=claim, repair_task=repair_task,
             developer=developer, packet=packet, executor_task=executor_task,
-            profile=profile, dispatch_adapter=dispatch_adapter,
+            profile=provider_profile, dispatch_adapter=dispatch_adapter,
             delegate_callable=delegate_callable,
             high_debug_task=high_debug_task,
             high_debug_ref=high_debug_ref,
