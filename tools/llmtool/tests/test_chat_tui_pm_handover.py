@@ -1,5 +1,6 @@
 """TUI PM Task handover tests (#683): explicit consent, fail-closed, real adoption path."""
 
+import contextlib
 import hashlib
 import io
 import json
@@ -146,8 +147,9 @@ class TUIHandoverTests(unittest.TestCase):
             clock=lambda: NOW,
             process_lister=lister,
         )
-        pipe = create_pipe_input()
-        self.addCleanup(pipe.close)
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        pipe = stack.enter_context(create_pipe_input())
         ui = chat_tui.ChatTUI(self.session, input=pipe, output=DummyOutput(), pm_api=api)
 
         def sync_worker(target, *args):
