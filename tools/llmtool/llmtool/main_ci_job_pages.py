@@ -132,7 +132,7 @@ def _unknown(result, reason):
 def _job_reason(job, sha, run_id, run_attempt):
     if not isinstance(job, dict):
         return MALFORMED_JOB
-    if type(job.get('id')) is not int:
+    if type(job.get('id')) is not int or job.get('id') <= 0:
         return MALFORMED_JOB
     name, status = job.get('name'), job.get('status')
     if not isinstance(name, str) or not name.strip():
