@@ -120,7 +120,10 @@ class ZeroTestDiscoveryTests(unittest.TestCase):
                     diff_sha256=DIFF_SHA256, changed_paths=list(paths),
                     read_paths=list(paths), write_paths=[])
         self.assertEqual([item['path'] for item in evidence], paths)
-        self.assertEqual(evidence[0]['exit_code'], 0)
+        # A zero-test discovery must not be recorded as PASSED. Python 3.12+
+        # exits 5 when no tests run; older interpreters exit 0 after printing
+        # "Ran 0 tests". Both are the real runner outcome, and neither is a pass.
+        self.assertIn(evidence[0]['exit_code'], (0, 5))
         self.assertEqual(evidence[0]['status'], 'FAILED')
 
 
