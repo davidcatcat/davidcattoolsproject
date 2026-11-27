@@ -52,15 +52,18 @@ def fingerprint_directory(path):
 def _collect_entries(path):
     """Return sorted (name, size, mtime_ns) lstat records of the entries."""
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    with os.fdopen(os.open(path, flags), 'rb') as handle:
-        info = handle.fstat()
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
         if not S_ISDIR(info.st_mode):
             raise StoreFingerprintError()
         entries = []
-        for entry in os.scandir(handle.fileno()):
+        for entry in os.scandir(fd):
             stat = entry.stat(follow_symlinks=False)
             entries.append((os.fsencode(entry.name), stat.st_size,
                             stat.st_mtime_ns))
+    finally:
+        os.close(fd)
     entries.sort()
     return entries
 
