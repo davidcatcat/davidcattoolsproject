@@ -1,9 +1,11 @@
 """#2119 WP-1 step 3: the EC2 _REMOTE_SCRIPT emits module_results with last-match ran."""
 import ast
+import io
 import json
 import re
 import sys
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -124,6 +126,29 @@ class ScriptModuleResultTests(unittest.TestCase):
     def test_script_statements_omit_the_field_when_no_module_ran(self):
         receipt, ran = self.run_emission([])
         self.assertEqual((ran, receipt), (0, dict(final=[])))
+
+    def test_script_emits_phase_markers_to_stderr_only(self):
+        parsed = ast.parse(rt._REMOTE_SCRIPT)
+        helper = next(
+            node for node in parsed.body
+            if isinstance(node, ast.FunctionDef) and node.name == 'mark'
+        )
+        namespace = dict(sys=sys)
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), '<remote-mark>', 'exec'), namespace)
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+            for name in ('workspace', 'archive', 'venv', 'requirements', 'package', 'tests', 'cleanup', 'receipt'):
+                namespace['mark'](name)
+        self.assertEqual(stdout_buf.getvalue(), '')
+        self.assertEqual(
+            stderr_buf.getvalue().splitlines(),
+            [f'LLMTOOL_REMOTE_PHASE:{name}' for name in (
+                'workspace', 'archive', 'venv', 'requirements', 'package', 'tests', 'cleanup', 'receipt'
+            )],
+        )
+        for name in ('workspace', 'archive', 'venv', 'requirements', 'package', 'tests', 'cleanup', 'receipt'):
+            self.assertIn(f'mark("{name}")', rt._REMOTE_SCRIPT)
 
 
 if __name__ == '__main__':

@@ -186,8 +186,12 @@ for _,path,_ in owned_dirs[20:]:
  except OSError: pass"""
 def cleanup_stale():
     return nobody_cli([python,"-c",cleanup_source,log_path or ""],limit=20,cleanup=True)
+def mark(name):
+    sys.stderr.write("LLMTOOL_REMOTE_PHASE:"+name+"\n")
+    sys.stderr.flush()
 stage="workspace"; failed_outputs=[]
 try:
+    mark("workspace")
     cleanup_stale()
     f=run(["git","-C",repo,"fetch","--no-tags","--end-of-options","origin",ref],limit=120)
     log+=f.stdout
@@ -205,7 +209,7 @@ try:
         info=os.stat(work)
         if info.st_uid!=uid or info.st_mode&0o777!=0o700: raise RuntimeError("workspace")
         try:
-            stage="archive"
+            stage="archive"; mark("archive")
             dirs=nobody_cli(["mkdir","-m","700","--",work+"/.home",work+"/.tmp"])
             log+=dirs.stdout
             if dirs.returncode: raise RuntimeError("environment")
@@ -214,16 +218,16 @@ try:
             extracted=nobody_run(work,["tar","-xf","-","-C",work],limit=30,input=archive.stdout)
             log+=extracted.stdout
             if archive.returncode or extracted.returncode: raise RuntimeError("archive")
-            stage="venv"
+            stage="venv"; mark("venv")
             v=nobody_run(work,[python,"-m","venv",work+"/venv"],limit=60); log+=v.stdout
             if v.returncode: raise RuntimeError("venv")
-            stage="requirements"
+            stage="requirements"; mark("requirements")
             pip=nobody_run(work,[work+"/venv/bin/python","-m","pip","install","-r","tools/llmtool/requirements-ci.txt"],limit=180); log+=pip.stdout
             if pip.returncode: raise RuntimeError("requirements")
-            stage="package"
+            stage="package"; mark("package")
             package=nobody_run(work,[work+"/venv/bin/python","-m","pip","install","--no-deps","-e","tools/llmtool"],limit=180); log+=package.stdout
             if package.returncode: raise RuntimeError("package")
-            stage="tests"
+            stage="tests"; mark("tests")
             for mod in mods:
                 test=nobody_run(work+"/tools/llmtool",[work+"/venv/bin/python","-m","unittest","discover","-s","tests","-p",mod+".py"],limit=int(ml),env={"HOME":work+"/.home","TMPDIR":work+"/.tmp"},capture_stderr=True)
                 test_output=test.stdout+(test.stderr or b""); log+=test_output
@@ -239,12 +243,14 @@ try:
             if result!="TIMEOUT" and code==1 and len(failures)==0 and ran>0: result="PASS"; code=0
         finally:
             if work:
+                mark("cleanup")
                 gone=nobody_cli(["rm","-rf","--",work],cleanup=True); log+=gone.stdout
 except subprocess.TimeoutExpired as exc:
     result="TIMEOUT"; code=124; log+=exc.stdout or b""; log+=f"REMOTE_STAGE_FAILED {stage} {type(exc).__name__}\n".encode()
 except Exception as exc:
     if result not in ("SHA_MISMATCH","TIMEOUT"): result="FAIL"
     code=code or 1; log+=f"REMOTE_STAGE_FAILED {stage} {type(exc).__name__}\n".encode()
+mark("cleanup")
 log_dir_run=nobody_cli(["mktemp","-d","/tmp/llmtool-remote-log.XXXXXX"],cleanup=True)
 log_dir=log_dir_run.stdout.decode("utf8","replace").strip()
 if log_dir_run.returncode==0:
@@ -261,6 +267,7 @@ receipt={"result":result,"exit_code":code,"source_sha":sha,"tree":tree,"fetch_he
 if result!="PASS": receipt["failure_excerpt"]=failure_excerpt(failed_outputs,work or "<REMOTE_WORKDIR>",os.path.expanduser("~"))
 if module_results: receipt["module_results"]=module_results
 raw=json.dumps(receipt,separators=(",",":"),sort_keys=True).encode()
+mark("receipt")
 print(raw.decode() if len(raw)<=32768 else "{}")
 os.close(lock_fd)
 '''

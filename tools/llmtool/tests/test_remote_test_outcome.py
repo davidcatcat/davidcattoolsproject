@@ -2,7 +2,13 @@
 
 import hashlib
 import json
+import os
+import subprocess
+import tempfile
+import types
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from llmtool import remote_test
 
@@ -461,6 +467,131 @@ class HostedOutcomeMappingTests(unittest.TestCase):
             remote_test._hosted_outcome(unknown_run, unknown_job, self.pass_raw, sha=_SHA, modules=_MODULES),
             ('OUTCOME', 'UNKNOWN', 'HOSTED_RUN_UNKNOWN'),
         )
+
+
+class _FakeStore:
+    def __init__(self, task):
+        self._task = task
+        self.outcomes = []
+
+    def get(self, task_id):
+        if task_id != self._task['task_id']:
+            raise KeyError(task_id)
+        return self._task
+
+    def append_remote_test_outcome(self, task_id, outcome):
+        saved = dict(outcome)
+        self.outcomes.append(saved)
+        return {'outcome': saved, 'counter': len(self.outcomes)}
+
+
+class SshTimeoutDiagnosticTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.config_path = Path(self.tmpdir.name) / 'remote-test.json'
+        self.config_path.write_text(json.dumps({
+            'host': 'example.invalid',
+            'user': 'runner',
+            'repo_path': '/srv/repo',
+            'python': '/usr/bin/python3',
+        }), encoding='utf-8')
+        os.chmod(self.config_path, 0o600)
+        self.task = {
+            'task_id': 'task-1',
+            'run_id': 'run-1',
+            'pm_session_id': 'pm-1',
+            'developer': {
+                'read_paths': ['tools/llmtool/tests/test_mod.py'],
+                'write_paths': [],
+            },
+            'completion': {
+                'evidence': {
+                    'common_dir': '/tmp/fake-common',
+                    'result': {'result_head': _SHA},
+                },
+            },
+            'remote_test_receipts': [],
+        }
+
+    def _run_timeout(self, *, stderr=None, stdout=None):
+        store = _FakeStore(self.task)
+        reg = types.SimpleNamespace(result_sha=_SHA, root='/tmp/fake-root')
+
+        def fake_transport(argv, script, timeout):
+            raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr)
+
+        with mock.patch.object(remote_test, 'read_d6_registration', return_value=reg), \
+                mock.patch.object(remote_test, '_ssh_timeout', return_value=1800), \
+                mock.patch.object(remote_test, '_remote_test_timeouts', return_value=(120, 600)), \
+                mock.patch.object(remote_test, 'record_remote_test_outcome_event', return_value={'event_id': 'evt-1'}):
+            res = remote_test.run_remote_test(
+                'task-1',
+                executor_task='task-1',
+                sha=_SHA,
+                ref=_REF,
+                modules=('test_mod',),
+                store=store,
+                config_path=self.config_path,
+                transport=fake_transport,
+            )
+        return res, store
+
+    def test_distinguishes_observed_phases_without_inferring_completion(self):
+        cases = (
+            (None, {'phase': 'NONE', 'stage': 'NONE'}),
+            (b'', {'phase': 'NONE', 'stage': 'NONE'}),
+            (b'LLMTOOL_REMOTE_PHASE:workspace\n', {'phase': 'PREPARATION', 'stage': 'WORKSPACE'}),
+            (b'LLMTOOL_REMOTE_PHASE:archive\n', {'phase': 'PREPARATION', 'stage': 'ARCHIVE'}),
+            (b'LLMTOOL_REMOTE_PHASE:venv\n', {'phase': 'PREPARATION', 'stage': 'VENV'}),
+            (b'LLMTOOL_REMOTE_PHASE:requirements\n', {'phase': 'PREPARATION', 'stage': 'REQUIREMENTS'}),
+            (b'LLMTOOL_REMOTE_PHASE:package\n', {'phase': 'PREPARATION', 'stage': 'PACKAGE'}),
+            (b'LLMTOOL_REMOTE_PHASE:workspace\nLLMTOOL_REMOTE_PHASE:tests\n', {'phase': 'TESTS', 'stage': 'TESTS'}),
+            (b'LLMTOOL_REMOTE_PHASE:tests\nLLMTOOL_REMOTE_PHASE:cleanup\n', {'phase': 'CLEANUP_OR_RECEIPT', 'stage': 'CLEANUP'}),
+            (b'LLMTOOL_REMOTE_PHASE:cleanup\nLLMTOOL_REMOTE_PHASE:receipt\n', {'phase': 'CLEANUP_OR_RECEIPT', 'stage': 'RECEIPT'}),
+        )
+        for stderr, expected in cases:
+            with self.subTest(stderr=stderr):
+                res, store = self._run_timeout(stderr=stderr)
+                self.assertEqual(res['result'], 'TIMEOUT')
+                self.assertEqual(res['code'], 'SSH_TIMEOUT')
+                self.assertEqual(res['outcome']['result'], 'TIMEOUT')
+                self.assertEqual(res['outcome']['code'], 'SSH_TIMEOUT')
+                self.assertEqual(set(res['outcome']), {'result', 'code', 'executor_task', 'sha', 'modules', 'at'})
+                self.assertEqual(res['diagnostic'], expected)
+                self.assertEqual(len(store.outcomes), 1)
+
+    def test_unknown_or_malformed_observations_cannot_become_success(self):
+        malformed_stderrs = (
+            b'LLMTOOL_REMOTE_PHASE:PASS\n',
+            b'LLMTOOL_REMOTE_PHASE:unknown_phase\n',
+            b'LLMTOOL_REMOTE_PHASE:tests extra\n',
+            b'\xff\xfe\xfd\n',
+            'LLMTOOL_REMOTE_PHASE:bad_str_stage\n',
+            12345,
+        )
+        fake_pass_stdout = _make_receipt_bytes('PASS')
+        for stderr in malformed_stderrs:
+            with self.subTest(stderr=stderr):
+                res, _ = self._run_timeout(stderr=stderr, stdout=fake_pass_stdout)
+                self.assertEqual(res['result'], 'TIMEOUT')
+                self.assertEqual(res['code'], 'SSH_TIMEOUT')
+                self.assertEqual(res['diagnostic'], {'phase': 'NONE', 'stage': 'NONE'})
+
+    def test_raw_transport_output_and_paths_are_not_persisted(self):
+        raw_stderr = (
+            b'ssh warning from /tmp/private/work/dir\n'
+            b'LLMTOOL_REMOTE_PHASE:tests\n'
+            b'raw test log line with /home/runner/log.txt\n'
+        )
+        raw_stdout = b'{"result":"PASS"} /tmp/raw-stdout-path\n'
+        res, store = self._run_timeout(stderr=raw_stderr, stdout=raw_stdout)
+        self.assertEqual(res['result'], 'TIMEOUT')
+        self.assertEqual(res['code'], 'SSH_TIMEOUT')
+        self.assertEqual(res['diagnostic'], {'phase': 'TESTS', 'stage': 'TESTS'})
+        serialized = json.dumps({'res': res, 'stored': store.outcomes}, sort_keys=True)
+        for forbidden in ('/tmp/private/work/dir', '/home/runner/log.txt', 'raw test log line', '/tmp/raw-stdout-path'):
+            self.assertNotIn(forbidden, serialized)
 
 
 if __name__ == '__main__':
