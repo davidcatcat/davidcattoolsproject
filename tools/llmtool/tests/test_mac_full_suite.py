@@ -184,6 +184,20 @@ class TestMacFullSuite(unittest.TestCase):
                 self.assertEqual(result, MAC_FULL_SUITE_STATE_UNAVAILABLE)
                 self.assertEqual(runner.calls, [])
 
+    def test_blank_run_status_state_unavailable(self) -> None:
+        """Return MAC_FULL_SUITE_STATE_UNAVAILABLE for blank run status, no dispatch."""
+        for blank_status in ['', '   ', '\t\n']:
+            with self.subTest(status=blank_status):
+                runner = FakeRunner(returncode=0)
+                github_get = FakeGithubGet(response={'workflow_runs': [
+                    {'status': blank_status},
+                ]})
+                result = request_full_suite(runner, '/repo/root', github_get)
+
+                self.assertEqual(result, MAC_FULL_SUITE_STATE_UNAVAILABLE)
+                self.assertEqual(github_get.calls, [_EXPECTED_PATH])
+                self.assertEqual(runner.calls, [])
+
     def test_none_runner_or_read(self) -> None:
         """Return MAC_FULL_SUITE_STATE_UNAVAILABLE when runner or github_get is None."""
         runner = FakeRunner(returncode=0)

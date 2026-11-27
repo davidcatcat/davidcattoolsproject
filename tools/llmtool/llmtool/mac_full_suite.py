@@ -29,7 +29,7 @@ def request_full_suite(gh_runner, root, github_get, *, profile=_UNSET):
     queued or waiting; MAC_FULL_SUITE_DISPATCHED on exit 0;
     MAC_FULL_SUITE_DISPATCH_FAILED on runner exit non-zero or exception; or
     MAC_FULL_SUITE_STATE_UNAVAILABLE if runner or github_get is missing, the
-    read fails, or the run list is malformed.
+    read fails, the run list is malformed, or a run status is blank.
     Never raises, never retries, and sends no other GitHub write.
     """
     try:
@@ -63,7 +63,7 @@ def request_full_suite(gh_runner, root, github_get, *, profile=_UNSET):
             if not isinstance(run, dict):
                 return MAC_FULL_SUITE_STATE_UNAVAILABLE
             status = run.get('status')
-            if not isinstance(status, str):
+            if not isinstance(status, str) or not status.strip():
                 return MAC_FULL_SUITE_STATE_UNAVAILABLE
 
         for run in runs:
