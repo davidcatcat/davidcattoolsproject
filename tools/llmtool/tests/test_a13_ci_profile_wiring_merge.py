@@ -242,7 +242,7 @@ class R2SubstitutedProfileTests(unittest.TestCase):
         defaults = default_profile()
         for via_patch in (False, True):
             with self.subTest(via_patch=via_patch):
-                root = self.root / f'patch_{via_patch}'
+                root = self.root / f'patch_{via_patch}' / 'tasks'
                 github = _IncidentGitHub([B, A], ALT_PROFILE)
                 github.passed(A)
                 github.code_failure(B)
