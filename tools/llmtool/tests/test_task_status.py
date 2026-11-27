@@ -10,7 +10,7 @@ from llmtool import task_status
 from llmtool.cli import main, parser_for_cli
 from llmtool.task_index import TaskStatusIndex
 from llmtool.task_store import TaskStore
-from llmtool.task_submission_cli import run_task_abandon
+from llmtool.task_submission_cli import _record as pm_record, run_task_abandon
 from test_task_store import record as valid_record
 
 
@@ -168,6 +168,7 @@ class TaskStatusTests(unittest.TestCase):
                 'DEVELOPER_RESPONDED': 'RUNNING', 'DEVELOPER_UNAVAILABLE': 'UNAVAILABLE',
                 'DEVELOPER_OUTCOME_UNKNOWN': 'UNKNOWN',
                 'DEVELOPER_OUTPUT_REJECTED': 'FAILED',
+                'BLOCKED': 'BLOCKED',
             }),
             ('callback', {
                 'WAITING_EXECUTOR': 'RUNNING', 'VERIFYING_EXECUTOR': 'RUNNING',
@@ -266,6 +267,7 @@ class TaskStatusTests(unittest.TestCase):
             ({'state': 'DEVELOPER_OUTPUT_REJECTED'}, 'FAILED'),
             ({'state': 'DEVELOPER_OUTCOME_UNKNOWN'}, 'UNKNOWN'),
             ({'state': 'DEVELOPER_OUTCOME_UNKNOWN', 'error_code': 'CODEX_BLOCKED'}, 'BLOCKED'),
+            ({'state': 'BLOCKED'}, 'BLOCKED'),
         )
         for developer, expected in cases:
             value = {
@@ -429,6 +431,149 @@ class TaskStatusTests(unittest.TestCase):
                                      created['pm_session_id'])])
             self.assertEqual(unreadable, 0)
             self.assertNotIn(created['task_id'], index.entries)
+
+    def test_persisted_developer_blocked_precedes_stale_callback_and_preserves_precedence(self):
+        def callback_for(base, *, state='WAITING_EXECUTOR'):
+            return {
+                'state': state,
+                'executor_task_id': 'executor-d6',
+                'evidence': {
+                    'task_id': base['task_id'],
+                    'run_id': base['run_id'],
+                    'contract_digest': base['task_binding']['contract_digest'],
+                    'executor_task_id': 'executor-d6',
+                    'source_sha': 'd' * 40,
+                    'execution_mode': 'DIRECT_D6',
+                    'verification_state': 'NOT_STARTED',
+                },
+                'missing_gates': [],
+                'pm_dispatch': 'NOT_STARTED',
+                'pm_response': None,
+                'pm_recommendation': None,
+                'pm_usage': None,
+                'pm_error_code': None,
+            }
+
+        def developer_for(base, *, profile, state='BLOCKED', error_code='AGY_EMPTY_RESULT',
+                          callback_state='WAITING_EXECUTOR', reported=None, artifact=None):
+            provider_type = 'agy-cli' if profile == 'agy' else 'claude-cli'
+            dev = {
+                'assignment_id': '1' * 32,
+                'selection_source': 'PM',
+                'state': state,
+                'provider_profile': profile,
+                'provider_type': provider_type,
+                'model': 'gemini-test' if profile == 'agy' else 'claude-test',
+                'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+                'session_id': 'dev-' + '1' * 32,
+                'source_sha': 'd' * 40,
+                'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+                'read_paths': ['src.py'],
+                'write_paths': ['src.py'],
+                'acceptance': ['the result is recorded'],
+                'context_sha256': 'a' * 64,
+                'egress_basis': 'Approved non-sensitive Task context.',
+                'input_bytes': 100,
+                'max_tokens': None,
+                'artifact_format': 'unified_diff',
+                'artifact': artifact,
+                'artifact_sha256': (None if artifact is None else
+                                    hashlib.sha256(artifact.encode('utf-8')).hexdigest()),
+                'usage': None,
+                'error_code': error_code,
+                'execution': None,
+                'created_at': '2026-11-27T00:00:00Z',
+                'owner_assignment_ref': None,
+                'direct_result_callback': callback_for(base, state=callback_state),
+            }
+            if profile == 'claude':
+                dev['executor_task_id'] = 'executor-d6'
+            if reported is not None:
+                dev['reported'] = reported
+            return dev
+
+        def persisted_blocked_record(store, *, task_id, run_id, profile, error_code):
+            prompt = 'Task goal'
+            base = pm_record(
+                task_id, run_id, 'pm-' + 'e' * 32, 'pm', prompt,
+                state='PM_RESPONDED',
+                provider_type='openai-compatible',
+                model='pm-model',
+                backend='NO_NATIVE_SESSION_ID_EXPOSED',
+                request_sha=hashlib.sha256(prompt.encode('utf-8')).hexdigest(),
+            )
+            base.update(
+                response='PM response',
+                pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                                  'base_url': None},
+                pm_assignment={'schema_version': 1, 'route': profile, 'risk': 'LOW',
+                               'goal': 'Developer goal',
+                               'acceptance': ['the result is recorded']},
+            )
+            base['developer'] = developer_for(
+                base, profile=profile, state='BLOCKED', error_code=error_code)
+            return store._write(base, create=True)
+
+        with tempfile.TemporaryDirectory() as root:
+            store = TaskStore(Path(root).resolve() / 'tasks')
+            agy_saved = persisted_blocked_record(
+                store, task_id='a' * 32, run_id='b' * 32,
+                profile='agy', error_code='AGY_EMPTY_RESULT')
+            self.assertEqual(task_status.derive_state(agy_saved), 'BLOCKED')
+            listed = task_status.task_status(store=store)
+            self.assertEqual(
+                next(item['state'] for item in listed['tasks']
+                     if item['task_id'] == agy_saved['task_id']),
+                'BLOCKED')
+
+            claude_saved = persisted_blocked_record(
+                store, task_id='c' * 32, run_id='d' * 32,
+                profile='claude', error_code='CLAUDE_NO_CHANGES')
+            self.assertEqual(task_status.derive_state(claude_saved), 'BLOCKED')
+
+            # Genuine terminal callback states retain precedence over Developer BLOCKED.
+            for cb_state, expected in (
+                    ('PM_RETURNED', 'COMPLETED'),
+                    ('PM_RESPONSE_REJECTED', 'FAILED'),
+                    ('PM_UNAVAILABLE', 'UNAVAILABLE'),
+                    ('PM_OUTCOME_UNKNOWN', 'UNKNOWN')):
+                with self.subTest(callback_state=cb_state):
+                    record_value = {
+                        **agy_saved,
+                        'developer': developer_for(
+                            agy_saved, profile='agy', state='BLOCKED',
+                            error_code='AGY_EMPTY_RESULT', callback_state=cb_state),
+                    }
+                    self.assertEqual(task_status.derive_state(record_value), expected)
+
+            # Merged and abandoned records retain precedence over Developer BLOCKED.
+            self.assertEqual(task_status.derive_state({
+                **agy_saved,
+                'merge_attempt': {'pr': 1, 'head_sha': 'd' * 40, 'state': 'MERGED',
+                                  'claimed_at': '2026-11-27T00:00:00Z'},
+            }), 'COMPLETED')
+            self.assertEqual(task_status.derive_state({
+                **agy_saved,
+                'completion_events': [{'source': 'GITHUB', 'marker_type': 'merge',
+                                       'marker_status': 'MERGED'}],
+            }), 'COMPLETED')
+            store.abandon(agy_saved['task_id'], pm_session_id=agy_saved['pm_session_id'],
+                          reason='PM closed blocked work')
+            self.assertEqual(task_status.derive_state(store.get(agy_saved['task_id'])), 'ABANDONED')
+
+            # Negative controls: generic unknown and prose-only BLOCKED summary.
+            unknown_dev = developer_for(agy_saved, profile='agy',
+                                        state='DEVELOPER_OUTCOME_UNKNOWN',
+                                        error_code='AGY_RESULT_UNKNOWN')
+            unknown_dev.pop('direct_result_callback')
+            self.assertEqual(task_status.derive_state({**agy_saved, 'developer': unknown_dev}),
+                             'UNKNOWN')
+            prose_responded = developer_for(
+                agy_saved, profile='agy', state='DEVELOPER_RESPONDED',
+                error_code=None, artifact='diff --git a/src.py b/src.py\n',
+                reported={'summary': 'BLOCKED: prose summary only'})
+            self.assertEqual(task_status.derive_state({**agy_saved, 'developer': prose_responded}),
+                             'RUNNING')
 
 
 if __name__ == '__main__':
