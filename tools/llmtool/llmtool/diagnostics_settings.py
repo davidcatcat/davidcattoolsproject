@@ -79,15 +79,15 @@ def resolve_diagnostics_home(*, environ=None, platform=None, home=None):
             return _absolute(env['LLMTOOL_HOME'], windows)
         if windows:
             return _absolute(env.get('LOCALAPPDATA', ''), True) / 'llmtool'
+        if system.startswith('linux'):
+            try:
+                return _absolute(env['XDG_STATE_HOME']) / 'llmtool'
+            except (ValueError, UnicodeError, KeyError):
+                base = _absolute(str(Path.home() if home is None else home))
+                return base / '.local/state/llmtool'
         base = _absolute(str(Path.home() if home is None else home))
         if system == 'darwin':
             return base / 'Library/Application Support/llmtool'
-        if system.startswith('linux'):
-            try:
-                state = _absolute(env.get('XDG_STATE_HOME', ''))
-            except (ValueError, UnicodeError):
-                state = base / '.local/state'
-            return state / 'llmtool'
         raise ValueError('unsupported diagnostics home platform')
     except (ValueError, UnicodeError):
         raise LLMToolError('diagnostics home requires a safe absolute location') from None
