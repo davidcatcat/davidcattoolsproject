@@ -2168,8 +2168,6 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                 excerpt_key: excerpt_val,
                 'receipt_path': None,
             }
-            if stream_diagnostic is not None:
-                refusal['stream_diagnostic'] = stream_diagnostic
             binding = task.get('task_binding')
             contract_digest = (binding.get('contract_digest')
                                if type(binding) is dict else None)
