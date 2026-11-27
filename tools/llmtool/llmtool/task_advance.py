@@ -588,10 +588,21 @@ def _required_linux_checks(paths, old_paths=(), *, profile=_UNSET):
     CI diffs with --no-renames, so a rename's old path is classified exactly
     like a changed path: both sides of a rename add their checks. Returns
     None (fail closed) when the paths cannot be classified the way CI does.
+    When ``profile`` is omitted, keep the legacy ``_LINUX_FLAG_CHECKS`` tuple
+    for callers outside the merge gate (such as ``_review_ci_gate``).
     """
-    resolved = _resolve_ci_profile(profile)
+    if profile is _UNSET:
+        flag_checks = _LINUX_FLAG_CHECKS
+    else:
+        resolved = _resolve_ci_profile(profile)
+        flag_checks = (
+            resolved.linux_code_check,
+            resolved.docs_check,
+            resolved.gateway_check,
+            resolved.ai_loop_check,
+        )
     if not paths:
-        return [resolved.linux_code_check]
+        return [flag_checks[0]]
     names = list(paths) + list(old_paths)
     if any(type(name) is not str or '\0' in name for name in names):
         return None
@@ -600,12 +611,6 @@ def _required_linux_checks(paths, old_paths=(), *, profile=_UNSET):
         flags = _ci_path_classes().linux_flags(data)
     except Exception:
         return None
-    flag_checks = (
-        resolved.linux_code_check,
-        resolved.docs_check,
-        resolved.gateway_check,
-        resolved.ai_loop_check,
-    )
     if type(flags) is not tuple or len(flags) != len(flag_checks):
         return None
     required = [name for flag, name in zip(flags, flag_checks) if flag is True]

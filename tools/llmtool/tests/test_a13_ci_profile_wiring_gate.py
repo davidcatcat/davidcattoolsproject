@@ -599,6 +599,29 @@ class R4NoGateWeakenedTests(unittest.TestCase):
                         {'eligible': False, 'code': expected, 'member': None},
                     )
 
+    def test_pre_review_ci_gate_stays_on_legacy_checks_when_default_profile_patched(self):
+        defaults = default_profile()
+        files = [{'filename': 'tools/llmtool/llmtool/a.py'}]
+        failed_default = _FakeGitHub(
+            files=files,
+            check_runs=[_run(1, defaults.linux_code_check, 'failure')],
+        )
+        alt_only = _FakeGitHub(
+            files=files,
+            check_runs=[_run(2, ALT_PROFILE.linux_code_check, 'failure')],
+        )
+        with mock.patch.object(ci_profile, 'default_profile', return_value=ALT_PROFILE):
+            latest = {}
+            self.assertEqual(
+                task_advance._review_ci_gate(PR, HEAD, failed_default, latest_out=latest),
+                ('CI_FAILED', 'LINUX_CI_FAILED'),
+            )
+            self.assertIn(latest.get('name'), task_advance._LINUX_FLAG_CHECKS)
+            self.assertEqual(
+                task_advance._review_ci_gate(PR, HEAD, alt_only),
+                ('WAITING_CI', 'LINUX_CI_PENDING'),
+            )
+
 
 if __name__ == '__main__':
     unittest.main()
