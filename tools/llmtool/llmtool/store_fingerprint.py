@@ -41,27 +41,26 @@ def fingerprint_directory(path):
     code STORE_FINGERPRINT_INVALID.
     """
     try:
-        entries = _collect_entries(path)
+        return _digest(_collect_entries(path))
     except StoreFingerprintError:
         raise
     except Exception:
         # Fail closed; the message never carries any input value.
         raise StoreFingerprintError()
-    return _digest(entries)
 
 
 def _collect_entries(path):
     """Return sorted (name, size, mtime_ns) lstat records of the entries."""
-    directory = os.lstat(path)
-    if not S_ISDIR(directory.st_mode):
-        # Not a directory at all, or a symbolic link to one: refuse both.
-        raise StoreFingerprintError()
-    entries = []
-    with os.scandir(path) as handle:
-        for entry in handle:
-            info = entry.stat(follow_symlinks=False)
-            entries.append((os.fsencode(entry.name), info.st_size,
-                            info.st_mtime_ns))
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    with os.fdopen(os.open(path, flags), 'rb') as handle:
+        info = handle.fstat()
+        if not S_ISDIR(info.st_mode):
+            raise StoreFingerprintError()
+        entries = []
+        for entry in os.scandir(handle.fileno()):
+            stat = entry.stat(follow_symlinks=False)
+            entries.append((os.fsencode(entry.name), stat.st_size,
+                            stat.st_mtime_ns))
     entries.sort()
     return entries
 
