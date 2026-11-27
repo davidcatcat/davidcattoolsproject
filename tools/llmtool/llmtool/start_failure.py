@@ -237,25 +237,58 @@ def _sha256_text(text):
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 
-def _ci_identity_sha256(base, profile=_PROFILE_UNSET):
+def _ci_claim_check_names(claim):
+    """The CI check names a CI repair claim was built with, or None.
+
+    #2793 F1: the claim stores the profile's accepted names, so later
+    verification uses the names accepted at packet creation. A malformed list
+    is not a profile snapshot and returns None.
+    """
+    names = claim.get('ci_check_names') if type(claim) is dict else None
+    if type(names) not in (list, tuple) or len(names) != 5:
+        return None
+    from . import ci_profile
+    try:
+        for name in names:
+            ci_profile._validate_name(name)
+    except Exception:
+        return None
+    return tuple(names)
+
+
+def _ci_identity_sha256(base, claim=None, profile=_PROFILE_UNSET):
     """The review_repair._ci_failure identity digest rebuilt from a CI packet, or None.
 
     A CI packet is bound to the exact check name that was accepted when it was
-    built (#2793 A13.0). With a profile, only that profile's names are accepted;
-    without one, the name recorded in the packet is validated as a profile name
-    and the claim digest proves it was the built name. A name outside the given
-    profile, or a malformed name, returns None, so the packet never binds.
+    built (#2793 A13.0). Without a profile, a claim's stored names are used; a
+    legacy claim without them resolves the default profile, which must be valid.
+    With a profile, that profile's names are used, and a claim whose stored
+    names differ refuses. A name outside the chosen names, malformed stored
+    names, or an invalid or missing profile returns None, so the packet never
+    binds and the original names are never used as a fallback.
     """
     from . import review_repair
+    stored = None
+    if type(claim) is dict and 'ci_check_names' in claim:
+        stored = _ci_claim_check_names(claim)
+        if stored is None:
+            return None
     if profile is _PROFILE_UNSET:
-        from . import ci_profile
-        name_pattern = r'(.{1,100})'
+        if stored is not None:
+            checks = stored
+        else:
+            try:
+                checks = tuple(review_repair._ci_repair_checks())
+            except Exception:
+                return None
     else:
         try:
-            checks = review_repair._ci_repair_checks(profile)
+            checks = tuple(review_repair._ci_repair_checks(profile))
         except Exception:
             return None
-        name_pattern = '(' + '|'.join(re.escape(name) for name in checks) + ')'
+        if stored is not None and checks != stored:
+            return None
+    name_pattern = '(' + '|'.join(re.escape(name) for name in checks) + ')'
     header = re.compile(re.escape(review_repair.CI_PACKET_HEADER) +
                         r' check=' + name_pattern + r' run=([1-9][0-9]*)'
                         r' conclusion=failure head=([0-9a-f]{40})')
@@ -264,11 +297,6 @@ def _ci_identity_sha256(base, profile=_PROFILE_UNSET):
     if match is None:
         return None
     name, run_id, head = match.groups()
-    if profile is _PROFILE_UNSET:
-        try:
-            ci_profile._validate_name(name)
-        except Exception:
-            return None
     if head != base['failed_head']:
         return None
     identity = {'kind': 'CI', 'task': base['task'], 'pr': base['pr'],
@@ -348,7 +376,7 @@ def _matches(packet, claim, root, store, profile=_PROFILE_UNSET):
             if key not in _PACKET_HIGH_DEBUG_FIELDS}
     if (comment_id is None and
             base['reviewer_text_excerpt_untrusted_data'].startswith(_CI_EXCERPT_PREFIX)):
-        digest = _ci_identity_sha256(base, profile)
+        digest = _ci_identity_sha256(base, claim, profile)
     else:
         digest = _sha256_text(canonical(base))
     stored_digest = claim.get('packet_sha256')
@@ -400,8 +428,9 @@ def repair_packet_matches(packet, claim, root, store=None, profile=_PROFILE_UNSE
 
     Pure. Any miss, malformed input or error gives False; the caller refuses
     START_RETRY_REPAIR_PACKET_MISMATCH. For a CI packet the accepted check names
-    come from the CI profile (#2793 A13.0): the default profile when profile is
-    not given, else that profile.
+    are the profile snapshot stored on the claim (#2793 F1); without one, or
+    with a profile argument, they come from the CI profile (#2793 A13.0): the
+    default profile when profile is not given, else that profile.
     """
     try:
         return _matches(packet, claim, root, store, profile) is True
