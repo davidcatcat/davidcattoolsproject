@@ -16,9 +16,9 @@ import time
 from pathlib import Path
 from argparse import Namespace
 
-from . import active_pm_inbox, ci_failure_overlap, github_events, review_dispatch, review_repair
+from . import active_pm_inbox, ci_failure_overlap, ci_profile, github_events, review_dispatch, review_repair
 from . import github_identity, review_result, sensitive_paths, task_completion
-from . import lineage_counts, mac_full_suite, repair_policy, review_transcript
+from . import lineage_counts, mac_full_due, mac_full_suite, repair_policy, review_transcript
 from . import remote_test, start_failure, task_submission_cli
 from . import guidance_refresh
 from . import dispute_arbiter
@@ -550,6 +550,23 @@ _GATEWAY_CHECK = 'gateway tests (Linux 3.14)'
 # In linux_flags() order: code, docs, gateway, ai_loop.
 _LINUX_FLAG_CHECKS = ('check (Linux 3.14)', 'check (docs)', _GATEWAY_CHECK, _AI_LOOP_CHECK)
 _CI_PATH_CLASSES = []
+_UNSET = mac_full_due._UNSET
+MERGE_CI_PROFILE_INVALID = 'MERGE_CI_PROFILE_INVALID'
+
+
+def _resolve_ci_profile(profile=_UNSET):
+    """Return a validated CiProfile with distinct check names, or raise ProfileError."""
+    resolved = mac_full_due.resolve_profile() if profile is _UNSET else mac_full_due.resolve_profile(profile)
+    checks = (
+        resolved.linux_code_check,
+        resolved.docs_check,
+        resolved.gateway_check,
+        resolved.ai_loop_check,
+        resolved.macos_check,
+    )
+    if len(set(checks)) != len(checks):
+        raise mac_full_due.ProfileError('ci_profile')
+    return resolved
 
 
 def _ci_path_classes():
@@ -565,15 +582,27 @@ def _ci_path_classes():
     return _CI_PATH_CLASSES[0]
 
 
-def _required_linux_checks(paths, old_paths=()):
+def _required_linux_checks(paths, old_paths=(), *, profile=_UNSET):
     """The exact-head Linux workflow check names a PR with these paths needs.
 
     CI diffs with --no-renames, so a rename's old path is classified exactly
     like a changed path: both sides of a rename add their checks. Returns
     None (fail closed) when the paths cannot be classified the way CI does.
+    When ``profile`` is omitted, keep the legacy ``_LINUX_FLAG_CHECKS`` tuple
+    for callers outside the merge gate (such as ``_review_ci_gate``).
     """
+    if profile is _UNSET:
+        flag_checks = _LINUX_FLAG_CHECKS
+    else:
+        resolved = _resolve_ci_profile(profile)
+        flag_checks = (
+            resolved.linux_code_check,
+            resolved.docs_check,
+            resolved.gateway_check,
+            resolved.ai_loop_check,
+        )
     if not paths:
-        return ['check (Linux 3.14)']
+        return [flag_checks[0]]
     names = list(paths) + list(old_paths)
     if any(type(name) is not str or '\0' in name for name in names):
         return None
@@ -582,19 +611,24 @@ def _required_linux_checks(paths, old_paths=()):
         flags = _ci_path_classes().linux_flags(data)
     except Exception:
         return None
-    if type(flags) is not tuple or len(flags) != len(_LINUX_FLAG_CHECKS):
+    if type(flags) is not tuple or len(flags) != len(flag_checks):
         return None
-    required = [name for flag, name in zip(flags, _LINUX_FLAG_CHECKS) if flag is True]
+    required = [name for flag, name in zip(flags, flag_checks) if flag is True]
     return required or None
 
 
 def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=False,
-                  owner_acceptance=None, acceptance_out=None, skip_owner_acceptance=False):
+                  owner_acceptance=None, acceptance_out=None, skip_owner_acceptance=False,
+                  profile=_UNSET):
     """Check every exact-head merge gate; return None or one refusal code.
 
     acceptance_out, when given, is a dict that gets the carried-acceptance
     evidence on a carry pass (#1237). Without it carry mode never runs.
     """
+    try:
+        resolved = _resolve_ci_profile(profile)
+    except mac_full_due.ProfileError:
+        return MERGE_CI_PROFILE_INVALID
     try:
         checks = github_get(f'commits/{head}/check-runs?per_page=100')
     except Exception:
@@ -644,17 +678,17 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
                  if type(item) is dict and item.get('previous_filename') is not None]
     if any(type(path) is not str for path in old_paths):
         return 'MERGE_CHECKS_UNAVAILABLE'
-    required_checks = _required_linux_checks(paths, old_paths)
+    required_checks = _required_linux_checks(paths, old_paths, profile=resolved)
     if required_checks is None:
         return 'MERGE_CHECKS_UNAVAILABLE'
-    docs_only = required_checks == ['check (docs)']
+    docs_only = required_checks == [resolved.docs_check]
     requires_macos = not docs_only and _mac_ci_runs(paths + old_paths)
     if requires_macos:
-        required_checks.append('check (macOS 3.13)')
+        required_checks.append(resolved.macos_check)
     names = {item['name'] for item in check_runs}
-    missing_macos = requires_macos and 'check (macOS 3.13)' not in names
+    missing_macos = requires_macos and resolved.macos_check not in names
     other_missing = any(name not in names for name in required_checks
-                        if name != 'check (macOS 3.13)')
+                        if name != resolved.macos_check)
     if other_missing or (missing_macos and not allow_missing_macos):
         return 'MERGE_REQUIRED_CHECK_MISSING'
     # #1182: a skipped required check never counts as SUCCESS. Every run is
@@ -662,7 +696,7 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
     # The macOS check keeps its own skipped and mac-ci rules below.
     if any(not any(item['name'] == name and item.get('conclusion') == 'success'
                    for item in check_runs)
-           for name in required_checks if name != 'check (macOS 3.13)'):
+           for name in required_checks if name != resolved.macos_check):
         return 'MERGE_REQUIRED_CHECK_SKIPPED'
     if owner_acceptance is not None:
         carry = {} if type(acceptance_out) is dict else None
@@ -679,7 +713,7 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
     elif not skip_owner_acceptance and _owner_acceptance_required(files):
         return 'MERGE_OWNER_ACCEPTANCE_MANUAL'
     if requires_macos:
-        mac_runs = [item for item in check_runs if item.get('name') == 'check (macOS 3.13)']
+        mac_runs = [item for item in check_runs if item.get('name') == resolved.macos_check]
         # GitHub can retain the earlier skipped run after mac-ci starts a new
         # run on the same head. Any successful exact-head macOS run is enough;
         # failures and in-progress runs have already been refused above.
@@ -2510,8 +2544,12 @@ def _owner_acceptance_code(url, number, head, github_get, *, carry_out=None):
 
 def _merge_once(*, store, record, number, head, pr, events, github_get,
                 gh_runner, root, owner_acceptance=None, owner_exception=None,
-                sleep_fn=None, sleep=None):
+                sleep_fn=None, sleep=None, profile=_UNSET):
     _sleep = time.sleep if sleep_fn is None and sleep is None else (sleep_fn if sleep_fn is not None else sleep)
+    try:
+        resolved_profile = _resolve_ci_profile(profile)
+    except mac_full_due.ProfileError:
+        return _merge_refusal(MERGE_CI_PROFILE_INVALID)
     if type(number) is not int or number < 1:
         return _merge_refusal('MERGE_PR_UNAVAILABLE')
     if type(pr) is not dict or pr.get('number', number) != number:
@@ -2586,7 +2624,7 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     acceptance_out = {}
     code = _merge_checks(record, number, head, pr, github_get,
                          allow_missing_macos=True, owner_acceptance=owner_acceptance,
-                         acceptance_out=acceptance_out)
+                         acceptance_out=acceptance_out, profile=resolved_profile)
     acceptance_carry = acceptance_out or None
     if code and code not in ('MERGE_MACOS_CHECK_MISSING', 'MERGE_MACOS_CHECK_SKIPPED'):
         if code == 'MERGE_CHECKS_NOT_GREEN':
@@ -2599,11 +2637,11 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
             check_runs = checks.get('check_runs') if type(checks) is dict else None
             mac_pending = (type(check_runs) is list and any(
                 type(item) is dict and item.get('head_sha') == head and
-                item.get('name') == 'check (macOS 3.13)' and
+                item.get('name') == resolved_profile.macos_check and
                 item.get('status') != 'completed' for item in check_runs))
             all_other_checks_green = (type(check_runs) is list and all(
                 type(item) is dict and item.get('head_sha') == head and
-                ((item.get('name') == 'check (macOS 3.13)' and
+                ((item.get('name') == resolved_profile.macos_check and
                   item.get('status') != 'completed') or
                  (item.get('status') == 'completed' and
                   item.get('conclusion') in ('success', 'skipped')))
@@ -2853,7 +2891,8 @@ def _merge_success(record, number, head, review_version, gh_runner, root, warnin
 
 
 def label_mac_ci_for_skipped_check(*, task_id, store=None, pr_number=None,
-                                   github_get=None, merge_gh_runner=None, cwd=None):
+                                   github_get=None, merge_gh_runner=None, cwd=None,
+                                   profile=_UNSET):
     """Label an exact-head skipped macOS check without entering the merge path.
 
     Return None when the available evidence is not specifically a skipped
@@ -2888,7 +2927,7 @@ def label_mac_ci_for_skipped_check(*, task_id, store=None, pr_number=None,
         return None
     # #1576: Owner acceptance gates the merge only, never the Mac run that precedes it.
     code = _merge_checks(record, number, head, pr, get, allow_missing_macos=True,
-                         skip_owner_acceptance=True)
+                         skip_owner_acceptance=True, profile=profile)
     if code != 'MERGE_MACOS_CHECK_SKIPPED':
         return None
     try:
@@ -4970,7 +5009,8 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                   github_get=None, cwd=None, publish_git_runner, publish_gh_runner,
                   record_result_call=None, merge_gh_runner, label_gh_runner=None,
                   owner_acceptance=None, owner_exception=None, executor_task=None,
-                  sleep_fn=None, sleep=None, ci_job_log_fetch=None, job_log_fetch=None):
+                  sleep_fn=None, sleep=None, ci_job_log_fetch=None, job_log_fetch=None,
+                  profile=_UNSET):
     """One advance step; the caller holds the advance lease and passes guarded runners."""
     if ci_job_log_fetch is None:
         ci_job_log_fetch = job_log_fetch
@@ -5143,7 +5183,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             gh_runner=_publish_run_gh if merge_gh_runner is None else merge_gh_runner,
             root=d6.get('root') or cwd or os.getcwd(), owner_acceptance=owner_acceptance,
             owner_exception=owner_exception,
-            sleep_fn=sleep_fn, sleep=sleep)
+            sleep_fn=sleep_fn, sleep=sleep, profile=profile)
         if (owner_exception is None and type(number) is int and
                 merge_result.get('step') == 'MERGE_REFUSED' and
                 merge_result.get('codes') == ['MERGE_CHECKS_NOT_GREEN']):

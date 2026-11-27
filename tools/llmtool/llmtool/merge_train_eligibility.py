@@ -14,7 +14,7 @@ need no receipt, every other PR needs an exact-head PASS receipt.
 import re
 import time
 
-from . import merge_train_store, repair_policy, sensitive_paths, task_advance, task_completion
+from . import mac_full_due, merge_train_store, repair_policy, sensitive_paths, task_advance, task_completion
 from .errors import LLMToolError
 
 TRAIN_MEMBER_RECORD_UNAVAILABLE = 'TRAIN_MEMBER_RECORD_UNAVAILABLE'
@@ -28,6 +28,8 @@ TRAIN_MEMBER_REMOTE_TEST_MISSING = 'TRAIN_MEMBER_REMOTE_TEST_MISSING'
 TRAIN_MEMBER_IN_LIVE_TRAIN = 'TRAIN_MEMBER_IN_LIVE_TRAIN'
 TRAIN_MEMBER_MERGEABLE_UNKNOWN = 'TRAIN_MEMBER_MERGEABLE_UNKNOWN'
 TRAIN_STORE_UNAVAILABLE = 'TRAIN_STORE_UNAVAILABLE'
+TRAIN_MEMBER_CI_PROFILE_INVALID = 'TRAIN_MEMBER_CI_PROFILE_INVALID'
+_UNSET = mac_full_due._UNSET
 # An exact-head success run whose id is not a positive int: the check data is
 # malformed, reported with the existing merge-gate code.
 _CHECKS_UNAVAILABLE = 'MERGE_CHECKS_UNAVAILABLE'
@@ -165,10 +167,12 @@ def _newest_success_id(check_runs, name, head):
     return max(ids, default=None)
 
 
-def _ci_gate(record, pr, head, pull, github_get):
+def _ci_gate(record, pr, head, pull, github_get, *, profile=_UNSET):
     """Return (code, None) or (None, (linux_run_id, macos_run_id))."""
+    resolved = task_advance._resolve_ci_profile(profile)
     try:
-        code = task_advance._merge_checks(record, pr, head, pull, github_get)
+        code = task_advance._merge_checks(record, pr, head, pull, github_get,
+                                          profile=resolved)
     except Exception:
         return _CHECKS_UNAVAILABLE, None
     if code is not None:
@@ -180,8 +184,8 @@ def _ci_gate(record, pr, head, pull, github_get):
     check_runs = checks.get('check_runs') if type(checks) is dict else None
     if type(check_runs) is not list:
         return _CHECKS_UNAVAILABLE, None
-    linux = _newest_success_id(check_runs, LINUX_CHECK, head)
-    macos = _newest_success_id(check_runs, MACOS_CHECK, head)
+    linux = _newest_success_id(check_runs, resolved.linux_code_check, head)
+    macos = _newest_success_id(check_runs, resolved.macos_check, head)
     if linux is False or macos is False:
         return _CHECKS_UNAVAILABLE, None
     return None, (linux, macos)
@@ -279,7 +283,7 @@ def _live_train_code(task_id, pr, train_root):
     return None
 
 
-def member_check(store, task_id, pr, github_get, train_root=None, sleep=None):
+def member_check(store, task_id, pr, github_get, train_root=None, sleep=None, *, profile=_UNSET):
     """Return whether Task ``task_id`` with PR ``pr`` may join a merge train.
 
     Returns ``{'eligible': True, 'code': None, 'member': {...}}`` with exactly
@@ -290,6 +294,11 @@ def member_check(store, task_id, pr, github_get, train_root=None, sleep=None):
     it defaults to ``time.sleep``.
     """
     get = _Snapshot(task_completion._github_get if github_get is None else github_get)
+
+    try:
+        resolved_profile = task_advance._resolve_ci_profile(profile)
+    except mac_full_due.ProfileError:
+        return _refused(TRAIN_MEMBER_CI_PROFILE_INVALID)
 
     # 0. #2281 limit 15b: the per-PR file maximum from policy.json, read
     # before any record or GitHub read; an invalid policy refuses at once.
@@ -356,7 +365,7 @@ def member_check(store, task_id, pr, github_get, train_root=None, sleep=None):
         return _refused(review_version)
 
     # 7. Exact-head CI under every routed rule (allow_missing_macos=False).
-    code, run_ids = _ci_gate(record, pr, head, pull, get)
+    code, run_ids = _ci_gate(record, pr, head, pull, get, profile=resolved_profile)
     if code is not None:
         return _refused(code)
     linux_run_id, macos_run_id = run_ids
