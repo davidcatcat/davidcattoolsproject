@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 
@@ -10,14 +11,52 @@ ROOT = Path(__file__).resolve().parents[1]
 TESTS = ROOT / "tests"
 TIMINGS = ROOT / "ci" / "test-module-seconds.json"
 MAC_TIMINGS = ROOT / "ci" / "mac-test-module-seconds.json"
+INVALID_TIMING_DIAGNOSTIC = "invalid timing configuration"
+
+
+def _is_finite_number(value):
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _reject_json_constant(value):
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
+def _load_timings(path):
+    timing_data = json.loads(
+        Path(path).read_text(encoding="utf-8"),
+        parse_constant=_reject_json_constant,
+    )
+    if not isinstance(timing_data, dict):
+        raise ValueError("timing data must be a JSON object")
+    if "default_seconds" not in timing_data or "modules" not in timing_data:
+        raise ValueError("timing data must contain 'default_seconds' and 'modules'")
+
+    default = timing_data["default_seconds"]
+    if not _is_finite_number(default) or default <= 0:
+        raise ValueError("'default_seconds' must be a finite positive number")
+
+    weights = timing_data["modules"]
+    if not isinstance(weights, dict):
+        raise ValueError("'modules' must be a JSON object")
+
+    for module_name, weight in weights.items():
+        if not isinstance(module_name, str) or not module_name:
+            raise ValueError("module keys in 'modules' must be non-empty strings")
+        if not _is_finite_number(weight) or weight < 0:
+            raise ValueError(f"weight for {module_name!r} must be a finite nonnegative number")
+
+    return default, weights
 
 
 def partition(shard_count, timings=None):
     """Return test module filenames grouped into ``shard_count`` shards."""
     path = timings if timings is not None else TIMINGS
-    timing_data = json.loads(Path(path).read_text(encoding="utf-8"))
-    default = timing_data["default_seconds"]
-    weights = timing_data["modules"]
+    default, weights = _load_timings(path)
     modules = sorted(path.name for path in TESTS.glob("test_*.py"))
     shards = [[] for _ in range(shard_count)]
     totals = [0] * shard_count
@@ -46,7 +85,11 @@ def main():
     args = parser.parse_args()
     if args.shard_count < 1 or not 1 <= args.shard <= args.shard_count:
         parser.error("require shard_count >= 1 and 1 <= shard <= shard_count")
-    for module in partition(args.shard_count, timings=args.timings)[args.shard - 1]:
+    try:
+        selected = partition(args.shard_count, timings=args.timings)[args.shard - 1]
+    except (OSError, ValueError):
+        raise SystemExit(INVALID_TIMING_DIAGNOSTIC)
+    for module in selected:
         print(module)
 
 
