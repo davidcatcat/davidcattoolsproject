@@ -152,7 +152,9 @@ class GwAgentUsage2812Tests(unittest.TestCase):
     def _run(self, result, *, requested_model='qwen-authorized', store_wrapper=None):
         temp = tempfile.TemporaryDirectory(prefix='gw-agent-usage-2812-')
         self.addCleanup(temp.cleanup)
-        root = Path(temp.name) / 'tasks'
+        # Resolve the temp path: TaskStore walks each component with O_NOFOLLOW,
+        # and on macOS the default temp path starts under the /var symlink.
+        root = Path(temp.name).resolve() / 'tasks'
         store = task_store.TaskStore(root)
         store.create(_task())
         used_store = store if store_wrapper is None else store_wrapper(store)
