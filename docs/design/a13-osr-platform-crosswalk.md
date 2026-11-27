@@ -11,7 +11,7 @@ Platform Coverage evidence matrix from issue #2841.
 ## 1. Cited provenance (not re-verified by this file)
 
 - Issue #396, comment `6552370022` — historical OSR-16, OSR-23, OSR-25 observations.
-- Issue #2793, comment `7210501920` — historical observation tied to the packaging/CI slice.
+- Issue #2793, comment `7210501920` — cited as historical evidence; not re-verified by this file.
 
 ## 2. Crosswalk rows
 
@@ -41,6 +41,8 @@ crosswalk slices remain separate and are not merged here.
 
 ## 5. Gates
 
-- Exact-head hosted docs check at the pinned main
-  `be913e781e8194fdd36e256d76e021f24a1454cb`.
+- Exact-head hosted docs check at this PR result HEAD
+  `b79502816424a36979c6dacf8f98e647a8f832f0`.
+- The main pin `be913e781e8194fdd36e256d76e021f24a1454cb` is the crosswalk
+  evidence pin, not the gate HEAD.
 - Formal review by `codex-reviewer` before acceptance.
