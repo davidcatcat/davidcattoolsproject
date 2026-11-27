@@ -141,7 +141,8 @@ def _with_failing(result, state, reason, failing):
 def _valid_job(job, sha):
     if not isinstance(job, dict):
         return False, MALFORMED_JOB
-    if type(job.get('id')) is not int:
+    jid = job.get('id')
+    if type(jid) is not int or jid <= 0:
         return False, MALFORMED_JOB
     name, status = job.get('name'), job.get('status')
     if not isinstance(name, str) or not name.strip():
