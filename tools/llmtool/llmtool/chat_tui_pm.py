@@ -72,6 +72,11 @@ def permission_mode():
     return pm_runtime.PM_PERMISSION_MODE
 
 
+def permission_label(runtime):
+    """The permission label shown for a PM runtime: Claude's mode or Codex's sandbox."""
+    return permission_mode() if runtime in ("claude-code", "claude") else "workspace-write"
+
+
 def error_code(exc):
     """The typed pm_runtime code of an exception, else UNKNOWN (never message text)."""
     return safe_code(getattr(exc, "pm_runtime_code", None))
@@ -150,6 +155,27 @@ class PMRuntimeAPI:
                          'config_dir': folder if private else None})
         return rows
 
+    def configured_model(self, runtime, binding=None):
+        """The configured PM model for this runtime, or None when it is not known."""
+        from . import role_config
+        binding = binding if type(binding) is dict else {}
+        account = binding.get('account')
+        options = {'environ': self.environ,
+                   'home': None if self.environ is None else self.environ.get('HOME')}
+        if type(account) is str and account:
+            options['cli'] = {'account': account}
+        roles = (('pm-codex-binding', 'pm') if runtime == 'codex'
+                 else ('pm', 'pm-claude-binding'))
+        for role in roles:
+            try:
+                resolved = role_config.resolve_role(role, **options)
+            except Exception:
+                continue
+            value = resolved.get('model') if type(resolved) is dict else None
+            if type(value) is str and value.strip():
+                return value.strip()
+        return None
+
     def account_checks(self):
         """Run provider login status probes, discarding all provider output."""
         results = []
@@ -202,6 +228,20 @@ class PMRuntimeAPI:
 
 _USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_read_input_tokens',
                'cache_creation_input_tokens')
+_CACHED_READ_ALIASES = ('cached_input_tokens',)
+
+
+def _usage_value(usage, key):
+    """A non-negative integer usage value, mapping Codex's cached-input field."""
+    value = usage.get(key)
+    if type(value) is int and value >= 0:
+        return value
+    if key == 'cache_read_input_tokens':
+        for alias in _CACHED_READ_ALIASES:
+            value = usage.get(alias)
+            if type(value) is int and value >= 0:
+                return value
+    return None
 
 
 def usage_totals(turns):
@@ -213,8 +253,8 @@ def usage_totals(turns):
         recorded = False
         if type(usage) is dict:
             for key in _USAGE_KEYS:
-                value = usage.get(key)
-                if type(value) is int and value >= 0:
+                value = _usage_value(usage, key)
+                if value is not None:
                     if totals[key] is None:
                         totals[key] = 0
                     totals[key] += value
@@ -235,8 +275,7 @@ def usage_gaps(turns):
         valid = set()
         if type(usage) is dict:
             for key in _USAGE_KEYS:
-                value = usage.get(key)
-                if type(value) is int and value >= 0:
+                if _usage_value(usage, key) is not None:
                     valid.add(key)
         if valid:
             counted += 1
@@ -291,6 +330,26 @@ def account_text(runtime, binding=None):
         getattr(runtime, 'runtime', 'claude-code')
     account = binding.get('account') if type(binding) is dict else None
     return safe_text(provider) + " account " + safe_text(account or "default")
+
+
+def pm_model(runtime, binding=None, api=None):
+    """The configured or observed PM model; UNKNOWN when no value is known."""
+    binding = binding if type(binding) is dict else {}
+    values = [binding.get('model')]
+    for name in ('model', 'last_reported_model', 'last_served_model'):
+        values.append(getattr(runtime, name, None))
+    for value in values:
+        if type(value) is str and value.strip():
+            return safe_text(value.strip())
+    resolver = getattr(api, 'configured_model', None)
+    if callable(resolver):
+        try:
+            value = resolver(runtime, binding)
+        except Exception:
+            value = None
+        if type(value) is str and value.strip():
+            return safe_text(value.strip())
+    return UNKNOWN
 
 
 def event_ids(event):

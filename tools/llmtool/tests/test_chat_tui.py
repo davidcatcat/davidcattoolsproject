@@ -6527,11 +6527,12 @@ class PMConversationTests(BoundedPMTest):
         # Full path, or ~/... when the temp dir sits under home (CI runners).
         self.assertRegex(status, r'Claude 帳號目錄：(/|~/)\S*\.claude\n')
         self.assertIn('權限模式（本機設定）：auto（自動，不跳出確認）', status)
+        self.assertIn('PM 模型：', status)
         self.assertIn('PM 狀態：暖機中…', status)
         self.assertIn('佇列（本機設定）：沒有', status)
         self.assertRegex(status, '背景：(讀取中|UNKNOWN（TaskStore：.*）|[0-9]+ 件進行中)')
         self.assertIn('主題（本機設定）：', status)
-        ordered = ['狀態（PM 模式）', 'PM session：', 'Claude 帳號目錄：',
+        ordered = ['狀態（PM 模式）', 'PM session：', 'PM 模型：', 'Claude 帳號目錄：',
                    '權限模式（本機設定）：', 'PM 狀態：', '背景：', '佇列（本機設定）：',
                    '主題（本機設定）：', '用量（本 session）：', 'Context 與額度：']
         positions = [status.index(line) for line in ordered]
@@ -6580,13 +6581,14 @@ class PMConversationTests(BoundedPMTest):
         expected_cwd = self.pm_runtime.display_path(str(self.temp_root))
         self.assertIn('PM session：' + self.session_id + '（codex，cwd ' + expected_cwd + '）', status)
         self.assertNotIn('cwd .）', status)
+        self.assertIn('PM 模型：', status)
         self.assertIn('  帳號：codex-test\n', status)
+        self.assertIn('權限模式（本機設定）：workspace-write', status)
         self.assertNotIn('Claude', status)
         self.assertNotIn('claude-code', status)
-        self.assertNotIn('權限模式', status)
-        ordered = ['狀態（PM 模式）', 'PM session：', '帳號：', 'PM 狀態：', '背景：',
-                   '佇列（本機設定）：', '主題（本機設定）：', '用量（本 session）：',
-                   'Context 與額度：']
+        ordered = ['狀態（PM 模式）', 'PM session：', 'PM 模型：', '帳號：', '權限模式（本機設定）：',
+                   'PM 狀態：', '背景：', '佇列（本機設定）：', '主題（本機設定）：',
+                   '用量（本 session）：', 'Context 與額度：']
         positions = [status.index(line) for line in ordered]
         self.assertEqual(positions, sorted(positions))
         self.assertEqual(fields['identity'], 'codex/codex-test')
@@ -6617,7 +6619,7 @@ class PMConversationTests(BoundedPMTest):
             self.assertIn('PM session：' + self.session_id + '（codex，cwd ' + expected_cwd + '）', status)
             self.assertNotIn('cwd .）', status)
             self.assertIn('  帳號：UNKNOWN\n', status)
-            self.assertNotIn('權限模式', status)
+            self.assertIn('權限模式（本機設定）：workspace-write', status)
             self.assertEqual(identity, 'codex/default')
             self.assertIn('workspace-write', mode)
 
@@ -9679,6 +9681,89 @@ class CodexThreadTaskReadTests(unittest.TestCase):
                     ui._read_background(FakeLoop(), self.NATIVE_ID)
                 bg_mock.assert_called_once_with(self.NATIVE_ID)
                 att_mock.assert_called_once_with(self.NATIVE_ID)
+
+
+class PMStatusModelTests(unittest.TestCase):
+    """R1: /status shows the configured or observed PM model and permission label."""
+
+    @staticmethod
+    def status(runtime_name, binding=None, api=None, runtime=None):
+        ui = object.__new__(chat_tui.ChatTUI)
+        ui.settings = {'theme': 'dark'}
+        ui.theme = 'dark'
+        ui.colour = False
+        ui.pm_mode = True
+        ui.pm_target = ('session', '/tmp')
+        ui.pm_outbox = []
+        ui.pm_outbox_paused = None
+        ui.background_count = lambda: 0
+        ui._pm_runtime_name = lambda: runtime_name
+        ui.pm_runtime = runtime if runtime is not None else Mock(claude_config_dir=None)
+        ui.pm_binding = binding
+        ui.pm_status_fields = lambda _compact: {'state': '待命'}
+        ui.pm_api = api if api is not None else Mock()
+        ui.pm_api.read_all_turns.return_value = []
+        if api is None:
+            ui.pm_api.configured_model.return_value = None
+        return ui.status_report()
+
+    def test_claude_status_shows_configured_model_and_permission_label(self):
+        status = self.status('claude-code', {
+            'runtime': 'claude-code', 'account': 'default', 'model': 'claude-sonnet-test'})
+        self.assertIn('PM 模型：claude-sonnet-test', status)
+        self.assertIn('權限模式（本機設定）：auto（自動，不跳出確認）', status)
+
+    def test_codex_status_shows_configured_model_and_permission_label(self):
+        status = self.status('codex', {
+            'runtime': 'codex', 'account': 'codex-test', 'model': 'gpt-5-codex-test'})
+        self.assertIn('PM 模型：gpt-5-codex-test', status)
+        self.assertIn('權限模式（本機設定）：workspace-write', status)
+        self.assertNotIn('Claude', status)
+
+    def test_unknown_pm_model_is_shown_as_unknown(self):
+        api = Mock()
+        api.read_all_turns.return_value = []
+        api.configured_model.return_value = None
+        status = self.status('codex', {'runtime': 'codex', 'account': 'codex-test'}, api=api)
+        self.assertIn('PM 模型：UNKNOWN', status)
+        self.assertNotIn('PM 模型：None', status)
+
+    def test_configured_role_model_is_used_when_the_binding_has_none(self):
+        with patch('llmtool.role_config.resolve_role',
+                   return_value={'model': 'configured-pm-model'}):
+            api = chat_tui_pm.PMRuntimeAPI(environ={})
+            self.assertEqual(api.configured_model('claude-code', {}), 'configured-pm-model')
+
+
+class PMUsageCodexCachedTokenTests(unittest.TestCase):
+    """R2: Codex cached_input_tokens count as cached-read tokens; Claude is unchanged."""
+
+    def test_codex_cached_input_tokens_count_as_cached_read(self):
+        turns = [
+            {'seq': 1, 'usage': {'input_tokens': 10, 'output_tokens': 2,
+                                 'cached_input_tokens': 7}},
+            {'seq': 2, 'usage': {'input_tokens': 5, 'output_tokens': 1,
+                                 'cache_read_input_tokens': 3}},
+        ]
+        totals, counted, missing = chat_tui_pm.usage_totals(turns)
+        self.assertEqual(totals['cache_read_input_tokens'], 10)
+        self.assertEqual((counted, missing), (2, 0))
+        self.assertEqual(chat_tui_pm.usage_gaps(turns)['cache_read_input_tokens'], 0)
+        line = chat_tui_pm.usage_status_line(turns, chat_tui._short_count)
+        self.assertIn('快取讀取 10', line)
+
+    def test_codex_cached_input_tokens_fill_a_gap(self):
+        turns = [{'seq': 1, 'usage': {'input_tokens': 4, 'output_tokens': 1,
+                                      'cached_input_tokens': 2}}]
+        self.assertEqual(chat_tui_pm.usage_gaps(turns)['cache_read_input_tokens'], 0)
+        totals, _counted, _missing = chat_tui_pm.usage_totals(turns)
+        self.assertEqual(totals['cache_read_input_tokens'], 2)
+
+    def test_claude_cache_read_count_is_unchanged_and_not_double_counted(self):
+        turns = [{'usage': {'input_tokens': 4, 'output_tokens': 1,
+                            'cache_read_input_tokens': 3, 'cached_input_tokens': 3}}]
+        totals, _counted, _missing = chat_tui_pm.usage_totals(turns)
+        self.assertEqual(totals['cache_read_input_tokens'], 3)
 
 
 if __name__ == '__main__':
