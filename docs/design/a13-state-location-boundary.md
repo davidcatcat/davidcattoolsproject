@@ -60,4 +60,6 @@ Compared with the two store defaults, the diagnostics location resolution is dif
 - Project state selection and migration belong to A13.1; isolation verification belongs to
   A13.3. Any installed-environment promise waits for its existing acceptance stage.
 - No universal state directory is chosen and no user data is changed by this note.
-- Gates: exact-head hosted docs check at the pinned main; formal review by codex-reviewer.
+- Gates: exact-head hosted docs check applies to the PR HEAD containing this document (the
+  pinned main is only the source-evidence reference and does not contain the note); formal
+  review by codex-reviewer.
