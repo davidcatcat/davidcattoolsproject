@@ -743,20 +743,16 @@ def _ci_repair_checks(value=_UNSET):
             resolved.macos_check)
 
 
-def _ci_failure(task, *, executor_task, pr_number, ci_failure, profile=_UNSET,
-                checks_out=None):
+def _ci_failure(task, *, executor_task, pr_number, ci_failure, profile=_UNSET):
     """Build a repair packet from one failed exact-head required CI check.
 
     Returns (packet, identity_sha256). The identity binds the Task, PR, head and
     check run, so a replayed failure of the same run reuses its claim even when
     the untrusted excerpt differs. Any malformed input refuses CI_FAILURE_INVALID.
-    The accepted check names come from profile (#2793 A13.0). When checks_out is
-    a list, it receives those names so the claim can preserve them (#2793 F1).
+    The accepted check names come from profile (#2793 A13.0).
     """
     from . import task_submission_cli
     accepted_checks = _ci_repair_checks(profile)
-    if checks_out is not None:
-        checks_out[:] = list(accepted_checks)
     if (type(ci_failure) is not dict or
             not _CI_FAILURE_FIELDS <= set(ci_failure) or
             not set(ci_failure) <= (_CI_FAILURE_FIELDS | _CI_FAILURE_OPTIONAL_FIELDS) or
@@ -1050,8 +1046,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     remote_test_receipt (EC2) and ci_failure (#1502 WP-D D11) are exclusive; both
     are test failures and share one count, the '<base>-ec2' family. For a
     ci_failure, profile is the CiProfile whose check names are accepted; a
-    missing or invalid profile refuses CI_REPAIR_PROFILE_INVALID. The claim
-    stores those names, so later verification accepts exactly the same set.
+    missing or invalid profile refuses CI_REPAIR_PROFILE_INVALID. Building and
+    later verification share the same effective CI profile resolution.
 
     auto is True only from task advance / drive. An auto review repair (a retry
     included) is refused REVIEW_REPAIR_PM_REQUIRED, inside the chain-locked
@@ -1098,13 +1094,11 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     if provider_profile == 'claude' and shutil.which(provider_profile) is None:
         _refuse('RUNTIME_NOT_ON_PATH')
     ci_identity_sha = None
-    ci_claim_checks = None
     body_holder = []
     if ci_failure is not None:
-        ci_claim_checks = []
         packet, ci_identity_sha = _ci_failure(task, executor_task=executor_task,
                                               pr_number=pr_number, ci_failure=ci_failure,
-                                              profile=profile, checks_out=ci_claim_checks)
+                                              profile=profile)
     elif remote_test_receipt is None:
         packet, _event = _failed_event(task, executor_task=executor_task,
                                        pr_number=pr_number, github_get=github_get,
@@ -1360,10 +1354,6 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
             'packet_sha256': packet_sha,
             'claimed_at': _now(),
         }
-        # #2793 F1: a CI claim keeps the check names it was built with, so every
-        # later verification accepts exactly those names and no others.
-        if ci_claim_checks is not None:
-            claim['ci_check_names'] = list(ci_claim_checks)
         if rca_entry is not None:
             claim['high_debug_report_sha256'] = rca_entry['report_sha256']
             if inherited is not None and rca_entry is inherited[1]:
