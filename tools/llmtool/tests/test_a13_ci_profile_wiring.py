@@ -259,6 +259,17 @@ class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):
             ai_loop_check='d', macos_check='e',
             linux_workflow_file='l.yml', macos_workflow_file='dir/m.yml',
         )
+        shard_collisions = tuple(
+            (
+                f'macos_check_collides_shard_{idx}',
+                CiProfile(
+                    linux_code_check='a', docs_check='b', gateway_check='c',
+                    ai_loop_check='d', macos_check=shard,
+                    linux_workflow_file='l.yml', macos_workflow_file='m.yml',
+                ),
+            )
+            for idx, shard in enumerate(due.SHARD_JOBS, 1)
+        )
         return (
             ('missing_none', None),
             ('invalid_str', 'llmtool-mac-ci.yml'),
@@ -268,7 +279,7 @@ class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):
             ('path_separator', bad_path),
             ('ambiguous_list', [ALT_PROFILE, default_profile()]),
             ('ambiguous_tuple', (ALT_PROFILE,)),
-        )
+        ) + shard_collisions
 
     def test_direct_bad_profile_refused_without_dispatch_or_reads(self):
         for kind, bad in self._bad_profiles():
@@ -326,6 +337,27 @@ class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):
                                      suite.MAC_FULL_SUITE_PROFILE_INVALID)
                     self.assertEqual(fetch.inspect_jobs(github)['reason'], fetch.PROFILE_INVALID)
                 self.assertEqual(gh.calls, [])
+
+    def test_shard_collision_profile_rejected_in_direct_helpers(self):
+        github = mock.Mock(side_effect=AssertionError('github_get must not be called'))
+        run = {'id': 11, 'status': 'completed', 'conclusion': 'success', 'head_sha': SHA}
+        for shard in due.SHARD_JOBS:
+            colliding = CiProfile(
+                linux_code_check='a', docs_check='b', gateway_check='c',
+                ai_loop_check='d', macos_check=shard,
+                linux_workflow_file='l.yml', macos_workflow_file='m.yml',
+            )
+            with self.subTest(shard=shard):
+                with self.assertRaises(due.ProfileError):
+                    due.resolve_profile(colliding)
+                with self.assertRaises(due.ProfileError):
+                    due.full_runs(github, profile=colliding)
+                with self.assertRaises(due.ProfileError):
+                    due.trusted(github, run, profile=colliding)
+                with self.assertRaises(due.ProfileError):
+                    due.sha_result(github, [run], SHA, profile=colliding)
+                with self.assertRaises(due.ProfileError):
+                    due.decide(github, now=T0, profile=colliding)
 
 
 if __name__ == '__main__':
