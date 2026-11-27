@@ -40,10 +40,12 @@ class OverlappingTestProfileTests(unittest.TestCase):
     def setUp(self):
         # Two overlapping relative-path patterns: every test_special_*
         # path also matches the broader test_* pattern.  Each entry uses
-        # a different valid runner kind.
-        self.broad = re.compile(r'tools/demo/tests/test_[A-Za-z0-9_]+\.py\Z')
+        # a different valid runner kind.  The patterns deliberately carry
+        # no end anchor, so test_trailing_text_is_unmatched fails if
+        # kind_for regresses from pattern fullmatch to pattern match.
+        self.broad = re.compile(r'tools/demo/tests/test_[A-Za-z0-9_]+\.py')
         self.specific = re.compile(
-            r'tools/demo/tests/test_special_[A-Za-z0-9_]+\.py\Z')
+            r'tools/demo/tests/test_special_[A-Za-z0-9_]+\.py')
         # Entry order A: broad first, specific second.
         self.profile_a = TestProfile((
             (self.broad, 'unittest'),
@@ -78,8 +80,11 @@ class OverlappingTestProfileTests(unittest.TestCase):
         self.assertEqual(self.profile_a.kind_for(path), 'unittest')
 
     def test_trailing_text_is_unmatched(self):
-        # An otherwise valid path with trailing text matches no pattern
-        # at its end, so both profiles report no match.
+        # The trailing-text path starts with a full prefix of each
+        # pattern.  A pattern match-based lookup would accept that
+        # prefix and return a kind, failing this assertion; the
+        # fullmatch contract must refuse it, so it pins the anchoring
+        # behaviour of kind_for at both ends.
         path = 'tools/demo/tests/test_special_alpha.py.bak'
         self.assertIsNone(self.profile_a.kind_for(path))
         self.assertIsNone(self.profile_b.kind_for(path))
