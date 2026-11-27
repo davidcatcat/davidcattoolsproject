@@ -382,12 +382,17 @@ def _inbox(store, session_key, *, reconcile):
     for record in records:
         handoff = _active_pm_handoff(record)
         if handoff is not None:
-            binding = _handoff_event(record, handoff)
-            known = (record.get('completion_events', []) +
-                     record.get('completion_event_tombstones', []))
-            already_recorded = any(
-                event['event_id'] == binding['event_id'] for event in known)
-            if not reconcile and not already_recorded:
+            developer = record.get('developer')
+            if type(developer) is dict:
+                binding = _handoff_event(record, handoff)
+                known = (record.get('completion_events', []) +
+                         record.get('completion_event_tombstones', []))
+                already_recorded = any(
+                    event['event_id'] == binding['event_id'] for event in known)
+            else:
+                binding = None
+                already_recorded = False
+            if not reconcile and not already_recorded and binding is not None:
                 pending.append({
                     'task_id': record['task_id'], 'event_id': binding['event_id'],
                     'source': binding['source'], 'session_id': binding['session_id'],
@@ -413,7 +418,8 @@ def _inbox(store, session_key, *, reconcile):
                    if event['state'] != 'ACKED']
         if unacked:
             handoff = _active_pm_handoff(record)
-            current = None if handoff is None else _handoff_event(record, handoff)['event_id']
+            current = (None if handoff is None or type(record.get('developer')) is not dict
+                       else _handoff_event(record, handoff)['event_id'])
             for event in unacked:
                 events.append({
                     **event,
