@@ -67,7 +67,7 @@ class ActivePMInboxWaitTests(unittest.TestCase):
         path.write_text('{}\n', encoding='utf-8')
         return native
 
-    def _record_pm(self, session=None):
+    def _record_pm(self, session=None, *, request_text='Synthetic inbox wait test.'):
         out = StringIO()
         with redirect_stdout(out):
             code = task_submission_cli.run_task_record_pm(
@@ -79,7 +79,7 @@ class ActivePMInboxWaitTests(unittest.TestCase):
                 ),
                 store=self.store,
                 input_stream=StringIO(json.dumps({
-                    'request': 'Synthetic inbox wait test.',
+                    'request': request_text,
                     'response': _RESPONSE,
                 })),
             )
@@ -99,11 +99,14 @@ class ActivePMInboxWaitTests(unittest.TestCase):
         return active_pm_inbox.record_remote_test_event(
             self.store, task['task_id'], receipt)
 
-    def _populate_synthetic_store(self, total_records, *, other_session):
-        template_view = self._record_pm(session=other_session)
+    def _populate_synthetic_store(self, total_records, *, other_session,
+                                  start_index=1, request_text='Synthetic inbox wait test.'):
+        template_view = self._record_pm(session=other_session, request_text=request_text)
         template = self.store.get(template_view['task_id'])
         template.pop('record_sha256', None)
-        for index in range(1, total_records):
+        created = [template_view]
+        for offset in range(1, total_records):
+            index = start_index + offset
             task_id = f'{index:032x}'
             contract = task_submission_cli._contract(task_id, template['request_sha256'])
             record = dict(template)
@@ -118,6 +121,8 @@ class ActivePMInboxWaitTests(unittest.TestCase):
                 os.write(fd, raw)
             finally:
                 os.close(fd)
+            created.append(record)
+        return created
 
     def test_r1_unchanged_wait_skips_full_reads(self):
         self._record_pm()
@@ -233,6 +238,9 @@ class ActivePMInboxWaitTests(unittest.TestCase):
 
         limit_error = LLMToolError('limit reached')
         limit_error.task_store_error_code = 'COMPLETION_EVENT_LIMIT'
+        index_path = self.state_dir / 'task-status-index.json'
+        if index_path.exists():
+            index_path.unlink()
         with patch.object(task_submission_cli, '_active_pm_handoff',
                           return_value={'packet': {'synthetic': True}}), \
              patch.object(active_pm_inbox, 'record_ready_event',
@@ -403,13 +411,132 @@ class ActivePMInboxWaitTests(unittest.TestCase):
         self.assertEqual(len(rootless_calls), 2)
         self.assertIs(rootless['timed_out'], True)
 
+    def test_r1_warm_inbox_read_in_new_store_skips_unchanged_non_pending_tasks(self):
+        other_session = self._claude_session()
+        self._populate_synthetic_store(10, other_session=other_session, start_index=1)
+        none_tasks = [self._record_pm() for _ in range(10)]
+        idle_tasks = [self._record_pm() for _ in range(3)]
+        pending_tasks = [self._record_pm() for _ in range(3)]
+        acked_ids = []
+        for task in idle_tasks:
+            event = self._record_event(task, digest_char='d')
+            active_pm_inbox.ack(self.store, event['event_id'], self.session_key,
+                                task_id=task['task_id'])
+            acked_ids.append(event['event_id'])
+        for task in pending_tasks:
+            self._record_event(task, digest_char='e')
+
+        warm = active_pm_inbox.read_inbox(self.store, self.session_key)
+        self.assertEqual(len(warm['events']), 3)
+        index_path = self.state_dir / 'task-status-index.json'
+        before_stat = index_path.stat()
+
+        new_store = TaskStore(self.store.root)
+        get_calls = []
+        original_get = new_store.get
+
+        def counting_get(task_id):
+            get_calls.append(task_id)
+            return original_get(task_id)
+
+        with patch.object(new_store, 'get', side_effect=counting_get):
+            second = active_pm_inbox.read_inbox(new_store, self.session_key)
+
+        self.assertEqual(second['events'], warm['events'])
+        self.assertEqual(sorted(get_calls), sorted(t['task_id'] for t in pending_tasks))
+        after_stat = index_path.stat()
+        self.assertEqual((before_stat.st_ino, before_stat.st_mtime_ns),
+                         (after_stat.st_ino, after_stat.st_mtime_ns))
+
+        # Updating one NONE task triggers a validated read of only that changed task + pending.
+        self._record_event(none_tasks[0], digest_char='f')
+        get_calls.clear()
+        changed_store = TaskStore(self.store.root)
+        original_changed_get = changed_store.get
+
+        def counting_changed_get(task_id):
+            get_calls.append(task_id)
+            return original_changed_get(task_id)
+
+        with patch.object(changed_store, 'get', side_effect=counting_changed_get):
+            after_change = active_pm_inbox.read_inbox(changed_store, self.session_key)
+
+        self.assertEqual(len(after_change['events']), 4)
+        self.assertEqual(sorted(get_calls),
+                         sorted([none_tasks[0]['task_id']] +
+                                [t['task_id'] for t in pending_tasks]))
+
+        # Session-scan ack without task_id still finds IDLE (already-acked) events.
+        idempotent = active_pm_inbox.ack(
+            TaskStore(self.store.root), acked_ids[0], self.session_key)
+        self.assertIs(idempotent['acknowledged_now'], False)
+        self.assertEqual(idempotent['event']['state'], 'ACKED')
+
+    def test_r4_damaged_or_changed_record_fails_closed_on_read_inbox(self):
+        none_task = self._record_pm()
+        pending_task = self._record_pm()
+        self._record_event(pending_task, digest_char='e')
+        initial = active_pm_inbox.read_inbox(self.store, self.session_key)
+        self.assertEqual(initial['unreadable_task_count'], 0)
+        self.assertEqual(len(initial['events']), 1)
+
+        bad_path = self.store.root / (none_task['task_id'] + '.json')
+        os.chmod(bad_path, 0o644)
+        try:
+            damaged = active_pm_inbox.read_inbox(
+                TaskStore(self.store.root), self.session_key)
+        finally:
+            os.chmod(bad_path, 0o600)
+
+        self.assertEqual(damaged['unreadable_task_count'], 1)
+        self.assertEqual(damaged['status'], 'ATTENTION')
+        self.assertEqual(len(damaged['events']), 1)
+
     def test_t2_synthetic_five_thousand_record_measurement(self):
         other_session = self._claude_session()
-        self._populate_synthetic_store(4999, other_session=other_session)
-        ready_task = self._record_pm()
-        # Warm the status index once before measuring the steady-state wait.
+        realistic_request = (
+            'Synthetic realistic PM request for inbox read measurement.\n' +
+            ('Synthetic context detail line without sensitive material.\n' * 60)
+        )
+        self._populate_synthetic_store(
+            2500, other_session=other_session, start_index=1,
+            request_text=realistic_request)
+        session_tasks = self._populate_synthetic_store(
+            2500, other_session=self.session, start_index=2501,
+            request_text=realistic_request)
+        for index in range(32):
+            self._record_event(session_tasks[index], digest_char='b')
+        ready_task = session_tasks[32]
+
+        # Warm the status index once before measuring steady-state reads and wait.
         initial = active_pm_inbox.read_inbox(self.store, self.session_key)
-        self.assertEqual(initial['events'], [])
+        self.assertEqual(len(initial['events']), 32)
+
+        cpu_before = time.process_time()
+        wall_before = time.monotonic()
+        read_before = active_pm_inbox.read_inbox(
+            TaskStore(self.store.root), self.session_key)
+        read_before_cpu = time.process_time() - cpu_before
+        read_before_elapsed = time.monotonic() - wall_before
+        self.assertEqual(len(read_before['events']), 32)
+        print(f'T2 read_inbox before change (records=5000, pending=32): '
+              f'cpu_s={read_before_cpu:.4f} elapsed_s={read_before_elapsed:.4f}')
+
+        self._record_event(ready_task, digest_char='c')
+        cpu_before = time.process_time()
+        wall_before = time.monotonic()
+        read_after = active_pm_inbox.read_inbox(
+            TaskStore(self.store.root), self.session_key)
+        read_after_cpu = time.process_time() - cpu_before
+        read_after_elapsed = time.monotonic() - wall_before
+        self.assertEqual(len(read_after['events']), 33)
+        print(f'T2 read_inbox after change (records=5000, pending=33): '
+              f'cpu_s={read_after_cpu:.4f} elapsed_s={read_after_elapsed:.4f}')
+
+        for item in session_tasks[:33]:
+            for event in self.store.get(item['task_id']).get('completion_events', []):
+                active_pm_inbox.ack(self.store, event['event_id'], self.session_key,
+                                    task_id=item['task_id'])
 
         cpu_before = time.process_time()
         wall_before = time.monotonic()
@@ -429,7 +556,7 @@ class ActivePMInboxWaitTests(unittest.TestCase):
             try:
                 time.sleep(0.2)
                 recorded_at.append(time.monotonic())
-                self._record_event(ready_task)
+                self._record_event(ready_task, digest_char='d')
             except BaseException as exc:
                 errors.append(exc)
 
