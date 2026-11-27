@@ -320,6 +320,67 @@ class CIChangedPathsTests(unittest.TestCase):
             paths = sorted(res.stdout.splitlines())
             self.assertEqual(paths, ["file_del.txt", "file_mod.txt"])
 
+    def test_diagnostic_lines_escape_breaks_and_keep_nul_bytes(self) -> None:
+        """Lines mode keeps one entry per path; NUL mode bytes stay unchanged."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            _git_run(["init"], repo)
+            _git_run(["checkout", "-B", "main"], repo)
+
+            ordinary = repo / "ordinary.txt"
+            ordinary.write_text("ordinary\n", encoding="utf-8")
+            newline_path = repo / "diag\nbreak.txt"
+            newline_path.write_text("newline name\n", encoding="utf-8")
+            escape_path = repo / "diag\\nliteral.txt"
+            escape_path.write_text("escape-looking name\n", encoding="utf-8")
+            _git_run(["add", "."], repo)
+            _git_commit(repo, "add diagnostic path fixtures")
+            base_sha = _get_sha(repo, "HEAD")
+
+            _git_run(["checkout", "-b", "pr"], repo)
+            for path in (ordinary, newline_path, escape_path):
+                path.write_text(
+                    path.read_text(encoding="utf-8") + "edited\n",
+                    encoding="utf-8",
+                )
+            _git_run(["add", "."], repo)
+            _git_commit(repo, "edit diagnostic path fixtures")
+            head_sha = _get_sha(repo, "HEAD")
+
+            res_lines = _run_script(
+                base=base_sha,
+                head=head_sha,
+                format_opt="lines",
+                repo_dir=repo,
+            )
+            self.assertEqual(res_lines.returncode, 0)
+            line_paths = res_lines.stdout.splitlines()
+            self.assertEqual(len(line_paths), 3)
+            self.assertEqual(
+                set(line_paths),
+                {
+                    "ordinary.txt",
+                    "diag\\nbreak.txt",
+                    "diag\\\\nliteral.txt",
+                },
+            )
+
+            res_nul = _run_script(
+                base=base_sha,
+                head=head_sha,
+                format_opt="nul",
+                repo_dir=repo,
+            )
+            self.assertEqual(res_nul.returncode, 0)
+            self.assertEqual(
+                {p for p in res_nul.stdout.split("\0") if p},
+                {
+                    "ordinary.txt",
+                    "diag\nbreak.txt",
+                    "diag\\nliteral.txt",
+                },
+            )
+
 
 class SelectorIntegrationTests(unittest.TestCase):
     def _run_ci_mac_modules(self, paths: list[str]) -> dict:
