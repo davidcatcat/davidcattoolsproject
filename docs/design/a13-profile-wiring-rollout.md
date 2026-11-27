@@ -1,7 +1,6 @@
 # A13.0 profile wiring — rollout runbook
 
-Status: draft. Some wiring PRs are still pending; this runbook is usable
-while they are.
+Status: draft; usable while wiring PRs are still pending.
 
 Basis
 - Issue #2793, Coordinator review comment 7210501920: adopt the profile
@@ -13,7 +12,7 @@ Basis
 
 Out of scope for this runbook: changing code, workflow, or live state;
 weakening the existing remote EC2 evidence or any gate; repeating the
-separate test-mode interface design (that design doc applies instead).
+separate test-mode interface design.
 
 Profile source: `tools/llmtool/llmtool/ci_profile.py` — `CiProfile`
 (immutable value), `default_profile()` (current check and workflow file
@@ -34,9 +33,12 @@ Stage 0 — record (before any merge)
 Stage 1 — verify each slice on its recorded HEAD, dependency order
 4. Default parity: at the real entry points the default profile yields
    exactly the check set from `default_profile()`.
-5. Non-default path use: the real test entry points accept and honour a
-   non-default profile; the test-profile consumers and the non-default
-   test-path fixture use it, with no hard-coded names.
+5. Non-default path use: the non-default profile's CI check names and
+   workflow file names reach their real consumers — the real test entry
+   points accept and honour the non-default profile (test-profile
+   consumers and the non-default test-path fixture), and the CI/workflow
+   consumers use the non-default check and workflow file names; no
+   hard-coded names.
 6. Refusal evidence: for missing, invalid, or ambiguous profile
    configuration the real entry points refuse (fail-closed); an invalid
    name is rejected with `CiProfileError` at construction, never
@@ -49,20 +51,21 @@ Stage 1 — verify each slice on its recorded HEAD, dependency order
 9. Required CI: on the recorded HEAD, the Linux code check, docs
    check, gateway check, and ai-loop check all pass.
 10. macOS check: formal review must be PASS before the PM enables the
-    macOS check (mac-ci). Once enabled, require its exact-head success
-    on the recorded HEAD before the slice merges.
+    macOS check (mac-ci); once enabled, require its exact-head success
+    on the recorded HEAD before merge.
 
 Stage 2 — sync
-11. Merge one slice at a time in dependency order; each slice must be
-    at its Stage 0 recorded HEAD (no rebase or re-recording). Before
+11. Merge one slice at a time in dependency order; each slice merges
+    at the HEAD recorded in §3 (only the §2 pre-merge path may
+    re-record it). Before
     each merge, record the then-current `main` HEAD in that slice's
     rollback target column in §3; after each merge, record the actual
     new `main` HEAD.
 12. After the last merge, confirm the live checkout uses the intended
-    revision: the live `main` revision must equal the final recorded
-    post-merge `main` HEAD, and the controller must report the revision
-    from step 2. `main` is deliberately past the step 1 baseline, so
-    compare only against the recorded post-merge value.
+    revision: the live `main` revision equals the final recorded
+    post-merge `main` HEAD and the controller reports the revision from
+    step 2 — never the step 1 baseline, which `main` has deliberately
+    passed.
 
 ## 2. Rollback
 
@@ -79,10 +82,14 @@ Safe rollback checklist — no force-push, no manual TaskStore edits:
 1. Stop advancement on the affected slice and every dependent slice.
 2. Retain the Task, its §3 evidence row, logs, and EC2 output.
 3. Identify the affected slice and its dependents from the §3 table.
-4. Restore via a reviewed revert in dependency-safe order (dependents
-   first); each revert carries its own review and required CI.
-5. Rerun the relevant Stage 1 checks for the affected slices.
-6. Verify the rollback: each affected slice's content equals the §3
+4. Pre-merge path: no merge has landed, so there is nothing to revert.
+   Fix the slice, re-record its HEAD in §3, and rerun its Stage 1
+   checks; no revert is issued.
+5. Post-merge path: restore via a reviewed revert in dependency-safe
+   order (dependents first); each revert carries its own review and
+   required CI.
+6. Rerun the relevant Stage 1 checks for the affected slices.
+7. Verify the rollback: each affected slice's content equals the §3
    rollback target recorded before its merge, and the controller
    reports the revision recorded in step 2. A reviewed revert makes a
    new `main` commit, so compare slice content and controller revision
@@ -103,7 +110,7 @@ name, never a hand-edited state.
 | slice | feature | head | verdict | tests (evidence) | rollback target |
 |-------|---------|------|---------|------------------|-----------------|
 | S1 | profile value + fail-closed validation (`ci_profile.py`) | pending | pending | construction and refusal (missing/invalid/ambiguous) tests (pending) | `main` HEAD before S1 merge (pending) |
-| S2 | real test entry points wired to the profile | pending | pending | default parity, non-default test-path fixture, EC2 evidence (pending) | `main` HEAD before S2 merge (pending) |
+| S2 | real test entry points wired to the profile | pending | pending | default parity, non-default test-path fixture + CI/workflow names at real consumers, EC2 evidence (pending) | `main` HEAD before S2 merge (pending) |
 | S3 | required CI names and coverage | pending | pending | full CI run on the recorded HEAD (pending) | `main` HEAD before S3 merge (pending) |
 
 The rollback target column is filled in during Stage 2; rows stay
