@@ -616,6 +616,17 @@ class GwAgentRoute(DeveloperRoute):
                 'usage': _normalize_gw_agent_usage(result.get('usage')),
                 'changed_paths': result['changed_paths']}
 
+    def reported_usage(self):
+        """Return the normalized cumulative usage of this result, or None.
+
+        The gateway result carries a usage object for every status, including
+        BUDGET_EXCEEDED. Only a fully reported integer token pair is returned;
+        an absent, partial or non-integer usage stays None (#2812).
+        """
+        if type(self._result) is not dict:
+            return None
+        return _normalize_gw_agent_usage(self._result.get('usage'))
+
     def validate_exit(self, exit_code, parsed):
         if type(exit_code) is not int or exit_code != _STATUS_EXIT.get(self._status):
             raise RouteError('GW_AGENT_OUTPUT_INVALID',
@@ -626,7 +637,11 @@ class GwAgentRoute(DeveloperRoute):
             code = self._gateway_code
             if code == 'MODEL_REPORTED_BLOCKED' and self._tool_failure is not None:
                 code = self._tool_failure
-            raise RouteError('GW_AGENT_' + self._status, facts={'gateway_code': code})
+            error = RouteError('GW_AGENT_' + self._status, facts={'gateway_code': code})
+            # #2812: a budget or context result can still carry the run's
+            # cumulative usage; expose it so the delegate records it truthfully.
+            error.gateway_usage = self.reported_usage()
+            raise error
 
     def _verified_audit_digest(self, path):
         """Load the verifier from the configured gateway package, isolated by name."""

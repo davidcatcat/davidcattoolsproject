@@ -8087,6 +8087,57 @@ def run_task_gw_agent_probe(args, *, store=None, stdout=None, probe_call=None):
     return 0 if result.get('status') == 'PASS' else 1
 
 
+def _gw_agent_refusal_usage(exc, route):
+    """Return a budget-exceeded gateway run's reported usage, or None (#2812).
+
+    The route attaches the normalized usage to its refusal. A refusal that
+    carries none is still checked against the parsed gateway result, so a
+    RouteError raised elsewhere on the same budget path keeps it. Only a
+    BUDGET_EXCEEDED result is consulted; no other refusal gains usage.
+    """
+    if getattr(exc, 'code', None) != 'GW_AGENT_BUDGET_EXCEEDED':
+        return None
+    usage = getattr(exc, 'gateway_usage', None)
+    if usage is None:
+        usage = getattr(exc, 'usage', None)
+    facts = getattr(exc, 'facts', None)
+    if usage is None and type(facts) is dict:
+        usage = facts.get('gateway_usage')
+        if usage is None:
+            usage = facts.get('usage')
+    if usage is None:
+        result = getattr(route, '_result', None)
+        if type(result) is dict:
+            usage = result.get('usage')
+    usage = _normalize_gw_agent_usage(usage)
+    if usage is None:
+        return None
+    # #2812: a gw-agent usage record names the served model, exactly like an
+    # accepted run's usage does (#1773). Only a verified gateway-reported model is
+    # kept; an unverified one leaves no served model rather than inventing it.
+    verifier = getattr(route, 'verified_model', None)
+    if callable(verifier):
+        try:
+            served_model = verifier(None, None)
+        except Exception:
+            served_model = None
+        if type(served_model) is str and served_model:
+            usage['served_model'] = served_model
+    return usage
+
+
+def _gw_agent_budget_execution(usage):
+    """The unknown-outcome execution block for a budget-exceeded run (#2812)."""
+    return {
+        'status': 'UNKNOWN', 'native_session_id': None,
+        'process_exit_code': None, 'stdout_sha256': None,
+        'elapsed_ms': None, 'cleanup_status': 'UNKNOWN',
+        'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
+        'source_bytes': None, 'source_file_count': None,
+        'source_manifest_sha256': None,
+    }
+
+
 def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     """Run the company Gw Agent Gateway route against its registered D6 task."""
     from . import gw_agent_sessions
@@ -8325,7 +8376,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
 
     def persist_failure(error_code, *, state='DEVELOPER_UNAVAILABLE',
                         provider_evidence=None, interrupted=False, stderr=None,
-                        error_cause=None, retry_after=None):
+                        error_cause=None, retry_after=None, usage=None, budget=False):
         # #2367: file the failure class in the existing availability record
         # before the Developer failure write, so a later admission sees the
         # hold even when that write is what fails (S2). This never raises.
@@ -8344,12 +8395,26 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             # #2532 follow-up: the fixed code behind a refused result write
             # (e.g. TASK_STORE_ARTIFACT_SENSITIVE); never the refused content.
             failed['error_cause'] = error_cause
+        if usage is not None:
+            # #2812: only the gateway's fully reported token pair is kept.
+            failed['usage'] = dict(usage)
+            # The record names the served model exactly when the usage does, so
+            # the TaskStore sees one consistent model and usage provenance.
+            served_model = usage.get('served_model')
+            if type(served_model) is str and served_model:
+                failed['model'] = served_model
+                _record_provider_model(failed, served_model)
+        if budget:
+            # #2812: a budget result still names whether usage was reported;
+            # no usage keeps the source UNKNOWN and invents no value.
+            failed['execution'] = _gw_agent_budget_execution(usage)
         records = [failed]
         if type(developer.get('execution')) is dict:
             # Keep what the run observed, cleanup_status above all, whenever the
             # store accepts it; the bare record stays valid whatever it held.
             observed = {**developer['execution'], 'status': 'UNKNOWN',
-                        'usage_source': 'UNKNOWN'}
+                        'usage_source': ('CLI_REPORTED'
+                                         if budget and usage is not None else 'UNKNOWN')}
             if interrupted:
                 # An interruption gives no provider evidence.
                 observed.pop('provider_evidence', None)
@@ -8374,6 +8439,17 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             # block the failure record itself.
             records.append({key: value for key, value in failed.items()
                             if key != 'error_cause'})
+        if usage is not None:
+            # #2812 R6: a store that refuses the usage-carrying record must
+            # still keep the failure, without usage and with an UNKNOWN source.
+            # Rebuild from the stored assignment so the fallback never carries
+            # the served-model fields that were added only for the usage.
+            without_usage = {**expected_developer, 'state': state,
+                             'error_code': error_code[:64], 'usage': None}
+            if type(failed.get('execution')) is dict:
+                without_usage['execution'] = {
+                    **failed['execution'], 'usage_source': 'UNKNOWN'}
+            records.append(without_usage)
         for record in records:
             try:
                 store.compare_and_update(
@@ -8534,11 +8610,15 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 code = (code + '_' + gateway_code)[:64]
         code = code[:64]
         facts = exc.facts if type(getattr(exc, 'facts', None)) is dict else {}
+        budget = (not owner_gate_denied and
+                  getattr(exc, 'code', None) == 'GW_AGENT_BUDGET_EXCEEDED')
         return persist_failure(code, provider_evidence=(
             None if owner_gate_denied else getattr(exc, 'provider_evidence', None)),
             stderr=getattr(exc, 'stderr_excerpt', None),
             retry_after=(getattr(exc, 'retry_after', None) or
-                         facts.get('retry_after') or facts.get('retry_after_seconds')))
+                         facts.get('retry_after') or facts.get('retry_after_seconds')),
+            usage=_gw_agent_refusal_usage(exc, route) if budget else None,
+            budget=budget)
     except Exception:
         return persist_failure('DEVELOPER_RESULT_UNKNOWN',
                                state='DEVELOPER_OUTCOME_UNKNOWN')

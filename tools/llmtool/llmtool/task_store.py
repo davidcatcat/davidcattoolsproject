@@ -1119,6 +1119,45 @@ def _validate_usage(value):
     validate_provider_usage({name: value[name] for name in _USAGE_FIELDS})
 
 
+# The Gateway's BUDGET_EXCEEDED reasons, exactly as its contract lists them
+# (tools/api-agent-gateway/README.md and api_agent_gateway/contract.py). The
+# TaskStore exception is this list only: a new or lookalike reason, or any
+# other unavailable error code, still refuses usage (#2812).
+_GW_AGENT_BUDGET_REASONS = frozenset((
+    'TURN_BUDGET_EXCEEDED',
+    'INPUT_TOKEN_BUDGET_EXCEEDED',
+    'OUTPUT_TOKEN_BUDGET_EXCEEDED',
+    'OUTPUT_TRUNCATED',
+    'WALL_TIME_EXCEEDED',
+    'SENT_BYTES_EXCEEDED',
+    'TOOL_RESULT_BYTES_EXCEEDED',
+    'CONTEXT_EXHAUSTED',
+))
+
+
+def _gw_agent_budget_usage_allowed(developer, usage):
+    """#2812: only a listed gw-agent budget result may keep usage.
+
+    The record's fixed budget error code must name one of the Gateway's
+    BUDGET_EXCEEDED reasons, and its execution must report that the usage came
+    from the provider. Any other unavailable record, route, error code or
+    usage source refuses usage.
+    """
+    if usage is None:
+        return False
+    budget_code = 'DEVELOPER_GW_AGENT_BUDGET_EXCEEDED'
+    error_code = developer.get('error_code')
+    reason = (error_code[len(budget_code) + 1:]
+              if type(error_code) is str and error_code.startswith(budget_code + '_')
+              else None)
+    execution = developer.get('execution')
+    return (developer.get('provider_profile') == 'gw-agent' and
+            reason in _GW_AGENT_BUDGET_REASONS and
+            type(execution) is dict and
+            execution.get('status') == 'UNKNOWN' and
+            execution.get('usage_source') == 'CLI_REPORTED')
+
+
 class TaskStoreConflict(LLMToolError):
     """A compare-and-update precondition lost to another task writer."""
 
@@ -3810,7 +3849,9 @@ def _validate(record, *, strict=True, repository_pattern=None):
                     (token_cap_required and developer['max_tokens'] is None)):
                 _fail()
             if dev_state == 'DEVELOPER_UNAVAILABLE' and (
-                    artifact is not None or usage is not None or
+                    artifact is not None or
+                    (usage is not None and
+                     not _gw_agent_budget_usage_allowed(developer, usage)) or
                     developer['error_code'] is None):
                 _fail()
             if dev_state == 'DEVELOPER_OUTCOME_UNKNOWN' and (
