@@ -875,6 +875,8 @@ class ChatTUI:
         self.pm_api = pm_api or chat_tui_pm.PMRuntimeAPI()
         self.pm_runtime = None
         self.pm_binding = None       # pm_runtime.current_binding() of the connected session
+        self.pm_handover_offer = None
+        self._last_pm_session = None
         self.pm_block_index = None   # block_index of the streaming text block
         self.pm_target = None        # (session_id, cwd) of the connected PM
         self.pm_mode = False
@@ -3801,6 +3803,10 @@ class ChatTUI:
                 self.append(_pm_subcommand_usage("use"))
                 return
             try:
+                old_binding = self._safe_current_binding()
+                old_session = (self.pm_target[0] if self.pm_target else
+                               (old_binding.get('native_session_id')
+                                if type(old_binding) is dict else None))
                 bindings = _pm_newest_first(self.pm_api.list_bindings())
                 # Short decimal tokens are list positions. An eight-character
                 # decimal token can also be a session ID prefix, so keep it in
@@ -3828,6 +3834,8 @@ class ChatTUI:
                         + " account " + chat_tui_pm.safe_text(binding.get('account') or 'default')
                         + " · " + chat_tui_pm.safe_text(binding.get('native_session_id'))[:8]
                         + "; /pm connect to connect")
+            self._offer_pm_handover(old_session, binding.get('native_session_id'),
+                                    binding.get('cwd'))
             return
         if parts[1:2] == ["accounts"]:
             if parts[2:] not in ([], ["--check"]):
@@ -3864,6 +3872,35 @@ class ChatTUI:
         if self.pm_pending:
             self.append("llmtool: a PM connect/disconnect/history request is in progress")
             return
+        if parts[1:2] == ["handover"]:
+            sub = parts[2:]
+            if sub in ([], ["confirm"]):
+                offer = self.pm_handover_offer
+                if type(offer) is not dict:
+                    self.append("llmtool: no pending PM Task handover (PM_SESSION_ADOPTION_NO_OFFER).")
+                    return
+                if not offer.get("old_session") or not offer.get("new_session"):
+                    self.append("llmtool: PM Task handover refused (PM_SESSION_ADOPTION_KEY_INVALID): "
+                                "missing session identity.")
+                    return
+                if not offer.get("cwd"):
+                    self.append("llmtool: PM Task handover refused (PM_SESSION_ADOPTION_CWD_MISMATCH): "
+                                "missing working directory.")
+                    return
+                self._pm_worker(self._pm_handover, dict(offer))
+                return
+            if sub in (["decline"], ["cancel"], ["no"]):
+                offer = self.pm_handover_offer
+                self.pm_handover_offer = None
+                if type(offer) is not dict:
+                    self.append("llmtool: no pending PM Task handover.")
+                else:
+                    self.append("llmtool: PM Task handover declined; %d open Task(s) remain with %s."
+                                % (offer.get("count", 0),
+                                   chat_tui_pm.safe_text(offer.get("old_session"))[:8]))
+                return
+            self.append("usage: /pm handover [confirm|decline]")
+            return
         if parts[1:2] == ["connect"] and len(parts) <= 4:
             session_id = parts[2] if len(parts) >= 3 else None
             if self.pm_runtime is not None:
@@ -3875,7 +3912,8 @@ class ChatTUI:
                                 + "; /pm disconnect first")
                 return
             self.pm_state = "connecting"
-            self._pm_worker(self._pm_connect, session_id, parts[3] if len(parts) == 4 else None)
+            self._pm_worker(self._pm_connect, session_id, parts[3] if len(parts) == 4 else None,
+                            self._previous_pm_session())
             return
         if parts[1:2] == ["new"]:
             runtime, account, cwd = "claude-code", None, None
@@ -3911,7 +3949,8 @@ class ChatTUI:
                 self.append("llmtool: connected to PM session " + self.pm_target[0]
                             + "; /pm disconnect before creating another")
                 return
-            self._pm_worker(self._pm_new, cwd or os.getcwd(), runtime, account)
+            self._pm_worker(self._pm_new, cwd or os.getcwd(), runtime, account,
+                            self._previous_pm_session())
             return
         if parts == ["/pm", "disconnect"]:
             if self.pm_runtime is None:
@@ -4030,9 +4069,81 @@ class ChatTUI:
             return None
         return self._queue_text("llmtool: 離開時 PM 佇列仍有未送出的訊息（沒有送出）")
 
-    def _pm_new(self, cwd, runtime, account, loop):
+    def _safe_current_binding(self):
         try:
-            outcome = {"binding": self.pm_api.create_dedicated(cwd, runtime, account)}
+            return self.pm_api.current_binding()
+        except Exception:
+            return None
+
+    def _previous_pm_session(self):
+        if self.pm_target:
+            return self.pm_target[0]
+        if self._last_pm_session:
+            return self._last_pm_session
+        binding = self._safe_current_binding()
+        return binding.get("native_session_id") if type(binding) is dict else None
+
+    def _offer_pm_handover(self, old_session, new_session, cwd):
+        if not old_session or not new_session or old_session == new_session:
+            if (type(self.pm_handover_offer) is dict and
+                    self.pm_handover_offer.get("new_session") != new_session):
+                self.pm_handover_offer = None
+            return
+        self.pm_handover_offer = None
+        try:
+            count = self.pm_api.open_task_count(old_session)
+        except LLMToolError as exc:
+            self.append("llmtool: could not check open Tasks for previous PM session %s (%s)."
+                        % (chat_tui_pm.safe_text(old_session)[:8],
+                           chat_tui_pm.adoption_error_code(exc)))
+            return
+        except Exception:
+            self.append("llmtool: could not check open Tasks for previous PM session %s (%s)."
+                        % (chat_tui_pm.safe_text(old_session)[:8], chat_tui_task.UNKNOWN))
+            return
+        if count > 0:
+            self.pm_handover_offer = {"old_session": old_session, "new_session": new_session,
+                                      "cwd": cwd, "count": count}
+            self.append("llmtool: previous PM session %s has %d open Task(s). "
+                        "Run /pm handover to move them to %s, or /pm handover decline to dismiss."
+                        % (chat_tui_pm.safe_text(old_session)[:8], count,
+                           chat_tui_pm.safe_text(new_session)[:8]))
+
+    def _pm_handover(self, offer, loop):
+        try:
+            result = self.pm_api.adopt_session(
+                offer["old_session"], offer["new_session"], cwd=offer["cwd"])
+            outcome = {"offer": offer, "result": result}
+        except LLMToolError as exc:
+            outcome = {"offer": offer, "error": chat_tui_pm.adoption_error_code(exc)}
+        except Exception:
+            outcome = {"offer": offer, "error": chat_tui_task.UNKNOWN}
+        self._post(loop, self.finish_pm_handover, outcome)
+
+    def finish_pm_handover(self, outcome):
+        self.pm_pending = False
+        offer = outcome.get("offer") if type(outcome) is dict else {}
+        old_session = offer.get("old_session")
+        new_session = offer.get("new_session")
+        self.append(chat_tui_pm.handover_outcome_text(outcome, old_session, new_session))
+        result = outcome.get("result")
+        if ("error" not in outcome and type(result) is dict and
+                type(result.get("moved")) is list and type(result.get("skipped")) is list and
+                not result["skipped"]):
+            self.pm_handover_offer = None
+
+    def _pm_new(self, cwd, runtime, account, prior_session, loop):
+        try:
+            binding = self.pm_api.create_dedicated(cwd, runtime, account)
+            outcome = {"binding": binding, "prior_session": prior_session}
+            new_session = binding.get("native_session_id") if type(binding) is dict else None
+            if prior_session and new_session and prior_session != new_session:
+                try:
+                    outcome["handover_count"] = self.pm_api.open_task_count(prior_session)
+                except LLMToolError as exc:
+                    outcome["handover_error"] = chat_tui_pm.adoption_error_code(exc)
+                except Exception:
+                    outcome["handover_error"] = chat_tui_task.UNKNOWN
         except LLMToolError as exc:
             outcome = {"error": chat_tui_pm.error_code(exc)}
         except Exception:
@@ -4049,6 +4160,30 @@ class ChatTUI:
         self.append("Dedicated PM session " + chat_tui_pm.safe_text(binding.get("native_session_id"))
                     + " dedicated binding created (cwd " + chat_tui_pm.safe_text(binding.get("cwd"))
                     + "); the session starts on the first message. /pm connect connects to it.")
+        self._handle_switch_handover(
+            outcome.get("prior_session"), binding.get("native_session_id"),
+            binding.get("cwd"), outcome)
+
+    def _handle_switch_handover(self, old_session, new_session, cwd, outcome):
+        if not old_session or not new_session or old_session == new_session:
+            if (type(self.pm_handover_offer) is dict and
+                    self.pm_handover_offer.get("new_session") != new_session):
+                self.pm_handover_offer = None
+            return
+        self.pm_handover_offer = None
+        if "handover_error" in outcome:
+            self.append("llmtool: could not check open Tasks for previous PM session %s (%s)."
+                        % (chat_tui_pm.safe_text(old_session)[:8],
+                           chat_tui_pm.safe_code(outcome["handover_error"])))
+            return
+        count = outcome.get("handover_count", 0)
+        if count > 0:
+            self.pm_handover_offer = {"old_session": old_session, "new_session": new_session,
+                                      "cwd": cwd, "count": count}
+            self.append("llmtool: previous PM session %s has %d open Task(s). "
+                        "Run /pm handover to move them to %s, or /pm handover decline to dismiss."
+                        % (chat_tui_pm.safe_text(old_session)[:8], count,
+                           chat_tui_pm.safe_text(new_session)[:8]))
 
     def _pm_worker(self, target, *args):
         self.pm_pending = True
@@ -4069,8 +4204,8 @@ class ChatTUI:
         except LLMToolError as exc:
             return None, chat_tui_pm.error_code(exc)
 
-    def _pm_connect(self, session_id, cwd, loop):
-        outcome = {"session": session_id, "cwd": cwd}
+    def _pm_connect(self, session_id, cwd, prior_session, loop):
+        outcome = {"session": session_id, "cwd": cwd, "prior_session": prior_session}
         runtime = None
         try:
             if session_id is None or cwd is None:
@@ -4100,6 +4235,13 @@ class ChatTUI:
             except LLMToolError:
                 outcome["binding"] = None
             outcome["history"], outcome["history_error"] = self._pm_read_history(session_id, runtime)
+            if prior_session and outcome.get("session") and prior_session != outcome["session"]:
+                try:
+                    outcome["handover_count"] = self.pm_api.open_task_count(prior_session)
+                except LLMToolError as exc:
+                    outcome["handover_error"] = chat_tui_pm.adoption_error_code(exc)
+                except Exception:
+                    outcome["handover_error"] = chat_tui_task.UNKNOWN
         except LLMToolError as exc:
             outcome["error"] = chat_tui_pm.error_code(exc)
         except Exception:
@@ -4147,6 +4289,7 @@ class ChatTUI:
             threading.Thread(target=self._pm_watch, args=(self.pm_runtime, self._loop),
                              name="llmtool-chat-pm-watch", daemon=True).start()
         self.pm_target = (outcome["session"], getattr(self.pm_runtime, "cwd", outcome["cwd"]))
+        self._last_pm_session = self.pm_target[0]
         self.pm_mode, self.task_profile, self.pm_state = True, None, "idle"
         # Status shows 暖機中… until the first turn's first output; W41 A: no warm-up message.
         self.pm_warm = True
@@ -4159,6 +4302,13 @@ class ChatTUI:
             "open elsewhere. Esc interrupts a turn; /pm disconnect ends the "
             "connection. Chat replies are never the PM.")
         self._append_history(outcome["history"], outcome["history_error"])
+        if (type(self.pm_handover_offer) is dict and
+                self.pm_handover_offer.get("new_session") == self.pm_target[0]):
+            if self.pm_target[1] and not self.pm_handover_offer.get("cwd"):
+                self.pm_handover_offer["cwd"] = self.pm_target[1]
+        else:
+            self._handle_switch_handover(
+                outcome.get("prior_session"), self.pm_target[0], self.pm_target[1], outcome)
         if self._auto_resume_pending:
             session = self.pm_target[0]
             runtime = self.pm_runtime
@@ -4248,6 +4398,7 @@ class ChatTUI:
         self._pm_background_live.clear()
         self.pm_runtime, self.pm_target, self.pm_mode, self.pm_state = None, None, False, None
         self.pm_binding, self.pm_warm = None, False
+        self.pm_handover_offer = None
         self.append("PM disconnected; chat mode (Enter sends to chat provider "
                     + self.session.provider + ", not a PM)")
         self._pm_pause("PM 已斷線")
@@ -4788,6 +4939,7 @@ class ChatTUI:
         with self._pm_lock:
             self._pm_exiting = True
             self._auto_resume_pending = False
+            self.pm_handover_offer = None
             runtimes = [self.pm_runtime, self._pm_unadopted]
             self.pm_runtime, self._pm_unadopted = None, None
         # Exit: the turn's late worker callbacks are stale; nothing is rendered any more.

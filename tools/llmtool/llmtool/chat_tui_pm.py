@@ -94,9 +94,13 @@ class PMRuntimeAPI:
     """The pm_runtime S2 calls the TUI makes. Nothing here writes Core state except
     through pm_runtime itself (create_dedicated_pm, PMRuntime)."""
 
-    def __init__(self, *, state_root=None, runner=None, environ=None):
+    def __init__(self, *, state_root=None, runner=None, environ=None,
+                 task_store=None, clock=None, process_lister=None):
         self.state_root, self.runner = state_root, runner
         self.environ = environ
+        self.task_store = task_store
+        self.clock = clock
+        self.process_lister = process_lister
 
     def runtime(self, session_id, cwd):
         from .pm_runtime import PMRuntime
@@ -229,6 +233,86 @@ class PMRuntimeAPI:
     def read_recent_turns(self, session_id, count):
         from .pm_runtime import read_history
         return read_history(session_id, latest=count, state_root=self.state_root)['turns']
+
+    def _task_store(self, *, create=False):
+        """Return the TaskStore, or None when read-only and the default store is absent."""
+        if self.task_store is not None:
+            return self.task_store
+        from pathlib import Path
+        from .task_store import TaskStore
+        home = None if self.environ is None else self.environ.get('HOME')
+        root = (Path(home) / '.local' / 'state' / 'llmtool' / 'tasks'
+                if home else Path.home() / '.local' / 'state' / 'llmtool' / 'tasks')
+        if not create and not os.path.lexists(root):
+            return None
+        return TaskStore(root)
+
+    def open_task_count(self, session_id):
+        """Count open (non-abandoned) Tasks owned by ``session_id``."""
+        from . import active_pm_inbox
+        session_key = active_pm_inbox.pm_session_key(session_id)
+        store = self._task_store(create=False)
+        if store is None:
+            return 0
+        count = 0
+        for task_id in store.task_ids():
+            record = store.get(task_id)
+            if (record.get('pm_session_id') == session_key and
+                    record.get('abandonment') is None):
+                count += 1
+        return count
+
+    def adopt_session(self, old_session_id, new_session_id, *, cwd):
+        """Adopt open Tasks from ``old_session_id`` to ``new_session_id`` via active_pm_inbox."""
+        from . import active_pm_inbox
+        from .errors import LLMToolError
+        try:
+            old_key = active_pm_inbox.pm_session_key(old_session_id)
+            new_key = active_pm_inbox.pm_session_key(new_session_id)
+        except LLMToolError as exc:
+            if getattr(exc, 'task_store_error_code', None) is None:
+                exc.task_store_error_code = 'PM_SESSION_ADOPTION_KEY_INVALID'
+            raise
+        store = self._task_store(create=True)
+        return active_pm_inbox.adopt_pm_session(
+            store, old_key, new_key, old_native_id=old_session_id, cwd=cwd,
+            environ=self.environ, state_root=self.state_root,
+            clock=self.clock, process_lister=self.process_lister)
+
+
+def adoption_error_code(exc):
+    """The typed adoption or runtime error code of an exception, else UNKNOWN."""
+    return safe_code(getattr(exc, 'task_store_error_code', None)
+                     or getattr(exc, 'pm_runtime_code', None))
+
+
+def handover_outcome_text(outcome, old_session_id, new_session_id):
+    """Format a fail-closed user message for a PM Task handover attempt."""
+    old_short = safe_text(old_session_id)[:8] if type(old_session_id) is str else UNKNOWN
+    new_short = safe_text(new_session_id)[:8] if type(new_session_id) is str else UNKNOWN
+    if 'error' in outcome:
+        code = safe_code(outcome['error'])
+        return ("llmtool: PM Task handover refused (" + code
+                + "): no Tasks moved from " + old_short + ".")
+    result = outcome.get('result')
+    if type(result) is not dict:
+        return ("llmtool: PM Task handover failed (" + UNKNOWN
+                + "): invalid adoption result.")
+    moved = result.get('moved')
+    skipped = result.get('skipped')
+    if type(moved) is not list or type(skipped) is not list:
+        return ("llmtool: PM Task handover failed (" + UNKNOWN
+                + "): invalid adoption result.")
+    if skipped:
+        return ("llmtool: PM Task handover incomplete (PM_SESSION_ADOPTION_PARTIAL_SKIP): "
+                "moved %d, skipped %d; retry /pm handover to resume."
+                % (len(moved), len(skipped)))
+    if not moved:
+        return ("llmtool: PM Task handover moved 0 Tasks "
+                "(PM_SESSION_ADOPTION_NO_ELIGIBLE_TASKS): no eligible open Tasks remained for "
+                + old_short + ".")
+    return ("PM Task handover completed: moved %d open Task(s) from %s to %s."
+            % (len(moved), old_short, new_short))
 
 
 _USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_read_input_tokens',
