@@ -113,6 +113,13 @@ class MainCiJobPagesTests(unittest.TestCase):
             with self.subTest(fetched=fetched):
                 self.assertUnknown(collect(fetched), pages_mod.MALFORMED_JOB)
 
+    def test_zero_and_negative_job_ids_are_unknown(self):
+        cases = [[page([job(0)], 1)],
+                 [page([job(-1)], 1)]]
+        for fetched in cases:
+            with self.subTest(fetched=fetched):
+                self.assertUnknown(collect(fetched), pages_mod.MALFORMED_JOB)
+
     def test_invalid_identity_inputs_are_unknown(self):
         cases = [((None, RUN_ID, RUN_ATTEMPT), pages_mod.SHA_INVALID),
                  (('not-a-sha', RUN_ID, RUN_ATTEMPT), pages_mod.SHA_INVALID),
