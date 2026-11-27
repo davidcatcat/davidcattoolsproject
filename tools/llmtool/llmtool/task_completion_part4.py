@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 
+from . import ci_profile
 from .errors import LLMToolError
 
 # #2281 A2: the parent module is already in sys.modules while it imports this
@@ -314,8 +315,40 @@ def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
             'check_ids': check_ids, 'check_outcomes': check_outcomes}
 
 
+def _resolve_ci_profile(profile=_UNSET):
+    """Return one validated live CI profile, or stop with CI_PROFILE_INVALID."""
+    if profile is _UNSET:
+        provider = getattr(ci_profile, 'default_profile', None)
+        try:
+            profile = provider() if callable(provider) else None
+        except Exception:
+            profile = None
+    if type(profile) is not ci_profile.CiProfile:
+        _stop('CI_PROFILE_INVALID')
+    try:
+        names = [getattr(profile, name)
+                 for name in ci_profile.CiProfile.__dataclass_fields__]
+        for name in names:
+            ci_profile._validate_name(name)
+    except (ci_profile.CiProfileError, AttributeError):
+        _stop('CI_PROFILE_INVALID')
+    if len(set(names)) != len(names):
+        _stop('CI_PROFILE_INVALID')
+    return profile
+
+
+def _is_mac_workflow(workflow, field):
+    return field == 'code_check' and workflow[field] == _m._MAC_CHECK
+
+
+def _profile_check_name(workflow, field, mac_check):
+    if _is_mac_workflow(workflow, field):
+        return mac_check
+    return workflow[field]
+
+
 def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None,
-                         pr_merged=False, pr_head_ref=None):
+                         pr_merged=False, pr_head_ref=None, profile=_UNSET):
     """Exact-head CI evidence for every trusted workflow on the selected path.
 
     Code path: every ci_trust workflow with a ``code_check`` must succeed and
@@ -323,28 +356,37 @@ def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None,
     ``docs_check``. With the Owner's values this is the Mac + Linux code gate
     and the Linux ``check (docs)`` docs gate.
     """
+    profile = _resolve_ci_profile(profile)
+    mac_check = profile.macos_check
     ci_trust = _ci_trust()
     docs_only = _docs_only_ci(changed_paths)
     linux_required = True
     field = 'docs_check' if docs_only else 'code_check'
     selected = [workflow for workflow in ci_trust['workflows']
                 if workflow[field] is not None]
+    if sum(_is_mac_workflow(workflow, field) for workflow in selected) > 1:
+        _stop('CI_PROFILE_INVALID')
     # #1558: like task_advance._merge_checks, Mac only for Mac-workflow paths.
     if (not docs_only and type(changed_paths) is list and changed_paths and
             all(type(path) is str for path in changed_paths)):
         from . import task_advance  # imported here: task_advance imports this module
         if not task_advance._mac_ci_runs(changed_paths):
             selected = [workflow for workflow in selected
-                        if workflow[field] != _m._MAC_CHECK]
+                        if not _is_mac_workflow(workflow, field)]
     if not selected:
         _stop('TRUST_CI_INVALID')
+    required_checks = [_profile_check_name(workflow, field, mac_check)
+                       for workflow in selected]
+    if len(set(required_checks)) != len(required_checks):
+        _stop('CI_PROFILE_INVALID')
     results = []
     for index, workflow in enumerate(selected):
         try:
             result = _parent_collect_one_ci_workflow(
                 pr_number=pr_number, result_sha=result_sha,
                 workflow_path=workflow['path'], workflow_name=workflow['name'],
-                check_name=workflow[field], runner_names=workflow['runner_names'],
+                check_name=_profile_check_name(workflow, field, mac_check),
+                runner_names=workflow['runner_names'],
                 runner_labels=workflow['runner_labels'], mode=ci_trust['mode'],
                 app_id=ci_trust['github_actions_app_id'], pr_merged=pr_merged,
                 pr_head_ref=pr_head_ref)
@@ -363,7 +405,8 @@ def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None,
                         pr_number=pr_number, result_sha=result_sha,
                         workflow_path=later_workflow['path'],
                         workflow_name=later_workflow['name'],
-                        check_name=later_workflow[field],
+                        check_name=_profile_check_name(
+                            later_workflow, field, mac_check),
                         runner_names=later_workflow['runner_names'],
                         runner_labels=later_workflow['runner_labels'],
                         mode=ci_trust['mode'], app_id=ci_trust['github_actions_app_id'],
@@ -394,7 +437,7 @@ def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None,
                     'successful_checks': sorted(successful), 'check_ids': check_ids,
                     'check_outcomes': check_outcomes, 'linux_required': linux_required,
                     'docs_only': docs_only,
-                    'required_checks': sorted(item[field] for item in selected),
+                    'required_checks': sorted(required_checks),
                     'workflow_path': primary_workflow['path'],
                     'workflow_name': primary_workflow['name']}
         results.append(result)
@@ -409,6 +452,6 @@ def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None,
             'successful_checks': sorted(successful), 'check_ids': check_ids,
             'check_outcomes': check_outcomes,
             'linux_required': linux_required, 'docs_only': docs_only,
-            'required_checks': sorted(workflow[field] for workflow in selected),
+            'required_checks': sorted(required_checks),
             'workflow_path': primary_workflow['path'],
             'workflow_name': primary_workflow['name']}

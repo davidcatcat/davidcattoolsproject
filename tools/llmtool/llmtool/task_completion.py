@@ -1311,6 +1311,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                             reviewer_task_id, common_dir, changed_paths=None,
                             task_record=None):
     """Read a public PR, formal review marker and exact-head required check runs."""
+    profile = _resolve_ci_profile()
     if (type(pr_number) is not int or not 1 <= pr_number <= 9999999 or
             type(result_sha) is not str or _HEX40.fullmatch(result_sha) is None or
             type(task_id) is not str or re.fullmatch(r'[0-9a-f]{32}', task_id) is None or
@@ -1612,7 +1613,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                       not reviewer_gates.intersection(missing))
     ci = _collect_ci_evidence(pr_number=pr_number, result_sha=result_sha,
                               changed_paths=changed_paths, pr_merged=is_merged_pr,
-                              pr_head_ref=pr['head'].get('ref'))
+                              pr_head_ref=pr['head'].get('ref'), profile=profile)
     successful = set(ci['successful_checks'])
     required_checks = set(ci['required_checks'])
     if not required_checks.issubset(successful):
@@ -1708,5 +1709,6 @@ from .task_completion_part3 import (  # noqa: E402
 from .task_completion_part4 import (  # noqa: E402
     _collect_ci_evidence,
     _collect_one_ci_workflow,
+    _resolve_ci_profile,
     verify_artifact_applied,
 )
