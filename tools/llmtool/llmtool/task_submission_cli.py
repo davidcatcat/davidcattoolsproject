@@ -1178,7 +1178,7 @@ def add_task_submission_parsers(actions):
                                  'the Task; default: CLAUDE_CODE_SESSION_ID or '
                                  'CODEX_THREAD_ID'))
     repair = actions.add_parser(
-        'repair', help='Dispatch one bounded repair for the newest failed formal review')
+        'repair', help='Dispatch one bounded repair for a failed review or hosted Linux test')
     repair.add_argument('task_id', help='existing durable Task ID')
     repair.add_argument('--executor-task', required=True,
                         help='registered D6 Executor task id bound to the Task')
@@ -1187,6 +1187,8 @@ def add_task_submission_parsers(actions):
     repair.add_argument('--family', help='root-cause family key (default: pr-<N>)')
     repair.add_argument('--auto-review', action='store_true',
                         help='dispatch the next formal review after a successful repair')
+    repair.add_argument('--from-hosted-linux', action='store_true',
+                        help='Repair an exact-head hosted Linux failure after repeated EC2 timeouts')
     repair.add_argument('--recover-claim', metavar='REPAIR_TASK_ID',
                         help=('#1928/#2475: recover this UNKNOWN repair claim after its '
                               'evidence checks; an EC2/CI claim returns to CLAIMED so the '
@@ -2906,7 +2908,7 @@ def _repost_truncated_fail(args, *, store=None, github_get=None, gh_runner=None)
 def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
                     current_head=None, review_dispatcher=None,
                     delegate_callable=None, repair_task_recorder=None):
-    """Thin CLI adapter for a bounded review-triggered Developer repair.
+    """CLI adapter for a bounded review or hosted Linux Developer repair.
 
     #1230 A1 (#1124 rest, item 2): the caller's PM session must own the Task.
     A refused caller gets one ``pm_caller.refusal`` line and exit 1, before any
@@ -2925,6 +2927,26 @@ def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
         _print(pending)
         return 1
     recover = getattr(args, 'recover_claim', None)
+    if getattr(args, 'from_hosted_linux', False):
+        if (recover is not None or getattr(args, 'auto_review', False) or
+                any(getattr(args, name, None) is not None for name in (
+                    'family', 'high_debug_task', 'high_debug_ref', 'high_debug_family'))):
+            raise LLMToolError('--from-hosted-linux cannot be combined with review or recovery options')
+        from . import hosted_ci_repair
+        from .review_repair import repair_review
+        try:
+            failure = hosted_ci_repair.failure_for_task(
+                store.get(args.task_id), args.executor_task, args.pr, github_get=github_get)
+            result = repair_review(
+                store=store, task_id=args.task_id, executor_task=args.executor_task,
+                pr_number=args.pr, github_get=github_get, dispatch_adapter=dispatch_adapter,
+                current_head=current_head, delegate_callable=delegate_callable,
+                repair_task_recorder=repair_task_recorder, ci_failure=failure)
+        except LLMToolError as exc:
+            code = getattr(exc, 'review_repair_code', 'HOSTED_CI_REPAIR_EVIDENCE_UNAVAILABLE')
+            _print({'task_id': args.task_id, 'code': code})
+            return 1
+        return _print(result)
     if recover is not None:
         if (getattr(args, 'auto_review', False) or getattr(args, 'family', None) is not None or
                 getattr(args, 'high_debug_task', None) is not None or
