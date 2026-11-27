@@ -306,7 +306,7 @@ class RealTaskStoreRepairAndRetryTests(unittest.TestCase):
 
     def _new_store(self):
         self._stores += 1
-        store_dir = Path(self.temp.name) / f'store_{self._stores}'
+        store_dir = Path(self.temp.name).resolve() / f'store_{self._stores}'
         store_dir.mkdir(mode=0o700)
         os.chmod(store_dir, 0o700)
         return TaskStore(store_dir)
