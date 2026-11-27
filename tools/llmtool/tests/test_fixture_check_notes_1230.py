@@ -47,6 +47,17 @@ class FixtureCheckNoteTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertIn("fixture-check note: sample.py: baseline can shrink (1 to 0)", output)
         self.assertIn("fixture-check: 0 violation(s)", output)
+        self.assertIn(
+            "fixture-check: baseline outcome: within baseline; 0 observed finding(s)", output)
+
+    def test_main_reports_findings_within_baseline_and_succeeds(self):
+        status, _violations, output = self.run_with(
+            {"sample.py": 1}, ["sample.py:1: demo_rule"], use_main=True)
+        self.assertEqual(status, 0)
+        self.assertIn("tools/llmtool/tests/sample.py:1: demo_rule", output)
+        self.assertIn("fixture-check: 1 violation(s)", output)
+        self.assertIn(
+            "fixture-check: baseline outcome: within baseline; 1 observed finding(s)", output)
 
     def test_exceeded_baseline_keeps_status_and_counts_real_violation(self):
         status, _violations, output = self.run_with(
@@ -54,6 +65,9 @@ class FixtureCheckNoteTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("tools/llmtool/tests/sample.py:1: demo_rule", output)
         self.assertIn("fixture-check: 1 violation(s)", output)
+        self.assertIn(
+            "fixture-check: baseline outcome: above baseline; 1 observed finding(s)", output)
+        self.assertNotIn("within baseline", output)
         self.assertNotIn("fixture-check note:", output)
 
     def test_check_returns_exceeded_status_with_the_real_violation(self):

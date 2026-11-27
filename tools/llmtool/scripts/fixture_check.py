@@ -381,6 +381,9 @@ def main(argv: list[str] | None = None) -> int:
     for item in violations:
         print(item)
     print(f"fixture-check: {len(violations)} violation(s)")
+    if not args.write_baseline:
+        outcome = "above baseline" if status else "within baseline"
+        print(f"fixture-check: baseline outcome: {outcome}; {len(violations)} observed finding(s)")
     return status
 
 
