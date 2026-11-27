@@ -9546,6 +9546,7 @@ class CodexThreadTaskReadTests(unittest.TestCase):
         thread_event = self.active_record(
             '7' * 32, 'pm-' + self.THREAD_ID,
             developer={'state': 'DEVELOPER_RESPONDED'},
+            completion={'state': 'WAITING_PM'},
             completion_events=[{
                 'task_id': '7' * 32, 'event_id': 'a' * 32, 'state': 'PENDING', 'current': True,
                 'received_at': '2026-11-27T00:03:00Z', 'sequence': 0,
@@ -9598,7 +9599,7 @@ class CodexThreadTaskReadTests(unittest.TestCase):
             config_path.parent.mkdir(parents=True)
             config_path.write_text(CONFIG)
             state_root = root / 'pm-state'
-            state_root.mkdir(parents=True)
+            state_root.mkdir(parents=True, mode=0o700)
             pm_runtime._write_json_atomic(
                 state_root,
                 pm_runtime._runtime_state_path(state_root, 'pm-' + self.NATIVE_ID),
@@ -9615,8 +9616,10 @@ class CodexThreadTaskReadTests(unittest.TestCase):
 
             session = ChatSession(resolve_config(environ={}, cwd=home, home=home))
             api = chat_tui_pm.PMRuntimeAPI(state_root=state_root, environ={'HOME': str(home)})
-            with create_pipe_input() as pipe:
-                ui = chat_tui.ChatTUI(session, input=pipe, output=DummyOutput(), pm_api=api)
+            with patch('llmtool.chat_tui_theme.settings_path',
+                       return_value=root / 'tui-settings.json'):
+                with create_pipe_input() as pipe:
+                    ui = chat_tui.ChatTUI(session, input=pipe, output=DummyOutput(), pm_api=api)
             ui.pm_runtime = Mock(runtime='codex', _root=state_root, state_root=state_root,
                                  turn_active=Mock(return_value=False),
                                  automatic_sends_blocked=Mock(return_value=False))
