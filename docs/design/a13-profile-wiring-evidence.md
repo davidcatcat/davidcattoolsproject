@@ -29,8 +29,8 @@ record.
 | #2825 | `d3594f48` | Test profile | `task_completion.py`, `task_completion_part3.py` | `test_a13_test_profile_wiring.py` |
 | #2827 | `6de84094` | CI profile | `main_incident.py`, `main_incident_cli.py` | `test_a13_ci_profile_wiring_merge.py` |
 | #2830 | `a090bb2e` | CI profile | `merge_train_eligibility.py`; merge check gate in `task_advance.py` | `test_a13_ci_profile_wiring_gate.py` |
-| #2829 | `31734f77` | CI profile | `review_repair.py`, `start_failure.py`, `task_submission_cli.py` (with `TaskStore` persistence in `task_store.py`) | `test_a13_ci_profile_wiring_repair.py` |
-| #2832 | `c494c928` | CI profile | `task_completion.py` | `test_a13_ci_profile_wiring_completion.py` |
+| #2829 | `31734f77` | CI profile | `review_repair.py`, `start_failure.py` (regression test also exercises `task_submission_cli.py` and `TaskStore` in `task_store.py`) | `test_a13_ci_profile_wiring_repair.py` |
+| #2832 | `c494c928` | CI profile | `task_completion.py`, `task_completion_part4.py` | `test_a13_ci_profile_wiring_completion.py` |
 | #2835 | `e8e883fb` | CI profile | `task_submission_cli.py` | `test_a13_ci_profile_wiring_prompt.py` |
 
 ### Substituted-profile and refusal coverage (test coverage only)
