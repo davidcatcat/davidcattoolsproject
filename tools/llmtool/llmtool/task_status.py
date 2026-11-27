@@ -37,6 +37,7 @@ _DEVELOPER_STATES = {
     'DEVELOPER_UNAVAILABLE': 'UNAVAILABLE',
     'DEVELOPER_OUTCOME_UNKNOWN': 'UNKNOWN',
     'DEVELOPER_OUTPUT_REJECTED': 'FAILED',
+    'BLOCKED': 'BLOCKED',
 }
 
 
@@ -60,19 +61,24 @@ def derive_state(record):
         return 'COMPLETED'
     developer = record.get('developer')
     if type(developer) is dict:
+        state = developer.get('state')
+        codex_blocked = (state == 'DEVELOPER_OUTCOME_UNKNOWN' and
+                         developer.get('error_code') == 'CODEX_BLOCKED')
         callback = developer.get('direct_result_callback')
         if type(callback) is dict:
-            state = _CALLBACK_STATES.get(callback.get('state'))
+            cb_state = _CALLBACK_STATES.get(callback.get('state'))
             gates = callback.get('missing_gates')
-            if state is None:
+            if cb_state is None:
                 return 'UNKNOWN'
-            if state == 'RUNNING' and type(gates) is list and gates:
-                return 'BLOCKED'
-            return state
-        state = developer.get('state')
+            if cb_state == 'RUNNING':
+                if state == 'BLOCKED' or codex_blocked:
+                    return 'BLOCKED'
+                if type(gates) is list and gates:
+                    return 'BLOCKED'
+            return cb_state
         mapped = _DEVELOPER_STATES.get(state)
         if mapped is not None:
-            if state == 'DEVELOPER_OUTCOME_UNKNOWN' and developer.get('error_code') == 'CODEX_BLOCKED':
+            if codex_blocked:
                 return 'BLOCKED'
             if state != 'DEVELOPER_RESPONDED':
                 return mapped
