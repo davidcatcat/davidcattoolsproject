@@ -9547,7 +9547,7 @@ class CodexThreadTaskReadTests(unittest.TestCase):
             '7' * 32, 'pm-' + self.THREAD_ID,
             developer={'state': 'DEVELOPER_RESPONDED'},
             completion_events=[{
-                'event_id': 'a' * 32, 'state': 'PENDING', 'current': True,
+                'task_id': '7' * 32, 'event_id': 'a' * 32, 'state': 'PENDING', 'current': True,
                 'received_at': '2026-11-27T00:03:00Z', 'sequence': 0,
                 'source': 'DIRECT_D6_DEVELOPER', 'session_id': 's' * 32,
                 'run_id': 'r' * 32, 'source_sha': '0' * 40, 'payload_sha256': '1' * 64,
