@@ -505,12 +505,8 @@ def _review_binding_line(task_id, run_id, contract_digest, result_sha):
 
 
 def _registered_test(path):
-    if type(path) is not str:
-        return None
-    for pattern, kind in _m._TEST_REGISTRY:
-        if pattern.fullmatch(path):
-            return kind
-    return None
+    """Return the runner kind the parent's live test-evidence profile gives."""
+    return _m._classify_test_path(path)
 
 
 def _docs_only(paths):

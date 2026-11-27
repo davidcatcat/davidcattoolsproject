@@ -39,6 +39,7 @@ from datetime import datetime, timezone
 from . import github_identity
 from . import repair_policy
 from . import source_freshness
+from . import test_profile
 from . import trust
 from . import worker_dispatch
 from .errors import LLMToolError
@@ -74,10 +75,6 @@ _GITHUB_ACTIONS_APP_ID = 15368
 _D6_EVIDENCE_STATES = frozenset(('ACTIVE', 'REVIEW_PENDING', 'REPAIR'))
 # A GitHub-hosted job reports this runner group; self-hosted groups never do.
 _GITHUB_HOSTED_RUNNER_GROUP = 'GitHub Actions'
-_TEST_REGISTRY = (
-    (re.compile(r'tools/llmtool/tests/test_[A-Za-z0-9_]+\.py\Z'), 'unittest'),
-    (re.compile(r'scripts/test_[A-Za-z0-9_]+\.py\Z'), 'script'),
-)
 _REVIEW_ID = re.compile(r'[a-z0-9][a-z0-9-]{0,95}\Z')
 _REVIEW_VERDICTS = frozenset(('PASS', 'FAIL', 'BLOCKED'))
 _GH_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
@@ -136,6 +133,34 @@ def _stop(code):
     error = LLMToolError('Executor completion evidence is unavailable; details omitted')
     error.completion_code = code
     raise error from None
+
+
+def _classify_test_path(path):
+    """Return the runner kind the live test-evidence profile gives a path.
+
+    ``test_profile.default_profile`` is looked up at use time so a caller can
+    substitute a profile. A provider that is missing, raises, or returns
+    anything other than a :class:`TestProfile` refuses with
+    ``TEST_PROFILE_INVALID``, as does a path that matches entries with
+    different runner kinds. Classification never falls back to an older
+    registry.
+    """
+    provider = getattr(test_profile, 'default_profile', None)
+    if not callable(provider):
+        _stop('TEST_PROFILE_INVALID')
+    try:
+        profile = provider()
+    except Exception:
+        _stop('TEST_PROFILE_INVALID')
+    if type(profile) is not test_profile.TestProfile:
+        _stop('TEST_PROFILE_INVALID')
+    if type(path) is not str:
+        return None
+    kinds = {kind for pattern, kind in profile.entries
+             if pattern.fullmatch(path) is not None}
+    if len(kinds) > 1:
+        _stop('TEST_PROFILE_INVALID')
+    return kinds.pop() if kinds else None
 
 
 def _canonical_json_bytes(value, code):
