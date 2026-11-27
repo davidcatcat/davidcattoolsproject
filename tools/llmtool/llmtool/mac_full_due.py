@@ -144,7 +144,7 @@ def full_runs(github_get, *, profile=_UNSET):
 
 
 def trusted(github_get, run, *, profile=_UNSET):
-    """A success counts only when every shard job and the check job succeeded."""
+    """A success counts only when every required job has exactly one success record."""
     resolved = resolve_profile(profile)
     if run.get('status') != 'completed' or run.get('conclusion') != 'success':
         return False
@@ -155,8 +155,19 @@ def trusted(github_get, run, *, profile=_UNSET):
     jobs = data.get('jobs') if isinstance(data, dict) else None
     if not isinstance(jobs, list):
         raise StateError('jobs')
-    done = {job.get('name'): job.get('conclusion') for job in jobs if isinstance(job, dict)}
-    return all(done.get(name) == 'success' for name in full_jobs(resolved))
+    required = set(full_jobs(resolved))
+    conclusions = {}
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        name = job.get('name')
+        if name not in required:
+            continue
+        if name in conclusions:
+            # Two records for one required job disagree or are ambiguous: fail closed.
+            return False
+        conclusions[name] = job.get('conclusion')
+    return all(conclusions.get(name) == 'success' for name in required)
 
 
 def sha_result(github_get, runs, sha, skip_id=None, *, profile=_UNSET):

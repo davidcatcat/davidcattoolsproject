@@ -118,6 +118,37 @@ class MacFullDueCases(unittest.TestCase):
         self.github.finish(jobs=[dict(job, conclusion='skipped') for job in OK_JOBS])
         self.assertEqual(self.sweep(T0 + 2100), due.DISPATCHED)
 
+    def test_e_missing_required_job_is_not_trusted(self):
+        self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
+        self.github.finish(jobs=OK_JOBS[:-1])
+        self.assertNotEqual(self.sweep(T0 + 2100), due.VERIFIED)
+        self.assertEqual(len(self.gh.calls), 2)
+
+    def test_e_duplicate_required_job_is_never_trusted(self):
+        check = due.JOBS[-1]
+        cases = (
+            ('success_then_failure', OK_JOBS + [{'name': check, 'conclusion': 'failure'}]),
+            ('failure_then_success', [{'name': check, 'conclusion': 'failure'}] + OK_JOBS),
+            ('success_then_success', OK_JOBS + [{'name': check, 'conclusion': 'success'}]),
+            ('duplicate_shard', OK_JOBS + [{'name': due.SHARD_JOBS[0], 'conclusion': 'failure'}]),
+        )
+        for label, jobs in cases:
+            with self.subTest(case=label):
+                self.setUp()
+                self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
+                self.github.finish(jobs=jobs)
+                self.assertNotEqual(self.sweep(T0 + 2100), due.VERIFIED)
+                self.assertEqual(len(self.gh.calls), 2)
+
+    def test_e_unrelated_job_names_do_not_change_trust(self):
+        self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
+        self.github.finish(jobs=OK_JOBS + [
+            {'name': 'lint', 'conclusion': 'failure'},
+            {'name': 'macos-check-extra', 'conclusion': 'success'},
+        ])
+        self.assertEqual(self.sweep(T0 + 2100), due.VERIFIED)
+        self.assertEqual(len(self.gh.calls), 1)
+
     def test_f_failed_full_keeps_fail_raises_alert_and_never_passes(self):
         self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
         self.github.finish('failure')
