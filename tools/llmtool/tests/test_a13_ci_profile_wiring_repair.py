@@ -409,23 +409,18 @@ class RealTaskStoreRepairAndRetryTests(unittest.TestCase):
 
     def test_out_of_set_name_with_matching_digest_refuses_in_verifier_and_retry(self):
         store = self._new_store()
-        default_name = _default_checks()[0]
         forged_name = _alt_checks()[0]
-        root_id, repair_task_id, packet, persisted_root, claim = (
-            self._build_and_persist_repair(store, default_name)
-        )
-        header, _, rest = packet['reviewer_text_excerpt_untrusted_data'].partition('\n')
-        forged_packet = dict(packet, reviewer_text_excerpt_untrusted_data=(
-            header.replace(default_name, forged_name) + '\n' + rest))
-        forged_claim = dict(claim, packet_sha256=_identity(
-            forged_name, task=root_id, executor=D6, head=HEAD, pr=PR))
-        store.compare_and_update(
-            root_id,
-            expected={'record_sha256': persisted_root['record_sha256']},
-            review_repair_claims=[forged_claim],
-        )
+        with mock.patch.object(ci_profile, 'default_profile',
+                               return_value=ALT_PROFILE):
+            root_id, repair_task_id, forged_packet, _persisted_root, claim = (
+                self._build_and_persist_repair(store, forged_name)
+            )
         reread_root = store.get(root_id)
         reread_claim = reread_root['review_repair_claims'][0]
+        self.assertEqual(
+            reread_claim['packet_sha256'],
+            _identity(forged_name, task=root_id, executor=D6, head=HEAD, pr=PR),
+        )
 
         self.assertFalse(start_failure.repair_packet_matches(
             forged_packet, reread_claim, reread_root, store))
