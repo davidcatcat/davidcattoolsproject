@@ -431,6 +431,62 @@ class MalformedStreamPositionTests(unittest.TestCase):
         self.assertIs(task_advance._well_formed_review_refusal(exc.review_refusal),
                       exc.review_refusal)
 
+    def test_useful_agent_message_followed_by_whitespace_message_preserves_observed(self):
+        useful_text = 'synthetic useful agent message'
+        bad_line = 'not valid json after whitespace agent message'
+        raw = (
+            json.dumps({'type': 'thread.started', 'thread_id': '0123456789abcdef'}) + '\n'
+            + json.dumps({'type': 'item.completed',
+                          'item': {'type': 'agent_message', 'text': useful_text}}) + '\n'
+            + json.dumps({'type': 'item.completed',
+                          'item': {'type': 'agent_message', 'text': '   \n\t '}}) + '\n'
+            + bad_line + '\n'
+        ).encode('utf-8')
+        exc = self._refusal(raw)
+        receipt = self._receipt(exc)
+
+        self._assert_not_a_verdict_and_no_text(receipt, [useful_text, bad_line])
+        diag = receipt['stream_diagnostic']
+        self.assertEqual(diag['position'], review_dispatch.STREAM_MALFORMED_AFTER_AGENT_MESSAGE)
+        self.assertEqual(diag['category'], review_dispatch.STREAM_MALFORMED_INVALID_JSON)
+        self.assertEqual(diag['line'], 4)
+        self.assertEqual(diag['valid_events'], 3)
+        self.assertEqual(diag['agent_messages'], 2)
+        self.assertIs(diag['agent_message_observed'], True)
+        self.assertIs(diag['useful_agent_message_observed'], True)
+        self.assertNotIn('stream_diagnostic', exc.review_refusal)
+        self.assertIs(task_advance._well_formed_review_refusal(exc.review_refusal),
+                      exc.review_refusal)
+
+    def test_useful_agent_message_followed_by_oversized_message_preserves_observed(self):
+        useful_text = 'synthetic useful agent message'
+        oversized_text = 'oversized-marker-' + ('a' * review_dispatch._CODEX_REVIEW_MAX_OUTPUT)
+        bad_line = '{"dup": 1, "dup": 2}'
+        raw = (
+            json.dumps({'type': 'thread.started', 'thread_id': '0123456789abcdef'}) + '\n'
+            + json.dumps({'type': 'item.completed',
+                          'item': {'type': 'agent_message', 'text': useful_text}}) + '\n'
+            + json.dumps({'type': 'item.completed',
+                          'item': {'type': 'agent_message', 'text': oversized_text}}) + '\n'
+            + bad_line + '\n'
+        ).encode('utf-8')
+        exc = self._refusal(raw)
+        receipt = self._receipt(exc)
+
+        self._assert_not_a_verdict_and_no_text(
+            receipt, [useful_text, 'oversized-marker-', bad_line])
+        diag = receipt['stream_diagnostic']
+        self.assertEqual(diag['position'], review_dispatch.STREAM_MALFORMED_AFTER_AGENT_MESSAGE)
+        self.assertEqual(diag['category'], review_dispatch.STREAM_MALFORMED_DUPLICATE_KEY)
+        self.assertEqual(diag['line'], 4)
+        self.assertEqual(diag['valid_events'], 3)
+        self.assertEqual(diag['agent_messages'], 2)
+        self.assertIs(diag['agent_message_observed'], True)
+        self.assertIs(diag['useful_agent_message_observed'], True)
+        self.assertNotIn('stream_diagnostic', exc.review_refusal)
+        self.assertIs(task_advance._well_formed_review_refusal(exc.review_refusal),
+                      exc.review_refusal)
+
     def _advance_malformed(self, raw, *, fail_receipt_write=False):
         record = {
             'task_id': TASK, 'run_id': RUN, 'record_sha256': 'r' * 64,

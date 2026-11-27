@@ -711,7 +711,7 @@ def _codex_stream_diagnostic(raw):
         raw_lines.pop()
     valid_events = 0
     agent_messages = 0
-    final = None
+    useful_agent_message_observed = False
     for index, raw_line in enumerate(raw_lines, 1):
         if not raw_line:
             continue
@@ -743,8 +743,7 @@ def _codex_stream_diagnostic(raw):
                 'valid_events': valid_events,
                 'agent_messages': agent_messages,
                 'agent_message_observed': agent_messages > 0,
-                'useful_agent_message_observed': (
-                    final is not None and bool(final.strip())),
+                'useful_agent_message_observed': useful_agent_message_observed,
             }
         if type(event) is dict:
             valid_events += 1
@@ -755,10 +754,8 @@ def _codex_stream_diagnostic(raw):
                     type(item.get('text')) is str):
                 agent_messages += 1
                 text = item['text']
-                if len(text.encode('utf-8')) > _CODEX_REVIEW_MAX_OUTPUT:
-                    final = None
-                else:
-                    final = text
+                if len(text.encode('utf-8')) <= _CODEX_REVIEW_MAX_OUTPUT and text.strip():
+                    useful_agent_message_observed = True
     return None
 
 
