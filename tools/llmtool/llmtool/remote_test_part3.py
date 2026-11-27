@@ -1,3 +1,72 @@
+# #1706 R9: reproduce a main incident's failing modules on EC2 ------------------
+
+INCIDENT_UNKNOWN = 'INCIDENT_UNKNOWN'
+INCIDENT_UNREADABLE = 'INCIDENT_UNREADABLE'
+INCIDENT_NOT_OPEN = 'INCIDENT_NOT_OPEN'
+INCIDENT_ARGUMENT_INVALID = 'INCIDENT_ARGUMENT_INVALID'
+INCIDENT_SHA_NOT_RECORDED = 'INCIDENT_SHA_NOT_RECORDED'
+INCIDENT_MODULE_NOT_FAILING = 'INCIDENT_MODULE_NOT_FAILING'
+INCIDENT_MODULE_CAP = 'INCIDENT_MODULE_CAP'
+INCIDENT_CONFIG_INVALID = 'CONFIG_INVALID'
+INCIDENT_RECEIPT_SENSITIVE = 'RECEIPT_SENSITIVE'
+INCIDENT_RECEIPT_INCONSISTENT = 'RECEIPT_INCONSISTENT'
+_INCIDENT_RECORD_ATTEMPTS = 3
+
+
+def _screen_incident_receipt(parsed):
+    """Screen every output-derived field of a validated receipt (PR #1763, CWE-532).
+
+    ``final`` lines and ``failure_excerpt`` are the only receipt strings taken
+    from test output. Each goes through the sensitive-content screen; any hit
+    refuses the whole receipt (None). A final line that passes the screen but
+    is not in the unittest summary grammar (``main_incident_store.FINAL_SUMMARY``)
+    is redacted to ``main_incident_store.FINAL_REDACTED``; the store checks both
+    again before it records the receipt. The Task remote-test path does not use
+    this function.
+    """
+    from . import main_incident_store as incident_store
+    finals = parsed['final']
+    excerpt = parsed.get('failure_excerpt')
+    values = list(finals) + ([excerpt] if excerpt is not None else [])
+    if any(_emitted_sensitive(value) for value in values):
+        return None
+    screened = dict(parsed)
+    screened['final'] = [line if incident_store.FINAL_SUMMARY.fullmatch(line)
+                         else incident_store.FINAL_REDACTED for line in finals]
+    return screened
+
+
+def _incident_denied(code, incident_id):
+    """A refusal before anything ran; nothing is recorded anywhere."""
+    from . import main_incident_store as incident_store
+    safe = (incident_id if type(incident_id) is str and
+            incident_store.INCIDENT_ID.fullmatch(incident_id) else None)
+    return {'result': 'ADMISSION_DENIED', 'code': code, 'incident_id': safe,
+            'persisted': False}
+
+
+def _record_incident_result(incident_store, incident_id, entry, root):
+    """Append entry to the incident, rereading after a concurrent change.
+
+    The record is forward only, so a newer version still holds every SHA and
+    failing module the run was admitted on; the store re-checks that anyway.
+    """
+    code = incident_store.INCIDENT_RECORD_CONFLICT
+    for _ in range(_INCIDENT_RECORD_ATTEMPTS):
+        try:
+            current = incident_store.get(incident_id, root)
+            saved = incident_store.append_remote_test(
+                incident_id, current['record_sha256'], entry, root)
+        except LLMToolError as exc:
+            code = getattr(exc, 'incident_code', None) or incident_store.INCIDENT_RECORD_UNAVAILABLE
+            if code == incident_store.INCIDENT_RECORD_CONFLICT:
+                continue
+            break
+        return dict(entry, incident_id=incident_id, persisted=True,
+                    record_sha256=saved['record_sha256'])
+    return dict(entry, incident_id=incident_id, persisted=False, record_code=code)
+
+
 def run_incident_remote_test(incident_id, *, sha, modules=(), root=None,
                              config_path=None, transport=None, now=None):
     """Run a main incident's failing modules at one of its SHAs over EC2 SSH.
