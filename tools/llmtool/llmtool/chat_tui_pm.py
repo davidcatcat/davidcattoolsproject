@@ -164,7 +164,7 @@ class PMRuntimeAPI:
                    'home': None if self.environ is None else self.environ.get('HOME')}
         if type(account) is str and account:
             options['cli'] = {'account': account}
-        roles = (('pm-codex-binding', 'pm') if runtime == 'codex'
+        roles = (('pm-codex-binding',) if runtime == 'codex'
                  else ('pm', 'pm-claude-binding'))
         for role in roles:
             try:

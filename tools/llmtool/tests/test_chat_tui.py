@@ -9734,6 +9734,23 @@ class PMStatusModelTests(unittest.TestCase):
             api = chat_tui_pm.PMRuntimeAPI(environ={})
             self.assertEqual(api.configured_model('claude-code', {}), 'configured-pm-model')
 
+    def test_codex_status_does_not_fall_back_to_the_claude_pm_role(self):
+        calls = []
+
+        def resolve(role, **_options):
+            calls.append(role)
+            return {'model': 'claude-pm-model'} if role == 'pm' else {}
+
+        with patch('llmtool.role_config.resolve_role', side_effect=resolve):
+            api = Mock()
+            api.read_all_turns.return_value = []
+            resolver = chat_tui_pm.PMRuntimeAPI(environ={}).configured_model
+            api.configured_model.side_effect = resolver
+            status = self.status('codex', {'runtime': 'codex', 'account': 'codex-test'}, api=api)
+        self.assertIn('PM 模型：UNKNOWN', status)
+        self.assertNotIn('claude-pm-model', status)
+        self.assertEqual(calls, ['pm-codex-binding'])
+
 
 class PMUsageCodexCachedTokenTests(unittest.TestCase):
     """R2: Codex cached_input_tokens count as cached-read tokens; Claude is unchanged."""
