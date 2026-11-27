@@ -127,6 +127,35 @@ class MainCiJobSummaryTests(unittest.TestCase):
         self.assertEqual(result['failing'],
                          [{'id': 2, 'name': GATEWAY, 'conclusion': 'failure'}])
 
+    def test_nonpositive_job_id_is_malformed_and_not_reported_as_failing(self):
+        # Zero or negative job IDs are malformed and must not be admitted to
+        # failing even when status is completed and conclusion is failing.
+        for bad_id in (0, -1):
+            with self.subTest(job_id=bad_id):
+                pages = [[job(bad_id, GATEWAY, 'failure')]]
+                result = summary.summarize(SHA, pages, 1)
+                self.assertEqual(result['state'], summary.UNKNOWN)
+                self.assertEqual(result['reason'], summary.MALFORMED_JOB)
+                self.assertEqual(result['failing'], [])
+                self.assertEqual(result['total_jobs'], 0)
+
+    def test_positive_failing_jobs_reported_alongside_nonpositive_job_id(self):
+        # Positive failed job IDs before and after a nonpositive-ID job are
+        # still reported in input order with state UNKNOWN.
+        for bad_id in (0, -5):
+            with self.subTest(job_id=bad_id):
+                pages = [[job(1, CHECK, 'cancelled'),
+                          job(bad_id, 'broken', 'failure'),
+                          job(2, GATEWAY, 'failure')]]
+                result = summary.summarize(SHA, pages, 3)
+                self.assertEqual(result['state'], summary.UNKNOWN)
+                self.assertEqual(result['reason'], summary.MALFORMED_JOB)
+                self.assertEqual(
+                    result['failing'],
+                    [{'id': 1, 'name': CHECK, 'conclusion': 'cancelled'},
+                     {'id': 2, 'name': GATEWAY, 'conclusion': 'failure'}])
+                self.assertEqual(result['total_jobs'], 2)
+
     def test_malformed_page_does_not_hide_failing_job_on_another_page(self):
         # F1: a malformed page is skipped, so a failing job on a usable page is
         # still reported.
