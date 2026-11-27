@@ -982,8 +982,8 @@ def _run_registered_tests(root, source_sha, eligible, *, home, pycache=None):
             'duration_ms': max(0, int((time.monotonic()-started)*1000)),
             'command_sha256': hashlib.sha256(json.dumps(argv, separators=(',', ':')).encode()).hexdigest(),
         }
-        ran = re.findall(rb'(?m)^Ran ([0-9]+) tests?\b', output) if kind == 'script' else None
-        if code or (kind == 'script' and (not ran or int(ran[-1]) == 0)):
+        ran = re.findall(rb'(?m)^Ran ([0-9]+) tests?\b', output)
+        if code or not ran or int(ran[-1]) == 0:
             item['output_excerpt'] = _test_excerpt(home, output, code)
             item['status'] = 'FAILED'
         else:

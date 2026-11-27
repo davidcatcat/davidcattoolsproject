@@ -1,7 +1,9 @@
 """#2793 A13.0 wiring: completion classification follows llmtool.test_profile."""
 
 import re
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from llmtool import task_completion, test_profile
@@ -90,6 +92,36 @@ class SubstitutedProfileTests(unittest.TestCase):
         self.assertEqual(_eligible_with_profile(paths, CUSTOM_PROFILE), [
             ('tools/llmtool/tests/test_custom_one.py', 'script'),
         ])
+
+
+class ZeroTestDiscoveryTests(unittest.TestCase):
+    """A profile that sends a path to unittest discovery must run real tests.
+
+    F1: a substituted profile may classify a ``scripts/`` path as ``unittest``.
+    Discovery then looks for that basename under ``tools/llmtool/tests``; an
+    empty discovery must not be recorded as PASSED for the classified path.
+    """
+
+    def test_zero_test_unittest_discovery_is_recorded_as_failed(self):
+        profile = test_profile.TestProfile((
+            (re.compile(r'scripts/test_[A-Za-z0-9_]+\.py\Z'), 'unittest'),
+        ))
+        paths = ['scripts/test_absent.py']
+        snapshot = {'diff_sha256': DIFF_SHA256, 'changed_paths': list(paths),
+                    'source_sha': SOURCE_SHA}
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, 'tools', 'llmtool', 'tests').mkdir(parents=True)
+            with mock.patch.object(test_profile, 'default_profile',
+                                   return_value=profile), \
+                    mock.patch.object(task_completion, '_worktree_snapshot',
+                                      side_effect=[dict(snapshot), dict(snapshot)]):
+                evidence = task_completion.run_bounded_worktree_tests(
+                    root=root, source_sha=SOURCE_SHA,
+                    diff_sha256=DIFF_SHA256, changed_paths=list(paths),
+                    read_paths=list(paths), write_paths=[])
+        self.assertEqual([item['path'] for item in evidence], paths)
+        self.assertEqual(evidence[0]['exit_code'], 0)
+        self.assertEqual(evidence[0]['status'], 'FAILED')
 
 
 class SingleSnapshotTests(unittest.TestCase):
