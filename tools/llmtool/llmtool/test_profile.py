@@ -38,8 +38,9 @@ class TestProfile:
         """Build a profile from an ordered iterable of (pattern, kind) pairs.
 
         Raises :class:`TestProfileError` when the entry list is empty, when an
-        entry is not a two-item pair whose first item is a compiled pattern,
-        or when a kind is not exactly the string ``unittest`` or ``script``.
+        entry is not a two-item pair whose first item is a compiled string
+        pattern (a compiled bytes pattern is also refused), or when a kind
+        is not exactly the string ``unittest`` or ``script``.
         """
         validated = []
         for entry in entries:
@@ -47,6 +48,11 @@ class TestProfile:
                 raise TestProfileError()
             pattern, kind = entry
             if not isinstance(pattern, re.Pattern):
+                raise TestProfileError()
+            # A compiled bytes pattern is still a re.Pattern, but it would
+            # make kind_for raise TypeError for every normal string path;
+            # refuse it at construction with the fixed code instead.
+            if isinstance(pattern.pattern, bytes):
                 raise TestProfileError()
             # A type check first: plain membership relies on __eq__, so an
             # object with a permissive __eq__ could otherwise be accepted.
