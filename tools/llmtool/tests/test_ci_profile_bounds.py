@@ -1,10 +1,11 @@
 """#2793 A13.0: CI profile name bounds.
 
 Rejection tests with non-default fixtures, per the Coordinator technical
-review: each profile field in turn refuses an invalid name with the fixed
-error code, a name at the length limit is accepted while one character more
-is refused, and a profile built only from non-default names keeps every
-given name and differs from the default profile.
+review: each profile field in turn refuses an invalid name -- including an
+all-space identifier -- with the fixed error code, a name at the length
+limit is accepted while one character more is refused, and a profile built
+only from non-default names keeps every given name and differs from the
+default profile.
 """
 import dataclasses
 import unittest
@@ -37,6 +38,7 @@ class PerFieldRefusalTests(unittest.TestCase):
 
     _INVALID_NAMES = (
         ('empty', ''),
+        ('blank', '   '),
         ('non-printable', 'bad\nname'),
         ('over-100', 'a' * 101),
     )
