@@ -43,19 +43,22 @@ Stage 1 — verify each slice on its recorded HEAD, dependency order
    silently coerced or defaulted.
 7. EC2 evidence: the existing remote EC2 run reports the expected
    checks; record the output in the slice row in §3.
-8. Required CI: every check in the profile passes — Linux code check,
-   docs check, gateway check, ai-loop check, macOS check.
-9. Independent review: signed off by a reviewer outside the slice's
-    author set. Gates held: exact-head hosted docs check; formal review
-    by codex-reviewer.
+8. Independent review: signed off by a reviewer outside the slice's
+   author set. Gates held: exact-head hosted docs check; formal review
+   by codex-reviewer.
+9. Required CI: on the recorded HEAD, the Linux code check, docs
+   check, gateway check, and ai-loop check all pass.
+10. macOS check: formal review must be PASS before the PM enables the
+    macOS check (mac-ci). Once enabled, require its exact-head success
+    on the recorded HEAD before the slice merges.
 
 Stage 2 — sync
-10. Merge one slice at a time in dependency order; each slice must be
+11. Merge one slice at a time in dependency order; each slice must be
     at its Stage 0 recorded HEAD (no rebase or re-recording). Before
     each merge, record the then-current `main` HEAD in that slice's
     rollback target column in §3; after each merge, record the actual
     new `main` HEAD.
-11. After the last merge, confirm the live checkout uses the intended
+12. After the last merge, confirm the live checkout uses the intended
     revision: the live `main` revision must equal the final recorded
     post-merge `main` HEAD, and the controller must report the revision
     from step 2. `main` is deliberately past the step 1 baseline, so
@@ -92,9 +95,9 @@ requirement.
 
 ## 3. Per-slice evidence checklist
 
-`head` = recorded slice HEAD; `verdict` = ok only when steps 4–9 all
+`head` = recorded slice HEAD; `verdict` = ok only when steps 4–10 all
 pass for that HEAD. Rollback target = the `main` HEAD recorded before
-that slice's merge (step 10) — always a recorded HEAD, never a slice
+that slice's merge (step 11) — always a recorded HEAD, never a slice
 name, never a hand-edited state.
 
 | slice | feature | head | verdict | tests (evidence) | rollback target |
