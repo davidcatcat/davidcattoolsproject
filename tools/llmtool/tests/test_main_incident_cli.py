@@ -102,7 +102,8 @@ class FakeGitHub:
             return {'workflow_runs': self.mac}
         for sha in self.commits:
             if path == mic.LINUX_RUNS.format(sha=sha):
-                return {'check_runs': self.linux.get(sha, [])}
+                runs = self.linux.get(sha, [])
+                return {'total_count': len(runs), 'check_runs': runs}
             if path == f'commits/{sha}/pulls':
                 return self.pulls[sha]
         for run_id, jobs in self.jobs.items():
@@ -362,12 +363,13 @@ class MainIncidentCliTests(unittest.TestCase):
         valid_run = {'id': 1, 'name': mi.LINUX_CHECK, 'head_sha': A,
                      'status': 'completed', 'conclusion': 'success'}
         bad_responses = (
-            ('full_page', {'check_runs': full_page}),
+            ('full_page', {'total_count': len(full_page), 'check_runs': full_page}),
+            ('missing_total_count', {'check_runs': [valid_run]}),
             ('total_count_mismatch', {'total_count': 2, 'check_runs': [valid_run]}),
             ('total_count_str', {'total_count': '1', 'check_runs': [valid_run]}),
             ('total_count_bool', {'total_count': True, 'check_runs': [valid_run]}),
-            ('check_runs_not_list', {'check_runs': 'bad'}),
-            ('check_runs_non_dict', {'check_runs': [None]}),
+            ('check_runs_not_list', {'total_count': 1, 'check_runs': 'bad'}),
+            ('check_runs_non_dict', {'total_count': 1, 'check_runs': [None]}),
         )
         for kind, response in bad_responses:
             with self.subTest(kind=kind):

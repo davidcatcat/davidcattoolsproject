@@ -147,10 +147,9 @@ def _linux_runs(github_get, sha, *, profile=mac_full_due._UNSET):
     runs = data.get('check_runs') if isinstance(data, dict) else None
     if not isinstance(runs, list) or len(runs) >= 100:
         raise mac_full_due.StateError(path)
-    if 'total_count' in data:
-        total = data['total_count']
-        if type(total) is not int or total != len(runs):
-            raise mac_full_due.StateError(path)
+    total = data.get('total_count')
+    if type(total) is not int or total != len(runs):
+        raise mac_full_due.StateError(path)
     if any(not isinstance(run, dict) for run in runs):
         raise mac_full_due.StateError(path)
     out = []

@@ -128,7 +128,8 @@ class _IncidentGitHub:
             return {'workflow_runs': self.mac}
         for sha in self.commits:
             if path == mic.linux_runs_path(self.profile.linux_code_check, sha):
-                return {'check_runs': self.linux.get(sha, [])}
+                runs = self.linux.get(sha, [])
+                return {'total_count': len(runs), 'check_runs': runs}
             if path == f'commits/{sha}/pulls':
                 return self.pulls.get(sha, [])
         for run_id, jobs in self.jobs.items():
