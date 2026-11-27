@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 
 from .errors import LLMToolError
+from .store_fingerprint import fingerprint_directory
 from .task_index import TaskStatusIndex
 from .task_store import PM_NATIVE_SESSION_ID, SESSION_ID, TASK_ID, TaskStoreConflict
 
@@ -386,12 +387,11 @@ def _inbox(store, session_key, *, reconcile):
     events, blocked, pending = [], [], []
     for record in records:
         handoff = _active_pm_handoff(record)
-        if handoff is not None:
+        if not reconcile and handoff is not None:
             binding = _handoff_event(record, handoff)
             known = (record.get('completion_events', []) +
                      record.get('completion_event_tombstones', []))
-            if not reconcile and not any(
-                    event['event_id'] == binding['event_id'] for event in known):
+            if not any(event['event_id'] == binding['event_id'] for event in known):
                 pending.append({
                     'task_id': record['task_id'], 'event_id': binding['event_id'],
                     'source': binding['source'], 'session_id': binding['session_id'],
@@ -413,17 +413,18 @@ def _inbox(store, session_key, *, reconcile):
                         for event in record.get('completion_events', [])),
                     'action': _BLOCKED_ACTIONS.get(code, 'RETRY_INBOX'),
                 })
-        handoff = _active_pm_handoff(record)
-        current = None if handoff is None else _handoff_event(record, handoff)['event_id']
-        for event in record.get('completion_events', []):
-            if event['state'] == 'ACKED':
-                continue
-            events.append({
-                **event,
-                'current': event['event_id'] == current,
-                'active_pm_handoff': handoff if event['event_id'] == current else None,
-                'pm_recovery': recovery(record),
-            })
+        unacked = [event for event in record.get('completion_events', [])
+                   if event['state'] != 'ACKED']
+        if unacked:
+            handoff = _active_pm_handoff(record)
+            current = None if handoff is None else _handoff_event(record, handoff)['event_id']
+            for event in unacked:
+                events.append({
+                    **event,
+                    'current': event['event_id'] == current,
+                    'active_pm_handoff': handoff if event['event_id'] == current else None,
+                    'pm_recovery': recovery(record),
+                })
     events.sort(key=lambda event: (event['received_at'], event['task_id'], event['sequence']))
     unclaimed, claimed, assignments_code = _developer_assignments(store, session_key)
     return {'pm_session_id': session_key,
@@ -638,25 +639,60 @@ def peek_inbox(store, session_key):
     return _inbox(store, session_key, reconcile=False)
 
 
+def _store_fingerprint(store):
+    """Return the store root directory fingerprint, or None to fail closed."""
+    root = getattr(store, 'root', None)
+    if root is None:
+        return None
+    try:
+        return fingerprint_directory(root)
+    except Exception:
+        return None
+
+
+def _has_newly_unclaimed_assignment(store, session_key, already_unclaimed):
+    """True when any assignment became UNCLAIMED or assignments could not be read."""
+    unclaimed, _claimed, assignments_code = _developer_assignments(store, session_key)
+    if assignments_code is not None:
+        return True
+    return bool({item['assignment_id'] for item in unclaimed} - already_unclaimed)
+
+
 def wait_inbox(store, session_key, *, wait=False, timeout=DEFAULT_WAIT_SECONDS,
                poll=POLL_SECONDS, clock=time.monotonic, sleep=time.sleep):
     if type(timeout) is not int or not 0 <= timeout <= MAX_WAIT_SECONDS:
         raise LLMToolError('inbox timeout must be 0 to %d seconds' % MAX_WAIT_SECONDS)
     deadline = clock() + timeout
     already_unclaimed = None
+    last_fingerprint = None
+    last_inbox = None
     while True:
-        inbox = read_inbox(store, session_key)
-        unclaimed = {item['assignment_id'] for item in inbox['unclaimed_assignments']}
-        # Wake for assignments that become UNCLAIMED during this wait only, so a
-        # long-unclaimed assignment does not turn --wait into a tight loop.
-        newly_unclaimed = already_unclaimed is not None and bool(unclaimed - already_unclaimed)
-        already_unclaimed = unclaimed if already_unclaimed is None else already_unclaimed
-        if (inbox['events'] or inbox['blocked'] or newly_unclaimed or not wait or
-                clock() >= deadline):
-            inbox['timed_out'] = bool(wait and not inbox['events'] and not inbox['blocked']
-                                      and not newly_unclaimed)
-            return inbox
-        sleep(max(0.0, min(poll, deadline - clock())))
+        current_fingerprint = _store_fingerprint(store) if wait else None
+        if (not wait or last_inbox is None or current_fingerprint is None or
+                last_fingerprint is None or current_fingerprint != last_fingerprint or
+                _has_newly_unclaimed_assignment(store, session_key, already_unclaimed)):
+            inbox = read_inbox(store, session_key)
+            unclaimed = {item['assignment_id'] for item in inbox['unclaimed_assignments']}
+            # Wake for assignments that become UNCLAIMED during this wait only, so a
+            # long-unclaimed assignment does not turn --wait into a tight loop.
+            newly_unclaimed = (already_unclaimed is not None and
+                               bool(unclaimed - already_unclaimed))
+            already_unclaimed = unclaimed if already_unclaimed is None else already_unclaimed
+            last_fingerprint = current_fingerprint
+            last_inbox = inbox
+            if inbox['events'] or inbox['blocked'] or newly_unclaimed or not wait:
+                inbox['timed_out'] = False
+                return inbox
+            now = clock()
+            if now >= deadline:
+                inbox['timed_out'] = True
+                return inbox
+        else:
+            now = clock()
+            if now >= deadline:
+                last_inbox['timed_out'] = True
+                return last_inbox
+        sleep(max(0.0, min(poll, deadline - now)))
 
 
 def ack_decision_sha256(event_id):
