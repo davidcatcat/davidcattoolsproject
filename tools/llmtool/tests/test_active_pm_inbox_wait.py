@@ -512,7 +512,8 @@ class ActivePMInboxWaitTests(unittest.TestCase):
             return [scanned], 0
 
         with patch.object(task_submission_cli, '_active_pm_handoff',
-                          return_value=handoff), \
+                          side_effect=lambda record: (
+                              handoff if type(record.get('developer')) is dict else None)), \
              patch.object(active_pm_inbox, '_session_records',
                           side_effect=scan_then_ack):
             after_ack = active_pm_inbox.read_inbox(self.store, self.session_key)
@@ -556,23 +557,29 @@ class ActivePMInboxWaitTests(unittest.TestCase):
         scanned['completion_events'] = [dict(old_event, event_id=old_binding['event_id'])]
 
         new_handoff = {'packet': {'synthetic': 'new'}}
-        fresh_record = self.store.get(task['task_id'])
-        fresh_record['developer'] = {
-            'route': 'agy',
-            'session_id': 'synthetic-session',
-            'source_sha': 'c' * 40,
-            'direct_result_callback': {'state': 'PM_EVIDENCE_READY'},
-        }
-        fresh_record['record_sha256'] = task_store_module._digest(fresh_record)
-        self.store._write(fresh_record, create=False)
-        expected_binding = active_pm_inbox._handoff_event(fresh_record, new_handoff)
+        original_get = self.store.get
+
+        def get_with_fresh_developer(task_id):
+            record = original_get(task_id)
+            if task_id == task['task_id']:
+                record = dict(record, developer={
+                    'route': 'agy',
+                    'session_id': 'synthetic-session',
+                    'source_sha': 'c' * 40,
+                    'direct_result_callback': {'state': 'PM_EVIDENCE_READY'},
+                })
+            return record
+
+        expected_binding = active_pm_inbox._handoff_event(
+            get_with_fresh_developer(task['task_id']), new_handoff)
 
         def handoff_for_record(record):
             if record.get('developer', {}).get('source_sha') == 'c' * 40:
                 return new_handoff
             return old_handoff
 
-        with patch.object(task_submission_cli, '_active_pm_handoff',
+        with patch.object(self.store, 'get', side_effect=get_with_fresh_developer), \
+             patch.object(task_submission_cli, '_active_pm_handoff',
                           side_effect=handoff_for_record), \
              patch.object(active_pm_inbox, '_session_records',
                           return_value=([scanned], 0)):
