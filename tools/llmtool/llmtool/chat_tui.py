@@ -3793,50 +3793,6 @@ class ChatTUI:
                 lines.append("  … %d more (/pm list --all)" % (len(bindings) - 10))
             self.append("\n".join(lines))
             return
-        if parts[1:2] == ["use"]:
-            unknown = next((part for part in parts[2:] if part.startswith("-")), None)
-            if unknown is not None:
-                self.append("unknown option " + unknown + "\n" +
-                            _pm_subcommand_usage("use"))
-                return
-            if len(parts) != 3:
-                self.append(_pm_subcommand_usage("use"))
-                return
-            try:
-                old_binding = self._safe_current_binding()
-                old_session = (self.pm_target[0] if self.pm_target else
-                               (old_binding.get('native_session_id')
-                                if type(old_binding) is dict else None))
-                bindings = _pm_newest_first(self.pm_api.list_bindings())
-                # Short decimal tokens are list positions. An eight-character
-                # decimal token can also be a session ID prefix, so keep it in
-                # the prefix lookup below.
-                number = (int(parts[2]) - 1
-                          if parts[2].isdigit() and len(parts[2]) < 8 else None)
-                if number is not None:
-                    session_id = (bindings[number]['native_session_id']
-                                  if 0 <= number < len(bindings) else None)
-                else:
-                    matches = [row for row in bindings
-                               if isinstance(row.get('native_session_id'), str) and
-                               row['native_session_id'].startswith(parts[2])]
-                    session_id = (matches[0]['native_session_id']
-                                  if len(parts[2]) >= 8 and len(matches) == 1 else
-                                  parts[2] if any(row.get('native_session_id') == parts[2]
-                                                  for row in bindings) else None)
-                if session_id is None:
-                    raise ValueError()
-                binding = self.pm_api.select_binding(session_id)
-            except Exception:
-                self.append("llmtool: PM session not selected; use /pm list and /pm use N|SESSION")
-                return
-            self.append("PM selected: " + chat_tui_pm.safe_text(binding.get('runtime', 'claude-code'))
-                        + " account " + chat_tui_pm.safe_text(binding.get('account') or 'default')
-                        + " · " + chat_tui_pm.safe_text(binding.get('native_session_id'))[:8]
-                        + "; /pm connect to connect")
-            self._offer_pm_handover(old_session, binding.get('native_session_id'),
-                                    binding.get('cwd'))
-            return
         if parts[1:2] == ["accounts"]:
             if parts[2:] not in ([], ["--check"]):
                 if parts[2] != "--check" and parts[2].startswith("-"):
@@ -3871,6 +3827,49 @@ class ChatTUI:
             return
         if self.pm_pending:
             self.append("llmtool: a PM connect/disconnect/history request is in progress")
+            return
+        if parts[1:2] == ["use"]:
+            unknown = next((part for part in parts[2:] if part.startswith("-")), None)
+            if unknown is not None:
+                self.append("unknown option " + unknown + "\n" +
+                            _pm_subcommand_usage("use"))
+                return
+            if len(parts) != 3:
+                self.append(_pm_subcommand_usage("use"))
+                return
+            try:
+                old_session = self._previous_pm_session()
+                bindings = _pm_newest_first(self.pm_api.list_bindings())
+                # Short decimal tokens are list positions. An eight-character
+                # decimal token can also be a session ID prefix, so keep it in
+                # the prefix lookup below.
+                number = (int(parts[2]) - 1
+                          if parts[2].isdigit() and len(parts[2]) < 8 else None)
+                if number is not None:
+                    session_id = (bindings[number]['native_session_id']
+                                  if 0 <= number < len(bindings) else None)
+                else:
+                    matches = [row for row in bindings
+                               if isinstance(row.get('native_session_id'), str) and
+                               row['native_session_id'].startswith(parts[2])]
+                    session_id = (matches[0]['native_session_id']
+                                  if len(parts[2]) >= 8 and len(matches) == 1 else
+                                  parts[2] if any(row.get('native_session_id') == parts[2]
+                                                  for row in bindings) else None)
+                if session_id is None:
+                    raise ValueError()
+                binding = self.pm_api.select_binding(session_id)
+            except Exception:
+                self.append("llmtool: PM session not selected; use /pm list and /pm use N|SESSION")
+                return
+            if type(binding) is dict and binding.get('native_session_id'):
+                self._last_pm_session = binding['native_session_id']
+            self.append("PM selected: " + chat_tui_pm.safe_text(binding.get('runtime', 'claude-code'))
+                        + " account " + chat_tui_pm.safe_text(binding.get('account') or 'default')
+                        + " · " + chat_tui_pm.safe_text(binding.get('native_session_id'))[:8]
+                        + "; /pm connect to connect")
+            self._offer_pm_handover(old_session, binding.get('native_session_id'),
+                                    binding.get('cwd'))
             return
         if parts[1:2] == ["handover"]:
             sub = parts[2:]
@@ -4163,12 +4162,16 @@ class ChatTUI:
         new_session = offer.get("new_session")
         self.append(chat_tui_pm.handover_outcome_text(outcome, old_session, new_session))
         result = outcome.get("result")
+        same_offer = (type(self.pm_handover_offer) is dict and
+                      self.pm_handover_offer.get("old_session") == old_session and
+                      self.pm_handover_offer.get("new_session") == new_session)
+        if not same_offer:
+            return
         if ("error" not in outcome and type(result) is dict and
                 type(result.get("moved")) is list and type(result.get("skipped")) is list and
                 not result["skipped"]):
             self.pm_handover_offer = None
-        elif (type(self.pm_handover_offer) is dict and
-              type(outcome) is dict and
+        elif (type(outcome) is dict and
               type(outcome.get("remaining_count")) is int):
             self.pm_handover_offer["count"] = outcome["remaining_count"]
 
@@ -4197,6 +4200,8 @@ class ChatTUI:
                         + chat_tui_pm.error_text(outcome["error"]))
             return
         binding = outcome["binding"] if type(outcome["binding"]) is dict else {}
+        if binding.get("native_session_id"):
+            self._last_pm_session = binding["native_session_id"]
         self.append("Dedicated PM session " + chat_tui_pm.safe_text(binding.get("native_session_id"))
                     + " dedicated binding created (cwd " + chat_tui_pm.safe_text(binding.get("cwd"))
                     + "); the session starts on the first message. /pm connect connects to it.")

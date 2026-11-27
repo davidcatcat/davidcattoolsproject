@@ -507,6 +507,71 @@ class TUIHandoverTests(unittest.TestCase):
         self.assertNotIn("handover completed", ui.conversation.text)
         self.assertEqual(self.store.get(task["task_id"])["pm_session_id"], "pm-" + old)
 
+    def test_pm_use_refused_while_handover_pending_and_stale_finish_does_not_clobber(self):
+        old, task = self.stopped_claude_with_task()
+        second = self.bound_claude(account="claude-one", config_dir=self.first)
+        third = self.bound_claude(account="claude-one", config_dir=self.first)
+        pm_runtime.select_binding(old, state_root=self.state)
+
+        ui = self.make_ui()
+        ui.run_pm_command("/pm use " + second)
+        self.assertIsNotNone(ui.pm_handover_offer)
+
+        deferred = []
+
+        def hold_worker(target, *args):
+            ui.pm_pending = True
+            deferred.append((target, args))
+
+        ui._pm_worker = hold_worker
+        ui.run_pm_command("/pm handover")
+        self.assertTrue(ui.pm_pending)
+
+        before = len(ui.conversation.text)
+        ui.run_pm_command("/pm use " + third)
+        self.assertIn("in progress", ui.conversation.text[before:])
+        self.assertEqual(ui.pm_api.current_binding()["native_session_id"], second)
+        self.assertEqual(ui.pm_handover_offer["new_session"], second)
+
+        target, args = deferred[0]
+        target(*args, _ImmediateLoop())
+        self.assertFalse(ui.pm_pending)
+        self.assertEqual(self.store.get(task["task_id"])["pm_session_id"], "pm-" + second)
+        self.assertIsNone(ui.pm_handover_offer)
+
+        # A stale handover completion must not clobber a newer offer.
+        new_offer = {"old_session": second, "new_session": third,
+                     "cwd": str(self.cwd), "count": 1}
+        ui.pm_handover_offer = dict(new_offer)
+        ui.finish_pm_handover({
+            "offer": {"old_session": old, "new_session": second, "cwd": str(self.cwd), "count": 1},
+            "result": {"moved": [task["task_id"]], "skipped": []},
+        })
+        self.assertEqual(ui.pm_handover_offer, new_offer)
+
+    def test_consecutive_selection_after_disconnect_offers_handover_for_prior_selected_session(self):
+        first = self.bound_claude(account="claude-one", config_dir=self.first)
+        second, task = self.stopped_claude_with_task()
+        third = self.bound_claude(account="claude-one", config_dir=self.first)
+        pm_runtime.select_binding(first, state_root=self.state)
+
+        ui = self.make_ui()
+        with patch.object(ui.pm_api, "runtime",
+                          side_effect=lambda sid, cwd: _FakeRuntime(sid, cwd)):
+            ui.run_pm_command("/pm connect " + first + " " + str(self.cwd))
+            ui.run_pm_command("/pm disconnect")
+            ui.run_pm_command("/pm use " + second)
+            before = len(ui.conversation.text)
+            ui.run_pm_command("/pm connect " + third + " " + str(self.cwd))
+
+        self.assertIn("1 open Task(s)", ui.conversation.text[before:])
+        self.assertIsNotNone(ui.pm_handover_offer)
+        self.assertEqual(ui.pm_handover_offer["old_session"], second)
+        self.assertEqual(ui.pm_handover_offer["new_session"], third)
+
+        ui.run_pm_command("/pm handover")
+        self.assertEqual(self.store.get(task["task_id"])["pm_session_id"], "pm-" + third)
+
 
 if __name__ == "__main__":
     unittest.main()
