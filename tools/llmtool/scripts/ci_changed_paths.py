@@ -12,6 +12,25 @@ import sys
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 TIMEOUT_SECONDS = 60
 ERROR_MESSAGE = "ci_changed_paths: failed to determine changed paths\n"
+_LINE_MODE_ESCAPES = {
+    "\\": "\\\\",
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+    "\v": "\\v",
+    "\f": "\\f",
+    "\x1c": "\\x1c",
+    "\x1d": "\\x1d",
+    "\x1e": "\\x1e",
+    "\x85": "\\x85",
+    "\u2028": "\\u2028",
+    "\u2029": "\\u2029",
+}
+
+
+def _escape_for_lines(path: str) -> str:
+    """Render *path* on a single diagnostic line."""
+    return "".join(_LINE_MODE_ESCAPES.get(char, char) for char in path)
 
 
 def _fail() -> None:
@@ -128,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write(f"{path}\0")
     else:
         for path in paths:
-            sys.stdout.write(f"{path}\n")
+            sys.stdout.write(f"{_escape_for_lines(path)}\n")
     sys.stdout.flush()
     return 0
 
