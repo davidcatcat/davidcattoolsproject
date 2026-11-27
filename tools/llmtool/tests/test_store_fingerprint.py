@@ -41,6 +41,39 @@ class FingerprintTests(unittest.TestCase):
                 fh.write(b'two')
             self.assertEqual(first, fingerprint_directory(self.tmp))
 
+    def test_entry_permission_change_differs(self):
+        path = os.path.join(self.tmp, 'entry-a.txt')
+        with open(path, 'wb') as fh:
+            fh.write(b'a')
+        os.chmod(path, 0o600)
+        first = fingerprint_directory(self.tmp)
+        os.chmod(path, 0o644)
+        try:
+            second = fingerprint_directory(self.tmp)
+            self.assertNotEqual(first, second)
+        finally:
+            os.chmod(path, 0o600)
+        self.assertNotEqual(second, fingerprint_directory(self.tmp))
+
+    def test_entry_hardlink_count_change_differs(self):
+        path = os.path.join(self.tmp, 'entry-a.txt')
+        with open(path, 'wb') as fh:
+            fh.write(b'a')
+        first = fingerprint_directory(self.tmp)
+        with tempfile.TemporaryDirectory() as other_base:
+            other = os.path.join(os.path.realpath(other_base), 'hardlink.txt')
+            os.link(path, other)
+            self.assertNotEqual(first, fingerprint_directory(self.tmp))
+
+    def test_directory_permission_change_differs(self):
+        os.chmod(self.tmp, 0o700)
+        first = fingerprint_directory(self.tmp)
+        os.chmod(self.tmp, 0o755)
+        try:
+            self.assertNotEqual(first, fingerprint_directory(self.tmp))
+        finally:
+            os.chmod(self.tmp, 0o700)
+
 
 class MissingPathTests(unittest.TestCase):
     def test_missing_path_raises_module_error_with_fixed_code(self):

@@ -301,6 +301,43 @@ class ActivePMInboxWaitTests(unittest.TestCase):
         self.assertEqual([item['assignment_id'] for item in result['unclaimed_assignments']],
                          [assigned['assignment_id']])
 
+    def test_r3_r4_metadata_only_change_during_wait_updates_inbox(self):
+        task = self._record_pm()
+        task_path = self.store.root / (task['task_id'] + '.json')
+        read_calls = []
+        original_read = active_pm_inbox.read_inbox
+
+        def counting_read(store, session_key):
+            read_calls.append(session_key)
+            return original_read(store, session_key)
+
+        sleep_calls = []
+
+        def sleep(seconds):
+            sleep_calls.append(seconds)
+            if len(sleep_calls) == 1:
+                os.chmod(task_path, 0o644)
+
+        ticks = iter([0.0, 2.0, 4.0, 6.0])
+        try:
+            with patch.object(active_pm_inbox, 'read_inbox', side_effect=counting_read):
+                result = active_pm_inbox.wait_inbox(
+                    self.store,
+                    self.session_key,
+                    wait=True,
+                    timeout=6,
+                    poll=2.0,
+                    clock=lambda: next(ticks),
+                    sleep=sleep,
+                )
+        finally:
+            os.chmod(task_path, 0o600)
+
+        self.assertEqual(len(read_calls), 2)
+        self.assertIs(result['timed_out'], True)
+        self.assertEqual(result['unreadable_task_count'], 1)
+        self.assertEqual(result['status'], 'ATTENTION')
+
     def test_r4_fails_closed_when_fingerprint_unavailable(self):
         task = self._record_pm()
         read_calls = []
