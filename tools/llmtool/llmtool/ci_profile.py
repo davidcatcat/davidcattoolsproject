@@ -26,10 +26,11 @@ class CiProfileError(ValueError):
 
 
 def _validate_name(value):
-    """Refuse values that are not non-empty printable strings of at most 100 chars."""
+    """Refuse values that are not non-empty printable, non-blank strings of at most 100 chars."""
     if (
         not isinstance(value, str)
         or not value
+        or not value.strip()
         or not value.isprintable()
         or len(value) > _MAX_NAME_LEN
     ):
