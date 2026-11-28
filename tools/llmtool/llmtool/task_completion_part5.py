@@ -9,7 +9,15 @@ the whole chain. Any doubt fails closed as RESULT_SCOPE_MISMATCH.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import selectors
+import stat
 import sys
+import time
 
 from .errors import LLMToolError
 
@@ -242,3 +250,114 @@ def _stacked_scope_check(root, normalized_chain, bound_source_sha, bound_result_
         allowed = union if second_parent is not None else bound_paths
         if not paths.issubset(allowed):
             _stop('RESULT_SCOPE_MISMATCH')
+
+
+def _resolve_test_target(root, path, kind):
+    """Validate an admitted test path and return (start_dir, filename)."""
+    if not _relative_path(path):
+        _stop('TEST_PATH_INVALID')
+    target = Path(root).joinpath(*path.split('/'))
+    try:
+        target_stat = target.lstat()
+    except OSError:
+        _stop('TEST_PATH_INVALID')
+    if not stat.S_ISREG(target_stat.st_mode):
+        _stop('TEST_PATH_INVALID')
+    parent = Path(path).parent.as_posix()
+    filename = Path(path).name
+    if kind in ('unittest', 'script'):
+        # unittest discover walks subdirectories recursively; refuse if any
+        # other file with the same name sits under start_dir so discovery can
+        # never report a result from another file.
+        start_path = (Path(root) if parent == '.'
+                      else Path(root).joinpath(*parent.split('/')))
+        target_real = os.path.realpath(target)
+        for dirpath, dirnames, filenames in os.walk(start_path):
+            dirnames[:] = [d for d in dirnames if d != '.git']
+            if filename in filenames:
+                candidate_real = os.path.realpath(
+                    os.path.join(dirpath, filename))
+                if candidate_real != target_real:
+                    _stop('TEST_PATH_INVALID')
+    return parent, filename
+
+
+def _run_registered_tests(root, source_sha, eligible, *, home, pycache=None):
+    per_module_timeout, total_timeout = _m._local_test_timeouts()
+    evidence = []
+    run_deadline = time.monotonic() + total_timeout
+    for path, kind in eligible:
+        if time.monotonic() >= run_deadline:
+            _stop('TEST_RUNNER_TIMEOUT')
+        start_dir, filename = _resolve_test_target(root, path, kind)
+        env = {'PATH': os.path.dirname(sys.executable) + ':/usr/bin:/bin',
+               'LC_ALL': 'C', 'HOME': home,
+               'PYTHONPATH': str(Path(root) / 'tools' / 'llmtool'),
+               'PYTHONDONTWRITEBYTECODE': '1', 'TMPDIR': home}
+        if pycache is not None:
+            env['PYTHONPYCACHEPREFIX'] = pycache
+        if kind == 'unittest':
+            argv = [sys.executable, '-B', '-m', 'unittest', 'discover',
+                    '-s', start_dir, '-p', filename]
+        elif kind == 'script':
+            argv = [sys.executable, '-I', '-B', '-m', 'unittest', 'discover',
+                    '-s', start_dir, '-p', filename]
+        else:
+            argv = [sys.executable, '-I', '-B', path]
+        try:
+            process = _m.subprocess.Popen(
+                argv, cwd=root, env=env,
+                stdin=_m.subprocess.DEVNULL, stdout=_m.subprocess.PIPE,
+                stderr=_m.subprocess.STDOUT, shell=False, close_fds=True,
+                start_new_session=True)
+        except OSError:
+            _stop('TEST_RUNNER_UNAVAILABLE')
+        output = bytearray()
+        deadline = min(time.monotonic() + per_module_timeout, run_deadline)
+        selector = selectors.DefaultSelector()
+        started = time.monotonic()
+        try:
+            os.set_blocking(process.stdout.fileno(), False)
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    _stop('TEST_RUNNER_TIMEOUT')
+                for key, _ in selector.select(min(remaining, .1)):
+                    chunk = os.read(key.fileobj.fileno(), 8192)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                    else:
+                        if len(output) + len(chunk) > _m._TEST_OUTPUT_LIMIT:
+                            _stop('TEST_OUTPUT_TOO_LARGE')
+                        output.extend(chunk)
+            code = process.wait(timeout=max(0, deadline - time.monotonic()))
+        except _m.subprocess.TimeoutExpired:
+            _stop('TEST_RUNNER_TIMEOUT')
+        finally:
+            selector.close()
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, 9)
+                except OSError:
+                    process.kill()
+                process.wait()
+            process.stdout.close()
+        item = {
+            'path': path, 'source_sha': source_sha, 'exit_code': code,
+            'output_sha256': hashlib.sha256(output).hexdigest(),
+            'duration_ms': max(0, int((time.monotonic() - started) * 1000)),
+            'command_sha256': hashlib.sha256(
+                json.dumps(argv, separators=(',', ':')).encode()).hexdigest(),
+        }
+        ran = re.findall(rb'(?m)^Ran ([0-9]+) tests?\b', output)
+        # A reported zero fails; a discovery kind always reports a count.
+        zero_tests = bool(ran) and int(ran[-1]) == 0
+        discovery = kind in ('unittest', 'script')
+        if code or zero_tests or (discovery and not ran):
+            item['output_excerpt'] = _m._test_excerpt(home, output, code)
+            item['status'] = 'FAILED'
+        else:
+            item['status'] = 'PASSED'
+        evidence.append(item)
+    return evidence

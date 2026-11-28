@@ -1,6 +1,9 @@
 """#2793 A13.0 wiring: completion classification follows llmtool.test_profile."""
 
+import hashlib
+import json
 import re
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -113,8 +116,9 @@ class ZeroTestDiscoveryTests(unittest.TestCase):
     """A profile that sends a path to unittest discovery must run real tests.
 
     F1: a substituted profile may classify a ``scripts/`` path as ``unittest``.
-    Discovery then looks for that basename under ``tools/llmtool/tests``; an
-    empty discovery must not be recorded as PASSED for the classified path.
+    Discovery now runs in the admitted path's own directory rather than
+    ``tools/llmtool/tests``; an absent file is refused with ``TEST_PATH_INVALID``
+    and an existing file with zero tests is recorded as FAILED.
     """
 
     def test_zero_test_unittest_discovery_is_recorded_as_failed(self):
@@ -130,16 +134,156 @@ class ZeroTestDiscoveryTests(unittest.TestCase):
                                    return_value=profile), \
                     mock.patch.object(task_completion, '_worktree_snapshot',
                                       side_effect=[dict(snapshot), dict(snapshot)]):
+                # scripts/test_absent.py does not exist in root, so execution
+                # now refuses with TEST_PATH_INVALID instead of discovering in
+                # tools/llmtool/tests.
+                with self.assertRaises(LLMToolError) as caught:
+                    task_completion.run_bounded_worktree_tests(
+                        root=root, source_sha=SOURCE_SHA,
+                        diff_sha256=DIFF_SHA256, changed_paths=list(paths),
+                        read_paths=list(paths), write_paths=[])
+        self.assertEqual(caught.exception.completion_code, 'TEST_PATH_INVALID')
+
+    def test_zero_test_unittest_discovery_on_existing_empty_file_fails(self):
+        profile = test_profile.TestProfile((
+            (re.compile(r'scripts/test_[A-Za-z0-9_]+\.py\Z'), 'unittest'),
+        ))
+        paths = ['scripts/test_empty.py']
+        snapshot = {'diff_sha256': DIFF_SHA256, 'changed_paths': list(paths),
+                    'source_sha': SOURCE_SHA}
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, 'scripts').mkdir(parents=True)
+            Path(root, 'scripts', 'test_empty.py').write_text('', encoding='utf-8')
+            with mock.patch.object(test_profile, 'default_profile',
+                                   return_value=profile), \
+                    mock.patch.object(task_completion, '_worktree_snapshot',
+                                      side_effect=[dict(snapshot), dict(snapshot)]):
                 evidence = task_completion.run_bounded_worktree_tests(
                     root=root, source_sha=SOURCE_SHA,
                     diff_sha256=DIFF_SHA256, changed_paths=list(paths),
                     read_paths=list(paths), write_paths=[])
         self.assertEqual([item['path'] for item in evidence], paths)
-        # A zero-test discovery must not be recorded as PASSED. Python 3.12+
-        # exits 5 when no tests run; older interpreters exit 0 after printing
-        # "Ran 0 tests". Both are the real runner outcome, and neither is a pass.
+        # Python 3.12+ exits 5 when no tests run; older interpreters exit 0
+        # after printing "Ran 0 tests". Neither is a pass.
         self.assertIn(evidence[0]['exit_code'], (0, 5))
         self.assertEqual(evidence[0]['status'], 'FAILED')
+
+
+class NonDefaultDirectoryExecutionTests(unittest.TestCase):
+    """Real execution through the public entry runs the admitted file itself."""
+
+    PASS_BODY = (
+        'import unittest\n\n'
+        'class SampleTest(unittest.TestCase):\n'
+        '    def test_ok(self):\n'
+        '        self.assertTrue(True)\n'
+    )
+    FAIL_BODY = (
+        'import unittest\n\n'
+        'class SampleTest(unittest.TestCase):\n'
+        '    def test_fail(self):\n'
+        '        self.fail("expected failure")\n'
+    )
+
+    def _run_real_worktree(self, root, paths, profile):
+        snapshot = {'diff_sha256': DIFF_SHA256, 'changed_paths': list(paths),
+                    'source_sha': SOURCE_SHA}
+        with mock.patch.object(test_profile, 'default_profile',
+                               return_value=profile), \
+                mock.patch.object(task_completion, '_worktree_snapshot',
+                                  side_effect=[dict(snapshot), dict(snapshot)]):
+            return task_completion.run_bounded_worktree_tests(
+                root=root, source_sha=SOURCE_SHA,
+                diff_sha256=DIFF_SHA256, changed_paths=list(paths),
+                read_paths=list(paths), write_paths=[])
+
+    def test_non_default_directory_failing_file_never_passes_when_default_passes(self):
+        cases = (
+            ('unittest', 'tools/llmtool/tests', 'custom/tests',
+             r'custom/tests/test_[A-Za-z0-9_]+\.py\Z'),
+            ('script', 'scripts', 'custom/scripts',
+             r'custom/scripts/test_[A-Za-z0-9_]+\.py\Z'),
+        )
+        for kind, default_dir, custom_dir, pattern in cases:
+            with self.subTest(kind=kind):
+                profile = test_profile.TestProfile(
+                    ((re.compile(pattern), kind),))
+                admitted = f'{custom_dir}/test_same.py'
+                with tempfile.TemporaryDirectory() as root:
+                    Path(root, default_dir).mkdir(parents=True)
+                    Path(root, custom_dir).mkdir(parents=True)
+                    Path(root, default_dir, 'test_same.py').write_text(
+                        self.PASS_BODY, encoding='utf-8')
+                    Path(root, admitted).write_text(
+                        self.FAIL_BODY, encoding='utf-8')
+                    evidence = self._run_real_worktree(
+                        root, [admitted], profile)
+                self.assertEqual([item['path'] for item in evidence], [admitted])
+                self.assertEqual(evidence[0]['status'], 'FAILED')
+                self.assertNotEqual(evidence[0]['status'], 'PASSED')
+                self.assertEqual(evidence[0]['exit_code'], 1)
+
+    def test_non_default_directory_passing_file_passes_for_both_kinds(self):
+        cases = (
+            ('unittest', 'custom/tests',
+             r'custom/tests/test_[A-Za-z0-9_]+\.py\Z'),
+            ('script', 'custom/scripts',
+             r'custom/scripts/test_[A-Za-z0-9_]+\.py\Z'),
+        )
+        for kind, custom_dir, pattern in cases:
+            with self.subTest(kind=kind):
+                profile = test_profile.TestProfile(
+                    ((re.compile(pattern), kind),))
+                admitted = f'{custom_dir}/test_pass.py'
+                with tempfile.TemporaryDirectory() as root:
+                    Path(root, custom_dir).mkdir(parents=True)
+                    Path(root, admitted).write_text(
+                        self.PASS_BODY, encoding='utf-8')
+                    evidence = self._run_real_worktree(
+                        root, [admitted], profile)
+                self.assertEqual([item['path'] for item in evidence], [admitted])
+                self.assertEqual(evidence[0]['status'], 'PASSED')
+                self.assertEqual(evidence[0]['exit_code'], 0)
+
+    def test_subdirectory_shadow_file_is_refused(self):
+        profile = test_profile.TestProfile((
+            (re.compile(r'custom/test_[A-Za-z0-9_]+\.py\Z'), 'unittest'),
+        ))
+        admitted = 'custom/test_shadow.py'
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, 'custom', 'sub').mkdir(parents=True)
+            Path(root, admitted).write_text('', encoding='utf-8')
+            Path(root, 'custom', 'sub', 'test_shadow.py').write_text(
+                self.PASS_BODY, encoding='utf-8')
+            with self.assertRaises(LLMToolError) as caught:
+                self._run_real_worktree(root, [admitted], profile)
+        self.assertEqual(caught.exception.completion_code, 'TEST_PATH_INVALID')
+
+    def test_default_profile_command_digests_stay_unchanged(self):
+        paths = ['scripts/test_beta.py', 'tools/llmtool/tests/test_alpha.py']
+        expected_argvs = {
+            'tools/llmtool/tests/test_alpha.py': [
+                sys.executable, '-B', '-m', 'unittest', 'discover',
+                '-s', 'tools/llmtool/tests', '-p', 'test_alpha.py',
+            ],
+            'scripts/test_beta.py': [
+                sys.executable, '-I', '-B', '-m', 'unittest', 'discover',
+                '-s', 'scripts', '-p', 'test_beta.py',
+            ],
+        }
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, 'tools', 'llmtool', 'tests').mkdir(parents=True)
+            Path(root, 'scripts').mkdir(parents=True)
+            for rel in paths:
+                Path(root, rel).write_text(self.PASS_BODY, encoding='utf-8')
+            evidence = self._run_real_worktree(
+                root, paths, test_profile.default_profile())
+        by_path = {item['path']: item for item in evidence}
+        for rel, argv in expected_argvs.items():
+            expected_digest = hashlib.sha256(
+                json.dumps(argv, separators=(',', ':')).encode()).hexdigest()
+            self.assertEqual(by_path[rel]['status'], 'PASSED')
+            self.assertEqual(by_path[rel]['command_sha256'], expected_digest)
 
 
 class SingleSnapshotTests(unittest.TestCase):
