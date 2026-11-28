@@ -81,6 +81,7 @@ TASK_ACTIONS = {
 }
 
 TASK_REFUSAL_ATTRIBUTES = {
+    'delegate': 'completion_code',
     'high-debug': 'high_debug_code',
     'repair': 'review_repair_code',
     'review-dispatch': 'review_dispatch_code',
@@ -799,7 +800,7 @@ def main(argv=None):
         else:
             refusal_label = 'review-prompt'
         if (getattr(args, 'command', None) == 'task' and
-                getattr(args, 'action', None) in ('review-prompt', 'review-dispatch', 'review-result', 'repair', 'high-debug') and
+                getattr(args, 'action', None) in ('review-prompt', 'review-dispatch', 'review-result', 'repair', 'high-debug', 'delegate') and
                 type(refusal_code) is str and
                 re.fullmatch(r'[A-Z0-9_]{1,64}', refusal_code)):
             line = 'llmtool: ' + refusal_label + ' refused: ' + refusal_code
