@@ -1280,7 +1280,8 @@ def _declared_test_modules(record):
     except Exception:
         return None
     if modules is None:
-        return ()
+        # #2793: unusable TestProfile; the overlap check must report unknown.
+        return None
     if type(modules) not in (list, tuple, set, frozenset):
         return None
     result = tuple(modules)
@@ -1757,9 +1758,11 @@ def _remote_test_receipt_summary(record, head):
         hosted_run_id = (actions.get('run_id')
                          if type(actions) is dict and type(actions.get('run_id')) is int and actions['run_id'] > 0
                          else None)
-        if receipt['result'] == 'PASS' and not remote_test.pass_receipt_covers(
-                receipt, remote_test.remote_required_modules(record)):
-            return None
+        if receipt['result'] == 'PASS':
+            required = remote_test.remote_required_modules(record)
+            # None: unusable TestProfile, so no PASS receipt can be summarized.
+            if required is None or not remote_test.pass_receipt_covers(receipt, required):
+                return None
         summary_result = ('NOT_EXECUTED'
                           if _receipt_not_executed(receipt)
                           else receipt.get('result'))
@@ -3682,8 +3685,9 @@ def _remote_test_status(record, d6, extra_modules=()):
         if type(claimed) is not str or claimed != digest:
             continue
         if receipt['result'] == 'PASS':
-            if remote_test.pass_receipt_covers(
-                    receipt, required_modules):
+            # None: unusable TestProfile, so no receipt covers the head.
+            if (required_modules is not None and
+                    remote_test.pass_receipt_covers(receipt, required_modules)):
                 return 'PASS', None, receipt
             break
         if receipt['result'] in ('TIMEOUT', 'SHA_MISMATCH'):
@@ -3715,7 +3719,7 @@ def _remote_test_status(record, d6, extra_modules=()):
             return 'UNREACHABLE', None, None
         if (outcome.get('result') == 'ADMISSION_DENIED' and
                 outcome.get('code') == 'MODULE_NOT_ADMITTED' and
-                outcome.get('modules') == [] and not required_modules):
+                outcome.get('modules') == [] and required_modules == ()):
             return 'ADMISSION_DENIED', None, None
     return None, None, None
 
@@ -3979,10 +3983,12 @@ def _admission_test_profile(profile=_PROFILE_UNSET):
 
 
 def _admission_test_module_stem(profile, path):
-    """Return the lowercase module stem when a unittest entry matches path.
+    """Return the lowercase module stem of a path the profile calls unittest.
 
-    Path matching comes from the profile's ``unittest`` entries; the lowercase
-    stem constraint is applied on top, as the remote side always required.
+    The first matching entry decides (``TestProfile.kind_for``), as on the
+    validation side, so a path owned by an earlier ``script`` entry is never
+    admitted through a later ``unittest`` entry. The lowercase stem constraint
+    is applied on top, as the remote side always required.
     """
     name = path.rsplit('/', 1)[-1]
     if not name.endswith('.py'):
@@ -3990,10 +3996,7 @@ def _admission_test_module_stem(profile, path):
     stem = name[:-3]
     if _PR_TEST_MODULE_STEM.fullmatch(stem) is None:
         return None
-    for pattern, kind in profile.entries:
-        if kind == 'unittest' and pattern.fullmatch(path) is not None:
-            return stem
-    return None
+    return stem if profile.kind_for(path) == 'unittest' else None
 
 
 def _pr_changed_test_modules(number, head, github_get, pr, profile=_PROFILE_UNSET):

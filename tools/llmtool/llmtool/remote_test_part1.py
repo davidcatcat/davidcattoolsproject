@@ -313,17 +313,13 @@ def _ssh_timeout():
         raise LLMToolError('ADMISSION_DENIED: remote test timeout config is invalid') from None
 
 
-def _task_path_modules(task):
-    developer = task.get('developer') if type(task.get('developer')) is dict else {}
-    declared_paths = set()
-    for field in ('read_paths', 'write_paths'):
-        paths = developer.get(field)
-        if type(paths) is list:
-            declared_paths.update(
-                path for path in paths
-                if type(path) is str and
-                re.fullmatch(r'tools/llmtool/tests/test_[a-z0-9_]{1,80}\.py', path))
-    return tuple(sorted(Path(path).stem for path in declared_paths))
+def _task_path_modules(task, profile=None):
+    """Declared test module stems; () when the TestProfile is unusable."""
+    if profile is None:
+        profile = _remote_test_profile()
+    if profile is None:
+        return ()
+    return tuple(sorted({stem for stem, _ in _declared_module_paths(profile, task)}))
 
 
 _MAC_MANIFEST = Path(__file__).resolve().parents[1] / 'ci' / 'mac-modules.txt'
@@ -389,18 +385,26 @@ def remote_required_modules(task, extra_modules=()):
     """Task test modules a Linux remote receipt must cover (#2573, #2491).
 
     extra_modules are the exact-head test modules the PR adds or changes.
-    Darwin-only modules are left to the exact-head Mac CI merge gate.
+    Darwin-only modules the profile selects in the default tests directory
+    are left to the exact-head Mac CI merge gate.
+    None means the TestProfile is unusable: the set is unknown, never empty.
     """
-    required = set(_task_path_modules(task))
-    for module in extra_modules:
-        if type(module) is str and _MODULE.fullmatch(module):
-            required.add(module)
-    darwin = _darwin_only_modules(required)
+    profile = _remote_test_profile()
+    if profile is None:
+        return None
+    extras = {module for module in extra_modules
+              if type(module) is str and _MODULE.fullmatch(module)}
+    required = extras.union(_task_path_modules(task, profile))
+    darwin = _darwin_only_modules(
+        _darwin_candidates(profile, task, required, extras))
     return tuple(module for module in sorted(required) if module not in darwin)
 
 
 def _admitted_modules(task):
-    declared = _task_path_modules(task)
+    profile = _remote_test_profile()
+    if profile is None:
+        return ()
+    declared = _task_path_modules(task, profile)
     if declared:
         return declared
     completion = task.get('completion')
@@ -419,7 +423,6 @@ def _admitted_modules(task):
     names = set()
     for test in tests:
         path = test.get('path') if type(test) is dict else None
-        match = re.fullmatch(r'tools/llmtool/tests/(test_[a-z0-9_]{1,80})\.py', path or '')
-        if match:
-            names.add(match.group(1))
+        names.add(_remote_module_stem(profile, path or ''))
+    names.discard(None)
     return tuple(sorted(names))
