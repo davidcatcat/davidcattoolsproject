@@ -45,6 +45,7 @@ class _DispatchStore:
 
     def __init__(self, task):
         self.task = copy.deepcopy(task)
+        self.writes = 0
 
     def get(self, task_id):
         if task_id != self.task['task_id']:
@@ -53,21 +54,26 @@ class _DispatchStore:
 
     def d6_bind_compare_and_update(self, task_id, *, executor_task_id, expected,
                                    developer, completion, **kwargs):
+        self.writes += 1
         self.task['developer'] = copy.deepcopy(developer)
         self.task['completion'] = copy.deepcopy(completion)
         return copy.deepcopy(self.task)
 
     def prepare_direct_dispatch(self, task_id, *, expected_developer, developer):
+        self.writes += 1
         self.task['developer'] = copy.deepcopy(developer)
         return copy.deepcopy(self.task)
 
     def authorize_direct_spawn(self, task_id, *, expected_developer):
+        self.writes += 1
         return copy.deepcopy(self.task)
 
     def record_opencode_launch(self, task_id, *, assignment_id, pid, start_time, pgid):
+        self.writes += 1
         return copy.deepcopy(self.task)
 
     def compare_and_update(self, task_id, *, expected, **changes):
+        self.writes += 1
         for key in ('developer', 'completion'):
             if key in changes:
                 self.task[key] = copy.deepcopy(changes[key])
@@ -201,7 +207,7 @@ class OpenCodeWorkflowGrantTests(unittest.TestCase):
             self.assertEqual(task['issue'], issue)
         return task
 
-    def _dispatch(self, task, read_paths, write_paths, commit):
+    def _dispatch(self, task, read_paths, write_paths, commit, *, store=None):
         branch = self._git('rev-parse', '--abbrev-ref', 'HEAD').stdout.decode(
             'ascii').strip()
         snapshot = SimpleNamespace(
@@ -212,7 +218,8 @@ class OpenCodeWorkflowGrantTests(unittest.TestCase):
             session_ref='Executor Session 1', native_session_id=None,
             root=str(self.root), common_dir=str(self.root / '.git'),
             branch=branch, source_sha=commit, result_sha=commit)
-        store = _DispatchStore(task)
+        if store is None:
+            store = _DispatchStore(task)
         args = Namespace(
             task_id=task['task_id'], provider='opencode', selection_source='PM',
             executor_task='executor-task-1', read_path=list(read_paths),
@@ -303,22 +310,28 @@ class OpenCodeWorkflowGrantTests(unittest.TestCase):
         grant = self._commit([self._entry('read'), self._entry('write')])
         no_grant = self._commit([])
         cases = (
-            ('missing issue', grant, None, WORKFLOW),
-            ('missing grant', no_grant, ISSUE, WORKFLOW),
-            ('case changed', grant, ISSUE, '.github/workflows/CI.yml'),
-            ('prefixed', grant, ISSUE, WORKFLOW + '/extra'),
+            ('missing issue', grant, None, WORKFLOW, 'GRANT_ISSUE_INVALID'),
+            ('missing grant', no_grant, ISSUE, WORKFLOW, 'GRANT_NOT_FOUND'),
+            ('case changed', grant, ISSUE, '.github/workflows/CI.yml',
+             'GRANT_PATH_CONFUSION'),
+            ('prefixed', grant, ISSUE, WORKFLOW + '/extra',
+             'GRANT_PATH_INVALID'),
         )
-        for label, commit, issue, path in cases:
+        for label, commit, issue, path, grant_code in cases:
             with self.subTest(case=label):
                 self.cli = self._fake_cli(expect_read=path)
-                code, store = self._dispatch(
-                    self._dispatch_task(issue=issue), [path, 'source.py'],
-                    ['source.py'], commit)
-                self.assertEqual(code, 1)
-                self.assertEqual(store.task['developer']['state'],
-                                 'DEVELOPER_UNAVAILABLE')
-                self.assertEqual(store.task['developer']['error_code'],
-                                 'OPENCODE_SCOPE_INVALID')
+                store = _DispatchStore(self._dispatch_task(issue=issue))
+                with self.assertRaises(LLMToolError) as caught:
+                    self._dispatch(
+                        store.task, [path, 'source.py'], ['source.py'],
+                        commit, store=store)
+                self.assertEqual(getattr(caught.exception, 'code', None),
+                                 'WORKFLOW_GRANT_REFUSED')
+                self.assertIn('WORKFLOW_GRANT_REFUSED', str(caught.exception))
+                self.assertIn(grant_code, str(caught.exception))
+                self.assertEqual(store.writes, 0)
+                self.assertIsNone(store.task['developer'])
+                self.assertIsNone(store.task['completion'])
 
     def test_granted_read_path_is_accepted(self):
         commit = self._commit([self._entry('read')])
