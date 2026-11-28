@@ -12,6 +12,11 @@ _INDEX_NAME = 'task-status-index.json'
 _MAX_INDEX_BYTES = 4 * 1024 * 1024
 _SCHEMA_VERSION = 1
 _BASE_KEYS = frozenset({'stat', 'readable', 'created_at', 'pm_session_id'})
+INBOX_NONE = 'NONE'
+INBOX_IDLE = 'IDLE'
+INBOX_PENDING = 'PENDING'
+_INBOX_STATES = frozenset({INBOX_NONE, INBOX_IDLE, INBOX_PENDING})
+_OPTIONAL_KEYS = frozenset({'tui', 'inbox'})
 # Optional 'tui' projection of a readable record: the chat TUI's Task list row and its
 # newest events, so the list and events views need no per-record TaskStore.get.
 TUI_EVENT_LIMIT = 3     # newest events kept per Task
@@ -67,8 +72,10 @@ def _valid_tui(value):
 
 
 def _valid_entry(task_id, value):
-    if type(value) is not dict or not (set(value) == _BASE_KEYS or
-                                       set(value) == _BASE_KEYS | {'tui'}):
+    if type(value) is not dict:
+        return False
+    keys = set(value)
+    if not _BASE_KEYS <= keys or not keys <= (_BASE_KEYS | _OPTIONAL_KEYS):
         return False
     key = value['stat']
     if (type(key) is not list or len(key) != 5 or
@@ -79,9 +86,10 @@ def _valid_entry(task_id, value):
         return (type(value['created_at']) is str and
                 (value['pm_session_id'] is None or
                  type(value['pm_session_id']) is str) and
-                ('tui' not in value or _valid_tui(value['tui'])))
-    return ('tui' not in value and value['created_at'] is None and
-            value['pm_session_id'] is None)
+                ('tui' not in value or _valid_tui(value['tui'])) and
+                ('inbox' not in value or value['inbox'] in _INBOX_STATES))
+    return ('tui' not in value and 'inbox' not in value and
+            value['created_at'] is None and value['pm_session_id'] is None)
 
 
 def _tui_summary(record):
@@ -92,6 +100,30 @@ def _tui_summary(record):
     except Exception:
         return None
     return summary if _valid_tui(summary) else None
+
+
+def _inbox_summary(record):
+    """The inbox projection of one readable record, or None when it cannot be built."""
+    try:
+        from .active_pm_inbox import _handoff_event
+        from .task_submission_cli import _active_pm_handoff, _active_pm_runtime
+
+        if not _active_pm_runtime(record):
+            return INBOX_NONE
+        events = record.get('completion_events', [])
+        if any(event.get('state') != 'ACKED' for event in events):
+            return INBOX_PENDING
+        handoff = _active_pm_handoff(record)
+        if handoff is not None:
+            event_id = _handoff_event(record, handoff)['event_id']
+            tombstones = record.get('completion_event_tombstones', [])
+            if not any(event.get('event_id') == event_id for event in events + tombstones):
+                return INBOX_PENDING
+        if events or record.get('completion_event_tombstones'):
+            return INBOX_IDLE
+        return INBOX_NONE
+    except Exception:
+        return None
 
 
 def _index_path(store):
@@ -219,9 +251,14 @@ class TaskStatusIndex:
             return
         payload = self._payload(self.entries)
         if len(payload) > _MAX_INDEX_BYTES:
-            # The TUI projection is optional: keep the status metadata within the bound.
+            # The TUI projection is optional: keep the status and inbox metadata within the bound.
             payload = self._payload({
                 task_id: {key: item for key, item in value.items() if key != 'tui'}
+                for task_id, value in self.entries.items()})
+        if len(payload) > _MAX_INDEX_BYTES:
+            payload = self._payload({
+                task_id: {key: item for key, item in value.items()
+                          if key not in ('tui', 'inbox')}
                 for task_id, value in self.entries.items()})
         if len(payload) > _MAX_INDEX_BYTES:
             return
@@ -275,8 +312,12 @@ class TaskStatusIndex:
         summary = _tui_summary(record)
         if summary is not None:
             entry['tui'] = summary
-        self.entries[task_id] = entry
-        self.changed = True
+        inbox = _inbox_summary(record)
+        if inbox is not None:
+            entry['inbox'] = inbox
+        if self.entries.get(task_id) != entry:
+            self.entries[task_id] = entry
+            self.changed = True
 
     def remember_full_scan(self, task_id):
         """Read one record and cache it only if its metadata stayed stable."""
@@ -316,13 +357,82 @@ class TaskStatusIndex:
 
     def _unreadable_entry(self, task_id, key):
         if key is None:
-            self.entries.pop(task_id, None)
-        else:
-            self.entries[task_id] = {
-                'stat': list(key), 'readable': False,
-                'created_at': None, 'pm_session_id': None,
-            }
-        self.changed = True
+            if self.entries.pop(task_id, None) is not None:
+                self.changed = True
+            return
+        entry = {
+            'stat': list(key), 'readable': False,
+            'created_at': None, 'pm_session_id': None,
+        }
+        if self.entries.get(task_id) != entry:
+            self.entries[task_id] = entry
+            self.changed = True
+
+    def scan_inbox(self, task_ids, session_key, *, include_idle=False):
+        """Return (records, unreadable) for ``session_key``, failing closed on any doubt."""
+        from .errors import LLMToolError
+
+        records = []
+        unreadable = 0
+        root = self.store.root
+        for task_id in task_ids:
+            path = os.path.join(root, task_id + '.json')
+            key = None
+            entry = None
+            try:
+                key = _stat_key(path)
+            except Exception:
+                pass
+            if self.enabled and key is not None:
+                candidate = self.entries.get(task_id)
+                if candidate is not None and candidate['stat'] == list(key):
+                    entry = candidate
+            if entry is not None:
+                if not entry['readable']:
+                    unreadable += 1
+                    continue
+                if entry['pm_session_id'] != session_key:
+                    continue
+                inbox_state = entry.get('inbox')
+                if inbox_state == INBOX_NONE:
+                    continue
+                if inbox_state == INBOX_IDLE and not include_idle:
+                    continue
+                try:
+                    record, _ = self.reread(task_id)
+                except LLMToolError:
+                    unreadable += 1
+                    continue
+                if record.get('pm_session_id') == session_key:
+                    records.append(record)
+                continue
+            before_key = key
+            try:
+                record = self.store.get(task_id)
+            except LLMToolError:
+                unreadable += 1
+                try:
+                    after_key = _stat_key(path)
+                except Exception:
+                    after_key = None
+                if self.enabled:
+                    if before_key == after_key:
+                        self._unreadable_entry(task_id, before_key)
+                    elif self.entries.pop(task_id, None) is not None:
+                        self.changed = True
+                continue
+            try:
+                after_key = _stat_key(path)
+            except Exception:
+                after_key = None
+            if self.enabled:
+                if before_key is not None and before_key == after_key:
+                    self._record_entry(task_id, after_key, record)
+                elif self.entries.pop(task_id, None) is not None:
+                    self.changed = True
+            if record.get('pm_session_id') == session_key:
+                records.append(record)
+        return records, unreadable
 
     def scan(self, task_ids):
         """Return metadata rows and the number of known unreadable records."""

@@ -343,7 +343,7 @@ _BLOCKED_ACTIONS = {
 }
 
 
-def _session_records(store, session_key):
+def _session_records(store, session_key, *, include_idle=False):
     from .task_submission_cli import _active_pm_runtime
 
     unreadable = 0
@@ -361,63 +361,77 @@ def _session_records(store, session_key):
                 records.append(record)
         return records, unreadable
 
-    # scan() refreshes uncached or changed files and retains unreadable records
-    # in its count. Once warm, only Tasks indexed to this PM need a validated
-    # read for the inbox's active-runtime check.
-    candidates, unreadable = index.scan(task_ids)
-    for task_id, _, indexed_session in candidates:
-        if indexed_session != session_key:
-            continue
-        try:
-            record, _ = index.reread(task_id)
-        except LLMToolError:
-            unreadable += 1
-            continue
+    # scan_inbox() refreshes uncached or changed files and retains unreadable
+    # records in its count. Once warm, only this PM's inbox-relevant Tasks
+    # (or IDLE event-bearing Tasks for ack) need a validated read.
+    candidates, unreadable = index.scan_inbox(
+        task_ids, session_key, include_idle=include_idle)
+    for record in candidates:
         if record.get('pm_session_id') == session_key and _active_pm_runtime(record):
             records.append(record)
     index.flush()
     return records, unreadable
 
 
+def _handoff_already_recorded(record, handoff):
+    developer = record.get('developer')
+    if type(developer) is not dict:
+        return None, False
+    binding = _handoff_event(record, handoff)
+    known = (record.get('completion_events', []) +
+             record.get('completion_event_tombstones', []))
+    return binding, any(event['event_id'] == binding['event_id'] for event in known)
+
+
 def _inbox(store, session_key, *, reconcile):
     """Build an inbox view, optionally reconciling READY Tasks into events."""
     from .task_submission_cli import _active_pm_handoff
 
-    records, unreadable = _session_records(store, session_key)
+    records, unreadable = _session_records(store, session_key, include_idle=False)
     events, blocked, pending = [], [], []
     for record in records:
         handoff = _active_pm_handoff(record)
-        if not reconcile and handoff is not None:
-            binding = _handoff_event(record, handoff)
-            known = (record.get('completion_events', []) +
-                     record.get('completion_event_tombstones', []))
-            if not any(event['event_id'] == binding['event_id'] for event in known):
-                pending.append({
-                    'task_id': record['task_id'], 'event_id': binding['event_id'],
-                    'source': binding['source'], 'session_id': binding['session_id'],
-                    'state': 'NOT_YET_RECORDED',
-                })
-        if reconcile and handoff is not None:
-            try:
-                record_ready_event(store, record['task_id'])
-                record = store.get(record['task_id'])
-            except LLMToolError as exc:
-                # Deliver what is already durable and report why the newest
-                # result has no event yet; the next read retries.
-                code = getattr(exc, 'task_store_error_code', None) or \
-                    'COMPLETION_EVENT_UNAVAILABLE'
-                blocked.append({
-                    'task_id': record['task_id'], 'code': code,
-                    'unacknowledged_event_count': sum(
-                        event['state'] != 'ACKED'
-                        for event in record.get('completion_events', [])),
-                    'action': _BLOCKED_ACTIONS.get(code, 'RETRY_INBOX'),
-                })
+        if handoff is not None:
+            if not reconcile:
+                binding, already_recorded = _handoff_already_recorded(record, handoff)
+                if not already_recorded and binding is not None:
+                    pending.append({
+                        'task_id': record['task_id'], 'event_id': binding['event_id'],
+                        'source': binding['source'], 'session_id': binding['session_id'],
+                        'state': 'NOT_YET_RECORDED',
+                    })
+            else:
+                try:
+                    record = store.get(record['task_id'])
+                    fresh_handoff = _active_pm_handoff(record)
+                    if fresh_handoff is not None:
+                        _binding, already_recorded = _handoff_already_recorded(
+                            record, fresh_handoff)
+                        if not already_recorded:
+                            record_ready_event(store, record['task_id'])
+                            record = store.get(record['task_id'])
+                except LLMToolError as exc:
+                    # Deliver what is already durable and report why the newest
+                    # result has no event yet; the next read retries.
+                    code = getattr(exc, 'task_store_error_code', None) or \
+                        'COMPLETION_EVENT_UNAVAILABLE'
+                    blocked.append({
+                        'task_id': record['task_id'], 'code': code,
+                        'unacknowledged_event_count': sum(
+                            event['state'] != 'ACKED'
+                            for event in record.get('completion_events', [])),
+                        'action': _BLOCKED_ACTIONS.get(code, 'RETRY_INBOX'),
+                    })
+                    try:
+                        record = store.get(record['task_id'])
+                    except LLMToolError:
+                        continue
         unacked = [event for event in record.get('completion_events', [])
                    if event['state'] != 'ACKED']
         if unacked:
             handoff = _active_pm_handoff(record)
-            current = None if handoff is None else _handoff_event(record, handoff)['event_id']
+            current = (None if handoff is None or type(record.get('developer')) is not dict
+                       else _handoff_event(record, handoff)['event_id'])
             for event in unacked:
                 events.append({
                     **event,
@@ -758,7 +772,7 @@ def ack(store, event_id, session_key, task_id=None):
         if owner is None:
             raise LLMToolError(_ACK_NOT_FOUND)
         return _ack_event(store, event_id, session_key, owner)
-    records, _ = _session_records(store, session_key)
+    records, _ = _session_records(store, session_key, include_idle=True)
     for record in records:
         result = _tombstone_ack(event_id, record)
         if result is not None:
