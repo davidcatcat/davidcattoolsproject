@@ -188,6 +188,7 @@ class ProjectContextTests(unittest.TestCase):
             ("relative", "srv/canonical", WORKSPACE, TASKS),
             ("unnormalized", ROOT + "/", WORKSPACE, TASKS),
             ("dot segment", "/srv/./canonical", WORKSPACE, TASKS),
+            ("double leading slash", "//srv/canonical", WORKSPACE, TASKS),
             ("equal", ROOT, ROOT, TASKS),
             ("contains", "/srv", WORKSPACE, TASKS),
             ("inside", ROOT, ROOT + "/nested", TASKS),
