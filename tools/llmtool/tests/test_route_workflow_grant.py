@@ -19,6 +19,8 @@ from unittest.mock import patch
 from llmtool import authorization_workflow_grant, task_submission_cli
 from llmtool.developer_routes.base import (
     DeveloperRoute, RouteError, WORKFLOW_GRANT_REFUSED)
+from llmtool.errors import LLMToolError
+from llmtool.opencode_direct_developer import DirectResult
 from llmtool.task_store import TaskStoreConflict
 
 GRANT_PATH = 'tools/llmtool/workflow-grants.json'
@@ -29,6 +31,15 @@ ISSUE = 2281
 OWNER = ('https://github.com/davidcatcat/davidcattoolsproject/'
          'issues/2281#issuecomment-1')
 ROUTE_NAMES = ('agy', 'claude', 'gw-agent')
+
+
+def _grant_entry(paths=None, issue=None, mode='write', owner=OWNER):
+    return {
+        'issue': ISSUE if issue is None else issue,
+        'owner_record_url': owner,
+        'mode': mode,
+        'paths': list(paths or (PATH,)),
+    }
 
 
 class _TestRoute(DeveloperRoute):
@@ -92,12 +103,7 @@ class RouteWorkflowGrantTests(unittest.TestCase):
             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def _entry(self, paths=None, issue=None, mode='write', owner=OWNER):
-        return {
-            'issue': ISSUE if issue is None else issue,
-            'owner_record_url': owner,
-            'mode': mode,
-            'paths': list(paths or (PATH,)),
-        }
+        return _grant_entry(paths=paths, issue=issue, mode=mode, owner=owner)
 
     def _commit(self, entries):
         path = self.root / GRANT_PATH
@@ -327,24 +333,52 @@ class _DispatchStore:
 
 
 class DispatchCallerWorkflowGrantTests(unittest.TestCase):
-    """A0-A2: the dispatch caller passes Task read paths to the route check.
+    """#2942: all four dispatch callers refuse disallowed workflow paths pre-write.
 
-    The AGY and Claude routes carry no Task Issue, so a workflow path stays
-    refused (fail closed) even before any grant file is read.
+    Refusing before any durable Task write leaves no Developer assignment on the
+    Task and leaves the D6 unchanged, so a corrected re-delegate of the same
+    Task is admitted. OpenCode honours Issue-bound grants; AGY, Claude and
+    gw-agent refuse every .github/workflows path, granted or not (#2281 W3).
     """
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
+        self._git('init', '-q')
         (self.root / 'src.py').write_text('x = 1\n', encoding='utf-8')
+        self._git('add', '--', 'src.py')
+        self._git('commit', '-q', '-m', 'fixture')
 
     def tearDown(self):
         self.temp.cleanup()
 
+    def _git(self, *arguments):
+        return subprocess.run(
+            ['git', '-C', str(self.root),
+             '-c', 'user.name=Workflow Grant Dispatch Test',
+             '-c', 'user.email=test@example.invalid',
+             '-c', 'commit.gpgsign=false', *arguments],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def _head(self):
+        return self._git('rev-parse', 'HEAD').stdout.decode('ascii').strip()
+
+    def _entry(self, paths=None, issue=None, mode='write', owner=OWNER):
+        return _grant_entry(paths=paths, issue=issue, mode=mode, owner=owner)
+
+    def _commit_grants(self, entries):
+        path = self.root / GRANT_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({'schema_version': 1, 'grants': entries}),
+                        encoding='utf-8')
+        self._git('add', '--', GRANT_PATH)
+        self._git('commit', '-q', '-m', 'grant fixture')
+        return self._head()
+
     @staticmethod
-    def _task(route, task_id):
+    def _task(route, task_id, *, issue=None):
         acceptance = ['record the bounded result']
-        return {
+        record = {
             'schema_version': 2, 'task_id': task_id, 'run_id': 'b' * 32,
             'state': 'PM_RESPONDED', 'response': 'PM response',
             'request': route + ' request',
@@ -355,59 +389,136 @@ class DispatchCallerWorkflowGrantTests(unittest.TestCase):
                                  'base_url': None},
             'developer': None, 'completion': None,
         }
+        if issue is not None:
+            record['issue'] = issue
+        return record
 
-    def _run(self, route, *, write_workflow=False):
+    def _run(self, route, *, store=None, read_paths=None, write_paths=None,
+             issue=None, head=None):
         task_id = 'a' * 32
-        task = self._task(route, task_id)
-        store = _DispatchStore(task)
-        write_paths = [PATH] if write_workflow else ['src.py']
+        if store is None:
+            store = _DispatchStore(self._task(route, task_id, issue=issue))
+        store.root = self.root / 'tasks'
+        head = head or self._head()
+        read_paths = [PATH, 'src.py'] if read_paths is None else list(read_paths)
+        write_paths = ['src.py'] if write_paths is None else list(write_paths)
         snapshot = SimpleNamespace(root=str(self.root),
                                    common_dir=str(self.root / '.git'),
-                                   branch='task-branch', head='d' * 40, clean=True)
+                                   branch='task-branch', head=head, clean=True)
+        agent_by_route = {
+            'agy': 'codex',
+            'claude': 'claude-developer',
+            'gw-agent': 'codex',
+            'opencode': 'opencode-developer',
+        }
         registration = SimpleNamespace(
             task_id='executor-d6', root=snapshot.root,
             common_dir=snapshot.common_dir, branch=snapshot.branch,
             source_sha=snapshot.head, result_sha=snapshot.head,
-            trusted_agent_id=('claude-developer' if route == 'claude' else 'codex'),
+            trusted_agent_id=agent_by_route[route],
             session_ref='session-ref', native_session_id=None)
         args = Namespace(
-            task_id=task_id, provider=route, mode='direct', background=False,
+            task_id=task_id, provider=route,
+            mode='proposal' if route == 'opencode' else 'direct',
+            background=False,
             owner_ref=None, context_stdin=False, selection_source='PM',
-            acceptance=task['pm_assignment']['acceptance'],
+            acceptance=store.task['pm_assignment']['acceptance'],
             egress_basis='Approved non-sensitive Task context.',
+            data_class='PUBLIC_REPO',
             executor_task='executor-d6', cwd=snapshot.root,
-            read_path=[PATH, 'src.py'], write_path=write_paths, repair_packet=None)
-        requests, refusals, launched = [], [], []
+            read_path=read_paths, write_path=write_paths, repair_packet=None)
+        requests, launched = [], []
+        model_by_route = {
+            'agy': 'gemini-test',
+            'claude': 'claude-test-1',
+            'gw-agent': 'qwen-authorized',
+            'opencode': 'opencode/sample-model-free',
+        }
+        model = model_by_route[route]
 
         def route_runner(route_object, request, **_kwargs):
             requests.append(request)
-            try:
-                route_object.validate_request(request)
-            except RouteError as exc:
-                refusals.append(exc)
-                raise
+            route_object.validate_request(request)
             launched.append(True)
-            raise AssertionError('provider launch was reached')
+            return SimpleNamespace(
+                session_id='12345678-1234-4234-8234-123456789abc',
+                model=model, exit_code=0, summary='updated',
+                stderr_excerpt=None, stdout_sha256='e' * 64,
+                elapsed_ms=10, cleanup_status='CONFIRMED',
+                usage={'prompt_tokens': 1, 'completion_tokens': 1,
+                       'total_tokens': 2})
+
+        def opencode_runner(**kwargs):
+            requests.append(kwargs)
+            launched.append(True)
+            return DirectResult(
+                0, 'ses_Abc123', 'Updated.', None, 'UNKNOWN', 'a' * 64, 10,
+                'CONFIRMED', 'opencode v2.0.32', 10, 1, 'b' * 64)
 
         boundary = SimpleNamespace(
             prepare=lambda *_args: ((), 'f' * 64),
             verify=lambda *_args, **_kwargs: {'verified': True,
                                               'policy_sha256': 'f' * 64})
-        config = {'routes': {route: {
+        route_entry = {
             'executable': route, 'denied_dirs': ['.' + route],
-            'max_diff_bytes': 64 * 1024}}}
+            'default_model': model, 'allowed_models': [model],
+            'default_effort': 'high', 'max_diff_bytes': 64 * 1024,
+        }
+        if route == 'gw-agent':
+            route_entry = {
+                'allowed_data_classes': ['synthetic', 'public_repo'],
+                'default_model': model, 'allowed_models': [model],
+                'default_effort': 'low', 'default_timeout': 10800,
+                'max_timeout': 18000, 'package_path': str(self.root),
+                'budgets': {
+                    'max_turns': 512, 'max_input_tokens': 262144,
+                    'max_output_tokens': 65536, 'max_wall_seconds': 10800,
+                    'max_tool_result_bytes': 262144,
+                    'max_sent_bytes': 16777216,
+                },
+                'profile': {
+                    'data_class_map': {'SYNTHETIC': 'synthetic',
+                                       'PUBLIC_REPO': 'public_repo'},
+                    'context_cap_tokens': 32768,
+                    'max_output_tokens': 8192,
+                },
+            }
+        config = {'routes': {route: route_entry}}
+        fake_site = SimpleNamespace(
+            is_repair=False,
+            route_fields=lambda: {},
+            after_result=lambda *_a, **_kw: None,
+            __enter__=lambda: fake_site,
+            __exit__=lambda *_a: None,
+        )
+        fake_gw_route = SimpleNamespace(
+            validate_profile=lambda *_a: (model, 'low'),
+            validate_request=lambda req: (
+                task_submission_cli.validate_workflow_grants(req) or req),
+            audit_copy_path=str(self.root / 'audit.jsonl'),
+            _result={'audit_sha256': 'a' * 64},
+        )
         with contextlib.ExitStack() as stack:
             stack.enter_context(patch.object(
                 task_submission_cli.worker_dispatch, 'evaluate',
                 return_value=SimpleNamespace(
                     allowed=True, reason_code='OWNER_POLICY_ALLOWED')))
             stack.enter_context(patch.object(
+                task_submission_cli.worker_dispatch, 'authorize_dispatch'))
+            stack.enter_context(patch.object(
                 task_submission_cli.task_completion, 'validate_task_binding'))
             stack.enter_context(patch.object(
                 task_submission_cli.task_completion, 'bind_executor_task',
                 return_value=(registration, snapshot)))
-            # The fake store has no chain history; this test proves the dispatch
-            # caller builds the request and the route refuses it before launch.
+            stack.enter_context(patch.object(
+                task_submission_cli.task_completion, 'read_d6_registration',
+                return_value=registration))
+            stack.enter_context(patch.object(
+                task_submission_cli.task_completion, 'collect_git_snapshot',
+                return_value=snapshot))
+            stack.enter_context(patch.object(
+                task_submission_cli.task_completion, '_worktree_diff',
+                return_value=(write_paths, b'diff --git a/src.py b/src.py\n')))
             stack.enter_context(patch.object(
                 task_submission_cli, '_delegate_chain_gate',
                 side_effect=lambda _args, _store, _binding, claim: claim()))
@@ -418,12 +529,23 @@ class DispatchCallerWorkflowGrantTests(unittest.TestCase):
                 task_submission_cli, '_developer_card_prefix',
                 return_value=('', 'c' * 64)))
             stack.enter_context(patch.object(
+                task_submission_cli, '_record_skill_delivery'))
+            stack.enter_context(patch.object(
                 task_submission_cli, '_remote_receipt_test_policy',
                 return_value='LOCAL'))
             stack.enter_context(patch.object(
                 task_submission_cli, '_direct_result_callback',
                 return_value={'state': 'WAITING_EXECUTOR',
                               'executor_task_id': 'executor-d6'}))
+            stack.enter_context(patch.object(
+                task_submission_cli, '_bind_direct_native_session',
+                return_value=False))
+            stack.enter_context(patch.object(
+                task_submission_cli, '_bind_codex_native_session',
+                return_value='SKIPPED'))
+            stack.enter_context(patch.object(
+                task_submission_cli, 'run_task_direct_result_event',
+                return_value=0))
             stack.enter_context(patch.object(task_submission_cli, '_task_view',
                                              return_value={}))
             stack.enter_context(patch.object(task_submission_cli, '_print'))
@@ -433,39 +555,150 @@ class DispatchCallerWorkflowGrantTests(unittest.TestCase):
                                              return_value='/usr/bin/' + route))
             stack.enter_context(patch.object(
                 task_submission_cli, '_agy_developer_profile',
-                return_value=('test-model', 'high')))
+                return_value=(model, 'high')))
             stack.enter_context(patch.object(
                 task_submission_cli, '_claude_developer_profile',
-                return_value=('claude-test-1', 'high', '/tmp/claude-config')))
+                return_value=(model, 'high', '/tmp/claude-config')))
+            stack.enter_context(patch.object(
+                task_submission_cli, '_opencode_developer_profile',
+                return_value=(model, 12)))
+            stack.enter_context(patch.object(
+                task_submission_cli, '_gw_agent_endpoint',
+                return_value=({'type': 'openai-compatible', 'model': model,
+                               'base_url': 'https://authorized.example'},
+                              {'max_tokens': 8192})))
+            stack.enter_context(patch.object(
+                task_submission_cli, '_gw_agent_developer_profile',
+                return_value=(model, 'low')))
+            stack.enter_context(patch.object(
+                task_submission_cli, 'installed_gateway_stale',
+                return_value=False))
+            stack.enter_context(patch.object(
+                task_submission_cli.repair_policy, 'gw_agent_max_turns',
+                return_value=512))
+            stack.enter_context(patch.object(
+                task_submission_cli.worker_availability, 'gw_agent_refusal',
+                return_value=None))
+            stack.enter_context(patch('llmtool.gw_agent_sessions.sweep_quietly'))
+            stack.enter_context(patch.object(
+                task_submission_cli.gw_agent_callsite, 'SessionCallSite',
+                return_value=fake_site))
+            stack.enter_context(patch.object(
+                task_submission_cli, 'GwAgentRoute',
+                return_value=fake_gw_route))
+            stack.enter_context(patch.object(
+                task_submission_cli, 'cleanup_audit_copies'))
+            stack.enter_context(patch.object(
+                task_submission_cli.skill_ledger, 'record_not_delivered'))
+            stack.enter_context(patch.object(
+                task_submission_cli, '_bootstrap_registered_d6'))
+            stack.enter_context(patch.object(
+                task_submission_cli, '_refresh_d6_binding_after_bootstrap',
+                return_value=registration))
+            stack.enter_context(patch.object(
+                task_submission_cli, '_developer_output_rejection',
+                return_value=None))
+            stack.enter_context(patch.object(
+                task_submission_cli.opencode_direct_developer, 'run',
+                side_effect=opencode_runner))
             stack.enter_context(patch.object(task_submission_cli, 'for_platform',
                                              return_value=boundary))
             if route == 'agy':
                 status = task_submission_cli.run_task_agy_delegate(
                     args, store=store, route_runner=route_runner)
-            else:
+            elif route == 'claude':
                 status = task_submission_cli.run_task_claude_delegate(
                     args, store=store, route_runner=route_runner)
-        return status, store, requests, refusals, launched
+            elif route == 'gw-agent':
+                status = task_submission_cli.run_task_gw_agent_delegate(
+                    args, store=store, route_runner=route_runner)
+            else:
+                status = task_submission_cli.run_task_opencode_delegate(
+                    args, store=store, d6_binding=(registration, snapshot))
+        return status, store, requests, launched
 
-    def test_workflow_paths_are_refused_through_the_dispatch_caller(self):
-        for route in ('agy', 'claude'):
+    def test_workflow_paths_refused_prewrite_and_corrected_redelegate_admitted(self):
+        for route in ('agy', 'opencode', 'gw-agent', 'claude'):
             for write_workflow in (False, True):
                 with self.subTest(route=route, write_workflow=write_workflow):
-                    (status, store, requests, refusals,
-                     launched) = self._run(route, write_workflow=write_workflow)
-                    self.assertEqual(status, 1)
-                    self.assertEqual(launched, [])
-                    self.assertEqual(len(requests), 1)
-                    self.assertEqual(requests[0]['read_paths'], [PATH, 'src.py'])
-                    self.assertEqual(requests[0]['write_paths'],
-                                     [PATH] if write_workflow else ['src.py'])
-                    self.assertEqual(len(refusals), 1)
-                    self.assertEqual(refusals[0].code, WORKFLOW_GRANT_REFUSED)
-                    self.assertEqual(
-                        refusals[0].observed_facts.get('workflow_grant_code'),
-                        'GRANT_ISSUE_INVALID')
-                    self.assertEqual(store.task['developer']['error_code'],
+                    store = _DispatchStore(self._task(route, 'a' * 32))
+                    bad_read = [PATH, 'src.py']
+                    bad_write = [PATH] if write_workflow else ['src.py']
+                    with self.assertRaises(LLMToolError) as caught:
+                        self._run(route, store=store,
+                                  read_paths=bad_read, write_paths=bad_write)
+                    self.assertEqual(getattr(caught.exception, 'code', None),
                                      WORKFLOW_GRANT_REFUSED)
+                    self.assertIn(WORKFLOW_GRANT_REFUSED, str(caught.exception))
+                    self.assertEqual(store.writes, 0)
+                    self.assertIsNone(store.task['developer'])
+                    self.assertIsNone(store.task['completion'])
+
+                    status, store, requests, launched = self._run(
+                        route, store=store,
+                        read_paths=['src.py'], write_paths=['src.py'])
+                    self.assertEqual(status, 0)
+                    self.assertEqual(len(requests), 1)
+                    self.assertEqual(requests[0]['read_paths'], ['src.py'])
+                    self.assertEqual(requests[0]['write_paths'], ['src.py'])
+                    self.assertEqual(launched, [True])
+                    self.assertEqual(store.task['developer']['state'],
+                                     'DEVELOPER_RESPONDED')
+
+    def test_granted_workflow_paths_admitted_on_opencode_only(self):
+        head = self._commit_grants([
+            self._entry([PATH, OTHER], issue=ISSUE, mode='read'),
+            self._entry([OTHER], issue=ISSUE, mode='write'),
+        ])
+        status, store, requests, launched = self._run(
+            'opencode', read_paths=[PATH, OTHER, 'src.py'],
+            write_paths=[OTHER], issue=ISSUE, head=head)
+        self.assertEqual(status, 0)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]['read_paths'], [PATH, OTHER, 'src.py'])
+        self.assertEqual(requests[0]['write_paths'], [OTHER])
+        self.assertEqual(launched, [True])
+        self.assertEqual(store.task['developer']['state'],
+                         'DEVELOPER_RESPONDED')
+
+    def test_granted_workflow_paths_refused_prewrite_on_agy_claude_and_gw_agent(self):
+        head = self._commit_grants([
+            self._entry([PATH, OTHER], issue=ISSUE, mode='read'),
+            self._entry([OTHER], issue=ISSUE, mode='write'),
+        ])
+        for route in ('agy', 'claude', 'gw-agent'):
+            for mode in ('read', 'write'):
+                with self.subTest(route=route, mode=mode):
+                    store = _DispatchStore(
+                        self._task(route, 'a' * 32, issue=ISSUE))
+                    read_paths = ([PATH, 'src.py'] if mode == 'read'
+                                  else [OTHER, 'src.py'])
+                    write_paths = ([OTHER] if mode == 'write'
+                                   else ['src.py'])
+                    with self.assertRaises(LLMToolError) as caught:
+                        self._run(
+                            route, store=store, read_paths=read_paths,
+                            write_paths=write_paths, issue=ISSUE, head=head)
+                    self.assertEqual(getattr(caught.exception, 'code', None),
+                                     WORKFLOW_GRANT_REFUSED)
+                    self.assertIn(WORKFLOW_GRANT_REFUSED,
+                                  str(caught.exception))
+                    self.assertIn('GRANT_ISSUE_INVALID',
+                                  str(caught.exception))
+                    self.assertEqual(store.writes, 0)
+                    self.assertIsNone(store.task['developer'])
+                    self.assertIsNone(store.task['completion'])
+
+                    status, store, requests, launched = self._run(
+                        route, store=store, read_paths=['src.py'],
+                        write_paths=['src.py'], issue=ISSUE, head=head)
+                    self.assertEqual(status, 0)
+                    self.assertEqual(len(requests), 1)
+                    self.assertEqual(requests[0]['read_paths'], ['src.py'])
+                    self.assertEqual(requests[0]['write_paths'], ['src.py'])
+                    self.assertEqual(launched, [True])
+                    self.assertEqual(store.task['developer']['state'],
+                                     'DEVELOPER_RESPONDED')
 
 
 if __name__ == '__main__':
