@@ -427,6 +427,16 @@ class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):
                 self.assertEqual(err.getvalue(), f'llmtool: {mic.PROFILE_INVALID}\n')
                 self.assertEqual(store.list_records(self.root), [])
 
+                jobs_args = cli.parser_for_cli().parse_args(['ci', 'main-incident', 'jobs'])
+                j_out, j_err = io.StringIO(), io.StringIO()
+                with redirect_stdout(j_out), redirect_stderr(j_err):
+                    j_status = mic.run_main_incident(jobs_args, github_get=github, profile=bad)
+                self.assertEqual(j_status, 2)
+                self.assertEqual(json.loads(j_out.getvalue())['reason'], fetch.PROFILE_INVALID)
+                self.assertEqual(j_err.getvalue(), f'llmtool: {fetch.PROFILE_INVALID}\n')
+                github.assert_not_called()
+                self.assertEqual(store.list_records(self.root), [])
+
     def test_patched_default_profile_error_refused(self):
         for exc in (CiProfileError(), RuntimeError('missing profile')):
             with self.subTest(exc=type(exc).__name__):
