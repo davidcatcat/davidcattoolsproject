@@ -67,6 +67,21 @@ source snapshot):
   note above (dated 2026-11-28) that #2919 (head `c1240594`) was
   awaiting formal review.
 
+### Dated follow-up note (2026-11-28, second update)
+
+Update to the dated 2026-11-28 notes above: the merged fact below is
+recorded as supplied (no test run, runtime validation, or exit closure
+is claimed; closure stays pending; the pinned main
+`4ffd749a95b313591c383b13e1148d80c9704cca` remains unchanged as the
+source snapshot):
+- [PR #2926](https://github.com/davidcatcat/davidcattoolsproject/pull/2926),
+  merged as `250d9212`: `test_hosted_ci_repair.py` now covers,
+  through `failure_for_task`, refusal of a missing, raising or
+  wrong-type CI profile and of a substituted Linux workflow file or
+  check name the trust settings do not contain, each without a
+  GitHub read. Test code only. Refusal of duplicate check names is
+  not covered.
+
 ## Status
 
 Closure is **pending**. Blocked work stays blocked: nothing here waives a
