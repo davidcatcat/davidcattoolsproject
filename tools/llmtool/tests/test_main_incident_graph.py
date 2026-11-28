@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 import unittest
 
@@ -152,6 +153,29 @@ class NameTests(unittest.TestCase):
         self.assertEqual(graph.defined_names(text),
                          {'added', 'INSIDE', 'LEFT', 'RIGHT', 'SECOND', 'run'})
 
+    @unittest.skipUnless(hasattr(ast, 'Match'), 'match syntax requires Python 3.10+')
+    def test_defined_names_cover_module_level_match_cases(self):
+        text = ('match value:\n'
+                '    case "a":\n'
+                '        FROM_BODY = 1\n'
+                '    case [FIRST, *REST] as SEQ:\n'
+                '        pass\n'
+                '    case {"k": VAL, **EXTRA}:\n'
+                '        pass\n'
+                '    case Box(POS, attr=KWD):\n'
+                '        pass\n'
+                '    case LEFT | RIGHT:\n'
+                '        pass\n'
+                '    case _:\n'
+                '        pass\n'
+                'def run(arg):\n'
+                '    match arg:\n'
+                '        case INNER:\n'
+                '            INNER_BODY = 1\n')
+        self.assertEqual(graph.defined_names(text),
+                         {'FROM_BODY', 'FIRST', 'REST', 'SEQ', 'VAL', 'EXTRA',
+                          'POS', 'KWD', 'LEFT', 'RIGHT', 'run'})
+
     def test_used_names_from_from_imports_and_module_attributes(self):
         text = ('from llmtool.alpha import run\nfrom llmtool import gamma as g\n'
                 'import llmtool.delta\nimport llmtool.epsilon as eps\nfrom . import beta\n'
@@ -194,6 +218,27 @@ class DependencyAliasTests(unittest.TestCase):
         result = incident.dependency_check(scope, later)
         self.assertEqual(result['code'], incident.REVERT_DEPENDENT)
         self.assertEqual(result['dependents'][0]['names'], ['llmtool.alpha.added'])
+
+
+class DependencyMatchTests(unittest.TestCase):
+    @unittest.skipUnless(hasattr(ast, 'Match'), 'match syntax requires Python 3.10+')
+    def test_later_reference_to_name_introduced_in_top_level_case(self):
+        alpha = P + 'llmtool/alpha.py'
+        user = P + 'llmtool/user.py'
+        scope = {'files': {alpha: {'before': 'def run():\n    return 1\n',
+                                   'after': ('def run():\n    return 1\n\n\n'
+                                             'match MODE:\n'
+                                             '    case "fast":\n'
+                                             '        added = 2\n'
+                                             '    case [captured, *_]:\n'
+                                             '        pass\n')}}}
+        later = [{'pr': 201, 'merge_sha': '1' * 40, 'files': {
+            user: 'from llmtool.alpha import added, captured\n'}}]
+        result = incident.dependency_check(scope, later)
+        self.assertEqual(result['code'], incident.REVERT_DEPENDENT)
+        self.assertEqual(result['dependents'][0]['kinds'], [incident.USES_ADDED_NAME])
+        self.assertEqual(result['dependents'][0]['names'],
+                         ['llmtool.alpha.added', 'llmtool.alpha.captured'])
 
 
 if __name__ == '__main__':

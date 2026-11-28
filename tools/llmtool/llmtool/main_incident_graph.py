@@ -24,6 +24,7 @@ import ast
 
 PREFIX = 'tools/llmtool/'
 _TRY = tuple(kind for kind in (ast.Try, getattr(ast, 'TryStar', None)) if kind is not None)
+_MATCH = getattr(ast, 'Match', None)
 
 
 def module_name(path):
@@ -118,6 +119,29 @@ def _bind(target, out):
         _bind(target.value, out)
 
 
+def _pattern_bind(pattern, out):
+    if pattern is None:
+        return
+    if isinstance(pattern, (ast.MatchAs, ast.MatchStar)):
+        if pattern.name:
+            out.add(pattern.name)
+        if isinstance(pattern, ast.MatchAs):
+            _pattern_bind(pattern.pattern, out)
+    elif isinstance(pattern, (ast.MatchSequence, ast.MatchOr)):
+        for sub in pattern.patterns:
+            _pattern_bind(sub, out)
+    elif isinstance(pattern, ast.MatchMapping):
+        for sub in pattern.patterns:
+            _pattern_bind(sub, out)
+        if pattern.rest:
+            out.add(pattern.rest)
+    elif isinstance(pattern, ast.MatchClass):
+        for sub in pattern.patterns:
+            _pattern_bind(sub, out)
+        for sub in pattern.kwd_patterns:
+            _pattern_bind(sub, out)
+
+
 def _top_level(body, out):
     for node in body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -154,6 +178,10 @@ def _top_level(body, out):
                 _top_level(handler.body, out)
             _top_level(node.orelse, out)
             _top_level(node.finalbody, out)
+        elif _MATCH is not None and isinstance(node, _MATCH):
+            for case in node.cases:
+                _pattern_bind(case.pattern, out)
+                _top_level(case.body, out)
 
 
 def defined_names(text):
