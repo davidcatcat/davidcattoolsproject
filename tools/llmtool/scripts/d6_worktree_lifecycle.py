@@ -363,20 +363,25 @@ BOOTSTRAP_STOP_RE = re.compile(rb"STOP: .+ \(([A-Z0-9_]{1,64})\)")
 
 
 def _run_git(cwd, *args, check=True, timeout=GIT_TIMEOUT_SECONDS):
+    """Run Git with the same hook, fsmonitor and lazy-fetch protections as ENV-2."""
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": os.path.expanduser("~"),
         "LC_ALL": "C",
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_ATTR_NOSYSTEM": "1",
         "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_LAZY_FETCH": "1",
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_PAGER": "cat",
         "PAGER": "cat",
     }
     try:
         result = subprocess.run(
-            ["/usr/bin/git", *args], cwd=str(cwd), env=env,
+            ["/usr/bin/git", "--no-optional-locks", "--no-replace-objects",
+             "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+             "-c", "gc.auto=0", *args], cwd=str(cwd), env=env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, check=False, text=True,
             timeout=timeout,
@@ -1309,10 +1314,8 @@ def lease_status(record, now=None):
 
 
 def _task_git(cwd, *args, check=True, timeout=GIT_TIMEOUT_SECONDS):
-    """Git for retire: task-tree hooks, fsmonitor and auto-gc never run."""
-    return _run_git(cwd, "--no-optional-locks", "--no-replace-objects",
-                    "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-                    "-c", "gc.auto=0", *args, check=check, timeout=timeout)
+    """Git for retire: ``_run_git`` already disables hooks, fsmonitor and auto-gc."""
+    return _run_git(cwd, *args, check=check, timeout=timeout)
 
 
 def _resolve_lsof():
