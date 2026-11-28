@@ -29,7 +29,7 @@ Admitted source notes (linked; their tables are not copied here):
 
 Follow-up to the "Real profile wiring and non-default regression" row: the
 profile refusal coverage recorded for that row now also includes
-(test-coverage only; closure remains pending):
+(no runtime validation is claimed; closure remains pending):
 - [PR #2911](https://github.com/davidcatcat/davidcattoolsproject/pull/2911),
   merged as `ee0c1bf0`: added `TestProfile` constructor refusal for
   non-iterable entry containers with the fixed error code
