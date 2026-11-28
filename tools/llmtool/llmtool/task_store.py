@@ -160,7 +160,8 @@ _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS = (
 _REVIEW_DISPATCH_RESULT_FIELDS = frozenset((
     'task_id', 'run_id', 'contract_digest', 'head', 'verdict', 'review_text'))
 _REVIEW_USAGE_UNKNOWN_REASONS = frozenset((
-    'TRANSCRIPT_UNAVAILABLE', 'USAGE_ABSENT', 'STREAM_USAGE_ABSENT'))
+    'TRANSCRIPT_UNAVAILABLE', 'USAGE_ABSENT', 'STREAM_USAGE_ABSENT',
+    'CAUSE_NOT_ESTABLISHED'))
 _REVIEW_REPAIR_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'attempt', 'state',
     'comment_id', 'packet_sha256', 'claimed_at'))

@@ -67,7 +67,24 @@ REVIEW_FAILURE_REASONS = _D6_CREATE_FAILURE_REASONS | frozenset((
     # The review prompt was refused before any Reviewer session started.
     'REVIEW_PROMPT_REFUSED',
     # Claude Reviewer bridge reported the launched session never took the prompt (#2753).
-    'SESSION_NOT_STARTED', 'PROMPT_NOT_DELIVERED'))
+    'SESSION_NOT_STARTED', 'PROMPT_NOT_DELIVERED',
+    # #1019 C2: closed-list reasons when a formal review claim has no usage/session.
+    'QUOTA_OR_USAGE_LIMIT', 'REVIEWER_NOT_STARTED', 'CAUSE_NOT_ESTABLISHED'))
+_UNKNOWN_CLAIM_REASONS = frozenset((
+    'QUOTA_OR_USAGE_LIMIT', 'REVIEWER_NOT_STARTED', 'CAUSE_NOT_ESTABLISHED'))
+_PRE_START_DISPATCH_CODES = frozenset((
+    'ROUTE_CONFIG_UNAVAILABLE', 'ROLE_MODEL_NOT_ALLOWED',
+    'REVIEWER_RUNTIME_UNAVAILABLE', 'REVIEWER_PROMPT_TOO_LARGE',
+    'REVIEWER_GITHUB_LOGIN_UNAVAILABLE', 'REVIEWER_GITHUB_LOGIN_MISMATCH',
+    'REVIEWER_NOT_ALLOWED', 'OWNER_PAUSED', 'OWNER_ASSIGNMENT_REQUIRED',
+    'REVIEW_PROMPT_PR_HEAD_MISMATCH', 'REVIEW_PROMPT_PR_UNAVAILABLE',
+    'REVIEW_PROMPT_D6_UNAVAILABLE', 'REVIEW_PROMPT_EXECUTOR_DIRTY',
+    'REVIEW_PROMPT_EXECUTOR_HEAD_MISMATCH', 'REVIEW_PROMPT_BINDING_MISSING'))
+_QUOTA_OR_USAGE_LIMIT_RE = re.compile(
+    r'(?:\b(?:rate[ -]?limit|usage[ -]?limit|quota|too many requests|'
+    r'resource[_ -]?exhausted)\b|(?:status|code|http|error)\s*[:=]?\s*429\b)',
+    re.IGNORECASE)
+_NONZERO_SCAN_BYTES = 256 * 1024
 # #1909 item 1: fixed codes for a Reviewer session bind that failed after the session started; kept apart from REVIEW_FAILURE_REASONS (nothing-posted reasons).
 REVIEWER_BIND_FAILURE_REASONS = frozenset(('REVIEWER_SESSION_BIND_FAILED', 'REVIEWER_SESSION_BIND_TIMEOUT'))
 REVIEW_OUTPUT_WITHHELD = 'REVIEW_OUTPUT_WITHHELD'
@@ -98,12 +115,15 @@ def _unique_json_object(pairs):
 
 
 def _refuse(code, message='Reviewer dispatch refused; details omitted', *, reason=None,
-            mismatch_keys=None, excerpt=None, reply_diagnostic=None,
-            reply_diagnostic_label=None, stream_diagnostic=None):
+            claim_reason=None, mismatch_keys=None, excerpt=None,
+            reply_diagnostic=None, reply_diagnostic_label=None,
+            stream_diagnostic=None):
     error = LLMToolError(message)
     error.review_dispatch_code = code
     if reason is not None:
         error.review_failure_reason = reason
+    if claim_reason is not None:
+        error.review_claim_reason = claim_reason
     if mismatch_keys is not None:
         # Fixed JSON key names only; never a returned or expected value.
         error.review_binding_mismatch_keys = tuple(mismatch_keys)
@@ -1092,6 +1112,33 @@ def _record_codex_quota(raw_stdout):
         pass
 
 
+def _nonzero_exit_claim_reason(stdout, stderr):
+    """Classify a non-zero Reviewer CLI exit without retaining any output text."""
+    for raw in (stdout, stderr):
+        if type(raw) is bytes:
+            text = raw[:_NONZERO_SCAN_BYTES].decode('utf-8', 'replace')
+        elif type(raw) is str:
+            text = raw[:_NONZERO_SCAN_BYTES]
+        else:
+            continue
+        if _QUOTA_OR_USAGE_LIMIT_RE.search(text):
+            return 'QUOTA_OR_USAGE_LIMIT'
+    return 'CAUSE_NOT_ESTABLISHED'
+
+
+def _unknown_claim_reason(exc, *, reviewer_started):
+    """Return one closed-list reason for an UNKNOWN formal review claim."""
+    claim_reason = getattr(exc, 'review_claim_reason', None)
+    if claim_reason in _UNKNOWN_CLAIM_REASONS:
+        return claim_reason
+    if (not reviewer_started or
+            getattr(exc, 'launch_refusal', None) is not None or
+            isinstance(exc, OSError) or
+            getattr(exc, 'review_dispatch_code', None) in _PRE_START_DISPATCH_CODES):
+        return 'REVIEWER_NOT_STARTED'
+    return 'CAUSE_NOT_ESTABLISHED'
+
+
 def _codex_stream_usage(raw):
     """Return (usage, usage_unknown_reason) parsed from a Codex exec JSONL stream."""
     from . import high_debug, task_store
@@ -1150,7 +1197,8 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
         _refuse('REVIEWER_RUNTIME_UNAVAILABLE')
     if result.returncode:
         # #1946 (as #1938): fixed words only; stderr text never reaches the message.
-        _refuse('REVIEW_NOT_POSTED', 'Codex Reviewer exited unsuccessfully; details omitted')
+        _refuse('REVIEW_NOT_POSTED', 'Codex Reviewer exited unsuccessfully; details omitted',
+                claim_reason=_nonzero_exit_claim_reason(result.stdout, result.stderr))
     binding = task.get('task_binding')
     if type(binding) is not dict:
         _refuse('REVIEW_PROMPT_BINDING_MISSING')
@@ -1318,7 +1366,8 @@ def _dispatch_agy(*, reviewer_root, prompt, task, head, version=1,
         if result.returncode:
             # Fixed words only; stderr text never reaches the message.
             _refuse('REVIEW_NOT_POSTED',
-                    'AGY Reviewer exited unsuccessfully; details omitted')
+                    'AGY Reviewer exited unsuccessfully; details omitted',
+                    claim_reason=_nonzero_exit_claim_reason(result.stdout, result.stderr))
         try:
             with open(log_path, 'rb') as handle:
                 log_text = handle.read(_AGY_REVIEW_MAX_LOG).decode('utf-8', 'replace')
@@ -2243,6 +2292,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             return output
         if prior['state'] == 'CLAIMED':
             unknown = dict(prior, state='UNKNOWN', updated_at=_now())
+            if 'failure_reason' not in unknown and 'bind_failure_reason' not in unknown:
+                unknown['failure_reason'] = 'CAUSE_NOT_ESTABLISHED'
             updated_claims = [unknown if claim is prior else claim for claim in claims]
             try:
                 store.compare_and_update(
@@ -2335,6 +2386,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         owner_assignment_ref=(task.get("developer") or {}).get("owner_assignment_ref"))
     bind = bind_session or _bind_d6
     session_id = None
+    reviewer_started = False
     try:
         # Authorization is deliberately re-read immediately before each side effect.
         gate = _policy(task, reviewer_key)
@@ -2390,6 +2442,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             reviewer = task_completion.read_d6_registration(
                 reviewer_task, executor.common_dir,
                 allowed_states=task_completion._D6_EVIDENCE_STATES)
+            reviewer_started = True
             if codex_runner is None:
                 codex_result = _dispatch_codex(
                     reviewer_root=reviewer.root, prompt=prompt,
@@ -2415,6 +2468,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             reviewer = task_completion.read_d6_registration(
                 reviewer_task, executor.common_dir,
                 allowed_states=task_completion._D6_EVIDENCE_STATES)
+            reviewer_started = True
             if agy_runner is None:
                 agy_result = _dispatch_agy(
                     reviewer_root=reviewer.root, prompt=prompt,
@@ -2433,6 +2487,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             bind(task_id=reviewer_task, session_id=session_id, repo_root=repo_root)
             structured_result = agy_result
         else:
+            reviewer_started = True
             session_id = send(task_id=reviewer_task, prompt=prompt,
                               repo_root=repo_root, env=env)
             bind(task_id=reviewer_task, session_id=session_id, repo_root=repo_root)
@@ -2477,10 +2532,16 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         if session_id is not None:
             unknown['native_session_id'] = session_id
         reason = getattr(exc, 'review_failure_reason', None)
+        bind_reason = (exc.args[0] if type(exc) is RuntimeError and
+                       len(exc.args) == 1 and
+                       exc.args[0] in REVIEWER_BIND_FAILURE_REASONS else None)
         if reason in REVIEW_FAILURE_REASONS:
             unknown['failure_reason'] = reason
-        if type(exc) is RuntimeError and len(exc.args) == 1 and exc.args[0] in REVIEWER_BIND_FAILURE_REASONS:
-            unknown['bind_failure_reason'] = exc.args[0]
+        elif bind_reason is not None:
+            unknown['bind_failure_reason'] = bind_reason
+        else:
+            unknown['failure_reason'] = _unknown_claim_reason(
+                exc, reviewer_started=reviewer_started)
         mismatch = getattr(exc, 'review_binding_mismatch_keys', None)
         if reason == 'VERDICT_BINDING_MISMATCH' and type(mismatch) is tuple:
             # Keep only the fixed JSON key names; never a returned or expected value.
@@ -2727,6 +2788,7 @@ def dispatch_arbiter(*, store, task_id, executor_task, pr_number, finding_id,
         owner_assignment_ref=(task.get("developer") or {}).get("owner_assignment_ref"))
     bind = bind_session or _bind_d6
     session_id = None
+    reviewer_started = False
     try:
         gate = _policy(task, selected)
         if not gate.allowed:
@@ -2814,6 +2876,7 @@ def dispatch_arbiter(*, store, task_id, executor_task, pr_number, finding_id,
                 _refuse('REVIEW_NOT_POSTED')
             bind(task_id=reviewer_task, session_id=session_id, repo_root=repo_root)
         else:
+            reviewer_started = True
             session_id = send(task_id=reviewer_task, prompt=prompt,
                               repo_root=repo_root, env=env)
             bind(task_id=reviewer_task, session_id=session_id, repo_root=repo_root)
