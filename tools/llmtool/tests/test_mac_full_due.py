@@ -205,6 +205,34 @@ class MacFullDueCases(unittest.TestCase):
         self.assertEqual(self.sweep(T0 + 2100), due.VERIFIED)
         self.assertEqual(len(self.gh.calls), 1)
 
+    def test_e_unhashable_or_non_string_job_names_do_not_crash_and_cannot_satisfy_full(self):
+        bad_names = (
+            ('list', [due.JOBS[-1]]),
+            ('dict', {'name': due.JOBS[-1]}),
+            ('none', None),
+            ('int', 123),
+        )
+        for label, bad_name in bad_names:
+            with self.subTest(case=f'missing_required_{label}'):
+                self.setUp()
+                self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
+                self.github.finish(jobs=OK_JOBS[:-1] + [{'name': bad_name, 'conclusion': 'success'}])
+                self.assertFalse(due.trusted(self.github, self.github.runs[0]))
+                code, _ = due.decide(self.github, now=T0 + 2100)
+                self.assertEqual(code, due.DUE)
+                self.assertEqual(self.sweep(T0 + 2100), due.DISPATCHED)
+                self.assertEqual(len(self.gh.calls), 2)
+
+            with self.subTest(case=f'extra_ignored_{label}'):
+                self.setUp()
+                self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
+                self.github.finish(jobs=OK_JOBS + [{'name': bad_name, 'conclusion': 'failure'}])
+                self.assertTrue(due.trusted(self.github, self.github.runs[0]))
+                code, _ = due.decide(self.github, now=T0 + 2100)
+                self.assertEqual(code, due.VERIFIED)
+                self.assertEqual(self.sweep(T0 + 2100), due.VERIFIED)
+                self.assertEqual(len(self.gh.calls), 1)
+
     def test_f_failed_full_keeps_fail_raises_alert_and_never_passes(self):
         self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
         self.github.finish('failure')

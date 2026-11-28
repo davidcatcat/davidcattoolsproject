@@ -192,7 +192,7 @@ def trusted(github_get, run, *, profile=_UNSET):
         if not isinstance(job, dict):
             continue
         name = job.get('name')
-        if name not in required:
+        if not isinstance(name, str) or name not in required:
             continue
         if name in conclusions:
             # Two records for one required job disagree or are ambiguous: fail closed.
