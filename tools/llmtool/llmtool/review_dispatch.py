@@ -451,6 +451,37 @@ def _iter_jsonl_lines(raw):
             yield line
 
 
+def _codex_event_is_used(event):
+    """Return True when the parser reads data from this Codex event."""
+    if type(event) is not dict:
+        return False
+    if event.get('type') == 'thread.started':
+        return True
+    item = event.get('item')
+    return (event.get('type') == 'item.completed' and
+            type(item) is dict and item.get('type') == 'agent_message')
+
+
+def _codex_jsonl_event(line):
+    """Return one Codex JSONL event, skipping an unused event with a duplicate key.
+
+    A duplicate key in an event whose content the parser uses still raises, so
+    the caller refuses it as before. Any other event with a duplicate key is
+    unusable and is dropped without using its payload. A line that is not an
+    event object with a string ``type`` remains malformed.
+    """
+    try:
+        return json.loads(line, object_pairs_hook=_unique_json_object)
+    except ValueError as exc:
+        if str(exc) != 'duplicate key':
+            raise
+        event = json.loads(line)
+        if (type(event) is dict and type(event.get('type')) is str and
+                not _codex_event_is_used(event)):
+            return None
+        raise
+
+
 def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, version=1):
     """Accept one exact, binding-complete Codex review object from JSONL."""
     if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_STREAM_CEILING:
@@ -464,7 +495,7 @@ def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, ve
         # #2212: read stream line by line with a 16 MiB ceiling; retain at most
         # 1 MiB (final agent message and thread_id); oversized intermediate events skipped.
         for line in _iter_jsonl_lines(raw):
-            event = json.loads(line, object_pairs_hook=_unique_json_object)
+            event = _codex_jsonl_event(line)
             if type(event) is dict and event.get('type') == 'thread.started':
                 current = event.get('thread_id')
                 if (thread_id is not None or type(current) is not str or
@@ -559,7 +590,7 @@ def _jsonl_shape(raw):
         if not line:
             continue
         try:
-            json.loads(line, object_pairs_hook=_unique_json_object)
+            _codex_jsonl_event(line)
         except (ValueError, RecursionError):
             first = line.lstrip()[:1]
             kind = ('blank' if not first else 'brace' if first in '{[' else
@@ -734,7 +765,7 @@ def _codex_final_message(raw):
     final = None
     try:
         for line in _iter_jsonl_lines(raw):
-            event = json.loads(line, object_pairs_hook=_unique_json_object)
+            event = _codex_jsonl_event(line)
             item = event.get('item') if type(event) is dict else None
             if (type(event) is dict and event.get('type') == 'item.completed' and
                     type(item) is dict and item.get('type') == 'agent_message' and
@@ -769,7 +800,7 @@ def _codex_stream_diagnostic(raw):
             category = STREAM_MALFORMED_INVALID_UTF8
         if category is None:
             try:
-                event = json.loads(line, object_pairs_hook=_unique_json_object)
+                event = _codex_jsonl_event(line)
             except ValueError as exc:
                 category = (STREAM_MALFORMED_DUPLICATE_KEY
                             if str(exc) == 'duplicate key'

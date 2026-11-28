@@ -127,6 +127,7 @@ def parse_codex_ruling(raw, *, task_id, run_id, contract_digest, head,
     from .review_dispatch import (
         _CODEX_REVIEW_MAX_OUTPUT,
         _CODEX_REVIEW_STREAM_CEILING,
+        _codex_jsonl_event,
         _iter_jsonl_lines,
         _refuse,
         _unique_json_object,
@@ -141,7 +142,7 @@ def parse_codex_ruling(raw, *, task_id, run_id, contract_digest, head,
     thread_id = None
     try:
         for line in _iter_jsonl_lines(raw):
-            event = json.loads(line, object_pairs_hook=_unique_json_object)
+            event = _codex_jsonl_event(line)
             if type(event) is dict and event.get('type') == 'thread.started':
                 current = event.get('thread_id')
                 if (thread_id is not None or type(current) is not str or
