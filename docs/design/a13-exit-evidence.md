@@ -84,30 +84,40 @@ source snapshot):
 
 ### Dated follow-up note (2026-11-28, third update)
 
-Update to the dated 2026-11-28 notes above: the sub-requirements named in
-the "Real profile wiring and non-default regression" row now map to the
-merged test modules below, all in `tools/llmtool/tests`, recorded as
-supplied (no test run, runtime validation, or exit closure is claimed):
+Update to the dated 2026-11-28 notes above: this note maps only the
+regression and refusal sub-requirements of the "Real profile wiring and
+non-default regression" row to the merged test modules below, all in
+`tools/llmtool/tests`, recorded as supplied (no test run, runtime
+validation, or exit closure is claimed); the deferral of unwired
+ProjectContext consumers is recorded in the earlier update above through
+PR #2914.
 - Non-default CI name workflow and test-path regression evidence:
-  substituted and invalid CI profile coverage in
-  `test_a13_ci_profile_wiring.py` ([PR #2824](https://github.com/davidcatcat/davidcattoolsproject/pull/2824),
-  extended by PR #2872 for one workflow file in both roles) and in
-  `test_a13_ci_profile_wiring_merge.py` (PR #2827, restored lookup
-  PR #2884), and merge train entry coverage in
-  `test_a13_ci_profile_wiring_train.py`
+  substituted CI profile coverage in
+  `test_a13_ci_profile_wiring.py`
+  ([PR #2824](https://github.com/davidcatcat/davidcattoolsproject/pull/2824)),
+  `test_a13_ci_profile_wiring_merge.py` (PR #2827, restored lookup PR
+  #2884) and `test_a13_ci_profile_wiring_train.py`
   ([PR #2930](https://github.com/davidcatcat/davidcattoolsproject/pull/2930),
-  merged as `c0684d9e`).
-- Remaining missing- or ambiguous-settings refusal cases: substituted
-  test directory execution and refusal coverage in
-  `test_a13_test_profile_wiring.py` (classes
-  `NonDefaultDirectoryExecutionTests` and `RefusalTests`, changed by
+  merged as `c0684d9e`); and substituted test directory execution in the
+  group `NonDefaultDirectoryExecutionTests` of
+  `test_a13_test_profile_wiring.py` (changed by
   [PR #2925](https://github.com/davidcatcat/davidcattoolsproject/pull/2925),
   merged as `495f20b6`).
-- Refusal of a CI profile with duplicate check names in the CI repair
-  path only
+- Missing- or ambiguous-settings refusal evidence: invalid or ambiguous CI
+  profile refusal in `test_a13_ci_profile_wiring.py` (PR #2824, extended by
+  PR #2872 for one workflow file in both roles),
+  `test_a13_ci_profile_wiring_merge.py` (PR #2827, restored lookup PR
+  #2884) and `test_a13_ci_profile_wiring_train.py` (PR #2930, merged as
+  `c0684d9e`); the group `RefusalTests` of
+  `test_a13_test_profile_wiring.py` (changed by
+  [PR #2825](https://github.com/davidcatcat/davidcattoolsproject/pull/2825),
+  merged as `d3594f48`, and
+  [PR #2919](https://github.com/davidcatcat/davidcattoolsproject/pull/2919),
+  merged as `ad367ece`; PR #2925 did not change it); and duplicate CI check
+  name refusal in the CI repair path only
   ([PR #2932](https://github.com/davidcatcat/davidcattoolsproject/pull/2932),
-  merged as `05e96294`); this refines the duplicate-check-name statement in
-  the second update above for that CI repair path.
+  merged as `05e96294`), which refines the duplicate-check-name statement
+  in the second update above for that CI repair path.
 
 Outstanding for the row: PR #2837 is open and the combined remote
 evidence follows it; PM verification on a pinned main is pending.
