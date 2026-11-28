@@ -70,11 +70,15 @@ def _refused(code, result=None):
 def _max_members():
     """The configured member maximum, else the previous default.
 
-    A configured value above the fixed candidate and record cap cannot be
-    built, so it is refused fail closed here rather than silently capped.
+    A configured value outside MIN_MEMBERS..TECHNICAL_MEMBERS_MAX (or not an
+    int, excluding booleans) cannot be built, so it is refused fail closed here
+    rather than silently capped or failing later.
     """
-    maximum = repair_policy.load_policy().get(MEMBERS_MAX_KEY, MAX_MEMBERS)
-    if maximum > TECHNICAL_MEMBERS_MAX:
+    policy = repair_policy.load_policy()
+    if type(policy) is not dict:
+        raise LLMToolError(POLICY_INVALID)
+    maximum = policy.get(MEMBERS_MAX_KEY, MAX_MEMBERS)
+    if type(maximum) is not int or not MIN_MEMBERS <= maximum <= TECHNICAL_MEMBERS_MAX:
         raise LLMToolError(POLICY_INVALID)
     return maximum
 
