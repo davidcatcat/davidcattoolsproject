@@ -41,8 +41,9 @@ crosswalk slices remain separate and are not merged here.
 
 ## 5. Gates
 
-- Exact-head hosted docs check at this PR result HEAD
-  `b79502816424a36979c6dacf8f98e647a8f832f0`.
+- Exact-head hosted docs check: must pass on the PR's current exact HEAD at
+  review time (no fixed SHA is stated, since a committed file cannot name its
+  own commit SHA without going stale).
 - The main pin `be913e781e8194fdd36e256d76e021f24a1454cb` is the crosswalk
   evidence pin, not the gate HEAD.
 - Formal review by `codex-reviewer` before acceptance.
