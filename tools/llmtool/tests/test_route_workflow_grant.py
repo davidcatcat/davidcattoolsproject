@@ -33,6 +33,15 @@ OWNER = ('https://github.com/davidcatcat/davidcattoolsproject/'
 ROUTE_NAMES = ('agy', 'claude', 'gw-agent')
 
 
+def _grant_entry(paths=None, issue=None, mode='write', owner=OWNER):
+    return {
+        'issue': ISSUE if issue is None else issue,
+        'owner_record_url': owner,
+        'mode': mode,
+        'paths': list(paths or (PATH,)),
+    }
+
+
 class _TestRoute(DeveloperRoute):
     """Minimal adapter: only the shared request validation is under test."""
 
@@ -94,12 +103,7 @@ class RouteWorkflowGrantTests(unittest.TestCase):
             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def _entry(self, paths=None, issue=None, mode='write', owner=OWNER):
-        return {
-            'issue': ISSUE if issue is None else issue,
-            'owner_record_url': owner,
-            'mode': mode,
-            'paths': list(paths or (PATH,)),
-        }
+        return _grant_entry(paths=paths, issue=issue, mode=mode, owner=owner)
 
     def _commit(self, entries):
         path = self.root / GRANT_PATH
@@ -358,6 +362,9 @@ class DispatchCallerWorkflowGrantTests(unittest.TestCase):
     def _head(self):
         return self._git('rev-parse', 'HEAD').stdout.decode('ascii').strip()
 
+    def _entry(self, paths=None, issue=None, mode='write', owner=OWNER):
+        return _grant_entry(paths=paths, issue=issue, mode=mode, owner=owner)
+
     def _commit_grants(self, entries):
         path = self.root / GRANT_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -614,7 +621,7 @@ class DispatchCallerWorkflowGrantTests(unittest.TestCase):
             for write_workflow in (False, True):
                 with self.subTest(route=route, write_workflow=write_workflow):
                     store = _DispatchStore(self._task(route, 'a' * 32))
-                    bad_read = ['src.py'] if write_workflow else [PATH, 'src.py']
+                    bad_read = [PATH, 'src.py']
                     bad_write = [PATH] if write_workflow else ['src.py']
                     with self.assertRaises(LLMToolError) as caught:
                         self._run(route, store=store,
@@ -637,14 +644,14 @@ class DispatchCallerWorkflowGrantTests(unittest.TestCase):
 
     def test_granted_workflow_paths_are_admitted_on_all_four_routes(self):
         head = self._commit_grants([
-            self._entry([PATH], issue=ISSUE, mode='read'),
+            self._entry([PATH, OTHER], issue=ISSUE, mode='read'),
             self._entry([OTHER], issue=ISSUE, mode='write'),
         ])
         for route in ('agy', 'opencode', 'gw-agent', 'claude'):
             with self.subTest(route=route):
                 status, store, requests, launched = self._run(
-                    route, read_paths=[PATH, 'src.py'], write_paths=[OTHER],
-                    issue=ISSUE, head=head)
+                    route, read_paths=[PATH, OTHER, 'src.py'],
+                    write_paths=[OTHER], issue=ISSUE, head=head)
                 self.assertEqual(status, 0)
                 self.assertEqual(len(requests), 1)
                 self.assertEqual(launched, [True])

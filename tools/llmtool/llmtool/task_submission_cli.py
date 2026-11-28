@@ -7201,6 +7201,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             'read_paths': read_paths, 'write_paths': write_paths, 'executable': executable,
             'prompt': prompt, 'log_path': 'agy.log', 'timeout': timeout,
             'state_dirs': (),
+            **({'issue': task['issue']} if task.get('issue') is not None else {}),
         }, gate=route_gate, boundary=GatedBoundary(),
            snapshot=capture_snapshot, on_launch=authorize_agy_spawn, on_child=record_agy_child)
         _record_skill_delivery(task, registration, snapshot, 'agy', result.model,
@@ -7963,6 +7964,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
             'expected_branch': registration.branch, 'expected_head': snapshot.head,
             'read_paths': read_paths, 'write_paths': write_paths, 'executable': executable,
             'prompt': prompt, 'timeout': timeout, 'state_dirs': (),
+            **({'issue': task['issue']} if task.get('issue') is not None else {}),
         }, gate=route_gate, boundary=GatedBoundary(), snapshot=capture_snapshot)
         _record_skill_delivery(task, registration, snapshot, 'claude', model,
                                card_prefix_sha256, result)
@@ -8645,7 +8647,9 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 'expected_branch': registration.branch, 'expected_head': snapshot.head,
                 'read_paths': read_paths, 'write_paths': write_paths, 'executable': sys.executable,
                 'prompt': prompt, 'task': task_input, 'timeout': timeout,
-                'state_dirs': (), **site.route_fields()}, gate=route_gate, boundary=for_platform(),
+                'state_dirs': (), **site.route_fields(),
+                **({'issue': task['issue']} if task.get('issue') is not None else {})},
+                gate=route_gate, boundary=for_platform(),
                 snapshot=capture_snapshot,
                 on_launch=lambda: _record_gw_agent_skill_not_delivered(task))
         finally:
