@@ -39,10 +39,10 @@ class TestProfile:
 
         Raises :class:`TestProfileError` when ``entries`` cannot be iterated,
         when the entry list is empty, when an entry is not a two-item pair
-        whose first item is a compiled pattern, or when a kind is not exactly
-        the string ``unittest`` or ``script``.  Only the failure to obtain an
-        iterator is normalized here; errors raised later by an accepted
-        iterator propagate unchanged.
+        whose first item is a compiled string pattern, or when a kind is not
+        exactly the string ``unittest`` or ``script``.  Only the failure to
+        obtain an iterator is normalized here; errors raised later by an
+        accepted iterator propagate unchanged.
         """
         try:
             iterator = iter(entries)
@@ -53,7 +53,11 @@ class TestProfile:
             if not isinstance(entry, (tuple, list)) or len(entry) != 2:
                 raise TestProfileError()
             pattern, kind = entry
-            if not isinstance(pattern, re.Pattern):
+            # ``kind_for`` matches against a ``str`` relative path, so a
+            # compiled bytes pattern could only fail later with TypeError.
+            # Refuse it here with the fixed code instead.
+            if not isinstance(pattern, re.Pattern) or not isinstance(
+                    pattern.pattern, str):
                 raise TestProfileError()
             # A type check first: plain membership relies on __eq__, so an
             # object with a permissive __eq__ could otherwise be accepted.

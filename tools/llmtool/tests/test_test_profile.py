@@ -86,6 +86,14 @@ class RefusalCodeTests(unittest.TestCase):
         self._rejected((re.compile(_SCRIPT_RE),))
         self._rejected((re.compile(_SCRIPT_RE), 'script', 1))
 
+    def test_bytes_pattern_is_refused_at_construction(self):
+        # kind_for matches a str relative path, so a compiled bytes
+        # pattern would fail later with TypeError.  It is refused with
+        # the fixed code at construction instead.
+        self._rejected(((re.compile(b'scripts/test_[A-Za-z0-9_]+\\.py\\Z'),
+                         'script'),),
+                       'scripts/test_')
+
     def test_kind_must_be_exactly_one_of_the_two_strings(self):
         self._rejected(((re.compile(_SCRIPT_RE), 'unittest '),),
                        'unittest ')
