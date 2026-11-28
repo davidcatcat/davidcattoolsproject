@@ -1,38 +1,89 @@
 # A13.0 Design Note: Test Execution Modes (#2793)
 
-One-page note defining the A13.0 test-mode interface. It records phase
-boundaries only; it leaves the selection of the GitHub pre-PR approach and all
-implementation to A13.2.
+One-page note defining the A13.0 test-mode interface (revised 2026-11-28). It
+records phase boundaries only; it leaves the selection of the GitHub pre-PR
+approach and all implementation to A13.2.
 
 Sources: #2793 Owner decision, GitHub comment 7208490147; Coordinator review,
-GitHub comment 7210501920.
+GitHub comment 7210501920; Roadmap amendment
+[PR #2923](https://github.com/davidcatcat/davidcattoolsproject/pull/2923) and
+formal PM-relayed Owner record
+[#2793 comment 7236027900](https://github.com/davidcatcat/davidcattoolsproject/issues/2793#issuecomment-7236027900)
+(2026-11-28).
 
 ## Phase boundaries
 
 - A13.0 (this note): define the execution modes, the conceptual evidence
-  binding, and the runner-kind / execution-mode boundary.
+  binding, the runner-kind / execution-mode boundary, and the 2026-11-28
+  validation/merge policy alignment.
 - A13.2: implement the mode interface and make the GitHub pre-PR selection.
+- Effective date: the 2026-11-28 revision takes effect for implementation only
+  after formal review. Nothing here claims implementation, runtime validation,
+  or exit closure, or introduces any new product decision, interface, or scope
+  beyond the Roadmap section "External project validation and CI policy
+  (2026-11-28 product direction)".
 
-## Execution modes (explicit per project)
+## Revision scope (2026-11-28): superseded vs. binding
 
-Each project selects one explicit mode. A mode is never inferred from failure
-or environment, and there is no silent fallback.
+- **Superseded (for implementation only after formal review):** only the
+  earlier requirement of *exactly one automated execution mode per project* is
+  superseded, per
+  [PR #2923](https://github.com/davidcatcat/davidcattoolsproject/pull/2923) and
+  Owner record
+  [#2793 comment 7236027900](https://github.com/davidcatcat/davidcattoolsproject/issues/2793#issuecomment-7236027900).
+- **Still binding:** the three automated execution modes (`local`, `github`,
+  `remote`), no mode inference and no silent fallback, no cross-mode
+  substitution, the runner-kind / execution-mode boundary, all evidence binding
+  and failure rules, existing self-development gates and security policy,
+  historical evidence, and the open GitHub pre-PR timing decision.
 
-- `local` — default for new users. The runner executes on the user's own
-  machine, at the recorded commit of the working tree.
+## Execution modes (explicit per automated check)
+
+A project may explicitly configure zero, one, or multiple required validation
+checks, with **exactly one explicitly selected execution mode** (`local`,
+`github`, or `remote`) per automated check. A mode is never inferred from
+failure or environment, and there is no silent fallback. Multiple checks in
+different modes are not fallback or substitutes for one another.
+
+- `local` — default proposed for new users. The runner executes on the user's
+  own machine, at the recorded commit of the working tree.
 - `github` — hosted exact-head CI. Evidence comes from a hosted runner that
   checked out the exact commit being attested.
 - `remote` — a configured user-owned host. Evidence comes from a runner on a
   host the user owns and has configured.
 
-This repository continues `remote` on the existing remote EC2 host; the
-existing Owner Mac policy applies unchanged. If the selected mode cannot
-produce valid evidence for a requested check, the check fails.
+This repository continues `remote` on the existing remote EC2 host; existing
+self-development gates, security policy, and the Owner Mac policy apply
+unchanged. If the selected mode cannot produce valid evidence for a requested
+check (including when a required target toolchain is missing), the check fails
+rather than falling back or skipping.
+
+## Manual acceptance, no-test path, and merge gates
+
+- **Separate manual acceptance:** manual acceptance is separately recorded and
+  is not an automated execution mode or a substitute for a required automated
+  check.
+- **No-test path (`NOT_TESTED`):** a project explicitly configured with zero
+  automated checks may proceed with development, but records `NOT_TESTED` (or
+  equivalent) with scope and reason, never an automated PASS.
+- **Mandatory independent review and merge gates:** independent formal review
+  of the exact head, trust, worktree isolation, credential isolation, and
+  mandatory repository checks cannot be disabled. Independent formal PASS and
+  valid evidence for every configured required check are required before any
+  llmtool-mediated merge (manual or automatic). Failed, pending, unavailable,
+  stale, mismatched, or unknown required evidence blocks both. No manual
+  acceptance, human confirmation, or preset overrides a required failed or
+  missing check or branch protection.
+- **Merging `NOT_TESTED`:** automatic merge of a `NOT_TESTED` revision is
+  prohibited. A manual merge through llmtool requires separately recorded
+  explicit authorized human acceptance for that exact project and head,
+  independent formal PASS, and all applicable mandatory checks; it is allowed
+  only when no required automated check is outstanding.
 
 ## Evidence binding (conceptual)
 
-A piece of test evidence is bound to, and accepted only when it matches, all
-of:
+A piece of test evidence for each automated check is bound to, and accepted
+only when it matches, all of:
 
 1. Project or repository identity it was produced for.
 2. The exact commit it covers (full, unambiguous identity).
@@ -40,9 +91,10 @@ of:
 4. The configured test selection and outcome: which tests were selected and
    what result each produced.
 
-Missing, mismatched, ambiguous, or unverified evidence is rejected, never
-downgraded or substituted. Unverified covers anything whose binding the
-accepting side cannot check.
+Missing, mismatched, ambiguous, or unverified required evidence fails the
+check; it is never downgraded to `NOT_TESTED`, substituted, or replaced by
+manual acceptance. Unverified covers anything whose binding the accepting side
+cannot check.
 
 ## Runner kind is not execution mode
 
