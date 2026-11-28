@@ -398,6 +398,57 @@ class MacTestIdSelectionTests(unittest.TestCase):
             self.assertEqual(report["level"], "L3")
             self.assertEqual(report["test_ids"], ["FULL"])
 
+    def test_invalid_direct_test_does_not_stop_later_fallback_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "tools/llmtool/llmtool/probe_module.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("# source fixture\n", encoding="utf-8")
+            tests = root / "tools/llmtool/tests"
+            tests.mkdir(parents=True)
+            (tests / "test_chat_tui_pty.py").write_text(
+                "import unittest\nclass ChatTUIPTYTests(unittest.TestCase): pass\n",
+                encoding="utf-8",
+            )
+            # Exists but declares no test case, so direct validation fails.
+            (tests / "test_probe_module.py").write_text(
+                "# invalid direct test module\n", encoding="utf-8"
+            )
+            manifest = root / "tools/llmtool/ci/mac-modules.txt"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(
+                "test_chat_tui_pty.ChatTUIPTYTests\n", encoding="utf-8"
+            )
+            source_path = "tools/llmtool/llmtool/probe_module.py"
+            direct_path = "tools/llmtool/tests/test_probe_module.py"
+            rejected_path = "tools/mac-runner/setup.sh"
+            with patch.object(ci_mac_modules, "MODULE_LIST", manifest):
+                source_first = ci_mac_modules.selection_report(
+                    [source_path, rejected_path], root
+                )
+                rejected_first = ci_mac_modules.selection_report(
+                    [rejected_path, source_path], root
+                )
+        for label, report in (
+            ("source-first", source_first),
+            ("rejected-first", rejected_first),
+        ):
+            with self.subTest(order=label):
+                self.assertEqual(report["level"], "L3")
+                self.assertEqual(report["test_ids"], ["FULL"])
+                self.assertIn("missing_direct_test", report["fallback_reasons"])
+                self.assertIn("unsupported_path", report["fallback_reasons"])
+                self.assertIn(direct_path, report["fallback_paths"])
+                self.assertIn(rejected_path, report["fallback_paths"])
+                self.assertIn(
+                    {"path": direct_path, "reason": "missing_direct_test"},
+                    report["fallback_details"],
+                )
+                self.assertIn(
+                    {"path": rejected_path, "reason": "unsupported_path"},
+                    report["fallback_details"],
+                )
+
     def test_directly_changed_test_selects_its_whole_module(self):
         report = ci_mac_modules.selection_report(
             ["tools/llmtool/tests/test_developer_route_agy.py"], REPO_ROOT
