@@ -375,10 +375,16 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
             any(type(module) is not str for module in modules)):
         return denied('MODULE_NOT_ADMITTED')
     admitted = remote_required_modules(task)
-    if pr is not None and (not modules or not set(modules).issubset(admitted)):
-        extra_modules = _pr_changed_test_modules_for_admission(pr, recorded_head)
-        if extra_modules:
-            admitted = remote_required_modules(task, extra_modules)
+    if (admitted is not None and pr is not None and
+            (not modules or not set(modules).issubset(admitted))):
+        # Derived again even without extras: an unusable profile may be why.
+        admitted = remote_required_modules(
+            task, _pr_changed_test_modules_for_admission(pr, recorded_head))
+    if admitted is None:
+        # #2793: an unusable TestProfile admits nothing; not an admission denial.
+        return _record_outcome(store, task_id, task, result='UNKNOWN',
+                               code=TEST_PROFILE_INVALID, executor_task=executor_task,
+                               sha=sha, modules=modules)
     selected = tuple(sorted(set(modules or admitted)))
     if not selected or not set(selected).issubset(admitted):
         return denied('MODULE_NOT_ADMITTED')

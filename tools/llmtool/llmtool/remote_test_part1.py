@@ -313,17 +313,21 @@ def _ssh_timeout():
         raise LLMToolError('ADMISSION_DENIED: remote test timeout config is invalid') from None
 
 
-def _task_path_modules(task):
+def _task_path_modules(task, patterns=None):
+    """Declared test module stems; () when the TestProfile is unusable."""
+    if patterns is None:
+        patterns = _remote_unittest_patterns()
+    if patterns is None:
+        return ()
     developer = task.get('developer') if type(task.get('developer')) is dict else {}
-    declared_paths = set()
+    stems = set()
     for field in ('read_paths', 'write_paths'):
         paths = developer.get(field)
         if type(paths) is list:
-            declared_paths.update(
-                path for path in paths
-                if type(path) is str and
-                re.fullmatch(r'tools/llmtool/tests/test_[a-z0-9_]{1,80}\.py', path))
-    return tuple(sorted(Path(path).stem for path in declared_paths))
+            stems.update(_remote_module_stem(patterns, path)
+                         for path in paths if type(path) is str)
+    stems.discard(None)
+    return tuple(sorted(stems))
 
 
 _MAC_MANIFEST = Path(__file__).resolve().parents[1] / 'ci' / 'mac-modules.txt'
@@ -390,8 +394,12 @@ def remote_required_modules(task, extra_modules=()):
 
     extra_modules are the exact-head test modules the PR adds or changes.
     Darwin-only modules are left to the exact-head Mac CI merge gate.
+    None means the TestProfile is unusable: the set is unknown, never empty.
     """
-    required = set(_task_path_modules(task))
+    patterns = _remote_unittest_patterns()
+    if patterns is None:
+        return None
+    required = set(_task_path_modules(task, patterns))
     for module in extra_modules:
         if type(module) is str and _MODULE.fullmatch(module):
             required.add(module)
@@ -400,7 +408,10 @@ def remote_required_modules(task, extra_modules=()):
 
 
 def _admitted_modules(task):
-    declared = _task_path_modules(task)
+    patterns = _remote_unittest_patterns()
+    if patterns is None:
+        return ()
+    declared = _task_path_modules(task, patterns)
     if declared:
         return declared
     completion = task.get('completion')
@@ -419,7 +430,6 @@ def _admitted_modules(task):
     names = set()
     for test in tests:
         path = test.get('path') if type(test) is dict else None
-        match = re.fullmatch(r'tools/llmtool/tests/(test_[a-z0-9_]{1,80})\.py', path or '')
-        if match:
-            names.add(match.group(1))
+        names.add(_remote_module_stem(patterns, path or ''))
+    names.discard(None)
     return tuple(sorted(names))
