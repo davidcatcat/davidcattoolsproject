@@ -668,7 +668,7 @@ class DispatchCallerWorkflowGrantTests(unittest.TestCase):
                     store = _DispatchStore(
                         self._task(route, 'a' * 32, issue=ISSUE))
                     read_paths = ([PATH, 'src.py'] if mode == 'read'
-                                  else ['src.py'])
+                                  else [OTHER, 'src.py'])
                     write_paths = ([OTHER] if mode == 'write'
                                    else ['src.py'])
                     with self.assertRaises(LLMToolError) as caught:
