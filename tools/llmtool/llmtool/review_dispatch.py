@@ -451,6 +451,100 @@ def _iter_jsonl_lines(raw):
             yield line
 
 
+class _CodexDuplicateObject(dict):
+    """A parsed JSON object that keeps every key occurrence for classification."""
+
+    def __init__(self, pairs):
+        super().__init__()
+        self.pairs = tuple(pairs)
+        for key, value in pairs:
+            self[key] = value
+
+
+def _codex_duplicate_object(pairs):
+    return _CodexDuplicateObject(pairs)
+
+
+def _codex_event_is_used(event):
+    """Return True when the parser reads data from this Codex event."""
+    if not isinstance(event, dict):
+        return False
+    if event.get('type') == 'thread.started':
+        return True
+    item = event.get('item')
+    return (event.get('type') == 'item.completed' and
+            isinstance(item, dict) and item.get('type') == 'agent_message')
+
+
+def _codex_duplicate_event_could_be_used(event):
+    """True when any duplicate-key reading of the event would be used.
+
+    A repeated ``type``, ``item`` or ``item.type`` can make an event look
+    unused under last-value-wins while another value is a used event. The event
+    is skipped only when no such reading is used.
+    """
+    if not isinstance(event, _CodexDuplicateObject):
+        return _codex_event_is_used(event)
+    types = [value for key, value in event.pairs if key == 'type']
+    if any(value == 'thread.started' for value in types):
+        return True
+    if not any(value == 'item.completed' for value in types):
+        return False
+    for key, item in event.pairs:
+        if key != 'item' or not isinstance(item, _CodexDuplicateObject):
+            continue
+        if any(value == 'agent_message'
+               for item_key, value in item.pairs if item_key == 'type'):
+            return True
+    return False
+
+
+def _codex_jsonl_event(line):
+    """Return one Codex JSONL event, skipping an unused event with a duplicate key.
+
+    A duplicate key in an event whose content the parser uses still raises, so
+    the caller refuses it as before. A repeated discriminator key is refused
+    when any of its values could make the event used. Any other event with a
+    duplicate key is unusable and is dropped without using its payload. A line
+    that is not an event object with a string ``type`` remains malformed.
+    """
+    try:
+        return json.loads(line, object_pairs_hook=_unique_json_object)
+    except ValueError as exc:
+        if str(exc) != 'duplicate key':
+            raise
+    event = json.loads(line, object_pairs_hook=_codex_duplicate_object)
+    if (type(event) is not _CodexDuplicateObject or
+            type(event.get('type')) is not str or
+            _codex_duplicate_event_could_be_used(event)):
+        raise ValueError('duplicate key')
+    return None
+
+
+def _codex_stream_without_skipped_events(raw):
+    """Return JSONL bytes with unused duplicate-key events removed.
+
+    The review parser drops an unused event that holds a duplicate key. Later
+    readers, such as usage extraction, must not read that event's payload, so
+    they are given a stream that no longer contains it.
+    """
+    if type(raw) is not bytes:
+        return raw
+    kept = []
+    try:
+        for line in _iter_jsonl_lines(raw):
+            try:
+                json.loads(line, object_pairs_hook=_unique_json_object)
+            except ValueError as exc:
+                if str(exc) == 'duplicate key':
+                    continue
+                raise
+            kept.append(line)
+    except (UnicodeError, ValueError, RecursionError):
+        return raw
+    return ('\n'.join(kept) + ('\n' if kept else '')).encode('utf-8')
+
+
 def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, version=1):
     """Accept one exact, binding-complete Codex review object from JSONL."""
     if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_STREAM_CEILING:
@@ -464,7 +558,7 @@ def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, ve
         # #2212: read stream line by line with a 16 MiB ceiling; retain at most
         # 1 MiB (final agent message and thread_id); oversized intermediate events skipped.
         for line in _iter_jsonl_lines(raw):
-            event = json.loads(line, object_pairs_hook=_unique_json_object)
+            event = _codex_jsonl_event(line)
             if type(event) is dict and event.get('type') == 'thread.started':
                 current = event.get('thread_id')
                 if (thread_id is not None or type(current) is not str or
@@ -559,7 +653,7 @@ def _jsonl_shape(raw):
         if not line:
             continue
         try:
-            json.loads(line, object_pairs_hook=_unique_json_object)
+            _codex_jsonl_event(line)
         except (ValueError, RecursionError):
             first = line.lstrip()[:1]
             kind = ('blank' if not first else 'brace' if first in '{[' else
@@ -734,7 +828,7 @@ def _codex_final_message(raw):
     final = None
     try:
         for line in _iter_jsonl_lines(raw):
-            event = json.loads(line, object_pairs_hook=_unique_json_object)
+            event = _codex_jsonl_event(line)
             item = event.get('item') if type(event) is dict else None
             if (type(event) is dict and event.get('type') == 'item.completed' and
                     type(item) is dict and item.get('type') == 'agent_message' and
@@ -769,7 +863,7 @@ def _codex_stream_diagnostic(raw):
             category = STREAM_MALFORMED_INVALID_UTF8
         if category is None:
             try:
-                event = json.loads(line, object_pairs_hook=_unique_json_object)
+                event = _codex_jsonl_event(line)
             except ValueError as exc:
                 category = (STREAM_MALFORMED_DUPLICATE_KEY
                             if str(exc) == 'duplicate key'
@@ -1001,6 +1095,8 @@ def _record_codex_quota(raw_stdout):
 def _codex_stream_usage(raw):
     """Return (usage, usage_unknown_reason) parsed from a Codex exec JSONL stream."""
     from . import high_debug, task_store
+    if type(raw) is bytes:
+        raw = _codex_stream_without_skipped_events(raw)
     parsed = high_debug._usage_from_events(raw) if type(raw) is bytes else 'UNKNOWN'
     if type(parsed) is not dict:
         return None, 'STREAM_USAGE_ABSENT'
