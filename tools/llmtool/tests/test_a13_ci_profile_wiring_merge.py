@@ -379,6 +379,11 @@ class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):
             ai_loop_check='d', macos_check=due.SHARD_JOBS[0],
             linux_workflow_file='l.yml', macos_workflow_file='m.yml',
         )
+        duplicate_checks = CiProfile(
+            linux_code_check='a', docs_check='a', gateway_check='c',
+            ai_loop_check='d', macos_check='e',
+            linux_workflow_file='l.yml', macos_workflow_file='m.yml',
+        )
         return (
             ('missing_none', None),
             ('invalid_str', 'check (Linux 3.14)'),
@@ -389,6 +394,7 @@ class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):
             ('ambiguous_list', [ALT_PROFILE, default_profile()]),
             ('ambiguous_tuple', (ALT_PROFILE,)),
             ('shard_collision', shard_collision),
+            ('duplicate_checks', duplicate_checks),
         )
 
     def test_main_incident_and_cli_refuse_bad_profiles_without_reads(self):
@@ -419,6 +425,16 @@ class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):
                 self.assertEqual(status, 2)
                 self.assertEqual(payload, {'code': mic.PROFILE_INVALID, 'profile': 'invalid'})
                 self.assertEqual(err.getvalue(), f'llmtool: {mic.PROFILE_INVALID}\n')
+                self.assertEqual(store.list_records(self.root), [])
+
+                jobs_args = cli.parser_for_cli().parse_args(['ci', 'main-incident', 'jobs'])
+                j_out, j_err = io.StringIO(), io.StringIO()
+                with redirect_stdout(j_out), redirect_stderr(j_err):
+                    j_status = mic.run_main_incident(jobs_args, github_get=github, profile=bad)
+                self.assertEqual(j_status, 2)
+                self.assertEqual(json.loads(j_out.getvalue())['reason'], fetch.PROFILE_INVALID)
+                self.assertEqual(j_err.getvalue(), f'llmtool: {fetch.PROFILE_INVALID}\n')
+                github.assert_not_called()
                 self.assertEqual(store.list_records(self.root), [])
 
     def test_patched_default_profile_error_refused(self):
