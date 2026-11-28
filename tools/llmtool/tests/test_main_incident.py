@@ -89,6 +89,19 @@ class RunKindTests(unittest.TestCase):
         self.assertIsNone(mi.run_kind(linux('1', A)))
         self.assertIsNone(mi.run_kind(linux(1, 'not-a-sha')))
 
+    def test_non_string_and_unhashable_job_names_are_ignored(self):
+        required = list(mac_full_due.JOBS)
+        for bad_name in (None, 123, True, [required[0]], {'name': required[0]}):
+            with self.subTest(bad_name=bad_name):
+                missing_required = [{'name': bad_name, 'conclusion': 'success'}] + [
+                    {'name': name, 'conclusion': 'success'} for name in required[1:]
+                ]
+                self.assertIsNone(mi.run_kind(full(1, A, jobs=missing_required)))
+                with_extra = [{'name': name, 'conclusion': 'success'} for name in required] + [
+                    {'name': bad_name, 'conclusion': 'success'}
+                ]
+                self.assertEqual(mi.run_kind(full(2, A, jobs=with_extra)), mi.FULL_MAC)
+
 
 class HeadStateTests(unittest.TestCase):
     def test_trusted_pass_needs_linux_and_trusted_full(self):
@@ -132,6 +145,42 @@ class HeadStateTests(unittest.TestCase):
 
     def test_unique_success_jobs_still_pass_with_the_matching_linux_check(self):
         self.assertTrue(mi.trusted_pass(runs(linux(1, A), full(2, A)), A))
+
+    def test_direct_pass_evaluation_ignores_non_string_and_unhashable_job_names(self):
+        required = list(mac_full_due.JOBS)
+        for bad_name in (None, 123, True, [required[0]], {'name': required[0]}):
+            with self.subTest(bad_name=bad_name):
+                missing_required = [{'name': bad_name, 'conclusion': 'success'}] + [
+                    {'name': name, 'conclusion': 'success'} for name in required[1:]
+                ]
+                bad_run = full(1, A, jobs=missing_required)
+                self.assertFalse(mi._passed(mi.FULL_MAC, bad_run))
+                self.assertIsNone(mi.check_state(mi.FULL_MAC, bad_run))
+                self.assertFalse(mi.trusted_pass(runs(linux(2, A), bad_run), A))
+
+                with_extra = [{'name': name, 'conclusion': 'success'} for name in required] + [
+                    {'name': bad_name, 'conclusion': 'failure'}
+                ]
+                good_run = full(3, A, jobs=with_extra)
+                self.assertTrue(mi._passed(mi.FULL_MAC, good_run))
+                self.assertEqual(mi.check_state(mi.FULL_MAC, good_run), mi.PASS)
+                self.assertTrue(mi.trusted_pass(runs(linux(4, A), good_run), A))
+
+        for bad_jobs in (None, 'bad'):
+            with self.subTest(bad_jobs=bad_jobs):
+                malformed = full(5, A) | {'jobs': bad_jobs}
+                self.assertFalse(mi._passed(mi.FULL_MAC, malformed))
+                self.assertIsNone(mi.check_state(mi.FULL_MAC, malformed))
+
+    def test_malformed_mac_job_name_does_not_crash_classification_or_drop_other_evidence(self):
+        history = commits(B, A)
+        malformed_mac = full(11, B, 'failure', jobs=[{'name': ['shards (1/3)'], 'conclusion': 'failure'}])
+        data = runs(linux(1, A), full(2, A), linux(10, B, 'failure', failed_tests=[T]), malformed_mac)
+        result = mi.classify_incident(history, data)
+        self.assertTrue(result['incident'])
+        self.assertEqual((result['pass_sha'], result['fail_sha'], result['class']), (A, B, mi.UNKNOWN))
+        self.assertIn({'code': 'TEST_FAILURE', 'kind': mi.LINUX, 'run': 10, 'tests': [T]},
+                      result['evidence'])
 
     def test_failed_run_then_green_rerun_on_same_sha_is_not_failing(self):
         self.assertFalse(mi.head_failed(runs(full(1, A, 'failure'), full(2, A)), A))
