@@ -6,17 +6,17 @@ Basis
 - Issue #2793, Coordinator review comment 7210501920: adopt the profile
   wiring in dependency-ordered stages; nothing ships on a partial
   profile.
-- A13.0 Roadmap migration and rollback exit requirement: the migration
-  is complete only when every slice passes its checks and the rollback
-  path has been verified end to end.
+- A13.0 Roadmap migration and rollback exit requirement: migration
+  complete only when every slice passes its checks and the
+  migration/rollback and regression tests pass. An end-to-end rollback
+  drill is not a Roadmap requirement; the §2 drill is optional.
 
-Out of scope for this runbook: changing code, workflow, or live state;
+Out of scope: changing code, workflow, or live state;
 weakening the existing remote EC2 evidence or any gate; repeating the
 separate test-mode interface design.
 
-Profile source: `tools/llmtool/llmtool/ci_profile.py` — `CiProfile`
-(immutable value), `default_profile()` (current check and workflow file
-names), `CiProfileError` (fail-closed name validation).
+Profile source: `tools/llmtool/llmtool/ci_profile.py` — `CiProfile`,
+`default_profile()`, `CiProfileError`.
 
 ## 1. Staged rollout checklist (PM)
 
@@ -26,19 +26,18 @@ Work the stages in order. Any failed step stops the rollout and starts
 Stage 0 — record (before any merge)
 1. Record the `main` HEAD (pre-sync baseline).
 2. Record the controller revision in use.
-3. Record the HEAD of every reviewed wiring PR, one row per slice in §3.
-   The post-sync `main` revision is not predictable, so it is recorded
-   as it happens in Stage 2.
+3. Record the HEAD of every reviewed wiring PR, one row per slice in §3
+   (the post-sync `main` revision is recorded in Stage 2 as it
+   happens).
 
 Stage 1 — verify each slice on its recorded HEAD, dependency order
 4. Default parity: at the real entry points the default profile yields
    exactly the check set from `default_profile()`.
 5. Non-default path use: the non-default profile's CI check names and
-   workflow file names reach their real consumers — the real test entry
-   points accept and honour the non-default profile (test-profile
-   consumers and the non-default test-path fixture), and the CI/workflow
-   consumers use the non-default check and workflow file names; no
-   hard-coded names.
+   workflow file names reach their real consumers — real test entry
+   points accept and honour the profile (test-profile consumers,
+   non-default test-path fixture) and CI/workflow consumers use the
+   non-default check and workflow file names; no hard-coded names.
 6. Refusal evidence: for missing, invalid, or ambiguous profile
    configuration the real entry points refuse (fail-closed); an invalid
    name is rejected with `CiProfileError` at construction, never
@@ -92,24 +91,23 @@ Safe rollback checklist — no force-push, no manual TaskStore edits:
 7. Verify the rollback: each affected slice's content equals the §3
    rollback target recorded before its merge, and the controller
    reports the revision recorded in step 2. A reviewed revert makes a
-   new `main` commit, so compare slice content and controller revision
-   against those explicit rollback targets — not the step 1 baseline.
-   Resume only when both hold and the affected checks are green.
+   new `main` commit, so compare against those explicit targets, not
+   the step 1 baseline. Resume only when both hold and the affected
+   checks are green.
 
-The rollback drill and live verification have not been run as of this
-runbook; both are pending and are required by the roadmap exit
-requirement.
+The rollback drill (not a Roadmap requirement), the regression tests,
+and live verification are all pending; none has been run.
 
 ## 3. Per-slice evidence checklist
 
 `head` = recorded slice HEAD; `verdict` = ok only when steps 4–10 all
 pass for that HEAD. Rollback target = the `main` HEAD recorded before
-that slice's merge (step 11) — always a recorded HEAD, never a slice
-name, never a hand-edited state.
+that slice's merge (step 11) — always a recorded HEAD, never a
+hand-edited state.
 
 | slice | feature | head | verdict | tests (evidence) | rollback target |
 |-------|---------|------|---------|------------------|-----------------|
-| S1 | profile value + fail-closed validation (`ci_profile.py`) | pending | pending | construction and refusal (missing/invalid/ambiguous) tests (pending) | `main` HEAD before S1 merge (pending) |
+| S1 | profile value + fail-closed validation | pending | pending | construction and refusal (missing/invalid/ambiguous) tests (pending) | `main` HEAD before S1 merge (pending) |
 | S2 | real test entry points wired to the profile | pending | pending | default parity, non-default test-path fixture + CI/workflow names at real consumers, EC2 evidence (pending) | `main` HEAD before S2 merge (pending) |
 | S3 | required CI names and coverage | pending | pending | full CI run on the recorded HEAD (pending) | `main` HEAD before S3 merge (pending) |
 
