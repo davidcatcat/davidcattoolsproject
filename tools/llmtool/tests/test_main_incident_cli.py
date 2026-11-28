@@ -383,6 +383,80 @@ class MainIncidentCliTests(unittest.TestCase):
                 self.assertEqual((status, payload['code']), (2, mic.UNAVAILABLE))
                 self.assertEqual(store.list_records(self.root), [])
 
+    def test_scan_refuses_repeated_linux_check_ids_in_either_order(self):
+        # Same ID and head with conflicting conclusions must not depend on payload order.
+        for first, second in (('failure', 'success'), ('success', 'failure')):
+            with self.subTest(conclusions=(first, second)):
+                github = FakeGitHub([A])
+                github.mac_run(A, 'success')
+                github.linux[A] = [
+                    {'id': 7, 'name': mi.LINUX_CHECK, 'head_sha': A,
+                     'status': 'completed', 'conclusion': first},
+                    {'id': 7, 'name': mi.LINUX_CHECK, 'head_sha': A,
+                     'status': 'completed', 'conclusion': second},
+                ]
+                status, payload = self.run_cli(['scan'], github)
+                self.assertEqual((status, payload['code']), (2, mic.UNAVAILABLE))
+                self.assertEqual(store.list_records(self.root), [])
+
+    def test_scan_refuses_nonpositive_linux_check_ids(self):
+        for run_id in (0, -1):
+            with self.subTest(run_id=run_id):
+                github = FakeGitHub([A])
+                github.mac_run(A, 'success')
+                github.linux[A] = [
+                    {'id': run_id, 'name': mi.LINUX_CHECK, 'head_sha': A,
+                     'status': 'completed', 'conclusion': 'success'},
+                ]
+                status, payload = self.run_cli(['scan'], github)
+                self.assertEqual((status, payload['code']), (2, mic.UNAVAILABLE))
+                self.assertEqual(store.list_records(self.root), [])
+
+    def test_scan_ignores_other_heads_and_checks_with_nonpositive_ids(self):
+        github = FakeGitHub([C, A])
+        github.passed(A)
+        github.code_failure(C)
+        github.merged(C, 12)
+        github.linux[C] = [
+            {'id': 0, 'name': 'docs', 'head_sha': C,
+             'status': 'completed', 'conclusion': 'success'},
+            {'id': -1, 'name': mi.LINUX_CHECK, 'head_sha': A,
+             'status': 'completed', 'conclusion': 'failure'},
+            {'id': 9, 'name': mi.LINUX_CHECK, 'head_sha': C,
+             'status': 'completed', 'conclusion': 'failure'},
+        ]
+        github.annotations[9] = [{'message': FAIL_LINE}]
+        status, payload = self.run_cli(['scan'], github)
+        self.assertEqual((status, payload['code']), (0, mic.CREATED))
+        latest = store.get(payload['incident_id'], self.root)['observations'][0]
+        self.assertEqual([run['id'] for run in latest['failing_runs']
+                          if run['kind'] == mi.LINUX], [9])
+
+    def test_linux_runs_uses_the_effective_profile_check_name(self):
+        class Profile:
+            linux_code_check = 'check (Linux substituted)'
+
+        github = FakeGitHub([A])
+        github.linux[A] = [
+            {'id': 1, 'name': Profile.linux_code_check, 'head_sha': A,
+             'status': 'completed', 'conclusion': 'success'},
+            {'id': 2, 'name': mi.LINUX_CHECK, 'head_sha': A,
+             'status': 'completed', 'conclusion': 'failure'},
+            {'id': 0, 'name': 'docs', 'head_sha': A,
+             'status': 'completed', 'conclusion': 'success'},
+        ]
+        with mock.patch.object(mac_full_due, 'resolve_profile', return_value=Profile()):
+            runs = mic._linux_runs(github, A)
+        self.assertEqual([(run['id'], run['conclusion']) for run in runs],
+                         [(1, 'success')])
+        # The duplicate rule follows the substituted check name too.
+        github.linux[A].append(
+            {'id': 1, 'name': Profile.linux_code_check, 'head_sha': A,
+             'status': 'completed', 'conclusion': 'failure'})
+        with mock.patch.object(mac_full_due, 'resolve_profile', return_value=Profile()):
+            with self.assertRaises(mac_full_due.StateError):
+                mic._linux_runs(github, A)
+
     def test_scan_by_another_session_cannot_touch_the_incident(self):
         github = self.single()
         incident = self.scanned(github)
