@@ -1,16 +1,18 @@
 """Explicit same-head hosted test repair after a repeated EC2 timeout."""
 
 import copy
+from dataclasses import replace
 import io
 import json
 import tempfile
+from types import SimpleNamespace
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from llmtool import hosted_ci_repair, pm_caller, review_repair, task_advance, task_completion
-from llmtool import task_submission_cli
+from llmtool import ci_profile, hosted_ci_repair, mac_full_due, pm_caller, review_repair
+from llmtool import task_advance, task_completion, task_submission_cli
 from llmtool.ci_profile import default_profile
 from llmtool.cli import parser_for_cli
 from llmtool.errors import LLMToolError
@@ -170,3 +172,29 @@ class HostedCiRepairTests(unittest.TestCase):
         repair.assert_called_once()
         self.assertEqual(repair.call_args.kwargs['ci_failure']['check_run_id'], AGGREGATE)
         self.assertEqual(json.loads(output.getvalue()), {'state': 'claimed'})
+
+    def test_refuses_invalid_ci_profile_without_github_read(self):
+        cases = (
+            ('missing', mock.patch.object(mac_full_due, 'ci_profile', SimpleNamespace())),
+            ('raising', mock.patch.object(
+                ci_profile, 'default_profile', side_effect=RuntimeError('profile unavailable'))),
+            ('wrong_type', mock.patch.object(
+                ci_profile, 'default_profile', return_value='not-a-profile')),
+        )
+        for kind, patcher in cases:
+            with self.subTest(kind=kind), patcher:
+                self.assert_refusal(review_repair.CI_REPAIR_PROFILE_INVALID)
+                self.get.assert_not_called()
+                self.read_log.assert_not_called()
+
+    def test_refuses_untrusted_substituted_linux_workflow_or_check_without_github_read(self):
+        cases = (
+            ('workflow_file', replace(PROFILE, linux_workflow_file='other-linux-ci.yml')),
+            ('check_name', replace(PROFILE, linux_code_check='other check (Linux 3.14)')),
+        )
+        for field, substituted in cases:
+            with self.subTest(field=field), mock.patch.object(
+                    ci_profile, 'default_profile', return_value=substituted):
+                self.assert_refusal('HOSTED_CI_REPAIR_WORKFLOW_UNTRUSTED')
+                self.get.assert_not_called()
+                self.read_log.assert_not_called()
