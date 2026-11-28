@@ -9,11 +9,11 @@
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6685246395"
     },
     "claude-developer": {
-      "dispatch": "PAUSED",
+      "dispatch": "ALLOWED",
       "decided_by": "Owner",
-      "decided_at": "2026-11-24",
-      "reason": "Owner 2026-11-24 (relayed via independent line): claude-developer paused; its work is reassigned to other routes",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-7121158963"
+      "decided_at": "2026-11-29",
+      "reason": "Owner decision 2026-11-29 (#289 comment 7244429004): resumed claude-developer on account claude2 with formal review by codex-reviewer.",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-7244429004"
     },
     "opencode-developer": {
       "dispatch": "ALLOWED",

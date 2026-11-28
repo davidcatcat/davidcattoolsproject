@@ -309,17 +309,18 @@ class WorkerDispatchTests(unittest.TestCase):
             worker_dispatch.evaluate('agy', None, task_id).reason_code,
             'OWNER_ASSIGNMENT_REQUIRED')
 
-    def test_real_claude_developer_policy_is_owner_paused(self):
+    def test_real_claude_developer_policy_is_owner_allowed(self):
         with patch.object(worker_dispatch, '_POLICY_PATH',
                           Path(worker_dispatch._DEFAULT_POLICY_PATH)):
             decision = worker_dispatch.evaluate('claude-developer')
-        # #289 c7121158963 (Owner 2026-11-24): claude-developer paused.
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason_code, 'OWNER_PAUSED')
+        # #289 c7244429004 (Owner 2026-11-29): claude-developer resumed on claude2.
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason_code, 'OWNER_POLICY_ALLOWED')
         real_policy = worker_dispatch._parse_policy(
             Path(worker_dispatch._DEFAULT_POLICY_PATH).read_bytes())
         worker = real_policy['workers']['claude-developer']
-        self.assertEqual(worker['dispatch'], 'PAUSED')
+        # #289 c7244429004 (Owner 2026-11-29): claude-developer resumed on claude2.
+        self.assertEqual(worker['dispatch'], 'ALLOWED')
         self.assertNotIn('owner_assignments', worker)
 
     # #289 (Owner decision 2026-11-14): the real policy resumes PM-selected AGY
@@ -396,8 +397,8 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(
             {key: row['dispatch'] for key, row in policy['workers'].items()},
             {'codex-developer': 'PAUSED',
-             # #289 c7121158963 (Owner 2026-11-24): claude-developer paused.
-             'claude-developer': 'PAUSED',
+             # #289 c7244429004 (Owner 2026-11-29): claude-developer resumed on claude2.
+             'claude-developer': 'ALLOWED',
              'opencode-developer': 'ALLOWED', 'agy': 'ALLOWED',
              # #1019 c7232754534 / #289 c7238827457 (Owner 2026-11-28): one AGY Reviewer route.
              'agy-reviewer': 'ALLOWED',
