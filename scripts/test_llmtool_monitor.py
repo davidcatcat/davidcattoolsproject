@@ -7478,14 +7478,27 @@ def kproc(pid, ppid, start, comm=b"x", uid=None, pstat=2, pgid=None, **kwargs):
 
 class _TableFixture:
     """A ProcessTable over FakeKernel with a fake ps, ps -U and clocks."""
+    ME_PID = 90000
+    ME_PPID = 89999
+
+    def _stop_pid_patches(self):
+        while getattr(self, "_pid_patches", None):
+            self._pid_patches.pop().stop()
 
     def setUp(self):
+        self._pid_patches = [
+            patch.object(mon.os, "getpid", return_value=self.ME_PID),
+            patch.object(mon.os, "getppid", return_value=self.ME_PPID),
+        ]
+        for pid_patch in self._pid_patches:
+            pid_patch.start()
+        self.addCleanup(self._stop_pid_patches)
         self.clock, self.wall, self.full, self.users = [100.0], [NOW], [], []
-        self.me = kproc(os.getpid(), os.getppid(), NOW - 50, b"Python", flag=mon.P_CONTROLT,
-                        tpgid=os.getpid())
+        self.me = kproc(self.ME_PID, self.ME_PPID, NOW - 50, b"Python", flag=mon.P_CONTROLT,
+                        tpgid=self.ME_PID)
         self.agent = kproc(4000, 1, NOW - 3725, b"claude", flag=mon.P_CONTROLT, tpgid=4000,
                            eflag=mon.EPROC_SLEADER)
-        self.kernel = FakeKernel([self.me, self.agent], {os.getpid(): "python monitor",
+        self.kernel = FakeKernel([self.me, self.agent], {self.ME_PID: "python monitor",
                                                          4000: "claude --resume"})
 
     def _table(self, ps_text):
@@ -7511,7 +7524,7 @@ class ProcessTableTests(_TableFixture, unittest.TestCase):
     runs the same rows come from the kernel's process list."""
 
     def test_rows_between_ps_runs_equal_what_ps_would_print(self):
-        table = self._table(f"{os.getpid()} {os.getppid()} {os.getpid()} 00:50 S+ python monitor\n"
+        table = self._table(f"{self.ME_PID} {self.ME_PPID} {self.ME_PID} 00:50 S+ python monitor\n"
                             "4000 1 4000 01:02:05 Ss+ claude --resume\n")
         first = self._rows(table)
         self.assertEqual(self.full, [100.0])
@@ -7526,16 +7539,16 @@ class ProcessTableTests(_TableFixture, unittest.TestCase):
         self.assertEqual(len(self.full), 2)   # STAT and other accounts refreshed
 
     def test_snapshot_from_kernel_rows_matches_parse_of_ps_text(self):
-        text = (f"{os.getpid()} {os.getppid()} {os.getpid()} 00:50 S+ python monitor\n"
+        text = (f"{self.ME_PID} {self.ME_PPID} {self.ME_PID} 00:50 S+ python monitor\n"
                 "4000 1 4000 01:02:05 Ss+ claude --resume\n"
                 "4001 4000 4000 00:10 S /bin/zsh -c make\n")
         self.kernel.procs.append(kproc(4001, 4000, NOW - 10, b"zsh", pgid=4000))
         table = self._table(text)
         table.rows()
-        self.assertEqual(mon.collect(table=table), mon.parse_processes(text, os.getpid()))
+        self.assertEqual(mon.collect(table=table), mon.parse_processes(text, self.ME_PID))
 
     def test_new_process_command_is_read_once_and_exec_reads_it_again(self):
-        table = self._table(f"{os.getpid()} {os.getppid()} {os.getpid()} 00:50 S+ python monitor\n"
+        table = self._table(f"{self.ME_PID} {self.ME_PPID} {self.ME_PID} 00:50 S+ python monitor\n"
                             "4000 1 4000 01:02:05 Ss+ claude --resume\n")
         table.rows()
         self.kernel.procs.append(kproc(4100, 4000, NOW - 2, b"zsh", eflag=mon.EPROC_SLEADER))
@@ -7600,6 +7613,7 @@ class ProcessTableTests(_TableFixture, unittest.TestCase):
                           "20-00:00:00"])
 
     def test_real_kernel_rows_agree_with_ps_on_this_mac(self):
+        self._stop_pid_patches()
         if sys.platform != "darwin":
             self.skipTest("macOS sysctl layout")
         kernel = mon._Sysctl()
@@ -7612,6 +7626,22 @@ class ProcessTableTests(_TableFixture, unittest.TestCase):
         (pid, ppid, pgid, _, _, command), = mon.ps_rows(shown)
         self.assertEqual((pid, ppid, pgid, command),
                          (mine[0].pid, mine[0].ppid, mine[0].pgid, kernel.command(os.getpid())))
+
+    def test_host_pid_colliding_with_fixture_id_does_not_affect_table_tests(self):
+        self._stop_pid_patches()
+        for name in (
+            "test_rows_between_ps_runs_equal_what_ps_would_print",
+            "test_new_process_command_is_read_once_and_exec_reads_it_again",
+            "test_a_process_that_becomes_a_zombie_is_shown_as_ps_shows_it",
+        ):
+            with self.subTest(test=name), \
+                 patch.object(mon.os, "getpid", return_value=4000), \
+                 patch.object(mon.os, "getppid", return_value=1):
+                self.setUp()
+                try:
+                    getattr(self, name)()
+                finally:
+                    self._stop_pid_patches()
 
 
 def _reference_wrap(text, cols):
