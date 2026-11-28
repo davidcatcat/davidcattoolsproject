@@ -136,7 +136,7 @@ class RemoteProfileValidationRegressionTests(unittest.TestCase):
         self.assertEqual(remote_test_part1._admitted_modules(task), ('test_alpha', 'test_beta'))
 
         def github_get(path):
-            if path == 'pulls/17/files?per_page=100&page=1':
+            if path in ('pulls/17/files?per_page=100', 'pulls/17/files?per_page=100&page=1'):
                 return [{'filename': 'tools/llmtool/tests/test_gamma.py', 'status': 'modified'}]
             return []
 
@@ -153,7 +153,7 @@ class RemoteProfileValidationRegressionTests(unittest.TestCase):
         task = _task(read_paths=['tools/llmtool/tests/test_declared.py'])
 
         def github_get(path):
-            if path == 'pulls/17/files?per_page=100&page=1':
+            if path in ('pulls/17/files?per_page=100', 'pulls/17/files?per_page=100&page=1'):
                 return [{'filename': 'tools/llmtool/tests/test_removed.py', 'status': 'removed'}]
             return []
 
