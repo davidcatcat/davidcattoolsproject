@@ -39,6 +39,34 @@ profile refusal coverage recorded for that row now also includes
   head `c1240594`, awaiting formal review: extends the `TestProfile`
   constructor refusal to compiled bytes regex patterns.
 
+### Dated follow-up note (2026-11-28, update)
+
+Update to the dated 2026-11-28 note above: the merged facts below are
+recorded as supplied (no test run, runtime validation, or exit closure
+is claimed; closure stays pending; #2836 and #2837 remain open and
+unmerged; the pinned main
+`4ffd749a95b313591c383b13e1148d80c9704cca` remains unchanged as the
+source snapshot):
+- [PR #2869](https://github.com/davidcatcat/davidcattoolsproject/pull/2869),
+  merged as `6b473b4f`: inventory rows OSR-16, OSR-23, OSR-25 in
+  `a13-osr-platform-crosswalk.md`.
+- [PR #2870](https://github.com/davidcatcat/davidcattoolsproject/pull/2870),
+  merged as `2268ba77`: the two dry-run findings in
+  `a13-dry-run-acceptance-crosswalk.md`.
+- [PR #2914](https://github.com/davidcatcat/davidcattoolsproject/pull/2914),
+  merged as `54b6031d`: the deferred ProjectContext consumers in
+  `a13-project-context-consumer-handoff.md`; the explicit deferral of
+  unwired ProjectContext consumers is recorded there, correcting the
+  prior statement that it was not recorded.
+- [PR #2912](https://github.com/davidcatcat/davidcattoolsproject/pull/2912),
+  merged as `d1427b5c`: production refusal of double-leading-slash
+  project roots on POSIX, with tests.
+- [PR #2919](https://github.com/davidcatcat/davidcattoolsproject/pull/2919),
+  merged as `ad367ece`: production constructor refusal of compiled
+  bytes patterns, with tests; correcting the statement in the dated
+  note above (dated 2026-11-28) that #2919 (head `c1240594`) was
+  awaiting formal review.
+
 ## Status
 
 Closure is **pending**. Blocked work stays blocked: nothing here waives a
