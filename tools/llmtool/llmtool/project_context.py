@@ -112,7 +112,8 @@ def _validate_roots(value):
         _fail()
     for root in value:
         if (not _printable_ascii(root, 1, 1024) or
-                not os.path.isabs(root) or os.path.normpath(root) != root):
+                not os.path.isabs(root) or os.path.normpath(root) != root or
+                (os.name == "posix" and root.startswith("//"))):
             _fail()
     for index, left in enumerate(value):
         for right in value[index + 1:]:
