@@ -98,6 +98,20 @@ Illustration (placeholder IDs; use the dispatched ones):
 {"task_id":"<32 hex>","run_id":"<32 hex>","head":"<40 hex>","verdict":"FIX","review":"<!-- activity: type=review_verdict actor=Codex target=PM status=FIX -->\nVerdict: FAIL | Version: v1 | HEAD: <40 hex>\nLLMTOOL-REVIEW-BINDING v1 task=<32 hex> run=<32 hex> contract=<64 hex> head=<40 hex>\nFinding: F1 [High] tools/llmtool/llmtool/foo.py:10 <text>"}
 ```
 
+## AGY Reviewer route (#2938)
+
+`agy-reviewer` is the third formal Reviewer route, after `claude-reviewer` and
+`codex-reviewer`; it runs through the AGY CLI on the Claude-family model
+`claude-sonnet-5-5-medium`. It is selected only by an explicit request (PM
+selection) and is never the implicit default, and it leaves `formal_reviewer_order`
+unchanged.
+
+- Its verdict marker actor is `AGY` (`type=review_verdict actor=AGY`); the marker and
+  `Verdict:` line follow the same rules as above, with a non-PASS conclusion using the
+  Transition record rule values as with the other routes.
+- It is Claude family, so it never formally reviews a Claude-authored Task.
+- A dispute on an `agy-reviewer` FAIL has no AGY arbiter.
+
 ## Reviewer record for these Tasks
 
 - The `actor=Claude` verdict comes from the separate, read-only Reviewer context that

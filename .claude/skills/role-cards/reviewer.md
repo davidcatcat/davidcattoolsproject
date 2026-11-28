@@ -1,6 +1,6 @@
 # Reviewer role card
 
-Role: formal Reviewer (`claude-reviewer`, `codex-reviewer`). Source: [#1502](https://github.com/davidcatcat/davidcattoolsproject/issues/1502) WP-F design §3.4.
+Role: formal Reviewer (`claude-reviewer`, `codex-reviewer`, `agy-reviewer`). Source: [#1502](https://github.com/davidcatcat/davidcattoolsproject/issues/1502) WP-F design §3.4.
 
 Read this card and the [formal verdict format](../ai-team-delivery/formal-verdict.md), including its Codex reply shape, before starting. A review that fails on output format (for example `OUTPUT_NOT_JSONL`) is fixed in that format file so it matches what llmtool accepts, and the PM records it (#2423).
 
@@ -50,6 +50,17 @@ Source: [#1943 D rules](https://github.com/davidcatcat/davidcattoolsproject/issu
 - Review against the Task requirements, diff and tests. You may read a consultation report, but "implemented as the consultation advised" is never a PASS reason. Your verdict cites its own evidence (D-3).
 - With no formal Reviewer available, the existing WAITING rule applies. Consultation output never stands in for formal review (D-4).
 - A conflict between consultation and a formal finding goes to the O3/E10 arbiter. The PM cannot use advice to withdraw, downgrade or defer a finding (D-5).
+
+## AGY Reviewer appendix
+
+`agy-reviewer` is a formal Reviewer route selected only by an explicit request and
+never the implicit default; `formal_reviewer_order` is unchanged (#2938).
+
+- It runs through the AGY CLI on the Claude-family model `claude-sonnet-5-5-medium`.
+- Its verdict marker actor is `AGY`.
+- It is Claude family, so it never formally reviews a Claude-authored Task; if asked,
+  report BLOCKED with that reason.
+- A dispute on an `agy-reviewer` FAIL has no AGY arbiter.
 
 ## Codex Reviewer appendix
 
