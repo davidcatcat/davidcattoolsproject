@@ -99,5 +99,36 @@ class RefusalCodeTests(unittest.TestCase):
                        'unittest')
 
 
+class NonDefaultPatternTests(unittest.TestCase):
+    """A13.0: non-default test-path coverage for TestProfile.kind_for."""
+
+    def test_unanchored_pattern_matches_whole_path_only(self):
+        # A synthetic unanchored custom text pattern (no \A/\Z):
+        # kind_for must match the exact relative path, and must not
+        # match a longer path that has the pattern as a prefix or a
+        # path with different leading components.
+        profile = TestProfile(((re.compile(r'docs/readme'), 'unittest'),))
+        self.assertEqual(profile.kind_for('docs/readme'), 'unittest')
+        self.assertIsNone(profile.kind_for('docs/readme.md'))
+        self.assertIsNone(profile.kind_for('src/docs/readme'))
+
+    def test_kind_for_selects_the_first_matching_entry_in_order(self):
+        # Two custom patterns that both fullmatch the same exact path:
+        # the kind of the first entry wins in each ordering.  This pins
+        # the TestProfile value object only; it does not weaken the
+        # task-completion rejection of ambiguous mappings.
+        readme = re.compile(r'docs/readme')
+        docs = re.compile(r'docs/.*')
+        path = 'docs/readme'
+        self.assertEqual(
+            TestProfile(((readme, 'unittest'), (docs, 'script')))
+            .kind_for(path),
+            'unittest')
+        self.assertEqual(
+            TestProfile(((docs, 'script'), (readme, 'unittest')))
+            .kind_for(path),
+            'script')
+
+
 if __name__ == '__main__':
     unittest.main()
