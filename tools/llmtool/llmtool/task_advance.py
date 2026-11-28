@@ -21,6 +21,8 @@ from . import github_identity, review_result, sensitive_paths, task_completion
 from . import lineage_counts, mac_full_due, mac_full_suite, repair_policy, review_transcript
 from . import remote_test, start_failure, task_submission_cli
 from . import guidance_refresh
+from . import test_profile
+from .test_profile import TestProfile
 from . import dispute_arbiter
 from .ai_github_exec import AiIdentityError, verified_ai_env
 from .errors import LLMToolError
@@ -3948,19 +3950,69 @@ _PR_RENAME_STATUSES = frozenset(('renamed', 'copied'))
 # modules the PR adds or changes. The pre-review EC2 gate fails closed with this
 # code; remote-test admission instead falls back to the declared modules.
 PR_CHANGED_TESTS_UNAVAILABLE = 'PR_CHANGED_TESTS_UNAVAILABLE'
-_PR_TEST_MODULE_PATH = re.compile(r'tools/llmtool/tests/(test_[a-z0-9_]{1,80})\.py\Z')
+# #2793: admission now derives changed test modules from the project
+# TestProfile. The existing lowercase module-stem constraint stays on top.
+_PR_TEST_MODULE_STEM = re.compile(r'test_[a-z0-9_]{1,80}\Z')
+# Retained for existing importers that still need the historical extractor.
+_PR_TEST_MODULE_PATH = re.compile(
+    r'tools/llmtool/tests/(test_[a-z0-9_]{1,80})\.py\Z')
+_PROFILE_UNSET = object()
 
 
-def _pr_changed_test_modules(number, head, github_get, pr):
+def _admission_test_profile(profile=_PROFILE_UNSET):
+    """Return the validated TestProfile for admission, or None.
+
+    An omitted profile resolves the live project provider
+    ``test_profile.default_profile``, so a provider substitution is honoured.
+    A missing provider, or any failure to resolve or validate its result,
+    returns None, so the caller fails closed with
+    PR_CHANGED_TESTS_UNAVAILABLE instead of using hard-coded paths.
+    """
+    try:
+        resolved = (test_profile.default_profile()
+                    if profile is _PROFILE_UNSET else profile)
+    except Exception:
+        return None
+    if type(resolved) is not TestProfile:
+        return None
+    return resolved
+
+
+def _admission_test_module_stem(profile, path):
+    """Return the lowercase module stem when a unittest entry matches path.
+
+    Path matching comes from the profile's ``unittest`` entries; the lowercase
+    stem constraint is applied on top, as the remote side always required.
+    """
+    name = path.rsplit('/', 1)[-1]
+    if not name.endswith('.py'):
+        return None
+    stem = name[:-3]
+    if _PR_TEST_MODULE_STEM.fullmatch(stem) is None:
+        return None
+    for pattern, kind in profile.entries:
+        if kind == 'unittest' and pattern.fullmatch(path) is not None:
+            return stem
+    return None
+
+
+def _pr_changed_test_modules(number, head, github_get, pr, profile=_PROFILE_UNSET):
     """Return (test module stems, None) the PR adds or changes at this exact head.
 
     The PR snapshot must name this open, unmerged PR at ``head``; its complete
     file list is read with the same fail-closed page reader as the #2473
     docs-only gate. A PR snapshot that omits ``changed_files`` still relies on
     that bounded reader. A removed module is not runnable at the head and is
-    left out. Missing, unreadable or inconsistent data returns
-    (None, PR_CHANGED_TESTS_UNAVAILABLE), so the caller fails closed.
+    left out. Test paths come from the ``unittest`` entries of the project
+    TestProfile (``profile`` may inject one), with the existing lowercase
+    module-stem constraint applied on top. A profile that cannot be resolved
+    or validated returns (None, PR_CHANGED_TESTS_UNAVAILABLE) and never falls
+    back to hard-coded paths. Missing, unreadable or inconsistent PR data also
+    returns (None, PR_CHANGED_TESTS_UNAVAILABLE), so the caller fails closed.
     """
+    resolved = _admission_test_profile(profile)
+    if resolved is None:
+        return None, PR_CHANGED_TESTS_UNAVAILABLE
     if (type(pr) is not dict or type(number) is not int or pr.get('number') != number or
             type(pr.get('head')) is not dict or pr['head'].get('sha') != head or
             pr.get('state') not in (None, 'open') or pr.get('merged') is True):
@@ -3982,14 +4034,17 @@ def _pr_changed_test_modules(number, head, github_get, pr):
         path, status = item.get('filename'), item.get('status')
         if type(path) is not str or not path:
             return None, PR_CHANGED_TESTS_UNAVAILABLE
-        match = _PR_TEST_MODULE_PATH.fullmatch(path)
-        if match is None:
+        try:
+            stem = _admission_test_module_stem(resolved, path)
+        except Exception:
+            return None, PR_CHANGED_TESTS_UNAVAILABLE
+        if stem is None:
             continue
         if status == 'removed':
             continue
         if type(status) is not str or status not in _PR_FILE_STATUSES:
             return None, PR_CHANGED_TESTS_UNAVAILABLE
-        modules.add(match.group(1))
+        modules.add(stem)
     return tuple(sorted(modules)), None
 
 
