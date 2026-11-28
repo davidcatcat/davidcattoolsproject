@@ -34,7 +34,7 @@ not restate their rows.
 | OSR-21 | [a13-osr-runtime-crosswalk.md](a13-osr-runtime-crosswalk.md) | A13.1 (policy), A13.5 (provider handoff); policy and provider handoff stay open |
 | OSR-23 | [a13-osr-platform-crosswalk.md](a13-osr-platform-crosswalk.md) | A13.4 / A13.7; carried over — a configured ARM runner does not prove the siginfo path ran |
 | OSR-24 | [a13-osr-registration-packaging-crosswalk.md](a13-osr-registration-packaging-crosswalk.md) | A13.4; A13.4 owns installer metadata plus update and removal evidence |
-| OSR-25 | [a13-osr-platform-crosswalk.md](a13-osr-platform-crosswalk.md) | A13.4 / A13.7; carried over as packaging and scheduling facts — no runs are claimed |
+| OSR-25 | [a13-osr-platform-crosswalk.md](a13-osr-platform-crosswalk.md) | A13.4 / A13.7; A13.4 clean install check (pending); A13.7 runtime validation (pending); carried over as packaging and scheduling facts — no runs are claimed |
 
 ## Scope notes
 
