@@ -26,10 +26,12 @@ success cannot hide a newer failure or a pending rerun (the one exception is
 the completed skip-only Mac dispatch described below).
 
 For the FULL Mac check only, a listing with no matching SHA reports
-``full_mac_not_run`` when the newest listed run was created before the main
-commit's committer date, so absence is provable from the two existing reads.
-A missing or unparseable date, or a listed run created at or after that date,
-still reports ``run_list_bound``: a matching run may be newer than the page.
+``full_mac_not_run`` when the observed run dates establish the listing is
+non-increasing and the newest listed run was created before the main commit's
+committer date, so absence is provable from the two existing reads. A missing,
+unparseable, or out-of-order date, or a listed run created at or after that
+date, still reports ``run_list_bound``: a matching run may be newer than the
+page.
 
 Each run's pages are passed through ``main_ci_job_pages.collect_pages`` (SHA,
 run id and run attempt all bound) and then ``main_ci_job_summary.summarize``.
@@ -177,17 +179,28 @@ def _parse_time(value):
 def _full_mac_absent(runs, main_date):
     """True only when the listing proves the main SHA has no FULL Mac run.
 
-    The listing is newest first, so a newest run created before the main
-    commit rules every later run out. A missing or unparseable date cannot
-    prove absence, and an empty listing has no newest run to compare.
+    Every listed run must have a valid timestamp in non-increasing order, and
+    the newest run must be created before the main commit. Any missing,
+    unparseable, or out-of-order date, an empty listing, or a newest run at
+    or after the main commit cannot prove absence.
     """
     if not runs:
         return False
-    created = _parse_time(runs[0].get('created_at'))
     committed = _parse_time(main_date)
-    if created is None or committed is None:
+    if committed is None:
         return False
-    return created < committed
+    prev = None
+    for run in runs:
+        created = _parse_time(run.get('created_at'))
+        if created is None:
+            return False
+        if prev is None:
+            if created >= committed:
+                return False
+        elif created > prev:
+            return False
+        prev = created
+    return True
 
 
 def _listed_runs(github_get, workflow, event):

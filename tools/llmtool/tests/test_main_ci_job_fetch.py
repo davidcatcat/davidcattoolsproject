@@ -307,6 +307,53 @@ class MainCiJobFetchTests(unittest.TestCase):
         self.assertEqual(result['state'], fetch.UNKNOWN)
         self.assertEqual(result['reason'], fetch.RUN_LIST_BOUND)
 
+    def test_full_mac_absence_proved_by_ordered_multi_entry_listing(self):
+        github = green_github()
+        github.main_date = '2026-11-21T00:00:00Z'
+        github.workflow(fetch.MAC_WORKFLOW, 'workflow_dispatch', [
+            run(MAC_RUN, sha=OLDER, created_at='2026-11-20T02:00:00Z'),
+            run(MAC_RUN - 1, sha=OLDER, created_at='2026-11-20T01:00:00Z'),
+            run(MAC_RUN - 2, sha=OLDER, created_at='2026-11-20T01:00:00Z'),
+        ])
+        result = fetch.inspect_jobs(github)
+        self.assertEqual(result['state'], fetch.UNKNOWN)
+        self.assertEqual(result['reason'], fetch.FULL_MAC_NOT_RUN)
+        self.assertEqual(result['runs'][1]['reason'], fetch.FULL_MAC_NOT_RUN)
+        self.assertEqual(result['runs'][0]['state'], fetch.GREEN)
+
+    def test_full_mac_out_of_order_later_recent_run_stays_run_list_bound(self):
+        for later_date in ('2026-11-22T00:00:00Z', '2026-11-20T01:00:00Z'):
+            with self.subTest(later_date=later_date):
+                github = green_github()
+                github.main_date = '2026-11-21T00:00:00Z'
+                github.workflow(fetch.MAC_WORKFLOW, 'workflow_dispatch', [
+                    run(MAC_RUN - 1, sha=OLDER, created_at='2026-11-20T00:00:00Z'),
+                    run(MAC_RUN, sha=OLDER, created_at=later_date),
+                ])
+                result = fetch.inspect_jobs(github)
+                self.assertEqual(result['state'], fetch.UNKNOWN)
+                self.assertEqual(result['reason'], fetch.RUN_LIST_BOUND)
+                self.assertEqual(result['runs'][1]['reason'], fetch.RUN_LIST_BOUND)
+
+    def test_full_mac_malformed_or_missing_later_timestamp_stays_run_list_bound(self):
+        for later_created in ('not-a-date', None):
+            with self.subTest(later_created=later_created):
+                github = green_github()
+                github.main_date = '2026-11-21T00:00:00Z'
+                later = run(MAC_RUN - 1, sha=OLDER)
+                if later_created is None:
+                    del later['created_at']
+                else:
+                    later['created_at'] = later_created
+                github.workflow(fetch.MAC_WORKFLOW, 'workflow_dispatch', [
+                    run(MAC_RUN, sha=OLDER, created_at='2026-11-20T00:00:00Z'),
+                    later,
+                ])
+                result = fetch.inspect_jobs(github)
+                self.assertEqual(result['state'], fetch.UNKNOWN)
+                self.assertEqual(result['reason'], fetch.RUN_LIST_BOUND)
+                self.assertEqual(result['runs'][1]['reason'], fetch.RUN_LIST_BOUND)
+
     def test_linux_missing_run_stays_run_missing_when_dates_could_prove_it(self):
         github = green_github()
         github.main_date = '2026-11-21T00:00:00Z'
