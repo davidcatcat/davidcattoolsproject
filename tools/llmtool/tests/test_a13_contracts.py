@@ -47,41 +47,48 @@ OUTSIDE_ROOT_SAMPLES = (
 
 
 def _check_evidence_patterns_stay_inside(
-        context, evidence, samples):
+        test_case, context, evidence, samples):
     """Assert that every evidence pattern stays inside the canonical root.
 
-    This is the root-check sequence the existing test applies to the default
-    profile; the substituted-profile tests apply it unchanged.
+    One shared implementation of the root check: the existing test applies
+    it to the default profile, and the substituted-profile tests apply the
+    same code.  The test case supplies the assertions, so the checks survive
+    ``python -O`` like the assertions in the test methods do.
     """
-    assert evidence.entries
+    test_case.assertTrue(evidence.entries)
     for pattern, kind in evidence.entries:
-        # The pattern source itself must describe a relative path.
-        source = pattern.pattern
-        assert not os.path.isabs(source)
-        joined = os.path.normpath(
-            os.path.join(context.canonical_root, source))
-        assert os.path.commonpath(
-            (joined, context.canonical_root)) == context.canonical_root
-        assert joined != context.canonical_root
+        with test_case.subTest(pattern=pattern.pattern):
+            # The pattern source itself must describe a relative path.
+            source = pattern.pattern
+            test_case.assertFalse(os.path.isabs(source))
+            joined = os.path.normpath(
+                os.path.join(context.canonical_root, source))
+            test_case.assertEqual(
+                os.path.commonpath((joined, context.canonical_root)),
+                context.canonical_root)
+            test_case.assertNotEqual(joined, context.canonical_root)
 
-        # And a concrete path it matches must resolve inside the root.
-        matches = [path for path in samples
-                   if pattern.fullmatch(path) is not None]
-        assert matches
-        relative = matches[0]
-        assert evidence.kind_for(relative) == kind
-        resolved = os.path.normpath(
-            os.path.join(context.canonical_root, relative))
-        assert os.path.commonpath(
-            (resolved, context.canonical_root)) == context.canonical_root
-        assert resolved != context.canonical_root
+            # And a concrete path it matches must resolve inside the root.
+            matches = [path for path in samples
+                       if pattern.fullmatch(path) is not None]
+            test_case.assertTrue(matches)
+            relative = matches[0]
+            test_case.assertEqual(evidence.kind_for(relative), kind)
+            resolved = os.path.normpath(
+                os.path.join(context.canonical_root, relative))
+            test_case.assertEqual(
+                os.path.commonpath((resolved, context.canonical_root)),
+                context.canonical_root)
+            test_case.assertNotEqual(resolved, context.canonical_root)
 
 
-def _check_ci_names_are_distinct_and_plain(ci):
+def _check_ci_names_are_distinct_and_plain(test_case, ci):
     """Assert distinct CI names and plain workflow file names.
 
-    This is the CI-name sequence the existing test applies to the default
-    profile; the substituted-profile tests apply it unchanged.
+    One shared implementation of the CI-name check: the existing test
+    applies it to the default profile, and the substituted-profile tests
+    apply the same code.  The test case supplies the assertions, so the
+    checks survive ``python -O`` like the assertions in the test methods do.
     """
     checks = (
         ci.linux_code_check,
@@ -94,13 +101,14 @@ def _check_ci_names_are_distinct_and_plain(ci):
         ci.linux_workflow_file,
         ci.macos_workflow_file,
     )
-    assert len(set(checks)) == len(checks)
-    assert len(set(workflows)) == len(workflows)
-    assert not set(checks) & set(workflows)
+    test_case.assertEqual(len(set(checks)), len(checks))
+    test_case.assertEqual(len(set(workflows)), len(workflows))
+    test_case.assertFalse(set(checks) & set(workflows))
     for name in workflows:
-        assert os.path.basename(name) == name
-        assert "/" not in name
-        assert "\\" not in name
+        with test_case.subTest(workflow=name):
+            test_case.assertEqual(os.path.basename(name), name)
+            test_case.assertNotIn("/", name)
+            test_case.assertNotIn("\\", name)
 
 
 def _substituted_test_profile():
@@ -170,63 +178,22 @@ class A13ContractTests(unittest.TestCase):
         self.assertEqual(set(self.context.allowed_origins), expected)
 
     def test_evidence_patterns_stay_inside_canonical_root(self):
-        self.assertTrue(self.evidence.entries)
-        for pattern, kind in self.evidence.entries:
-            with self.subTest(pattern=pattern.pattern):
-                # The pattern source itself must describe a relative path.
-                source = pattern.pattern
-                self.assertFalse(os.path.isabs(source))
-                joined = os.path.normpath(
-                    os.path.join(self.context.canonical_root, source))
-                self.assertEqual(
-                    os.path.commonpath((joined, self.context.canonical_root)),
-                    self.context.canonical_root)
-                self.assertNotEqual(joined, self.context.canonical_root)
-
-                # And a concrete path it matches must resolve inside the root.
-                matches = [path for path in EVIDENCE_SAMPLES
-                           if pattern.fullmatch(path) is not None]
-                self.assertTrue(matches)
-                relative = matches[0]
-                self.assertEqual(self.evidence.kind_for(relative), kind)
-                resolved = os.path.normpath(
-                    os.path.join(self.context.canonical_root, relative))
-                self.assertEqual(
-                    os.path.commonpath((resolved, self.context.canonical_root)),
-                    self.context.canonical_root)
-                self.assertNotEqual(resolved, self.context.canonical_root)
+        _check_evidence_patterns_stay_inside(
+            self, self.context, self.evidence, EVIDENCE_SAMPLES)
 
     def test_ci_names_are_distinct_and_workflow_names_are_plain(self):
-        checks = (
-            self.ci.linux_code_check,
-            self.ci.docs_check,
-            self.ci.gateway_check,
-            self.ci.ai_loop_check,
-            self.ci.macos_check,
-        )
-        workflows = (
-            self.ci.linux_workflow_file,
-            self.ci.macos_workflow_file,
-        )
-        self.assertEqual(len(set(checks)), len(checks))
-        self.assertEqual(len(set(workflows)), len(workflows))
-        self.assertFalse(set(checks) & set(workflows))
-        for name in workflows:
-            with self.subTest(workflow=name):
-                self.assertEqual(os.path.basename(name), name)
-                self.assertNotIn("/", name)
-                self.assertNotIn("\\", name)
+        _check_ci_names_are_distinct_and_plain(self, self.ci)
 
     def test_substituted_test_profile_passes_the_contract_checks(self):
         evidence = _substituted_test_profile()
         # The substituted profile keeps the same canonical root and stays
         # inside it for every pattern, like the default profile.
         _check_evidence_patterns_stay_inside(
-            self.context, evidence, SUBSTITUTED_EVIDENCE_SAMPLES)
+            self, self.context, evidence, SUBSTITUTED_EVIDENCE_SAMPLES)
 
     def test_substituted_ci_profile_passes_the_contract_checks(self):
         ci = _substituted_ci_profile()
-        _check_ci_names_are_distinct_and_plain(ci)
+        _check_ci_names_are_distinct_and_plain(self, ci)
         # The substituted check names differ from the default profile's.
         self.assertNotEqual(ci.linux_code_check, self.ci.linux_code_check)
         self.assertNotEqual(ci.docs_check, self.ci.docs_check)
@@ -238,9 +205,12 @@ class A13ContractTests(unittest.TestCase):
         evidence = _outside_root_test_profile()
         for pattern, kind in evidence.entries:
             with self.subTest(pattern=pattern.pattern):
+                # Each pattern is checked on its own single-entry profile so
+                # that every entry is exercised, not just the first.
+                single = TestProfile(((pattern, kind),))
                 with self.assertRaises(AssertionError):
                     _check_evidence_patterns_stay_inside(
-                        self.context, evidence, OUTSIDE_ROOT_SAMPLES)
+                        self, self.context, single, OUTSIDE_ROOT_SAMPLES)
 
 
 if __name__ == "__main__":
