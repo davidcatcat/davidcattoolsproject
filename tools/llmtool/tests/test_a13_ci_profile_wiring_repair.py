@@ -19,9 +19,11 @@ from __future__ import annotations
 
 from argparse import Namespace
 from contextlib import ExitStack, redirect_stdout
+from dataclasses import replace
 import hashlib
 import importlib
 import io
+import itertools
 import json
 import os
 from pathlib import Path
@@ -461,6 +463,37 @@ class RealTaskStoreRepairAndRetryTests(unittest.TestCase):
                 self.assertIsNone(store.get(root_id).get('review_repair_claims'))
                 self.assertEqual(dispatched, [])
 
+    def test_duplicate_check_name_profile_refuses_at_repair_review_without_claim_or_dispatch(self):
+        check_fields = ('linux_code_check', 'docs_check', 'gateway_check',
+                        'ai_loop_check', 'macos_check')
+        base = default_profile()
+        for first, second in itertools.combinations(check_fields, 2):
+            dup_profile = replace(base, **{second: getattr(base, first)})
+            with self.subTest(first=first, second=second):
+                store = self._new_store()
+                root_id = task_store.new_id()
+                store.create(_task_record(root_id, with_developer=True))
+                dispatched = []
+                with mock.patch.object(ci_profile, 'default_profile',
+                                       return_value=dup_profile):
+                    with self.assertRaises(LLMToolError) as caught:
+                        review_repair.repair_review(
+                            store=store,
+                            task_id=root_id,
+                            executor_task=D6,
+                            pr_number=PR,
+                            github_get=lambda _path: [],
+                            dispatch_adapter=lambda **request: dispatched.append(request),
+                            current_head=lambda _task, _executor: HEAD,
+                            repair_task_recorder=lambda **request: store.create(
+                                _task_record(request['repair_task_id'])),
+                            ci_failure=_failure(getattr(dup_profile, first)),
+                        )
+                self.assertEqual(caught.exception.review_repair_code,
+                                 'CI_REPAIR_PROFILE_INVALID')
+                self.assertIsNone(store.get(root_id).get('review_repair_claims'))
+                self.assertEqual(dispatched, [])
+
 
 class R1DefaultProfileTests(unittest.TestCase):
     def test_default_names_build_and_bind_exactly_as_before(self):
@@ -551,6 +584,43 @@ class R3InvalidProfileTests(unittest.TestCase):
             ('ambiguous_list', [ALT_PROFILE, default_profile()]),
             ('ambiguous_tuple', (ALT_PROFILE,)),
         )
+
+    def test_duplicate_check_names_refuse_in_ci_failure_and_never_match_packet(self):
+        check_fields = ('linux_code_check', 'docs_check', 'gateway_check',
+                        'ai_loop_check', 'macos_check')
+        base = default_profile()
+        root_id = task_store.new_id()
+        root = {'task_id': root_id}
+        name = _default_checks()[0]
+        packet, identity = review_repair._ci_failure(
+            root, executor_task=D6, pr_number=PR, ci_failure=_failure(name))
+        claim = {'executor_task': D6, 'pr': PR, 'head_sha': HEAD,
+                 'version': 1, 'attempt': 1, 'family': f'pr-{PR}-ec2',
+                 'state': 'DISPATCHED', 'repair_task_id': '2' * 32,
+                 'comment_id': None, 'packet_sha256': identity,
+                 'claimed_at': '2026-11-27T00:00:00Z'}
+        for first, second in itertools.combinations(check_fields, 2):
+            dup_profile = replace(base, **{second: getattr(base, first)})
+            with self.subTest(first=first, second=second):
+                with self.assertRaises(LLMToolError) as caught:
+                    review_repair._ci_failure(
+                        root, executor_task=D6, pr_number=PR,
+                        ci_failure=_failure(getattr(dup_profile, first)),
+                        profile=dup_profile)
+                self.assertEqual(caught.exception.review_repair_code,
+                                 'CI_REPAIR_PROFILE_INVALID')
+                self.assertFalse(start_failure.repair_packet_matches(
+                    packet, claim, root, profile=dup_profile))
+                with mock.patch.object(ci_profile, 'default_profile',
+                                       return_value=dup_profile):
+                    with self.assertRaises(LLMToolError) as caught_default:
+                        review_repair._ci_failure(
+                            root, executor_task=D6, pr_number=PR,
+                            ci_failure=_failure(getattr(dup_profile, first)))
+                    self.assertEqual(caught_default.exception.review_repair_code,
+                                     'CI_REPAIR_PROFILE_INVALID')
+                    self.assertFalse(start_failure.repair_packet_matches(
+                        packet, claim, root))
 
     def test_direct_and_default_bad_profile_refuses_with_fixed_code(self):
         root = {'task_id': task_store.new_id()}

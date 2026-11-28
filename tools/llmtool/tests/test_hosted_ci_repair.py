@@ -3,6 +3,7 @@
 import copy
 from dataclasses import replace
 import io
+import itertools
 import json
 import tempfile
 from types import SimpleNamespace
@@ -196,5 +197,16 @@ class HostedCiRepairTests(unittest.TestCase):
             with self.subTest(field=field), mock.patch.object(
                     ci_profile, 'default_profile', return_value=substituted):
                 self.assert_refusal('HOSTED_CI_REPAIR_WORKFLOW_UNTRUSTED')
+                self.get.assert_not_called()
+                self.read_log.assert_not_called()
+
+    def test_refuses_duplicate_check_name_profile_without_github_read(self):
+        check_fields = ('linux_code_check', 'docs_check', 'gateway_check',
+                        'ai_loop_check', 'macos_check')
+        for first, second in itertools.combinations(check_fields, 2):
+            dup_profile = replace(PROFILE, **{second: getattr(PROFILE, first)})
+            with self.subTest(first=first, second=second), mock.patch.object(
+                    ci_profile, 'default_profile', return_value=dup_profile):
+                self.assert_refusal(review_repair.CI_REPAIR_PROFILE_INVALID)
                 self.get.assert_not_called()
                 self.read_log.assert_not_called()

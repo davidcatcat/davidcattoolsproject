@@ -715,16 +715,23 @@ def _resolve_ci_profile(value):
     """Return a validated CiProfile for the CI repair step.
 
     The resolution and refusal follow mac_full_due.resolve_profile (#2793 slice
-    1). A missing default and any invalid or ambiguous value refuse
-    CI_REPAIR_PROFILE_INVALID; the original names are never used as a fallback.
+    1). A missing default and any invalid, duplicate-check or ambiguous value
+    refuse CI_REPAIR_PROFILE_INVALID; the original names are never used as a
+    fallback.
     """
     try:
         from . import mac_full_due
-        if value is _UNSET:
-            return mac_full_due.resolve_profile()
-        return mac_full_due.resolve_profile(value)
+        resolved = (mac_full_due.resolve_profile()
+                    if value is _UNSET
+                    else mac_full_due.resolve_profile(value))
     except Exception:
         _refuse(CI_REPAIR_PROFILE_INVALID)
+    checks = (resolved.linux_code_check, resolved.docs_check,
+              resolved.gateway_check, resolved.ai_loop_check,
+              resolved.macos_check)
+    if len(set(checks)) != len(checks):
+        _refuse(CI_REPAIR_PROFILE_INVALID)
+    return resolved
 
 
 def _ci_repair_checks(value=_UNSET):
