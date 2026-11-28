@@ -98,7 +98,8 @@ def run_kind(run, *, profile=_UNSET):
     jobs = run.get('jobs')
     if (run.get('event') == 'workflow_dispatch' and run.get('head_branch') == 'main' and
             isinstance(jobs, list)):
-        names = {job.get('name') for job in jobs if isinstance(job, dict)}
+        names = {job.get('name') for job in jobs
+                 if isinstance(job, dict) and isinstance(job.get('name'), str)}
         if set(mac_full_due.full_jobs(resolved)) <= names:
             return FULL_MAC
     return None
@@ -115,12 +116,17 @@ def _passed(kind, run, *, profile=_UNSET):
         return False
     if kind == LINUX:
         return True
+    jobs = run.get('jobs')
+    if not isinstance(jobs, list):
+        return False
     required = set(mac_full_due.full_jobs(resolved))
     conclusions = {}
-    for job in run['jobs']:
-        if not isinstance(job, dict) or job.get('name') not in required:
+    for job in jobs:
+        if not isinstance(job, dict):
             continue
-        name = job['name']
+        name = job.get('name')
+        if not isinstance(name, str) or name not in required:
+            continue
         if name in conclusions:
             # Two records for one required job: fail closed, as mac_full_due.trusted does.
             return False
