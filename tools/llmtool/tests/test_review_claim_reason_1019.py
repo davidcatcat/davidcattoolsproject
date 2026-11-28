@@ -289,6 +289,63 @@ class DispatchUnknownClaimReasonTests(unittest.TestCase):
                 self.assertNotIn('failure_reason', claim)
                 self.assertNotIn('/private/reviewer-account', json.dumps(claim))
 
+    def test_codex_failed_verdict_and_nonzero_exit_retain_readable_usage_on_unknown_claim(self):
+        usage_event = {
+            'type': 'turn.completed',
+            'usage': {
+                'input_tokens': 120,
+                'cached_input_tokens': 30,
+                'output_tokens': 25,
+                'reasoning_output_tokens': 5,
+            },
+        }
+        expected_usage = {
+            'prompt_tokens': 120,
+            'completion_tokens': 25,
+            'total_tokens': 145,
+            'cached_prompt_tokens': 30,
+        }
+        invalid_verdict_stream = '\n'.join((
+            json.dumps({'type': 'thread.started', 'thread_id': '0123456789abcdef'}),
+            json.dumps({'type': 'item.completed', 'item': {
+                'type': 'agent_message', 'text': 'not json'}}),
+            json.dumps(usage_event),
+        )).encode('utf-8')
+        nonzero_usage_stream = (json.dumps(usage_event) + '\n').encode('utf-8')
+        zero_usage_stream = '\n'.join((
+            json.dumps({'type': 'thread.started', 'thread_id': '0123456789abcdef'}),
+            json.dumps({'type': 'item.completed', 'item': {
+                'type': 'agent_message', 'text': 'not json'}}),
+            json.dumps({'type': 'turn.completed', 'usage': {
+                'input_tokens': 0, 'cached_input_tokens': 0,
+                'output_tokens': 0, 'reasoning_output_tokens': 0}}),
+        )).encode('utf-8')
+        cases = (
+            ('invalid_verdict_keeps_usage', 0, invalid_verdict_stream,
+             'VERDICT_NOT_JSON', None, expected_usage),
+            ('nonzero_exit_keeps_usage', 1, nonzero_usage_stream,
+             None, 'CAUSE_NOT_ESTABLISHED', expected_usage),
+            ('invalid_verdict_zero_usage_never_stored', 0, zero_usage_stream,
+             'VERDICT_NOT_JSON', None, None),
+        )
+        for name, rc, stdout_bytes, exp_failure, exp_unknown, exp_usage in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as sub_dir:
+                store = _make_store(Path(sub_dir) / 'store', provider_profile='agy')
+                proc = SimpleNamespace(returncode=rc, stdout=stdout_bytes, stderr=b'')
+                _, claim = self._dispatch_codex_expecting_unknown(store, proc=proc)
+                self.assertEqual(claim['state'], 'UNKNOWN')
+                self.assertNotIn('usage_unknown', claim)
+                if exp_failure is not None:
+                    self.assertEqual(claim['failure_reason'], exp_failure)
+                    self.assertNotIn('unknown_reason', claim)
+                else:
+                    self.assertEqual(claim['unknown_reason'], exp_unknown)
+                    self.assertNotIn('failure_reason', claim)
+                if exp_usage is not None:
+                    self.assertEqual(claim['usage'], exp_usage)
+                else:
+                    self.assertNotIn('usage', claim)
+
 
 class SessionEndedWithoutVerdictTests(unittest.TestCase):
     """R1, R2, R3, R4: DISPATCHED Claude claims whose session ends without a verdict."""

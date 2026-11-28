@@ -7081,10 +7081,13 @@ class TaskStore:
                                   type(after['review_result'].get('source')) is dict and
                                   after['review_result']['source'].get('kind') == 'CODEX_JSONL')) and
                                 (('usage' not in after and 'usage_unknown' not in after) or
-                                 (after.get('state') == 'COMPLETED' and
-                                  'usage' not in before and
+                                 ('usage' not in before and
                                   'usage_unknown' not in before and
-                                  ('usage' in after) != ('usage_unknown' in after))) and
+                                  ((after.get('state') == 'COMPLETED' and
+                                    ('usage' in after) != ('usage_unknown' in after)) or
+                                   (after.get('state') == 'UNKNOWN' and
+                                    'usage' in after and
+                                    'usage_unknown' not in after)))) and
                                 all(old == new for i, (old, new) in
                                     enumerate(zip(old_claims, new_claims)) if i != index))
                             if (not allowed_claim_transition and not ruled_entry and

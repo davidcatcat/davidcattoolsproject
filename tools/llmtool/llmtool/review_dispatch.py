@@ -1195,6 +1195,12 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
         _refuse('REVIEWER_TIMEOUT')
     except OSError:
         _refuse('REVIEWER_RUNTIME_UNAVAILABLE')
+    if usage_out is not None:
+        usage, reason = _codex_stream_usage(result.stdout)
+        if usage is not None:
+            usage_out['usage'] = usage
+        else:
+            usage_out['usage_unknown'] = {'reason': reason}
     if result.returncode:
         # #1946 (as #1938): fixed words only; stderr text never reaches the message.
         _refuse('REVIEW_NOT_POSTED', 'Codex Reviewer exited unsuccessfully; details omitted',
@@ -1203,17 +1209,10 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
     if type(binding) is not dict:
         _refuse('REVIEW_PROMPT_BINDING_MISSING')
     _record_codex_quota(result.stdout)
-    parsed = parser(
+    return parser(
         result.stdout, task_id=task.get('task_id'), run_id=task.get('run_id'),
         contract_digest=binding.get('contract_digest'),
         head=head, version=version)
-    if usage_out is not None:
-        usage, reason = _codex_stream_usage(result.stdout)
-        if usage is not None:
-            usage_out['usage'] = usage
-        else:
-            usage_out['usage_unknown'] = {'reason': reason}
-    return parsed
 
 
 def _agy_review_argv(executable, *, prompt, model, effort, log_path):
@@ -2389,6 +2388,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
     bind = bind_session or _bind_d6
     session_id = None
     reviewer_started = False
+    codex_usage = {}
     try:
         # Authorization is deliberately re-read immediately before each side effect.
         gate = _policy(task, reviewer_key)
@@ -2438,7 +2438,6 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             env.pop('CLAUDE_CONFIG_DIR', None)
         home = env.get('HOME') or os.path.expanduser('~')
         env = github_identity.ai_github_env(env, home)
-        codex_usage = {}
         structured_result = None
         if reviewer_key == 'codex-reviewer':
             reviewer = task_completion.read_d6_registration(
@@ -2533,6 +2532,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             session_id = exc_session_id
         if session_id is not None:
             unknown['native_session_id'] = session_id
+        if 'usage' in codex_usage:
+            unknown['usage'] = codex_usage['usage']
         reason = getattr(exc, 'review_failure_reason', None)
         bind_reason = (exc.args[0] if type(exc) is RuntimeError and
                        len(exc.args) == 1 and
