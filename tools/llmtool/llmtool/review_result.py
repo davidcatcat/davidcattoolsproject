@@ -361,6 +361,7 @@ def _settle_unknown_claim(store, task, claim, comments, *, head, version):
     stored = task.get('review_dispatch_claim')
     claims = [stored] if type(stored) is dict else stored
     settled = dict(claim, state='DISPATCHED', updated_at=_now())
+    settled.pop('unknown_reason', None)
     updated = [settled if item is claim else item for item in claims]
     try:
         store.compare_and_update(task['task_id'], expected={'review_dispatch_claim': stored},
@@ -435,7 +436,7 @@ def _inline_copies(pr_number, head, body, *, inline_io, github_get):
 
 
 def _record_claude_claim_usage(store, task_id, *, executor_task, pr_number, version, kind,
-                               config_dir=None):
+                               config_dir=None, reviewer_session_done=False):
     """Attach transcript token usage or usage_unknown once to a DISPATCHED Claude claim."""
     from . import review_transcript
     from .task_store import TaskStoreConflict
@@ -448,9 +449,28 @@ def _record_claude_claim_usage(store, task_id, *, executor_task, pr_number, vers
                 claim.get('account_mode') == 'CODEX_CLI' or
                 claim.get('reviewer') == 'codex-reviewer'):
             return
-        patch = review_transcript.claim_usage(claim, config_dir=config_dir)
+        try:
+            patch = review_transcript.claim_usage(claim, config_dir=config_dir)
+        except Exception:
+            if not reviewer_session_done:
+                raise
+            patch = {'usage_unknown': {'reason': 'CAUSE_NOT_ESTABLISHED'}}
         if patch is None:
-            return
+            if not reviewer_session_done:
+                return
+            reason = 'CAUSE_NOT_ESTABLISHED'
+            session_id = claim.get('native_session_id')
+            reviewer_task = claim.get('reviewer_task')
+            if type(session_id) is str and type(reviewer_task) is str:
+                try:
+                    usage, transcript_reason = review_transcript.transcript_usage(
+                        session_id, config_dir, reviewer_task)
+                    if (usage is None and
+                            transcript_reason in ('TRANSCRIPT_UNAVAILABLE', 'USAGE_ABSENT')):
+                        reason = transcript_reason
+                except Exception:
+                    pass
+            patch = {'usage_unknown': {'reason': reason}}
         stored = task.get('review_dispatch_claim')
         claims = [stored] if type(stored) is dict else stored
         updated = [dict(claim, **patch) if item is claim else item for item in claims]
@@ -548,7 +568,8 @@ def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
         _settle_unknown_claim(store, task, claim, comments, head=head, version=version)
     _record_claude_claim_usage(
         store, task_id, executor_task=executor_task, pr_number=pr_number,
-        version=version, kind=kind, config_dir=config_dir)
+        version=version, kind=kind, config_dir=config_dir,
+        reviewer_session_done=reviewer_session_done)
     output = {'state': outcome, 'event_id': event_id,
               'created': result['created'], 'comment_id': comment_id,
               'head': head, 'version': version}

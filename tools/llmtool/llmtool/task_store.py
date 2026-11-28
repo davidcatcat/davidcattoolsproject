@@ -160,7 +160,8 @@ _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS = (
 _REVIEW_DISPATCH_RESULT_FIELDS = frozenset((
     'task_id', 'run_id', 'contract_digest', 'head', 'verdict', 'review_text'))
 _REVIEW_USAGE_UNKNOWN_REASONS = frozenset((
-    'TRANSCRIPT_UNAVAILABLE', 'USAGE_ABSENT', 'STREAM_USAGE_ABSENT'))
+    'TRANSCRIPT_UNAVAILABLE', 'USAGE_ABSENT', 'STREAM_USAGE_ABSENT',
+    'CAUSE_NOT_ESTABLISHED'))
 _REVIEW_REPAIR_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'attempt', 'state',
     'comment_id', 'packet_sha256', 'claimed_at'))
@@ -1584,6 +1585,12 @@ def _known_bind_failure_reason(value):
     return type(value) is str and value in REVIEWER_BIND_FAILURE_REASONS
 
 
+def _known_review_unknown_reason(value):
+    """Return whether ``value`` is one fixed unknown-claim reason name."""
+    from .review_dispatch import UNKNOWN_CLAIM_REASONS
+    return type(value) is str and value in UNKNOWN_CLAIM_REASONS
+
+
 _BINDING_MISMATCH_KEY_NAMES = frozenset(('task_id', 'run_id', 'head'))
 
 
@@ -2868,6 +2875,7 @@ def _validate(record, *, strict=True, repository_pattern=None):
             if (type(item) is not dict or
                     set(item) - frozenset(('failure_reason', 'binding_mismatch_keys',
                                            'rules_sha256', 'bind_failure_reason',
+                                           'unknown_reason',
                                            'review_kind', 'purpose', 'dispute',
                                            'reviewer', 'launch_refusal',
                                            'usage', 'usage_unknown')) not in (
@@ -2893,6 +2901,12 @@ def _validate(record, *, strict=True, repository_pattern=None):
                      (not _known_bind_failure_reason(item['bind_failure_reason']) or
                       item.get('state') != 'UNKNOWN' or
                       'failure_reason' in item)) or
+                    # #1019 C2: only an UNKNOWN claim without failure_reason or bind_failure_reason.
+                    ('unknown_reason' in item and
+                     (not _known_review_unknown_reason(item['unknown_reason']) or
+                      item.get('state') != 'UNKNOWN' or
+                      'failure_reason' in item or
+                      'bind_failure_reason' in item)) or
                     ('binding_mismatch_keys' in item and
                      not _valid_binding_mismatch_keys(item)) or
                     # #1502 WP-F: sha256 of the exact Reviewer rule prefix sent.
@@ -7067,10 +7081,13 @@ class TaskStore:
                                   type(after['review_result'].get('source')) is dict and
                                   after['review_result']['source'].get('kind') == 'CODEX_JSONL')) and
                                 (('usage' not in after and 'usage_unknown' not in after) or
-                                 (after.get('state') == 'COMPLETED' and
-                                  'usage' not in before and
+                                 ('usage' not in before and
                                   'usage_unknown' not in before and
-                                  ('usage' in after) != ('usage_unknown' in after))) and
+                                  ((after.get('state') == 'COMPLETED' and
+                                    ('usage' in after) != ('usage_unknown' in after)) or
+                                   (after.get('state') == 'UNKNOWN' and
+                                    'usage' in after and
+                                    'usage_unknown' not in after)))) and
                                 all(old == new for i, (old, new) in
                                     enumerate(zip(old_claims, new_claims)) if i != index))
                             if (not allowed_claim_transition and not ruled_entry and
@@ -7109,8 +7126,8 @@ class TaskStore:
                                     type(before.get('native_session_id')) is str and
                                     before.get('review_kind') != 'security' and
                                     after.get('review_kind') != 'security' and
-                                    set(after) == set(before) and
-                                    all(before.get(key) == after.get(key) for key in before
+                                    set(after) == set(before) - {'unknown_reason'} and
+                                    all(before.get(key) == after.get(key) for key in after
                                         if key not in ('state', 'updated_at')) and
                                     any(type(event) is dict and
                                         event.get('source') == 'REVIEWER' and
