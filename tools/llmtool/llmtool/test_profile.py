@@ -37,12 +37,19 @@ class TestProfile:
     def __init__(self, entries):
         """Build a profile from an ordered iterable of (pattern, kind) pairs.
 
-        Raises :class:`TestProfileError` when the entry list is empty, when an
-        entry is not a two-item pair whose first item is a compiled pattern,
-        or when a kind is not exactly the string ``unittest`` or ``script``.
+        Raises :class:`TestProfileError` when ``entries`` cannot be iterated,
+        when the entry list is empty, when an entry is not a two-item pair
+        whose first item is a compiled pattern, or when a kind is not exactly
+        the string ``unittest`` or ``script``.  Only the failure to obtain an
+        iterator is normalized here; errors raised later by an accepted
+        iterator propagate unchanged.
         """
+        try:
+            iterator = iter(entries)
+        except TypeError:
+            raise TestProfileError() from None
         validated = []
-        for entry in entries:
+        for entry in iterator:
             if not isinstance(entry, (tuple, list)) or len(entry) != 2:
                 raise TestProfileError()
             pattern, kind = entry
