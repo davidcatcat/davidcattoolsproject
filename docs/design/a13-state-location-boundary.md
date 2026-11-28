@@ -56,6 +56,23 @@ Compared with the two store defaults, the diagnostics location resolution is dif
 | PM runtime | `pm_runtime.py`: `_session_state_root`; `pm_runtime_codex.py`: `CodexRuntime.open` | Supplied `state_root` or default `~/.local/state/llmtool/pm-runtime`; no `XDG_STATE_HOME` in the default | A13.1: project state selection and migration |
 | Diagnostics | `diagnostics_settings.py`: `resolve_diagnostics_home` | `LLMTOOL_HOME` if set; Darwin `~/Library/Application Support/llmtool`; Linux valid absolute `XDG_STATE_HOME` else `~/.local/state/llmtool`; Windows branch present, no support claim made | A13.3: isolation verification; installed-environment promise waits for its existing acceptance stage |
 
+## Follow-up — Linux XDG resolver fix and follow-up regression
+
+- Source snapshot: `14061925`. This follow-up postdates the OSR-17 handoff above; the
+  historical snapshot and the TaskStore and PM runtime rows are unchanged.
+- PR #2887 merged the Linux XDG resolver fix and PR #2891 added its follow-up regression;
+  together they cover the resolver `resolve_diagnostics_home` in `diagnostics_settings.py`
+  and its focused test `test_a13_diagnostics_xdg.py`.
+- The focused test mocks the user-home lookup and filesystem/settings access so any attempt
+  fails, then asserts: a valid `XDG_STATE_HOME` resolves with no home lookup
+  (`test_valid_xdg_state_resolves_without_home_lookup`); the explicit `LLMTOOL_HOME` override
+  precedes it (`test_explicit_override_precedence_in_same_setup`); and the injected home
+  fallback is covered and never performs a home lookup
+  (`test_injected_home_fallback_never_performs_home_lookup`).
+- Scope mark: resolver and test coverage only. Project state selection and migration (A13.1)
+  and isolation verification (A13.3) remain pending. This follow-up makes no new runtime or
+  rollout claim.
+
 ## Boundary and gates
 
 - Project state selection and migration belong to A13.1; isolation verification belongs to
