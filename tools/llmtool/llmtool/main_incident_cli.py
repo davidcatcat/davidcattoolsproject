@@ -153,12 +153,20 @@ def _linux_runs(github_get, sha, *, profile=mac_full_due._UNSET):
     if any(not isinstance(run, dict) for run in runs):
         raise mac_full_due.StateError(path)
     out = []
+    seen = set()
     for run in runs:
         if run.get('name') != resolved.linux_code_check or run.get('head_sha') != sha:
             continue
-        if type(run.get('id')) is not int or not isinstance(run.get('status'), str):
+        run_id = run.get('id')
+        if (type(run_id) is not int or run_id <= 0 or
+                not isinstance(run.get('status'), str)):
             raise mac_full_due.StateError(path)
-        out.append({'id': run['id'], 'name': run['name'], 'head_sha': sha,
+        # A repeated ID cannot be ordered: conflicting conclusions would depend on
+        # payload order, so fail closed as unavailable.
+        if run_id in seen:
+            raise mac_full_due.StateError(path)
+        seen.add(run_id)
+        out.append({'id': run_id, 'name': run['name'], 'head_sha': sha,
                     'status': run['status'], 'conclusion': run.get('conclusion')})
     return out
 
