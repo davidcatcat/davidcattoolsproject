@@ -21,21 +21,31 @@ def _module_name(value):
     return name if _MODULE.fullmatch(name) else None
 
 
+def _valid_changed_path(path):
+    """A changed path must be a non-blank file path, not a directory path."""
+    return (type(path) is str and bool(path.strip()) and
+            not path.rstrip().endswith('/'))
+
+
 def overlap(failing_modules, changed_paths, declared_modules=()):
     """Return OVERLAP, NO_OVERLAP or UNKNOWN for one red required check.
 
     OVERLAP when a failing module is declared by the Task, is itself a changed
     file, or tests a changed source file of the same stem (``x.py`` and
-    ``test_x``). An empty or malformed failing list is UNKNOWN.
+    ``test_x``). An empty or malformed failing list, declared module or changed
+    path is UNKNOWN.
     """
     if (type(failing_modules) not in (list, tuple) or not failing_modules or
             type(changed_paths) not in (list, tuple) or
             type(declared_modules) not in (list, tuple)):
         return UNKNOWN
     failing = [_module_name(item) for item in failing_modules]
-    if None in failing or any(type(path) is not str for path in changed_paths):
+    declared = [_module_name(item) for item in declared_modules]
+    if None in failing or None in declared:
         return UNKNOWN
-    related = {_module_name(item) for item in declared_modules} - {None}
+    if not all(_valid_changed_path(path) for path in changed_paths):
+        return UNKNOWN
+    related = set(declared)
     for path in changed_paths:
         name = path.rsplit('/', 1)[-1]
         if name.endswith('.py'):

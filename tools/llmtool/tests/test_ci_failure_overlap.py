@@ -38,6 +38,29 @@ class CiFailureOverlapTests(unittest.TestCase):
             with self.subTest(args=args):
                 self.assertEqual(ov.overlap(*args), ov.UNKNOWN)
 
+    def test_malformed_declared_module_is_unknown(self):
+        cases = [['not a module'], [''], ['   '], ['test_x/'],
+                 ['tools/llmtool/tests/'], ['test_x', 'not a module'],
+                 [None], [7]]
+        for declared in cases:
+            with self.subTest(declared=declared):
+                result = ov.overlap(
+                    ['test_x'], ['a.py'], declared_modules=declared)
+                self.assertEqual(result, ov.UNKNOWN)
+
+    def test_blank_or_directory_changed_path_is_unknown(self):
+        cases = [[''], ['   '], ['tools/llmtool/tests/'],
+                 ['tools/llmtool/tests/ '], [STORE, '']]
+        for changed in cases:
+            with self.subTest(changed=changed):
+                self.assertEqual(ov.overlap(['test_x'], changed), ov.UNKNOWN)
+
+    def test_default_empty_declared_modules_keeps_result(self):
+        self.assertEqual(
+            ov.overlap(['test_task_store'], [STORE_TEST]), ov.OVERLAP)
+        self.assertEqual(
+            ov.overlap(['test_task_store'], ['docs/x.md']), ov.NO_OVERLAP)
+
 
 if __name__ == '__main__':
     unittest.main()
