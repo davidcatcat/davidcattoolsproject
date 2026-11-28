@@ -478,6 +478,87 @@ class MainCiJobFetchTests(unittest.TestCase):
         self.assertEqual(result['reason'], fetch.RUN_LIST_FAILED)
         self.assertEqual(result['runs'][1]['state'], fetch.GREEN)
 
+    def test_duplicate_full_shard_success_then_skipped_is_unknown_without_fallback(self):
+        github = green_github()
+        newer = MAC_RUN + 1
+        github.workflow(fetch.MAC_WORKFLOW, 'workflow_dispatch', [
+            run(newer, attempt=1), run(MAC_RUN, attempt=MAC_ATTEMPT)])
+        jobs = [
+            job(20, MAC_SHARDS[0], newer, 1, conclusion='success'),
+            job(21, MAC_SHARDS[0], newer, 1, conclusion='skipped'),
+            job(22, MAC_SHARDS[1], newer, 1, conclusion='success'),
+            job(23, MAC_SHARDS[2], newer, 1, conclusion='success'),
+            job(24, MAC_JOB, newer, 1, conclusion='success'),
+        ]
+        github.page(newer, 1, len(jobs), jobs)
+        result = fetch.inspect_jobs(github)
+        self.assertEqual(result['state'], fetch.UNKNOWN)
+        self.assertEqual(result['reason'], fetch.FULL_EVIDENCE_AMBIGUOUS)
+        self.assertEqual(result['runs'][1]['run_id'], newer)
+        self.assertEqual(result['runs'][1]['state'], fetch.UNKNOWN)
+        self.assertEqual(result['runs'][1]['reason'], fetch.FULL_EVIDENCE_AMBIGUOUS)
+        self.assertEqual(result['failing'], [])
+        self.assertNotIn(github.jobs_path(MAC_RUN, 1), github.calls)
+
+    def test_duplicate_full_shard_skipped_then_success_is_unknown_without_fallback(self):
+        github = green_github()
+        newer = MAC_RUN + 1
+        github.workflow(fetch.MAC_WORKFLOW, 'workflow_dispatch', [
+            run(newer, attempt=1), run(MAC_RUN, attempt=MAC_ATTEMPT)])
+        jobs = [
+            job(20, MAC_SHARDS[0], newer, 1, conclusion='skipped'),
+            job(21, MAC_SHARDS[0], newer, 1, conclusion='success'),
+            job(22, MAC_SHARDS[1], newer, 1, conclusion='success'),
+            job(23, MAC_SHARDS[2], newer, 1, conclusion='success'),
+            job(24, MAC_JOB, newer, 1, conclusion='success'),
+        ]
+        github.page(newer, 1, len(jobs), jobs)
+        result = fetch.inspect_jobs(github)
+        self.assertEqual(result['state'], fetch.UNKNOWN)
+        self.assertEqual(result['reason'], fetch.FULL_EVIDENCE_AMBIGUOUS)
+        self.assertEqual(result['runs'][1]['run_id'], newer)
+        self.assertEqual(result['runs'][1]['state'], fetch.UNKNOWN)
+        self.assertEqual(result['runs'][1]['reason'], fetch.FULL_EVIDENCE_AMBIGUOUS)
+        self.assertEqual(result['failing'], [])
+        self.assertNotIn(github.jobs_path(MAC_RUN, 1), github.calls)
+
+    def test_duplicate_full_shard_both_success_is_unknown_without_fallback(self):
+        github = green_github()
+        newer = MAC_RUN + 1
+        github.workflow(fetch.MAC_WORKFLOW, 'workflow_dispatch', [
+            run(newer, attempt=1), run(MAC_RUN, attempt=MAC_ATTEMPT)])
+        jobs = [
+            job(20, MAC_SHARDS[0], newer, 1, conclusion='success'),
+            job(21, MAC_SHARDS[0], newer, 1, conclusion='success'),
+            job(22, MAC_SHARDS[1], newer, 1, conclusion='success'),
+            job(23, MAC_SHARDS[2], newer, 1, conclusion='success'),
+            job(24, MAC_JOB, newer, 1, conclusion='success'),
+        ]
+        github.page(newer, 1, len(jobs), jobs)
+        result = fetch.inspect_jobs(github)
+        self.assertEqual(result['state'], fetch.UNKNOWN)
+        self.assertEqual(result['reason'], fetch.FULL_EVIDENCE_AMBIGUOUS)
+        self.assertEqual(result['runs'][1]['run_id'], newer)
+        self.assertNotIn(github.jobs_path(MAC_RUN, 1), github.calls)
+
+    def test_duplicate_full_shard_with_failure_preserves_red_reporting(self):
+        github = green_github()
+        jobs = [
+            job(20, MAC_SHARDS[0], MAC_RUN, MAC_ATTEMPT, conclusion='success'),
+            job(21, MAC_SHARDS[0], MAC_RUN, MAC_ATTEMPT, conclusion='failure'),
+            job(22, MAC_SHARDS[1], MAC_RUN, MAC_ATTEMPT, conclusion='success'),
+            job(23, MAC_SHARDS[2], MAC_RUN, MAC_ATTEMPT, conclusion='success'),
+            job(24, MAC_JOB, MAC_RUN, MAC_ATTEMPT, conclusion='success'),
+        ]
+        github.page(MAC_RUN, 1, len(jobs), jobs)
+        result = fetch.inspect_jobs(github)
+        self.assertEqual(result['state'], fetch.RED)
+        self.assertIsNone(result['reason'])
+        self.assertEqual(result['failing'], [{
+            'kind': fetch.FULL_MAC, 'workflow': fetch.MAC_WORKFLOW,
+            'run_id': MAC_RUN, 'run_attempt': MAC_ATTEMPT,
+            'id': 21, 'name': MAC_SHARDS[0], 'conclusion': 'failure'}])
+
 
 if __name__ == '__main__':
     unittest.main()

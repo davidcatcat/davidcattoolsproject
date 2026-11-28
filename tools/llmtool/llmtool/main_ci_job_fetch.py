@@ -42,7 +42,9 @@ shows the FULL shard jobs actually ran. The full-due gate can dispatch a run
 that skips the shards (``select`` and ``check`` succeed, ``shards`` are
 ``skipped``); such a run did not execute the FULL suite, so a completed
 skip-only run is never GREEN and the newest older run that did run the shards
-is selected instead. The scan of older matching runs is bounded by
+is selected instead. Duplicate records for any required FULL shard name make
+the run ambiguous (UNKNOWN with ``full_evidence_ambiguous``) without falling
+back to an older run. The scan of older matching runs is bounded by
 ``MAX_RUNS_TO_SCAN``; exhausting it, or the run listing, is UNKNOWN.
 
 The result is a new dict: ``sha``, ``state`` (``red``, ``green`` or
@@ -112,6 +114,7 @@ PAGES_FAILED = 'pages_failed'
 PAGES_MALFORMED = 'pages_malformed'
 PAGES_BOUND = 'pages_bound'
 FULL_EVIDENCE_MISSING = 'full_evidence_missing'
+FULL_EVIDENCE_AMBIGUOUS = 'full_evidence_ambiguous'
 FULL_MAC_NOT_RUN = 'full_mac_not_run'
 RUN_SCAN_BOUND = 'run_scan_bound'
 PROFILE_INVALID = 'ci_profile_invalid'
@@ -219,14 +222,22 @@ def _matching_runs(runs, sha):
     return sorted(matching, key=lambda item: item['id'], reverse=True), None
 
 
-def _full_evidence(pages):
-    """True when the FULL shard jobs are present and none of them was skipped."""
+def _full_evidence_state(pages):
+    """Return 'ok', 'skip', or 'ambiguous' for a completed FULL Mac job listing."""
     conclusions = {}
     for jobs in pages:
         for job in jobs:
-            if isinstance(job, dict):
-                conclusions.setdefault(job.get('name'), job.get('conclusion'))
-    return all(conclusions.get(name) not in (None, 'skipped') for name in FULL_SHARDS)
+            if not isinstance(job, dict):
+                continue
+            name = job.get('name')
+            if name not in FULL_SHARDS:
+                continue
+            if name in conclusions:
+                return 'ambiguous'
+            conclusions[name] = job.get('conclusion')
+    if all(conclusions.get(name) not in (None, 'skipped') for name in FULL_SHARDS):
+        return 'ok'
+    return 'skip'
 
 
 def _run_guard(run):
@@ -359,10 +370,15 @@ def _run_report(github_get, sha, kind, workflow, event, run):
     else:
         result['state'] = summary['state']
         result['reason'] = summary['reason']
-        if (kind == FULL_MAC and result['state'] == GREEN
-                and not _full_evidence(collected['pages'])):
-            # A success that skipped the FULL shards did not run the suite.
-            return result, True
+        if kind == FULL_MAC and result['state'] == GREEN:
+            evidence = _full_evidence_state(collected['pages'])
+            if evidence == 'ambiguous':
+                result['state'] = UNKNOWN
+                result['reason'] = FULL_EVIDENCE_AMBIGUOUS
+                return result, False
+            if evidence == 'skip':
+                # A success that skipped the FULL shards did not run the suite.
+                return result, True
     return result, False
 
 
