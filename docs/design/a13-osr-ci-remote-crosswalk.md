@@ -16,7 +16,7 @@ non-sensitive facts are used.
 | Field | OSR-07 | OSR-27 |
 |---|---|---|
 | Source ID | OSR-07 | OSR-27 |
-| Linked evidence | #396 comment 6552370022; merged note [a13-profile-wiring-evidence.md](a13-profile-wiring-evidence.md) | #396 comment 6552370022; merged note [a13-remote-test-profile-boundary.md](a13-remote-test-profile-boundary.md); interface record [a13-test-execution-modes.md](a13-test-execution-modes.md); PR [#2860](https://github.com/llmtool/llmtool/pull/2860) (reviewed HEAD `0e6926c0`, merged as `50a7668a`); hosted run [46081471824](https://github.com/llmtool/llmtool/actions/runs/46081471824) (same-head PASS) |
+| Linked evidence | #396 comment 6552370022; merged note [a13-profile-wiring-evidence.md](a13-profile-wiring-evidence.md) | #396 comment 6552370022; merged note [a13-remote-test-profile-boundary.md](a13-remote-test-profile-boundary.md); interface record [a13-test-execution-modes.md](a13-test-execution-modes.md); PR [#2860](https://github.com/davidcatcat/davidcattoolsproject/pull/2860) (reviewed HEAD `0e6926c0`, merged as `50a7668a`); hosted run [46081471824](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/46081471824) (same-head PASS) |
 | Consumer | main CI readers and merge consumers; the completion collector reads `ci_trust` | remote test-profile boundary and test execution modes; the combined R1+R2 work |
 | Disposition | Partial: #2829 merged as `31734f77` for CI repair checks; at the pinned base the task-advance wait and rerun work in #2837 remains pending | Pending: the hardcoded legacy remote module selection and the Darwin-only exclusion are recorded, together with the required/admitted/executed module distinction; the combined R1+R2 work follows #2837, which remains pending at the pinned base |
 | Owning milestone | A13.1 (external repo CI trust) and A13.2 (full evidence validation) | A13.2 (relocation; full local, github and remote execution) |
@@ -47,8 +47,8 @@ until the row-level mapping exists.
 
 ## OSR-27 follow-up (dated 2026-11-28)
 
-PR [#2860](https://github.com/llmtool/llmtool/pull/2860) was reviewed at HEAD `0e6926c0` and merged as
-`50a7668a`; hosted run [46081471824](https://github.com/llmtool/llmtool/actions/runs/46081471824)
+PR [#2860](https://github.com/davidcatcat/davidcattoolsproject/pull/2860) was reviewed at HEAD `0e6926c0` and merged as
+`50a7668a`; hosted run [46081471824](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/46081471824)
 produced a same-head PASS covering 22 modules and 1,220 tests. This
 follow-up is dated 2026-11-28, the verified date of the reviewed HEAD and
 the merge commit. It is test evidence for the existing project recorded
