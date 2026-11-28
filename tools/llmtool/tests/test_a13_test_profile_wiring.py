@@ -321,6 +321,55 @@ class NonDefaultDirectoryExecutionTests(unittest.TestCase):
                 self._run_real_worktree(root, [admitted], profile)
         self.assertEqual(caught.exception.completion_code, 'TEST_PATH_INVALID')
 
+    def test_subpackage_init_cannot_supply_passing_result_for_both_kinds(self):
+        for kind in ('unittest', 'script'):
+            with self.subTest(kind=kind):
+                profile = test_profile.TestProfile((
+                    (re.compile(r'custom/test_[A-Za-z0-9_]+\.py\Z'), kind),
+                ))
+                admitted = 'custom/test_empty.py'
+                with tempfile.TemporaryDirectory() as root:
+                    Path(root, 'custom', 'sub').mkdir(parents=True)
+                    Path(root, admitted).write_text('', encoding='utf-8')
+                    Path(root, 'custom', 'sub', '__init__.py').write_text(
+                        self.PASS_BODY, encoding='utf-8')
+                    with self.assertRaises(LLMToolError) as caught:
+                        self._run_real_worktree(root, [admitted], profile)
+                self.assertEqual(
+                    caught.exception.completion_code, 'TEST_PATH_INVALID')
+
+    def test_symlinked_subpackage_init_is_refused(self):
+        profile = test_profile.TestProfile((
+            (re.compile(r'custom/test_[A-Za-z0-9_]+\.py\Z'), 'unittest'),
+        ))
+        admitted = 'custom/test_empty.py'
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, 'custom').mkdir(parents=True)
+            Path(root, 'other').mkdir(parents=True)
+            Path(root, admitted).write_text('', encoding='utf-8')
+            Path(root, 'other', '__init__.py').write_text(
+                self.PASS_BODY, encoding='utf-8')
+            Path(root, 'custom', 'link_sub').symlink_to(Path(root, 'other'))
+            with self.assertRaises(LLMToolError) as caught:
+                self._run_real_worktree(root, [admitted], profile)
+        self.assertEqual(caught.exception.completion_code, 'TEST_PATH_INVALID')
+
+    def test_non_identifier_filename_is_refused_for_both_kinds(self):
+        for kind in ('unittest', 'script'):
+            with self.subTest(kind=kind):
+                profile = test_profile.TestProfile((
+                    (re.compile(r'custom/test-[A-Za-z0-9_]+\.py\Z'), kind),
+                ))
+                admitted = 'custom/test-bad.py'
+                with tempfile.TemporaryDirectory() as root:
+                    Path(root, 'custom').mkdir(parents=True)
+                    Path(root, admitted).write_text(
+                        self.PASS_BODY, encoding='utf-8')
+                    with self.assertRaises(LLMToolError) as caught:
+                        self._run_real_worktree(root, [admitted], profile)
+                self.assertEqual(
+                    caught.exception.completion_code, 'TEST_PATH_INVALID')
+
     def test_default_profile_command_digests_stay_unchanged(self):
         paths = ['scripts/test_beta.py', 'tools/llmtool/tests/test_alpha.py']
         expected_argvs = {

@@ -280,15 +280,17 @@ def _resolve_test_target(root, path, kind):
     parent = Path(path).parent.as_posix()
     filename = Path(path).name
     if kind in ('unittest', 'script'):
-        if any(ch in filename for ch in '*?[]'):
+        if (any(ch in filename for ch in '*?[]') or
+                not filename.endswith('.py') or
+                not filename[:-3].isidentifier()):
             _stop('TEST_PATH_INVALID')
         # unittest discover walks subdirectories recursively (including
-        # symlinked directories); refuse if any other file with the same name
-        # sits under start_dir so discovery can never report a result from
-        # another file.
+        # symlinked directories) and imports any subpackage __init__.py
+        # regardless of -p; refuse any same-named file or subpackage under
+        # start_dir so discovery can never report a result from another file.
         start_path = (Path(root) if parent == '.'
                       else Path(root).joinpath(*parent.split('/')))
-        start_dir = (parent if parent == '.' or start_path.is_dir()
+        start_dir = (parent if parent == '.' or '/' in parent or start_path.is_dir()
                      else './' + parent)
         target_real = os.path.realpath(target)
         seen_dirs = set()
@@ -314,6 +316,8 @@ def _resolve_test_target(root, path, kind):
                 if (sub_stat.st_dev, sub_stat.st_ino) not in seen_dirs:
                     kept.append(d)
             dirnames[:] = kept
+            if dirpath != str(start_path) and '__init__.py' in filenames:
+                _stop('TEST_PATH_INVALID')
             if filename in filenames:
                 candidate_real = os.path.realpath(
                     os.path.join(dirpath, filename))
