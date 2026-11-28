@@ -160,33 +160,96 @@ def _literal_path_parts(pattern):
     return (directory.strip('/') or '.'), prefix
 
 
+def _top_level_branches(source):
+    """The pattern's ``|`` branches outside groups and character classes."""
+    branches = []
+    start = 0
+    depth = 0
+    escaped = False
+    in_class = False
+    for index, char in enumerate(source):
+        if escaped:
+            escaped = False
+        elif char == '\\':
+            escaped = True
+        elif in_class:
+            if char == ']':
+                in_class = False
+        elif char == '[':
+            in_class = True
+        elif char == '(':
+            depth += 1
+        elif char == ')':
+            depth = max(0, depth - 1)
+        elif char == '|' and depth == 0:
+            branches.append(source[start:index])
+            start = index + 1
+    branches.append(source[start:])
+    return branches
+
+
+def _literal_root(source):
+    """The repository directory before the source's first regex metacharacter."""
+    literal = _REGEX_META.split(source, 1)[0]
+    return literal.rpartition('/')[0].strip('/') or '.'
+
+
 def _test_search_paths(entries):
-    """Repository directories to git-grep, from each pattern's literal prefix."""
+    """Repository directories to git-grep, from each pattern's literal prefix.
+
+    Every top-level branch can name its own directory, so each is searched.
+    A case-insensitive pattern can name a directory in any case, which a git
+    pathspec cannot express, so it searches the repository root; the result
+    filter still applies the whole pattern.
+    """
     paths = []
     for pattern, _kind in entries:
-        root = _literal_path_parts(pattern)[0]
-        if root not in paths:
-            paths.append(root)
+        if pattern.flags & re.IGNORECASE:
+            roots = ['.']
+        else:
+            roots = [_literal_root(branch)
+                     for branch in _top_level_branches(pattern.pattern)]
+            if '.' in roots:
+                roots = ['.']
+        for root in roots:
+            if root not in paths:
+                paths.append(root)
     return paths
 
 
-def _is_test_path(entries, path):
+def _entries_are_default(entries):
+    """True when entries are the registry default, whose legacy path shapes apply."""
+    try:
+        # The registry constant, not default_profile(): a replaced default must
+        # not bring the legacy shapes along.
+        from .test_profile import _DEFAULT_PROFILE
+        default = tuple((pattern.pattern, pattern.flags, kind)
+                        for pattern, kind in _DEFAULT_PROFILE.entries)
+    except Exception:
+        return False
+    return tuple((pattern.pattern, pattern.flags, kind)
+                 for pattern, kind in entries) == default
+
+
+def _is_test_path(entries, path, *, legacy=False):
     """True when a found path is one of the profile's test paths.
 
-    The fixed locations this replaces covered every file under a ``tests``
-    directory and matched ``test_*.py`` files by name.  Both legacy shapes stay
-    accepted, so the default profile returns the same items as before.
+    The fixed locations the default profile replaces covered every file under a
+    ``tests`` directory and matched ``test_*.py`` files by name.  Both legacy
+    shapes stay accepted for the default profile only, so it returns the same
+    items as before without widening a caller-supplied profile.
     """
     for pattern, kind in entries:
         if pattern.fullmatch(path) is not None:
             return True
+        if not legacy:
+            continue
         root, prefix = _literal_path_parts(pattern)
         root_prefix = '' if root == '.' else root + '/'
         if not path.startswith(root_prefix):
             continue
         name = path[len(root_prefix):]
-        if (prefix == 'test_' and '/' not in name and
-                name.startswith('test_') and name.endswith('.py')):
+        if prefix == 'test_' and name.startswith('test_') and name.endswith('.py'):
             return True
         if kind == 'unittest' and root.rsplit('/', 1)[-1] == 'tests':
             return True
@@ -234,7 +297,8 @@ def reference_patterns(path):
 
 
 def _module_referencing_tests_bounded(*, root, commit, read_paths, write_paths, test_entries,
-                                      test_paths, runner=None, max_greps=None, deadline=None):
+                                      test_paths, runner=None, max_greps=None, deadline=None,
+                                      legacy=False):
     """Test files at commit that reference a written file but are in neither read nor write.
 
     The search locations come from the profile entries, and a result counts
@@ -282,7 +346,7 @@ def _module_referencing_tests_bounded(*, root, commit, read_paths, write_paths, 
         for line in (result.stdout or '').splitlines():
             test = line[len(commit) + 1:] if line.startswith(commit + ':') else line
             if (test and test not in known and test != path and
-                    _is_test_path(test_entries, test)):
+                    _is_test_path(test_entries, test, legacy=legacy)):
                 names.append(test)
         leaf = name.rsplit('.', 1)[0]
         # Tests named after the file come first; the rest follow by name.
@@ -300,11 +364,12 @@ def _module_referencing_tests_bounded(*, root, commit, read_paths, write_paths, 
 
 
 def _capped_fallback_result(*, root, commit, read_paths, write_paths, test_entries,
-                            test_paths, runner=None, max_greps, deadline, reason=None):
+                            test_paths, runner=None, max_greps, deadline, reason=None,
+                            legacy=False):
     fallback, partial = _module_referencing_tests_bounded(
         root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
         test_entries=test_entries, test_paths=test_paths,
-        runner=runner, max_greps=max_greps, deadline=deadline)
+        runner=runner, max_greps=max_greps, deadline=deadline, legacy=legacy)
     if reason is None and not partial:
         return fallback
     if reason is not None:
@@ -429,7 +494,7 @@ def _candidate_names(text, definitions):
 
 
 def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, test_entries,
-                               test_paths, runner=None, budget=None):
+                               test_paths, runner=None, budget=None, legacy=False):
     """Tests that directly exercise names the spec texts change; None when no name is found.
 
     The search locations and the accepted test paths both come from the
@@ -491,7 +556,8 @@ def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, 
         tests = []
         for line in (result.stdout or '').splitlines():
             test = line[len(commit) + 1:] if line.startswith(commit + ':') else line
-            if test and test not in tests and _is_test_path(test_entries, test):
+            if (test and test not in tests and
+                    _is_test_path(test_entries, test, legacy=legacy)):
                 tests.append(test)
         tests.sort()
         for test in tests[:MAX_TESTS_PER_PATH]:
@@ -533,6 +599,7 @@ def referencing_tests(*, root, commit, read_paths, write_paths, runner=None, tex
                      'TestProfile is invalid; test search refused '
                      '(fixed locations are not used)')]
     test_paths = _test_search_paths(entries)
+    legacy = _entries_are_default(entries)
     deadline = time.monotonic() + PRECISE_SEARCH_MAX_SECONDS
     budget = {'deadline': deadline, 'greps': 0}
     if texts is not None:
@@ -540,7 +607,7 @@ def referencing_tests(*, root, commit, read_paths, write_paths, runner=None, tex
             precise = _precise_referencing_tests(
                 root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
                 texts=texts, test_entries=entries, test_paths=test_paths,
-                runner=runner, budget=budget)
+                runner=runner, budget=budget, legacy=legacy)
             if precise is not None:
                 return precise
         except _PreciseSearchCapped as exc:
@@ -549,14 +616,15 @@ def referencing_tests(*, root, commit, read_paths, write_paths, runner=None, tex
                 root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
                 test_entries=entries, test_paths=test_paths,
                 runner=runner, max_greps=remaining_greps, deadline=exc.deadline,
-                reason=exc.reason)
+                reason=exc.reason, legacy=legacy)
         except Exception:
             pass
     remaining_greps = max(0, MAX_PRECISE_GREPS - budget['greps'])
     return _capped_fallback_result(
         root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
         test_entries=entries, test_paths=test_paths,
-        runner=runner, max_greps=remaining_greps, deadline=budget['deadline'])
+        runner=runner, max_greps=remaining_greps, deadline=budget['deadline'],
+        legacy=legacy)
 
 
 # --- #2503 PR-6: route capability and size advice ----------------------------

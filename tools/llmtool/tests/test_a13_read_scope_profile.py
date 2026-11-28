@@ -83,6 +83,80 @@ class ReadScopeProfileTest(unittest.TestCase):
         self.assertIn((advice.TEST_REFERENCES_WRITE, DEFAULT_SUPPORT),
                       self.kinds(self.refs()))
 
+    def test_default_profile_keeps_nested_legacy_script_shapes(self):
+        # The old scripts/test_*.py pathspec spanned '/' too.
+        nested_support = 'scripts/test_pkg/helper.py'
+        nested_test = 'scripts/test_pkg/test_x.py'
+        non_test = 'scripts/pkg/test_y.py'
+        for name in (nested_support, nested_test, non_test):
+            Path(self.root, name).parent.mkdir(parents=True, exist_ok=True)
+            Path(self.root, name).write_text('import llmtool.widget\n')
+        _git(self.root, 'add', '-A')
+        _git(self.root, 'commit', '-qm', 'nested script paths')
+        paths = [path for _kind, path in self.kinds(self.refs())]
+        self.assertIn(nested_support, paths)
+        self.assertIn(nested_test, paths)
+        self.assertNotIn(non_test, paths)
+
+    def test_custom_profile_does_not_inherit_default_legacy_shapes(self):
+        real = 'checks/tests/test_widget_real.py'
+        helper = 'checks/tests/helper.py'
+        nested = 'checks/test_pkg/helper.py'
+        for name in (real, helper, nested):
+            Path(self.root, name).parent.mkdir(parents=True, exist_ok=True)
+            Path(self.root, name).write_text('import llmtool.widget\n')
+        _git(self.root, 'add', '-A')
+        _git(self.root, 'commit', '-qm', 'custom tests')
+        profile = TestProfile((
+            (re.compile(r'checks/tests/test_[A-Za-z0-9_]+\.py\Z'), 'unittest'),
+        ))
+        self.assertEqual(self.kinds(self.refs(profile=profile)), [
+            (advice.TEST_REFERENCES_WRITE, real),
+        ])
+
+    def test_top_level_alternation_searches_each_branch(self):
+        files = {
+            'checks/test_alpha.py': 'import llmtool.widget\n',
+            'specs/test_beta.py': 'import llmtool.widget\n',
+            'specs/helper.py': 'import llmtool.widget\n',
+        }
+        for name, text in files.items():
+            Path(self.root, name).parent.mkdir(parents=True, exist_ok=True)
+            Path(self.root, name).write_text(text)
+        _git(self.root, 'add', '-A')
+        _git(self.root, 'commit', '-qm', 'alternating tests')
+        profile = TestProfile((
+            (re.compile(r'checks/test_alpha\.py|specs/test_beta\.py'), 'unittest'),
+        ))
+        self.assertEqual(self.kinds(self.refs(profile=profile)), [
+            (advice.TEST_REFERENCES_WRITE, 'checks/test_alpha.py'),
+            (advice.TEST_REFERENCES_WRITE, 'specs/test_beta.py'),
+        ])
+
+    def test_case_insensitive_pattern_searches_its_directory(self):
+        path = 'checks/test_widget_case.py'
+        Path(self.root, path).parent.mkdir(parents=True, exist_ok=True)
+        Path(self.root, path).write_text('import llmtool.widget\n')
+        _git(self.root, 'add', '-A')
+        _git(self.root, 'commit', '-qm', 'case-insensitive test')
+        profile = TestProfile((
+            (re.compile(r'CHECKS/TEST_WIDGET_CASE\.py', re.IGNORECASE), 'unittest'),
+        ))
+        self.assertEqual(self.kinds(self.refs(profile=profile)), [
+            (advice.TEST_REFERENCES_WRITE, path),
+        ])
+
+    def test_precise_search_keeps_nested_legacy_script_shapes(self):
+        path = 'scripts/test_pkg/test_precise.py'
+        Path(self.root, path).parent.mkdir(parents=True, exist_ok=True)
+        Path(self.root, path).write_text(
+            'from llmtool import widget\n\n\n'
+            'def test_call():\n    assert widget.widget_fn(1) == 1\n')
+        _git(self.root, 'add', '-A')
+        _git(self.root, 'commit', '-qm', 'nested precise test')
+        self.assertIn((advice.TEST_LOCKS_CHANGE, path),
+                      self.kinds(self.refs(texts=['Change widget_fn to return 2.'])))
+
     def test_non_default_profile_directory_is_searched(self):
         self.assertEqual(self.kinds(self.refs()), [
             (advice.TEST_REFERENCES_WRITE, SCRIPT_TEST),
@@ -135,6 +209,13 @@ class ReadScopeProfileTest(unittest.TestCase):
                 self.assertIn('invalid', items[0]['note'])
                 self.assertIn('refused', items[0]['note'])
         self.assertEqual(calls, [])
+
+    def test_invalid_profile_refuses_the_precise_search_too(self):
+        items = advice.referencing_tests(
+            root=self.root, commit='HEAD', read_paths=[], write_paths=[WIDGET],
+            profile=object(), texts=['Change widget_fn to return 2.'])
+        self.assertEqual([(item['kind'], item['path']) for item in items],
+                         [(advice.TEST_PROFILE_INVALID, None)])
 
 
 if __name__ == '__main__':
