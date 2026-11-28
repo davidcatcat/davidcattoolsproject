@@ -6353,16 +6353,24 @@ def _delegate_timeout(args, route):
             exc.code) from None
 
 
-def _validate_delegate_workflow_grants(task, registration, snapshot, read_paths, write_paths):
-    """Refuse any ungranted .github/workflows path before any durable Task write."""
+def _validate_delegate_workflow_grants(task, registration, snapshot, read_paths, write_paths,
+                                       *, honor_issue=False):
+    """Refuse any ungranted .github/workflows path before any durable Task write.
+
+    Only OpenCode honours Issue-bound workflow grants (#2281 W3); AGY, Claude
+    and gw-agent never receive the Task Issue here so every .github/workflows
+    path on those routes is refused with GRANT_ISSUE_INVALID.
+    """
+    request = {
+        'root': registration.root,
+        'expected_head': snapshot.head,
+        'read_paths': read_paths,
+        'write_paths': write_paths,
+    }
+    if honor_issue and task.get('issue') is not None:
+        request['issue'] = task['issue']
     try:
-        validate_workflow_grants({
-            'root': registration.root,
-            'expected_head': snapshot.head,
-            'read_paths': read_paths,
-            'write_paths': write_paths,
-            'issue': task.get('issue'),
-        })
+        validate_workflow_grants(request)
     except RouteError as exc:
         grant_code = (exc.observed_facts.get('workflow_grant_code')
                       if isinstance(getattr(exc, 'observed_facts', None), dict)
@@ -6446,7 +6454,8 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         args, store, task, registration, snapshot, 'opencode', read_paths, write_paths)
     if reassignment is not None:
         registration = reassignment.successor
-    _validate_delegate_workflow_grants(task, registration, snapshot, read_paths, write_paths)
+    _validate_delegate_workflow_grants(
+        task, registration, snapshot, read_paths, write_paths, honor_issue=True)
     repair_packet = (reassignment.repair_packet if reassignment is not None
                      else getattr(args, 'repair_packet', None))
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
@@ -7201,7 +7210,6 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             'read_paths': read_paths, 'write_paths': write_paths, 'executable': executable,
             'prompt': prompt, 'log_path': 'agy.log', 'timeout': timeout,
             'state_dirs': (),
-            **({'issue': task['issue']} if task.get('issue') is not None else {}),
         }, gate=route_gate, boundary=GatedBoundary(),
            snapshot=capture_snapshot, on_launch=authorize_agy_spawn, on_child=record_agy_child)
         _record_skill_delivery(task, registration, snapshot, 'agy', result.model,
@@ -7964,7 +7972,6 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
             'expected_branch': registration.branch, 'expected_head': snapshot.head,
             'read_paths': read_paths, 'write_paths': write_paths, 'executable': executable,
             'prompt': prompt, 'timeout': timeout, 'state_dirs': (),
-            **({'issue': task['issue']} if task.get('issue') is not None else {}),
         }, gate=route_gate, boundary=GatedBoundary(), snapshot=capture_snapshot)
         _record_skill_delivery(task, registration, snapshot, 'claude', model,
                                card_prefix_sha256, result)
@@ -8647,8 +8654,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 'expected_branch': registration.branch, 'expected_head': snapshot.head,
                 'read_paths': read_paths, 'write_paths': write_paths, 'executable': sys.executable,
                 'prompt': prompt, 'task': task_input, 'timeout': timeout,
-                'state_dirs': (), **site.route_fields(),
-                **({'issue': task['issue']} if task.get('issue') is not None else {})},
+                'state_dirs': (), **site.route_fields()},
                 gate=route_gate, boundary=for_platform(),
                 snapshot=capture_snapshot,
                 on_launch=lambda: _record_gw_agent_skill_not_delivered(task))

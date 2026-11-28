@@ -333,11 +333,12 @@ class _DispatchStore:
 
 
 class DispatchCallerWorkflowGrantTests(unittest.TestCase):
-    """#2942: all four dispatch callers refuse ungranted workflow paths pre-write.
+    """#2942: all four dispatch callers refuse disallowed workflow paths pre-write.
 
     Refusing before any durable Task write leaves no Developer assignment on the
     Task and leaves the D6 unchanged, so a corrected re-delegate of the same
-    Task is admitted. Granted workflow paths continue to work.
+    Task is admitted. OpenCode honours Issue-bound grants; AGY, Claude and
+    gw-agent refuse every .github/workflows path, granted or not (#2281 W3).
     """
 
     def setUp(self):
@@ -642,21 +643,56 @@ class DispatchCallerWorkflowGrantTests(unittest.TestCase):
                     self.assertEqual(store.task['developer']['state'],
                                      'DEVELOPER_RESPONDED')
 
-    def test_granted_workflow_paths_are_admitted_on_all_four_routes(self):
+    def test_granted_workflow_paths_admitted_on_opencode_only(self):
         head = self._commit_grants([
             self._entry([PATH, OTHER], issue=ISSUE, mode='read'),
             self._entry([OTHER], issue=ISSUE, mode='write'),
         ])
-        for route in ('agy', 'opencode', 'gw-agent', 'claude'):
-            with self.subTest(route=route):
-                status, store, requests, launched = self._run(
-                    route, read_paths=[PATH, OTHER, 'src.py'],
-                    write_paths=[OTHER], issue=ISSUE, head=head)
-                self.assertEqual(status, 0)
-                self.assertEqual(len(requests), 1)
-                self.assertEqual(launched, [True])
-                self.assertEqual(store.task['developer']['state'],
-                                 'DEVELOPER_RESPONDED')
+        status, store, requests, launched = self._run(
+            'opencode', read_paths=[PATH, OTHER, 'src.py'],
+            write_paths=[OTHER], issue=ISSUE, head=head)
+        self.assertEqual(status, 0)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(launched, [True])
+        self.assertEqual(store.task['developer']['state'],
+                         'DEVELOPER_RESPONDED')
+
+    def test_granted_workflow_paths_refused_prewrite_on_agy_claude_and_gw_agent(self):
+        head = self._commit_grants([
+            self._entry([PATH, OTHER], issue=ISSUE, mode='read'),
+            self._entry([OTHER], issue=ISSUE, mode='write'),
+        ])
+        for route in ('agy', 'claude', 'gw-agent'):
+            for mode in ('read', 'write'):
+                with self.subTest(route=route, mode=mode):
+                    store = _DispatchStore(
+                        self._task(route, 'a' * 32, issue=ISSUE))
+                    read_paths = ([PATH, 'src.py'] if mode == 'read'
+                                  else ['src.py'])
+                    write_paths = ([OTHER] if mode == 'write'
+                                   else ['src.py'])
+                    with self.assertRaises(LLMToolError) as caught:
+                        self._run(
+                            route, store=store, read_paths=read_paths,
+                            write_paths=write_paths, issue=ISSUE, head=head)
+                    self.assertEqual(getattr(caught.exception, 'code', None),
+                                     WORKFLOW_GRANT_REFUSED)
+                    self.assertIn(WORKFLOW_GRANT_REFUSED,
+                                  str(caught.exception))
+                    self.assertIn('GRANT_ISSUE_INVALID',
+                                  str(caught.exception))
+                    self.assertEqual(store.writes, 0)
+                    self.assertIsNone(store.task['developer'])
+                    self.assertIsNone(store.task['completion'])
+
+                    status, store, requests, launched = self._run(
+                        route, store=store, read_paths=['src.py'],
+                        write_paths=['src.py'], issue=ISSUE, head=head)
+                    self.assertEqual(status, 0)
+                    self.assertEqual(len(requests), 1)
+                    self.assertEqual(launched, [True])
+                    self.assertEqual(store.task['developer']['state'],
+                                     'DEVELOPER_RESPONDED')
 
 
 if __name__ == '__main__':
