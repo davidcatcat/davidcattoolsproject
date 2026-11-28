@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .active_pm_inbox import record_remote_test_event, record_remote_test_outcome_event
 from .errors import LLMToolError
-from . import ai_github_exec, github_identity
+from . import ai_github_exec, github_identity, test_profile
 from .task_completion import _github_get, _trusted_slug, read_d6_registration
 from .task_store import TaskStore, _emitted_sensitive, _json_bytes
 
@@ -313,17 +313,42 @@ def _ssh_timeout():
         raise LLMToolError('ADMISSION_DENIED: remote test timeout config is invalid') from None
 
 
-def _task_path_modules(task):
+_UNSET = object()
+
+
+def _resolve_profile(profile=_UNSET):
+    if profile is _UNSET:
+        try:
+            profile = test_profile.default_profile()
+        except Exception:
+            return None
+    if type(profile) is not test_profile.TestProfile:
+        return None
+    return profile
+
+
+def _module_from_path(path, profile):
+    if (profile is None or type(path) is not str or not path.endswith('.py') or
+            profile.kind_for(path) != 'unittest'):
+        return None
+    stem = Path(path).stem
+    return stem if _MODULE.fullmatch(stem) else None
+
+
+def _task_path_modules(task, *, profile=_UNSET):
+    resolved = _resolve_profile(profile)
+    if resolved is None:
+        return ()
     developer = task.get('developer') if type(task.get('developer')) is dict else {}
-    declared_paths = set()
+    modules = set()
     for field in ('read_paths', 'write_paths'):
         paths = developer.get(field)
         if type(paths) is list:
-            declared_paths.update(
-                path for path in paths
-                if type(path) is str and
-                re.fullmatch(r'tools/llmtool/tests/test_[a-z0-9_]{1,80}\.py', path))
-    return tuple(sorted(Path(path).stem for path in declared_paths))
+            for path in paths:
+                module = _module_from_path(path, resolved)
+                if module is not None:
+                    modules.add(module)
+    return tuple(sorted(modules))
 
 
 _MAC_MANIFEST = Path(__file__).resolve().parents[1] / 'ci' / 'mac-modules.txt'
@@ -385,13 +410,16 @@ def _darwin_only_modules(stems, *, manifest=None, tests_dir=None):
     return frozenset(found)
 
 
-def remote_required_modules(task, extra_modules=()):
+def remote_required_modules(task, extra_modules=(), *, profile=_UNSET):
     """Task test modules a Linux remote receipt must cover (#2573, #2491).
 
     extra_modules are the exact-head test modules the PR adds or changes.
     Darwin-only modules are left to the exact-head Mac CI merge gate.
     """
-    required = set(_task_path_modules(task))
+    resolved = _resolve_profile(profile)
+    if resolved is None:
+        return ()
+    required = set(_task_path_modules(task, profile=resolved))
     for module in extra_modules:
         if type(module) is str and _MODULE.fullmatch(module):
             required.add(module)
@@ -399,8 +427,11 @@ def remote_required_modules(task, extra_modules=()):
     return tuple(module for module in sorted(required) if module not in darwin)
 
 
-def _admitted_modules(task):
-    declared = _task_path_modules(task)
+def _admitted_modules(task, *, profile=_UNSET):
+    resolved = _resolve_profile(profile)
+    if resolved is None:
+        return ()
+    declared = _task_path_modules(task, profile=resolved)
     if declared:
         return declared
     completion = task.get('completion')
@@ -419,7 +450,7 @@ def _admitted_modules(task):
     names = set()
     for test in tests:
         path = test.get('path') if type(test) is dict else None
-        match = re.fullmatch(r'tools/llmtool/tests/(test_[a-z0-9_]{1,80})\.py', path or '')
-        if match:
-            names.add(match.group(1))
+        module = _module_from_path(path, resolved)
+        if module is not None:
+            names.add(module)
     return tuple(sorted(names))
