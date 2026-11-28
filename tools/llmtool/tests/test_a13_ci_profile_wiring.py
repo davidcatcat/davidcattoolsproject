@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
 import io
+import itertools
 import json
 from pathlib import Path
 import sys
@@ -247,6 +248,32 @@ class R2SubstitutedProfileTests(unittest.TestCase):
 
 
 class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):
+    _CHECK_FIELDS = (
+        'linux_code_check',
+        'docs_check',
+        'gateway_check',
+        'ai_loop_check',
+        'macos_check',
+    )
+
+    def _duplicate_check_profiles(self):
+        base = {
+            'linux_code_check': 'a',
+            'docs_check': 'b',
+            'gateway_check': 'c',
+            'ai_loop_check': 'd',
+            'macos_check': 'e',
+            'linux_workflow_file': 'l.yml',
+            'macos_workflow_file': 'm.yml',
+        }
+        return tuple(
+            (
+                f'duplicate_check_{first}_{second}',
+                CiProfile(**(base | {second: base[first]})),
+            )
+            for first, second in itertools.combinations(self._CHECK_FIELDS, 2)
+        )
+
     def _bad_profiles(self):
         mutated = CiProfile(
             linux_code_check='a', docs_check='b', gateway_check='c',
@@ -285,7 +312,7 @@ class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):
             ('duplicate_workflow', duplicate_workflow),
             ('ambiguous_list', [ALT_PROFILE, default_profile()]),
             ('ambiguous_tuple', (ALT_PROFILE,)),
-        ) + shard_collisions
+        ) + shard_collisions + self._duplicate_check_profiles()
 
     def test_direct_bad_profile_refused_without_dispatch_or_reads(self):
         for kind, bad in self._bad_profiles():
@@ -383,6 +410,23 @@ class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):
             due.sha_result(github, [run], SHA, profile=duplicate)
         with self.assertRaises(due.ProfileError):
             due.decide(github, now=T0, profile=duplicate)
+        self.assertEqual(github.call_count, 0)
+
+    def test_duplicate_check_name_profile_rejected_in_direct_helpers(self):
+        github = mock.Mock(side_effect=AssertionError('github_get must not be called'))
+        run = {'id': 11, 'status': 'completed', 'conclusion': 'success', 'head_sha': SHA}
+        for label, duplicate in self._duplicate_check_profiles():
+            with self.subTest(case=label):
+                with self.assertRaises(due.ProfileError):
+                    due.resolve_profile(duplicate)
+                with self.assertRaises(due.ProfileError):
+                    due.full_runs(github, profile=duplicate)
+                with self.assertRaises(due.ProfileError):
+                    due.trusted(github, run, profile=duplicate)
+                with self.assertRaises(due.ProfileError):
+                    due.sha_result(github, [run], SHA, profile=duplicate)
+                with self.assertRaises(due.ProfileError):
+                    due.decide(github, now=T0, profile=duplicate)
         self.assertEqual(github.call_count, 0)
 
 
