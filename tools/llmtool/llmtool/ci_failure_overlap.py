@@ -26,16 +26,21 @@ def overlap(failing_modules, changed_paths, declared_modules=()):
 
     OVERLAP when a failing module is declared by the Task, is itself a changed
     file, or tests a changed source file of the same stem (``x.py`` and
-    ``test_x``). An empty or malformed failing list is UNKNOWN.
+    ``test_x``). An empty or malformed failing list, declared module or changed
+    path is UNKNOWN.
     """
     if (type(failing_modules) not in (list, tuple) or not failing_modules or
             type(changed_paths) not in (list, tuple) or
             type(declared_modules) not in (list, tuple)):
         return UNKNOWN
     failing = [_module_name(item) for item in failing_modules]
-    if None in failing or any(type(path) is not str for path in changed_paths):
+    declared = [_module_name(item) for item in declared_modules]
+    if None in failing or None in declared:
         return UNKNOWN
-    related = {_module_name(item) for item in declared_modules} - {None}
+    if any(type(path) is not str or not path.strip() or path.endswith('/')
+           for path in changed_paths):
+        return UNKNOWN
+    related = set(declared)
     for path in changed_paths:
         name = path.rsplit('/', 1)[-1]
         if name.endswith('.py'):
