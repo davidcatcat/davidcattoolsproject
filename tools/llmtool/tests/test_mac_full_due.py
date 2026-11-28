@@ -26,6 +26,7 @@ class FakeGitHub:
         self.main, self.merged_at, self.runs, self.jobs = 'a' * 40, T0, [], {}
         self.fail, self.reads, self.on_runs = None, [], None
         self.total_override = None
+        self.page_totals = {}
 
     def merge(self, sha, at):
         self.main, self.merged_at = sha, at
@@ -56,7 +57,9 @@ class FakeGitHub:
                 if key == 'page':
                     page = int(value)
         start = (page - 1) * 100
-        total = len(jobs) if self.total_override is None else self.total_override
+        total = self.page_totals.get(
+            page, len(jobs) if self.total_override is None else self.total_override
+        )
         return {'total_count': total, 'jobs': jobs[start:start + 100]}
 
 
@@ -174,6 +177,24 @@ class MacFullDueCases(unittest.TestCase):
         self.github.total_override = 101
         self.assertEqual(self.sweep(T0 + 2100), due.UNAVAILABLE)
         self.assertEqual(len(self.gh.calls), 1)
+
+    def test_e_conflicting_total_count_across_pages_is_unavailable(self):
+        self.github.runs = [{
+            'id': 1,
+            'status': 'completed',
+            'conclusion': 'success',
+            'head_sha': self.github.main,
+            'html_url': 'u',
+        }]
+        filler = [{'name': f'extra-{i}', 'conclusion': 'success'} for i in range(97)]
+        self.github.jobs[1] = OK_JOBS + filler
+        self.assertEqual(len(self.github.jobs[1]), 101)
+        self.github.page_totals = {1: 102, 2: 101}
+        code, detail = due.request_full(self.gh, '/repo', self.github, now=T0 + 2100)
+        self.assertEqual(code, due.UNAVAILABLE)
+        self.assertEqual(detail, {'read': 'jobs'})
+        self.assertEqual(self.gh.calls, [])
+        self.assertTrue(any('page=2' in path for path in self.github.reads))
 
     def test_e_unrelated_job_names_do_not_change_trust(self):
         self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
