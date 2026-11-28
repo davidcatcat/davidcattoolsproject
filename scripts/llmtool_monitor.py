@@ -8692,7 +8692,8 @@ def gw_rows(processes: list[Process], now: float, canonical: str) -> list[Office
 
 # Codex reviewers are not a standing Worker: they run as sessions the PM starts
 # and appear under it. The `codex-reviewer` dispatch switch (Owner 2026-10-25)
-# gates them but gets no roster row of its own.
+# gates them but gets no roster row of its own; neither does `agy-reviewer`
+# (#1019, an explicit-selection formal Reviewer route).
 WORKER_ROSTER = (   # (display name, worker-dispatch.json key, sort order)
     ("opencode developer", "opencode-developer", 50),
     ("agy", "agy", 60),
@@ -8714,7 +8715,7 @@ DISPATCH_VALUES = frozenset({"ALLOWED", "PAUSED", "OWNER_ASSIGNMENT_ONLY"})
 # gate would refuse; a test checks both agree.
 DISPATCH_WORKERS = frozenset({"codex-developer", "claude-developer", "opencode-developer", "agy",
                               "company-gw", "gw-agent", "claude-reviewer",
-                              "codex-reviewer"})
+                              "codex-reviewer", "agy-reviewer"})
 # #1502 WP-B: the AI Debug keys are optional, as in the gate: a file without
 # them is valid, a file with only one of them is not.
 DISPATCH_DEBUG_WORKERS = frozenset({"codex-debug", "claude-debug"})
