@@ -21,6 +21,12 @@ def _module_name(value):
     return name if _MODULE.fullmatch(name) else None
 
 
+def _valid_changed_path(path):
+    """A changed path must be a non-blank file path, not a directory path."""
+    return (type(path) is str and bool(path.strip()) and
+            not path.rstrip().endswith('/'))
+
+
 def overlap(failing_modules, changed_paths, declared_modules=()):
     """Return OVERLAP, NO_OVERLAP or UNKNOWN for one red required check.
 
@@ -37,8 +43,7 @@ def overlap(failing_modules, changed_paths, declared_modules=()):
     declared = [_module_name(item) for item in declared_modules]
     if None in failing or None in declared:
         return UNKNOWN
-    if any(type(path) is not str or not path.strip() or path.endswith('/')
-           for path in changed_paths):
+    if not all(_valid_changed_path(path) for path in changed_paths):
         return UNKNOWN
     related = set(declared)
     for path in changed_paths:
