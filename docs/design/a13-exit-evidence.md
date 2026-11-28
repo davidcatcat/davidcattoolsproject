@@ -25,6 +25,20 @@ Admitted source notes (linked; their tables are not copied here):
 | Migration / rollback | None merged for exit: the #2836 rollback runbook is held on REPAIR_DEBUG_REQUIRED. | The missing #2836 exit evidence is retained as blocked; the runbook is not a substitute for it. | PM retains the missing exit evidence and re-verifies it in a verified record once the hold resolves; the hold is not waived and no end-to-end rollback drill is demanded. |
 | Test mode interface handoff | #2834 merged: test mode interface; requirement recorded in `docs/design/a13-test-execution-modes.md`; the runner-kind boundary lives in `tools/llmtool/llmtool/test_profile.py` (`TestProfile.kind_for`, `default_profile`). | Full mode implementation is A13.2, outside the A13.0 exit. | PM records the A13.2 scope for full mode implementation; A13.0 hands off at the merged interface and declares no runtime validation. |
 
+### Dated follow-up note (2026-11-28)
+
+Follow-up to the "Real profile wiring and non-default regression" row: the
+profile refusal coverage recorded for that row now also includes
+(no runtime validation is claimed; closure remains pending):
+- [PR #2911](https://github.com/davidcatcat/davidcattoolsproject/pull/2911),
+  merged as `ee0c1bf0`: added `TestProfile` constructor refusal for
+  non-iterable entry containers with the fixed error code
+  `TEST_PROFILE_INVALID` (test profile source
+  `tools/llmtool/llmtool/test_profile.py`).
+- [PR #2919](https://github.com/davidcatcat/davidcattoolsproject/pull/2919),
+  head `c1240594`, awaiting formal review: extends the `TestProfile`
+  constructor refusal to compiled bytes regex patterns.
+
 ## Status
 
 Closure is **pending**. Blocked work stays blocked: nothing here waives a
