@@ -60,7 +60,8 @@ never the implicit default; `formal_reviewer_order` is unchanged (#2938).
 - Its verdict marker actor is `AGY`.
 - It is Claude family, so it never formally reviews a Claude-authored Task; if asked,
   report BLOCKED with that reason.
-- A dispute on an `agy-reviewer` FAIL has no AGY arbiter.
+- A dispute on an `agy-reviewer` FAIL gets no arbiter of any family
+  (`DISPUTE_ARBITER_UNAVAILABLE`).
 
 ## Codex Reviewer appendix
 
