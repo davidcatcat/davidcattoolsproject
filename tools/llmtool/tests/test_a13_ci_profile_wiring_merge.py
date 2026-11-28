@@ -379,6 +379,11 @@ class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):
             ai_loop_check='d', macos_check=due.SHARD_JOBS[0],
             linux_workflow_file='l.yml', macos_workflow_file='m.yml',
         )
+        duplicate_checks = CiProfile(
+            linux_code_check='a', docs_check='a', gateway_check='c',
+            ai_loop_check='d', macos_check='e',
+            linux_workflow_file='l.yml', macos_workflow_file='m.yml',
+        )
         return (
             ('missing_none', None),
             ('invalid_str', 'check (Linux 3.14)'),
@@ -389,6 +394,7 @@ class R3InvalidOrAmbiguousProfileTests(unittest.TestCase):
             ('ambiguous_list', [ALT_PROFILE, default_profile()]),
             ('ambiguous_tuple', (ALT_PROFILE,)),
             ('shard_collision', shard_collision),
+            ('duplicate_checks', duplicate_checks),
         )
 
     def test_main_incident_and_cli_refuse_bad_profiles_without_reads(self):
