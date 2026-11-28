@@ -324,7 +324,7 @@ def select_test_ids(
                 module_id = _module_id(direct_path, repo_root)
                 if module_id is None:
                     reject(direct_path, "missing_direct_test")
-                    break
+                    continue
                 dynamic_ids.add(module_id)
             if rejection_count > rejections_before_path:
                 continue
