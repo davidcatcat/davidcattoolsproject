@@ -514,9 +514,10 @@ class SshTimeoutDiagnosticTests(unittest.TestCase):
             'remote_test_receipts': [],
         }
 
-    def _run_timeout(self, *, stderr=None, stdout=None):
+    def _run_timeout(self, *, stderr=None, stdout=None, modules=('test_mod',)):
         store = _FakeStore(self.task)
         reg = types.SimpleNamespace(result_sha=_SHA, root='/tmp/fake-root')
+        self.task['developer']['read_paths'] = [f'tools/llmtool/tests/{m}.py' for m in modules]
 
         def fake_transport(argv, script, timeout):
             raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr)
@@ -530,7 +531,7 @@ class SshTimeoutDiagnosticTests(unittest.TestCase):
                 executor_task='task-1',
                 sha=_SHA,
                 ref=_REF,
-                modules=('test_mod',),
+                modules=modules,
                 store=store,
                 config_path=self.config_path,
                 transport=fake_transport,
@@ -592,6 +593,67 @@ class SshTimeoutDiagnosticTests(unittest.TestCase):
         serialized = json.dumps({'res': res, 'stored': store.outcomes}, sort_keys=True)
         for forbidden in ('/tmp/private/work/dir', '/home/runner/log.txt', 'raw test log line', '/tmp/raw-stdout-path'):
             self.assertNotIn(forbidden, serialized)
+
+    def test_tests_phase_module_progress_distinguishes_none_valid_and_invalid(self):
+        cases = (
+            (
+                ('test_mod',),
+                b'LLMTOOL_REMOTE_PHASE:tests\n',
+                {'phase': 'TESTS', 'stage': 'TESTS'},
+            ),
+            (
+                ('test_mod',),
+                b'LLMTOOL_REMOTE_PHASE:tests\nLLMTOOL_REMOTE_MODULE:1/1\n',
+                {'phase': 'TESTS', 'stage': 'TESTS', 'module_stage': 'STARTED', 'module_ordinal': 1, 'module_total': 1},
+            ),
+            (
+                ('test_a', 'test_b', 'test_c'),
+                b'LLMTOOL_REMOTE_PHASE:tests\nLLMTOOL_REMOTE_MODULE:1/3\nLLMTOOL_REMOTE_MODULE:2/3\n',
+                {'phase': 'TESTS', 'stage': 'TESTS', 'module_stage': 'STARTED', 'module_ordinal': 2, 'module_total': 3},
+            ),
+            (
+                ('test_a', 'test_b', 'test_c'),
+                b'LLMTOOL_REMOTE_PHASE:tests\nLLMTOOL_REMOTE_MODULE:1/3\nLLMTOOL_REMOTE_MODULE:2/3\nLLMTOOL_REMOTE_PHASE:cleanup\n',
+                {'phase': 'CLEANUP_OR_RECEIPT', 'stage': 'CLEANUP'},
+            ),
+            (
+                ('test_a', 'test_b', 'test_c'),
+                b'LLMTOOL_REMOTE_PHASE:tests\nLLMTOOL_REMOTE_MODULE:1/3\nLLMTOOL_REMOTE_PHASE:cleanup\nLLMTOOL_REMOTE_PHASE:receipt\n',
+                {'phase': 'CLEANUP_OR_RECEIPT', 'stage': 'RECEIPT'},
+            ),
+        )
+        for modules, stderr, expected in cases:
+            with self.subTest(modules=modules, stderr=stderr):
+                res, store = self._run_timeout(stderr=stderr, modules=modules)
+                self.assertEqual(res['result'], 'TIMEOUT')
+                self.assertEqual(res['code'], 'SSH_TIMEOUT')
+                self.assertEqual(res['diagnostic'], expected)
+                self.assertEqual(set(res['outcome']), {'result', 'code', 'executor_task', 'sha', 'modules', 'at'})
+                self.assertEqual(len(store.outcomes), 1)
+
+    def test_malformed_or_inconsistent_module_markers_report_invalid_without_leaking(self):
+        bad_stderrs = (
+            b'LLMTOOL_REMOTE_PHASE:tests\nLLMTOOL_REMOTE_MODULE:\n',
+            b'LLMTOOL_REMOTE_PHASE:tests\nLLMTOOL_REMOTE_MODULE:0/3\n',
+            b'LLMTOOL_REMOTE_PHASE:tests\nLLMTOOL_REMOTE_MODULE:1/0\n',
+            b'LLMTOOL_REMOTE_PHASE:tests\nLLMTOOL_REMOTE_MODULE:4/3\n',
+            b'LLMTOOL_REMOTE_PHASE:tests\nLLMTOOL_REMOTE_MODULE:test_secret_name\n',
+            b'LLMTOOL_REMOTE_PHASE:tests\nLLMTOOL_REMOTE_MODULE:1/3 /tmp/leak\n',
+            b'LLMTOOL_REMOTE_PHASE:tests\nLLMTOOL_REMOTE_MODULE:1/2\n',
+            b'LLMTOOL_REMOTE_PHASE:tests\nLLMTOOL_REMOTE_MODULE:2/3\n',
+            b'LLMTOOL_REMOTE_PHASE:tests\nLLMTOOL_REMOTE_MODULE:1/3\nLLMTOOL_REMOTE_MODULE:1/3\n',
+            b'LLMTOOL_REMOTE_PHASE:tests\nLLMTOOL_REMOTE_MODULE:1/3\nLLMTOOL_REMOTE_MODULE:2/4\n',
+            b'LLMTOOL_REMOTE_MODULE:1/3\nLLMTOOL_REMOTE_PHASE:tests\n',
+        )
+        for stderr in bad_stderrs:
+            with self.subTest(stderr=stderr):
+                res, _ = self._run_timeout(stderr=stderr, modules=('test_a', 'test_b', 'test_c'))
+                self.assertEqual(res['result'], 'TIMEOUT')
+                self.assertEqual(res['code'], 'SSH_TIMEOUT')
+                self.assertEqual(res['diagnostic'], {'phase': 'TESTS', 'stage': 'TESTS', 'module_stage': 'INVALID'})
+                serialized = json.dumps(res['diagnostic'], sort_keys=True)
+                self.assertNotIn('test_secret_name', serialized)
+                self.assertNotIn('/tmp/leak', serialized)
 
 
 if __name__ == '__main__':

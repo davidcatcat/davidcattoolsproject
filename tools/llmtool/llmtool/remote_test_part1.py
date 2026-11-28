@@ -189,6 +189,9 @@ def cleanup_stale():
 def mark(name):
     sys.stderr.write("LLMTOOL_REMOTE_PHASE:"+name+"\n")
     sys.stderr.flush()
+def mark_module(index,total):
+    sys.stderr.write(f"LLMTOOL_REMOTE_MODULE:{index}/{total}\n")
+    sys.stderr.flush()
 stage="workspace"; failed_outputs=[]
 try:
     mark("workspace")
@@ -228,7 +231,8 @@ try:
             package=nobody_run(work,[work+"/venv/bin/python","-m","pip","install","--no-deps","-e","tools/llmtool"],limit=180); log+=package.stdout
             if package.returncode: raise RuntimeError("package")
             stage="tests"; mark("tests")
-            for mod in mods:
+            for idx,mod in enumerate(mods,1):
+                mark_module(idx,len(mods))
                 test=nobody_run(work+"/tools/llmtool",[work+"/venv/bin/python","-m","unittest","discover","-s","tests","-p",mod+".py"],limit=int(ml),env={"HOME":work+"/.home","TMPDIR":work+"/.tmp"},capture_stderr=True)
                 test_output=test.stdout+(test.stderr or b""); log+=test_output
                 lines=[x.decode("utf8","replace").strip() for x in test_output.splitlines() if b"Ran " in x or b"OK" in x or b"FAILED" in x or b"ERROR" in x]

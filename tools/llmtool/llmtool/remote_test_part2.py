@@ -151,9 +151,11 @@ _SSH_TIMEOUT_PHASES = {
     'receipt': ('CLEANUP_OR_RECEIPT', 'RECEIPT'),
 }
 _SSH_TIMEOUT_MARKER = re.compile(r'LLMTOOL_REMOTE_PHASE:([a-z]{1,24})')
+_SSH_TIMEOUT_MODULE_MARKER = re.compile(r'LLMTOOL_REMOTE_MODULE:([1-9][0-9]{0,3})/([1-9][0-9]{0,3})')
+_SSH_TIMEOUT_MAX_MODULES = 1024
 
 
-def _ssh_timeout_diagnostic(exc):
+def _ssh_timeout_diagnostic(exc, *, module_count=None):
     """Return a fixed, content-free phase diagnostic from TimeoutExpired stderr."""
     raw = getattr(exc, 'stderr', None)
     if type(raw) is bytes:
@@ -163,13 +165,50 @@ def _ssh_timeout_diagnostic(exc):
     else:
         text = ''
     phase, stage = 'NONE', 'NONE'
+    module_seen = False
+    module_invalid = False
+    expected_ordinal = 1
+    observed_total = None
+    last_ordinal = None
     for line in text.splitlines():
-        match = _SSH_TIMEOUT_MARKER.fullmatch(line.strip())
+        stripped = line.strip()
+        match = _SSH_TIMEOUT_MARKER.fullmatch(stripped)
         if match:
             mapped = _SSH_TIMEOUT_PHASES.get(match.group(1))
             if mapped is not None:
+                if mapped[0] == 'TESTS' and (phase == 'TESTS' or module_seen):
+                    module_invalid = True
                 phase, stage = mapped
-    return {'phase': phase, 'stage': stage}
+            continue
+        if stripped.startswith('LLMTOOL_REMOTE_MODULE:'):
+            module_seen = True
+            if phase != 'TESTS':
+                module_invalid = True
+                continue
+            mod_match = _SSH_TIMEOUT_MODULE_MARKER.fullmatch(stripped)
+            if not mod_match:
+                module_invalid = True
+                continue
+            ordinal = int(mod_match.group(1))
+            total = int(mod_match.group(2))
+            if (total > _SSH_TIMEOUT_MAX_MODULES or ordinal > total or
+                    (module_count is not None and total != module_count) or
+                    (observed_total is not None and total != observed_total) or
+                    ordinal != expected_ordinal):
+                module_invalid = True
+                continue
+            observed_total = total
+            last_ordinal = ordinal
+            expected_ordinal += 1
+    diagnostic = {'phase': phase, 'stage': stage}
+    if phase == 'TESTS' and module_seen:
+        if module_invalid or last_ordinal is None or observed_total is None:
+            diagnostic['module_stage'] = 'INVALID'
+        else:
+            diagnostic['module_stage'] = 'STARTED'
+            diagnostic['module_ordinal'] = last_ordinal
+            diagnostic['module_total'] = observed_total
+    return diagnostic
 
 
 def _record_outcome(store, task_id, task, *, result, code, executor_task, sha, modules,
@@ -371,7 +410,7 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
     except subprocess.TimeoutExpired as exc:
         return _record_outcome(store, task_id, task, result='TIMEOUT', code='SSH_TIMEOUT',
                                executor_task=executor_task, sha=sha, modules=selected,
-                               diagnostic=_ssh_timeout_diagnostic(exc))
+                               diagnostic=_ssh_timeout_diagnostic(exc, module_count=len(selected)))
     except (OSError, ConnectionError):
         return _record_outcome(store, task_id, task, result='UNAVAILABLE', code='SSH_UNAVAILABLE',
                                executor_task=executor_task, sha=sha, modules=selected)
@@ -397,73 +436,4 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
     saved = store.append_remote_test_receipt(task_id, receipt)
     record_remote_test_event(store, task_id, saved)
     return saved
-
-
-# #1706 R9: reproduce a main incident's failing modules on EC2 ------------------
-
-INCIDENT_UNKNOWN = 'INCIDENT_UNKNOWN'
-INCIDENT_UNREADABLE = 'INCIDENT_UNREADABLE'
-INCIDENT_NOT_OPEN = 'INCIDENT_NOT_OPEN'
-INCIDENT_ARGUMENT_INVALID = 'INCIDENT_ARGUMENT_INVALID'
-INCIDENT_SHA_NOT_RECORDED = 'INCIDENT_SHA_NOT_RECORDED'
-INCIDENT_MODULE_NOT_FAILING = 'INCIDENT_MODULE_NOT_FAILING'
-INCIDENT_MODULE_CAP = 'INCIDENT_MODULE_CAP'
-INCIDENT_CONFIG_INVALID = 'CONFIG_INVALID'
-INCIDENT_RECEIPT_SENSITIVE = 'RECEIPT_SENSITIVE'
-INCIDENT_RECEIPT_INCONSISTENT = 'RECEIPT_INCONSISTENT'
-_INCIDENT_RECORD_ATTEMPTS = 3
-
-
-def _screen_incident_receipt(parsed):
-    """Screen every output-derived field of a validated receipt (PR #1763, CWE-532).
-
-    ``final`` lines and ``failure_excerpt`` are the only receipt strings taken
-    from test output. Each goes through the sensitive-content screen; any hit
-    refuses the whole receipt (None). A final line that passes the screen but
-    is not in the unittest summary grammar (``main_incident_store.FINAL_SUMMARY``)
-    is redacted to ``main_incident_store.FINAL_REDACTED``; the store checks both
-    again before it records the receipt. The Task remote-test path does not use
-    this function.
-    """
-    from . import main_incident_store as incident_store
-    finals = parsed['final']
-    excerpt = parsed.get('failure_excerpt')
-    values = list(finals) + ([excerpt] if excerpt is not None else [])
-    if any(_emitted_sensitive(value) for value in values):
-        return None
-    screened = dict(parsed)
-    screened['final'] = [line if incident_store.FINAL_SUMMARY.fullmatch(line)
-                         else incident_store.FINAL_REDACTED for line in finals]
-    return screened
-
-
-def _incident_denied(code, incident_id):
-    """A refusal before anything ran; nothing is recorded anywhere."""
-    from . import main_incident_store as incident_store
-    safe = (incident_id if type(incident_id) is str and
-            incident_store.INCIDENT_ID.fullmatch(incident_id) else None)
-    return {'result': 'ADMISSION_DENIED', 'code': code, 'incident_id': safe,
-            'persisted': False}
-
-
-def _record_incident_result(incident_store, incident_id, entry, root):
-    """Append entry to the incident, rereading after a concurrent change.
-
-    The record is forward only, so a newer version still holds every SHA and
-    failing module the run was admitted on; the store re-checks that anyway.
-    """
-    code = incident_store.INCIDENT_RECORD_CONFLICT
-    for _ in range(_INCIDENT_RECORD_ATTEMPTS):
-        try:
-            current = incident_store.get(incident_id, root)
-            saved = incident_store.append_remote_test(
-                incident_id, current['record_sha256'], entry, root)
-        except LLMToolError as exc:
-            code = getattr(exc, 'incident_code', None) or incident_store.INCIDENT_RECORD_UNAVAILABLE
-            if code == incident_store.INCIDENT_RECORD_CONFLICT:
-                continue
-            break
-        return dict(entry, incident_id=incident_id, persisted=True,
-                    record_sha256=saved['record_sha256'])
-    return dict(entry, incident_id=incident_id, persisted=False, record_code=code)
 
