@@ -1,6 +1,6 @@
 # Formal verdict comment for `llmtool task complete`
 
-This format applies only when an llmtool Task's formal Claude or Codex review is checked by
+This format applies only when an llmtool Task's formal Claude, Codex or AGY review is checked by
 `llmtool task complete --reviewer-task --pr`, which parses it strictly
 (`tools/llmtool/llmtool/task_completion.py`). Every other PR records its review
 conclusion under the [Transition record](pm-continuation.md#transition-record) rule,
@@ -25,8 +25,8 @@ FORMAL SECURITY/FUNCTIONAL/QA ACCEPT
   `Verdict: FAIL`).
 - The binding line uses the Task ID, Run ID and contract digest that the PM gives the
   Reviewer (from `llmtool task show`) and the same HEAD.
-- The `FORMAL SECURITY/FUNCTIONAL/QA ACCEPT` line appears on formal Claude or Codex
-  PASS comments.
+- The `FORMAL SECURITY/FUNCTIONAL/QA ACCEPT` line appears on formal Claude, Codex
+  or AGY PASS comments.
 - Each finding has a stable ID and a severity on its own line:
   `Finding: F<n> [<severity>] <file:line> <text>`, numbered F1, F2, ... in order, with
   severity `Blocker`, `High`, `Medium`, `Low` or `Advisory` ([#1502](https://github.com/davidcatcat/davidcattoolsproject/issues/1502)
@@ -110,7 +110,10 @@ unchanged.
   `Verdict:` line follow the same rules as above, with a non-PASS conclusion using the
   Transition record rule values as with the other routes.
 - It is Claude family, so it never formally reviews a Claude-authored Task.
-- A dispute on an `agy-reviewer` FAIL has no AGY arbiter.
+- A dispute on an `agy-reviewer` FAIL gets no arbiter of any family
+  (`DISPUTE_ARBITER_UNAVAILABLE`).
+- An AGY PASS needs the same `FORMAL SECURITY/FUNCTIONAL/QA ACCEPT` line and binding
+  line as a Codex PASS.
 
 ## Reviewer record for these Tasks
 
