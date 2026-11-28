@@ -32,9 +32,19 @@ def _reject_json_constant(value):
     raise ValueError(f"non-finite JSON constant: {value}")
 
 
+def _reject_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key!r}")
+        result[key] = value
+    return result
+
+
 def _load_timings(path):
     timing_data = json.loads(
         Path(path).read_text(encoding="utf-8"),
+        object_pairs_hook=_reject_duplicate_keys,
         parse_constant=_reject_json_constant,
     )
     if not isinstance(timing_data, dict):
