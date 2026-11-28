@@ -313,18 +313,18 @@ def _ssh_timeout():
         raise LLMToolError('ADMISSION_DENIED: remote test timeout config is invalid') from None
 
 
-def _task_path_modules(task, patterns=None):
+def _task_path_modules(task, profile=None):
     """Declared test module stems; () when the TestProfile is unusable."""
-    if patterns is None:
-        patterns = _remote_unittest_patterns()
-    if patterns is None:
+    if profile is None:
+        profile = _remote_test_profile()
+    if profile is None:
         return ()
     developer = task.get('developer') if type(task.get('developer')) is dict else {}
     stems = set()
     for field in ('read_paths', 'write_paths'):
         paths = developer.get(field)
         if type(paths) is list:
-            stems.update(_remote_module_stem(patterns, path)
+            stems.update(_remote_module_stem(profile, path)
                          for path in paths if type(path) is str)
     stems.discard(None)
     return tuple(sorted(stems))
@@ -396,10 +396,10 @@ def remote_required_modules(task, extra_modules=()):
     Darwin-only modules are left to the exact-head Mac CI merge gate.
     None means the TestProfile is unusable: the set is unknown, never empty.
     """
-    patterns = _remote_unittest_patterns()
-    if patterns is None:
+    profile = _remote_test_profile()
+    if profile is None:
         return None
-    required = set(_task_path_modules(task, patterns))
+    required = set(_task_path_modules(task, profile))
     for module in extra_modules:
         if type(module) is str and _MODULE.fullmatch(module):
             required.add(module)
@@ -408,10 +408,10 @@ def remote_required_modules(task, extra_modules=()):
 
 
 def _admitted_modules(task):
-    patterns = _remote_unittest_patterns()
-    if patterns is None:
+    profile = _remote_test_profile()
+    if profile is None:
         return ()
-    declared = _task_path_modules(task, patterns)
+    declared = _task_path_modules(task, profile)
     if declared:
         return declared
     completion = task.get('completion')
@@ -430,6 +430,6 @@ def _admitted_modules(task):
     names = set()
     for test in tests:
         path = test.get('path') if type(test) is dict else None
-        names.add(_remote_module_stem(patterns, path or ''))
+        names.add(_remote_module_stem(profile, path or ''))
     names.discard(None)
     return tuple(sorted(names))

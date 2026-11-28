@@ -50,6 +50,13 @@ CUSTOM = TestProfile((
     (re.compile(r'custom/tests/test_[a-z0-9_]+\.py', re.IGNORECASE), 'unittest'),
 ))
 
+# Overlapping entries: the script entry comes first and owns FIRST.
+FIRST = 'custom/tests/test_first_2793.py'
+SCRIPT_ENTRY = (re.compile(r'custom/tests/test_first_2793\.py'), 'script')
+UNIT_ENTRY = (re.compile(r'custom/tests/test_[a-z0-9_]+\.py'), 'unittest')
+SCRIPT_FIRST = TestProfile((SCRIPT_ENTRY, UNIT_ENTRY))
+UNIT_FIRST = TestProfile((UNIT_ENTRY, SCRIPT_ENTRY))
+
 
 def forged(entries):
     """A TestProfile-typed value that skipped constructor validation."""
@@ -245,21 +252,38 @@ class NonDefaultProfileTests(unittest.TestCase):
                 self.assertNotEqual(TestProfile(entries), CUSTOM)
 
     def test_entry_order_and_whole_path_matching(self):
-        path = 'custom/tests/test_first_2793.py'
-        script = (re.compile(r'custom/tests/test_first_2793\.py'), 'script')
-        unit = (re.compile(r'custom/tests/test_[a-z0-9_]+\.py'), 'unittest')
-        ordered = TestProfile((script, unit))
-        self.assertEqual(ordered.kind_for(path), 'script')
-        self.assertEqual(TestProfile((unit, script)).kind_for(path), 'unittest')
-        self.assertIsNone(ordered.kind_for(path + '.bak'))
-        self.assertIsNone(ordered.kind_for('prefix/' + path))
-        # Both remote sides read the unittest entries, so they stay in agreement.
-        get = changed_files((path, 'added'))
-        with patch.object(test_profile, 'default_profile', return_value=ordered):
-            admission = task_advance._pr_changed_test_modules(
-                PR, SHA, get, get(f'pulls/{PR}'))
-            self.assertEqual(admission, (('test_first_2793',), None))
-            self.assertEqual(remote_test._task_path_modules(declared(path)), admission[0])
+        self.assertEqual(SCRIPT_FIRST.kind_for(FIRST), 'script')
+        self.assertEqual(UNIT_FIRST.kind_for(FIRST), 'unittest')
+        self.assertIsNone(SCRIPT_FIRST.kind_for(FIRST + '.bak'))
+        self.assertIsNone(SCRIPT_FIRST.kind_for('prefix/' + FIRST))
+        other = 'custom/tests/test_other_2793.py'
+        paths = (FIRST, other, FIRST + '.bak', 'prefix/' + FIRST)
+        get = changed_files(*((path, 'added') for path in paths))
+        # The first matching entry decides in every remote derivation.
+        for label, profile, stems in (
+                ('script_first', SCRIPT_FIRST, ('test_other_2793',)),
+                ('unit_first', UNIT_FIRST, ('test_first_2793', 'test_other_2793'))):
+            with self.subTest(label), \
+                    patch.object(test_profile, 'default_profile', return_value=profile), \
+                    patch.object(remote_test, '_github_get', get):
+                self.assertEqual(remote_test._task_path_modules(declared(*paths)), stems)
+                self.assertEqual(remote_test._admitted_modules(declared(*paths)), stems)
+                self.assertEqual(remote_test._admitted_modules(evidence_only(*paths)),
+                                 stems)
+                self.assertEqual(remote_test.remote_required_modules(declared(*paths)),
+                                 stems)
+                self.assertEqual(
+                    remote_test._pr_changed_test_modules_for_admission(PR, SHA), stems)
+
+    def test_removed_unittest_path_does_not_admit_a_script_path_of_the_same_stem(self):
+        get = changed_files((FIRST, 'added'),
+                            ('custom/tests/sub/test_first_2793.py', 'removed'))
+        nested = (re.compile(r'custom/tests/(?:sub/)?test_[a-z0-9_]+\.py'), 'unittest')
+        with patch.object(test_profile, 'default_profile',
+                          return_value=TestProfile((SCRIPT_ENTRY, nested))), \
+                patch.object(remote_test, '_github_get', get):
+            self.assertEqual(
+                remote_test._pr_changed_test_modules_for_admission(PR, SHA), ())
 
 
 class UnusableProfileDerivationTests(unittest.TestCase):
@@ -346,6 +370,22 @@ class RunRemoteTestProfileTests(unittest.TestCase):
         self.assertEqual(refused['code'], 'MODULE_NOT_ADMITTED')
         self.assertEqual(result['result'], 'PASS')
         self.assertEqual(self.executed, [['test_beta_2793']])
+
+    def test_script_first_path_is_never_run(self):
+        other = 'custom/tests/test_other_2793.py'
+        get = changed_files((FIRST, 'added'), (other, 'modified'))
+        with patch.object(test_profile, 'default_profile', return_value=SCRIPT_FIRST):
+            for read_paths in ([FIRST, other], [other]):
+                self.store.task['developer']['read_paths'] = read_paths
+                for pr in (None, PR):
+                    with self.subTest(declared=len(read_paths), pr=pr):
+                        refused = self.run_it(('test_first_2793',), pr=pr, get=get)
+                        self.assertEqual((refused['result'], refused['code']),
+                                         ('ADMISSION_DENIED', 'MODULE_NOT_ADMITTED'))
+            self.assertEqual(self.executed, [])
+            result = self.run_it(pr=PR, get=get)
+        self.assertEqual(result['result'], 'PASS')
+        self.assertEqual(self.executed, [['test_other_2793']])
 
     def test_skipped_only_run_is_never_pass(self):
         self.skipped = 1
