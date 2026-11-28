@@ -57,6 +57,13 @@
       "reason": "Owner decision 2026-11-26 (option B, #289 comment 7181570990): resume codex-reviewer for formal review; claude-reviewer is not paused; codex-debug stays PAUSED.",
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-7181570990"
     },
+    "agy-reviewer": {
+      "dispatch": "ALLOWED",
+      "decided_by": "Owner",
+      "decided_at": "2026-11-28",
+      "reason": "Owner decision 2026-11-28 (relayed #1019 comment 7232754534, #289 comment 7238827457): add one formal Reviewer route that runs through the AGY CLI with model claude-sonnet-5-5-medium; it is PM-selectable only and never the implicit default; codex-reviewer and claude-reviewer keep their current dispatch status and order.",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-7238827457"
+    },
     "codex-debug": {
       "dispatch": "ALLOWED",
       "decided_by": "Owner",

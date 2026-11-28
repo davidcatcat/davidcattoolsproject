@@ -36,7 +36,7 @@ ROLE_PROVIDERS = {
 ROLE_ALIAS_PROVIDER_MISMATCH = "ROLE_ALIAS_PROVIDER_MISMATCH"
 # Role ids `llmtool roles` always lists, in addition to configured roles.
 KNOWN_ROLES = (
-    "agy-developer", "claude-debug", "claude-developer", "claude-reviewer",
+    "agy-developer", "agy-reviewer", "claude-debug", "claude-developer", "claude-reviewer",
     "codex-debug", "codex-developer", "codex-reviewer", "gw-agent-developer",
     "opencode-developer", "pm",
 )

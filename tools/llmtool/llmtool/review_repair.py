@@ -167,7 +167,7 @@ _PROFILE_FAMILIES = {'claude': 'claude', 'codex': 'codex',
 _REVIEW_ACCOUNT_MODES = {'CODEX_CLI': 'codex-reviewer',
                          'EXPLICIT_CLAUDE_CONFIG_DIR': 'claude-reviewer',
                          'DEFAULT_SECOND_ACCOUNT': 'claude-reviewer'}
-_VERDICT_ACTOR = re.compile(r'<!-- activity: type=review_verdict actor=(Claude|Codex) ')
+_VERDICT_ACTOR = re.compile(r'<!-- activity: type=review_verdict actor=(Claude|Codex|AGY) ')
 
 
 # Model-name markers, in the fixed order used for a route that can serve more
@@ -234,7 +234,8 @@ def claim_reviewer(claim):
         first = next((line.strip() for line in text.splitlines() if line.strip()), '')
         match = _VERDICT_ACTOR.match(first)
         if match is not None:
-            return {'Claude': 'claude-reviewer', 'Codex': 'codex-reviewer'}[match.group(1)]
+            return {'Claude': 'claude-reviewer', 'Codex': 'codex-reviewer',
+                    'AGY': 'agy-reviewer'}[match.group(1)]
     return _REVIEW_ACCOUNT_MODES.get(claim.get('account_mode'))
 
 

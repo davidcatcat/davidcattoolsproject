@@ -399,6 +399,8 @@ class WorkerDispatchTests(unittest.TestCase):
              # #289 c7121158963 (Owner 2026-11-24): claude-developer paused.
              'claude-developer': 'PAUSED',
              'opencode-developer': 'ALLOWED', 'agy': 'ALLOWED',
+             # #1019 c7232754534 / #289 c7238827457 (Owner 2026-11-28): one AGY Reviewer route.
+             'agy-reviewer': 'ALLOWED',
              'company-gw': 'PAUSED', 'gw-agent': 'ALLOWED',
              # #289 c7181570990 (Owner 2026-11-26): codex-reviewer ALLOWED.
              # #289 c7218927310 (Owner 2026-11-27): codex-debug ALLOWED.

@@ -25,7 +25,7 @@ MAX_REPAIR_PER_ASSIGNMENT = 1
 MAX_RECOVERY_PER_ASSIGNMENT = 1
 WORKERS = frozenset((
     'codex-developer', 'claude-developer', 'opencode-developer', 'agy',
-    'company-gw', 'gw-agent', 'claude-reviewer', 'codex-reviewer',
+    'company-gw', 'gw-agent', 'claude-reviewer', 'codex-reviewer', 'agy-reviewer',
 ))
 # #1502 WP-E (E9): the gw Agent route's worker id is gw-agent. Its old id is a
 # retired alias. Stored Task records, ledgers, receipts and monitor inputs that
