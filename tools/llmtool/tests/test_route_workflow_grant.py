@@ -639,6 +639,8 @@ class DispatchCallerWorkflowGrantTests(unittest.TestCase):
                         read_paths=['src.py'], write_paths=['src.py'])
                     self.assertEqual(status, 0)
                     self.assertEqual(len(requests), 1)
+                    self.assertEqual(requests[0]['read_paths'], ['src.py'])
+                    self.assertEqual(requests[0]['write_paths'], ['src.py'])
                     self.assertEqual(launched, [True])
                     self.assertEqual(store.task['developer']['state'],
                                      'DEVELOPER_RESPONDED')
@@ -653,6 +655,8 @@ class DispatchCallerWorkflowGrantTests(unittest.TestCase):
             write_paths=[OTHER], issue=ISSUE, head=head)
         self.assertEqual(status, 0)
         self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]['read_paths'], [PATH, OTHER, 'src.py'])
+        self.assertEqual(requests[0]['write_paths'], [OTHER])
         self.assertEqual(launched, [True])
         self.assertEqual(store.task['developer']['state'],
                          'DEVELOPER_RESPONDED')
@@ -690,6 +694,8 @@ class DispatchCallerWorkflowGrantTests(unittest.TestCase):
                         write_paths=['src.py'], issue=ISSUE, head=head)
                     self.assertEqual(status, 0)
                     self.assertEqual(len(requests), 1)
+                    self.assertEqual(requests[0]['read_paths'], ['src.py'])
+                    self.assertEqual(requests[0]['write_paths'], ['src.py'])
                     self.assertEqual(launched, [True])
                     self.assertEqual(store.task['developer']['state'],
                                      'DEVELOPER_RESPONDED')
