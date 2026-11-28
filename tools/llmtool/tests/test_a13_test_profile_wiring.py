@@ -237,5 +237,31 @@ class RefusalTests(unittest.TestCase):
                          'TEST_PROFILE_INVALID')
 
 
+class ConstructorInputRefusalTests(unittest.TestCase):
+    def test_non_iterable_entries_refuse_with_fixed_code(self):
+        for entries in (None, True, 1):
+            with self.subTest(entries=entries):
+                with self.assertRaises(
+                        test_profile.TestProfileError) as caught:
+                    test_profile.TestProfile(entries)
+                self.assertEqual(caught.exception.CODE, 'TEST_PROFILE_INVALID')
+                self.assertEqual(str(caught.exception), 'TEST_PROFILE_INVALID')
+
+    def test_generator_entries_are_still_accepted(self):
+        pattern = re.compile(
+            r'tools/llmtool/tests/test_[A-Za-z0-9_]+\.py\Z')
+        profile = test_profile.TestProfile(
+            ((entry, 'unittest') for entry in (pattern,)))
+        self.assertEqual(profile.entries, ((pattern, 'unittest'),))
+
+    def test_iterator_errors_after_iteration_starts_propagate(self):
+        def entries():
+            raise RuntimeError('iterator failed')
+            yield
+
+        with self.assertRaises(RuntimeError):
+            test_profile.TestProfile(entries())
+
+
 if __name__ == '__main__':
     unittest.main()
