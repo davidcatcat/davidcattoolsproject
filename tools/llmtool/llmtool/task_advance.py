@@ -3983,10 +3983,12 @@ def _admission_test_profile(profile=_PROFILE_UNSET):
 
 
 def _admission_test_module_stem(profile, path):
-    """Return the lowercase module stem when a unittest entry matches path.
+    """Return the lowercase module stem of a path the profile calls unittest.
 
-    Path matching comes from the profile's ``unittest`` entries; the lowercase
-    stem constraint is applied on top, as the remote side always required.
+    The first matching entry decides (``TestProfile.kind_for``), as on the
+    validation side, so a path owned by an earlier ``script`` entry is never
+    admitted through a later ``unittest`` entry. The lowercase stem constraint
+    is applied on top, as the remote side always required.
     """
     name = path.rsplit('/', 1)[-1]
     if not name.endswith('.py'):
@@ -3994,10 +3996,7 @@ def _admission_test_module_stem(profile, path):
     stem = name[:-3]
     if _PR_TEST_MODULE_STEM.fullmatch(stem) is None:
         return None
-    for pattern, kind in profile.entries:
-        if kind == 'unittest' and pattern.fullmatch(path) is not None:
-            return stem
-    return None
+    return stem if profile.kind_for(path) == 'unittest' else None
 
 
 def _pr_changed_test_modules(number, head, github_get, pr, profile=_PROFILE_UNSET):

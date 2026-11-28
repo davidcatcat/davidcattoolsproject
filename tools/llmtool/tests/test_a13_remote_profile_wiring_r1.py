@@ -286,6 +286,86 @@ class NonDefaultProfileTests(unittest.TestCase):
                 remote_test._pr_changed_test_modules_for_admission(PR, SHA), ())
 
 
+class ScriptFirstAgreementTests(unittest.TestCase):
+    """Admission and validation both let the first matching entry decide."""
+
+    OTHER = 'custom/tests/test_other_2793.py'
+
+    def test_changed_path_helper_agrees_with_validation(self):
+        get = changed_files((FIRST, 'added'), (self.OTHER, 'modified'))
+        for label, profile, stems in (
+                ('script_first', SCRIPT_FIRST, ('test_other_2793',)),
+                ('unit_first', UNIT_FIRST, ('test_first_2793', 'test_other_2793'))):
+            with self.subTest(label), \
+                    patch.object(test_profile, 'default_profile', return_value=profile):
+                modules, code = task_advance._pr_changed_test_modules(
+                    PR, SHA, get, get(f'pulls/{PR}'))
+                self.assertIsNone(code)
+                self.assertEqual(modules, stems)
+                self.assertEqual(remote_test._task_path_modules(
+                    declared(FIRST, self.OTHER)), stems)
+                self.assertEqual(remote_test.remote_required_modules(
+                    declared(), modules), stems)
+
+
+def mixed_profile():
+    """The default registry entries followed by one custom unittest entry."""
+    return TestProfile(test_profile.default_profile().entries + CUSTOM.entries[1:])
+
+
+class DarwinOnlyProfilePathTests(unittest.TestCase):
+    """The Darwin-only exclusion follows the profile-selected module path."""
+
+    STEM = 'test_mac_2793'
+    DEFAULT_PATH = DIR + STEM + '.py'
+    CUSTOM_PATH = 'custom/tests/' + STEM + '.py'
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        (root / f'{self.STEM}.py').write_text(
+            'import sys\nimport unittest\n\n'
+            "@unittest.skipUnless(sys.platform == 'darwin', 'Darwin only')\n"
+            'class MacTests(unittest.TestCase):\n'
+            '    def test_one(self):\n        pass\n')
+        manifest = root / 'mac-modules.txt'
+        manifest.write_text(f'{self.STEM}.MacTests\n')
+        for name, value in (('_MAC_MANIFEST', manifest), ('_TESTS_DIR', root)):
+            patcher = patch.object(remote_test, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def required(self, profile, paths, extras=()):
+        with patch.object(test_profile, 'default_profile', return_value=profile):
+            return remote_test.remote_required_modules(declared(*paths), extras)
+
+    def test_default_profile_still_excludes_declared_and_changed_modules(self):
+        profile = test_profile.default_profile()
+        for paths, extras in (((self.DEFAULT_PATH,), ()), ((), (self.STEM,)),
+                              ((self.DEFAULT_PATH,), (self.STEM,))):
+            with self.subTest(declared=len(paths), changed=len(extras)):
+                self.assertEqual(self.required(profile, paths, extras), ())
+
+    def test_custom_directory_module_with_the_same_stem_stays_required(self):
+        for paths, extras in (((self.CUSTOM_PATH,), ()), ((), (self.STEM,)),
+                              ((self.CUSTOM_PATH,), (self.STEM,)),
+                              ((self.DEFAULT_PATH, self.CUSTOM_PATH), ())):
+            with self.subTest(declared=len(paths), changed=len(extras)):
+                self.assertEqual(self.required(CUSTOM, paths, extras), (self.STEM,))
+
+    def test_mixed_profile_excludes_only_a_known_default_path(self):
+        profile = mixed_profile()
+        self.assertEqual(self.required(profile, (self.DEFAULT_PATH,)), ())
+        for paths, extras in (((self.CUSTOM_PATH,), ()),
+                              ((self.DEFAULT_PATH, self.CUSTOM_PATH), ()),
+                              ((), (self.STEM,)),
+                              # A changed stem has no path: it may be the custom one.
+                              ((self.DEFAULT_PATH,), (self.STEM,))):
+            with self.subTest(declared=len(paths), changed=len(extras)):
+                self.assertEqual(self.required(profile, paths, extras), (self.STEM,))
+
+
 class UnusableProfileDerivationTests(unittest.TestCase):
     def test_nothing_is_derived_and_default_paths_are_no_fallback(self):
         path = DIR + 'test_alpha_2793.py'
@@ -386,6 +466,15 @@ class RunRemoteTestProfileTests(unittest.TestCase):
             result = self.run_it(pr=PR, get=get)
         self.assertEqual(result['result'], 'PASS')
         self.assertEqual(self.executed, [['test_other_2793']])
+
+    def test_custom_module_with_a_darwin_only_stem_is_run(self):
+        # The real default module of this name is Darwin-only (#2573).
+        stem = 'test_review_authority_native'
+        self.store.task['developer']['read_paths'] = [f'custom/tests/{stem}.py']
+        with patch.object(test_profile, 'default_profile', return_value=CUSTOM):
+            result = self.run_it()
+        self.assertEqual(result['result'], 'PASS')
+        self.assertEqual(self.executed, [[stem]])
 
     def test_skipped_only_run_is_never_pass(self):
         self.skipped = 1

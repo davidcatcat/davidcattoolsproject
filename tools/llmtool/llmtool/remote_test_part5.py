@@ -41,6 +41,42 @@ def _remote_module_stem(profile, path):
     return name[:-3]
 
 
+def _declared_module_paths(profile, task):
+    """(stem, path) for each declared Task path that names an admitted module."""
+    developer = task.get('developer') if type(task.get('developer')) is dict else {}
+    pairs = []
+    for field in ('read_paths', 'write_paths'):
+        paths = developer.get(field)
+        if type(paths) is list:
+            pairs.extend((_remote_module_stem(profile, path), path)
+                         for path in paths if type(path) is str)
+    return tuple(pair for pair in pairs if pair[0] is not None)
+
+
+# #2573: the Darwin-only classifier and its Mac CI baseline cover this directory.
+_DEFAULT_TESTS_PREFIX = 'tools/llmtool/tests/'
+
+
+def _darwin_candidates(profile, task, required, extras):
+    """Required stems that the Darwin-only classifier is allowed to judge.
+
+    It reads the default tests directory, so every declared path the profile
+    selects for a stem must be there. A PR-changed stem (extras) carries no
+    path: it qualifies only when each unittest entry of the profile is a
+    default registry entry, so no other directory can have selected it. Any
+    doubt keeps the module required.
+    """
+    registry = {(pattern.pattern, pattern.flags)
+                for pattern, kind in test_profile._DEFAULT_PROFILE.entries
+                if kind == 'unittest'}
+    elsewhere = {stem for stem, path in _declared_module_paths(profile, task)
+                 if path != _DEFAULT_TESTS_PREFIX + stem + '.py'}
+    if any(kind == 'unittest' and (pattern.pattern, pattern.flags) not in registry
+           for pattern, kind in profile.entries):
+        elsewhere.update(extras)
+    return required - elsewhere
+
+
 def _pr_changed_test_modules_for_admission(number, head):
     """PR added or changed test modules when exact-head data is readable, else ().
 

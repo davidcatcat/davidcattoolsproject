@@ -319,15 +319,7 @@ def _task_path_modules(task, profile=None):
         profile = _remote_test_profile()
     if profile is None:
         return ()
-    developer = task.get('developer') if type(task.get('developer')) is dict else {}
-    stems = set()
-    for field in ('read_paths', 'write_paths'):
-        paths = developer.get(field)
-        if type(paths) is list:
-            stems.update(_remote_module_stem(profile, path)
-                         for path in paths if type(path) is str)
-    stems.discard(None)
-    return tuple(sorted(stems))
+    return tuple(sorted({stem for stem, _ in _declared_module_paths(profile, task)}))
 
 
 _MAC_MANIFEST = Path(__file__).resolve().parents[1] / 'ci' / 'mac-modules.txt'
@@ -393,17 +385,18 @@ def remote_required_modules(task, extra_modules=()):
     """Task test modules a Linux remote receipt must cover (#2573, #2491).
 
     extra_modules are the exact-head test modules the PR adds or changes.
-    Darwin-only modules are left to the exact-head Mac CI merge gate.
+    Darwin-only modules the profile selects in the default tests directory
+    are left to the exact-head Mac CI merge gate.
     None means the TestProfile is unusable: the set is unknown, never empty.
     """
     profile = _remote_test_profile()
     if profile is None:
         return None
-    required = set(_task_path_modules(task, profile))
-    for module in extra_modules:
-        if type(module) is str and _MODULE.fullmatch(module):
-            required.add(module)
-    darwin = _darwin_only_modules(required)
+    extras = {module for module in extra_modules
+              if type(module) is str and _MODULE.fullmatch(module)}
+    required = extras.union(_task_path_modules(task, profile))
+    darwin = _darwin_only_modules(
+        _darwin_candidates(profile, task, required, extras))
     return tuple(module for module in sorted(required) if module not in darwin)
 
 

@@ -1,9 +1,11 @@
-"""#2793 A13.2: an unusable TestProfile fails closed at the advance gates.
+"""#2793 A13.2: the advance gates follow the TestProfile and fail closed.
 
 Review finding F1 of PR #2952: with an unusable profile the required module
 set looked empty, so a stored receipt covered the head and review could be
 dispatched. These tests drive the real status, summary, decision, advance and
-CI failure overlap code with the default provider made unusable.
+CI failure overlap code with the default provider made unusable. Findings F1
+(script-first overlap) and F2 (Darwin-only stem collision) of PR #2967 are
+driven through the same gates with a substituted profile.
 """
 
 import contextlib
@@ -11,13 +13,18 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from llmtool import ci_failure_overlap, remote_test, task_advance, test_profile
+from llmtool import (ci_failure_overlap, ci_profile, remote_test, task_advance,
+                     test_profile)
 
 try:
-    from tests.test_a13_remote_profile_wiring_r1 import unusable_cases
+    from tests import test_ec2_changed_tests_2491 as changed_fixtures
+    from tests.test_a13_remote_profile_wiring_r1 import (
+        CUSTOM, FIRST, SCRIPT_FIRST, unusable_cases)
     from tests.test_task_advance import HEAD, PR, base_record, d6, remote_receipt
 except ImportError:
-    from test_a13_remote_profile_wiring_r1 import unusable_cases
+    import test_ec2_changed_tests_2491 as changed_fixtures
+    from test_a13_remote_profile_wiring_r1 import (
+        CUSTOM, FIRST, SCRIPT_FIRST, unusable_cases)
     from test_task_advance import HEAD, PR, base_record, d6, remote_receipt
 
 MODULE = 'test_task_advance'
@@ -157,6 +164,91 @@ class AdvanceGateTests(unittest.TestCase):
                     {(item['result'], item['code'])
                      for item in record['remote_test_outcomes']},
                     {('UNKNOWN', 'TEST_PROFILE_INVALID')})
+
+
+class OverlappingProfileGateTests(unittest.TestCase):
+    """PR #2967 F1: a script-first path is required on neither side."""
+
+    OTHER = 'custom/tests/test_other_2793.py'
+    THIRD = 'custom/tests/test_third_2793.py'
+
+    def setUp(self):
+        patcher = patch('llmtool.source_freshness.code_tree', return_value='d' * 64)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def advance(self, *changed):
+        """Advance a Task whose stored PASS receipt covers only OTHER."""
+        value = changed_fixtures.record(
+            receipts=[changed_fixtures.receipt(('test_other_2793',))])
+        value['developer']['read_paths'] = [FIRST, self.OTHER]
+        ci = ci_profile.default_profile()
+        names = (ci.linux_code_check, ci.docs_check, ci.gateway_check, ci.ai_loop_check)
+        base = changed_fixtures.changed_tests_get(*changed)
+
+        def get(path):
+            if path.endswith('/check-runs?per_page=100'):
+                return {'total_count': len(names), 'check_runs': [{
+                    'id': number, 'name': name, 'head_sha': changed_fixtures.HEAD,
+                    'status': 'completed', 'conclusion': 'success'}
+                    for number, name in enumerate(names, 1)]}
+            return base(path)
+
+        dispatch = Mock(return_value={'state': 'DISPATCHED'})
+        with patch.object(test_profile, 'default_profile', return_value=SCRIPT_FIRST), \
+                patch.object(task_advance, '_d6_snapshot',
+                             return_value=changed_fixtures.d6()), \
+                patch.object(task_advance, '_pr_snapshot',
+                             return_value=changed_fixtures.pr_snapshot(
+                                 changed_files=len(changed))), \
+                patch.object(task_advance, '_review_outcomes', return_value=[]), \
+                patch.object(task_advance, '_run_remote_test',
+                             return_value={'code': None}) as run:
+            result = task_advance.advance(
+                task_id=changed_fixtures.TASK_ID,
+                store=changed_fixtures.FakeStore(value),
+                pr_number=changed_fixtures.PR, github_get=get,
+                dispatch_review_call=dispatch,
+                publish_gh_runner=lambda *_args: SimpleNamespace(returncode=0))
+        return result, dispatch, run
+
+    def test_changed_script_first_path_never_blocks_review(self):
+        result, dispatch, run = self.advance(FIRST, self.OTHER)
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        dispatch.assert_called_once()
+        run.assert_not_called()
+
+    def test_changed_unittest_path_is_still_required(self):
+        result, dispatch, run = self.advance(FIRST, self.THIRD)
+        self.assertEqual(result['step'], 'RUN_REMOTE_TEST')
+        dispatch.assert_not_called()
+        run.assert_called_once()
+
+
+class DarwinStemCollisionGateTests(unittest.TestCase):
+    """PR #2967 F2: a PASS receipt cannot omit a custom Darwin-only stem."""
+
+    # The real default module of this name is Darwin-only (#2573).
+    STEM = 'test_review_authority_native'
+
+    def test_receipt_without_the_custom_module_does_not_cover_the_head(self):
+        record = covered_record()
+        record['developer']['read_paths'] = [
+            f'custom/tests/{MODULE}.py', f'custom/tests/{self.STEM}.py']
+        with patch.object(test_profile, 'default_profile', return_value=CUSTOM):
+            self.assertEqual(remote_test.remote_required_modules(record),
+                             (self.STEM, MODULE))
+            self.assertIsNone(task_advance._remote_test_status(record, d6())[0])
+            self.assertIsNone(task_advance._remote_test_receipt_summary(record, HEAD))
+            self.assertEqual(task_advance.decide(record, d6(), PR, {}),
+                             'RUN_REMOTE_TEST')
+
+    def test_default_path_is_still_left_to_mac_ci(self):
+        record = covered_record()
+        record['developer']['read_paths'] = [
+            PATH, f'tools/llmtool/tests/{self.STEM}.py']
+        self.assertEqual(remote_test.remote_required_modules(record), (MODULE,))
+        self.assertEqual(task_advance.decide(record, d6(), PR, {}), 'DISPATCH_REVIEW')
 
 
 class OverlapGateTests(unittest.TestCase):
