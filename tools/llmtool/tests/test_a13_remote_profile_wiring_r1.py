@@ -141,7 +141,7 @@ class RemoteProfileValidationRegressionTests(unittest.TestCase):
             return []
 
         changed, code = task_advance._pr_changed_test_modules(
-            17, HEAD, github_get, {'head': {'sha': HEAD}, 'changed_files': 1})
+            17, HEAD, github_get, {'number': 17, 'head': {'sha': HEAD}, 'changed_files': 1})
         self.assertIsNone(code)
         self.assertEqual(changed, ('test_gamma',))
         self.assertEqual(
@@ -158,7 +158,7 @@ class RemoteProfileValidationRegressionTests(unittest.TestCase):
             return []
 
         changed, code = task_advance._pr_changed_test_modules(
-            17, HEAD, github_get, {'head': {'sha': HEAD}, 'changed_files': 1})
+            17, HEAD, github_get, {'number': 17, 'head': {'sha': HEAD}, 'changed_files': 1})
         self.assertIsNone(code)
         self.assertEqual(changed, ())
         self.assertEqual(remote_test_part1._task_path_modules(task), ('test_declared',))
