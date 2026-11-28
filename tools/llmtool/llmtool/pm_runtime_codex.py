@@ -40,6 +40,8 @@ class CodexRuntime:
         self._interrupted = False
         self._mutex = threading.RLock()
         self._closed = False
+        self._usage_total = None
+        self._usage_total_thread = None
 
     def open(self):
         from . import pm_runtime
@@ -133,8 +135,56 @@ class CodexRuntime:
         from . import pm_runtime
         return pm_runtime._runtime_state_path(self.owner._root, self.owner._key)
 
+    @staticmethod
+    def _usage_total_value(usage):
+        """A cumulative usage total, or None when the value is not usable."""
+        if type(usage) is not dict or not usage:
+            return None
+        if any(type(key) is not str or type(value) is not int or value < 0
+               for key, value in usage.items()):
+            return None
+        return dict(usage)
+
+    @staticmethod
+    def _turn_usage_delta(usage, earlier):
+        """This turn's own usage: the current total minus the earlier thread total."""
+        if type(usage) is not dict or type(earlier) is not dict or not usage:
+            return {}
+        own = {}
+        for key, value in usage.items():
+            if type(key) is not str or type(value) is not int or value < 0:
+                return {}
+            previous = earlier.get(key)
+            if type(previous) is not int or previous < 0 or value < previous:
+                return {}
+            own[key] = value - previous
+        return own
+
+    def _turn_usage(self, usage, resumed):
+        """Usage of just this turn, persisting the thread total for the next turn."""
+        total = self._usage_total_value(usage)
+        if not resumed:
+            own = dict(usage)
+        elif self._usage_total is None or self._usage_total_thread != self._thread_id:
+            own = {}
+        else:
+            own = self._turn_usage_delta(usage, self._usage_total)
+        if total is not None and self._thread_id is not None:
+            self._usage_total = total
+            self._usage_total_thread = self._thread_id
+            try:
+                self._save_state(codex_usage_total=total,
+                                 codex_usage_thread_id=self._thread_id)
+            except LLMToolError:
+                # The turn's own usage is still known; a later turn treats the
+                # unpersisted total as missing rather than subtracting a stale one.
+                pass
+        return own
+
     def _read_state(self):
         path = self._state_path()
+        self._usage_total = None
+        self._usage_total_thread = None
         try:
             fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
         except FileNotFoundError:
@@ -153,6 +203,10 @@ class CodexRuntime:
                 if type(thread_id) is not str or not _THREAD_ID.fullmatch(thread_id):
                     raise _error('PM_STATE_INVALID')
                 self._thread_id = thread_id
+                total = self._usage_total_value(value.get('codex_usage_total'))
+                if value.get('codex_usage_thread_id') == thread_id and total is not None:
+                    self._usage_total = total
+                    self._usage_total_thread = thread_id
         except (ValueError, UnicodeError, OSError):
             raise _error('PM_STATE_INVALID') from None
         finally:
@@ -291,6 +345,7 @@ class CodexRuntime:
         seq = 0
         result_text = ''
         thread_id = self._thread_id
+        resumed = thread_id is not None
         tools = set()
         error = None
 
@@ -358,10 +413,12 @@ class CodexRuntime:
                 elif kind == 'turn.completed':
                     usage_value = item.get('usage')
                     usage = usage_value if type(usage_value) is dict else {}
+                    own_usage = self._turn_usage(usage, resumed)
                     status = 'INTERRUPTED' if self._interrupted else 'COMPLETED'
-                    self.owner._finish(record, status, result_text, usage)
+                    self.owner._finish(record, status, result_text, own_usage)
                     yield event('TURN_END', status=status,
-                                result_text=pm_runtime._safe_result_text(result_text), usage=usage)
+                                result_text=pm_runtime._safe_result_text(result_text),
+                                usage=own_usage)
                     return
                 elif kind == 'item.failed':
                     failed = item.get('item')

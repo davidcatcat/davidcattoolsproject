@@ -42,7 +42,9 @@ class CodexRuntimeTests(unittest.TestCase):
         config.write_text('accounts:\n  codex-pm:\n    kind: codex\n    config_dir: ' +
                           str(self.account_dir) + '\n', encoding='utf-8')
 
-    def write_fake(self, mode='ok'):
+    def write_fake(self, mode='ok', usages=None):
+        if usages is None:
+            usages = [{'input_tokens': 2, 'output_tokens': 3}]
         fake = self.bin / 'codex'
         script = textwrap.dedent('''\
             #!__INTERPRETER__
@@ -64,6 +66,14 @@ class CodexRuntimeTests(unittest.TestCase):
             session = sessions / ('0000-' + __THREAD__ + '.jsonl')
             session.write_text(json.dumps({'type':'session_meta','payload':
                 {'id':__THREAD__,'cwd':os.getcwd()}}) + '\\n', encoding='utf-8')
+            usage_values = __USAGES__
+            counter_path = pathlib.Path(__COUNTER__)
+            try:
+                usage_index = int(counter_path.read_text(encoding='utf-8'))
+            except (FileNotFoundError, ValueError):
+                usage_index = 0
+            counter_path.write_text(str(usage_index + 1), encoding='utf-8')
+            usage = usage_values[min(usage_index, len(usage_values) - 1)]
             if __MODE__ == 'malformed':
                 print('{', flush=True)
                 sys.exit(3)
@@ -81,12 +91,13 @@ class CodexRuntimeTests(unittest.TestCase):
                     'type':'command_execution'}}), flush=True)
                 print(json.dumps({'type':'item.completed','item':{'type':'agent_message',
                     'text':'Codex answer'}}), flush=True)
-                print(json.dumps({'type':'turn.completed','usage':{'input_tokens':2,
-                    'output_tokens':3}}), flush=True)
+                print(json.dumps({'type':'turn.completed','usage':usage}), flush=True)
         ''')
         script = (script.replace('__INTERPRETER__', sys.executable)
                   .replace('__LOG__', repr(str(self.log)))
-                  .replace('__THREAD__', repr(THREAD)).replace('__MODE__', repr(mode)))
+                  .replace('__THREAD__', repr(THREAD)).replace('__MODE__', repr(mode))
+                  .replace('__USAGES__', repr(usages))
+                  .replace('__COUNTER__', repr(str(self.root / 'usage-counter'))))
         fake.write_text(script, encoding='utf-8')
         fake.chmod(0o700)
 
@@ -141,6 +152,68 @@ class CodexRuntimeTests(unittest.TestCase):
                             'workspace-write' in call['args'] and
                             '--ask-for-approval' in call['args'] and
                             'never' in call['args'] for call in calls))
+
+    def test_fresh_and_resumed_turns_store_only_their_own_usage(self):
+        self.write_fake(usages=[
+            {'input_tokens': 10, 'cached_input_tokens': 4, 'output_tokens': 3},
+            {'input_tokens': 25, 'cached_input_tokens': 9, 'output_tokens': 8},
+            {'input_tokens': 40, 'cached_input_tokens': 15, 'output_tokens': 12},
+        ])
+        runtime = self.make_runtime()
+        first = list(runtime.send('first'))[-1]
+        second = list(runtime.send('second'))[-1]
+        third = list(runtime.send('third'))[-1]
+        self.assertEqual(first['usage'],
+                         {'input_tokens': 10, 'cached_input_tokens': 4, 'output_tokens': 3})
+        self.assertEqual(second['usage'],
+                         {'input_tokens': 15, 'cached_input_tokens': 5, 'output_tokens': 5})
+        self.assertEqual(third['usage'],
+                         {'input_tokens': 15, 'cached_input_tokens': 6, 'output_tokens': 4})
+        turns = pm_runtime.read_history(runtime.pm_session_id,
+                                        state_root=self.state)['turns']
+        self.assertEqual(turns[-1]['usage'], third['usage'])
+
+    def test_resumed_turn_usage_survives_runtime_restart(self):
+        self.write_fake(usages=[
+            {'input_tokens': 10, 'output_tokens': 3},
+            {'input_tokens': 22, 'output_tokens': 9},
+            {'input_tokens': 30, 'output_tokens': 14},
+        ])
+        runtime = self.make_runtime()
+        first = list(runtime.send('first'))[-1]
+        second = list(runtime.send('second'))[-1]
+        self.assertEqual(first['usage'], {'input_tokens': 10, 'output_tokens': 3})
+        self.assertEqual(second['usage'], {'input_tokens': 12, 'output_tokens': 6})
+        runtime.close()
+        restarted = pm_runtime.PMRuntime(runtime.pm_session_id, cwd=str(self.cwd),
+                                         state_root=self.state, environ=self.environ)
+        restarted.open()
+        self.addCleanup(restarted.close)
+        third = list(restarted.send('third'))[-1]
+        self.assertEqual(third['usage'], {'input_tokens': 8, 'output_tokens': 5})
+
+    def test_resumed_turn_without_earlier_total_records_no_usage(self):
+        self.write_fake(usages=[
+            {'input_tokens': 10, 'output_tokens': 3},
+            {'input_tokens': 22, 'output_tokens': 9},
+            {'input_tokens': 30, 'output_tokens': 14},
+        ])
+        runtime = self.make_runtime()
+        list(runtime.send('first'))
+        state_path = pm_runtime._runtime_state_path(runtime._root, runtime._key)
+        state = json.loads(state_path.read_text(encoding='utf-8'))
+        state.pop('codex_usage_total', None)
+        state.pop('codex_usage_thread_id', None)
+        pm_runtime._write_json_atomic(runtime._root, state_path, state)
+        runtime.close()
+        restarted = pm_runtime.PMRuntime(runtime.pm_session_id, cwd=str(self.cwd),
+                                         state_root=self.state, environ=self.environ)
+        restarted.open()
+        self.addCleanup(restarted.close)
+        second = list(restarted.send('second'))[-1]
+        third = list(restarted.send('third'))[-1]
+        self.assertEqual(second['usage'], {})
+        self.assertEqual(third['usage'], {'input_tokens': 8, 'output_tokens': 5})
 
     def test_malformed_output_and_process_exit_return_runtime_error_then_turn_end(self):
         expected_codes = {
