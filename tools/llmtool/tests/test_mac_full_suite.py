@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import types
 import unittest
 import yaml
 
+from llmtool import ci_profile
 from llmtool.mac_full_suite import (
     MAC_FULL_SUITE_ALREADY_QUEUED,
     MAC_FULL_SUITE_DISPATCHED,
@@ -75,6 +77,123 @@ class TestMacFullSuite(unittest.TestCase):
 
         self.assertEqual(result, MAC_FULL_SUITE_DISPATCHED)
         self.assertEqual(runner.calls, [('/repo/root', _EXPECTED_ARGV)])
+
+    def test_truncated_short_page_state_unavailable(self) -> None:
+        """A page shorter than total_count hides runs, so no dispatch occurs."""
+        cases = [
+            ([{'status': 'completed'}], 2),
+            ([], 1),
+            ([{'status': 'completed'}] * 3, 5),
+        ]
+        for runs, total in cases:
+            with self.subTest(total_count=total, returned=len(runs)):
+                runner = FakeRunner(returncode=0)
+                github_get = FakeGithubGet(response={
+                    'total_count': total,
+                    'workflow_runs': runs,
+                })
+                result = request_full_suite(runner, '/repo/root', github_get)
+
+                self.assertEqual(result, MAC_FULL_SUITE_STATE_UNAVAILABLE)
+                self.assertEqual(github_get.calls, [_EXPECTED_PATH])
+                self.assertEqual(runner.calls, [])
+
+    def test_valid_full_page_with_more_history_dispatches(self) -> None:
+        """A full 20-run page with more history beyond the limit may dispatch."""
+        runs = [{'status': 'completed', 'conclusion': 'success'}] * 20
+        runner = FakeRunner(returncode=0)
+        github_get = FakeGithubGet(response={
+            'total_count': 87,
+            'workflow_runs': runs,
+        })
+        result = request_full_suite(runner, '/repo/root', github_get)
+
+        self.assertEqual(result, MAC_FULL_SUITE_DISPATCHED)
+        self.assertEqual(github_get.calls, [_EXPECTED_PATH])
+        self.assertEqual(runner.calls, [('/repo/root', _EXPECTED_ARGV)])
+
+    def test_matching_short_page_dispatches(self) -> None:
+        """A short page matching total_count is complete and may dispatch."""
+        runner = FakeRunner(returncode=0)
+        github_get = FakeGithubGet(response={
+            'total_count': 2,
+            'workflow_runs': [
+                {'status': 'completed', 'conclusion': 'success'},
+                {'status': 'completed', 'conclusion': 'failure'},
+            ],
+        })
+        result = request_full_suite(runner, '/repo/root', github_get)
+
+        self.assertEqual(result, MAC_FULL_SUITE_DISPATCHED)
+        self.assertEqual(runner.calls, [('/repo/root', _EXPECTED_ARGV)])
+
+    def test_malformed_total_count_state_unavailable(self) -> None:
+        """A supplied total_count must be a nonnegative int."""
+        for bad_total in [-1, 1.5, '20', True, False, None, [], {}]:
+            with self.subTest(total_count=bad_total):
+                runner = FakeRunner(returncode=0)
+                github_get = FakeGithubGet(response={
+                    'total_count': bad_total,
+                    'workflow_runs': [],
+                })
+                result = request_full_suite(runner, '/repo/root', github_get)
+
+                self.assertEqual(result, MAC_FULL_SUITE_STATE_UNAVAILABLE)
+                self.assertEqual(github_get.calls, [_EXPECTED_PATH])
+                self.assertEqual(runner.calls, [])
+
+    def test_full_page_preserves_queued_handling(self) -> None:
+        """A queued run on a full page still yields ALREADY_QUEUED."""
+        runs = [{'status': 'queued'}] + [
+            {'status': 'completed', 'conclusion': 'success'}] * 19
+        runner = FakeRunner(returncode=0)
+        github_get = FakeGithubGet(response={
+            'total_count': 45,
+            'workflow_runs': runs,
+        })
+        result = request_full_suite(runner, '/repo/root', github_get)
+
+        self.assertEqual(result, MAC_FULL_SUITE_ALREADY_QUEUED)
+        self.assertEqual(github_get.calls, [_EXPECTED_PATH])
+        self.assertEqual(runner.calls, [])
+
+    def test_full_page_preserves_in_progress_dispatch(self) -> None:
+        """An in-progress run on a full page does not block the request."""
+        runs = [{'status': 'in_progress'}] + [
+            {'status': 'completed', 'conclusion': 'success'}] * 19
+        runner = FakeRunner(returncode=0)
+        github_get = FakeGithubGet(response={
+            'total_count': 30,
+            'workflow_runs': runs,
+        })
+        result = request_full_suite(runner, '/repo/root', github_get)
+
+        self.assertEqual(result, MAC_FULL_SUITE_DISPATCHED)
+        self.assertEqual(runner.calls, [('/repo/root', _EXPECTED_ARGV)])
+
+    def test_profile_substitution_uses_substituted_workflow(self) -> None:
+        """A substituted profile changes the read path and dispatch workflow."""
+        profile = replace(
+            ci_profile.default_profile(),
+            macos_workflow_file='llmtool-alt-mac-ci.yml',
+        )
+        runner = FakeRunner(returncode=0)
+        github_get = FakeGithubGet(response={
+            'total_count': 25,
+            'workflow_runs': [{'status': 'completed', 'conclusion': 'success'}] * 20,
+        })
+        result = request_full_suite(
+            runner, '/repo/root', github_get, profile=profile)
+
+        self.assertEqual(result, MAC_FULL_SUITE_DISPATCHED)
+        self.assertEqual(github_get.calls, [(
+            'actions/workflows/llmtool-alt-mac-ci.yml/runs'
+            '?branch=main&event=workflow_dispatch&per_page=20'
+        )])
+        self.assertEqual(runner.calls, [(
+            '/repo/root',
+            ['workflow', 'run', 'llmtool-alt-mac-ci.yml', '--ref', 'main'],
+        )])
 
     def test_skip_when_run_is_queued(self) -> None:
         """Skip dispatch when any run is queued, waiting, pending, or requested."""
