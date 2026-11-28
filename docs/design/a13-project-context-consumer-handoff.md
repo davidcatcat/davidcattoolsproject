@@ -1,17 +1,23 @@
 # A13.0 ProjectContext Consumer Handoff
 
 Single public note. Records the explicit deferral of unwired
-ProjectContext consumers that the A13.0 exit checklist requires, placed
-outside the wiring subset as the exit evidence matrix directs. Not a
+ProjectContext consumers that the A13.0 exit checklist requires,
+placed outside the wiring subset. Not a
 design note, not a rollout runbook. No new policy, no new consumer
 interface, no implementation.
 
-- Pinned main: `4ffd749a95b313591c383b13e1148d80c9704cca` (spec base).
+- Pinned to the spec base: main `4ffd749a95b313591c383b13e1148d80c9704cca`,
+  kept solely as the source snapshot the supplied facts were verified
+  against; this note is not claimed verified at that exact head (see
+  Gates).
 - Authority: issue #2793, comment 7210501920; Roadmap A13.0 exit.
 - Linked exit evidence:
   [a13-exit-evidence.md](./a13-exit-evidence.md) — the A13.0 exit
-  evidence matrix, whose wiring row keeps "explicit deferral of unwired
-  ProjectContext consumers" outstanding and places it in this note.
+  evidence matrix. Its "Real profile wiring and non-default
+  regression" row lists "explicit deferral of unwired ProjectContext
+  consumers" as still outstanding and states that it is placed outside
+  the wiring subset in the linked note; the matrix does not name or
+  link this file.
 
 ## Facts at the pin (supplied, recorded as supplied)
 
@@ -23,9 +29,13 @@ interface, no implementation.
   module-level alias `from_trust`). Validation never reads files,
   uses the network or starts processes.
 - The Python source search found no production consumer outside the
-  defining module: `ProjectContext` and `from_trust` are defined and
-  referenced only in `tools/llmtool/llmtool/project_context.py`; no
-  production import or call site was found elsewhere in the tree.
+  defining module: no production import or call site of `ProjectContext`
+  or `from_trust` was found outside
+  `tools/llmtool/llmtool/project_context.py`. That statement is
+  limited to production code. Test files reference the value and the
+  factory (for example, `tools/llmtool/tests/test_project_context.py`
+  and `tools/llmtool/tests/test_a13_contracts.py`), and tests are not
+  production consumers.
 
 ## Pending phase handoffs
 
