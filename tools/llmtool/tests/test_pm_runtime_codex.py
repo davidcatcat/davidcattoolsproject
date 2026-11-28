@@ -215,6 +215,35 @@ class CodexRuntimeTests(unittest.TestCase):
         self.assertEqual(second['usage'], {})
         self.assertEqual(third['usage'], {'input_tokens': 8, 'output_tokens': 5})
 
+    def test_unusable_resumed_usage_invalidates_baseline_across_restart(self):
+        self.write_fake(usages=[
+            {'input_tokens': 10, 'output_tokens': 3},
+            None,
+            {'input_tokens': 30, 'output_tokens': 14},
+            {'input_tokens': 45, 'output_tokens': 20},
+        ])
+        runtime = self.make_runtime()
+        first = list(runtime.send('first'))[-1]
+        second = list(runtime.send('second'))[-1]
+        self.assertEqual(first['usage'], {'input_tokens': 10, 'output_tokens': 3})
+        self.assertEqual(second['usage'], {})
+        runtime.close()
+        restarted = pm_runtime.PMRuntime(runtime.pm_session_id, cwd=str(self.cwd),
+                                         state_root=self.state, environ=self.environ)
+        restarted.open()
+        self.addCleanup(restarted.close)
+        third = list(restarted.send('third'))[-1]
+        fourth = list(restarted.send('fourth'))[-1]
+        # The turn after the unusable total must stay unknown, not become
+        # 30 - 10 (which would attribute the missing turn's tokens here).
+        self.assertEqual(third['usage'], {})
+        self.assertEqual(fourth['usage'], {'input_tokens': 15, 'output_tokens': 6})
+        turns = pm_runtime.read_history(restarted.pm_session_id,
+                                        state_root=self.state)['turns']
+        self.assertEqual(turns[1]['usage'], {})
+        self.assertEqual(turns[2]['usage'], {})
+        self.assertEqual(turns[3]['usage'], fourth['usage'])
+
     def test_malformed_output_and_process_exit_return_runtime_error_then_turn_end(self):
         expected_codes = {
             'malformed': ['PM_STREAM_INVALID'],

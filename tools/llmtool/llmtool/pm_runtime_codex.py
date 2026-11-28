@@ -169,7 +169,21 @@ class CodexRuntime:
             own = {}
         else:
             own = self._turn_usage_delta(usage, self._usage_total)
-        if total is not None and self._thread_id is not None:
+        if total is None or self._thread_id is None:
+            # The current total is unusable, so no baseline can be trusted for
+            # the next turn. Clear the last usable total; otherwise a later
+            # turn would subtract it and attribute this turn's tokens there.
+            self._usage_total = None
+            self._usage_total_thread = None
+            if self._thread_id is not None:
+                try:
+                    self._save_state(codex_usage_total=None,
+                                     codex_usage_thread_id=self._thread_id)
+                except LLMToolError:
+                    # In-memory invalidation still protects later turns in this
+                    # process; persistence is best effort.
+                    pass
+        else:
             self._usage_total = total
             self._usage_total_thread = self._thread_id
             try:
