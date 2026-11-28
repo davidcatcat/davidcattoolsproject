@@ -259,9 +259,11 @@ def _resolve_test_target(root, path, kind):
     target = Path(root).joinpath(*path.split('/'))
     try:
         target_stat = target.lstat()
+    except FileNotFoundError:
+        target_stat = None
     except OSError:
         _stop('TEST_PATH_INVALID')
-    if not stat.S_ISREG(target_stat.st_mode):
+    if target_stat is not None and not stat.S_ISREG(target_stat.st_mode):
         _stop('TEST_PATH_INVALID')
     parent = Path(path).parent.as_posix()
     filename = Path(path).name

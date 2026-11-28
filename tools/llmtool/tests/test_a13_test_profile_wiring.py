@@ -117,7 +117,8 @@ class ZeroTestDiscoveryTests(unittest.TestCase):
 
     F1: a substituted profile may classify a ``scripts/`` path as ``unittest``.
     Discovery now runs in the admitted path's own directory rather than
-    ``tools/llmtool/tests``; an absent file is refused with ``TEST_PATH_INVALID``
+    ``tools/llmtool/tests``; an absent file fails discovery (unless shadowed
+    by a subdirectory file, which is refused with ``TEST_PATH_INVALID``)
     and an existing file with zero tests is recorded as FAILED.
     """
 
@@ -134,15 +135,17 @@ class ZeroTestDiscoveryTests(unittest.TestCase):
                                    return_value=profile), \
                     mock.patch.object(task_completion, '_worktree_snapshot',
                                       side_effect=[dict(snapshot), dict(snapshot)]):
-                # scripts/test_absent.py does not exist in root, so execution
-                # now refuses with TEST_PATH_INVALID instead of discovering in
-                # tools/llmtool/tests.
-                with self.assertRaises(LLMToolError) as caught:
-                    task_completion.run_bounded_worktree_tests(
-                        root=root, source_sha=SOURCE_SHA,
-                        diff_sha256=DIFF_SHA256, changed_paths=list(paths),
-                        read_paths=list(paths), write_paths=[])
-        self.assertEqual(caught.exception.completion_code, 'TEST_PATH_INVALID')
+                # scripts/test_absent.py and scripts/ do not exist in root;
+                # discovery runs in scripts/ rather than tools/llmtool/tests and
+                # fails instead of refusing before Popen (so Popen-mocked tests
+                # with absent fixture files still reach the launcher).
+                evidence = task_completion.run_bounded_worktree_tests(
+                    root=root, source_sha=SOURCE_SHA,
+                    diff_sha256=DIFF_SHA256, changed_paths=list(paths),
+                    read_paths=list(paths), write_paths=[])
+        self.assertEqual([item['path'] for item in evidence], paths)
+        self.assertEqual(evidence[0]['status'], 'FAILED')
+        self.assertNotEqual(evidence[0]['exit_code'], 0)
 
     def test_zero_test_unittest_discovery_on_existing_empty_file_fails(self):
         profile = test_profile.TestProfile((
