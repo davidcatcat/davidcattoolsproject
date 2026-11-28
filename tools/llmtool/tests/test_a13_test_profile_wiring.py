@@ -18,6 +18,21 @@ CUSTOM_PROFILE = test_profile.TestProfile((
 ))
 
 
+def _bytes_pattern_profile():
+    """A TestProfile-shaped value carrying a compiled bytes pattern.
+
+    ``TestProfile`` now refuses a bytes pattern at construction, so this
+    builds the invalid value directly to model a caller-supplied profile
+    that completion must still refuse.
+    """
+    pattern = re.compile(b'test')
+    profile = object.__new__(test_profile.TestProfile)
+    object.__setattr__(profile, '_entries', ((pattern, 'unittest'),))
+    object.__setattr__(
+        profile, '_keys', ((pattern.pattern, pattern.flags, 'unittest'),))
+    return profile
+
+
 def _eligible_with_profile(paths, profile):
     """Run the real worktree completion classification and return its picks."""
     snapshot = {'diff_sha256': DIFF_SHA256, 'changed_paths': list(paths),
@@ -180,15 +195,10 @@ class RefusalTests(unittest.TestCase):
         self._refused(mock.Mock(return_value=object()))
 
     def test_bytes_pattern_profile_refuses(self):
-        bytes_profile = test_profile.TestProfile((
-            (re.compile(b'test'), 'unittest'),
-        ))
-        self._refused(mock.Mock(return_value=bytes_profile))
+        self._refused(mock.Mock(return_value=_bytes_pattern_profile()))
 
     def test_real_completion_refuses_a_bytes_pattern_profile(self):
-        bytes_profile = test_profile.TestProfile((
-            (re.compile(b'test'), 'unittest'),
-        ))
+        bytes_profile = _bytes_pattern_profile()
         paths = ['tools/llmtool/tests/test_alpha.py']
         snapshot = {'diff_sha256': DIFF_SHA256, 'changed_paths': list(paths),
                     'source_sha': SOURCE_SHA}
@@ -246,6 +256,12 @@ class ConstructorInputRefusalTests(unittest.TestCase):
                     test_profile.TestProfile(entries)
                 self.assertEqual(caught.exception.CODE, 'TEST_PROFILE_INVALID')
                 self.assertEqual(str(caught.exception), 'TEST_PROFILE_INVALID')
+
+    def test_bytes_pattern_entries_refuse_with_fixed_code(self):
+        with self.assertRaises(test_profile.TestProfileError) as caught:
+            test_profile.TestProfile(((re.compile(b'test'), 'unittest'),))
+        self.assertEqual(caught.exception.CODE, 'TEST_PROFILE_INVALID')
+        self.assertEqual(str(caught.exception), 'TEST_PROFILE_INVALID')
 
     def test_generator_entries_are_still_accepted(self):
         pattern = re.compile(
