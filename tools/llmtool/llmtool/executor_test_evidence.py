@@ -1,9 +1,11 @@
 """#2119 WP-3 slice 1: expected remote test modules for a Task. Pure; not wired in.
 
 Design: docs/design/executor-step-tests-off-mac.md section 4.1. The remote set
-uses the same pattern as remote_test._task_path_modules; the TUI set uses the
-test-file patterns of task_advance. Anything that looks like a test but is not
-in the remote set is unsupported.
+is derived from the unittest entries of the default TestProfile: a declared
+path is remote when one of those patterns matches the whole path and the file
+stem is ``test_`` followed by 1 to 80 characters of ``[a-z0-9_]``. The TUI set
+uses the test-file patterns of task_advance. Anything that looks like a test
+but is not in the remote set is unsupported.
 """
 import hashlib
 import re
@@ -11,30 +13,84 @@ import re
 from .errors import LLMToolError
 from .remote_test import valid_module_results
 from .task_store import _json_bytes
+from .test_profile import default_profile
 
-_REMOTE = re.compile(r'tools/llmtool/tests/test_[a-z0-9_]{1,80}\.py')
 _TUI = re.compile(r'test_(chat_tui|tui_)[a-z0-9_]*')
 _TEST_SHAPED = re.compile(r'test_[^/]*\.py')
+_LOWERCASE_STEM = re.compile(r'[a-z0-9_]{1,80}')
+_TEST_PATHS_INVALID = 'EXECUTOR_TEST_PATHS_INVALID'
+
+
+def _unittest_entries(profile):
+    """The unittest (pattern, kind) entries of the project TestProfile.
+
+    The entries are checked structurally; a value without a well-formed
+    entries tuple, an entry that is not a pair of a compiled string
+    pattern and a known runner kind, or a profile without any unittest
+    entry raises the llmtool EXECUTOR_TEST_PATHS_INVALID error and the
+    default registry paths are never a fallback.
+    """
+    entries = getattr(profile, 'entries', None)
+    if type(entries) is not tuple:
+        raise LLMToolError(_TEST_PATHS_INVALID)
+    for entry in entries:
+        if type(entry) is not tuple or len(entry) != 2:
+            raise LLMToolError(_TEST_PATHS_INVALID)
+        pattern, kind = entry
+        if (type(pattern) is not re.Pattern
+                or not isinstance(pattern.pattern, str)):
+            raise LLMToolError(_TEST_PATHS_INVALID)
+        if type(kind) is not str or kind not in ('unittest', 'script'):
+            raise LLMToolError(_TEST_PATHS_INVALID)
+    unittest_entries = tuple(entry for entry in entries if entry[1] == 'unittest')
+    if not unittest_entries:
+        raise LLMToolError(_TEST_PATHS_INVALID)
+    return unittest_entries
+
+
+def _is_remote(path, unittest_entries):
+    """True when the path is a remote test module.
+
+    One of the profile's unittest patterns must match the whole path and the
+    path's file stem must be ``test_`` followed by 1 to 80 characters of
+    ``[a-z0-9_]``; the 80 limit applies to the characters after the prefix,
+    not to the whole stem.
+    """
+    stem = path.rsplit('/', 1)[-1][:-3]
+    if not stem.startswith('test_'):
+        return False
+    suffix = stem[len('test_'):]
+    return (_LOWERCASE_STEM.fullmatch(suffix) is not None and any(
+        pattern.fullmatch(path) is not None
+        for pattern, _kind in unittest_entries))
 
 
 def expected_remote_modules(read_paths, write_paths):
     """Return (remote, tui, unsupported) as sorted tuples.
 
+    The remote module paths come from the unittest entries of the default
+    TestProfile; a path is remote when a unittest pattern matches the whole
+    path and the file stem is ``test_`` followed by 1 to 80 characters of
+    ``[a-z0-9_]``. With the default profile the result is identical to the
+    hard-coded registry paths.
+
     remote: module stems of declared remote test paths, TUI modules included.
     tui: the remote stems that are TUI test modules.
     unsupported: sorted test-shaped paths outside the remote pattern.
     """
+    unittest_entries = _unittest_entries(default_profile())
     paths = set()
     for value in (read_paths, write_paths):
         if type(value) not in (list, tuple) or any(type(item) is not str for item in value):
-            raise LLMToolError('EXECUTOR_TEST_PATHS_INVALID')
+            raise LLMToolError(_TEST_PATHS_INVALID)
         paths.update(value)
-    remote_paths = sorted(path for path in paths if _REMOTE.fullmatch(path))
+    remote_paths = sorted(path for path in paths
+                          if _is_remote(path, unittest_entries))
     remote = tuple(sorted(path.rsplit('/', 1)[-1][:-3] for path in remote_paths))
     tui = tuple(stem for stem in remote if _TUI.fullmatch(stem))
     unsupported = {path for path in paths
                    if _TEST_SHAPED.fullmatch(path.rsplit('/', 1)[-1]) and
-                   not _REMOTE.fullmatch(path)}
+                   not _is_remote(path, unittest_entries)}
     return remote, tui, tuple(sorted(unsupported))
 
 
