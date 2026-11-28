@@ -361,6 +361,7 @@ def _settle_unknown_claim(store, task, claim, comments, *, head, version):
     stored = task.get('review_dispatch_claim')
     claims = [stored] if type(stored) is dict else stored
     settled = dict(claim, state='DISPATCHED', updated_at=_now())
+    settled.pop('unknown_reason', None)
     updated = [settled if item is claim else item for item in claims]
     try:
         store.compare_and_update(task['task_id'], expected={'review_dispatch_claim': stored},

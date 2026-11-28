@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from llmtool import review_dispatch, review_result, task_store, worker_dispatch
+from llmtool import review_dispatch, review_result, task_advance, task_store, worker_dispatch
 from llmtool.developer_routes import load_route_config
 from llmtool.errors import LLMToolError
 import worker_policy_fixture
@@ -182,8 +182,10 @@ class DispatchUnknownClaimReasonTests(unittest.TestCase):
                 exc, claim = self._dispatch_codex_expecting_unknown(
                     store, which_path=which_path, proc=proc, run_side_effect=run_exc)
                 self.assertEqual(claim['state'], 'UNKNOWN')
-                self.assertEqual(claim['failure_reason'], expected_reason)
-                self.assertIn(claim['failure_reason'], review_dispatch.REVIEW_FAILURE_REASONS)
+                self.assertEqual(claim['unknown_reason'], expected_reason)
+                self.assertIn(claim['unknown_reason'], review_dispatch.UNKNOWN_CLAIM_REASONS)
+                self.assertNotIn(claim['unknown_reason'], review_dispatch.REVIEW_FAILURE_REASONS)
+                self.assertNotIn('failure_reason', claim)
                 self.assertNotIn('usage', claim)
                 self.assertNotIn('usage_unknown', claim)
                 self.assertNotIn('/private/path/secret', json.dumps(claim))
@@ -197,7 +199,8 @@ class DispatchUnknownClaimReasonTests(unittest.TestCase):
         exc, claim = self._dispatch_codex_expecting_unknown(store, preflights=[first, moved])
         self.assertEqual(exc.review_dispatch_code, 'REVIEW_PROMPT_PR_HEAD_MISMATCH')
         self.assertEqual(claim['state'], 'UNKNOWN')
-        self.assertEqual(claim['failure_reason'], 'REVIEWER_NOT_STARTED')
+        self.assertEqual(claim['unknown_reason'], 'REVIEWER_NOT_STARTED')
+        self.assertNotIn('failure_reason', claim)
         self.assertFalse(hasattr(exc, 'review_refusal'))
         self.assertIsNone(review_dispatch.read_refusal_receipt(store=store, task_id=TASK, claim=claim))
 
@@ -216,9 +219,36 @@ class DispatchUnknownClaimReasonTests(unittest.TestCase):
             result = review_dispatch.dispatch_review(
                 store=store, task_id=TASK, executor_task=EXECUTOR, pr_number=PR, version=1)
         self.assertEqual(result['state'], 'UNKNOWN')
-        self.assertEqual(result['failure_reason'], 'CAUSE_NOT_ESTABLISHED')
+        self.assertEqual(result['unknown_reason'], 'CAUSE_NOT_ESTABLISHED')
+        self.assertNotIn('failure_reason', result)
         stored = store.get(TASK)['review_dispatch_claim'][0]
-        self.assertEqual(stored['failure_reason'], 'CAUSE_NOT_ESTABLISHED')
+        self.assertEqual(stored['unknown_reason'], 'CAUSE_NOT_ESTABLISHED')
+        self.assertNotIn('failure_reason', stored)
+
+    def test_unknown_reason_does_not_change_advance_decide_outcome_unknown(self):
+        for reason in sorted(review_dispatch.UNKNOWN_CLAIM_REASONS):
+            with self.subTest(reason=reason):
+                record = {
+                    'task_id': TASK, 'run_id': RUN,
+                    'task_binding': {'contract_digest': 'c' * 64},
+                    'developer': {'state': 'DEVELOPER_RESPONDED'},
+                    'completion': {'executor_task_id': EXECUTOR},
+                    'review_dispatch_claim': [{
+                        'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD,
+                        'version': 1, 'state': 'UNKNOWN',
+                        'reviewer_task': REVIEWER, 'native_session_id': None,
+                        'account_mode': 'ROLES',
+                        'claimed_at': '2026-11-28T00:00:00Z',
+                        'updated_at': '2026-11-28T00:00:00Z',
+                        'unknown_reason': reason,
+                    }],
+                }
+                d6 = {'result_head': HEAD, 'recorded_result_head': HEAD, 'dirty': False}
+                pr = {'number': PR, 'head': {'sha': HEAD}, 'merged': False}
+                self.assertEqual(
+                    task_advance.decide(record, d6, pr, {}, docs_only=True),
+                    'REVIEW_OUTCOME_UNKNOWN',
+                )
 
     def test_claude_rejected_and_unknown_dispatch_record_closed_reasons(self):
         cases = (
@@ -255,7 +285,8 @@ class DispatchUnknownClaimReasonTests(unittest.TestCase):
                             bind_session=lambda **_: None, prompt_renderer=lambda *_: 'prompt')
                 claim = store.get(TASK)['review_dispatch_claim'][0]
                 self.assertEqual(claim['state'], 'UNKNOWN')
-                self.assertEqual(claim['failure_reason'], expected_reason)
+                self.assertEqual(claim['unknown_reason'], expected_reason)
+                self.assertNotIn('failure_reason', claim)
                 self.assertNotIn('/private/reviewer-account', json.dumps(claim))
 
 
@@ -358,6 +389,24 @@ class SessionEndedWithoutVerdictTests(unittest.TestCase):
             store.compare_and_update(
                 TASK, expected={'review_dispatch_claim': [legacy_unknown]},
                 review_dispatch_claim=[dict(legacy_unknown, failure_reason='NOT_IN_CLOSED_LIST')])
+        with self.assertRaises(LLMToolError):
+            store.compare_and_update(
+                TASK, expected={'review_dispatch_claim': [legacy_unknown]},
+                review_dispatch_claim=[dict(legacy_unknown, unknown_reason='NOT_IN_CLOSED_LIST')])
+        with self.assertRaises(LLMToolError):
+            store.compare_and_update(
+                TASK, expected={'review_dispatch_claim': [legacy_unknown]},
+                review_dispatch_claim=[dict(
+                    legacy_unknown,
+                    failure_reason='REVIEWER_D6_CREATE_FAILED',
+                    unknown_reason='REVIEWER_NOT_STARTED')])
+        with self.assertRaises(LLMToolError):
+            store.compare_and_update(
+                TASK, expected={'review_dispatch_claim': [legacy_unknown]},
+                review_dispatch_claim=[dict(
+                    legacy_unknown,
+                    bind_failure_reason='REVIEWER_SESSION_BIND_TIMEOUT',
+                    unknown_reason='CAUSE_NOT_ESTABLISHED')])
 
 
 if __name__ == '__main__':

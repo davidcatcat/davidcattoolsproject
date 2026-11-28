@@ -67,10 +67,10 @@ REVIEW_FAILURE_REASONS = _D6_CREATE_FAILURE_REASONS | frozenset((
     # The review prompt was refused before any Reviewer session started.
     'REVIEW_PROMPT_REFUSED',
     # Claude Reviewer bridge reported the launched session never took the prompt (#2753).
-    'SESSION_NOT_STARTED', 'PROMPT_NOT_DELIVERED',
-    # #1019 C2: closed-list reasons when a formal review claim has no usage/session.
-    'QUOTA_OR_USAGE_LIMIT', 'REVIEWER_NOT_STARTED', 'CAUSE_NOT_ESTABLISHED'))
-_UNKNOWN_CLAIM_REASONS = frozenset((
+    'SESSION_NOT_STARTED', 'PROMPT_NOT_DELIVERED'))
+# #1019 C2: closed-list reasons when a formal review claim ends UNKNOWN without a
+# failure_reason or bind_failure_reason; never changes advance behaviour.
+UNKNOWN_CLAIM_REASONS = frozenset((
     'QUOTA_OR_USAGE_LIMIT', 'REVIEWER_NOT_STARTED', 'CAUSE_NOT_ESTABLISHED'))
 _PRE_START_DISPATCH_CODES = frozenset((
     'ROUTE_CONFIG_UNAVAILABLE', 'ROLE_MODEL_NOT_ALLOWED',
@@ -1129,7 +1129,7 @@ def _nonzero_exit_claim_reason(stdout, stderr):
 def _unknown_claim_reason(exc, *, reviewer_started):
     """Return one closed-list reason for an UNKNOWN formal review claim."""
     claim_reason = getattr(exc, 'review_claim_reason', None)
-    if claim_reason in _UNKNOWN_CLAIM_REASONS:
+    if claim_reason in UNKNOWN_CLAIM_REASONS:
         return claim_reason
     if (not reviewer_started or
             getattr(exc, 'launch_refusal', None) is not None or
@@ -2292,8 +2292,10 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             return output
         if prior['state'] == 'CLAIMED':
             unknown = dict(prior, state='UNKNOWN', updated_at=_now())
-            if 'failure_reason' not in unknown and 'bind_failure_reason' not in unknown:
-                unknown['failure_reason'] = 'CAUSE_NOT_ESTABLISHED'
+            if ('failure_reason' not in unknown and
+                    'bind_failure_reason' not in unknown and
+                    'unknown_reason' not in unknown):
+                unknown['unknown_reason'] = 'CAUSE_NOT_ESTABLISHED'
             updated_claims = [unknown if claim is prior else claim for claim in claims]
             try:
                 store.compare_and_update(
@@ -2540,7 +2542,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         elif bind_reason is not None:
             unknown['bind_failure_reason'] = bind_reason
         else:
-            unknown['failure_reason'] = _unknown_claim_reason(
+            unknown['unknown_reason'] = _unknown_claim_reason(
                 exc, reviewer_started=reviewer_started)
         mismatch = getattr(exc, 'review_binding_mismatch_keys', None)
         if reason == 'VERDICT_BINDING_MISMATCH' and type(mismatch) is tuple:
