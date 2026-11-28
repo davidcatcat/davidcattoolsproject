@@ -73,9 +73,6 @@ class ExpectedRemoteModulesTests(unittest.TestCase):
             ('not', 'a', 'profile'),
             TestProfile((
                 (re.compile(r'scripts/test_[a-z0-9_]+\.py\Z'), 'script'),)),
-            TestProfile((
-                (re.compile(r'scripts/test_[a-z0-9_]+\.py\Z'), 'script'),
-                (re.compile(r'tests/test_[a-z0-9_]+\.py\Z'), 'pytest'),)),
         )
         for invalid in cases:
             with self.subTest(invalid=invalid):

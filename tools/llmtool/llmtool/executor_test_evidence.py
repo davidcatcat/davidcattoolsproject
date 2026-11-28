@@ -22,11 +22,13 @@ _TEST_PATHS_INVALID = 'EXECUTOR_TEST_PATHS_INVALID'
 def _unittest_entries(profile):
     """The unittest (pattern, kind) entries of the project TestProfile.
 
-    The entries are checked structurally; an invalid profile raises the
-    llmtool EXECUTOR_TEST_PATHS_INVALID error and the default registry
-    paths are never a fallback.
+    The entries are checked structurally; a value without a well-formed
+    entries tuple, an entry that is not a pair of a compiled string
+    pattern and a known runner kind, or a profile without any unittest
+    entry raises the llmtool EXECUTOR_TEST_PATHS_INVALID error and the
+    default registry paths are never a fallback.
     """
-    entries = profile.entries
+    entries = getattr(profile, 'entries', None)
     if type(entries) is not tuple:
         raise LLMToolError(_TEST_PATHS_INVALID)
     for entry in entries:
@@ -42,6 +44,19 @@ def _unittest_entries(profile):
     if not unittest_entries:
         raise LLMToolError(_TEST_PATHS_INVALID)
     return unittest_entries
+
+
+def _is_remote(path, unittest_entries):
+    """True when the path is a remote test module.
+
+    The path's file stem must satisfy the existing lowercase stem
+    constraint and one of the profile's unittest patterns must match the
+    whole path.
+    """
+    stem = path.rsplit('/', 1)[-1][:-3]
+    return (_LOWERCASE_STEM.fullmatch(stem) is not None and any(
+        pattern.fullmatch(path) is not None
+        for pattern, _kind in unittest_entries))
 
 
 def expected_remote_modules(read_paths, write_paths):
@@ -62,17 +77,13 @@ def expected_remote_modules(read_paths, write_paths):
         if type(value) not in (list, tuple) or any(type(item) is not str for item in value):
             raise LLMToolError(_TEST_PATHS_INVALID)
         paths.update(value)
-    remote_paths = sorted(
-        path for path in paths
-        if _LOWERCASE_STEM.fullmatch(path.rsplit('/', 1)[-1][:-3]) and any(
-            pattern.fullmatch(path) is not None
-            for pattern, _kind in unittest_entries))
+    remote_paths = sorted(path for path in paths
+                          if _is_remote(path, unittest_entries))
     remote = tuple(sorted(path.rsplit('/', 1)[-1][:-3] for path in remote_paths))
     tui = tuple(stem for stem in remote if _TUI.fullmatch(stem))
     unsupported = {path for path in paths
                    if _TEST_SHAPED.fullmatch(path.rsplit('/', 1)[-1]) and
-                   not any(pattern.fullmatch(path) is not None
-                           for pattern, _kind in unittest_entries)}
+                   not _is_remote(path, unittest_entries)}
     return remote, tui, tuple(sorted(unsupported))
 
 
