@@ -50,12 +50,14 @@ def _refuse(code):
     raise error from None
 
 
-def _codex_formal_pass(lines, *, head, version, task_id, run_id, contract_digest):
-    """Match Codex's PASS header and its exact accept and binding lines."""
+def _codex_formal_pass(lines, *, head, version, task_id, run_id, contract_digest,
+                       actor='Codex'):
+    """Match a structured Reviewer PASS header and its exact accept and binding lines."""
     if len(lines) < 4:
         return False
     return (
-        lines[0] == '<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->' and
+        lines[0] == (f'<!-- activity: type=review_verdict actor={actor} '
+                     'target=PM status=PASS -->') and
         lines[1] == f'Verdict: PASS | Version: v{version} | HEAD: {head}' and
         'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT' in lines[2:] and
         (f'LLMTOOL-REVIEW-BINDING v1 task={task_id} run={run_id} '
@@ -75,26 +77,31 @@ def _comment_verdict(comment, *, head, version, task):
     if (marker is not None and marker.group(1) == 'Claude' and
             task_completion._reviewer_author_family(developer) == 'claude'):
         return None
-    codex_formal_pass = False
-    codex_bound = False
-    if marker is not None and marker.group(1) == 'Codex':
+    # A structured CLI Reviewer (Codex or the AGY route, #1019) always binds the
+    # exact Task, run, contract and HEAD line; its family must differ from the
+    # Developer's. A Claude-family Task therefore never accepts an AGY verdict.
+    structured_actor = (marker.group(1) if marker is not None and
+                        marker.group(1) in ('Codex', 'AGY') else None)
+    structured_formal_pass = False
+    if structured_actor is not None:
         developer_family = task_completion._reviewer_author_family(developer)
-        if developer_family is None or developer_family == 'codex':
+        actor_family = 'codex' if structured_actor == 'Codex' else 'claude'
+        if developer_family is None or developer_family == actor_family:
             return None
         binding = next((match for line in lines[1:]
                         if (match := _CODEX_BINDING.fullmatch(line)) is not None), None)
         task_binding = task.get('task_binding')
-        codex_bound = (
+        structured_bound = (
             binding is not None and type(task_binding) is dict and
             binding.group(1) == task.get('task_id') and
             binding.group(2) == task.get('run_id') and
             binding.group(3) == task_binding.get('contract_digest') and
             binding.group(4) == head)
-        if not codex_bound:
+        if not structured_bound:
             return None
     if marker is not None and marker.group(1) == 'Claude':
         # #1898: a Claude verdict bound to another Task or run is not this Task's
-        # verdict, so it is ignored as the Codex branch does, never a REVIEW_FAIL.
+        # verdict, so it is ignored as the structured branch does, never a REVIEW_FAIL.
         binding = next((match for line in lines[1:]
                         if (match := _CODEX_BINDING.fullmatch(line.strip())) is not None), None)
         if binding is not None and (binding.group(1) != task.get('task_id') or
@@ -107,20 +114,20 @@ def _comment_verdict(comment, *, head, version, task):
     if raw_head != head or int(raw_version) != version:
         return None
     marker_matches = marker is not None and marker.group(2) == status
-    # A Codex PASS is formal only for a cross-family Task and the exact accept
-    # and binding lines required by the Codex Reviewer prompt.
-    if marker_matches and marker.group(1) == 'Codex' and status == 'PASS':
-        codex_formal_pass = _codex_formal_pass(
-            lines, head=head, version=version, task_id=task['task_id'],
-            run_id=task['run_id'],
+    # A structured PASS is formal only for a cross-family Task and the exact
+    # accept and binding lines required by its Reviewer prompt.
+    if marker_matches and structured_actor is not None and status == 'PASS':
+        structured_formal_pass = _codex_formal_pass(
+            lines, actor=structured_actor, head=head, version=version,
+            task_id=task['task_id'], run_id=task['run_id'],
             contract_digest=task['task_binding']['contract_digest'])
-        if not codex_formal_pass:
+        if not structured_formal_pass:
             return None
     comment_id = comment.get('id')
     if type(comment_id) is not int or comment_id < 0:
         _refuse('REVIEW_RESULT_INVALID')
 
-    formal_pass = (codex_formal_pass or
+    formal_pass = (structured_formal_pass or
                    (marker_matches and marker.group(1) == 'Claude' and status == 'PASS' and
                     task_completion._review_family_compatible(
                         developer, 'claude-reviewer') and

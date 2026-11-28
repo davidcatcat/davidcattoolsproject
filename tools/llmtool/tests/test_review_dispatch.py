@@ -244,7 +244,7 @@ class ReviewDispatchTests(unittest.TestCase):
                 self.assertEqual(None if result is None else result[2], expected)
 
     def invoke(self, *, create=None, preflight=None, policy=True, codex_runner=None,
-               reviewer_role=None):
+               agy_runner=None, reviewer_role=None):
         create = create or (lambda **kw: self.created.append(kw))
         send = lambda **kw: (self.sent.append(kw) or 'native-session')
         bind = lambda **kw: self.bound.append(kw)
@@ -258,7 +258,7 @@ class ReviewDispatchTests(unittest.TestCase):
             claim.get('version') == 1
             for claim in existing)
         selected_role = ('reviewer' if selected[4] == 'claude-reviewer'
-                         else 'codex-reviewer')
+                         else selected[4])
 
         def resolve_test_role(role):
             if reviewer_role is not None and role == selected_role:
@@ -276,10 +276,10 @@ class ReviewDispatchTests(unittest.TestCase):
                 store=self.store, task_id=TASK, executor_task='executor-d6',
                 pr_number=42, version=1, create_d6=create, dispatch_session=send,
                 bind_session=bind, prompt_renderer=lambda *_: 'bound prompt',
-                codex_runner=codex_runner)
+                codex_runner=codex_runner, agy_runner=agy_runner)
             if creates_claim:
                 resolve_role.assert_called_once_with(
-                    'reviewer' if selected[4] == 'claude-reviewer' else 'codex-reviewer')
+                    'reviewer' if selected[4] == 'claude-reviewer' else selected[4])
             else:
                 resolve_role.assert_not_called()
             return result
@@ -2673,6 +2673,270 @@ class CodexQuotaRecordingTests(unittest.TestCase):
             res = self._dispatch(stdout)
         self.assertEqual(res['verdict'], 'PASS')
         self.assertFalse(self.quota_file.exists())
+
+
+AGY_REVIEW_MODEL = _ROLES['agy-reviewer']['allowed_models'][0]
+
+
+def _agy_verdict_text(*, verdict='PASS', version=1, head=HEAD, task_id=TASK,
+                      run_id='c' * 32, contract='d' * 64, actor='AGY'):
+    marker_status = 'PASS' if verdict == 'PASS' else 'FIX'
+    displayed = 'PASS' if verdict == 'PASS' else 'FAIL'
+    lines = [
+        f'<!-- activity: type=review_verdict actor={actor} target=PM '
+        f'status={marker_status} -->',
+        f'Verdict: {displayed} | Version: v{version} | HEAD: {head}',
+        f'LLMTOOL-REVIEW-BINDING v1 task={task_id} run={run_id} '
+        f'contract={contract} head={head}',
+    ]
+    if verdict == 'PASS':
+        lines.append('FORMAL SECURITY/FUNCTIONAL/QA ACCEPT')
+    return '\n'.join(lines)
+
+
+def _agy_cli_reply(review_text, *, verdict='PASS', status='SUCCESS',
+                   conversation='b1a52cb7-9a55-4525-98f2-951ac2eacd4e',
+                   usage=None, head=HEAD):
+    if usage is None:
+        usage = {'input_tokens': 100, 'output_tokens': 20, 'total_tokens': 120,
+                 'thinking_tokens': 0, 'cache_read_tokens': 0}
+    return json.dumps({
+        'conversation_id': conversation, 'status': status,
+        'response': json.dumps({
+            'task_id': TASK, 'run_id': 'c' * 32, 'head': head,
+            'verdict': verdict, 'review': review_text}),
+        'usage': usage}).encode('utf-8')
+
+
+class AgyReviewerTests(unittest.TestCase):
+    """#1019: the AGY formal Reviewer route (model claude-sonnet-5-5-medium)."""
+
+    def _task(self, family='codex'):
+        return {'task_id': TASK, 'run_id': 'c' * 32,
+                'task_binding': {'contract_digest': 'd' * 64},
+                'developer': {'provider_profile': family}}
+
+    def test_explicit_selection_is_cross_family_only(self):
+        for family, allowed in (('codex', True), ('gw-agent', True),
+                                ('claude', False)):
+            task = self._task(family)
+            with self.subTest(family=family), patch.object(
+                    review_dispatch.worker_dispatch, 'evaluate',
+                    return_value=SimpleNamespace(allowed=True, reason_code='PAUSED')):
+                if allowed:
+                    self.assertEqual(
+                        review_dispatch._select_reviewer(task, 'agy-reviewer'),
+                        'agy-reviewer')
+                else:
+                    with self.assertRaises(LLMToolError) as raised:
+                        review_dispatch._select_reviewer(task, 'agy-reviewer')
+                    self.assertEqual(raised.exception.review_dispatch_code,
+                                     'REVIEWER_SAME_FAMILY')
+
+    def test_implicit_selection_follows_only_the_policy_order(self):
+        task = self._task('gw-agent')
+        with patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                          return_value=SimpleNamespace(
+                              allowed=True, reason_code='OWNER_POLICY_ALLOWED')):
+            # The shipped formal_reviewer_order does not name agy-reviewer, so
+            # an implicit selection keeps its existing default.
+            self.assertEqual(review_dispatch._select_reviewer(task), 'codex-reviewer')
+        # A policy order that names agy-reviewer would select it: that is an
+        # Owner-controlled policy change, not a default this route adds.
+        with patch.object(review_dispatch.repair_policy, 'formal_reviewer_order',
+                          return_value=['agy-reviewer', 'codex-reviewer']), \
+                patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                             return_value=SimpleNamespace(
+                                 allowed=True, reason_code='OWNER_POLICY_ALLOWED')):
+            self.assertEqual(review_dispatch._select_reviewer(task), 'agy-reviewer')
+
+    def test_paused_row_refuses_the_route(self):
+        with patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                          return_value=SimpleNamespace(allowed=False,
+                                                       reason_code='OWNER_PAUSED')):
+            with self.assertRaises(LLMToolError) as raised:
+                review_dispatch._select_reviewer(self._task('codex'), 'agy-reviewer')
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEWER_NOT_ALLOWED')
+
+    def test_parser_accepts_one_bound_structured_pass(self):
+        parsed = review_dispatch._parse_agy_review(
+            _agy_cli_reply(_agy_verdict_text()),
+            task=self._task('codex'), head=HEAD, version=1)
+        self.assertEqual(parsed['verdict'], 'PASS')
+        self.assertEqual(parsed['thread_id'], 'b1a52cb7-9a55-4525-98f2-951ac2eacd4e')
+        self.assertEqual(parsed['usage']['prompt_tokens'], 100)
+
+    def test_parser_refuses_a_claude_authored_task(self):
+        with self.assertRaises(LLMToolError) as raised:
+            review_dispatch._parse_agy_review(
+                _agy_cli_reply(_agy_verdict_text()),
+                task=self._task('claude'), head=HEAD, version=1)
+        self.assertEqual(getattr(raised.exception, 'review_failure_reason', None),
+                         'REVIEW_CLASSIFIER_REJECTED')
+
+    def test_parser_requires_the_agy_marker(self):
+        with self.assertRaises(LLMToolError) as raised:
+            review_dispatch._parse_agy_review(
+                _agy_cli_reply(_agy_verdict_text(actor='Claude')),
+                task=self._task('codex'), head=HEAD, version=1)
+        self.assertEqual(getattr(raised.exception, 'review_failure_reason', None),
+                         'REVIEW_HEADER_MISMATCH')
+
+    def test_parser_reports_binding_mismatch_keys_only(self):
+        with self.assertRaises(LLMToolError) as raised:
+            review_dispatch._parse_agy_review(
+                _agy_cli_reply(_agy_verdict_text(), head='e' * 40),
+                task=self._task('codex'), head=HEAD, version=1)
+        self.assertEqual(getattr(raised.exception, 'review_failure_reason', None),
+                         'VERDICT_BINDING_MISMATCH')
+        self.assertEqual(getattr(raised.exception, 'review_binding_mismatch_keys', None),
+                         ('head',))
+
+    def test_parser_refuses_prose_and_failed_status(self):
+        prose = json.dumps({'conversation_id': 'b1a52cb7-9a55-4525-98f2-951ac2eacd4e',
+                            'status': 'SUCCESS', 'response': 'Here is my review: {}'})
+        with self.assertRaises(LLMToolError) as raised:
+            review_dispatch._parse_agy_review(
+                prose.encode('utf-8'), task=self._task('codex'), head=HEAD, version=1)
+        self.assertEqual(getattr(raised.exception, 'review_failure_reason', None),
+                         'VERDICT_NOT_JSON')
+        with self.assertRaises(LLMToolError) as raised:
+            review_dispatch._parse_agy_review(
+                _agy_cli_reply(_agy_verdict_text(), status='RESOURCE_EXHAUSTED'),
+                task=self._task('codex'), head=HEAD, version=1)
+        self.assertEqual(getattr(raised.exception, 'review_failure_reason', None),
+                         'NO_FINAL_MESSAGE')
+
+    def _dispatch(self, *, requested_model=AGY_REVIEW_MODEL, logged_model=None,
+                  review_text=None):
+        review_text = review_text or _agy_verdict_text()
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen['argv'] = argv
+            log_index = argv.index('--log-file') + 1
+            Path(argv[log_index]).write_text(
+                'model_resolver: Resolving model '
+                + (logged_model or requested_model) + '\n', encoding='utf-8')
+            return SimpleNamespace(returncode=0,
+                                   stdout=_agy_cli_reply(review_text),
+                                   stderr=b'')
+
+        with patch.object(review_dispatch.shutil, 'which', return_value='/fake/agy'), \
+                patch.object(review_dispatch.developer_routes, 'role_timeout',
+                             return_value=60), \
+                patch.object(review_dispatch.subprocess, 'run', side_effect=fake_run):
+            parsed = review_dispatch._dispatch_agy(
+                reviewer_root='/repo/reviewer-d6', prompt='review this',
+                task=self._task('codex'), head=HEAD, version=1,
+                model=requested_model, effort='medium')
+        return parsed, seen['argv']
+
+    def test_dispatch_runs_agy_read_only_with_the_role_model(self):
+        parsed, argv = self._dispatch()
+        self.assertEqual(parsed['verdict'], 'PASS')
+        for flag in ('--sandbox', '--mode', 'plan', '--output-format', 'json'):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index('--mode') + 1], 'plan')
+        self.assertEqual(argv[argv.index('--model') + 1], AGY_REVIEW_MODEL)
+        self.assertEqual(argv[argv.index('--effort') + 1], 'medium')
+
+    def test_dispatch_refuses_a_model_it_cannot_verify(self):
+        with self.assertRaises(LLMToolError) as raised:
+            self._dispatch(logged_model='gemini-4-hydrogen-medium')
+        self.assertEqual(raised.exception.review_dispatch_code,
+                         'REVIEWER_MODEL_MISMATCH')
+
+    def test_dispatch_refuses_a_reply_without_model_evidence(self):
+        with patch.object(review_dispatch.shutil, 'which', return_value='/fake/agy'), \
+                patch.object(review_dispatch.developer_routes, 'role_timeout',
+                             return_value=60), \
+                patch.object(review_dispatch.subprocess, 'run',
+                             return_value=SimpleNamespace(
+                                 returncode=0,
+                                 stdout=_agy_cli_reply(_agy_verdict_text()),
+                                 stderr=b'')):
+            with self.assertRaises(LLMToolError) as raised:
+                review_dispatch._dispatch_agy(
+                    reviewer_root='/repo/reviewer-d6', prompt='review this',
+                    task=self._task('codex'), head=HEAD, version=1,
+                    model=AGY_REVIEW_MODEL, effort='medium')
+        self.assertEqual(raised.exception.review_dispatch_code,
+                         'REVIEWER_MODEL_UNVERIFIED')
+
+    def test_completed_claim_passes_the_merge_gate_selection(self):
+        from llmtool import task_advance
+        claim = {'pr': 42, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
+                 'review_kind': 'formal',
+                 'review_result': {'verdict': 'PASS',
+                                   'review_text': _agy_verdict_text()}}
+        record = {'review_dispatch_claim': [claim]}
+        self.assertTrue(task_advance._completed_codex_claim(claim))
+        self.assertIs(task_advance._completed_codex_pass_claim(record, 42, HEAD), claim)
+
+    def test_review_repair_attributes_an_agy_verdict_to_its_own_route(self):
+        from llmtool import review_repair
+        claim = {'state': 'COMPLETED',
+                 'review_result': {'review_text': _agy_verdict_text(verdict='FIX')}}
+        self.assertEqual(review_repair.claim_reviewer(claim), 'agy-reviewer')
+
+    def test_review_result_classifies_a_bound_agy_pass(self):
+        comment = {'id': 5, 'body': _agy_verdict_text(),
+                   'created_at': '2026-11-28T10:00:00Z'}
+        task = self._task('gw-agent')
+        verdict = review_result._comment_verdict(comment, head=HEAD, version=1,
+                                                 task=task)
+        self.assertEqual(verdict[2], 'REVIEW_PASS')
+        task['developer'] = {'provider_profile': 'claude'}
+        self.assertIsNone(review_result._comment_verdict(
+            comment, head=HEAD, version=1, task=task))
+
+    def test_dispatch_review_records_a_completed_agy_claim(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        store = DurableFakeStore(Path(temp.name) / 'task.json')
+        store.data.update({'developer': {'provider_profile': 'codex'},
+                           'run_id': 'c' * 32,
+                           'task_binding': {'contract_digest': 'd' * 64}})
+        executor = SimpleNamespace(root='/repo/worktree', common_dir='/repo/.git')
+        preflight = (TASK, executor, HEAD, 'd' * 40, 'agy-reviewer')
+        created, bound, runner_args = [], [], []
+
+        def run_agy(**kwargs):
+            runner_args.append(kwargs)
+            return {'thread_id': 'b1a52cb7-9a55-4525-98f2-951ac2eacd4e',
+                    'review_text': _agy_verdict_text(), 'verdict': 'PASS'}
+
+        gate = SimpleNamespace(allowed=True, reason_code='OWNER_POLICY_ALLOWED')
+        reviewer = SimpleNamespace(root='/repo/reviewer-d6')
+        with patch.object(review_dispatch, '_preflight', side_effect=[preflight, preflight]), \
+                patch.object(review_dispatch.worker_dispatch, 'evaluate', return_value=gate), \
+                patch.object(review_dispatch, '_resolve_github_login',
+                             return_value='reviewer-user'), \
+                patch.object(review_dispatch.role_config, 'resolve_role',
+                             return_value={'provider': 'agy', 'source': 'roles',
+                                           'model': AGY_REVIEW_MODEL, 'effort': None,
+                                           'config_dir': None, 'account': None}), \
+                patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                             return_value=reviewer):
+            result = review_dispatch.dispatch_review(
+                store=store, task_id=TASK, executor_task='executor-d6',
+                pr_number=42, version=1, create_d6=lambda **kw: created.append(kw),
+                dispatch_session=lambda **kw: self.fail('Claude bridge used'),
+                bind_session=lambda **kw: bound.append(kw),
+                prompt_renderer=lambda *_: 'bound prompt', agy_runner=run_agy)
+        claim = store.get(TASK)['review_dispatch_claim'][0]
+        self.assertEqual(claim['state'], 'COMPLETED')
+        self.assertEqual(claim['account_mode'], 'ROLES')
+        self.assertEqual(claim['native_session_id'],
+                         'b1a52cb7-9a55-4525-98f2-951ac2eacd4e')
+        self.assertEqual(claim['review_result']['verdict'], 'PASS')
+        self.assertEqual(claim['review_result']['review_text'], _agy_verdict_text())
+        self.assertEqual(created[0]['reviewer_key'], 'agy-reviewer')
+        self.assertEqual(result['verdict'], 'PASS')
+        self.assertEqual(result['review_text'], _agy_verdict_text())
+        self.assertEqual(bound[0]['session_id'], 'b1a52cb7-9a55-4525-98f2-951ac2eacd4e')
+        self.assertEqual(runner_args[0]['model'], AGY_REVIEW_MODEL)
 
 
 if __name__ == '__main__':

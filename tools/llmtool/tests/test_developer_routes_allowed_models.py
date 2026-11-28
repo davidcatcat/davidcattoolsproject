@@ -48,6 +48,8 @@ BAD_FORMAT = {'agy': ('https://example.invalid/m', 'has space', '-leading-dash',
 SHIPPED_ROLES = {
     'codex-reviewer': {'allowed_models': ['gpt-6.1-sol']},
     'claude-reviewer': {'allowed_models': ['claude-sonnet-5-5']},
+    # #1019: the AGY Reviewer route runs a Claude-family model.
+    'agy-reviewer': {'allowed_models': ['claude-sonnet-5-5-medium']},
     'codex-debug': {'allowed_models': ['gpt-6.1-sol']},
     'claude-debug': {'allowed_models': ['claude-opus-5-5']},
 }
@@ -380,6 +382,11 @@ class RoleRegistryTests(unittest.TestCase):
         for role, entry in roles.items():
             with self.subTest(role=role):
                 is_claude_model = entry['allowed_models'][0].startswith('claude-')
+                if role == 'agy-reviewer':
+                    # #1019: the AGY Reviewer is a route name, not a model
+                    # family, so it carries a Claude-family model by design.
+                    self.assertTrue(is_claude_model)
+                    continue
                 self.assertEqual(is_claude_model, role.startswith('claude-'))
 
     def test_config_without_roles_still_loads(self):
@@ -474,7 +481,7 @@ class RoleModelFamilyAllowlistTests(unittest.TestCase):
     """
 
     CODEX_ROLES = ('codex-reviewer', 'codex-debug')
-    CLAUDE_ROLES = ('claude-reviewer', 'claude-debug')
+    CLAUDE_ROLES = ('claude-reviewer', 'claude-debug', 'agy-reviewer')
     # Claude-family identifiers in prefixed, dotted and mixed-case forms.
     CLAUDE_FORMS = (
         'claude-opus-5-5', 'claude-example-b', 'Claude-opus-5-5', 'CLAUDE-OPUS-5-5',

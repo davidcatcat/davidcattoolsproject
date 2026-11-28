@@ -1788,7 +1788,7 @@ MERGE_REVIEW_VERDICT_NOT_POSTED = 'MERGE_REVIEW_VERDICT_NOT_POSTED'
 
 
 def _codex_verdict_marker(text):
-    """Return the Codex verdict marker of stored review text, or None."""
+    """Return the structured Reviewer verdict marker of stored text, or None."""
     if type(text) is not str:
         return None
     lines = [line for line in text.splitlines() if line.strip()]
@@ -1798,7 +1798,11 @@ def _codex_verdict_marker(text):
 
 
 def _completed_codex_claim(claim):
-    """True for a COMPLETED formal claim holding Codex verdict text."""
+    """True for a COMPLETED formal claim holding structured Reviewer verdict text.
+
+    #1019: the Codex and AGY Reviewer routes both store a structured, fully
+    binding verdict and complete the claim before the verdict is posted.
+    """
     if (type(claim) is not dict or claim.get('state') != 'COMPLETED' or
             review_result.review_kind(claim) != 'formal'):
         return False
@@ -1806,11 +1810,11 @@ def _completed_codex_claim(claim):
     if type(result) is not dict:
         return False
     marker = _codex_verdict_marker(result.get('review_text'))
-    return marker is not None and marker.group(1) == 'Codex'
+    return marker is not None and marker.group(1) in ('Codex', 'AGY')
 
 
 def _completed_codex_pass_claim(record, number, head, version=None):
-    """Return the newest COMPLETED Codex PASS claim for one PR head.
+    """Return the newest COMPLETED structured PASS claim for one PR head.
 
     With a version, only that claim is considered. With None, the highest
     version at the head is returned.
@@ -1827,7 +1831,8 @@ def _completed_codex_pass_claim(record, number, head, version=None):
         if (type(result) is not dict or result.get('verdict') != 'PASS'):
             continue
         marker = _codex_verdict_marker(result.get('review_text'))
-        if marker is not None and marker.group(1) == 'Codex' and marker.group(2) == 'PASS':
+        if (marker is not None and marker.group(1) in ('Codex', 'AGY') and
+                marker.group(2) == 'PASS'):
             found.append(claim)
     return max(found, key=lambda item: item['version'], default=None)
 
@@ -1921,7 +1926,7 @@ def _verified_posted_verdict_id(task, claim, github_get):
 
 
 def _ensure_completed_codex_posted(*, store, task, task_id, claim, root, github_get):
-    """Post a COMPLETED Codex verdict once; return its positive comment id."""
+    """Post a COMPLETED structured Reviewer verdict once; return its comment id."""
     result = claim.get('review_result')
     text = result.get('review_text') if type(result) is dict else None
     if type(text) is not str or not text:
@@ -1935,7 +1940,10 @@ def _ensure_completed_codex_posted(*, store, task, task_id, claim, root, github_
 
     def allowed():
         try:
-            return review_dispatch._policy(task, 'codex-reviewer').allowed
+            reviewer_key = review_dispatch._claim_reviewer_key(claim)
+            if reviewer_key is None:
+                return False
+            return review_dispatch._policy(task, reviewer_key).allowed
         except Exception:
             return False
 

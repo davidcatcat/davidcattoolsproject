@@ -209,6 +209,9 @@ _ROUTE_MODEL_CHECKS = {
 _ROLE_MODEL_CHECKS = {
     'codex-reviewer': _codex_role_model_ok,
     'claude-reviewer': _claude_role_model_ok,
+    # #1019: the AGY formal Reviewer runs a Claude-family model, so its family
+    # check is the Claude one; it is never the implicit default.
+    'agy-reviewer': _claude_role_model_ok,
     'codex-debug': _codex_role_model_ok,
     'claude-debug': _claude_role_model_ok,
 }

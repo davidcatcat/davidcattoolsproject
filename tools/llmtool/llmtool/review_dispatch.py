@@ -14,6 +14,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 
 from .errors import LLMToolError
@@ -26,8 +27,22 @@ _CODEX_REVIEW_EFFORT = 'high'
 # #289: the formal Reviewer keys and the model family each one authors in.
 # formal_reviewer_order, when present, is the preference order for an implicit
 # selection; an absent key keeps the legacy default below.
-_FORMAL_REVIEWERS = ('claude-reviewer', 'codex-reviewer')
-_REVIEWER_FAMILIES = {'claude-reviewer': 'claude', 'codex-reviewer': 'codex'}
+# #1019 (Owner 2026-11-28): agy-reviewer is a third formal Reviewer that runs
+# through the AGY CLI with a Claude-family model. It is selectable only by an
+# explicit request; it is never an implicit default and it is not in the
+# repository's formal_reviewer_order.
+_FORMAL_REVIEWERS = ('claude-reviewer', 'codex-reviewer', 'agy-reviewer')
+_REVIEWER_FAMILIES = {'claude-reviewer': 'claude', 'codex-reviewer': 'codex',
+                      'agy-reviewer': 'claude'}
+# #1019: the AGY Reviewer run. The model comes from the roles registry; this
+# effort is only the fallback when the role entry names none.
+_AGY_REVIEW_EFFORT = 'medium'
+# The review prompt is one argv element for AGY, so it is bounded well below
+# the platform ARG_MAX (1 MiB on macOS) before any provider call.
+_AGY_REVIEW_MAX_PROMPT = 128 * 1024
+_AGY_REVIEW_MAX_OUTPUT = 1024 * 1024
+_AGY_REVIEW_MAX_LOG = 1024 * 1024
+_AGY_CONVERSATION = re.compile(r'[A-Za-z0-9_-]{8,128}\Z')
 # #2281: the Codex Reviewer run timeout comes from role_timeout('codex-reviewer');
 # this fallback names the same 3 h role default, not a separate value.
 _CODEX_REVIEW_TIMEOUT = developer_routes.DEFAULT_ROLE_TIMEOUT_SECONDS
@@ -171,7 +186,7 @@ def _resolve_reviewer_role(reviewer_key):
     """#2027: resolve the role config for reviewer_key; tag review_dispatch_code on LLMToolError."""
     try:
         return role_config.resolve_role(
-            'reviewer' if reviewer_key == 'claude-reviewer' else 'codex-reviewer')
+            'reviewer' if reviewer_key == 'claude-reviewer' else reviewer_key)
     except LLMToolError as exc:
         code = getattr(exc, 'role_config_code', None)
         if code == role_config.ROUTE_CONFIG_UNAVAILABLE:
@@ -214,6 +229,38 @@ def _policy(task, reviewer_key):
 def _reviewer_family(reviewer_key):
     """#289: the model family a formal Reviewer key authors in, or None."""
     return _REVIEWER_FAMILIES.get(reviewer_key)
+
+
+# #1019: the verdict marker actor each formal Reviewer route writes.
+_REVIEWER_ACTORS = {'claude-reviewer': 'Claude', 'codex-reviewer': 'Codex',
+                    'agy-reviewer': 'AGY'}
+_ACTOR_REVIEWERS = {actor: key for key, actor in _REVIEWER_ACTORS.items()}
+
+
+def _reviewer_key_from_text(text, account_mode=None):
+    """Return the formal Reviewer key a stored verdict text or claim belongs to.
+
+    The marker names the route that authored the verdict, so an AGY verdict is
+    never attributed to the Claude or Codex route. Without a marker the claim's
+    account mode is the only evidence; an unknown one gives None.
+    """
+    if type(text) is str:
+        first = next((line.strip() for line in text.splitlines() if line.strip()), '')
+        match = task_completion._VERDICT_MARKER.fullmatch(first)
+        if match is not None:
+            return _ACTOR_REVIEWERS.get(match.group(1))
+    return {'CODEX_CLI': 'codex-reviewer',
+            'EXPLICIT_CLAUDE_CONFIG_DIR': 'claude-reviewer',
+            'DEFAULT_SECOND_ACCOUNT': 'claude-reviewer'}.get(account_mode)
+
+
+def _claim_reviewer_key(claim):
+    """Return the Reviewer key of one claim from its stored verdict, or None."""
+    if type(claim) is not dict:
+        return None
+    result = claim.get('review_result')
+    text = result.get('review_text') if type(result) is dict else None
+    return _reviewer_key_from_text(text, claim.get('account_mode'))
 
 
 def _formal_reviewer_order():
@@ -1022,6 +1069,183 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
             usage_out['usage'] = usage
         else:
             usage_out['usage_unknown'] = {'reason': reason}
+    return parsed
+
+
+def _agy_review_argv(executable, *, prompt, model, effort, log_path):
+    """Return the read-only AGY Reviewer argv; the prompt is one argv element."""
+    return [executable, '-p', prompt, '--model', model, '--effort', effort,
+            '--sandbox', '--mode', 'plan', '--output-format', 'json',
+            '--print-timeout', '0', '--log-file', str(log_path)]
+
+
+def _agy_usage(usage):
+    """Map one AGY usage object to the stored usage triplet, or None."""
+    from . import task_store
+    if type(usage) is not dict:
+        return None
+    prompt = usage.get('input_tokens')
+    completion = usage.get('output_tokens')
+    total = usage.get('total_tokens')
+    reasoning = usage.get('thinking_tokens', 0)
+    cached = usage.get('cache_read_tokens', 0)
+    for value in (prompt, completion, total, reasoning, cached):
+        if type(value) is not int or isinstance(value, bool) or value < 0:
+            return None
+    value = {'prompt_tokens': prompt, 'completion_tokens': completion,
+             'total_tokens': total, 'cached_prompt_tokens': cached,
+             'reasoning_tokens': reasoning}
+    try:
+        task_store._validate_usage(value)
+    except Exception:
+        return None
+    return value
+
+
+def _parse_agy_review(raw, *, task, head, version=1):
+    """Accept one exact, binding-complete AGY Reviewer reply.
+
+    The AGY CLI prints one JSON object; its ``response`` must be exactly one
+    JSON verdict object with the same keys as the Codex Reviewer contract. Its
+    review text must carry the actor=AGY marker, the version/head status line
+    and the exact binding line, and the shared classifier must agree.
+    """
+    if type(raw) is not bytes or len(raw) > _AGY_REVIEW_MAX_OUTPUT:
+        _refuse('REVIEW_NOT_POSTED', reason='OUTPUT_UNREADABLE')
+    try:
+        obj = json.loads(raw.decode('utf-8'), object_pairs_hook=_unique_json_object)
+    except (UnicodeError, ValueError, TypeError, RecursionError):
+        _refuse('REVIEW_NOT_POSTED', reason='OUTPUT_UNREADABLE')
+    if (type(obj) is not dict or type(obj.get('status')) is not str or
+            type(obj.get('conversation_id')) is not str or
+            _AGY_CONVERSATION.fullmatch(obj['conversation_id']) is None):
+        _refuse('REVIEW_NOT_POSTED', reason='THREAD_ID_INVALID')
+    if obj['status'] != 'SUCCESS':
+        _refuse('REVIEW_NOT_POSTED', reason='NO_FINAL_MESSAGE')
+    response = obj.get('response')
+    if type(response) is not str or not response.strip():
+        _refuse('REVIEW_NOT_POSTED', reason='NO_FINAL_MESSAGE')
+    if len(response.encode('utf-8')) > _CODEX_REVIEW_MAX_OUTPUT:
+        _refuse('REVIEW_NOT_POSTED', reason='OUTPUT_UNREADABLE')
+    try:
+        verdict = json.loads(response.strip(), object_pairs_hook=_unique_json_object)
+    except (ValueError, TypeError, RecursionError):
+        _refuse('REVIEW_NOT_POSTED', reason='VERDICT_NOT_JSON')
+    binding = task.get('task_binding')
+    if type(binding) is not dict:
+        _refuse('REVIEW_PROMPT_BINDING_MISSING')
+    task_id = task.get('task_id')
+    run_id = task.get('run_id')
+    contract_digest = binding.get('contract_digest')
+    expected = {'task_id', 'run_id', 'head', 'verdict', 'review'}
+    if type(verdict) is not dict or set(verdict) - {'contract_digest'} != expected:
+        _refuse('REVIEW_NOT_POSTED', reason='VERDICT_WRONG_FIELDS')
+    mismatched = [key for key, value in
+                  (('task_id', task_id), ('run_id', run_id), ('head', head))
+                  if verdict[key] != value]
+    if mismatched:
+        _refuse('REVIEW_NOT_POSTED',
+                'Reviewer dispatch refused: JSON binding keys differ: ' + ', '.join(mismatched),
+                reason='VERDICT_BINDING_MISMATCH', mismatch_keys=mismatched)
+    status = verdict.get('verdict')
+    if type(status) is not str or status not in ('PASS', 'FIX', 'FAIL', 'BLOCKED'):
+        _refuse('REVIEW_NOT_POSTED', reason='VERDICT_STATUS_INVALID')
+    review = verdict.get('review')
+    if type(review) is not str or len(review.encode('utf-8', 'replace')) > 65536:
+        _refuse('REVIEW_NOT_POSTED', reason='VERDICT_TEXT_INVALID')
+    lines = [line for line in review.splitlines() if line.strip()]
+    displayed_status = 'PASS' if status == 'PASS' else 'FAIL'
+    marker_status = 'PASS' if status == 'PASS' else 'FIX'
+    expected_marker = (f'<!-- activity: type=review_verdict actor=AGY target=PM '
+                       f'status={marker_status} -->')
+    expected_status = (f'Verdict: {displayed_status} | Version: v{version} | HEAD: {head}')
+    binding_line = (f'LLMTOOL-REVIEW-BINDING v1 task={task_id} run={run_id} '
+                    f'contract={contract_digest} head={head}')
+    if len(lines) < 3 or lines[0] != expected_marker or lines[1] != expected_status:
+        _refuse('REVIEW_NOT_POSTED', reason='REVIEW_HEADER_MISMATCH')
+    if binding_line not in lines:
+        _refuse('REVIEW_NOT_POSTED', reason='REVIEW_BINDING_LINE_MISSING')
+    from . import review_result
+    classified = review_result._comment_verdict(
+        {'id': 0, 'body': review,
+         'created_at': '2000-01-01T00:00:00Z',
+         'updated_at': '2000-01-01T00:00:00Z'},
+        head=head, version=version, task=task)
+    expected_outcome = 'REVIEW_PASS' if status == 'PASS' else 'REVIEW_FAIL'
+    if classified is None or classified[2] != expected_outcome:
+        _refuse('REVIEW_NOT_POSTED', reason='REVIEW_CLASSIFIER_REJECTED')
+    return {'thread_id': obj['conversation_id'], 'review_text': review,
+            'verdict': status, 'usage': _agy_usage(obj.get('usage'))}
+
+
+def _dispatch_agy(*, reviewer_root, prompt, task, head, version=1,
+                  model=None, effort=None, parser=_parse_agy_review,
+                  usage_out=None):
+    """Run one read-only AGY Reviewer in its own D6 and parse its verdict.
+
+    The run is sandboxed and in plan mode, so writes need an approval a print
+    run cannot give. The provider log stays in a private temporary directory,
+    proves the requested model, and is removed before returning.
+    """
+    model = _review_model('agy-reviewer', model)
+    try:
+        timeout = developer_routes.role_timeout('agy-reviewer')
+    except developer_routes.RouteError:
+        _refuse('ROUTE_CONFIG_UNAVAILABLE')
+    executable = shutil.which('agy')
+    if executable is None:
+        _refuse('REVIEWER_RUNTIME_UNAVAILABLE')
+    if (type(prompt) is not str or not prompt or
+            len(prompt.encode('utf-8')) > _AGY_REVIEW_MAX_PROMPT):
+        _refuse('REVIEWER_PROMPT_TOO_LARGE')
+    workdir = tempfile.mkdtemp(prefix='llmtool-agy-reviewer-')
+    try:
+        log_path = Path(workdir) / 'agy.log'
+        try:
+            env = {'PATH': os.pathsep.join((str(Path(executable).parent),
+                                            '/usr/bin', '/bin')),
+                   'HOME': os.path.expanduser('~'), 'LC_ALL': 'C',
+                   'NO_COLOR': '1', 'TMPDIR': workdir}
+            # The AGY Reviewer never posts or fetches: no gh credential helper
+            # and no GitHub/SSH credential variables reach this provider.
+            result = subprocess.run(
+                _agy_review_argv(executable, prompt=prompt, model=model,
+                                 effort=effort or _AGY_REVIEW_EFFORT,
+                                 log_path=log_path),
+                cwd=str(reviewer_root), stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                check=False, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _refuse('REVIEWER_TIMEOUT')
+        except OSError:
+            _refuse('REVIEWER_RUNTIME_UNAVAILABLE')
+        if result.returncode:
+            # Fixed words only; stderr text never reaches the message.
+            _refuse('REVIEW_NOT_POSTED',
+                    'AGY Reviewer exited unsuccessfully; details omitted')
+        try:
+            with open(log_path, 'rb') as handle:
+                log_text = handle.read(_AGY_REVIEW_MAX_LOG).decode('utf-8', 'replace')
+        except OSError:
+            log_text = ''
+        try:
+            verified = developer_routes.AgyRoute({'executable': executable}).verified_model(
+                log_text, model)
+        except Exception:
+            verified = None
+        if verified is None:
+            _refuse('REVIEWER_MODEL_UNVERIFIED')
+        if verified != model:
+            _refuse('REVIEWER_MODEL_MISMATCH')
+        parsed = parser(result.stdout, task=task, head=head, version=version)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    if usage_out is not None:
+        usage = parsed.get('usage')
+        if usage is not None:
+            usage_out['usage'] = usage
+        else:
+            usage_out['usage_unknown'] = {'reason': 'USAGE_ABSENT'}
     return parsed
 
 
@@ -1861,7 +2085,8 @@ def _refuse_version_used(claims, *, executor_task, pr_number, version, kind, mes
 
 def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                     create_d6=None, dispatch_session=None, bind_session=None,
-                    prompt_renderer=None, codex_runner=None, reviewer=None,
+                    prompt_renderer=None, codex_runner=None, agy_runner=None,
+                    reviewer=None,
                     comment_lister=None, comment_poster=None, post_clock=None,
                     kind='formal', refusal_rerun=False):
     """Claim once, create a read-only Reviewer D6 and bind its dispatched session.
@@ -1959,6 +2184,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             (reviewer_role['source'] == 'builtin' or config_dir is None)):
         _refuse('REVIEWER_ACCOUNT_UNCONFIGURED')
     claude_model = None
+    agy_model = None
+    agy_effort = None
     if reviewer_key == 'codex-reviewer':
         if reviewer_role.get('provider') not in (None, 'codex'):
             _refuse('REVIEWER_CONFIG_INVALID')
@@ -1972,6 +2199,14 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         except LLMToolError:
             _refuse('REVIEWER_CONFIG_INVALID')
         account_mode = ('ROLES' if reviewer_role['source'] == 'roles' else 'CODEX_CLI')
+    elif reviewer_key == 'agy-reviewer':
+        # #1019: the AGY route runs its own CLI under the roles registry model.
+        codex_model, codex_effort = None, None
+        if reviewer_role.get('provider') not in (None, 'agy'):
+            _refuse('REVIEWER_CONFIG_INVALID')
+        agy_model = _review_model('agy-reviewer', reviewer_role.get('model'))
+        agy_effort = reviewer_role.get('effort') or _AGY_REVIEW_EFFORT
+        account_mode = ('ROLES' if reviewer_role['source'] == 'roles' else 'EXPLICIT')
     else:
         codex_model, codex_effort = None, None
         claude_model = _review_model('claude-reviewer', reviewer_role.get('model'))
@@ -2054,6 +2289,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         home = env.get('HOME') or os.path.expanduser('~')
         env = github_identity.ai_github_env(env, home)
         codex_usage = {}
+        structured_result = None
         if reviewer_key == 'codex-reviewer':
             reviewer = task_completion.read_d6_registration(
                 reviewer_task, executor.common_dir,
@@ -2076,19 +2312,43 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             if type(session_id) is not str or not session_id:
                 _refuse('REVIEW_NOT_POSTED')
             bind(task_id=reviewer_task, session_id=session_id, repo_root=repo_root)
+            structured_result = codex_result
+        elif reviewer_key == 'agy-reviewer':
+            # #1019: the read-only AGY Reviewer runs in its own D6 and returns
+            # the same structured verdict shape as the Codex route.
+            reviewer = task_completion.read_d6_registration(
+                reviewer_task, executor.common_dir,
+                allowed_states=task_completion._D6_EVIDENCE_STATES)
+            if agy_runner is None:
+                agy_result = _dispatch_agy(
+                    reviewer_root=reviewer.root, prompt=prompt,
+                    task=task, head=head, version=version,
+                    model=agy_model, effort=agy_effort, usage_out=codex_usage)
+            else:
+                agy_result = agy_runner(
+                    reviewer_root=reviewer.root, prompt=prompt,
+                    task=task, head=head, version=version,
+                    model=agy_model, effort=agy_effort)
+            if type(agy_result) is not dict:
+                _refuse('REVIEW_NOT_POSTED')
+            session_id = agy_result.get('thread_id')
+            if type(session_id) is not str or not session_id:
+                _refuse('REVIEW_NOT_POSTED')
+            bind(task_id=reviewer_task, session_id=session_id, repo_root=repo_root)
+            structured_result = agy_result
         else:
             session_id = send(task_id=reviewer_task, prompt=prompt,
                               repo_root=repo_root, env=env)
             bind(task_id=reviewer_task, session_id=session_id, repo_root=repo_root)
-        result_state = 'COMPLETED' if reviewer_key == 'codex-reviewer' else 'DISPATCHED'
+        result_state = 'COMPLETED' if structured_result is not None else 'DISPATCHED'
         dispatched = dict(claim, state=result_state, reviewer_task=reviewer_task,
                           native_session_id=session_id, updated_at=_now())
         if result_state == 'COMPLETED':
             binding = task.get('task_binding')
             try:
                 from .task_submission_cli import _screen_text
-                review_text = _screen_text(codex_result['review_text'], 65536)
-                verdict = codex_result['verdict']
+                review_text = _screen_text(structured_result['review_text'], 65536)
+                verdict = structured_result['verdict']
             except LLMToolError:
                 # The claim schema has no separate withheld state. BLOCKED with
                 # empty text is its durable, non-PASS withheld representation.
@@ -2104,13 +2364,15 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             elif 'usage_unknown' in codex_usage:
                 dispatched['usage_unknown'] = codex_usage['usage_unknown']
             else:
-                dispatched['usage_unknown'] = {'reason': 'STREAM_USAGE_ABSENT'}
+                dispatched['usage_unknown'] = {
+                    'reason': ('USAGE_ABSENT' if reviewer_key == 'agy-reviewer'
+                               else 'STREAM_USAGE_ABSENT')}
         updated_claims = [dispatched if item is claim else item for item in claims + [claim]]
         store.compare_and_update(task_id, expected={'review_dispatch_claim': claims + [claim]},
                                  review_dispatch_claim=updated_claims)
-        if reviewer_key != 'codex-reviewer':
+        if structured_result is None:
             return dispatched
-        output = _review_return(dispatched, codex_result)
+        output = _review_return(dispatched, structured_result)
     except Exception as exc:
         unknown = dict(claim, state='UNKNOWN', updated_at=_now())
         exc_session_id = getattr(exc, 'native_session_id', None)

@@ -29,7 +29,9 @@ POLICY_KEYS = ('repair_max', 'parent_debug_max', 'group_debug_max', 'child_max',
                'waiting_notify_after_hours')
 # #289: the optional formal Reviewer preference order. Every entry is one known
 # formal Reviewer key, the list is non-empty, and no key repeats.
-FORMAL_REVIEWER_KEYS = ('claude-reviewer', 'codex-reviewer')
+# #1019: agy-reviewer is a known key, so a later Owner decision may order it;
+# this file's policy.json keeps its current order unchanged.
+FORMAL_REVIEWER_KEYS = ('claude-reviewer', 'codex-reviewer', 'agy-reviewer')
 # #1815 T3: optional limits as key -> (min, max); an absent key keeps its caller default.
 OPTIONAL_POLICY_LIMITS = {'timeout_continuation_max': (0, 3)}
 # #2281 L0b: optional AI-set limits from the #2281 limit table, each a positive

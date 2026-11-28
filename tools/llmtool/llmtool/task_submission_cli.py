@@ -1087,7 +1087,7 @@ def add_task_submission_parsers(actions):
                                  help='public GitHub pull request number')
     review_dispatch.add_argument('--version', type=int, default=1,
                                  help='review verdict version (1-9999; default 1)')
-    review_dispatch.add_argument('--reviewer', choices=('claude-reviewer', 'codex-reviewer'),
+    review_dispatch.add_argument('--reviewer', choices=('claude-reviewer', 'codex-reviewer', 'agy-reviewer'),
                                  help='formal Reviewer (default follows the current mapping)')
     review_dispatch.add_argument('--pm-session',
                                  help=('caller PM session (native UUID or pm- ID); must own '
@@ -2232,6 +2232,7 @@ def run_task_review_prompt(args, *, store=None):
     reviewer_actor = {
         'codex-reviewer': 'Codex',
         'claude-reviewer': 'Claude',
+        'agy-reviewer': 'AGY',
     }.get(reviewer_identity)
     if reviewer_actor is None:
         refuse('REVIEW_PROMPT_REVIEWER_IDENTITY_INVALID')
@@ -2245,6 +2246,15 @@ def run_task_review_prompt(args, *, store=None):
     if reviewer_actor == 'Codex':
         lines.extend((
             'Do not run tests here: this session is read-only and has no writable temporary directory.',
+            'Not running a test is never by itself a reason for FAIL, even when the Task contract names a test run.',
+            'Do not post to GitHub; llmtool posts the review text you return.',
+            'After returning the result, end this session and leave no background process.',
+        ))
+    elif reviewer_actor == 'AGY':
+        # #1019: the AGY print run is sandboxed and in plan mode, so it can run
+        # read-only git inspection but cannot write files or a temp directory.
+        lines.extend((
+            'Do not run tests here: this session is read-only and may not write files or a temporary directory.',
             'Not running a test is never by itself a reason for FAIL, even when the Task contract names a test run.',
             'Do not post to GitHub; llmtool posts the review text you return.',
             'After returning the result, end this session and leave no background process.',
@@ -2265,7 +2275,7 @@ def run_task_review_prompt(args, *, store=None):
     lines.extend(
         f'{index}. {json.dumps(item, ensure_ascii=True)}'
         for index, item in enumerate(pm_assignment['acceptance'], 1))
-    if reviewer_actor == 'Codex':
+    if reviewer_actor in ('Codex', 'AGY'):
         lines.extend((
             '<<< END PM TASK CONTRACT DATA >>>',
             *original_lines,
@@ -2409,7 +2419,8 @@ def _post_caller_verdict_under_lock(*, fd, directory, name, task, task_id, claim
         return output, False
     if conflict:
         raise failed('VERDICT_POST_CONFLICT')
-    if not review_dispatch._policy(task, 'codex-reviewer').allowed:
+    reviewer_key = review_dispatch._claim_reviewer_key(claim)
+    if reviewer_key is None or not review_dispatch._policy(task, reviewer_key).allowed:
         raise failed('VERDICT_POST_NOT_ALLOWED')
     try:
         current = review_dispatch._read_receipt(directory, name)

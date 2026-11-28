@@ -82,7 +82,7 @@ _GH_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
 _VERDICT_ACTIVITY = re.compile(r'<!-- activity: (?:[^>]* )?type=review_verdict(?: [^>]*)? -->')
 # The one standard formal verdict format: .claude/skills/ai-team-delivery/formal-verdict.md.
 _VERDICT_MARKER = re.compile(
-    r'<!-- activity: type=review_verdict actor=(Claude|Codex) target=PM status=(PASS|FIX|FAIL) -->')
+    r'<!-- activity: type=review_verdict actor=(Claude|Codex|AGY) target=PM status=(PASS|FIX|FAIL) -->')
 _VERDICT_STATUS = re.compile(
     r'Verdict: (PASS|FIX|FAIL) \| Version: v[1-9][0-9]{0,3} \| HEAD: ([0-9a-f]{40})')
 _FORMAL_ACCEPT = 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT'
@@ -1149,6 +1149,8 @@ def _review_family_compatible(developer, reviewer_identity):
     reviewer_family = {
         'claude-reviewer': 'claude',
         'codex-reviewer': 'codex',
+        # #1019: the AGY Reviewer route authors Claude-family models.
+        'agy-reviewer': 'claude',
     }.get(reviewer_identity)
     if developer_family is None or reviewer_family is None:
         return False
@@ -1336,9 +1338,16 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                     not _review_family_compatible(
                         pass_task.get('developer'), reviewer.trusted_agent_id)):
                 unsupported_family_comment = True
-        if standard and marker.group(1) == 'Codex' and marker.group(2) == 'PASS':
-            accepted_codex = False
-            if reviewer.trusted_agent_id == 'codex-reviewer':
+        # #1019: Codex and the AGY Reviewer both return a structured, fully
+        # binding PASS. Each is accepted only from its own Reviewer D6 and its
+        # one matching COMPLETED claim; any other PASS stays advisory.
+        structured_actor = (marker.group(1) if standard and
+                            marker.group(1) in ('Codex', 'AGY') else None)
+        accepted_structured = False
+        if structured_actor is not None and marker.group(2) == 'PASS':
+            expected_reviewer = ('codex-reviewer' if structured_actor == 'Codex'
+                                 else 'agy-reviewer')
+            if reviewer.trusted_agent_id == expected_reviewer:
                 try:
                     version_match = re.fullmatch(
                         r'Verdict: PASS \| Version: v([1-9][0-9]{0,3}) '
@@ -1379,7 +1388,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                     claim_body = (_canonical_verdict_body(
                                       matching_claims[0]['review_result'].get('review_text'))
                                   if len(matching_claims) == 1 else None)
-                    accepted_codex = (
+                    accepted_structured = (
                         type(codex_task_record) is dict and
                         codex_task_record.get('task_id') == task_id and
                         codex_task_record.get('run_id') == run_id and
@@ -1390,9 +1399,9 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                         len(matching_claims) == 1 and bool(claim_body) and
                         claim_body == comment_body)
                 except (LLMToolError, KeyError, TypeError, ValueError, IndexError):
-                    accepted_codex = False
-            if not accepted_codex:
-                # Unbound or otherwise unverified Codex PASS stays advisory.
+                    accepted_structured = False
+            if not accepted_structured:
+                # Unbound or otherwise unverified structured PASS stays advisory.
                 # When the only completed claim at the head is security-kind or
                 # unkinded at version 91 or above, no formal claim matches, so
                 # formal review remains unadmitted and completion refuses
@@ -1415,8 +1424,8 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
         accepted = (standard and (
             (marker.group(1) == 'Claude' and marker.group(2) == 'PASS' and
              claude_family_compatible) or
-            (marker.group(1) == 'Codex' and marker.group(2) == 'PASS' and
-             accepted_codex)))
+            (structured_actor is not None and marker.group(2) == 'PASS' and
+             accepted_structured)))
         if type(comment.get('id')) is not int:
             _stop('REVIEW_EVIDENCE_INVALID')
         created = _review_time(comment, 'created_at')
