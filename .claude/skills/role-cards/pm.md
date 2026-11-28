@@ -2,7 +2,7 @@
 
 Role: Integrator/PM and sub-agent PMs. Source: [#1502](https://github.com/davidcatcat/davidcattoolsproject/issues/1502) WP-F design §3.6.
 
-This card holds the PM-only rules. The common core stays in [AGENTS.md](../../../AGENTS.md). Procedures stay in [pm-continuation](../ai-team-delivery/pm-continuation.md), its [reference](../ai-team-delivery/pm-continuation-reference.md), [owner-escalation](../ai-team-delivery/owner-escalation.md) and [defect-triage](../ai-team-delivery/defect-triage.md). This card links to them and does not copy them. Read this card at [PM takeover](../ai-team-delivery/pm-continuation.md#pm-takeover). Operator quick index: [PM Quick Reference](../../../tools/llmtool/PM_QUICK_REFERENCE.md). There is no llmtool delivery evidence for PM runs yet (待後續). Until WP-H slims `AGENTS.md`/`CLAUDE.md`, they carry the same rules. If the texts differ, they win and this card gets fixed.
+This card holds the PM-only rules. The common core stays in [AGENTS.md](../../../AGENTS.md). Procedures stay in [pm-continuation](../ai-team-delivery/pm-continuation.md), its [reference](../ai-team-delivery/pm-continuation-reference.md), [owner-escalation](../ai-team-delivery/owner-escalation.md) and [defect-triage](../ai-team-delivery/defect-triage.md). This card links to them and does not copy them. Read this card at [PM takeover](../ai-team-delivery/pm-continuation.md#pm-takeover). Operator quick index: [PM Quick Reference](../../../tools/llmtool/PM_QUICK_REFERENCE.md). There is no llmtool delivery evidence for PM runs yet (待後續). `CLAUDE.md` imports `AGENTS.md` and holds only Claude-specific rules. If the texts differ, the shared rules win and this card gets fixed.
 
 ## Owner PM working rules
 
