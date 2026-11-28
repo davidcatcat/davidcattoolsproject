@@ -21,7 +21,8 @@ from . import github_identity, review_result, sensitive_paths, task_completion
 from . import lineage_counts, mac_full_due, mac_full_suite, repair_policy, review_transcript
 from . import remote_test, start_failure, task_submission_cli
 from . import guidance_refresh
-from .test_profile import TestProfile, default_profile
+from . import test_profile
+from .test_profile import TestProfile
 from . import dispute_arbiter
 from .ai_github_exec import AiIdentityError, verified_ai_env
 from .errors import LLMToolError
@@ -3961,12 +3962,15 @@ _PROFILE_UNSET = object()
 def _admission_test_profile(profile=_PROFILE_UNSET):
     """Return the validated TestProfile for admission, or None.
 
-    An omitted profile resolves the project default. Any failure to resolve or
-    validate it returns None, so the caller fails closed with
+    An omitted profile resolves the live project provider
+    ``test_profile.default_profile``, so a provider substitution is honoured.
+    A missing provider, or any failure to resolve or validate its result,
+    returns None, so the caller fails closed with
     PR_CHANGED_TESTS_UNAVAILABLE instead of using hard-coded paths.
     """
     try:
-        resolved = default_profile() if profile is _PROFILE_UNSET else profile
+        resolved = (test_profile.default_profile()
+                    if profile is _PROFILE_UNSET else profile)
     except Exception:
         return None
     if type(resolved) is not TestProfile:

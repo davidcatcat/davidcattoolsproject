@@ -2,18 +2,20 @@
 
 The admission-side derivation (``task_advance._pr_changed_test_modules``) now
 reads the ``unittest`` entries of a project ``TestProfile`` and applies the
-existing lowercase module-stem constraint on top.  The validation side
-(``remote_test_part1._task_path_modules`` and ``_admitted_modules``) still
-derives declared stems from hard-coded tool test paths at the base commit, so
-validation and admission agreement on the required coverage set is pending for
-the non-default case (boundary note section 1).
+existing lowercase module-stem constraint on top.  With no explicit profile it
+resolves the live ``test_profile.default_profile`` provider, so a provider
+substitution is honoured rather than a copy imported into ``task_advance``.
+The validation side (``remote_test_part1._task_path_modules`` and
+``_admitted_modules``) still derives declared stems from hard-coded tool test
+paths at the base commit, so validation and admission agreement on the required
+coverage set is pending for the non-default case (boundary note section 1).
 """
 
 import re
 import unittest
 from unittest.mock import patch
 
-from llmtool import task_advance
+from llmtool import task_advance, test_profile
 from llmtool.test_profile import TestProfile
 
 HEAD = 'a' * 40
@@ -102,24 +104,54 @@ class ProfileFailureTests(unittest.TestCase):
             PR, HEAD, github_get(*self.ENTRIES), snapshot(changed_files=1),
             profile=profile)
 
+    def _default_call(self):
+        return task_advance._pr_changed_test_modules(
+            PR, HEAD, github_get(*self.ENTRIES), snapshot(changed_files=1))
+
     def test_missing_profile_is_unavailable(self):
         self.assertEqual(self._call(None), (None, UNAVAILABLE))
 
     def test_invalid_profile_is_unavailable(self):
         self.assertEqual(self._call(object()), (None, UNAVAILABLE))
 
-    def test_raising_default_profile_is_unavailable(self):
-        with patch.object(task_advance, 'default_profile',
-                          side_effect=RuntimeError('profile unavailable')):
-            modules, code = task_advance._pr_changed_test_modules(
-                PR, HEAD, github_get(*self.ENTRIES), snapshot(changed_files=1))
-        self.assertEqual(modules, None)
-        self.assertEqual(code, UNAVAILABLE)
+    def test_missing_default_provider_is_unavailable(self):
+        with patch.object(test_profile, 'default_profile'):
+            del test_profile.default_profile
+            self.assertEqual(self._default_call(), (None, UNAVAILABLE))
 
-    def test_default_profile_returning_none_is_unavailable(self):
-        with patch.object(task_advance, 'default_profile', return_value=None):
+    def test_raising_default_provider_is_unavailable(self):
+        with patch.object(test_profile, 'default_profile',
+                          side_effect=RuntimeError('profile unavailable')):
+            self.assertEqual(self._default_call(), (None, UNAVAILABLE))
+
+    def test_default_provider_returning_none_is_unavailable(self):
+        with patch.object(test_profile, 'default_profile', return_value=None):
+            self.assertEqual(self._default_call(), (None, UNAVAILABLE))
+
+
+class LiveProviderProfileTests(unittest.TestCase):
+    """The provider substituted at ``test_profile`` is the one admission reads."""
+
+    PROFILE = TestProfile((
+        (re.compile(r'provider/tests/test_[a-z0-9_]+_2793\.py\Z'), 'unittest'),
+    ))
+
+    def test_provider_substitution_is_honoured(self):
+        entries = (
+            ('provider/tests/test_alpha_2793.py', 'added'),
+            ('tools/llmtool/tests/test_default_2793.py', 'added'),
+        )
+        with patch.object(test_profile, 'default_profile', return_value=self.PROFILE):
             modules, code = task_advance._pr_changed_test_modules(
-                PR, HEAD, github_get(*self.ENTRIES), snapshot(changed_files=1))
+                PR, HEAD, github_get(*entries), snapshot(changed_files=len(entries)))
+        self.assertEqual(code, None)
+        self.assertEqual(modules, ('test_alpha_2793',))
+
+    def test_provider_returning_an_invalid_profile_is_unavailable(self):
+        with patch.object(test_profile, 'default_profile', return_value=object()):
+            modules, code = task_advance._pr_changed_test_modules(
+                PR, HEAD, github_get(('provider/tests/test_alpha_2793.py', 'added')),
+                snapshot(changed_files=1))
         self.assertEqual(modules, None)
         self.assertEqual(code, UNAVAILABLE)
 
