@@ -354,6 +354,25 @@ class NonDefaultDirectoryExecutionTests(unittest.TestCase):
                 self._run_real_worktree(root, [admitted], profile)
         self.assertEqual(caught.exception.completion_code, 'TEST_PATH_INVALID')
 
+    def test_start_dir_symlink_cycle_with_init_is_refused_for_both_kinds(self):
+        for kind in ('unittest', 'script'):
+            with self.subTest(kind=kind):
+                profile = test_profile.TestProfile((
+                    (re.compile(r'custom/test_[A-Za-z0-9_]+\.py\Z'), kind),
+                ))
+                admitted = 'custom/test_empty.py'
+                with tempfile.TemporaryDirectory() as root:
+                    Path(root, 'custom').mkdir(parents=True)
+                    Path(root, admitted).write_text('', encoding='utf-8')
+                    Path(root, 'custom', '__init__.py').write_text(
+                        self.PASS_BODY, encoding='utf-8')
+                    Path(root, 'custom', 'link').symlink_to(
+                        Path(root, 'custom'))
+                    with self.assertRaises(LLMToolError) as caught:
+                        self._run_real_worktree(root, [admitted], profile)
+                self.assertEqual(
+                    caught.exception.completion_code, 'TEST_PATH_INVALID')
+
     def test_non_identifier_filename_is_refused_for_both_kinds(self):
         for kind in ('unittest', 'script'):
             with self.subTest(kind=kind):

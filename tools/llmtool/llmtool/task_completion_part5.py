@@ -309,8 +309,11 @@ def _resolve_test_target(root, path, kind):
             for d in dirnames:
                 if d == '.git':
                     continue
+                sub_path = os.path.join(dirpath, d)
+                if os.path.isfile(os.path.join(sub_path, '__init__.py')):
+                    _stop('TEST_PATH_INVALID')
                 try:
-                    sub_stat = os.stat(os.path.join(dirpath, d))
+                    sub_stat = os.stat(sub_path)
                 except OSError:
                     continue
                 if (sub_stat.st_dev, sub_stat.st_ino) not in seen_dirs:
