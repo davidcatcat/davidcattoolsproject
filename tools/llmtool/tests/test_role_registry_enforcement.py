@@ -1,12 +1,12 @@
 """#1502 WP-E invariant R1: one shared registry check for review/debug models.
 
-No code path may launch codex-reviewer, claude-reviewer, codex-debug or
-claude-debug with a model outside that role's model family, whatever the
-CLI, environment or user config says, with any provider prefix or case.
-Owner #2302 P2: any model of the role's own family is admitted; the role's
-allowed_models is not a membership list. Consumer launch tests live next to
-each consumer; this module covers the shared check and the resolver. Nothing
-here opens a network connection.
+No code path may launch codex-reviewer, claude-reviewer, agy-reviewer,
+codex-debug or claude-debug with a model outside that role's model family,
+whatever the CLI, environment or user config says, with any provider prefix
+or case. Owner #2302 P2: any model of the role's own family is admitted; the
+role's allowed_models is not a membership list. Consumer launch tests live
+next to each consumer; this module covers the shared check and the resolver.
+Nothing here opens a network connection.
 """
 
 import copy
@@ -24,7 +24,8 @@ from llmtool.developer_routes import (
 from llmtool.errors import LLMToolError
 
 CODEX_ROLES = ('codex-reviewer', 'codex-debug')
-CLAUDE_ROLES = ('claude-reviewer', 'claude-debug')
+# #1019: agy-reviewer runs a Claude-family model.
+CLAUDE_ROLES = ('claude-reviewer', 'claude-debug', 'agy-reviewer')
 
 
 def listed(config, role):
@@ -51,7 +52,7 @@ class SharedCheckTests(unittest.TestCase):
             check_registry_role_model(config, role, model)
         self.assertEqual(caught.exception.code, 'ROLE_MODEL_NOT_ALLOWED')
 
-    def test_registry_governs_exactly_the_four_review_and_debug_roles(self):
+    def test_registry_governs_exactly_the_review_and_debug_roles(self):
         self.assertEqual(REGISTRY_ROLES, frozenset(CODEX_ROLES + CLAUDE_ROLES))
         self.assertEqual(set(self.config['roles']), set(REGISTRY_ROLES))
 

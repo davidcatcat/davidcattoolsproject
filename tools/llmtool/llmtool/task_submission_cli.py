@@ -2243,7 +2243,16 @@ def run_task_review_prompt(args, *, store=None):
         f'Scope: git diff {base_sha}...{expected_head}',
         'Review this scope only. Read-only review; do not edit files, run mutating commands, commit, push, or publish.',
     ]
-    if reviewer_actor in ('Codex', 'AGY'):
+    if reviewer_actor == 'Codex':
+        lines.extend((
+            'Do not run tests here: this session is read-only and has no writable temporary directory.',
+            'Not running a test is never by itself a reason for FAIL, even when the Task contract names a test run.',
+            'Do not post to GitHub; llmtool posts the review text you return.',
+            'After returning the result, end this session and leave no background process.',
+        ))
+    elif reviewer_actor == 'AGY':
+        # #1019: the AGY print run is sandboxed and in plan mode, so it can run
+        # read-only git inspection but cannot write files or a temp directory.
         lines.extend((
             'Do not run tests here: this session is read-only and may not write files or a temporary directory.',
             'Not running a test is never by itself a reason for FAIL, even when the Task contract names a test run.',
