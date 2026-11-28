@@ -161,7 +161,10 @@ def _all_jobs(github_get, run_id):
         if reported is not None:
             if type(reported) is not int or reported < 0:
                 raise StateError('jobs')
-            total = reported
+            if total is None:
+                total = reported
+            elif reported != total:
+                raise StateError('jobs')
         jobs.extend(page_jobs)
         if total is not None:
             if len(jobs) == total:
