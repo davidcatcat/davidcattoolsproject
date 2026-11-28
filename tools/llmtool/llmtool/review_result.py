@@ -457,7 +457,19 @@ def _record_claude_claim_usage(store, task_id, *, executor_task, pr_number, vers
         if patch is None:
             if not reviewer_session_done:
                 return
-            patch = {'usage_unknown': {'reason': 'CAUSE_NOT_ESTABLISHED'}}
+            reason = 'CAUSE_NOT_ESTABLISHED'
+            session_id = claim.get('native_session_id')
+            reviewer_task = claim.get('reviewer_task')
+            if type(session_id) is str and type(reviewer_task) is str:
+                try:
+                    usage, transcript_reason = review_transcript.transcript_usage(
+                        session_id, config_dir, reviewer_task)
+                    if (usage is None and
+                            transcript_reason in ('TRANSCRIPT_UNAVAILABLE', 'USAGE_ABSENT')):
+                        reason = transcript_reason
+                except Exception:
+                    pass
+            patch = {'usage_unknown': {'reason': reason}}
         stored = task.get('review_dispatch_claim')
         claims = [stored] if type(stored) is dict else stored
         updated = [dict(claim, **patch) if item is claim else item for item in claims]
