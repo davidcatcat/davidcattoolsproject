@@ -137,6 +137,23 @@ This note supersedes the earlier statements that PR #2837 is open and
 that the row is outstanding on it. The combined remote evidence and PM
 verification on a pinned main are still pending.
 
+### Dated follow-up note (2026-11-29, update)
+
+Update to the "Real profile wiring and non-default regression" row:
+this note records only the two merged A13.0 slices below and nothing
+else, each as supplied (no test run, runtime validation, or exit
+closure is claimed; closure stays pending on R1 and R2):
+- [PR #2955](https://github.com/davidcatcat/davidcattoolsproject/pull/2955),
+  merged as `a2cf0ea3`, titled "Read scope advice searches the
+  TestProfile test locations": the module
+  `read_scope_advice.py`; the regression test module
+  `test_a13_read_scope_profile.py`.
+- [PR #2956](https://github.com/davidcatcat/davidcattoolsproject/pull/2956),
+  merged as `b26a297e`, titled "Executor test evidence paths come from
+  the TestProfile": the module
+  `executor_test_evidence.py`; the regression test module
+  `test_executor_test_evidence.py`.
+
 ## Status
 
 Closure is **pending**. Blocked work stays blocked: nothing here waives a
