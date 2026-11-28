@@ -654,12 +654,31 @@ class AgyRouteWiringTests(unittest.TestCase):
     def test_agy_blocked_reply_without_changes_is_kept_for_the_pm(self):
         reply = ('BLOCKED\n\nFinding F2 needs files outside read_paths:\n'
                  '- tools/llmtool/llmtool/developer_routes/agy.py\n')
-        _status, task, _events = self._run_agy_real_store(
+        status, task, events = self._run_agy_real_store(
             diff_bytes=b'', changed_paths=[], summary=reply)
         developer = task['developer']
+        self.assertEqual(status, 1)
+        self.assertEqual(developer['state'], 'BLOCKED')
+        self.assertEqual(developer['error_code'], 'AGY_BLOCKED')
+        self.assertIsNone(developer['artifact'])
+        self.assertIsNone(developer['artifact_sha256'])
+        self.assertEqual(events, [])
         self.assertEqual(developer['reported'], {'summary': reply.strip()})
-        self.assertFalse(developer['artifact'])
         self.assertEqual(developer['execution']['stdout_sha256'], 'e' * 64)
+
+    def test_agy_casual_blocked_mention_with_empty_diff_stays_responded(self):
+        for reply in (
+            'No code changes needed; not BLOCKED.',
+            'Blocked out the helper plan; no changes needed.',
+        ):
+            with self.subTest(reply=reply):
+                status, task, events = self._run_agy_real_store(
+                    diff_bytes=b'', changed_paths=[], summary=reply)
+                self.assertEqual(status, 0)
+                self.assertEqual(task['developer']['state'], 'DEVELOPER_RESPONDED')
+                self.assertIsNone(task['developer']['error_code'])
+                self.assertEqual(task['developer']['reported'], {'summary': reply})
+                self.assertEqual(len(events), 1)
 
     def test_agy_partial_change_with_blocked_reply_reaches_the_pm_packet(self):
         reply = 'Fixed F1. BLOCKED on F2: needs review_result.py outside read_paths.'
