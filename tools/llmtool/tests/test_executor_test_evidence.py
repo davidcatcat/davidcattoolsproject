@@ -46,11 +46,23 @@ class ExpectedRemoteModulesTests(unittest.TestCase):
 
     def test_remote_paths_come_from_the_default_test_profile(self):
         # The declared paths match the default profile's unittest pattern but
-        # break the existing lowercase stem constraint, so they are refused.
-        paths = [TESTS + 'test_Upper.py', TESTS + 'test_toolongstem' + 'a' * 75 + '.py']
+        # break the stem constraint (lowercase, at most 80 characters after
+        # the test_ prefix), so they are refused.
+        paths = [TESTS + 'test_Upper.py', TESTS + 'test_toolongstem' + 'a' * 76 + '.py']
         remote, tui, unsupported = expected_remote_modules(paths, [])
         self.assertEqual((remote, tui), ((), ()))
         self.assertEqual(unsupported, tuple(sorted(paths)))
+
+    def test_default_profile_pins_the_stem_length_boundary(self):
+        # The 80-character limit applies to the stem after the test_ prefix:
+        # exactly 80 characters after the prefix are accepted, 81 are
+        # refused, for the default profile.
+        accepted = TESTS + 'test_b' + 'a' * 79 + '.py'
+        refused = TESTS + 'test_c' + 'a' * 80 + '.py'
+        remote, tui, unsupported = expected_remote_modules([accepted, refused], [])
+        self.assertEqual(remote, (accepted.rsplit('/', 1)[-1][:-3],))
+        self.assertEqual(tui, ())
+        self.assertEqual(unsupported, (refused,))
 
     def test_non_default_profile_changes_the_remote_set(self):
         profile = TestProfile((

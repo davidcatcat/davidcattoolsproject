@@ -1,9 +1,11 @@
 """#2119 WP-3 slice 1: expected remote test modules for a Task. Pure; not wired in.
 
 Design: docs/design/executor-step-tests-off-mac.md section 4.1. The remote set
-uses the same pattern as remote_test._task_path_modules; the TUI set uses the
-test-file patterns of task_advance. Anything that looks like a test but is not
-in the remote set is unsupported.
+is derived from the unittest entries of the default TestProfile: a declared
+path is remote when one of those patterns matches the whole path and the file
+stem is ``test_`` followed by 1 to 80 characters of ``[a-z0-9_]``. The TUI set
+uses the test-file patterns of task_advance. Anything that looks like a test
+but is not in the remote set is unsupported.
 """
 import hashlib
 import re
@@ -49,12 +51,16 @@ def _unittest_entries(profile):
 def _is_remote(path, unittest_entries):
     """True when the path is a remote test module.
 
-    The path's file stem must satisfy the existing lowercase stem
-    constraint and one of the profile's unittest patterns must match the
-    whole path.
+    One of the profile's unittest patterns must match the whole path and the
+    path's file stem must be ``test_`` followed by 1 to 80 characters of
+    ``[a-z0-9_]``; the 80 limit applies to the characters after the prefix,
+    not to the whole stem.
     """
     stem = path.rsplit('/', 1)[-1][:-3]
-    return (_LOWERCASE_STEM.fullmatch(stem) is not None and any(
+    if not stem.startswith('test_'):
+        return False
+    suffix = stem[len('test_'):]
+    return (_LOWERCASE_STEM.fullmatch(suffix) is not None and any(
         pattern.fullmatch(path) is not None
         for pattern, _kind in unittest_entries))
 
@@ -63,9 +69,10 @@ def expected_remote_modules(read_paths, write_paths):
     """Return (remote, tui, unsupported) as sorted tuples.
 
     The remote module paths come from the unittest entries of the default
-    TestProfile; the existing lowercase stem constraint applies on top of a
-    unittest pattern match. With the default profile the result is identical
-    to the hard-coded registry paths.
+    TestProfile; a path is remote when a unittest pattern matches the whole
+    path and the file stem is ``test_`` followed by 1 to 80 characters of
+    ``[a-z0-9_]``. With the default profile the result is identical to the
+    hard-coded registry paths.
 
     remote: module stems of declared remote test paths, TUI modules included.
     tui: the remote stems that are TUI test modules.
