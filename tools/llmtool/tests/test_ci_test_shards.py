@@ -265,6 +265,21 @@ class CiTestShardsTests(unittest.TestCase):
                 + ("1" + "0" * 400)
                 + "}}"
             ),
+            "duplicate_default_malformed_then_valid": (
+                '{"default_seconds": "bad", "default_seconds": 3, "modules": {}}'
+            ),
+            "duplicate_default_valid": (
+                '{"default_seconds": 3, "default_seconds": 5, "modules": {}}'
+            ),
+            "duplicate_modules_key": (
+                '{"default_seconds": 3, "modules": {}, "modules": {"test_cli.py": 1}}'
+            ),
+            "duplicate_module_weight_valid": (
+                '{"default_seconds": 3, "modules": {"test_cli.py": 5, "test_cli.py": 10}}'
+            ),
+            "duplicate_module_weight_malformed_then_valid": (
+                '{"default_seconds": 3, "modules": {"test_cli.py": -1, "test_cli.py": 10}}'
+            ),
             "malformed_json": "{not json",
         }
         cli_checked = {
@@ -274,6 +289,10 @@ class CiTestShardsTests(unittest.TestCase):
             "shape_modules_list",
             "default_huge_int",
             "module_huge_int",
+            "duplicate_default_malformed_then_valid",
+            "duplicate_default_valid",
+            "duplicate_modules_key",
+            "duplicate_module_weight_valid",
             "malformed_json",
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -303,6 +322,22 @@ class CiTestShardsTests(unittest.TestCase):
                             proc.stderr.strip(),
                             ci_test_shards.INVALID_TIMING_DIAGNOSTIC,
                         )
+
+    def test_duplicate_timing_keys_rejected_before_planning_shards(self):
+        payloads = {
+            "duplicate_top_level": '{"default_seconds": 3, "default_seconds": 5, "modules": {}}',
+            "duplicate_module": '{"default_seconds": 3, "modules": {"test_cli.py": 5, "test_cli.py": 10}}',
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, payload in payloads.items():
+                with self.subTest(case=name):
+                    timing_path = root / f"{name}.json"
+                    timing_path.write_text(payload, encoding="utf-8")
+                    with patch.object(ci_test_shards, "TESTS") as mock_tests:
+                        with self.assertRaises(ValueError):
+                            ci_test_shards.partition(3, timings=timing_path)
+                        mock_tests.glob.assert_not_called()
 
     def test_valid_zero_module_weight_and_float_weights_accepted(self):
         with tempfile.TemporaryDirectory() as directory:
