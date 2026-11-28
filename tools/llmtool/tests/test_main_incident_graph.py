@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import unittest
 
+from llmtool import main_incident as incident
 from llmtool import main_incident_graph as graph
 
 
@@ -163,6 +164,36 @@ class NameTests(unittest.TestCase):
             with self.subTest(pair=pair):
                 self.assertIn(pair, used)
         self.assertIsNone(graph.used_names(P + 'llmtool/zeta.py', 'import (\n'))
+
+    def test_used_names_keep_every_module_bound_to_one_alias(self):
+        text = ('def first():\n'
+                '    from llmtool import alpha as mod\n'
+                '    return mod.added()\n'
+                'def second():\n'
+                '    import llmtool.beta as mod\n'
+                '    return mod.VALUE\n')
+        used = graph.used_names(P + 'llmtool/zeta.py', text)
+        self.assertIn(('llmtool.alpha', 'added'), used)
+        self.assertIn(('llmtool.beta', 'VALUE'), used)
+
+
+class DependencyAliasTests(unittest.TestCase):
+    def test_scope_name_added_to_the_first_module_of_a_shared_alias_is_found(self):
+        alpha = P + 'llmtool/alpha.py'
+        user = P + 'llmtool/user.py'
+        scope = {'files': {alpha: {'before': 'def run():\n    return 1\n',
+                                   'after': ('def run():\n    return 1\n\n\n'
+                                             'def added():\n    return 2\n')}}}
+        later = [{'pr': 201, 'merge_sha': '1' * 40, 'files': {user: (
+            'def first():\n'
+            '    from llmtool import alpha as mod\n'
+            '    return mod.added()\n'
+            'def second():\n'
+            '    import llmtool.beta as mod\n'
+            '    return mod.VALUE\n')}}]
+        result = incident.dependency_check(scope, later)
+        self.assertEqual(result['code'], incident.REVERT_DEPENDENT)
+        self.assertEqual(result['dependents'][0]['names'], ['llmtool.alpha.added'])
 
 
 if __name__ == '__main__':

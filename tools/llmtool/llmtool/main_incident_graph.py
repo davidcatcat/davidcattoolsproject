@@ -182,19 +182,24 @@ def used_names(path, text):
 
     ``from m import n`` uses (m, n); ``from m import *`` uses (m, '*'); an
     attribute read through an imported module alias (``import m as x; x.n``)
-    uses (m, n). Aliases are read without flow analysis, so the result is an
-    over-approximation.
+    uses (m, n), for every module bound to x anywhere in the file. Aliases are
+    read without flow analysis and an alias is never overwritten by a later
+    binding, so the result is an over-approximation.
     """
     tree = parse(text, path)
     if tree is None:
         return None
     module, package = module_name(path), is_package(path)
     aliases, out = {}, set()
+
+    def bind_alias(name, target):
+        aliases.setdefault(name, set()).add(target)
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 top = alias.name.split('.')[0]
-                aliases[alias.asname or top] = alias.name if alias.asname else top
+                bind_alias(alias.asname or top, alias.name if alias.asname else top)
         elif isinstance(node, ast.ImportFrom):
             base = _base(module, package, node.level)
             target = '.'.join(part for part in (base or '', node.module or '') if part)
@@ -204,15 +209,16 @@ def used_names(path, text):
                 out.add((target, alias.name))
                 if alias.name != '*':
                     # The bound name may be a submodule: x.n then uses (target.name, n).
-                    aliases[alias.asname or alias.name] = target + '.' + alias.name
+                    bind_alias(alias.asname or alias.name, target + '.' + alias.name)
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute):
             chain = _chain(node)
             if chain and chain[0] in aliases:
-                dotted = '.'.join([aliases[chain[0]]] + chain[1:])
-                module, _, name = dotted.rpartition('.')
-                if module:
-                    out.add((module, name))
+                for base in aliases[chain[0]]:
+                    dotted = '.'.join([base] + chain[1:])
+                    used_module, _, name = dotted.rpartition('.')
+                    if used_module:
+                        out.add((used_module, name))
     return out
 
 
