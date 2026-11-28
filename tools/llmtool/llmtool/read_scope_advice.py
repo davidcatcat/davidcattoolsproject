@@ -111,12 +111,149 @@ TEST_REFERENCES_MORE = 'TEST_REFERENCES_MORE'
 # #2602u: a test outside write that directly exercises a changed name.
 TEST_LOCKS_CHANGE = 'TEST_LOCKS_CHANGE'
 TEST_REFERENCES_CAPPED = 'TEST_REFERENCES_CAPPED'
+# TestProfileError.CODE: the fixed code for an unusable profile.  It carries no
+# input value, so the refusal never echoes caller data.
+TEST_PROFILE_INVALID = 'TEST_PROFILE_INVALID'
 GUIDANCE_DRIFT_JSON = 'tools/llmtool/guidance-drift.json'
 GUIDANCE_DRIFT_CHECK = 'tools/llmtool/scripts/guidance_drift_check.py'
 _HASHED_GUIDANCE = ('CLAUDE.md', 'AGENTS.md')
 MAX_TESTS_PER_PATH = 8
-_TEST_DIRS = ('tools/llmtool/tests', 'scripts/test_*.py')
 _WORD_END = '([^A-Za-z0-9_]|$)'
+_REGEX_META = re.compile(r'[\\^$.|?*+()\[\]{}]')
+_RUNNER_KINDS = ('unittest', 'script')
+
+
+def _profile_entries(profile):
+    """Validated (pattern, kind) entries from a TestProfile, or None when invalid.
+
+    ``None`` asks for the project default.  An invalid profile is never
+    replaced by the historical fixed locations: the caller gets one fixed
+    refusal item instead of advice from a profile it did not supply.
+    """
+    if profile is None:
+        from .test_profile import default_profile
+        try:
+            profile = default_profile()
+        except Exception:
+            return None
+    try:
+        entries = tuple(profile.entries)
+    except Exception:
+        return None
+    if not entries:
+        return None
+    for entry in entries:
+        if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+            return None
+        pattern, kind = entry
+        if not isinstance(pattern, re.Pattern) or not isinstance(pattern.pattern, str):
+            return None
+        if not isinstance(kind, str) or kind not in _RUNNER_KINDS:
+            return None
+    return entries
+
+
+def _literal_path_parts(pattern):
+    """(repository root, literal file-name prefix) before the first regex metacharacter."""
+    literal = _REGEX_META.split(pattern.pattern, 1)[0]
+    directory, _, prefix = literal.rpartition('/')
+    return (directory.strip('/') or '.'), prefix
+
+
+def _top_level_branches(source):
+    """The pattern's ``|`` branches outside groups and character classes."""
+    branches = []
+    start = 0
+    depth = 0
+    escaped = False
+    in_class = False
+    for index, char in enumerate(source):
+        if escaped:
+            escaped = False
+        elif char == '\\':
+            escaped = True
+        elif in_class:
+            if char == ']':
+                in_class = False
+        elif char == '[':
+            in_class = True
+        elif char == '(':
+            depth += 1
+        elif char == ')':
+            depth = max(0, depth - 1)
+        elif char == '|' and depth == 0:
+            branches.append(source[start:index])
+            start = index + 1
+    branches.append(source[start:])
+    return branches
+
+
+def _literal_root(source):
+    """The repository directory before the source's first regex metacharacter."""
+    literal = _REGEX_META.split(source, 1)[0]
+    return literal.rpartition('/')[0].strip('/') or '.'
+
+
+def _test_search_paths(entries):
+    """Repository directories to git-grep, from each pattern's literal prefix.
+
+    Every top-level branch can name its own directory, so each is searched.
+    A case-insensitive pattern can name a directory in any case, which a git
+    pathspec cannot express, so it searches the repository root; the result
+    filter still applies the whole pattern.
+    """
+    paths = []
+    for pattern, _kind in entries:
+        if pattern.flags & re.IGNORECASE:
+            roots = ['.']
+        else:
+            roots = [_literal_root(branch)
+                     for branch in _top_level_branches(pattern.pattern)]
+            if '.' in roots:
+                roots = ['.']
+        for root in roots:
+            if root not in paths:
+                paths.append(root)
+    return paths
+
+
+def _entries_are_default(entries):
+    """True when entries are the registry default, whose legacy path shapes apply."""
+    try:
+        # The registry constant, not default_profile(): a replaced default must
+        # not bring the legacy shapes along.
+        from .test_profile import _DEFAULT_PROFILE
+        default = tuple((pattern.pattern, pattern.flags, kind)
+                        for pattern, kind in _DEFAULT_PROFILE.entries)
+    except Exception:
+        return False
+    return tuple((pattern.pattern, pattern.flags, kind)
+                 for pattern, kind in entries) == default
+
+
+def _is_test_path(entries, path, *, legacy=False):
+    """True when a found path is one of the profile's test paths.
+
+    The fixed locations the default profile replaces covered every file under a
+    ``tests`` directory and matched ``test_*.py`` files by name.  Both legacy
+    shapes stay accepted for the default profile only, so it returns the same
+    items as before without widening a caller-supplied profile.
+    """
+    for pattern, kind in entries:
+        if pattern.fullmatch(path) is not None:
+            return True
+        if not legacy:
+            continue
+        root, prefix = _literal_path_parts(pattern)
+        root_prefix = '' if root == '.' else root + '/'
+        if not path.startswith(root_prefix):
+            continue
+        name = path[len(root_prefix):]
+        if prefix == 'test_' and name.startswith('test_') and name.endswith('.py'):
+            return True
+        if kind == 'unittest' and root.rsplit('/', 1)[-1] == 'tests':
+            return True
+    return False
 
 
 def _is_rule_json(path):
@@ -159,14 +296,16 @@ def reference_patterns(path):
     return patterns
 
 
-def _module_referencing_tests_bounded(*, root, commit, read_paths, write_paths, runner=None,
-                                      max_greps=None, deadline=None):
+def _module_referencing_tests_bounded(*, root, commit, read_paths, write_paths, test_entries,
+                                      test_paths, runner=None, max_greps=None, deadline=None,
+                                      legacy=False):
     """Test files at commit that reference a written file but are in neither read nor write.
 
-    Bounded: at most one git grep per written non-test .py/.json file over
-    tools/llmtool/tests and scripts/test_*.py, at most MAX_TESTS_PER_PATH
-    results each. When max_greps or deadline is set, stops once the aggregate
-    budget is spent and reports whether the fallback was partial.
+    The search locations come from the profile entries, and a result counts
+    only when it is one of the profile's test paths.  Bounded: at most one git
+    grep per written non-test .py/.json file, at most MAX_TESTS_PER_PATH results
+    each. When max_greps or deadline is set, stops once the aggregate budget is
+    spent and reports whether the fallback was partial.
     """
     run = runner or subprocess.run
     known = set(read_paths or []) | set(write_paths or [])
@@ -191,7 +330,7 @@ def _module_referencing_tests_bounded(*, root, commit, read_paths, write_paths, 
         argv = ['git', '-C', str(root), 'grep', '-l', '-E']
         for pattern in reference_patterns(path):
             argv += ['-e', pattern]
-        argv += [commit, '--', *_TEST_DIRS]
+        argv += [commit, '--', *test_paths]
         greps += 1
         try:
             result = run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
@@ -206,7 +345,8 @@ def _module_referencing_tests_bounded(*, root, commit, read_paths, write_paths, 
         names = []
         for line in (result.stdout or '').splitlines():
             test = line[len(commit) + 1:] if line.startswith(commit + ':') else line
-            if test and test not in known and test != path:
+            if (test and test not in known and test != path and
+                    _is_test_path(test_entries, test, legacy=legacy)):
                 names.append(test)
         leaf = name.rsplit('.', 1)[0]
         # Tests named after the file come first; the rest follow by name.
@@ -223,11 +363,13 @@ def _module_referencing_tests_bounded(*, root, commit, read_paths, write_paths, 
     return items, partial
 
 
-def _capped_fallback_result(*, root, commit, read_paths, write_paths, runner=None,
-                            max_greps, deadline, reason=None):
+def _capped_fallback_result(*, root, commit, read_paths, write_paths, test_entries,
+                            test_paths, runner=None, max_greps, deadline, reason=None,
+                            legacy=False):
     fallback, partial = _module_referencing_tests_bounded(
         root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
-        runner=runner, max_greps=max_greps, deadline=deadline)
+        test_entries=test_entries, test_paths=test_paths,
+        runner=runner, max_greps=max_greps, deadline=deadline, legacy=legacy)
     if reason is None and not partial:
         return fallback
     if reason is not None:
@@ -351,11 +493,13 @@ def _candidate_names(text, definitions):
     return found
 
 
-def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, runner=None,
-                               budget=None):
+def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, test_entries,
+                               test_paths, runner=None, budget=None, legacy=False):
     """Tests that directly exercise names the spec texts change; None when no name is found.
 
-    Any error propagates to referencing_tests(), which keeps the module-level list.
+    The search locations and the accepted test paths both come from the
+    profile entries.  Any error propagates to referencing_tests(), which keeps
+    the module-level list.
     """
     run = runner or subprocess.run
     given = [text for text in _texts(texts) if text.strip()]
@@ -397,7 +541,7 @@ def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, 
         else:
             pattern = '(^|[^A-Za-z0-9_])' + _ere(name) + '([^A-Za-z0-9_]|$)'
         argv = ['git', '-C', str(root), 'grep', '-l', '-E', '-e', pattern,
-                commit, '--', *_TEST_DIRS]
+                commit, '--', *test_paths]
         greps += 1
         budget['greps'] = greps
         try:
@@ -412,7 +556,8 @@ def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, 
         tests = []
         for line in (result.stdout or '').splitlines():
             test = line[len(commit) + 1:] if line.startswith(commit + ':') else line
-            if test and test not in tests:
+            if (test and test not in tests and
+                    _is_test_path(test_entries, test, legacy=legacy)):
                 tests.append(test)
         tests.sort()
         for test in tests[:MAX_TESTS_PER_PATH]:
@@ -431,8 +576,15 @@ def _precise_referencing_tests(*, root, commit, read_paths, write_paths, texts, 
             for test in sorted(found)] + more
 
 
-def referencing_tests(*, root, commit, read_paths, write_paths, runner=None, texts=None):
+def referencing_tests(*, root, commit, read_paths, write_paths, runner=None, texts=None,
+                      profile=None):
     """Test files to show the PM for the files being written.
+
+    Test locations and the accepted test paths come from ``profile`` (the
+    project default when omitted).  An invalid profile returns one fixed
+    ``TEST_PROFILE_INVALID`` refusal item and does not fall back to the
+    historical fixed locations, so no test advice comes from a profile the
+    caller did not supply.
 
     Without texts (the historical input) this returns the module-level reference
     list under the aggregate budget. With texts (the goal and acceptance), it
@@ -441,27 +593,38 @@ def referencing_tests(*, root, commit, read_paths, write_paths, runner=None, tex
     precise search is capped, finds no changed name, or errors. The advice stays
     fail-open either way.
     """
+    entries = _profile_entries(profile)
+    if entries is None:
+        return [item(TEST_PROFILE_INVALID, None,
+                     'TestProfile is invalid; test search refused '
+                     '(fixed locations are not used)')]
+    test_paths = _test_search_paths(entries)
+    legacy = _entries_are_default(entries)
     deadline = time.monotonic() + PRECISE_SEARCH_MAX_SECONDS
     budget = {'deadline': deadline, 'greps': 0}
     if texts is not None:
         try:
             precise = _precise_referencing_tests(
                 root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
-                texts=texts, runner=runner, budget=budget)
+                texts=texts, test_entries=entries, test_paths=test_paths,
+                runner=runner, budget=budget, legacy=legacy)
             if precise is not None:
                 return precise
         except _PreciseSearchCapped as exc:
             remaining_greps = max(0, MAX_PRECISE_GREPS - exc.greps)
             return _capped_fallback_result(
                 root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
+                test_entries=entries, test_paths=test_paths,
                 runner=runner, max_greps=remaining_greps, deadline=exc.deadline,
-                reason=exc.reason)
+                reason=exc.reason, legacy=legacy)
         except Exception:
             pass
     remaining_greps = max(0, MAX_PRECISE_GREPS - budget['greps'])
     return _capped_fallback_result(
         root=root, commit=commit, read_paths=read_paths, write_paths=write_paths,
-        runner=runner, max_greps=remaining_greps, deadline=budget['deadline'])
+        test_entries=entries, test_paths=test_paths,
+        runner=runner, max_greps=remaining_greps, deadline=budget['deadline'],
+        legacy=legacy)
 
 
 # --- #2503 PR-6: route capability and size advice ----------------------------
