@@ -22,7 +22,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from llmtool import (merge_train, merge_train_build, merge_train_eligibility,  # noqa: E402
-                     merge_train_store, pm_caller, task_completion)
+                     merge_train_store, pm_caller, repair_policy, task_completion)
 from llmtool.errors import LLMToolError  # noqa: E402
 
 GIT = '/usr/bin/git' if os.path.exists('/usr/bin/git') else shutil.which('git')
@@ -294,6 +294,70 @@ class BuildTrainTests(unittest.TestCase):
             main_read.assert_not_called()
             self._assert_no_push(runners)
         self.assertEqual(self.store.reads, [])
+
+    def test_invalid_policy_members_max_refuses_before_any_read(self):
+        invalid_values = (
+            None,
+            '6',
+            6.0,
+            [6],
+            True,
+            False,
+            -1,
+            0,
+            merge_train_build.MIN_MEMBERS - 1,
+            merge_train_build.TECHNICAL_MEMBERS_MAX + 1,
+        )
+        for value in invalid_values:
+            with self.subTest(value=value), mock.patch.object(
+                    repair_policy, 'load_policy',
+                    return_value={merge_train_build.MEMBERS_MAX_KEY: value}):
+                result, runners, main_read = self._build([TASK_A, TASK_B])
+                self.assertEqual(result, {'step': 'REFUSED',
+                                          'codes': ['POLICY_INVALID'], 'result': None})
+                main_read.assert_not_called()
+                self._assert_no_push(runners)
+        with mock.patch.object(repair_policy, 'load_policy',
+                               side_effect=LLMToolError('POLICY_INVALID')):
+            result, runners, main_read = self._build([TASK_A, TASK_B])
+            self.assertEqual(result, {'step': 'REFUSED',
+                                      'codes': ['POLICY_INVALID'], 'result': None})
+            main_read.assert_not_called()
+            self._assert_no_push(runners)
+        self.assertEqual(self.store.reads, [])
+        self.assertEqual(self.check_calls, [])
+        self.assertEqual(self.github_calls, [])
+        self.assertEqual(self._records(), [])
+
+    def test_valid_policy_members_max_and_default_fallback(self):
+        with mock.patch.object(repair_policy, 'load_policy',
+                               return_value={merge_train_build.MEMBERS_MAX_KEY: 2}):
+            refused, runners, main_read = self._build([TASK_A, TASK_B, TASK_C])
+            self.assertEqual(refused, {'step': 'REFUSED',
+                                       'codes': ['TRAIN_MEMBERS_INVALID'], 'result': None})
+            main_read.assert_not_called()
+            self._assert_no_push(runners)
+            self.assertEqual(self.store.reads, [])
+            result, runners, _ = self._build([TASK_A, TASK_B])
+            self._assert_built(result, runners, [TASK_A, TASK_B])
+
+        self.setUp()
+        with mock.patch.object(repair_policy, 'load_policy',
+                               return_value={merge_train_build.MEMBERS_MAX_KEY:
+                                             merge_train_build.TECHNICAL_MEMBERS_MAX}):
+            result, runners, _ = self._build([TASK_A, TASK_B])
+            self._assert_built(result, runners, [TASK_A, TASK_B])
+
+        self.setUp()
+        with mock.patch.object(repair_policy, 'load_policy', return_value={}):
+            members = [('%032x' % index, 200 + index) for index in range(1, 8)]
+            refused, runners, main_read = self._build(None, members=members)
+            self.assertEqual(refused, {'step': 'REFUSED',
+                                       'codes': ['TRAIN_MEMBERS_INVALID'], 'result': None})
+            main_read.assert_not_called()
+            self._assert_no_push(runners)
+            result, runners, _ = self._build([TASK_A, TASK_B])
+            self._assert_built(result, runners, [TASK_A, TASK_B])
 
     def test_invalid_clock_refuses_before_any_read(self):
         # #1182: the train clock must be an aware datetime; anything else reads nothing.
