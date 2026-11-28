@@ -61,7 +61,8 @@ from .developer_routes import (AgyRoute, ClaudeRoute, GwAgentRoute, RouteError, 
                                resolve_route_max_prompt_bytes,
                                resolve_route_max_task_paths,
                                resolve_route_timeout, run_route)
-from .developer_routes.base import _git_status_paths
+from .developer_routes.base import (WORKFLOW_GRANT_REFUSED, _git_status_paths,
+                                    validate_workflow_grants)
 from .developer_routes.gw_agent import (_GATEWAY_DATA_CLASS, _normalize_gw_agent_usage,
                                         GATEWAY_SOURCE_DIR, GATEWAY_STALE_CODE,
                                         cleanup_audit_copies, installed_gateway_stale)
@@ -6352,6 +6353,25 @@ def _delegate_timeout(args, route):
             exc.code) from None
 
 
+def _validate_delegate_workflow_grants(task, registration, snapshot, read_paths, write_paths):
+    """Refuse any ungranted .github/workflows path before any durable Task write."""
+    try:
+        validate_workflow_grants({
+            'root': registration.root,
+            'expected_head': snapshot.head,
+            'read_paths': read_paths,
+            'write_paths': write_paths,
+            'issue': task.get('issue'),
+        })
+    except RouteError as exc:
+        grant_code = (exc.observed_facts.get('workflow_grant_code')
+                      if isinstance(getattr(exc, 'observed_facts', None), dict)
+                      else None)
+        message = (f'{WORKFLOW_GRANT_REFUSED}: {grant_code}'
+                   if type(grant_code) is str and grant_code else WORKFLOW_GRANT_REFUSED)
+        raise _prelaunch_error(message, exc.code) from None
+
+
 def _serialize_direct_dispatch(run):
     @wraps(run)
     def invoke(args, *, store, **kwargs):
@@ -6426,6 +6446,7 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         args, store, task, registration, snapshot, 'opencode', read_paths, write_paths)
     if reassignment is not None:
         registration = reassignment.successor
+    _validate_delegate_workflow_grants(task, registration, snapshot, read_paths, write_paths)
     repair_packet = (reassignment.repair_packet if reassignment is not None
                      else getattr(args, 'repair_packet', None))
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
@@ -7001,6 +7022,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         args, store, task, registration, snapshot, 'agy', read_paths, write_paths)
     if reassignment is not None:
         registration = reassignment.successor
+    _validate_delegate_workflow_grants(task, registration, snapshot, read_paths, write_paths)
     repair_packet = (reassignment.repair_packet if reassignment is not None
                      else getattr(args, 'repair_packet', None))
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
@@ -7767,6 +7789,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None,
     if not decision.allowed:
         raise worker_dispatch.WorkerDispatchDenied(decision.reason_code)
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path, route='claude')
+    _validate_delegate_workflow_grants(task, registration, snapshot, read_paths, write_paths)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
     acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
@@ -8259,6 +8282,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     registration, snapshot = _delegate_d6_binding(args)
     _reject_claude_reserved_d6(registration)
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path, route='gw-agent')
+    _validate_delegate_workflow_grants(task, registration, snapshot, read_paths, write_paths)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
     acceptance = [_screen_text(item, RESPONSE_LIMIT) for item in args.acceptance]
