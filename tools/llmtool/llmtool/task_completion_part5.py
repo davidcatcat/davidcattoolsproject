@@ -253,10 +253,22 @@ def _stacked_scope_check(root, normalized_chain, bound_source_sha, bound_result_
 
 
 def _resolve_test_target(root, path, kind):
-    """Validate an admitted test path and return (start_dir, filename)."""
+    """Validate an admitted test path and return (start_dir, filename, exists)."""
     if not _relative_path(path):
         _stop('TEST_PATH_INVALID')
-    target = Path(root).joinpath(*path.split('/'))
+    parts = path.split('/')
+    cur = Path(root)
+    for part in parts[:-1]:
+        cur = cur / part
+        try:
+            part_stat = cur.lstat()
+        except FileNotFoundError:
+            break
+        except OSError:
+            _stop('TEST_PATH_INVALID')
+        if stat.S_ISLNK(part_stat.st_mode) or not stat.S_ISDIR(part_stat.st_mode):
+            _stop('TEST_PATH_INVALID')
+    target = Path(root).joinpath(*parts)
     try:
         target_stat = target.lstat()
     except FileNotFoundError:
@@ -268,20 +280,48 @@ def _resolve_test_target(root, path, kind):
     parent = Path(path).parent.as_posix()
     filename = Path(path).name
     if kind in ('unittest', 'script'):
-        # unittest discover walks subdirectories recursively; refuse if any
-        # other file with the same name sits under start_dir so discovery can
-        # never report a result from another file.
+        if any(ch in filename for ch in '*?[]'):
+            _stop('TEST_PATH_INVALID')
+        # unittest discover walks subdirectories recursively (including
+        # symlinked directories); refuse if any other file with the same name
+        # sits under start_dir so discovery can never report a result from
+        # another file.
         start_path = (Path(root) if parent == '.'
                       else Path(root).joinpath(*parent.split('/')))
+        start_dir = (parent if parent == '.' or start_path.is_dir()
+                     else './' + parent)
         target_real = os.path.realpath(target)
-        for dirpath, dirnames, filenames in os.walk(start_path):
-            dirnames[:] = [d for d in dirnames if d != '.git']
+        seen_dirs = set()
+        for dirpath, dirnames, filenames in os.walk(start_path, followlinks=True):
+            try:
+                dir_stat = os.stat(dirpath)
+            except OSError:
+                dirnames[:] = []
+                continue
+            dir_key = (dir_stat.st_dev, dir_stat.st_ino)
+            if dir_key in seen_dirs:
+                dirnames[:] = []
+                continue
+            seen_dirs.add(dir_key)
+            kept = []
+            for d in dirnames:
+                if d == '.git':
+                    continue
+                try:
+                    sub_stat = os.stat(os.path.join(dirpath, d))
+                except OSError:
+                    continue
+                if (sub_stat.st_dev, sub_stat.st_ino) not in seen_dirs:
+                    kept.append(d)
+            dirnames[:] = kept
             if filename in filenames:
                 candidate_real = os.path.realpath(
                     os.path.join(dirpath, filename))
                 if candidate_real != target_real:
                     _stop('TEST_PATH_INVALID')
-    return parent, filename
+    else:
+        start_dir = parent
+    return start_dir, filename, target_stat is not None
 
 
 def _run_registered_tests(root, source_sha, eligible, *, home, pycache=None):
@@ -291,7 +331,7 @@ def _run_registered_tests(root, source_sha, eligible, *, home, pycache=None):
     for path, kind in eligible:
         if time.monotonic() >= run_deadline:
             _stop('TEST_RUNNER_TIMEOUT')
-        start_dir, filename = _resolve_test_target(root, path, kind)
+        start_dir, filename, target_exists = _resolve_test_target(root, path, kind)
         env = {'PATH': os.path.dirname(sys.executable) + ':/usr/bin:/bin',
                'LC_ALL': 'C', 'HOME': home,
                'PYTHONPATH': str(Path(root) / 'tools' / 'llmtool'),
@@ -356,7 +396,7 @@ def _run_registered_tests(root, source_sha, eligible, *, home, pycache=None):
         # A reported zero fails; a discovery kind always reports a count.
         zero_tests = bool(ran) and int(ran[-1]) == 0
         discovery = kind in ('unittest', 'script')
-        if code or zero_tests or (discovery and not ran):
+        if code or zero_tests or (discovery and not ran) or not target_exists:
             item['output_excerpt'] = _m._test_excerpt(home, output, code)
             item['status'] = 'FAILED'
         else:

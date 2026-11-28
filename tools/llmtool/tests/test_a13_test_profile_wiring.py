@@ -262,6 +262,65 @@ class NonDefaultDirectoryExecutionTests(unittest.TestCase):
                 self._run_real_worktree(root, [admitted], profile)
         self.assertEqual(caught.exception.completion_code, 'TEST_PATH_INVALID')
 
+    def test_glob_filename_is_refused(self):
+        profile = test_profile.TestProfile((
+            (re.compile(r'custom/test_.*\.py\Z'), 'unittest'),
+        ))
+        admitted = 'custom/test_[a].py'
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, 'custom').mkdir(parents=True)
+            Path(root, admitted).write_text(self.FAIL_BODY, encoding='utf-8')
+            Path(root, 'custom', 'test_a.py').write_text(
+                self.PASS_BODY, encoding='utf-8')
+            with self.assertRaises(LLMToolError) as caught:
+                self._run_real_worktree(root, [admitted], profile)
+        self.assertEqual(caught.exception.completion_code, 'TEST_PATH_INVALID')
+
+    def test_absent_single_segment_directory_cannot_import_pythonpath_package(self):
+        profile = test_profile.TestProfile((
+            (re.compile(r'pkg_on_path/test_[A-Za-z0-9_]+\.py\Z'), 'unittest'),
+        ))
+        admitted = 'pkg_on_path/test_ok.py'
+        with tempfile.TemporaryDirectory() as root:
+            pkg = Path(root, 'tools', 'llmtool', 'pkg_on_path')
+            pkg.mkdir(parents=True)
+            (pkg / '__init__.py').write_text('', encoding='utf-8')
+            (pkg / 'test_ok.py').write_text(self.PASS_BODY, encoding='utf-8')
+            evidence = self._run_real_worktree(root, [admitted], profile)
+        self.assertEqual([item['path'] for item in evidence], [admitted])
+        self.assertEqual(evidence[0]['status'], 'FAILED')
+        self.assertNotEqual(evidence[0]['exit_code'], 0)
+
+    def test_symlinked_subdirectory_shadow_file_is_refused(self):
+        profile = test_profile.TestProfile((
+            (re.compile(r'custom/test_[A-Za-z0-9_]+\.py\Z'), 'unittest'),
+        ))
+        admitted = 'custom/test_shadow.py'
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, 'custom').mkdir(parents=True)
+            Path(root, 'other').mkdir(parents=True)
+            Path(root, admitted).write_text('', encoding='utf-8')
+            Path(root, 'other', 'test_shadow.py').write_text(
+                self.PASS_BODY, encoding='utf-8')
+            Path(root, 'custom', 'link_sub').symlink_to(Path(root, 'other'))
+            with self.assertRaises(LLMToolError) as caught:
+                self._run_real_worktree(root, [admitted], profile)
+        self.assertEqual(caught.exception.completion_code, 'TEST_PATH_INVALID')
+
+    def test_symlinked_parent_directory_is_refused(self):
+        profile = test_profile.TestProfile((
+            (re.compile(r'custom/test_[A-Za-z0-9_]+\.py\Z'), 'unittest'),
+        ))
+        admitted = 'custom/test_ok.py'
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, 'other').mkdir(parents=True)
+            Path(root, 'other', 'test_ok.py').write_text(
+                self.PASS_BODY, encoding='utf-8')
+            Path(root, 'custom').symlink_to(Path(root, 'other'))
+            with self.assertRaises(LLMToolError) as caught:
+                self._run_real_worktree(root, [admitted], profile)
+        self.assertEqual(caught.exception.completion_code, 'TEST_PATH_INVALID')
+
     def test_default_profile_command_digests_stay_unchanged(self):
         paths = ['scripts/test_beta.py', 'tools/llmtool/tests/test_alpha.py']
         expected_argvs = {
