@@ -1949,6 +1949,72 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, "D6_TASK_INPUT_INVALID")
         self.assertEqual(list(self.tasks.iterdir()), [])
 
+    def _git_calls(self, action):
+        """Run ``action`` and return every real Git argv/env it issued."""
+        calls = []
+        previous_run = lifecycle.subprocess.run
+
+        def capture(argv, *args, **kwargs):
+            if isinstance(argv, list) and argv[:1] == ["/usr/bin/git"]:
+                calls.append((list(argv), kwargs.get("env")))
+            return previous_run(argv, *args, **kwargs)
+
+        with patch.object(lifecycle.subprocess, "run", side_effect=capture):
+            action()
+        return calls
+
+    def _assert_git_protections(self, argv, env):
+        self.assertEqual(argv[:1], ["/usr/bin/git"])
+        for option in ("--no-optional-locks", "--no-replace-objects"):
+            self.assertIn(option, argv)
+        options = set(zip(argv, argv[1:]))
+        for setting in ("core.fsmonitor=false", "core.hooksPath=/dev/null",
+                        "gc.auto=0"):
+            self.assertIn(("-c", setting), options)
+        self.assertEqual(env["GIT_ATTR_NOSYSTEM"], "1")
+        self.assertEqual(env["GIT_NO_LAZY_FETCH"], "1")
+        self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(env["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertEqual(env["GIT_OPTIONAL_LOCKS"], "0")
+        self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
+
+    def test_worktree_creation_git_disables_hooks_fsmonitor_and_lazy_fetch(self):
+        marker = self.root / "d6-post-checkout-hook-ran"
+        hooks = self.source / ".git" / "hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
+        hook = hooks / "post-checkout"
+        hook.write_text(
+            "#!" + sys.executable + "\n"
+            "from pathlib import Path\n"
+            "Path(" + repr(str(marker)) + ").write_text('ran')\n",
+            encoding="utf-8")
+        hook.chmod(0o755)
+
+        def create():
+            with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                lifecycle.create_worktree(
+                    canonical_root=self.source, workspace_root=self.tasks,
+                    task_id="d6-git-protections", agent_id="codex-developer-test",
+                    session_ref="live test session", lease_ref="live test lease",
+                    branch="test/d6-git-protections", base_sha=self.base)
+
+        calls = self._git_calls(create)
+        additions = [call for call in calls
+                     if "worktree" in call[0] and "add" in call[0]]
+        self.assertEqual(len(additions), 1)
+        self._assert_git_protections(*additions[0])
+        # A repository post-checkout hook runs on worktree add; it must not.
+        self.assertFalse(marker.exists())
+
+    def test_read_path_git_disables_hooks_fsmonitor_and_lazy_fetch(self):
+        calls = self._git_calls(
+            lambda: self.assertTrue(lifecycle._valid_branch(self.source, "main")))
+        self.assertEqual(len(calls), 1)
+        argv, env = calls[0]
+        self.assertIn("check-ref-format", argv)
+        self._assert_git_protections(argv, env)
+
 
 class GitTimeoutTests(unittest.TestCase):
     """A stuck git lookup stops with a stable code instead of hanging."""
