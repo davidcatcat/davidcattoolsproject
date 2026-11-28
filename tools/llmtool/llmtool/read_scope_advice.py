@@ -111,6 +111,9 @@ TEST_REFERENCES_MORE = 'TEST_REFERENCES_MORE'
 # #2602u: a test outside write that directly exercises a changed name.
 TEST_LOCKS_CHANGE = 'TEST_LOCKS_CHANGE'
 TEST_REFERENCES_CAPPED = 'TEST_REFERENCES_CAPPED'
+# TestProfileError.CODE: the fixed code for an unusable profile.  It carries no
+# input value, so the refusal never echoes caller data.
+TEST_PROFILE_INVALID = 'TEST_PROFILE_INVALID'
 GUIDANCE_DRIFT_JSON = 'tools/llmtool/guidance-drift.json'
 GUIDANCE_DRIFT_CHECK = 'tools/llmtool/scripts/guidance_drift_check.py'
 _HASHED_GUIDANCE = ('CLAUDE.md', 'AGENTS.md')
@@ -124,8 +127,8 @@ def _profile_entries(profile):
     """Validated (pattern, kind) entries from a TestProfile, or None when invalid.
 
     ``None`` asks for the project default.  An invalid profile is never
-    replaced by the historical fixed locations: the caller gets no test
-    advice instead of advice from a profile it did not supply.
+    replaced by the historical fixed locations: the caller gets one fixed
+    refusal item instead of advice from a profile it did not supply.
     """
     if profile is None:
         from .test_profile import default_profile
@@ -150,21 +153,44 @@ def _profile_entries(profile):
     return entries
 
 
+def _literal_path_parts(pattern):
+    """(repository root, literal file-name prefix) before the first regex metacharacter."""
+    literal = _REGEX_META.split(pattern.pattern, 1)[0]
+    directory, _, prefix = literal.rpartition('/')
+    return (directory.strip('/') or '.'), prefix
+
+
 def _test_search_paths(entries):
     """Repository directories to git-grep, from each pattern's literal prefix."""
     paths = []
     for pattern, _kind in entries:
-        literal = _REGEX_META.split(pattern.pattern, 1)[0]
-        root = literal.rsplit('/', 1)[0] if '/' in literal else '.'
-        root = root.strip('/') or '.'
+        root = _literal_path_parts(pattern)[0]
         if root not in paths:
             paths.append(root)
     return paths
 
 
 def _is_test_path(entries, path):
-    """True when a found path is one of the profile's test paths."""
-    return any(pattern.fullmatch(path) is not None for pattern, _kind in entries)
+    """True when a found path is one of the profile's test paths.
+
+    The fixed locations this replaces covered every file under a ``tests``
+    directory and matched ``test_*.py`` files by name.  Both legacy shapes stay
+    accepted, so the default profile returns the same items as before.
+    """
+    for pattern, kind in entries:
+        if pattern.fullmatch(path) is not None:
+            return True
+        root, prefix = _literal_path_parts(pattern)
+        root_prefix = '' if root == '.' else root + '/'
+        if not path.startswith(root_prefix):
+            continue
+        name = path[len(root_prefix):]
+        if (prefix == 'test_' and '/' not in name and
+                name.startswith('test_') and name.endswith('.py')):
+            return True
+        if kind == 'unittest' and root.rsplit('/', 1)[-1] == 'tests':
+            return True
+    return False
 
 
 def _is_rule_json(path):
@@ -489,8 +515,10 @@ def referencing_tests(*, root, commit, read_paths, write_paths, runner=None, tex
     """Test files to show the PM for the files being written.
 
     Test locations and the accepted test paths come from ``profile`` (the
-    project default when omitted).  An invalid profile returns no items and
-    does not fall back to the historical fixed locations.
+    project default when omitted).  An invalid profile returns one fixed
+    ``TEST_PROFILE_INVALID`` refusal item and does not fall back to the
+    historical fixed locations, so no test advice comes from a profile the
+    caller did not supply.
 
     Without texts (the historical input) this returns the module-level reference
     list under the aggregate budget. With texts (the goal and acceptance), it
@@ -501,7 +529,9 @@ def referencing_tests(*, root, commit, read_paths, write_paths, runner=None, tex
     """
     entries = _profile_entries(profile)
     if entries is None:
-        return []
+        return [item(TEST_PROFILE_INVALID, None,
+                     'TestProfile is invalid; test search refused '
+                     '(fixed locations are not used)')]
     test_paths = _test_search_paths(entries)
     deadline = time.monotonic() + PRECISE_SEARCH_MAX_SECONDS
     budget = {'deadline': deadline, 'greps': 0}

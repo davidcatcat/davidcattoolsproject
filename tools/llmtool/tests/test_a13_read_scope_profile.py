@@ -14,6 +14,9 @@ from llmtool.test_profile import TestProfile, default_profile
 
 WIDGET = 'tools/llmtool/llmtool/widget.py'
 DEFAULT_TEST = 'tools/llmtool/tests/test_widget_default.py'
+# Beside the tests, so it does not match the default unittest pattern; the
+# historical fixed location searched the whole tests directory and found it.
+DEFAULT_SUPPORT = 'tools/llmtool/tests/widget_support.py'
 SCRIPT_TEST = 'scripts/test_widget_script.py'
 CUSTOM_TEST = 'checks/test_widget_custom.py'
 CUSTOM_NON_TEST = 'checks/helper.py'
@@ -35,6 +38,8 @@ class ReadScopeProfileTest(unittest.TestCase):
             WIDGET: 'def widget_fn(value):\n    return value\n',
             DEFAULT_TEST: ('from llmtool import widget\n\n\n'
                            'def test_call():\n    assert widget.widget_fn(1) == 1\n'),
+            DEFAULT_SUPPORT: ('from llmtool import widget\n\n\n'
+                              'def build():\n    return widget.widget_fn(3)\n'),
             SCRIPT_TEST: 'import llmtool.widget\n',
             CUSTOM_TEST: ('from llmtool import widget\n\n\n'
                           'def test_call():\n    assert widget.widget_fn(2) == 2\n'),
@@ -64,6 +69,7 @@ class ReadScopeProfileTest(unittest.TestCase):
         self.assertEqual(self.kinds(self.refs()), [
             (advice.TEST_REFERENCES_WRITE, SCRIPT_TEST),
             (advice.TEST_REFERENCES_WRITE, DEFAULT_TEST),
+            (advice.TEST_REFERENCES_WRITE, DEFAULT_SUPPORT),
         ])
 
     def test_no_profile_uses_the_project_default_profile(self):
@@ -72,10 +78,16 @@ class ReadScopeProfileTest(unittest.TestCase):
                 (advice.TEST_REFERENCES_WRITE, CUSTOM_TEST),
             ])
 
+    def test_default_profile_keeps_test_directory_support_modules(self):
+        # F1: the fixed location returned every match under tools/llmtool/tests.
+        self.assertIn((advice.TEST_REFERENCES_WRITE, DEFAULT_SUPPORT),
+                      self.kinds(self.refs()))
+
     def test_non_default_profile_directory_is_searched(self):
         self.assertEqual(self.kinds(self.refs()), [
             (advice.TEST_REFERENCES_WRITE, SCRIPT_TEST),
             (advice.TEST_REFERENCES_WRITE, DEFAULT_TEST),
+            (advice.TEST_REFERENCES_WRITE, DEFAULT_SUPPORT),
         ])
         # The custom directory is outside the default profile, and helper.py is
         # in the custom directory but is not one of its test paths.
@@ -101,7 +113,7 @@ class ReadScopeProfileTest(unittest.TestCase):
         self.assertEqual(len(more), 1)
         self.assertIn('4 more', more[0]['note'])
 
-    def test_invalid_profile_returns_no_items_without_fixed_fallback(self):
+    def test_invalid_profile_gives_one_fixed_refusal_without_fixed_fallback(self):
         calls = []
 
         def runner(argv, **kwargs):
@@ -115,9 +127,13 @@ class ReadScopeProfileTest(unittest.TestCase):
         )
         for profile in invalid:
             with self.subTest(profile=profile):
-                self.assertEqual(advice.referencing_tests(
+                items = advice.referencing_tests(
                     root=self.root, commit='HEAD', read_paths=[], write_paths=[WIDGET],
-                    runner=runner, profile=profile), [])
+                    runner=runner, profile=profile)
+                self.assertEqual([(item['kind'], item['path']) for item in items],
+                                 [(advice.TEST_PROFILE_INVALID, None)])
+                self.assertIn('invalid', items[0]['note'])
+                self.assertIn('refused', items[0]['note'])
         self.assertEqual(calls, [])
 
 
